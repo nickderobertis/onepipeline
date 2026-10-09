@@ -660,6 +660,7 @@ fn receipt(reply: std::process::Child) -> (Option<i32>, String) {
     )
 }
 
+#[cfg(unix)]
 fn committed_from(world: &World, run: &str, id: u64) -> Vec<Value> {
     world
         .events_of(run, "edit-committed")
@@ -669,6 +670,7 @@ fn committed_from(world: &World, run: &str, id: u64) -> Vec<Value> {
 }
 
 /// The note text a run recorded delivering, once per delivery.
+#[cfg(unix)]
 fn deliveries_of(world: &World, run: &str, text: &str) -> usize {
     world
         .events_of(run, "edit-committed")
@@ -683,8 +685,11 @@ fn deliveries_of(world: &World, run: &str, text: &str) -> usize {
         .count()
 }
 
+#[cfg(unix)]
 const RECOVERED_NOTE: &str = "the fixture moved to fixtures/v2; start from there";
+#[cfg(unix)]
 const RECOVERED_RULING: &str = "build only what fixtures/v2 needs";
+#[cfg(unix)]
 const LATER_RULING: &str = "build only what fixtures/v3 needs";
 
 /// **The envelopes a dead driver claimed are its adopter's first work.** A
@@ -1138,6 +1143,7 @@ fn a_journalled_record_that_does_not_read_as_its_payload_is_no_proof_an_envelope
 // writes — two records of one envelope, then its outcome line — cannot be timed from outside
 // the binary; taking those writes back out of the store is the one way to leave what such a
 // death leaves, and everything the driver wrote before it is left exactly as written.
+#[cfg(unix)]
 fn died_between_records(world: &World, run: &str, envelopes: &[u64]) {
     let log = world.run_file(run, "channel/command-outcomes.jsonl");
     let answered: String = std::fs::read_to_string(&log)
@@ -1171,6 +1177,7 @@ fn died_between_records(world: &World, run: &str, envelopes: &[u64]) {
 // llmlint: ignore-end[tests_mirror_real_usage]
 
 /// The commands an envelope's `edit-committed` records carry, in journal order.
+#[cfg(unix)]
 fn committed_commands(world: &World, run: &str, id: u64) -> Vec<Value> {
     committed_from(world, run, id)
         .iter()
@@ -1178,6 +1185,7 @@ fn committed_commands(world: &World, run: &str, id: u64) -> Vec<Value> {
         .collect()
 }
 
+#[cfg(unix)]
 fn model(model: &str) -> Value {
     json!({"op": "set-run-node-sets", "sets": [format!("members.worker.agent.model={model}")]})
 }
@@ -1297,6 +1305,7 @@ fn an_envelope_whose_write_ahead_cannot_be_read_is_left_unanswered_and_surfaced(
     }
 }
 
+#[cfg(unix)]
 const HELD_NOTE: &str = "the fixture moved to fixtures/v4; start from there";
 
 /// **What one recovered envelope writes down never costs another its own.** A
