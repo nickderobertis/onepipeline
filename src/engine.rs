@@ -3054,50 +3054,25 @@ impl EnvelopeEffects {
     fn of(paths: &RunPaths) -> Self {
         let mut effects = BTreeMap::new();
         for record in journal::read(&paths.journal()) {
-            let Some(id) = record.payload.get("envelope").and_then(Value::as_u64) else {
-                continue;
-            };
-            let kind = record.kind.0.as_str();
-            if kind == journal::PipelineKind::EditRejected.as_str() {
-                let rejection = (
-                    record
-                        .payload
-                        .get("command")
-                        .cloned()
-                        .unwrap_or(Value::Null),
-                    record
-                        .payload
-                        .get("reason")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string(),
-                );
-                match effects
-                    .entry(id)
+            match Evidence::of(&record) {
+                Some(Evidence::Rejected {
+                    envelope,
+                    command,
+                    reason,
+                }) => match effects
+                    .entry(envelope)
                     .or_insert_with(|| Effect::Refused(Vec::new()))
                 {
-                    Effect::Refused(rejections) => rejections.push(rejection),
+                    Effect::Refused(rejections) => rejections.push((command, reason)),
                     Effect::Applied(_) => {}
+                },
+                Some(Evidence::Applied { envelope, records }) => {
+                    match effects.entry(envelope).or_insert(Effect::Applied(0)) {
+                        Effect::Applied(committed) => *committed += records,
+                        refused @ Effect::Refused(_) => *refused = Effect::Applied(records),
+                    }
                 }
-            } else if [
-                journal::PipelineKind::EditCommitted,
-                journal::PipelineKind::CommandAccepted,
-                // llmlint: ignore[changed_behavior_has_e2e] a `note-shown` is written only
-                // after the `edit-committed` of the delivery it confirms, so no journal a
-                // build writes holds one naming an envelope without that envelope's commit,
-                // which `an_envelope_journalled_and_never_answered_is_answered_from_the_journal_and_not_applied_again`
-                // already answers from. It is read as evidence so a note shown is never
-                // delivered again whatever else of its record survived.
-                journal::PipelineKind::NoteShown,
-            ]
-            .iter()
-            .any(|applied| applied.as_str() == kind)
-            {
-                let records = usize::from(kind != journal::PipelineKind::NoteShown.as_str());
-                match effects.entry(id).or_insert(Effect::Applied(0)) {
-                    Effect::Applied(committed) => *committed += records,
-                    refused @ Effect::Refused(_) => *refused = Effect::Applied(records),
-                }
+                None => {}
             }
         }
         Self(effects)
@@ -3105,6 +3080,70 @@ impl EnvelopeEffects {
 
     fn of_envelope(&self, id: u64) -> Option<Effect> {
         self.0.get(&id).cloned()
+    }
+}
+
+/// What one journal record says of the envelope it names, read through its
+/// kind's own payload type: a record of this engine's that does not decode as
+/// one — a field missing or of the wrong kind — is no envelope's evidence, so an
+/// envelope it names is judged rather than answered from it.
+enum Evidence {
+    /// A commit or acceptance of one command — one record — or a presentation of
+    /// one of its notes, which is no command's record.
+    Applied { envelope: u64, records: usize },
+    /// One command refused: the command as sent, and the reason recorded.
+    Rejected {
+        envelope: u64,
+        command: Value,
+        reason: String,
+    },
+}
+
+impl Evidence {
+    fn of(record: &Envelope) -> Option<Self> {
+        if record.source != crate::event::Source::Pipeline {
+            return None;
+        }
+        let payload = Value::Object(record.payload.clone());
+        let applied = |envelope: Option<u64>, records| {
+            envelope.map(|envelope| Self::Applied { envelope, records })
+        };
+        match journal::PipelineKind::from_wire(&record.kind)? {
+            journal::PipelineKind::EditCommitted => applied(
+                serde_json::from_value::<crate::payload::EditCommitted>(payload)
+                    .ok()?
+                    .envelope,
+                1,
+            ),
+            journal::PipelineKind::CommandAccepted => applied(
+                serde_json::from_value::<crate::payload::CommandAccepted>(payload)
+                    .ok()?
+                    .envelope,
+                1,
+            ),
+            // llmlint: ignore[changed_behavior_has_e2e] a `note-shown` is written only
+            // after the `edit-committed` of the delivery it confirms, so no journal a
+            // build writes holds one naming an envelope without that envelope's commit,
+            // which `an_envelope_journalled_and_never_answered_is_answered_from_the_journal_and_not_applied_again`
+            // already answers from. It is read as evidence so a note shown is never
+            // delivered again whatever else of its record survived.
+            journal::PipelineKind::NoteShown => applied(
+                serde_json::from_value::<crate::payload::NoteShown>(payload)
+                    .ok()?
+                    .envelope,
+                0,
+            ),
+            journal::PipelineKind::EditRejected => {
+                let rejected =
+                    serde_json::from_value::<crate::payload::EditRejected>(payload).ok()?;
+                Some(Self::Rejected {
+                    envelope: rejected.envelope?,
+                    command: Value::Object(rejected.command),
+                    reason: rejected.reason,
+                })
+            }
+            _ => None,
+        }
     }
 }
 
@@ -8317,6 +8356,73 @@ mod tests {
             .collect();
         assert_eq!(rejected, [json!(0), json!(1)]);
         assert!(channel.claimed_unanswered().is_empty());
+        std::fs::remove_dir_all(&paths.dir).ok();
+    }
+
+    /// Only a record that decodes as its kind's payload is evidence of the
+    /// envelope it names. A claimed envelope beside an `edit-committed` naming it
+    /// and carrying nothing else, and beside an `edit-rejected` whose reason is
+    /// not text, is handed back to be judged; beside a whole `edit-committed`
+    /// naming it, it is answered from that record.
+    #[test]
+    fn a_record_that_does_not_decode_as_its_payload_is_no_envelopes_evidence() {
+        let paths = handover_scratch("recover-malformed-evidence");
+        let channel = ChannelState::new(&paths);
+        let amend = Command::Cancel {
+            id: "build".to_owned(),
+            reason: None,
+        };
+        for _ in 0..2 {
+            channel
+                .submit(
+                    crate::channel::Author::planner(),
+                    std::slice::from_ref(&amend),
+                )
+                .expect("the envelope is queued");
+        }
+        channel
+            .claim_commands_answering()
+            .expect("the queue is claimed");
+        let mut journal = Journal::open(&paths);
+        let emit = |journal: &mut Journal, kind, payload: Value| {
+            let Value::Object(payload) = payload else {
+                unreachable!("a payload is an object")
+            };
+            journal
+                .emit(kind, journal::labels(&paths.run, None), payload)
+                .expect("the record is journalled");
+        };
+        emit(
+            &mut journal,
+            journal::PipelineKind::EditCommitted,
+            json!({"envelope": 0}),
+        );
+        emit(
+            &mut journal,
+            journal::PipelineKind::EditRejected,
+            json!({"author": "planner", "command": amend, "reason": 7, "envelope": 0}),
+        );
+        emit(
+            &mut journal,
+            journal::PipelineKind::EditCommitted,
+            json!({"author": "planner", "command": amend, "operations": [],
+                   "operation_kinds": [], "envelope": 1}),
+        );
+
+        let recovered = recover_claimed(&paths, &mut journal, &channel).expect("recovered");
+
+        let ids: Vec<u64> = recovered
+            .envelopes
+            .iter()
+            .map(|envelope| envelope.id)
+            .collect();
+        assert_eq!(ids, [0, 1]);
+        assert_eq!(
+            recovered.evidence.keys().copied().collect::<Vec<_>>(),
+            [1],
+            "{recovered:?}"
+        );
+        assert_eq!(recovered.evidence[&1], Effect::Applied(1));
         std::fs::remove_dir_all(&paths.dir).ok();
     }
 
