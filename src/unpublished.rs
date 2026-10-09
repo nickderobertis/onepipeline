@@ -735,23 +735,27 @@ fn allocated(root: &Path, unresolved: &mut Vec<String>) -> u64 {
             if meta.is_dir() {
                 pending.push(entry.path());
             } else if meta.is_file() {
-                total = total.saturating_add(allocated_bytes(&meta));
+                total = total.saturating_add(file_bytes(&meta));
             }
         }
     }
     total
 }
 
+/// A file's bytes as this platform can count them: its allocated blocks on Unix,
+/// so a sparse file does not claim its apparent length.
 #[cfg(unix)]
-fn allocated_bytes(meta: &std::fs::Metadata) -> u64 {
+fn file_bytes(meta: &std::fs::Metadata) -> u64 {
     use std::os::unix::fs::MetadataExt;
     meta.blocks().saturating_mul(512)
 }
 
 // llmlint: ignore[changed_behavior_has_e2e] Windows reports no allocated block count through
 // std, so the apparent length stands in; the Unix arm is what the `--disk` journey drives.
+/// A file's bytes as this platform can count them: its apparent length, where std
+/// reports no allocated block count.
 #[cfg(not(unix))]
-fn allocated_bytes(meta: &std::fs::Metadata) -> u64 {
+fn file_bytes(meta: &std::fs::Metadata) -> u64 {
     meta.len()
 }
 
