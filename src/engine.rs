@@ -1850,9 +1850,9 @@ fn converge(
                     // A delivery a `cancel` preempted is already answered and
                     // journalled as refused, so what its thread says now is
                     // dropped rather than recorded a second time.
-                    if let Some((witnessed, _recording, overtaken)) = answered {
+                    if let Some((witnessed, _recording, recording)) = answered {
                         let mut answer = *answer;
-                        if overtaken {
+                        if recording == Recording::JudgedAgain {
                             rejudge_overtaken(paths, state, launch, &in_flight, &mut answer);
                         }
                         if record_delivered(
@@ -3016,6 +3016,16 @@ fn rejudge_overtaken(
         .collect();
 }
 
+/// How an answered delivery's envelope is recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Recording {
+    /// As its delivery answered: nothing it names changed under it.
+    AsDelivered,
+    /// After [`rejudge_overtaken`]: a `cancel` overtook it while it was
+    /// outstanding, so what it names may have changed under it.
+    JudgedAgain,
+}
+
 /// How far a preempted envelope got before a `cancel` answered it.
 enum Preempted {
     /// Held, and never offered: its own validation, one ruling per command.
@@ -3822,17 +3832,22 @@ impl NoteDeliveries {
     /// whose envelope is already answered and journalled — so a late answer
     /// from its thread records nothing a second time.
     ///
-    /// The `bool` says whether a `cancel` overtook it while it was outstanding,
-    /// which is what makes its commands judged again before it is recorded.
-    fn answered(&mut self, id: u64) -> Option<(Vec<Envelope>, PendingDelivery, bool)> {
+    /// The [`Recording`] says whether a `cancel` overtook it while it was
+    /// outstanding.
+    fn answered(&mut self, id: u64) -> Option<(Vec<Envelope>, PendingDelivery, Recording)> {
         self.outstanding.remove(&id).map(|outstanding| {
-            let overtaken = !outstanding
+            let recording = if outstanding
                 .progress
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .cancelled
-                .is_empty();
-            (outstanding.witnessed, outstanding.pending, overtaken)
+                .is_empty()
+            {
+                Recording::AsDelivered
+            } else {
+                Recording::JudgedAgain
+            };
+            (outstanding.witnessed, outstanding.pending, recording)
         })
     }
 

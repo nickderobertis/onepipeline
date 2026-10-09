@@ -8986,6 +8986,10 @@ envelope is answered once, its note and its amend each recorded once, the amend 
 the cancel. `an_overtaken_delivery_offers_no_note_into_the_cancelled_node` holds
 `[note lint, note build]` the same way: the note to `build` is never offered, and is
 answered `refused` naming the cancel beside the note `lint` read, `delivered`.
+`an_overtaken_envelope_is_judged_again_against_the_cancelled_node` overtakes
+`[note lint, cancel build]` with a second cancel of `build`: once `lint` answers, that
+envelope's own cancel is refused for a node already parked, recorded once as
+`edit-rejected` and never committed, and the envelope is answered once.
 `src/engine.rs`'s
 `a_cancel_preempts_its_nodes_note_and_overtakes_only_what_waits_elsewhere` drives the
 real reconciler with deliveries outstanding — one of them past a note another
