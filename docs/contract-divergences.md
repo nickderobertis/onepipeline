@@ -9371,9 +9371,10 @@ envelope whose driver died between its two records, whose second command the
 adopter commits after the adoption, each command recorded exactly once, in command
 order.
 `an_envelope_whose_write_ahead_cannot_be_read_is_left_unanswered_and_surfaced`
-leaves three half-journalled envelopes whose files are removed, torn and replaced
-by another envelope's: none is answered, none commits its second command, and each
-is surfaced. `a_recovered_envelope_committed_ahead_keeps_what_a_later_half_journalled_one_needs`
+leaves four half-journalled envelopes whose files are removed, torn, replaced by
+another envelope's, and cut one command short: none is answered, none commits its
+second command, each is surfaced and keeps its file, and the file of an envelope
+answered before the driver died is removed. `a_recovered_envelope_committed_ahead_keeps_what_a_later_half_journalled_one_needs`
 has a `reply` take the run over and reconcile, with no delivery thread, a held
 two-command envelope ahead of a half-journalled one: the later one is still
 finished from its own file, each command recorded once.

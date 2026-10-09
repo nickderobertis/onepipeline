@@ -1132,15 +1132,26 @@ fn a_journalled_record_that_does_not_read_as_its_payload_is_no_proof_an_envelope
 }
 
 /// Take back out of the store what a driver killed between an envelope's records
-/// leaves missing: every outcome line, and the record of the second command of
-/// each of `envelopes`.
+/// leaves missing: the outcome line and the record of the second command of each
+/// of `envelopes`.
 // llmlint: ignore-block[tests_mirror_real_usage] a driver killed between two adjacent
 // writes — two records of one envelope, then its outcome line — cannot be timed from outside
 // the binary; taking those writes back out of the store is the one way to leave what such a
 // death leaves, and everything the driver wrote before it is left exactly as written.
 fn died_between_records(world: &World, run: &str, envelopes: &[u64]) {
-    std::fs::write(world.run_file(run, "channel/command-outcomes.jsonl"), "")
-        .expect("the outcome log is emptied");
+    let log = world.run_file(run, "channel/command-outcomes.jsonl");
+    let answered: String = std::fs::read_to_string(&log)
+        .expect("the outcome log reads")
+        .lines()
+        .filter(|line| {
+            let outcome: Value = serde_json::from_str(line).expect("an outcome line");
+            !outcome["id"]
+                .as_u64()
+                .is_some_and(|id| envelopes.contains(&id))
+        })
+        .map(|line| format!("{line}\n"))
+        .collect();
+    std::fs::write(&log, answered).expect("the outcome log is rewritten");
     let journal = world.run_file(run, "events.jsonl");
     let mut seen = std::collections::BTreeSet::new();
     let kept: String = std::fs::read_to_string(&journal)
@@ -1172,13 +1183,15 @@ fn model(model: &str) -> Value {
 }
 
 /// **An envelope that cannot be finished is not answered as if it were.** A
-/// driver dies between the two records of each of three two-command envelopes,
+/// driver dies between the two records of each of four two-command envelopes,
 /// and what each wrote down before its first record cannot be used: removed,
-/// overwritten with what is not JSON, or replaced by another envelope's. The
-/// adopter commits nothing it cannot read, answers none of the three — `status`
-/// goes on naming them claimed with no outcome — and surfaces each to the
-/// planner, naming the command it was journalled through; the run itself goes
-/// on to settle.
+/// overwritten with what is not JSON, replaced by another envelope's, or naming
+/// the envelope with one command's operations too few. The adopter commits
+/// nothing it cannot read, answers none of the four — `status` goes on naming
+/// them claimed with no outcome — and surfaces each to the planner, naming the
+/// command it was journalled through; the run itself goes on to settle. A fifth
+/// two-command envelope, answered before the driver died, has what was written
+/// down for it removed, while the four still owed keep theirs.
 #[cfg(unix)]
 #[test]
 fn an_envelope_whose_write_ahead_cannot_be_read_is_left_unanswered_and_surfaced() {
@@ -1193,6 +1206,8 @@ fn an_envelope_whose_write_ahead_cannot_be_read_is_left_unanswered_and_surfaced(
         ("gone-1", "gone-2"),
         ("torn-1", "torn-2"),
         ("other-1", "other-2"),
+        ("short-1", "short-2"),
+        ("answered-1", "answered-2"),
     ] {
         world
             .run_with_stdin(
@@ -1202,15 +1217,27 @@ fn an_envelope_whose_write_ahead_cannot_be_read_is_left_unanswered_and_surfaced(
             .exited(0);
     }
     end_process(pid);
-    died_between_records(&world, run, &[0, 1, 2]);
-    // llmlint: ignore-block[tests_mirror_real_usage] what a store fault does to the run's
-    // private write-ahead files — one lost, one torn, one replaced — which no verb does and
-    // the adopter has to refuse to trust.
+    died_between_records(&world, run, &[0, 1, 2, 3]);
     let written = |id: u64| world.run_file(run, &format!("committing/{id}.json"));
+    assert!(
+        written(4).is_file(),
+        "the answered envelope was not written down"
+    );
+    // llmlint: ignore-block[tests_mirror_real_usage] what a store fault does to the run's
+    // private write-ahead files — one lost, one torn, one replaced, one cut short — which no
+    // verb does and the adopter has to refuse to trust.
     let another = std::fs::read_to_string(written(0)).expect("envelope 0 was written down");
     std::fs::remove_file(written(0)).expect("the first is removed");
     std::fs::write(written(1), "{\"envelope\": 1, \"operations\": [").expect("the second is torn");
     std::fs::write(written(2), another).expect("the third names another envelope");
+    let mut short: Value =
+        serde_json::from_str(&std::fs::read_to_string(written(3)).expect("envelope 3 was written"))
+            .expect("what was written is JSON");
+    short["operations"]
+        .as_array_mut()
+        .expect("one list per command")
+        .truncate(1);
+    std::fs::write(written(3), short.to_string()).expect("the fourth is cut short");
     // llmlint: ignore-end[tests_mirror_real_usage]
 
     let adopted = std::thread::scope(|scope| {
@@ -1224,18 +1251,29 @@ fn an_envelope_whose_write_ahead_cannot_be_read_is_left_unanswered_and_surfaced(
     });
     adopted.exited(0);
 
+    let answered: Vec<u64> = world
+        .command_outcomes(run)
+        .iter()
+        .filter_map(|outcome| outcome["id"].as_u64())
+        .collect();
+    assert_eq!(answered, [4]);
     assert!(
-        world.command_outcomes(run).is_empty(),
-        "{:?}",
-        world.command_outcomes(run)
-    );
-    assert!(
-        unanswered_line(&world, run).is_some_and(|line| line.contains("envelope(s) 0, 1, 2 ")),
+        unanswered_line(&world, run).is_some_and(|line| line.contains("envelope(s) 0, 1, 2, 3 ")),
         "{:?}",
         unanswered_line(&world, run)
     );
-    for (id, first) in [(0, "gone-1"), (1, "torn-1"), (2, "other-1")] {
+    for (id, first) in [(0, "gone-1"), (1, "torn-1"), (2, "other-1"), (3, "short-1")] {
         assert_eq!(committed_commands(&world, run, id), [model(first)]);
+    }
+    assert!(
+        !written(4).exists(),
+        "the answered envelope's write-ahead was kept"
+    );
+    for owed in [1, 2, 3] {
+        assert!(
+            written(owed).is_file(),
+            "envelope {owed}'s write-ahead was removed"
+        );
     }
     let surfaced: Vec<String> = world
         .events_of(run, "planner-surface-queued")
@@ -1248,8 +1286,8 @@ fn an_envelope_whose_write_ahead_cannot_be_read_is_left_unanswered_and_surfaced(
                 .to_owned()
         })
         .collect();
-    assert_eq!(surfaced.len(), 3, "{surfaced:?}");
-    for (message, id) in surfaced.iter().zip([0, 1, 2]) {
+    assert_eq!(surfaced.len(), 4, "{surfaced:?}");
+    for (message, id) in surfaced.iter().zip([0, 1, 2, 3]) {
         assert!(
             message.contains(&format!(
                 "envelope {id} was journalled through command 1 of 2"
