@@ -237,6 +237,7 @@ mod surface;
 mod templates;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod turns;
+mod unpublished;
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] these journeys reach
 // every caller of the workspace-listing operations across `src/`, so the crate's edge is
 // the narrowest they fit behind.

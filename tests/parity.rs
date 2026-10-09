@@ -1226,3 +1226,184 @@ fn shutdown_is_the_sdks_report_and_exit_code() {
     );
     let _ = std::fs::remove_dir_all(&onevcs_home);
 }
+
+/// A state root of its own for `unpublished`: one registered repository and one
+/// branch a session labelled for [`SESSION`] left preserved, made through the
+/// linked `onevcs` over real git. Answers the environment both sides run under.
+fn unpublished_host(root: &Path) -> Vec<(&'static str, String)> {
+    let home = root.join("onevcs-home");
+    let gitconfig = root.join("gitconfig");
+    std::fs::create_dir_all(&home).expect("a state root");
+    std::fs::write(
+        &gitconfig,
+        "[user]\n\tname = Parity\n\temail = parity@example.invalid\n[commit]\n\tgpgsign = false\n",
+    )
+    .expect("a git config");
+    std::fs::write(
+        home.join("rules.yml"),
+        "version: 3\nrules: []\ndefault:\n  publication: local-direct\n  approvals: none\n",
+    )
+    .expect("the rules");
+    let environment = vec![
+        ("ONEVCS_HOME", home.display().to_string()),
+        ("GIT_CONFIG_GLOBAL", gitconfig.display().to_string()),
+        ("XDG_STATE_HOME", root.join("state").display().to_string()),
+    ];
+    let run_git = |dir: &Path, args: &[&str]| {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_CONFIG_GLOBAL", &gitconfig)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("git runs");
+        assert!(status.success(), "git {args:?}");
+    };
+    let origin = root.join("origin.git");
+    std::fs::create_dir_all(&origin).expect("an origin");
+    run_git(&origin, &["init", "-q", "--bare", "--initial-branch=main"]);
+    run_git(root, &["clone", "-q", &origin.to_string_lossy(), "service"]);
+    let checkout = root.join("service");
+    std::fs::write(checkout.join("README.md"), "parity\n").expect("a seed");
+    run_git(&checkout, &["add", "-A"]);
+    run_git(&checkout, &["commit", "-q", "-m", "chore: seed"]);
+    run_git(&checkout, &["push", "-q", "origin", "main"]);
+    for (key, value) in &environment {
+        std::env::set_var(key, value);
+    }
+    use clap::Parser;
+    let registered = onevcs::run(&onevcs::cli::Cli::parse_from([
+        "onevcs",
+        "register",
+        &checkout.to_string_lossy(),
+    ]));
+    assert_eq!(registered, 0, "the checkout registers");
+    let vcs = onevcs::Providers::real().vcs;
+    let session = vcs
+        .open_session(onevcs::SessionRequest {
+            repo: checkout.to_string_lossy().into_owned(),
+            branch: Some("work/parity".to_owned()),
+            branch_name: None,
+            branch_prefix: None,
+            base: None,
+            execution_checkout: None,
+            pool: None,
+            overflow: None,
+            labels: [("launcher".to_owned(), SESSION.to_owned())]
+                .into_iter()
+                .collect(),
+            refuse_conflicts: false,
+        })
+        .expect("a session opens");
+    std::fs::write(session.worktree.join("work.txt"), "work\n").expect("the work");
+    run_git(&session.worktree, &["add", "-A"]);
+    run_git(
+        &session.worktree,
+        &["commit", "-q", "-m", "feat: parity work"],
+    );
+    vcs.close_session(&session.token)
+        .expect("the session closes");
+    environment
+}
+
+#[test]
+fn unpublished_lists_decides_refuses_and_acknowledges_as_the_sdk_does() {
+    let fixture = Fixture::new("unpublished");
+    let _env = fixture.enter();
+    let scratch = fixture.root.parent().expect("the fixture root").join("vcs");
+    let environment = unpublished_host(&scratch);
+    let binary = |args: &[&str]| {
+        fixture
+            .command(SESSION, args)
+            .envs(
+                environment
+                    .iter()
+                    .map(|(key, value)| (*key, value.as_str())),
+            )
+            .output()
+            .expect("the binary runs")
+    };
+    let acknowledgements = verbs::default_unpublished_acknowledgements().expect("a state root");
+    let request = |target| verbs::UnpublishedRequest {
+        target,
+        acknowledging: Some(SESSION.to_owned()),
+        acknowledgements: acknowledgements.clone(),
+        disk: false,
+        pr_author_graph: None,
+    };
+
+    let session = verbs::unpublished(&request(verbs::UnpublishedTarget::Session {
+        session: SESSION.to_owned(),
+    }))
+    .expect("the listing");
+    assert_eq!(session.verdict, verbs::UnpublishedVerdict::Owed);
+    same(
+        "unpublished, session",
+        &binary(&["unpublished"]),
+        &verbs::render_unpublished(&session),
+        session.exit_code(),
+    );
+    same(
+        "unpublished, session, json",
+        &binary(&["unpublished", "--format", "json"]),
+        &line(session.json()),
+        session.exit_code(),
+    );
+    let host = verbs::unpublished(&request(verbs::UnpublishedTarget::Host)).expect("the host");
+    same(
+        "unpublished, host",
+        &binary(&["unpublished", "--host"]),
+        &verbs::render_unpublished(&host),
+        host.exit_code(),
+    );
+    let unknown = verbs::unpublished(&request(verbs::UnpublishedTarget::Tokens {
+        tokens: vec!["s-000000000000".to_owned()],
+    }))
+    .expect_err("an unknown token is refused");
+    refused(
+        "unpublished, unknown token",
+        &binary(&["unpublished", "--token", "s-000000000000"]),
+        &unknown,
+    );
+
+    // The acknowledgement writes, so each side records into a directory of its own
+    // and the receipts are compared with that directory named alike.
+    let theirs = scratch.join("acknowledged-binary");
+    let ours = scratch.join("acknowledged-sdk");
+    let written = binary(&[
+        "unpublished",
+        "--acknowledge",
+        "work/parity",
+        "--reason",
+        "kept for parity",
+        "--acknowledgements",
+        &theirs.to_string_lossy(),
+    ]);
+    let acknowledged = verbs::acknowledge_unpublished(
+        &verbs::AcknowledgeRequest {
+            branch: "work/parity".to_owned(),
+            reason: "kept for parity".to_owned(),
+            repo: None,
+            session: SESSION.to_owned(),
+            acknowledgements: ours.clone(),
+        },
+        None,
+    )
+    .expect("the acknowledgement");
+    assert_eq!(
+        stdout(&written).replace(&*theirs.to_string_lossy(), "<dir>"),
+        verbs::render_unpublished_acknowledged(&acknowledged)
+            .replace(&*ours.to_string_lossy(), "<dir>"),
+        "the receipts differ\n{}",
+        stderr(&written)
+    );
+    assert_eq!(exit(&written), acknowledged.listing.exit_code());
+    assert_eq!(
+        acknowledged.listing.exit_code(),
+        verbs::EXIT_NOTHING_COUNTED
+    );
+    for (key, _) in &environment {
+        std::env::remove_var(key);
+    }
+}

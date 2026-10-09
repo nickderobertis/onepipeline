@@ -343,15 +343,6 @@ pub fn unpublished(request: &UnpublishedRequest) -> Result<Unpublished> {
             if tokens.is_empty() {
                 return Err(Error::Invalid("`--token` names no session".to_owned()));
             }
-            let providers = onevcs::Providers::real();
-            for token in tokens {
-                // Refused as onevcs refuses it: a token no record names is a
-                // different answer from a session that left nothing.
-                providers
-                    .vcs
-                    .session(&SessionToken(token.clone()))
-                    .map_err(|error| Error::Invalid(format!("{token}: {error}")))?;
-            }
             Selection {
                 detail: Detail::Decision,
                 sessions: tokens.iter().cloned().map(SessionToken).collect(),
@@ -359,27 +350,43 @@ pub fn unpublished(request: &UnpublishedRequest) -> Result<Unpublished> {
             }
         }
     };
-    Ok(listing(request, &selection))
+    listing(request, &selection)
+}
+
+/// Whether a token target names a session no record on this host names.
+fn unknown_token(target: &Target) -> bool {
+    let Target::Tokens { tokens } = target else {
+        return false;
+    };
+    let providers = onevcs::Providers::real();
+    tokens
+        .iter()
+        .any(|token| providers.vcs.session(&SessionToken(token.clone())).is_err())
 }
 
 /// The listing for one selection, read and decided.
-fn listing(request: &UnpublishedRequest, selection: &Selection) -> Unpublished {
+fn listing(request: &UnpublishedRequest, selection: &Selection) -> Result<Unpublished> {
     let mut unresolved = Vec::new();
     let read = onevcs::Providers::real()
         .vcs
         .recoverable_matching(Scope::All, selection);
     let recoverable = match read {
         Ok(rows) => rows,
+        // A token no record names is refused, in onevcs's own words: "nothing of that
+        // session is left" and "there is no such session" are different answers.
+        Err(error) if unknown_token(&request.target) => {
+            return Err(Error::Invalid(error.to_string()))
+        }
         Err(error) => {
             unresolved.push(format!(
                 "the recovery read failed, so whether anything is owed is unanswered: {error}"
             ));
-            return Unpublished {
+            return Ok(Unpublished {
                 target: request.target.clone(),
                 verdict: Verdict::Unanswered,
                 rows: Vec::new(),
                 unresolved,
-            };
+            });
         }
     };
     let mut unanswered = false;
@@ -430,12 +437,12 @@ fn listing(request: &UnpublishedRequest, selection: &Selection) -> Unpublished {
     } else {
         Verdict::None
     };
-    Unpublished {
+    Ok(Unpublished {
         target: request.target.clone(),
         verdict,
         rows,
         unresolved,
-    }
+    })
 }
 
 /// The acknowledgement standing for `row`, if one does: its identity and branch,

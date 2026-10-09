@@ -1127,7 +1127,7 @@ pub struct StopGuardArgs {
     #[arg(long, value_name = "DIR", requires = "unpublished")]
     pub unpublished_acknowledgements: Option<PathBuf>,
     /// The pr-author graph each printed landing command drafts with. Omitted,
-    /// each prints `--no-draft`.
+    /// each declines a draft out loud.
     #[arg(long, value_name = "PATH", requires = "unpublished")]
     pub unpublished_pr_author_graph: Option<PathBuf>,
 }
@@ -1163,7 +1163,7 @@ pub struct UnpublishedArgs {
     #[arg(long, value_name = "DIR")]
     pub acknowledgements: Option<PathBuf>,
     /// The pr-author graph each printed landing command drafts with; refused
-    /// unless it is a readable file. Omitted, each prints `--no-draft`.
+    /// unless it is a readable file. Omitted, each declines a draft out loud.
     #[arg(long, value_name = "PATH")]
     pub pr_author_graph: Option<PathBuf>,
     /// Record that the session has seen and deliberately left BRANCH at the tip
