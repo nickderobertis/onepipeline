@@ -9314,11 +9314,17 @@ by hand against its own receipt's *never send it again*.
 **An envelope journalled part way is finished, not dropped.** An envelope's
 commands are journalled one record each and its outcome line after them, so a
 driver can die between two of an envelope's records. Its writer writes down, in a
-private file of the run's directory, every operation an envelope of several
-commands commits — each note's disposition included — before the first record; the
-adopter answers such an envelope `applied` only after committing, in command
-order, the operations of every command without a record, so each command has
-exactly one record and no note is offered again.
+private file of the run's directory named by the envelope's id, every operation an
+envelope of several commands commits — each note's disposition included — before
+the first record, and that file stays until a driver starting on the run finds the
+envelope answered. The adopter answers such an envelope `applied` only after
+committing, in command order, the operations of every command without a record, so
+each command has exactly one record and no note is offered again. Where that file
+is missing, unreadable, or names another envelope, nothing more of the envelope is
+committed and it is **not answered**: `status` goes on naming it claimed with no
+outcome, its submitter is told nothing false, the planner is surfaced an
+`envelope-unrecovered` naming the command it was journalled through, and the next
+driver starting on the run tries again.
 
 **A recovered live note reaches the adopter's dispatch.** A conversation that ran
 inside the dead driver answers nothing, so the adopter offers it the note, is told
@@ -9364,6 +9370,13 @@ older build wrote it, which is judged and committed again; and a two-command
 envelope whose driver died between its two records, whose second command the
 adopter commits after the adoption, each command recorded exactly once, in command
 order.
+`an_envelope_whose_write_ahead_cannot_be_read_is_left_unanswered_and_surfaced`
+leaves three half-journalled envelopes whose files are removed, torn and replaced
+by another envelope's: none is answered, none commits its second command, and each
+is surfaced. `a_recovered_envelope_committed_ahead_keeps_what_a_later_half_journalled_one_needs`
+has a `reply` take the run over and reconcile, with no delivery thread, a held
+two-command envelope ahead of a half-journalled one: the later one is still
+finished from its own file, each command recorded once.
 `a_reply_that_takes_the_run_over_answers_what_the_dead_driver_claimed_before_its_own`
 kills a driver judging an `add`, then submits the same `add` from a `reply` that
 finds nothing driving: the claimed one is applied and its waiting `reply` told so,

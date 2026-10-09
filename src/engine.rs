@@ -2962,6 +2962,7 @@ fn recover_claimed(
     channel: &ChannelState,
 ) -> Result<Recovered> {
     let mut recovered = Recovered::default();
+    prune_committing(paths, channel);
     let claimed = channel.claimed_unanswered_records();
     if claimed.is_empty() {
         return Ok(recovered);
@@ -3019,7 +3020,9 @@ pub(crate) struct Recovered {
 
 /// Answer, in its turn, a recovered envelope the journal already holds `effect`
 /// of: `applied`, after committing whatever of it was not journalled yet, or
-/// `refused` with the reasons recorded. `true` where it committed anything now.
+/// `refused` with the reasons recorded — or, where what the rest of it commits
+/// cannot be read, nothing, and surfaced (see [`unrecovered`]). `true` where it
+/// committed anything now.
 fn answer_recovered(
     paths: &RunPaths,
     journal: &mut Journal,
@@ -3031,8 +3034,9 @@ fn answer_recovered(
     match effect {
         Effect::Applied(committed) => {
             let resumed = committed < envelope.commands.len();
-            if resumed {
-                resume_committing(paths, journal, state, envelope, committed)?;
+            if resumed && !resume_committing(paths, journal, state, envelope, committed)? {
+                // Left unanswered: what the rest of it commits could not be read.
+                return Ok(false);
             }
             channel.answer_commands(&applied_envelope(envelope.id, &envelope.commands))?;
             Ok(resumed)
@@ -3524,7 +3528,7 @@ fn record_delivered(
             .collect(),
     };
     if commands.len() > 1 {
-        ledger::write_json(&paths.dir.join(COMMITTING), &committing)?;
+        ledger::write_json(&committing_path(paths, envelope.id), &committing)?;
     }
     for (command, operations) in commands.iter().zip(&committing.operations) {
         commit_command(
@@ -3553,12 +3557,45 @@ fn record_delivered(
     Ok(!commands.is_empty())
 }
 
-/// Where an envelope of several commands is written down before its first record,
-/// under the run's own directory: one at a time, because one writer commits one
-/// envelope at a time. It stays until the next replaces it, and names its
-/// envelope, so a copy left from an envelope already answered is never read for
-/// another.
-const COMMITTING: &str = "committing.json";
+/// The directory, under the run's own, each envelope of several commands is
+/// written down in before its first record — one file per envelope, named by its
+/// id, so committing one envelope never overwrites what another still needs.
+/// A file stays until a driver starting on the run finds its envelope answered —
+/// see [`prune_committing`] — which is what keeps it for the driver that has to
+/// finish that envelope.
+const COMMITTING: &str = "committing";
+
+fn committing_path(paths: &RunPaths, envelope: u64) -> std::path::PathBuf {
+    paths.dir.join(COMMITTING).join(format!("{envelope}.json"))
+}
+
+/// Remove what was written down for every envelope the outcome log answers.
+///
+/// Read off the outcome log as it stands, so a log this reader cannot read
+/// answers nothing and removes nothing.
+fn prune_committing(paths: &RunPaths, channel: &ChannelState) {
+    let Ok(written) = std::fs::read_dir(paths.dir.join(COMMITTING)) else {
+        return;
+    };
+    let answered: BTreeSet<u64> = channel
+        .outcomes()
+        .iter()
+        .map(|outcome| outcome.id)
+        .collect();
+    for file in written.flatten() {
+        let path = file.path();
+        let id = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .and_then(|stem| stem.parse::<u64>().ok());
+        if id.is_some_and(|id| answered.contains(&id)) {
+            // llmlint: ignore[changed_behavior_has_e2e] a file in the run's own
+            // directory this writer cannot remove is a host fault no verb makes; left
+            // behind, it names an envelope already answered and is never read again.
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
 
 /// The operations each command of one envelope commits, in command order, as
 /// the delivery phase answered them — what a driver taking the run over commits
@@ -3582,25 +3619,32 @@ fn resume_committing(
     state: &mut Projected,
     envelope: &crate::channel::QueuedCommands,
     committed: usize,
-) -> Result<()> {
-    let written: Option<Committing> = ledger::read_json_opt(&paths.dir.join(COMMITTING));
-    let Some(written) = written.filter(|written| {
-        written.envelope == envelope.id && written.operations.len() == envelope.commands.len()
-    }) else {
-        // llmlint: ignore-block[changed_behavior_has_e2e] this build writes the
-        // envelope down before its first record and refuses to journal any record of
-        // it when that write fails, so a partly journalled envelope with nothing
-        // written down is one a store fault or a hand edit made, never a verb.
-        eprintln!(
-            "onepipeline: run '{}': envelope {} was journalled through command {} of {} and \
-             nothing says what the rest committed, so it is answered as journalled",
-            paths.run,
-            envelope.id,
-            committed,
-            envelope.commands.len()
-        );
-        return Ok(());
-        // llmlint: ignore-end[changed_behavior_has_e2e]
+) -> Result<bool> {
+    let path = committing_path(paths, envelope.id);
+    let written = std::fs::read_to_string(&path)
+        .map_err(|failure| failure.to_string())
+        .and_then(|text| {
+            serde_json::from_str::<Committing>(&text).map_err(|failure| failure.to_string())
+        })
+        .and_then(|written| {
+            if written.envelope == envelope.id
+                && written.operations.len() == envelope.commands.len()
+            {
+                Ok(written)
+            } else {
+                Err(format!(
+                    "it names envelope {} with {} commands",
+                    written.envelope,
+                    written.operations.len()
+                ))
+            }
+        });
+    let written = match written {
+        Ok(written) => written,
+        Err(why) => {
+            unrecovered(paths, journal, envelope, committed, &path, &why)?;
+            return Ok(false);
+        }
     };
     for (command, operations) in envelope
         .commands
@@ -3619,8 +3663,53 @@ fn resume_committing(
             envelope.id,
         )?;
     }
-    Ok(())
+    Ok(true)
 }
+
+/// Say that a recovered envelope could not be finished: only its first
+/// `committed` commands have their record, and what the rest commit cannot be
+/// read from `path` — `why`. It is left unanswered, so its submitter is told
+/// nothing false, `status` goes on naming it claimed with no outcome, and the
+/// next driver starting on the run tries again; the planner is surfaced which
+/// commands of it stand, because none of this is visible on the graph alone.
+fn unrecovered(
+    paths: &RunPaths,
+    journal: &mut Journal,
+    envelope: &crate::channel::QueuedCommands,
+    committed: usize,
+    path: &std::path::Path,
+    why: &str,
+) -> Result<()> {
+    let message = format!(
+        "reconciler: envelope {} was journalled through command {committed} of {} by a driver \
+         that died, and what the rest of it commits cannot be read from {} ({why}); it is left \
+         unanswered rather than reported applied, and its first {committed} command(s) stand",
+        envelope.id,
+        envelope.commands.len(),
+        path.display()
+    );
+    eprintln!("onepipeline: run '{}': {message}", paths.run);
+    raise(
+        paths,
+        journal,
+        Surface {
+            id: 0,
+            kind: UNRECOVERED.into(),
+            message,
+            source: crate::channel::source::RECONCILER.into(),
+            blocking: false,
+            queued_at: sys::now_millis(),
+            abandoned: false,
+            asker: None,
+            workstream: None,
+            correlation: None,
+        },
+    )
+}
+
+/// The surface kind a recovered envelope that could not be finished is raised
+/// under — see [`unrecovered`].
+const UNRECOVERED: &str = "envelope-unrecovered";
 
 fn applied_envelope(id: u64, commands: &[Command]) -> CommandOutcome {
     CommandOutcome {

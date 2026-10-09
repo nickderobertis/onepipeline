@@ -12,7 +12,7 @@
 //! from the journal where a record already names the envelope.
 
 // llmlint: ignore-file[expensive_tests_stay_behind_their_own_edge] measured rather than
-// assumed: the seventeen journeys here take about 25 seconds on the wall under nextest's
+// assumed: the nineteen journeys here take about 25 seconds on the wall under nextest's
 // parallelism, each driving a real detached or attached driver to its ending. What they
 // exercise is how a driver lets go of a run — `engine`, `driver`, `channel`, `projection`,
 // `views` and `hooks` together — which any change under `src/` can move, so a project edged
@@ -1128,6 +1128,244 @@ fn a_journalled_record_that_does_not_read_as_its_payload_is_no_proof_an_envelope
     assert_eq!(named.len(), 2, "{named:?}");
     assert!(named[0]["payload"].get("command").is_none());
     assert_eq!(named[1]["payload"]["command"]["op"], "set-run-node-sets");
+    assert_eq!(unanswered_line(&world, run), None);
+}
+
+/// Take back out of the store what a driver killed between an envelope's records
+/// leaves missing: every outcome line, and the record of the second command of
+/// each of `envelopes`.
+// llmlint: ignore-block[tests_mirror_real_usage] a driver killed between two adjacent
+// writes — two records of one envelope, then its outcome line — cannot be timed from outside
+// the binary; taking those writes back out of the store is the one way to leave what such a
+// death leaves, and everything the driver wrote before it is left exactly as written.
+fn died_between_records(world: &World, run: &str, envelopes: &[u64]) {
+    std::fs::write(world.run_file(run, "channel/command-outcomes.jsonl"), "")
+        .expect("the outcome log is emptied");
+    let journal = world.run_file(run, "events.jsonl");
+    let mut seen = std::collections::BTreeSet::new();
+    let kept: String = std::fs::read_to_string(&journal)
+        .expect("the journal reads")
+        .lines()
+        .filter(|line| {
+            let record: Value = serde_json::from_str(line).expect("a journal record");
+            let Some(id) = record["payload"]["envelope"].as_u64() else {
+                return true;
+            };
+            record["kind"] != "edit-committed" || !envelopes.contains(&id) || seen.insert(id)
+        })
+        .map(|line| format!("{line}\n"))
+        .collect();
+    std::fs::write(&journal, kept).expect("the journal is rewritten");
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// The commands an envelope's `edit-committed` records carry, in journal order.
+fn committed_commands(world: &World, run: &str, id: u64) -> Vec<Value> {
+    committed_from(world, run, id)
+        .iter()
+        .map(|event| event["payload"]["command"].clone())
+        .collect()
+}
+
+fn model(model: &str) -> Value {
+    json!({"op": "set-run-node-sets", "sets": [format!("members.worker.agent.model={model}")]})
+}
+
+/// **An envelope that cannot be finished is not answered as if it were.** A
+/// driver dies between the two records of each of three two-command envelopes,
+/// and what each wrote down before its first record cannot be used: removed,
+/// overwritten with what is not JSON, or replaced by another envelope's. The
+/// adopter commits nothing it cannot read, answers none of the three — `status`
+/// goes on naming them claimed with no outcome — and surfaces each to the
+/// planner, naming the command it was journalled through; the run itself goes
+/// on to settle.
+#[cfg(unix)]
+#[test]
+fn an_envelope_whose_write_ahead_cannot_be_read_is_left_unanswered_and_surfaced() {
+    let world = hooked_world("exit-unrecoverable");
+    let run = "unrecoverable";
+    world.script("build.wait", "hold");
+    let pid = start_detached(&world, run, vec![agent("build", &[])], &[]);
+    world.until("the held node to be dispatched", |world| {
+        !world.events_of(run, "node-dispatched").is_empty()
+    });
+    for (first, second) in [
+        ("gone-1", "gone-2"),
+        ("torn-1", "torn-2"),
+        ("other-1", "other-2"),
+    ] {
+        world
+            .run_with_stdin(
+                &["reply", run],
+                &json!({"version": 3, "commands": [model(first), model(second)]}).to_string(),
+            )
+            .exited(0);
+    }
+    end_process(pid);
+    died_between_records(&world, run, &[0, 1, 2]);
+    // llmlint: ignore-block[tests_mirror_real_usage] what a store fault does to the run's
+    // private write-ahead files — one lost, one torn, one replaced — which no verb does and
+    // the adopter has to refuse to trust.
+    let written = |id: u64| world.run_file(run, &format!("committing/{id}.json"));
+    let another = std::fs::read_to_string(written(0)).expect("envelope 0 was written down");
+    std::fs::remove_file(written(0)).expect("the first is removed");
+    std::fs::write(written(1), "{\"envelope\": 1, \"operations\": [").expect("the second is torn");
+    std::fs::write(written(2), another).expect("the third names another envelope");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    let adopted = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            world.until("the adopter to re-dispatch the held node", |world| {
+                world.events_of(run, "node-dispatched").len() >= 2
+            });
+            world.release("build.go");
+        });
+        world.run(&["adopt", run])
+    });
+    adopted.exited(0);
+
+    assert!(
+        world.command_outcomes(run).is_empty(),
+        "{:?}",
+        world.command_outcomes(run)
+    );
+    assert!(
+        unanswered_line(&world, run).is_some_and(|line| line.contains("envelope(s) 0, 1, 2 ")),
+        "{:?}",
+        unanswered_line(&world, run)
+    );
+    for (id, first) in [(0, "gone-1"), (1, "torn-1"), (2, "other-1")] {
+        assert_eq!(committed_commands(&world, run, id), [model(first)]);
+    }
+    let surfaced: Vec<String> = world
+        .events_of(run, "planner-surface-queued")
+        .into_iter()
+        .filter(|event| event["payload"]["kind"] == "envelope-unrecovered")
+        .map(|event| {
+            event["payload"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(surfaced.len(), 3, "{surfaced:?}");
+    for (message, id) in surfaced.iter().zip([0, 1, 2]) {
+        assert!(
+            message.contains(&format!(
+                "envelope {id} was journalled through command 1 of 2"
+            )),
+            "{message}"
+        );
+    }
+}
+
+const HELD_NOTE: &str = "the fixture moved to fixtures/v4; start from there";
+
+/// **What one recovered envelope writes down never costs another its own.** A
+/// driver holds a live note to a node whose turn is held, a two-command `amend`
+/// of that node behind it, and commits a later two-command envelope naming no
+/// node — and dies between that envelope's two records. A `reply` then finds
+/// nothing driving and becomes the writer, reconciling in claim order with no
+/// delivery thread: the note, then the held amend — committing an envelope of
+/// two commands of its own — then the half-journalled one, finished from what
+/// its driver wrote down, and then its own. Every envelope is answered
+/// `applied`, each command recorded exactly once, the finished envelope's second
+/// command after the amend.
+#[cfg(unix)]
+#[test]
+fn a_recovered_envelope_committed_ahead_keeps_what_a_later_half_journalled_one_needs() {
+    let world = World::new("exit-keeps-write-ahead");
+    let run = "keepswriteahead";
+    world.script("turn.hold", "hold");
+    world.write_graphs();
+    world.write_supervised_node_graph();
+    let path = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
+    world
+        .run_on_agentgraph(&["start", &path, "--detach"])
+        .exited(0);
+    world.until("the worker's turn to open", |world| {
+        !world.events_of(run, "turn-started").is_empty()
+    });
+    // Envelope 0: a live note, waiting on the held turn.
+    let note = waiting_reply_on_agentgraph(
+        &world,
+        run,
+        json!([{"op": "note", "id": "build", "addressee": "worker",
+                "text": HELD_NOTE, "deliver": "live"}]),
+    );
+    world.until("the driver to claim the note", |world| {
+        unanswered_line(world, run).is_some_and(|line| line.contains("envelope(s) 0 "))
+    });
+    // Envelope 1: two amends of the same node, held behind the note.
+    let amends = json!([
+        {"op": "amend", "id": "build", "text": "the first amendment"},
+        {"op": "amend", "id": "build", "text": "the second amendment"},
+    ]);
+    let held = waiting_reply_on_agentgraph(&world, run, amends.clone());
+    world.until("the driver to hold the amends", |world| {
+        unanswered_line(world, run).is_some_and(|line| line.contains("envelope(s) 0, 1 "))
+    });
+    // Envelope 2: two commands naming no node, committed while the others wait.
+    let (code, said) = receipt(waiting_reply_on_agentgraph(
+        &world,
+        run,
+        json!([model("first-half"), model("second-half")]),
+    ));
+    assert_eq!(code, Some(0), "{said}");
+    crate::harness::end_driver(&world, run);
+    died_between_records(&world, run, &[2]);
+    assert_eq!(committed_commands(&world, run, 2), [model("first-half")]);
+
+    // Envelope 3: a reply that finds nothing driving.
+    let (code, said) = receipt(waiting_reply_on_agentgraph(
+        &world,
+        run,
+        json!([model("after")]),
+    ));
+    assert_eq!(code, Some(0), "{said}");
+    assert!(said.contains("\"state\":\"applied\""), "{said}");
+
+    for (reply, what) in [(note, "the note"), (held, "the held amends")] {
+        let (code, said) = receipt(reply);
+        assert_eq!(code, Some(0), "{what}: {said}");
+        assert!(said.contains("\"state\":\"applied\""), "{what}: {said}");
+    }
+    let outcomes = world.command_outcomes(run);
+    let applied: Vec<(u64, bool)> = outcomes
+        .iter()
+        .map(|outcome| {
+            (
+                outcome["id"].as_u64().expect("an id"),
+                outcome["applied"] == json!(true),
+            )
+        })
+        .collect();
+    assert_eq!(
+        applied,
+        [(0, true), (1, true), (2, true), (3, true)],
+        "{outcomes:?}"
+    );
+    assert_eq!(
+        committed_commands(&world, run, 1),
+        amends.as_array().expect("a list").clone()
+    );
+    assert_eq!(
+        committed_commands(&world, run, 2),
+        [model("first-half"), model("second-half")]
+    );
+    assert_eq!(committed_commands(&world, run, 3), [model("after")]);
+    let journal = world.journal(run);
+    let at = |id: u64, command: &Value| {
+        journal
+            .iter()
+            .position(|event| {
+                event["kind"] == "edit-committed"
+                    && event["payload"]["envelope"] == json!(id)
+                    && event["payload"]["command"] == *command
+            })
+            .expect("committed")
+    };
+    assert!(at(1, &amends[1]) < at(2, &model("second-half")));
     assert_eq!(unanswered_line(&world, run), None);
 }
 
