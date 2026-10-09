@@ -232,7 +232,7 @@ pub struct UnpublishedRequest {
     pub acknowledgements: PathBuf,
     /// Take each row's disk reading.
     pub disk: bool,
-    /// The drafting graph a printed landing command names; [`unpublished`] makes
+    /// The drafting graph a printed landing command names; [`crate::verbs::unpublished`] makes
     /// it absolute and refuses one that is not a readable file.
     pub pr_author_graph: Option<PathBuf>,
 }
