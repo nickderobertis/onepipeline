@@ -9215,7 +9215,9 @@ set.
 **Exit statuses:** `0` nothing counted, `7` at least one counted, `1` unanswered,
 `2` refused. `7` is `watch`'s run-changed return too; a code above `3` belongs to
 one verb's protocol by the reading entries 58 and 68 rule on, so no caller meets
-both, and `7` is what ai-orchestrator's `scripts/plan.sh` already branches on.
+both, and `7` is what ai-orchestrator's `scripts/plan.sh` already branches on. The
+manager confirmed `0`/`7`/`1`/`2` on that reading (planner reply
+`c-b79809b04658ae71057f6eddbf84b100`).
 
 **The JSON document** (`--format json`, one object on standard output) is
 `{"target", "verdict", "rows", "unresolved"}`: `target` is `{"kind": "session",
@@ -9269,6 +9271,10 @@ declared sources take. Its continuation memory is its own file beside the guard'
 `<sha256(session)>.unpublished`, under the guard's rule: a continuation over an
 unchanged reason answers `none`. Without `--unpublished` the guard is exactly what
 entry 85 states.
+
+**Its latency is budgeted** in `budgets.yaml` — 0.2 s warm, 0.5 s cold and 0.5 s
+warm at ten times the host-shaped workload, plus a 180 s journey time — read from
+the telemetry `tests/stop_verdict/` writes and judged on the merge-path CI runner.
 
 ```json
 {
