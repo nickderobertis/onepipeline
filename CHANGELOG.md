@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.63.6](https://github.com/nickderobertis/onepipeline/compare/v0.63.5...v0.63.6) - 2026-10-09
+
+### Added
+
+- *(channel)* replay the commands a dead driver claimed, linking the fixed onevcs and onetaskgraph ([#827](https://github.com/nickderobertis/onepipeline/pull/827))
+
 ## [0.63.5](https://github.com/nickderobertis/onepipeline/compare/v0.63.4...v0.63.5) - 2026-10-09
 
 ### Fixed
