@@ -34,32 +34,41 @@ budgets:
     command: [node, scripts/stop-guard-unpublished-budget.mjs]
     unit: seconds
     direction: max
-    threshold: 0.2
+    threshold: 0.5
     description: >-
       Warm native Stop verdict: the slowest none, owed or unreadable scenario's maximum
       of ten current-binary `stop-guard --format claude-code --unpublished` calls with
       Claude Code's stdin, after one priming call. Read from the full-workload journey's
-      validated telemetry; this command times nothing.
+      validated telemetry; this command times nothing. The threshold is a temporary relaxation by the user's ruling of 2026-10-09,
+      made so the native verdict can land before onevcs's scoped decision read is released;
+      the design target remains 0.2 s warm (0.5 s cold, 0.5 s at 10x warm), and a later node of this plan restores it
+      after adopting that onevcs release.
   - id: stop-guard-unpublished-latency-cold
     measure: reported
     command: [node, scripts/stop-guard-unpublished-budget.mjs, --cold]
     unit: seconds
     direction: max
-    threshold: 0.5
+    threshold: 2.5
     description: >-
       Cold native Stop verdict: the same ten calls per scenario with every proof and
       index cache cleared before each, the slowest scenario's maximum. Read from the
-      journey's telemetry.
+      journey's telemetry. The threshold is a temporary relaxation by the user's ruling of 2026-10-09,
+      made so the native verdict can land before onevcs's scoped decision read is released;
+      the design target remains 0.5 s cold (0.2 s warm, 0.5 s at 10x warm), and a later node of this plan restores it
+      after adopting that onevcs release.
   - id: stop-guard-unpublished-latency-10x
     measure: reported
     command: [node, scripts/stop-guard-unpublished-budget.mjs, --scale, '10']
     unit: seconds
     direction: max
-    threshold: 0.5
+    threshold: 3.0
     description: >-
       Warm native Stop verdict at ten times the host-shaped workload: the slowest
       scenario's maximum of ten calls after one priming call. Read from the journey's
-      telemetry.
+      telemetry. The threshold is a temporary relaxation by the user's ruling of 2026-10-09,
+      made so the native verdict can land before onevcs's scoped decision read is released;
+      the design target remains 0.5 s at 10x warm (0.2 s warm, 0.5 s cold), and a later node of this plan restores it
+      after adopting that onevcs release.
   - id: stop-guard-unpublished-journey-time
     measure: reported
     command: [node, scripts/stop-guard-unpublished-budget.mjs, --journey-time]

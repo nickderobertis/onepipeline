@@ -9272,9 +9272,13 @@ declared sources take. Its continuation memory is its own file beside the guard'
 unchanged reason answers `none`. Without `--unpublished` the guard is exactly what
 entry 85 states.
 
-**Its latency is budgeted** in `budgets.yaml` — 0.2 s warm, 0.5 s cold and 0.5 s
+**Its latency is budgeted** in `budgets.yaml` — 0.5 s warm, 2.5 s cold and 3.0 s
 warm at ten times the host-shaped workload, plus a 180 s journey time — read from
 the telemetry `tests/stop_verdict/` writes and judged on the merge-path CI runner.
+The three latency thresholds are a temporary relaxation by the user's ruling of
+2026-10-09, so the verdict lands before onevcs's label-scoped decision read is
+released; the design targets remain 0.2 s, 0.5 s and 0.5 s, and a later node of
+this plan restores them after adopting that release.
 
 ```json
 {
