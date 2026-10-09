@@ -1152,11 +1152,25 @@ pub(crate) fn reconcile_queued(paths: &RunPaths) -> Result<()> {
     let launch: LaunchRecord = ledger::read_json(&paths.launch())?;
     let mut journal = Journal::open(paths);
     let mut state = Projected::open(paths);
+    let channel = ChannelState::of_run(paths, &launch);
+    // What the driver that went claimed and never answered comes first.
+    for envelope in recover_claimed(paths, &mut journal, &channel)? {
+        reconcile_envelope(
+            paths,
+            &mut journal,
+            &mut state,
+            &channel,
+            &launch,
+            &mut BTreeMap::new(),
+            None,
+            envelope,
+        )?;
+    }
     reconcile_edits(
         paths,
         &mut journal,
         &mut state,
-        &ChannelState::of_run(paths, &launch),
+        &channel,
         &launch,
         &mut BTreeMap::new(),
         None,
@@ -1190,6 +1204,9 @@ fn converge(
     // dispatch this loop starts, which is what lets a re-dispatch wait for it.
     let notes_in_flight = DeliveriesInFlight::default();
     let mut deliveries = NoteDeliveries::new(&tx, &notes_in_flight);
+    // What a driver before this one claimed and never answered, ahead of
+    // anything this one claims: held envelopes are judged first on every pass.
+    deliveries.behind = recover_claimed(paths, journal, &channel)?;
     let mut in_flight: BTreeMap<String, Dispatch> = BTreeMap::new();
     let stall_after = Duration::from_secs(stall_after_seconds());
     let mut upstreams = crate::crossdag::Observer::of_run(paths, state);
@@ -2867,6 +2884,167 @@ fn reconcile_edits(
     Ok(changed)
 }
 
+/// Take back every command envelope a driver before this one claimed and never
+/// answered, answering each whose effects the journal already holds and
+/// handing back the rest, in claim order, for this driver to reconcile ahead of
+/// anything it claims itself.
+///
+/// What a driver starting on a run calls once, before its first pass — and
+/// what `reply` calls when it becomes the run's writer itself — because a
+/// claim moves the queue's cursor past an envelope before anything answers it,
+/// and a driver that dies between the two takes the only copy it held with
+/// it. The cursor is never moved back: these are read off the channel's own
+/// commands log, at or below the cursor, with no outcome line — the list
+/// `status` names as claimed with no outcome. See
+/// [`ChannelState::claimed_unanswered_records`].
+///
+/// **Each is applied at most once.** Every record an envelope's effects leave
+/// names it — `edit-committed`, `command-accepted` and `edit-rejected` beside
+/// their command, `note-shown` beside its note — so an envelope the journal
+/// already carries a record of got as far as its effects and no further than
+/// its outcome line: it is answered from that record — `applied` for a commit,
+/// `refused` with the recorded reasons for a rejection — and nothing of it is
+/// applied or offered to a conversation again. An envelope with no such record
+/// had no effect, so judging it now is its first judgment. A note a `cancel`
+/// preempted is not among these: its refusal is already its outcome line.
+///
+/// Called only by the run's writer, holding the ownership lock, and only
+/// before it has claimed or handed anything itself: an envelope this process
+/// is holding behind a note, or delivering, has no outcome line either.
+/// `docs/contract-divergences.md` entry 113 carries the rule as a proposal.
+fn recover_claimed(
+    paths: &RunPaths,
+    journal: &mut Journal,
+    channel: &ChannelState,
+) -> Result<std::collections::VecDeque<crate::channel::QueuedCommands>> {
+    let mut owed = std::collections::VecDeque::new();
+    let claimed = channel.claimed_unanswered_records();
+    if claimed.is_empty() {
+        return Ok(owed);
+    }
+    let effects = EnvelopeEffects::of(paths);
+    for record in claimed {
+        match record {
+            Claimed::Envelope(envelope) => match effects.of_envelope(envelope.id) {
+                Some(Effect::Applied) => {
+                    channel.answer_commands(&applied_envelope(envelope.id, &envelope.commands))?;
+                }
+                Some(Effect::Refused(rejections)) => channel.answer_commands(&refused_again(
+                    envelope.id,
+                    &envelope.commands,
+                    rejections,
+                ))?,
+                None => owed.push_back(envelope),
+            },
+            Claimed::Undecodable(record) => match record
+                .carries_id
+                .then(|| effects.of_envelope(record.id))
+                .flatten()
+            {
+                // Its refusal is journalled and surfaced; only the answer is owed.
+                Some(_) => channel.answer_commands(&CommandOutcome {
+                    id: record.id,
+                    applied: false,
+                    reason: Some(record.reason.clone()),
+                    results: Vec::new(),
+                })?,
+                None => refuse_undecodable(paths, journal, channel, &record)?,
+            },
+        }
+    }
+    Ok(owed)
+}
+
+/// What the journal says one command envelope's effects were.
+#[derive(Debug, Clone, PartialEq)]
+enum Effect {
+    /// A command of it committed, or a note of it was shown: it applied.
+    Applied,
+    /// Its commands were refused, each recorded as sent with the reason its
+    /// submitter was owed, in the order they were recorded.
+    Refused(Vec<(Value, String)>),
+}
+
+/// Every record of the run's journal that names the command envelope it came
+/// in, by that envelope — what [`recover_claimed`] answers an envelope from.
+///
+/// A record written before records named their envelope names none, and is
+/// passed over: what it says is no envelope's evidence.
+struct EnvelopeEffects(BTreeMap<u64, Effect>);
+
+impl EnvelopeEffects {
+    fn of(paths: &RunPaths) -> Self {
+        let mut effects = BTreeMap::new();
+        for record in journal::read(&paths.journal()) {
+            let Some(id) = record.payload.get("envelope").and_then(Value::as_u64) else {
+                continue;
+            };
+            let kind = record.kind.0.as_str();
+            if kind == journal::PipelineKind::EditRejected.as_str() {
+                let rejection = (
+                    record
+                        .payload
+                        .get("command")
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                    record
+                        .payload
+                        .get("reason")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                );
+                match effects
+                    .entry(id)
+                    .or_insert_with(|| Effect::Refused(Vec::new()))
+                {
+                    Effect::Refused(rejections) => rejections.push(rejection),
+                    Effect::Applied => {}
+                }
+            } else if [
+                journal::PipelineKind::EditCommitted,
+                journal::PipelineKind::CommandAccepted,
+                journal::PipelineKind::NoteShown,
+            ]
+            .iter()
+            .any(|applied| applied.as_str() == kind)
+            {
+                effects.insert(id, Effect::Applied);
+            }
+        }
+        Self(effects)
+    }
+
+    fn of_envelope(&self, id: u64) -> Option<Effect> {
+        self.0.get(&id).cloned()
+    }
+}
+
+/// The answer a refused envelope was owed, rebuilt from its journalled
+/// rejections: each command recorded as refused is answered with the reason
+/// recorded beside it, and every other one as validated and not applied —
+/// exactly the words [`refused_envelope`] gave them the first time.
+fn refused_again(
+    id: u64,
+    commands: &[Command],
+    mut rejections: Vec<(Value, String)>,
+) -> CommandOutcome {
+    let evaluated: Vec<std::result::Result<Staged, String>> = commands
+        .iter()
+        .map(|command| {
+            let sent = json!(command);
+            match rejections
+                .iter()
+                .position(|(recorded, _)| *recorded == sent)
+            {
+                Some(at) => Err(rejections.remove(at).1),
+                None => Ok(Staged::Compiled(Vec::new())),
+            }
+        })
+        .collect();
+    refused_envelope(id, commands, &evaluated)
+}
+
 /// Judge one claimed envelope no outstanding delivery holds, and apply it or
 /// answer its refusal — or, where it offers a note, hand it to `deliveries`.
 ///
@@ -2907,7 +3085,14 @@ fn reconcile_envelope(
             // else of it happened.
             for (command, ruling) in commands.iter().zip(&evaluated) {
                 if let Err(error) = ruling {
-                    record_rejection(paths, journal, author.clone(), command, error)?;
+                    record_rejection(
+                        paths,
+                        journal,
+                        author.clone(),
+                        command,
+                        error,
+                        Some(envelope.id),
+                    )?;
                 }
             }
             channel.answer_commands(&refused_envelope(envelope.id, commands, &evaluated))?;
@@ -3071,7 +3256,14 @@ fn refuse_preempted(
                 .collect();
             for (command, ruling) in commands.iter().zip(&evaluated) {
                 if let Err(error) = ruling {
-                    record_rejection(paths, journal, author.clone(), command, error)?;
+                    record_rejection(
+                        paths,
+                        journal,
+                        author.clone(),
+                        command,
+                        error,
+                        Some(preempted.id),
+                    )?;
                 }
             }
             refused_envelope(preempted.id, commands, &evaluated)
@@ -3087,7 +3279,14 @@ fn refuse_preempted(
                 .collect();
             for (command, ruling) in commands.iter().zip(&evaluated) {
                 if let Err(error) = ruling {
-                    record_rejection(paths, journal, author.clone(), command, error)?;
+                    record_rejection(
+                        paths,
+                        journal,
+                        author.clone(),
+                        command,
+                        error,
+                        Some(preempted.id),
+                    )?;
                 }
             }
             refused_envelope(preempted.id, commands, &evaluated)
@@ -3157,7 +3356,14 @@ fn record_delivered(
         Err(evaluated) => {
             for (command, ruling) in commands.iter().zip(&evaluated) {
                 if let Err(error) = ruling {
-                    record_rejection(paths, journal, author.clone(), command, error)?;
+                    record_rejection(
+                        paths,
+                        journal,
+                        author.clone(),
+                        command,
+                        error,
+                        Some(envelope.id),
+                    )?;
                 }
             }
             channel.answer_commands(&refused_envelope(envelope.id, commands, &evaluated))?;
@@ -3166,26 +3372,37 @@ fn record_delivered(
     };
 
     for (command, delivery) in commands.iter().zip(&delivered) {
+        let operations = from_envelope(delivery.committed(), envelope.id);
         commit_command(
             paths,
             journal,
             state,
             author.clone(),
             command,
-            delivery.committed(),
+            &operations,
             in_flight,
+            envelope.id,
         )?;
         watch_presentations(
             paths,
             journal,
-            delivery.committed(),
+            &operations,
             in_flight,
-            offered_at,
+            Presented {
+                offered_at,
+                envelope: envelope.id,
+            },
             witnessed,
         )?;
     }
-    channel.answer_commands(&CommandOutcome {
-        id: envelope.id,
+    channel.answer_commands(&applied_envelope(envelope.id, commands))?;
+    Ok(!commands.is_empty())
+}
+
+/// What an envelope every command of which applied is answered.
+fn applied_envelope(id: u64, commands: &[Command]) -> CommandOutcome {
+    CommandOutcome {
+        id,
         applied: true,
         reason: None,
         results: commands
@@ -3198,8 +3415,23 @@ fn record_delivered(
                 reason: None,
             })
             .collect(),
-    })?;
-    Ok(!commands.is_empty())
+    }
+}
+
+/// `operations`, with each note delivery among them naming `envelope`, the
+/// command envelope it came in: what a driver taking the run over reads to
+/// tell a note already delivered from one it still owes.
+fn from_envelope(operations: &[edits::Operation], envelope: u64) -> Vec<edits::Operation> {
+    operations
+        .iter()
+        .cloned()
+        .map(|mut operation| {
+            if let edits::Operation::NoteDelivered { envelope: from, .. } = &mut operation {
+                *from = Some(envelope);
+            }
+            operation
+        })
+        .collect()
 }
 
 /// Every command's value where a phase produced one for all of them, or every
@@ -3231,10 +3463,10 @@ fn all_or_each_ruling<T>(
 /// refused, which is the one a manager must not resend blind. The envelope's own
 /// `reason` names the first refusal, which is what a reader of only that field
 /// has always had.
-fn refused_envelope<T: Unapplied>(
+fn refused_envelope<T: Unapplied, E: std::fmt::Display>(
     id: u64,
     commands: &[Command],
-    evaluated: &[std::result::Result<T, Error>],
+    evaluated: &[std::result::Result<T, E>],
 ) -> CommandOutcome {
     let refused: Vec<String> = commands
         .iter()
@@ -4019,6 +4251,11 @@ fn validate_command(
 /// Called only once the whole envelope has compiled, so everything here either
 /// succeeds or is a failure of the run's own journal — which ends the pass
 /// rather than half-applying an envelope.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the run's record, journal and state, the command with its author and \
+              operations, the dispatches it may cancel, and the envelope it came in"
+)]
 fn commit_command(
     paths: &RunPaths,
     journal: &mut Journal,
@@ -4027,6 +4264,7 @@ fn commit_command(
     command: &Command,
     operations: &[edits::Operation],
     in_flight: &BTreeMap<String, Dispatch>,
+    envelope: u64,
 ) -> Result<()> {
     // Dropping or retrying a running node raises its cooperative cancellation
     // signal: the dispatch stops and, for a lifecycle node, preserves what it
@@ -4044,6 +4282,7 @@ fn commit_command(
             ("command", json!(command)),
             ("operations", json!(operations)),
             ("operation_kinds", json!(operation_kinds(operations))),
+            ("envelope", json!(envelope)),
         ]),
     )?;
     record_operation_facts(paths, journal, author.clone(), operations)?;
@@ -4081,9 +4320,13 @@ fn watch_presentations(
     journal: &mut Journal,
     operations: &[edits::Operation],
     in_flight: &mut BTreeMap<String, Dispatch>,
-    offered_at: u64,
+    presented: Presented,
     witnessed: &[Envelope],
 ) -> Result<()> {
+    let Presented {
+        offered_at,
+        envelope,
+    } = presented;
     for operation in operations {
         let (edits::Operation::NoteDelivered { node, .. }, Some(note)) =
             (operation, crate::note::RecordedNote::of_delivery(operation))
@@ -4091,7 +4334,7 @@ fn watch_presentations(
             continue;
         };
         let mut watch = crate::note::Presentations::default();
-        watch.delivered_while_live(note, offered_at);
+        watch.delivered_while_live(note, offered_at, Some(envelope));
         for envelope in witnessed
             .iter()
             .filter(|envelope| envelope.labels.node.as_deref() == Some(node.as_str()))
@@ -4109,6 +4352,14 @@ fn watch_presentations(
         }
     }
     Ok(())
+}
+
+/// Where the notes [`watch_presentations`] watches for came from: the instant
+/// before the first was offered, and the command envelope that carried them.
+#[derive(Debug, Clone, Copy)]
+struct Presented {
+    offered_at: u64,
+    envelope: u64,
 }
 
 /// Which kind one accepted command is journalled under.
@@ -4165,15 +4416,20 @@ pub(crate) fn record_rejection(
     author: crate::channel::Author,
     command: &Command,
     error: &Error,
+    envelope: Option<u64>,
 ) -> Result<()> {
+    let mut payload = journal::payload(&[
+        ("author", json!(author)),
+        ("command", json!(command)),
+        ("reason", json!(error.to_string())),
+    ]);
+    if let Some(envelope) = envelope {
+        payload.insert("envelope".into(), json!(envelope));
+    }
     journal.emit(
         journal::PipelineKind::EditRejected,
         journal::labels(&paths.run, None),
-        journal::payload(&[
-            ("author", json!(author)),
-            ("command", json!(command)),
-            ("reason", json!(error.to_string())),
-        ]),
+        payload,
     )?;
     // Every rejection is also surfaced, so no accepted command is silently
     // dropped.
@@ -4214,11 +4470,7 @@ fn refuse_undecodable(
         journal.emit(
             journal::PipelineKind::EditRejected,
             journal::labels(&paths.run, None),
-            journal::payload(&[
-                ("author", json!(record.author)),
-                ("command", command.clone()),
-                ("reason", json!(record.reason)),
-            ]),
+            refused_undecodable(record, command),
         )?;
     }
     raise(
@@ -4246,6 +4498,22 @@ fn refuse_undecodable(
         reason: Some(record.reason.clone()),
         results: Vec::new(),
     })
+}
+
+/// The `edit-rejected` payload of one command of a record [`refuse_undecodable`]
+/// refuses, naming the record's envelope only where the record carries its own
+/// id: one answered under `0` for want of an id names no envelope, since a real
+/// envelope `0` is another envelope entirely.
+fn refused_undecodable(record: &Undecodable, command: &Value) -> serde_json::Map<String, Value> {
+    let mut payload = journal::payload(&[
+        ("author", json!(record.author)),
+        ("command", command.clone()),
+        ("reason", json!(record.reason)),
+    ]);
+    if record.carries_id {
+        payload.insert("envelope".into(), json!(record.id));
+    }
+    payload
 }
 
 /// One note as it is offered: the note itself, and where it may land.
@@ -4425,6 +4693,7 @@ fn note_record(
         shown_to: reached.shown_at_delivery().to_vec(),
         routed_to: reached.routed_to().to_vec(),
         reached,
+        envelope: None,
     }]
 }
 
@@ -7805,6 +8074,71 @@ mod tests {
         std::fs::remove_dir_all(&paths.dir).ok();
     }
 
+    /// **A record claimed and never answered is refused once.** Two records this
+    /// build cannot decode are claimed and neither is answered; the first had its
+    /// refusal journalled before its claimer went, the second had nothing. The
+    /// driver after it answers both — the first from its journalled refusal,
+    /// without journalling it again, and the second by refusing it now — and
+    /// hands back nothing to reconcile.
+    #[test]
+    fn a_claimed_undecodable_record_is_answered_once_whether_or_not_its_refusal_was_journalled() {
+        let paths = handover_scratch("recover-undecodable");
+        let transport =
+            onemessagebus::LocalTransport::open(paths.channel_dir()).expect("the channel opens");
+        for id in [0, 1] {
+            onemessagebus::Transport::append(
+                &transport,
+                &crate::channel::layout::COMMANDS
+                    .parse()
+                    .expect("the command queue's name"),
+                json!({"id": id, "commands": [{"op": "drop", "id": "sign-off"}]})
+                    .to_string()
+                    .as_bytes(),
+            )
+            .expect("the record is appended");
+        }
+        let channel = ChannelState::new(&paths);
+        let claimed = channel
+            .claim_commands_answering()
+            .expect("the queue is claimed");
+        let Some(Claimed::Undecodable(first)) = claimed.first() else {
+            panic!("the first record decoded: {claimed:?}");
+        };
+        let mut journal = Journal::open(&paths);
+        journal
+            .emit(
+                journal::PipelineKind::EditRejected,
+                journal::labels(&paths.run, None),
+                refused_undecodable(first, &first.commands[0]),
+            )
+            .expect("the refusal is journalled");
+        assert_eq!(channel.claimed_unanswered(), [0, 1]);
+
+        let owed = recover_claimed(&paths, &mut journal, &channel).expect("recovered");
+
+        assert!(owed.is_empty(), "{owed:?}");
+        let outcomes = channel.outcomes();
+        assert_eq!(
+            outcomes
+                .iter()
+                .map(|outcome| outcome.id)
+                .collect::<Vec<_>>(),
+            [0, 1]
+        );
+        for outcome in &outcomes {
+            assert!(!outcome.applied);
+            assert_eq!(outcome.reason.as_deref(), Some(first.reason.as_str()));
+        }
+        let rejected: Vec<Value> = journal::read(&paths.journal())
+            .into_iter()
+            .filter(|event| event.kind.0 == journal::PipelineKind::EditRejected.as_str())
+            .map(|event| event.payload["envelope"].clone())
+            .collect();
+        assert_eq!(rejected, [json!(0), json!(1)]);
+        assert!(channel.claimed_unanswered().is_empty());
+        std::fs::remove_dir_all(&paths.dir).ok();
+    }
+
     /// Long enough that a section of two file operations would have finished
     /// several times over, and short enough to pay twice in a unit test.
     const LONG_ENOUGH_TO_HAVE_RUN: Duration = Duration::from_millis(200);
@@ -9792,6 +10126,7 @@ mod tests {
                 shown_to: reached.shown_at_delivery().to_vec(),
                 routed_to: reached.routed_to().to_vec(),
                 reached,
+                envelope: None,
             };
         let commit = |journal: &mut Journal, operations: &[edits::Operation]| {
             journal
@@ -9996,6 +10331,7 @@ mod tests {
                 reached: crate::note::Reached::Carried,
                 shown_to: Vec::new(),
                 routed_to: Vec::new(),
+                envelope: None,
             },
         ];
         assert_eq!(
@@ -10572,6 +10908,7 @@ mod tests {
             shown_to: reached.shown_at_delivery().to_vec(),
             routed_to: reached.routed_to().to_vec(),
             reached,
+            envelope: None,
         }];
         let opened = |node: &str, at: u64, turn: u64| Envelope {
             v: 1,
@@ -10609,7 +10946,10 @@ mod tests {
             &mut journal,
             &operations,
             &mut BTreeMap::new(),
-            1_000,
+            Presented {
+                offered_at: 1_000,
+                envelope: 7,
+            },
             &witnessed,
         )
         .expect("the presentation is recorded");
@@ -10624,6 +10964,9 @@ mod tests {
         assert_eq!(shown.labels.node.as_deref(), Some("build"));
         assert_eq!(shown.payload["party"], json!("worker"));
         assert_eq!(shown.payload["turn"], json!(3));
+        // Named by the envelope that delivered it, which is what a driver taking
+        // the run over reads to know the note is not owed again.
+        assert_eq!(shown.payload["envelope"], json!(7));
         let _ = std::fs::remove_dir_all(&root);
     }
 

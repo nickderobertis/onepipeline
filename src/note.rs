@@ -942,6 +942,9 @@ struct Routed {
     /// The instant this routing was recorded, against which a relayed turn is
     /// read: a turn that opened before it cannot be the presentation of it.
     routed_at: u64,
+    /// The command envelope the note was delivered in, where the delivery
+    /// recorded one — see [`Shown::envelope`].
+    envelope: Option<u64>,
 }
 
 /// One presentation the stream showed happening.
@@ -954,6 +957,11 @@ pub(crate) struct Shown {
     pub evidence: Evidence,
     /// The note.
     pub note: RecordedNote,
+    /// The command envelope that delivered the note while the dispatch was
+    /// live, so a driver taking the run over can tell a note already shown from
+    /// one it still owes. `None` for a note a dispatch's task was composed with,
+    /// which reached it through the node's record rather than an envelope.
+    pub envelope: Option<u64>,
 }
 
 impl Shown {
@@ -972,6 +980,9 @@ impl Shown {
             "evidence".into(),
             serde_json::to_value(self.evidence).unwrap_or(Value::Null),
         );
+        if let Some(envelope) = self.envelope {
+            payload.insert("envelope".into(), Value::from(envelope));
+        }
         payload
     }
 }
@@ -1002,7 +1013,15 @@ impl Presentations {
     /// conversation answered: routed onward by it, as [`Reached::routed_to`]
     /// says, or recorded `carried` and watched all the same, because a lever
     /// outside the seam can still read it into a turn.
-    pub(crate) fn delivered_while_live(&mut self, note: RecordedNote, at: u64) {
+    ///
+    /// `envelope` is the command envelope that delivered it, which each
+    /// `note-shown` it leads to names.
+    pub(crate) fn delivered_while_live(
+        &mut self,
+        note: RecordedNote,
+        at: u64,
+        envelope: Option<u64>,
+    ) {
         let Some(routing) = Routing::of(&note.reached) else {
             return;
         };
@@ -1010,6 +1029,7 @@ impl Presentations {
             note,
             routing,
             routed_at: at,
+            envelope,
         });
     }
 
@@ -1029,6 +1049,7 @@ impl Presentations {
             note,
             routing: Routing::ComposedIntoTheTask(WorkerThenJudge::AwaitingWorker),
             routed_at: at,
+            envelope: None,
         });
     }
 
@@ -1081,6 +1102,7 @@ impl Presentations {
                 turn: opened.turn,
                 evidence,
                 note: routed.note.clone(),
+                envelope: routed.envelope,
             });
         }
         self.routed.retain(|routed| !routed.routing.settled());
@@ -1241,6 +1263,7 @@ mod tests {
                     shown_to: reached.shown_at_delivery().to_vec(),
                     routed_to: reached.routed_to().to_vec(),
                     reached,
+                    envelope: None,
                 }]),
             )],
         )
@@ -1399,6 +1422,7 @@ mod tests {
             shown_to: reached.shown_at_delivery().to_vec(),
             routed_to: reached.routed_to().to_vec(),
             reached,
+            envelope: None,
         };
         let wire = serde_json::to_value(record(Reached::Carried)).expect("it serializes");
         assert!(
@@ -1477,7 +1501,7 @@ mod tests {
     #[test]
     fn a_presentation_is_recorded_when_the_stream_shows_it_and_in_the_producers_order() {
         let mut watch = Presentations::default();
-        watch.delivered_while_live(recorded("stop", Reached::Worker), 1_000);
+        watch.delivered_while_live(recorded("stop", Reached::Worker), 1_000, None);
 
         // A supervisor turn that opened before the note was offered, and a
         // worker turn that opened before it too, confirm nothing — whatever
@@ -1535,7 +1559,7 @@ mod tests {
         // delivery and owed only to the worker, by the delivered turn that rides
         // the decision.
         let mut watch = Presentations::default();
-        watch.delivered_while_live(recorded("ruling", Reached::Supervisor), 2_000);
+        watch.delivered_while_live(recorded("ruling", Reached::Supervisor), 2_000, None);
         assert!(watch.observe(&turn(8, 2_100, "user", 5, None)).is_empty());
         let shown = watch.observe(&turn_on(
             9,
@@ -1569,6 +1593,7 @@ mod tests {
         watch.delivered_while_live(
             recorded("stop re-running the tier", Reached::Carried),
             5_000,
+            None,
         );
         // An instruction the payload bound cut short of the text says nothing
         // either way, and confirms nothing.
@@ -1610,8 +1635,8 @@ mod tests {
         // apart — are each recorded on the turn that opened on them, and a
         // supervisor turn answering the first's turn is shown the first alone.
         let mut watch = Presentations::default();
-        watch.delivered_while_live(recorded("first ruling", Reached::Worker), 6_000);
-        watch.delivered_while_live(recorded("second ruling", Reached::Worker), 6_000);
+        watch.delivered_while_live(recorded("first ruling", Reached::Worker), 6_000, None);
+        watch.delivered_while_live(recorded("second ruling", Reached::Worker), 6_000, None);
         let shown = watch.observe(&turn_on(
             17,
             6_100,
@@ -1659,7 +1684,7 @@ mod tests {
         // worker turn the producer did not stamp as a delivery confirms nothing,
         // and once both have been shown a further turn confirms nothing more.
         let mut watch = Presentations::default();
-        watch.delivered_while_live(recorded("queued ruling", Reached::Queued), 7_000);
+        watch.delivered_while_live(recorded("queued ruling", Reached::Queued), 7_000, None);
         assert!(watch.observe(&turn(20, 6_900, "user", 1, None)).is_empty());
         assert!(watch
             .observe(&turn(21, 7_050, "assistant", 2, Some("supervisor")))
@@ -1684,7 +1709,7 @@ mod tests {
 
         // And the judge first, where the supervisor's turn is the one to open.
         let mut watch = Presentations::default();
-        watch.delivered_while_live(recorded("queued ruling", Reached::Queued), 8_000);
+        watch.delivered_while_live(recorded("queued ruling", Reached::Queued), 8_000, None);
         let shown = watch.observe(&turn(25, 8_100, "user", 5, None));
         assert_eq!(shown.len(), 1, "{shown:?}");
         assert_eq!(shown[0].evidence.party(), Party::Supervisor);
@@ -1719,6 +1744,7 @@ mod tests {
                 },
             ),
             4_000,
+            None,
         );
         assert!(watch
             .observe(&turn(12, 4_100, "assistant", 7, Some("delivered")))
@@ -1770,6 +1796,7 @@ mod tests {
             shown_to: Reached::Supervisor.shown_at_delivery().to_vec(),
             routed_to: Reached::Supervisor.routed_to().to_vec(),
             reached: Reached::Supervisor,
+            envelope: None,
         })
         .expect("it serializes");
         let fields: Vec<String> = serde_json::from_value(block["note_delivered_fields"].clone())
@@ -1823,6 +1850,7 @@ mod tests {
             shown_to: Reached::Supervisor.shown_at_delivery().to_vec(),
             routed_to: Reached::Supervisor.routed_to().to_vec(),
             reached: Reached::Supervisor,
+            envelope: None,
         };
         let note = RecordedNote::of_delivery(&delivery).expect("a delivery carries a note");
         let mut written = serde_json::to_value(&delivery).expect("it serializes");

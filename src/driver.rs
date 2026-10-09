@@ -3375,6 +3375,8 @@ pub(crate) fn submit_envelope(
                             envelope.author.clone(),
                             command,
                             &error,
+                            // Never queued, so no envelope id names it.
+                            None,
                         )?;
                         lock.release();
                         return Err(error);
@@ -3405,6 +3407,8 @@ pub(crate) fn submit_envelope(
                             envelope.author.clone(),
                             command,
                             &error,
+                            // Never queued, so no envelope id names it.
+                            None,
                         )?;
                         lock.release();
                         return Err(error);

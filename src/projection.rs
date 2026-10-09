@@ -2725,6 +2725,7 @@ mod tests {
                         shown_to: Vec::new(),
                         routed_to: Vec::new(),
                         reached,
+                        envelope: None,
                     }]),
                 )],
             )

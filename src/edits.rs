@@ -295,6 +295,13 @@ pub enum Operation {
         /// where nothing is routed onward.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         routed_to: Vec<crate::note::Party>,
+        /// The command envelope the note came in, which is how a driver taking
+        /// the run over finds a note already delivered rather than offering it a
+        /// second time. Omitted where none did — a note `deliver` sent with
+        /// nothing driving the run never entered the queue — and absent from a
+        /// record written before the field existed, which reads back the same way.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        envelope: Option<u64>,
     },
     // llmlint: ignore-end[invalid_states_unrepresentable]
 }
@@ -4259,6 +4266,7 @@ mod tests {
             reached: crate::note::Reached::Carried,
             shown_to: Vec::new(),
             routed_to: Vec::new(),
+            envelope: None,
         };
         let mut graph = graph_of(vec![agent("build", &[])]);
         apply(&mut graph, &carried);
@@ -4277,6 +4285,7 @@ mod tests {
             reached: crate::note::Reached::Worker,
             shown_to: Vec::new(),
             routed_to: crate::note::Reached::Worker.routed_to().to_vec(),
+            envelope: None,
         };
         let mut untouched = graph_of(vec![agent("build", &[])]);
         apply(&mut untouched, &taken);

@@ -279,19 +279,24 @@ fn every_envelope_the_reconciler_cannot_decode_is_answered_and_nothing_of_it_app
         .into_iter()
         .map(|event| event["payload"].clone())
         .collect();
+    // Each names the envelope it came in by the record's own id, and the record
+    // with no id — answered under `0` — names none, since envelope `0` is another.
     let mut expected = Vec::new();
     for (record, reason) in records.iter().zip(&reasons) {
         let author = record["author"].as_str().unwrap_or("planner");
-        match record["commands"].as_array() {
-            Some(commands) => {
-                for command in commands {
-                    expected.push(json!({"author": author, "command": command, "reason": reason}));
-                }
+        let rejection = |command: Value| {
+            let mut rejection = json!({"author": author, "command": command, "reason": reason});
+            if let Some(id) = record["id"].as_u64() {
+                rejection["envelope"] = json!(id);
             }
-            _ => expected.push(json!({"author": author,
-                "command": {"op": "unreadable", "value": record}, "reason": reason})),
+            rejection
+        };
+        match record["commands"].as_array() {
+            Some(commands) => expected.extend(commands.iter().cloned().map(rejection)),
+            _ => expected.push(rejection(json!({"op": "unreadable", "value": record}))),
         }
     }
+    assert!(expected[0].get("envelope").is_none(), "{expected:?}");
     assert_eq!(rejected, expected);
     assert_eq!(rejected.len(), 7);
     assert_eq!(rejected[6]["author"], "monitor");
@@ -401,8 +406,9 @@ fn a_record_the_layout_refuses_is_answered_from_whatever_of_it_reads() {
         rejected,
         [
             json!({"author": "planner", "command": {"op": "unreadable", "value": "drop sign-off"},
-                   "reason": reasons[0]}),
-            json!({"author": "planner", "command": undecodable_drop, "reason": reasons[0]}),
+                   "reason": reasons[0], "envelope": 0}),
+            json!({"author": "planner", "command": undecodable_drop, "reason": reasons[0],
+                   "envelope": 0}),
         ]
     );
 

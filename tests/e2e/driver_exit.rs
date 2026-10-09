@@ -7,10 +7,12 @@
 //! ownership lock. A driver killed by a signal writes nothing, so the absence of
 //! one after the last `driver-adopted` is how a crash reads, and a driver that
 //! panics writes nothing either. `status` prints the last record, and names
-//! every command envelope claimed off the queue that has no outcome line.
+//! every command envelope claimed off the queue that has no outcome line — which
+//! the driver that next takes the run answers before anything it claims itself,
+//! from the journal where a record already names the envelope.
 
 // llmlint: ignore-file[expensive_tests_stay_behind_their_own_edge] measured rather than
-// assumed: the twelve journeys here take about 40 seconds on the wall under nextest's
+// assumed: the fifteen journeys here take about 25 seconds on the wall under nextest's
 // parallelism, each driving a real detached or attached driver to its ending. What they
 // exercise is how a driver lets go of a run — `engine`, `driver`, `channel`, `projection`,
 // `views` and `hooks` together — which any change under `src/` can move, so a project edged
@@ -587,8 +589,9 @@ fn status_names_an_envelope_the_driver_claimed_and_never_answered() {
     assert_eq!(
         unanswered_line(&world, run).as_deref().map(str::trim_start),
         Some(
-            "claimed with no outcome: command envelope(s) 1 — taken off the queue and never \
-             answered, so nothing applies them and their submitters were told nothing"
+            "claimed with no outcome: command envelope(s) 1 — taken off the queue and not \
+             answered yet, so their submitters have been told nothing; the run's next driver \
+             answers each before anything it claims itself"
         )
     );
     world
@@ -620,6 +623,277 @@ fn status_names_an_envelope_the_driver_claimed_and_never_answered() {
         let _ = reply.kill();
         let _ = reply.wait();
     }
+}
+
+/// A `reply` left waiting on its answer, as [`waiting_reply`], through the
+/// linked `oneagentgraph` a two-party conversation runs under.
+#[cfg(unix)]
+fn waiting_reply_on_agentgraph(world: &World, run: &str, commands: Value) -> std::process::Child {
+    use std::io::Write;
+    let mut reply = world.agentgraph_cmd(&["reply", run]);
+    reply
+        .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "600")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut replying = reply.spawn().expect("the reply starts");
+    replying
+        .stdin
+        .take()
+        .expect("the reply's stdin")
+        .write_all(
+            json!({"version": 3, "commands": commands})
+                .to_string()
+                .as_bytes(),
+        )
+        .expect("the envelope is written");
+    replying
+}
+
+/// What a waiting `reply` was told, once it has been told something.
+#[cfg(unix)]
+fn receipt(reply: std::process::Child) -> (Option<i32>, String) {
+    let output = reply.wait_with_output().expect("the reply is waited on");
+    (
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+    )
+}
+
+/// Every `edit-committed` naming command envelope `id`.
+fn committed_from(world: &World, run: &str, id: u64) -> Vec<Value> {
+    world
+        .events_of(run, "edit-committed")
+        .into_iter()
+        .filter(|event| event["payload"]["envelope"] == json!(id))
+        .collect()
+}
+
+/// The note text a run recorded delivering, once per delivery.
+fn deliveries_of(world: &World, run: &str, text: &str) -> usize {
+    world
+        .events_of(run, "edit-committed")
+        .iter()
+        .flat_map(|event| {
+            event["payload"]["operations"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+        })
+        .filter(|operation| operation["kind"] == "note-delivered" && operation["text"] == text)
+        .count()
+}
+
+const RECOVERED_NOTE: &str = "the fixture moved to fixtures/v2; start from there";
+const RECOVERED_RULING: &str = "build only what fixtures/v2 needs";
+
+/// **The envelopes a dead driver claimed are its adopter's first work.** A
+/// driver claims a live note into a node whose worker turn is held — handed to
+/// a delivery thread, waiting on that turn — and an `amend` of the same node,
+/// held behind the note; then it is killed before it answers either. Both
+/// submitters are still waiting, and `status` names both as claimed with no
+/// outcome. The driver that adopts the run takes them back ahead of anything
+/// new: the note is delivered once, the amend is applied — journalled under its
+/// envelope id — and each waiting `reply` is told so, with no envelope left
+/// unanswered.
+#[cfg(unix)]
+#[test]
+fn an_adopter_answers_the_envelopes_its_dead_driver_claimed_and_never_answered() {
+    let world = World::new("exit-recovers");
+    let run = "recovers";
+    world.script("turn.hold", "hold");
+    world.write_graphs();
+    world.write_supervised_node_graph();
+    let path = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
+    world
+        .run_on_agentgraph(&["start", &path, "--detach"])
+        .exited(0);
+    world.until("the worker's turn to open", |world| {
+        !world.events_of(run, "turn-started").is_empty()
+    });
+
+    // Envelope 0: a live note, waiting on the held turn to take it.
+    let note = waiting_reply_on_agentgraph(
+        &world,
+        run,
+        json!([{"op": "note", "id": "build", "addressee": "worker",
+                "text": RECOVERED_NOTE, "deliver": "live"}]),
+    );
+    world.until("the driver to claim the note", |world| {
+        unanswered_line(world, run).is_some_and(|line| line.contains("envelope(s) 0 "))
+    });
+    // Envelope 1: an amend of the same node, held behind the note.
+    let amend = waiting_reply_on_agentgraph(
+        &world,
+        run,
+        json!([{"op": "amend", "id": "build", "text": RECOVERED_RULING}]),
+    );
+    world.until("the driver to claim the amend behind it", |world| {
+        unanswered_line(world, run).is_some_and(|line| line.contains("envelope(s) 0, 1 "))
+    });
+    crate::harness::end_driver(&world, run);
+    assert!(world.command_outcomes(run).is_empty());
+    assert!(
+        unanswered_line(&world, run).is_some_and(|line| line.contains("envelope(s) 0, 1 ")),
+        "{:?}",
+        unanswered_line(&world, run)
+    );
+
+    let mut adopt = world.agentgraph_cmd(&["adopt", run]);
+    adopt
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut adopting = adopt.spawn().expect("the adoption starts");
+
+    // The amend commits, under its envelope's id, with the worker's turn still
+    // held: nothing of it waits on a turn.
+    world.until("the adopter to apply the amend", |world| {
+        !committed_from(world, run, 1).is_empty()
+    });
+    assert!(world.events_of(run, "node-settled").is_empty());
+    let (code, said) = receipt(amend);
+    assert_eq!(code, Some(0), "{said}");
+    assert!(said.contains("\"state\":\"applied\""), "{said}");
+    let (code, said) = receipt(note);
+    assert_eq!(code, Some(0), "{said}");
+    assert!(said.contains("\"state\":\"applied\""), "{said}");
+
+    let amended = committed_from(&world, run, 1);
+    assert_eq!(amended.len(), 1, "{amended:?}");
+    assert_eq!(amended[0]["payload"]["command"]["op"], "amend");
+    assert_eq!(amended[0]["payload"]["command"]["text"], RECOVERED_RULING);
+    let noted = committed_from(&world, run, 0);
+    assert_eq!(noted.len(), 1, "{noted:?}");
+    assert_eq!(noted[0]["payload"]["operations"][0]["envelope"], json!(0));
+    assert_eq!(deliveries_of(&world, run, RECOVERED_NOTE), 1);
+    let answered: Vec<u64> = world
+        .command_outcomes(run)
+        .iter()
+        .filter_map(|outcome| outcome["id"].as_u64())
+        .collect();
+    assert_eq!(answered, [0, 1]);
+    assert_eq!(unanswered_line(&world, run), None);
+
+    world.release("turn.go");
+    world.release("turn.settle");
+    let deadline = Instant::now() + Duration::from_secs(300);
+    while adopting
+        .try_wait()
+        .expect("the adoption is waited on")
+        .is_none()
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the adopter never let the run go"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(deliveries_of(&world, run, RECOVERED_NOTE), 1);
+}
+
+/// A node validator that passes the edit it is offered at submission and
+/// refuses the driver's own offer of it, writing one line to its log per offer.
+#[cfg(unix)]
+fn validator_refusing_its_second_offer(world: &World) -> (String, PathBuf) {
+    let offers = world.root.join("validator.offers");
+    let path = world.root.join("refuse-second-offer.sh");
+    onepipeline_testfakes::executable(
+        &path,
+        format!(
+            "#!/bin/sh\ncat > /dev/null\nseen=0\n[ -e '{offers}' ] && seen=1\necho offered >> \
+             '{offers}'\nif [ \"$seen\" = 1 ]; then\n  echo 'the second look refuses it' >&2\n  \
+             exit 1\nfi\nexit 0\n",
+            offers = offers.display(),
+        ),
+    );
+    (path.to_string_lossy().into_owned(), offers)
+}
+
+/// **An envelope whose effects were journalled and whose answer was not is
+/// answered from the journal.** A driver applies one envelope and refuses
+/// another — its node validator passes the add at submission and refuses it
+/// when the driver offers it — and dies between journalling each one's effects
+/// and writing its outcome line, which is the window the two writes leave. The
+/// adopter answers both from what the journal holds under their envelope ids:
+/// the applied one `applied`, committed exactly once, and the refused one with
+/// the reason recorded beside its rejection, with no command of it judged again.
+#[cfg(unix)]
+#[test]
+fn an_envelope_journalled_and_never_answered_is_answered_from_the_journal_and_not_applied_again() {
+    let world = hooked_world("exit-journalled");
+    let run = "journalled";
+    world.script("build.wait", "hold");
+    let (validator, offers) = validator_refusing_its_second_offer(&world);
+    let pid = start_detached(
+        &world,
+        run,
+        vec![agent("build", &[])],
+        &["--node-validator", &validator],
+    );
+    world.until("the held node to be dispatched", |world| {
+        !world.events_of(run, "node-dispatched").is_empty()
+    });
+    // Envelope 0: applied.
+    an_applied_edit(&world, run, "journalled-once");
+    // Envelope 1: refused by the driver, after its submission passed.
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 3, "commands": [
+                {"op": "add", "node": agent("fresh", &[])}
+            ]})
+            .to_string(),
+        )
+        .exited(crate::harness::REFUSED)
+        .err_has("the second look refuses it");
+    let rejected = world.events_of(run, "edit-rejected");
+    assert_eq!(rejected.len(), 1, "{rejected:?}");
+    assert_eq!(rejected[0]["payload"]["envelope"], json!(1));
+    let refused = world.command_outcomes(run)[1].clone();
+    end_process(pid);
+
+    // llmlint: ignore-block[tests_mirror_real_usage] a driver killed between journalling an
+    // envelope's effects and appending its outcome line: the two writes are adjacent, so no
+    // signal can be timed into the gap from outside, and taking the two outcome lines back
+    // out of the log is the one way to leave the store a death there leaves.
+    let log = world.run_file(run, "channel/command-outcomes.jsonl");
+    std::fs::write(&log, "").expect("the outcome log is emptied");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    assert!(
+        unanswered_line(&world, run).is_some_and(|line| line.contains("envelope(s) 0, 1 ")),
+        "{:?}",
+        unanswered_line(&world, run)
+    );
+    let offered = std::fs::read_to_string(&offers).expect("the validator's log");
+
+    let adopted = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            world.until("the adopter to re-dispatch the held node", |world| {
+                world.events_of(run, "node-dispatched").len() >= 2
+            });
+            world.release("build.go");
+        });
+        world.run(&["adopt", run])
+    });
+    adopted.exited(0);
+
+    let outcomes = world.command_outcomes(run);
+    let answered: Vec<u64> = outcomes
+        .iter()
+        .filter_map(|outcome| outcome["id"].as_u64())
+        .collect();
+    assert_eq!(answered, [0, 1], "{outcomes:?}");
+    assert_eq!(outcomes[0]["applied"], json!(true), "{}", outcomes[0]);
+    assert_eq!(committed_from(&world, run, 0).len(), 1);
+    assert_eq!(outcomes[1], refused, "the refusal was answered differently");
+    assert_eq!(world.events_of(run, "edit-rejected").len(), 1);
+    assert_eq!(
+        std::fs::read_to_string(&offers).expect("the validator's log"),
+        offered,
+        "the refused envelope was offered to its validator again"
+    );
+    assert_eq!(unanswered_line(&world, run), None);
 }
 
 /// **A driver that cannot write its record.** The run's journal stops taking
@@ -856,6 +1130,99 @@ fn a_run_reads_the_same_with_its_driver_exit_as_without_it() {
     // llmlint: ignore-end[tests_mirror_real_usage]
     assert!(world.events_of(run, "driver-exited").is_empty());
     assert_eq!(readings(&world, run), with);
+}
+
+/// **A record written before records named their envelope reads as it did.**
+/// A run that applied an edit, refused one at the driver, and carried a note —
+/// each record naming the envelope it came in — is read through every view; the
+/// same run with every `envelope` taken back out of its journal, as a build
+/// before the field wrote it, reads the same in each of them, and `status`
+/// names no envelope claimed with no outcome.
+#[cfg(unix)]
+#[test]
+fn a_run_journalled_before_records_named_their_envelope_reads_the_same() {
+    let world = hooked_world("exit-unnamed");
+    let run = "unnamed";
+    world.script("build.wait", "hold");
+    let (validator, _) = validator_refusing_its_second_offer(&world);
+    start_detached(
+        &world,
+        run,
+        vec![agent("build", &[])],
+        &["--node-validator", &validator],
+    );
+    world.until("the held node to be dispatched", |world| {
+        !world.events_of(run, "node-dispatched").is_empty()
+    });
+    an_applied_edit(&world, run, "named");
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 3, "commands": [
+                {"op": "add", "node": agent("fresh", &[])}
+            ]})
+            .to_string(),
+        )
+        .exited(crate::harness::REFUSED);
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 3, "commands": [
+                {"op": "note", "id": "build", "addressee": "worker",
+                 "text": "the fixture moved", "deliver": "next"}
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+    world.release("build.go");
+    world.until("the run to settle and its driver to let go", |world| {
+        !world.events_of(run, "driver-exited").is_empty()
+    });
+    let named = world.journal(run);
+    let carrying = |journal: &[Value]| {
+        journal
+            .iter()
+            .filter(|event| {
+                event["payload"].get("envelope").is_some()
+                    || event["payload"]["operations"]
+                        .as_array()
+                        .is_some_and(|ops| ops.iter().any(|op| op.get("envelope").is_some()))
+            })
+            .count()
+    };
+    // The edit, the rejection, and the note — the last naming it twice over.
+    assert_eq!(carrying(&named), 3, "{named:?}");
+    let with = readings(&world, run);
+
+    // llmlint: ignore-block[tests_mirror_real_usage] the run as a build before the field
+    // would have left it: no verb rewrites a record, and taking the field out of the store is
+    // the only way to read one run both ways through the compiled binary.
+    let journal = world.run_file(run, "events.jsonl");
+    let unnamed: String = std::fs::read_to_string(&journal)
+        .expect("the journal reads")
+        .lines()
+        .map(|line| {
+            let mut record: Value = serde_json::from_str(line).expect("a journal record");
+            if let Some(payload) = record["payload"].as_object_mut() {
+                payload.remove("envelope");
+                if let Some(operations) =
+                    payload.get_mut("operations").and_then(Value::as_array_mut)
+                {
+                    for operation in operations {
+                        if let Some(operation) = operation.as_object_mut() {
+                            operation.remove("envelope");
+                        }
+                    }
+                }
+            }
+            format!("{record}\n")
+        })
+        .collect();
+    std::fs::write(&journal, unnamed).expect("the journal is rewritten");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    assert_eq!(carrying(&world.journal(run)), 0);
+    assert_eq!(readings(&world, run), with);
+    assert_eq!(unanswered_line(&world, run), None);
 }
 
 /// **A record this build cannot read.** A `driver-exited` a newer build wrote,
