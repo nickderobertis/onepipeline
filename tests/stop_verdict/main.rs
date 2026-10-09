@@ -73,13 +73,29 @@ fn ms(since: Instant) -> u64 {
         .max(1)
 }
 
-/// The binary measured: the release build the producing recipe names, else this
-/// build's own (a record of which no budget accepts).
+/// The binary measured: the release build the producing recipe names — which must
+/// be this checkout's own `target/release/onepipeline` — else this build's own debug
+/// binary, a record of which no budget accepts.
 fn binary() -> (PathBuf, &'static str) {
     match std::env::var_os("ONEPIPELINE_BUDGET_BINARY") {
-        Some(path) => (PathBuf::from(path), "release"),
+        Some(path) => {
+            let named = std::fs::canonicalize(&path).expect("the named binary exists");
+            let release = std::fs::canonicalize(root().join("target/release/onepipeline"))
+                .expect("this checkout's release binary exists");
+            assert_eq!(
+                named, release,
+                "ONEPIPELINE_BUDGET_BINARY must be this checkout's release build; run \
+                 {JOURNEY_COMMAND}"
+            );
+            (named, "release")
+        }
         None => (PathBuf::from(env!("CARGO_BIN_EXE_onepipeline")), "debug"),
     }
+}
+
+/// One word a POSIX shell reads back exactly, single-quoted.
+fn shell_word(word: &str) -> String {
+    format!("'{}'", word.replace('\'', "'\\''"))
 }
 
 /// One workload's host: the onevcs fixture, the runs root, the state root, and
@@ -257,8 +273,9 @@ fn install_shim(directory: &Path, counted: &Path) {
     std::fs::write(
         &shim,
         format!(
-            "#!/bin/sh\necho x >> '{}'\nexec '{real}' \"$@\"\n",
-            counted.display()
+            "#!/bin/sh\necho x >> {}\nexec {} \"$@\"\n",
+            shell_word(&counted.display().to_string()),
+            shell_word(&real)
         ),
     )
     .expect("the shim");
@@ -604,6 +621,13 @@ fn full_workload_stop_verdict() {
     let run_id = std::env::var("ONEPIPELINE_BUDGET_INVOCATION").unwrap_or_else(|_| {
         digest(format!("{} {:?}", std::process::id(), std::time::SystemTime::now()).as_bytes())
     });
+    assert!(
+        run_id.len() == 64
+            && run_id
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+        "ONEPIPELINE_BUDGET_INVOCATION is not an invocation identity: {run_id:?}"
+    );
     let manifest = directory.join(telemetry::INVOCATION);
     let record_path = directory.join(if load_workers == 0 {
         telemetry::RECORD

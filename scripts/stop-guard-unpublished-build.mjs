@@ -11,7 +11,47 @@ export function inputFiles(root = repositoryRoot) {
     readFileSync(`${root}/scripts/stop-guard-unpublished-build-inputs.json`, "utf8"),
   );
   if (manifest?.version !== 1) throw new Error("unsupported build-input manifest version");
-  const files = new Set(manifest.files);
+  const unknown = Object.keys(manifest).filter(
+    (key) => !["version", "files", "directories", "prefixes"].includes(key),
+  );
+  if (unknown.length > 0) throw new Error(`build-input manifest names unknown fields ${unknown}`);
+  // Every path is repository-relative before it is joined onto the root: the rule the
+  // producer's own reader of this file applies.
+  const relative = (field, path) => {
+    if (
+      typeof path !== "string" ||
+      path === "" ||
+      path.startsWith("/") ||
+      path.includes("\\") ||
+      path.split("/").some((part) => part === "" || part === "." || part === "..")
+    ) {
+      throw new Error(
+        `build-input manifest ${field} entry ${JSON.stringify(path)} is not a repository-relative path`,
+      );
+    }
+    return path;
+  };
+  const list = (field) => {
+    if (!Array.isArray(manifest[field]))
+      throw new Error(`build-input manifest ${field} is not a list`);
+    return manifest[field];
+  };
+  const files = new Set(list("files").map((path) => relative("files", path)));
+  const directories = list("directories").map((path) => relative("directories", path));
+  const prefixes = list("prefixes").map((entry) => {
+    const keys = entry && typeof entry === "object" ? Object.keys(entry).sort().join(",") : "";
+    if (
+      keys !== "directory,prefix" ||
+      typeof entry.prefix !== "string" ||
+      entry.prefix === "" ||
+      entry.prefix.includes("/")
+    ) {
+      throw new Error(
+        `build-input manifest prefixes entry ${JSON.stringify(entry)} needs exactly a directory and a non-empty prefix without '/'`,
+      );
+    }
+    return { directory: relative("prefixes", entry.directory), prefix: entry.prefix };
+  });
   const walk = (path) => {
     const stat = lstatSync(`${root}/${path}`);
     if (stat.isDirectory()) {
@@ -22,8 +62,8 @@ export function inputFiles(root = repositoryRoot) {
       throw new Error(`unsupported build input ${path}`);
     }
   };
-  for (const directory of manifest.directories) walk(directory);
-  for (const { directory, prefix } of manifest.prefixes) {
+  for (const directory of directories) walk(directory);
+  for (const { directory, prefix } of prefixes) {
     for (const name of readdirSync(`${root}/${directory}`)) {
       if (name.startsWith(prefix)) walk(`${directory}/${name}`);
     }

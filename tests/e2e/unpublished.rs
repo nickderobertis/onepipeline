@@ -519,7 +519,7 @@ fn the_host_and_token_targets_list_what_they_name() {
     let (world, _repository) = host("unpub-targets");
     world.extra_repository("engine");
     let (mine, _) = worked(&world, "work/mine", MANAGER, "a.txt", "a\n", "feat: a");
-    worked(&world, "work/theirs", OTHER, "b.txt", "b\n", "feat: b");
+    let (theirs, _) = worked(&world, "work/theirs", OTHER, "b.txt", "b\n", "feat: b");
     let opened = onevcs(
         &world,
         &[
@@ -563,6 +563,41 @@ fn the_host_and_token_targets_list_what_they_name() {
     run.exited(COUNTED);
     assert_eq!(named["target"], json!({"kind": "tokens", "tokens": [mine]}));
     assert_eq!(branches(&named), ["work/mine"]);
+    let (run, both) = listed(&world, &["--token", &mine, "--token", &theirs]);
+    run.exited(COUNTED);
+    let mut named = branches(&both);
+    named.sort();
+    assert_eq!(named, ["work/mine", "work/theirs"]);
+
+    // The host and token targets apply the environment's manager's acknowledgements,
+    // and none when the environment names no manager.
+    world
+        .run(&[
+            "unpublished",
+            "--acknowledge",
+            "work/mine",
+            "--reason",
+            "seen by this shell's manager",
+        ])
+        .exited(NOTHING_COUNTED);
+    for target in [vec!["--host"], vec!["--token", mine.as_str()]] {
+        let (_, document) = listed(&world, &target);
+        assert_eq!(
+            row(&document, "work/mine")["acknowledgement"]["reason"],
+            "seen by this shell's manager",
+            "{target:?}"
+        );
+        let mut argv = vec!["unpublished", "--format", "json"];
+        argv.extend(target.iter().copied());
+        let output = world
+            .cmd(&argv)
+            .env("ONEPIPELINE_LAUNCHER_SESSION", "")
+            .output()
+            .expect("the binary runs");
+        let document: Value = serde_json::from_slice(&output.stdout).expect("a document");
+        assert_eq!(row(&document, "work/mine")["counted"], true, "{target:?}");
+        assert_eq!(row(&document, "work/mine")["acknowledgement"], Value::Null);
+    }
 
     world
         .run(&["unpublished", "--token", "s-000000000000"])
@@ -617,9 +652,25 @@ fn disk_reads_the_run_root_and_build_output_without_following_a_link() {
         bytes < allocated(&outside.join("huge")),
         "the reading followed the link out of the run root: {disk}"
     );
+    // The text listing states the same reading.
+    let text = world.run(&["unpublished", "--session", MANAGER, "--disk"]);
+    text.exited(COUNTED);
+    assert!(
+        text.stdout.contains(&format!(
+            "    disk: run root {} {bytes} bytes; build output node_modules={modules} \
+             target={target}\n",
+            run_root.display()
+        )),
+        "{}",
+        text.stdout
+    );
     // Without `--disk`, no reading at all.
     let (_, plain) = listed(&world, &["--session", MANAGER]);
     assert_eq!(row(&plain, "work/built")["disk"], Value::Null);
+    assert!(!world
+        .run(&["unpublished", "--session", MANAGER])
+        .stdout
+        .contains("disk:"));
 }
 
 /// The file's bytes, or `None` where it does not exist.
@@ -765,6 +816,28 @@ fn acknowledge_refuses_before_writing_and_answers_as_the_session_listing() {
         let keys: Vec<&String> = entry.as_object().expect("an entry").keys().collect();
         assert_eq!(keys, ["branch", "identity", "tip", "reason", "at"]);
     }
+    // Acknowledging a branch again replaces its entry and keeps the others.
+    acknowledge(&world, "work/a", "kept, and said again").exited(NOTHING_COUNTED);
+    let document: Value =
+        serde_json::from_slice(&bytes_of(&file).expect("the file")).expect("JSON");
+    let entries = document["acknowledged"].as_array().expect("entries");
+    let reasons: std::collections::BTreeMap<&str, &str> = entries
+        .iter()
+        .map(|entry| {
+            (
+                entry["branch"].as_str().expect("a branch"),
+                entry["reason"].as_str().expect("a reason"),
+            )
+        })
+        .collect();
+    assert_eq!(entries.len(), 2, "{document:#}");
+    assert_eq!(
+        reasons,
+        std::collections::BTreeMap::from([
+            ("work/a", "kept, and said again"),
+            ("work/b", "also kept")
+        ])
+    );
 
     // `--repo` names one of the two identities holding `work/twice`.
     let (_, host) = listed(&world, &["--host"]);
@@ -876,6 +949,30 @@ fn a_malformed_entry_a_duplicate_and_another_version_apply_nothing_and_say_so() 
             .run(&["unpublished", "--session", MANAGER])
             .exited(COUNTED)
             .err_has(said);
+    }
+
+    // A file that is there and cannot be read: honoured while readable, and once its
+    // read fails, nothing applies and that is said.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let good =
+            json!({"version": 1, "acknowledged": [entry("ok", "2026-09-30T08:15:00Z", &tip)]});
+        std::fs::write(&file, good.to_string()).expect("written");
+        let (run, honoured) = listed(&world, &["--session", MANAGER]);
+        run.exited(NOTHING_COUNTED);
+        assert_eq!(row(&honoured, "work/kept")["counted"], false);
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).expect("locked");
+        let (run, listing) = listed(&world, &["--session", MANAGER]);
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).expect("unlocked");
+        run.exited(COUNTED);
+        assert_eq!(row(&listing, "work/kept")["counted"], true);
+        assert!(
+            listing["unresolved"]
+                .to_string()
+                .contains("applies no acknowledgement, so every branch counts"),
+            "{listing:#}"
+        );
     }
 }
 
@@ -1489,7 +1586,44 @@ fn assert_every_landing_drafts_or_declines(text: &str) {
 #[test]
 fn a_printed_landing_command_runs_this_hosts_drafter() {
     let world = World::new("unpub-drafted");
-    world.repository("change-open", &[]);
+    let repository = world.repository("change-open", &[]);
+    // The library commits the marker in this process, so this world's git config
+    // carries the identity the binary's own commands get from their environment.
+    let config = std::fs::read_to_string(world.gitconfig()).expect("the world's git config");
+    std::fs::write(
+        world.gitconfig(),
+        format!("{config}[user]\n\tname = Unpublished\n\temail = unpublished@example.invalid\n"),
+    )
+    .expect("an identity");
+    // A step that did not finish: preserved with its incomplete-step marker, which
+    // onevcs lands with `recover` rather than `publish-branch`.
+    world.on_onevcs(|| {
+        let vcs = onevcs::Providers::real().vcs;
+        let session = vcs
+            .open_session(onevcs::SessionRequest {
+                repo: repository.checkout.to_string_lossy().into_owned(),
+                branch: Some("work/third".to_owned()),
+                branch_name: None,
+                branch_prefix: None,
+                base: None,
+                execution_checkout: None,
+                pool: None,
+                overflow: None,
+                labels: [("launcher".to_owned(), MANAGER.to_owned())]
+                    .into_iter()
+                    .collect(),
+                refuse_conflicts: false,
+            })
+            .expect("a session opens");
+        commit(&world, &session.worktree, "t.txt", "t\n", "feat: third");
+        // Work the step had not committed when it stopped: what the marker goes on.
+        std::fs::write(session.worktree.join("t-more.txt"), "unfinished\n")
+            .expect("unfinished work");
+        vcs.preserve(&session, onevcs::Provenance::IncompleteStep)
+            .expect("the incomplete step is preserved");
+        vcs.close_session(&session.token)
+            .expect("the session closes");
+    });
     worked(&world, "work/first", MANAGER, "f.txt", "f\n", "feat: first");
     worked(
         &world,
@@ -1586,8 +1720,37 @@ fn a_printed_landing_command_runs_this_hosts_drafter() {
         )
         .exited(0);
 
+    // The incomplete step's printed command is `repo-recover`, run as printed.
+    let listing = world.run_from(
+        &graphs,
+        &[
+            "unpublished",
+            "--session",
+            MANAGER,
+            "--pr-author-graph",
+            "pr-author.yaml",
+        ],
+    );
+    assert_every_landing_drafts_or_declines(&listing.stdout);
+    let printed = land_line(&listing.stdout, "work/third");
+    assert_eq!(
+        &printed[..2],
+        ["onepipeline", "repo-recover"],
+        "{printed:?}"
+    );
+    assert!(
+        printed.contains(&"--pr-author-graph".to_owned()),
+        "{printed:?}"
+    );
+    world
+        .run_from(
+            &elsewhere,
+            &printed[1..].iter().map(String::as_str).collect::<Vec<_>>(),
+        )
+        .exited(0);
+
     let opened = world.changes_opened();
-    assert_eq!(opened.len(), 2, "{opened:#?}");
+    assert_eq!(opened.len(), 3, "{opened:#?}");
     for change in &opened {
         assert_eq!(
             change["body"], "## What\nDrafted for the unpublished branch.",
@@ -1811,4 +1974,45 @@ fn acknowledge_refuses_a_file_it_cannot_read_whole_or_a_directory_it_cannot_writ
             "a partial file was left behind"
         );
     }
+}
+
+/// A guard asked to name a drafting graph that is not a readable file blocks naming
+/// why, exit 0, as an unanswered decision does; and one with no state root to read
+/// acknowledgements or keep its memory under says so rather than passing silently.
+#[test]
+fn a_guard_that_cannot_configure_its_decision_says_why() {
+    let (world, _repository) = host("unpub-guard-config");
+    worked(&world, "work/owed", MANAGER, "o.txt", "o\n", "feat: o");
+    let guard = guard_world(&world);
+    let missing = world.root.join("no-such-graph.yaml").display().to_string();
+    let reason = blocked(
+        &stop(
+            &guard,
+            &["--unpublished", "--unpublished-pr-author-graph", &missing],
+            MANAGER,
+            false,
+        )
+        .exited(0)
+        .clone_run(),
+    )
+    .expect("an unusable graph blocks");
+    assert!(
+        reason.contains("could not be answered") && reason.contains("not a readable file"),
+        "{reason}"
+    );
+
+    // No absolute state root at all: nothing to read acknowledgements under, and
+    // nowhere to keep a memory — a warning naming it, never silence.
+    let rootless = guard_world(&world)
+        .with_env("XDG_STATE_HOME", "relative/state")
+        .with_env("HOME", "relative-home")
+        .with_env("USERPROFILE", "relative-home");
+    let run = stop(&rootless, &["--unpublished"], MANAGER, false)
+        .exited(0)
+        .clone_run();
+    let said = warned(&run);
+    assert!(
+        said.contains("neither XDG_STATE_HOME nor a home directory names a state root"),
+        "{said}"
+    );
 }

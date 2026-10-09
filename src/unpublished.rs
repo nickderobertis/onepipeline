@@ -121,6 +121,7 @@ pub struct AcknowledgedBranch {
 
 /// The acknowledgement file, as written.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AcknowledgementFile {
     /// Always [`ACKNOWLEDGEMENT_FILE_VERSION`].
     pub version: u32,
@@ -368,8 +369,11 @@ pub fn unpublished(request: &UnpublishedRequest) -> Result<Unpublished> {
     listing(request, &selection, graph.as_deref())
 }
 
-/// Whether a token target names a session no record on this host names.
-fn unknown_token(target: &Target) -> bool {
+/// Whether a token target names a session onevcs cannot load: one no record on
+/// this host names, or one whose record it cannot read. onevcs answers both with the
+/// same kind of error, so both are the invocation naming a session that cannot be
+/// asked about — a refusal — rather than a read of the listing that failed.
+fn names_an_unloadable_session(target: &Target) -> bool {
     let Target::Tokens { tokens } = target else {
         return false;
     };
@@ -391,9 +395,10 @@ fn listing(
         .recoverable_matching(Scope::All, selection);
     let recoverable = match read {
         Ok(rows) => rows,
-        // A token no record names is refused, in onevcs's own words: "nothing of that
-        // session is left" and "there is no such session" are different answers.
-        Err(error) if unknown_token(&request.target) => {
+        // A named session onevcs cannot load is refused, in onevcs's own words:
+        // "nothing of that session is left" and "there is no such session" are
+        // different answers.
+        Err(error) if names_an_unloadable_session(&request.target) => {
             return Err(Error::Invalid(error.to_string()))
         }
         Err(error) => {
@@ -968,6 +973,17 @@ pub fn acknowledge(request: &AcknowledgeRequest, graph: Option<PathBuf>) -> Resu
                         file.display()
                     ))
                 })?;
+                // Held to the rule a read holds it to: an entry that could never suppress
+                // a count is not carried forward under this build's name.
+                if let Some(why) = entry_fault(&entry) {
+                    return Err(Error::Invalid(format!(
+                        "{}: the entry for {} [{}] is not an acknowledgement ({why}); repair \
+                         the file before recording another acknowledgement",
+                        file.display(),
+                        entry.branch,
+                        entry.identity
+                    )));
+                }
                 read.push(entry);
             }
             read

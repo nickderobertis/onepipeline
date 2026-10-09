@@ -142,6 +142,27 @@ pub(super) fn source_fingerprint(root: &Path) -> String {
     )
     .expect("the build-input manifest reads");
     assert_eq!(manifest.version, 1, "build-input manifest version");
+    // Repository-relative before anything is joined onto the root, the rule
+    // `scripts/stop-guard-unpublished-build.mjs` holds the same file to.
+    let relative = |path: &str| {
+        assert!(
+            !path.is_empty()
+                && !path.starts_with('/')
+                && !path.contains('\\')
+                && !path.split('/').any(|part| matches!(part, "" | "." | "..")),
+            "build-input manifest entry {path:?} is not a repository-relative path"
+        );
+    };
+    for path in manifest.files.iter().chain(&manifest.directories) {
+        relative(path);
+    }
+    for Prefix { directory, prefix } in &manifest.prefixes {
+        relative(directory);
+        assert!(
+            !prefix.is_empty() && !prefix.contains('/'),
+            "build-input prefix {prefix:?}"
+        );
+    }
     fn walk(root: &Path, relative: &str, into: &mut std::collections::BTreeSet<String>) {
         let path = root.join(relative);
         let meta = std::fs::symlink_metadata(&path).expect("a build input");
