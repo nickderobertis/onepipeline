@@ -1633,3 +1633,182 @@ fn the_documented_synopsis_is_the_verbs_own() {
         "{proposed}"
     );
 }
+
+/// The guard's warning, under Claude Code's rendering, or a failure naming what it
+/// said instead.
+fn warned(run: &Run) -> String {
+    let decision: Value = serde_json::from_str(run.stdout.trim())
+        .unwrap_or_else(|_| panic!("no decision object: {:?}", run.stdout));
+    assert!(decision.get("decision").is_none(), "{decision}");
+    decision["systemMessage"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no warning: {decision}"))
+        .to_owned()
+}
+
+/// The unpublished decision's memory follows the guard's rule for its own: a block
+/// it cannot record, a memory it cannot read on a continuation and one it cannot
+/// remove are each one warning naming what it would have refused on — never a
+/// block it could not bound, and never silence.
+#[test]
+fn a_memory_the_guard_cannot_keep_warns_and_never_blocks_unbounded() {
+    let (world, _repository) = host("unpub-memory");
+    worked(&world, "work/owed", MANAGER, "o.txt", "o\n", "feat: o");
+    let digest = hex(&Sha256::digest(MANAGER.as_bytes()));
+
+    // The memory's directory is a file: nothing can be recorded under it.
+    let blocked_state = world.root.join("state-file");
+    std::fs::create_dir_all(blocked_state.join("onepipeline")).expect("a state root");
+    std::fs::write(blocked_state.join("onepipeline/stop-guard"), "a file").expect("a file");
+    let guard =
+        guard_world(&world).with_env("XDG_STATE_HOME", &blocked_state.display().to_string());
+    let said = warned(
+        &stop(&guard, &["--unpublished"], MANAGER, false)
+            .exited(0)
+            .clone_run(),
+    );
+    assert!(
+        said.contains("owes a preserved branch and this stop was not refused")
+            && said.contains("could not record what it would block on")
+            && said.contains("work/owed"),
+        "{said}"
+    );
+
+    // The memory is a directory: a continuation cannot read what was last blocked on.
+    let state = world.root.join("state-dir");
+    let memory = state
+        .join("onepipeline/stop-guard")
+        .join(format!("{digest}.unpublished"));
+    std::fs::create_dir_all(memory.join("in-the-way")).expect("a directory in the way");
+    let guard = guard_world(&world).with_env("XDG_STATE_HOME", &state.display().to_string());
+    let said = warned(
+        &stop(&guard, &["--unpublished"], MANAGER, true)
+            .exited(0)
+            .clone_run(),
+    );
+    assert!(
+        said.contains("could not read what it last blocked on") && said.contains("work/owed"),
+        "{said}"
+    );
+
+    // Nothing owed, and that same memory cannot be removed: a warning that says so.
+    acknowledge(&world, "work/owed", "kept").exited(NOTHING_COUNTED);
+    let acknowledged = acknowledgement_file(&world, MANAGER)
+        .parent()
+        .expect("the acknowledgements directory")
+        .display()
+        .to_string();
+    let said = warned(
+        &stop(
+            &guard,
+            &[
+                "--unpublished",
+                "--unpublished-acknowledgements",
+                &acknowledged,
+            ],
+            MANAGER,
+            false,
+        )
+        .exited(0)
+        .clone_run(),
+    );
+    assert!(
+        said.contains("owes no preserved branch, but the guard could not remove"),
+        "{said}"
+    );
+}
+
+/// A run root that is gone and a directory under one that cannot be read are each
+/// said, and the reading of the first is `null` rather than a measured zero.
+#[cfg(unix)]
+#[test]
+fn disk_says_what_it_could_not_measure() {
+    let (world, _repository) = host("unpub-disk-faults");
+    let (gone, _) = worked(&world, "work/gone", MANAGER, "g.txt", "g\n", "feat: gone");
+    let (_, worktree) = open(&world, "work/locked", MANAGER);
+    commit(&world, &worktree, "l.txt", "l\n", "feat: locked");
+    let (_, document) = listed(&world, &["--session", MANAGER, "--disk"]);
+    let removed = PathBuf::from(
+        row(&document, "work/gone")["disk"]["run_root"]
+            .as_str()
+            .expect("a run root"),
+    );
+    assert!(removed.ends_with(&gone), "{removed:?}");
+    std::fs::remove_dir_all(&removed).expect("the run root is removed");
+    let locked = worktree.join("private");
+    std::fs::create_dir_all(&locked).expect("a directory");
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).expect("locked");
+
+    let (run, document) = listed(&world, &["--session", MANAGER, "--disk"]);
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).expect("unlocked");
+    run.exited(COUNTED);
+    let disk = &row(&document, "work/gone")["disk"];
+    assert_eq!(disk["run_root"], removed.display().to_string());
+    assert_eq!(disk["run_root_bytes"], Value::Null, "{disk}");
+    let said = document["unresolved"].to_string();
+    assert!(
+        said.contains("is not a directory, so its disk was not measured"),
+        "{said}"
+    );
+    assert!(
+        said.contains("could not be read while measuring disk"),
+        "{said}"
+    );
+    assert!(row(&document, "work/locked")["disk"]["run_root_bytes"].is_u64());
+}
+
+/// An existing acknowledgement file this build cannot read whole, and a directory
+/// nothing can be written in, are refused with nothing written.
+#[test]
+fn acknowledge_refuses_a_file_it_cannot_read_whole_or_a_directory_it_cannot_write() {
+    let (world, _repository) = host("unpub-ack-faults");
+    worked(&world, "work/a", MANAGER, "a.txt", "a\n", "feat: a");
+    let file = acknowledgement_file(&world, MANAGER);
+    std::fs::create_dir_all(file.parent().expect("parent")).expect("dir");
+    for (written, said) in [
+        ("not json".to_owned(), "repair or remove it"),
+        (
+            json!({"version": 1, "acknowledged": [{"branch": "work/a"}]}).to_string(),
+            "an entry cannot be read",
+        ),
+    ] {
+        std::fs::write(&file, &written).expect("written");
+        acknowledge(&world, "work/a", "kept")
+            .exited(REFUSED)
+            .err_has(said);
+        assert_eq!(std::fs::read_to_string(&file).expect("unchanged"), written);
+    }
+
+    // A directory that is there and refuses every write: nothing is read from it, and
+    // nothing can be put in it.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let read_only = world.root.join("read-only");
+        std::fs::create_dir_all(&read_only).expect("a directory");
+        std::fs::set_permissions(&read_only, std::fs::Permissions::from_mode(0o555))
+            .expect("read-only");
+        let refused = world.run(&[
+            "unpublished",
+            "--acknowledge",
+            "work/a",
+            "--reason",
+            "kept",
+            "--session",
+            MANAGER,
+            "--acknowledgements",
+            &read_only.display().to_string(),
+        ]);
+        std::fs::set_permissions(&read_only, std::fs::Permissions::from_mode(0o755))
+            .expect("writable again");
+        refused.exited(REFUSED).err_has("could not be written");
+        assert_eq!(
+            std::fs::read_dir(&read_only)
+                .expect("the directory")
+                .count(),
+            0,
+            "a partial file was left behind"
+        );
+    }
+}

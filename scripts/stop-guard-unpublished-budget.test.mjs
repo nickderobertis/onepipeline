@@ -270,3 +270,50 @@ test("the budget command reports each mode through the SDK, and refuses naming t
   assert.match(refused.stderr, /next: run 'just stop-verdict-journeys'/);
   rmSync(dir, { recursive: true });
 });
+
+const invocation = fileURLToPath(
+  new URL("./stop-guard-unpublished-invocation.mjs", import.meta.url),
+);
+
+function invoke(dir, ...program) {
+  return spawnSync(process.execPath, [invocation, ...program], {
+    env: { ...process.env, ONEPIPELINE_BUDGET_RECORDS: dir },
+    encoding: "utf8",
+  });
+}
+
+test("a producer that fails, cannot start, or is not named leaves no record a budget reads", () => {
+  for (const [program, status] of [
+    [[process.execPath, "-e", "process.exit(3)"], 3],
+    [["/nonexistent/stop-verdict-producer"], 1],
+    [[], 2],
+  ]) {
+    const dir = directory();
+    const ran = invoke(dir, ...program);
+    assert.equal(ran.status, status, ran.stderr);
+    assert.match(ran.stderr, /next: run 'just stop-verdict-journeys'/);
+    const manifest = JSON.parse(readFileSync(join(dir, schema["x-invocation"]), "utf8"));
+    assert.equal(manifest.state, "failed");
+    assert.throws(() => readFileSync(join(dir, schema["x-record"])), /ENOENT/);
+    assert.throws(() => readRecord(dir), /is missing|incomplete/);
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test("a producer that succeeds hands it the invocation identity it marked started", () => {
+  const dir = directory();
+  const ran = invoke(
+    dir,
+    process.execPath,
+    "-e",
+    "const fs=require('node:fs');fs.writeFileSync(process.argv[1], process.env.ONEPIPELINE_BUDGET_INVOCATION)",
+    join(dir, "seen"),
+  );
+  assert.equal(ran.status, 0, ran.stderr);
+  const seen = readFileSync(join(dir, "seen"), "utf8");
+  const manifest = JSON.parse(readFileSync(join(dir, schema["x-invocation"]), "utf8"));
+  assert.match(seen, /^[a-f0-9]{64}$/);
+  assert.equal(manifest.run_id, seen);
+  assert.equal(manifest.state, "started", "only the journey itself completes the invocation");
+  rmSync(dir, { recursive: true });
+});

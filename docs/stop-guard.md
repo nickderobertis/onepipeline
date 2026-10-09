@@ -203,7 +203,7 @@ at its current tip, in
 `<DIR>/<sha256(session)>.json` — `{"version": 1, "acknowledged": [{"branch",
 "identity", "tip", "reason", "at"}]}`, ai-orchestrator's version-1 format — and then
 answers as the session listing does. A branch that moves past the recorded tip
-counts again. Entry 113 of `docs/contract-divergences.md` states every rule.
+counts again.
 
 <!-- llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] the two harness
 sections below restate contracts owned by Claude Code and Codex, neither of which publishes

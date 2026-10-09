@@ -7,15 +7,23 @@ import { repositoryRoot, sourceFingerprint } from "./stop-guard-unpublished-buil
 
 export const journeyCommand = "just stop-verdict-journeys";
 export const recordDirectory = fileURLToPath(new URL("../target/budget-records/", import.meta.url));
-const schema = JSON.parse(
-  readFileSync(new URL("./stop-guard-unpublished-budget.schema.json", import.meta.url), "utf8"),
-);
+// Read on first use rather than at import, so a missing or broken schema reaches the
+// caller's error handler, and its next action, instead of failing module loading.
+let loaded;
+function loadedSchema() {
+  if (!loaded) {
+    loaded = JSON.parse(
+      readFileSync(new URL("./stop-guard-unpublished-budget.schema.json", import.meta.url), "utf8"),
+    );
+  }
+  return loaded;
+}
 const sha = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const digest = (text) => typeof text === "string" && /^[a-f0-9]{64}$/.test(text);
 
 /** Hold `value` to the checked schema: closed objects, every key required, types exact. */
 function conforms(value, node, at) {
-  const resolved = node.$ref ? schema.$defs[node.$ref.replace("#/$defs/", "")] : node;
+  const resolved = node.$ref ? loadedSchema().$defs[node.$ref.replace("#/$defs/", "")] : node;
   if (resolved.anyOf) {
     const errors = [];
     for (const option of resolved.anyOf) {
@@ -68,6 +76,7 @@ function sample(sample, what) {
 
 /** The validated current-gate record, or an error naming why it is not one. */
 export function readRecord(directory = recordDirectory, sourceRoot = repositoryRoot) {
+  const schema = loadedSchema();
   const read = (name) => {
     let text;
     try {
@@ -110,13 +119,24 @@ export function readRecord(directory = recordDirectory, sourceRoot = repositoryR
   if (!digest(build.source_sha256) || build.source_sha256 !== sourceFingerprint(sourceRoot)) {
     throw new Error("stale record: the build inputs changed since it was produced");
   }
+  // The name is checked before it is used: it is the record's to state, and only the
+  // one file the producer writes beside it is ever read.
+  if (build.binary !== schema["x-binary"]) {
+    throw new Error(
+      `the record names binary ${JSON.stringify(build.binary)}, not ${schema["x-binary"]}`,
+    );
+  }
   let binary;
   try {
-    binary = readFileSync(`${directory}/${build.binary}`);
-  } catch {
-    throw new Error("the producing binary is missing beside its record");
+    binary = readFileSync(`${directory}/${schema["x-binary"]}`);
+  } catch (error) {
+    throw new Error(
+      error.code === "ENOENT"
+        ? "the producing binary is missing beside its record"
+        : `the producing binary beside its record is unreadable: ${error.message}`,
+    );
   }
-  if (build.binary !== schema["x-binary"] || sha(binary) !== build.binary_sha256) {
+  if (sha(binary) !== build.binary_sha256) {
     throw new Error("the binary beside the record is not the one that produced it");
   }
   if (record.preparation_ms <= 0 || record.total_ms < record.preparation_ms) {

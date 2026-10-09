@@ -62,6 +62,15 @@ const DRAFTED_VERBS: [(&str, &str); 2] = [
 /// The `at` stamp's format, `%Y-%m-%dT%H:%M:%SZ`, as a length.
 const STAMP_LEN: usize = "2026-01-01T00:00:00Z".len();
 
+// llmlint: ignore-block[invalid_states_unrepresentable] these are the JSON document and the
+// version-1 acknowledgement file entry 113 fixes field by field, which ai-orchestrator's
+// adoption parses by name: strings for sessions, tokens, tips, reasons and stamps, and
+// `in_flight`, `counted` and `acknowledgement` as three fields. A newtype or a folded enum
+// would move that wire. What is enforced is each value's one boundary: `unpublished` and
+// `acknowledge` refuse a blank session, an empty token list and an unreadable graph before
+// anything is read, `entry_fault` holds every entry a file carries before it may suppress a
+// count, `shaped` derives the three row fields from one decision, and the version is the
+// constant this module writes and `read_file` refuses any other.
 /// What one listing is about.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
@@ -210,15 +219,15 @@ impl Unpublished {
 pub struct UnpublishedRequest {
     /// What to list.
     pub target: Target,
-    /// Whose acknowledgements apply: the session target's own session, and for
-    /// the other two the caller's, where one is named.
+    /// Whose acknowledgements apply to the host and token targets: the caller's,
+    /// where one is named. The session target always applies its own session's.
     pub acknowledging: Option<String>,
     /// The acknowledgements directory.
     pub acknowledgements: PathBuf,
     /// Take each row's disk reading.
     pub disk: bool,
-    /// The drafting graph a printed landing command names, made absolute and
-    /// checked to be a readable file by [`pr_author_graph`].
+    /// The drafting graph a printed landing command names; [`unpublished`] makes
+    /// it absolute and refuses one that is not a readable file.
     pub pr_author_graph: Option<PathBuf>,
 }
 
@@ -236,6 +245,7 @@ pub struct AcknowledgeRequest {
     /// The acknowledgements directory.
     pub acknowledgements: PathBuf,
 }
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// An acknowledgement recorded, and the session listing read after it.
 #[derive(Debug, Clone, PartialEq)]
@@ -326,6 +336,11 @@ fn named_session(session: &str) -> Result<()> {
 /// anything is read. A read that fails is not an error: it is
 /// [`Verdict::Unanswered`].
 pub fn unpublished(request: &UnpublishedRequest) -> Result<Unpublished> {
+    let graph = request
+        .pr_author_graph
+        .as_deref()
+        .map(pr_author_graph)
+        .transpose()?;
     let selection = match &request.target {
         Target::Session { session } => {
             named_session(session)?;
@@ -350,7 +365,7 @@ pub fn unpublished(request: &UnpublishedRequest) -> Result<Unpublished> {
             }
         }
     };
-    listing(request, &selection)
+    listing(request, &selection, graph.as_deref())
 }
 
 /// Whether a token target names a session no record on this host names.
@@ -365,7 +380,11 @@ fn unknown_token(target: &Target) -> bool {
 }
 
 /// The listing for one selection, read and decided.
-fn listing(request: &UnpublishedRequest, selection: &Selection) -> Result<Unpublished> {
+fn listing(
+    request: &UnpublishedRequest,
+    selection: &Selection,
+    graph: Option<&Path>,
+) -> Result<Unpublished> {
     let mut unresolved = Vec::new();
     let read = onevcs::Providers::real()
         .vcs
@@ -406,6 +425,11 @@ fn listing(request: &UnpublishedRequest, selection: &Selection) -> Result<Unpubl
             }
         }
     }
+    // llmlint: ignore-block[changed_behavior_has_e2e] onevcs's typed rows carry the
+    // identity of a validated registry and a branch read off a ref it enumerated, so no
+    // journey over the real library can hand this an empty one. The arm stays because the
+    // rule entry 113 states — a row not read whole is unanswered, never none — must hold
+    // whatever a later onevcs release answers with.
     for row in &recoverable {
         if row.identity.is_empty() || row.branch.branch.is_empty() {
             unanswered = true;
@@ -415,7 +439,12 @@ fn listing(request: &UnpublishedRequest, selection: &Selection) -> Result<Unpubl
             ));
         }
     }
-    let acknowledged = match &request.acknowledging {
+    // llmlint: ignore-end[changed_behavior_has_e2e]
+    let acknowledging = match &request.target {
+        Target::Session { session } => Some(session),
+        Target::Host | Target::Tokens { .. } => request.acknowledging.as_ref(),
+    };
+    let acknowledged = match acknowledging {
         Some(session) => read_acknowledgements(
             &acknowledgement_file(&request.acknowledgements, session),
             &mut unresolved,
@@ -427,7 +456,7 @@ fn listing(request: &UnpublishedRequest, selection: &Selection) -> Result<Unpubl
         .map(|row| {
             let standing = standing(&row, &acknowledged, &mut unresolved);
             let disk = request.disk.then(|| disk(&row, &mut unresolved));
-            shaped(row, standing, disk, request.pr_author_graph.as_deref())
+            shaped(row, standing, disk, graph)
         })
         .collect();
     let verdict = if unanswered {
@@ -458,6 +487,10 @@ fn standing(
     match &row.tip {
         Some(tip) if *tip == entry.tip => Some(entry.clone()),
         Some(_) => None,
+        // llmlint: ignore[changed_behavior_has_e2e] onevcs answers a `null` tip only for a
+        // ref it enumerated and then could not read, which no journey over real git can
+        // stage without the row itself disappearing; the arm is entry 113's rule that a
+        // row with no tip has no standing acknowledgement and counts.
         None => {
             unresolved.push(format!(
                 "{} [{}]: onevcs could not read its tip, so its acknowledgement does not stand \
@@ -547,6 +580,9 @@ fn run_root(row: &Recoverable, unresolved: &mut Vec<String>) -> Option<PathBuf> 
         (Some(held), _) => Some(held.worktree.clone()),
         (None, Some(token)) => match onevcs::Providers::real().vcs.session(token) {
             Ok(record) => Some(record.session.worktree),
+            // llmlint: ignore[changed_behavior_has_e2e] onevcs names a row's session only
+            // off a record it just read, so the record vanishing between the two reads is a
+            // race no journey can stage deterministically; it is said rather than dropped.
             Err(error) => {
                 unresolved.push(format!(
                     "{} [{}]: its session {} could not be read, so its disk was not measured: \
@@ -564,6 +600,9 @@ fn run_root(row: &Recoverable, unresolved: &mut Vec<String>) -> Option<PathBuf> 
             .file_name()
             .and_then(|name| name.to_str())
             .is_some_and(|name| name.starts_with("s-"));
+    // llmlint: ignore[changed_behavior_has_e2e] every session a journey can open places its
+    // worktree at `<…>/<s-token>/worktree`; a pooled slot's layout is the one that is not,
+    // and placing one needs a pool configuration this verb's journeys do not exercise.
     if !shaped {
         unresolved.push(format!(
             "{} [{}]: its worktree {} is not at `<…>/<s-token>/worktree`, so it has no run root \
@@ -671,7 +710,9 @@ fn allocated_bytes(meta: &std::fs::Metadata) -> u64 {
 /// One line of text a person reads: something visible in it, and no character
 /// that is not printable — a newline among them.
 pub(crate) fn reason_fault(reason: &str) -> Option<String> {
-    let trimmed = reason.trim();
+    // Only surrounding spaces are forgiven: a newline or a tab at either end is the
+    // second line or the control character this rule refuses anywhere else.
+    let trimmed = reason.trim_matches(' ');
     if !trimmed.chars().any(|c| printable(c) && c != ' ') {
         return Some(format!(
             "the reason {reason:?} carries no visible character, so it says nothing"
@@ -847,6 +888,7 @@ fn read_acknowledgements(path: &Path, unresolved: &mut Vec<String>) -> Vec<Ackno
 /// without `--repo`, a row whose tip onevcs could not read, an existing file this
 /// build cannot read whole, and a host read that failed.
 pub fn acknowledge(request: &AcknowledgeRequest, graph: Option<PathBuf>) -> Result<Acknowledged> {
+    let graph = graph.as_deref().map(pr_author_graph).transpose()?;
     if let Some(fault) = reason_fault(&request.reason) {
         return Err(Error::Invalid(format!(
             "{fault}; an acknowledgement needs `--reason \"<why this branch is deliberately left>\"`"
@@ -942,7 +984,7 @@ pub fn acknowledge(request: &AcknowledgeRequest, graph: Option<PathBuf>) -> Resu
         branch: row.branch.branch.clone(),
         identity: row.identity.clone(),
         tip,
-        reason: request.reason.trim().to_owned(),
+        reason: request.reason.trim_matches(' ').to_owned(),
         at: stamp(crate::sys::now_millis()),
     };
     kept.retain(|other| !(other.identity == entry.identity && other.branch == entry.branch));
@@ -1220,7 +1262,16 @@ mod tests {
     #[test]
     fn a_reason_is_one_visible_line() {
         assert!(reason_fault("kept for the spike").is_none());
-        for refused in ["", "   ", "two\nlines", "tab\there", "\u{200b}"] {
+        assert!(reason_fault("  spaced  ").is_none());
+        for refused in [
+            "",
+            "   ",
+            "two\nlines",
+            "tab\there",
+            "\u{200b}",
+            "trailing\n",
+            "\tleading",
+        ] {
             assert!(reason_fault(refused).is_some(), "{refused:?}");
         }
     }

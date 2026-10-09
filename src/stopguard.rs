@@ -253,6 +253,10 @@ pub(crate) fn guard(
                     .unwrap_or_else(|_| Err("the guard's own consultation of it failed".to_owned()))
             })
             .collect();
+        // llmlint: ignore-block[changed_behavior_has_e2e] `join` fails only when the
+        // decision's thread panicked, which nothing a journey hands the guard can make it
+        // do; the arm keeps a panic from reading as `none`, blocking as an unanswered
+        // decision does.
         let unpublished = deciding.map(|deciding| {
             deciding.join().unwrap_or_else(|_| {
                 Verdict::Block(format!(
@@ -263,6 +267,7 @@ pub(crate) fn guard(
                 ))
             })
         });
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         (own, answered, unpublished)
     });
     let mut verdicts = vec![own];

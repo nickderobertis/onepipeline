@@ -6,7 +6,10 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-const directory = fileURLToPath(new URL("../target/budget-records/", import.meta.url));
+// `ONEPIPELINE_BUDGET_RECORDS` points it at another directory, which its tests use.
+const directory =
+  process.env.ONEPIPELINE_BUDGET_RECORDS ||
+  fileURLToPath(new URL("../target/budget-records/", import.meta.url));
 const run_id = randomBytes(32).toString("hex");
 const manifest = (state) =>
   writeFileSync(

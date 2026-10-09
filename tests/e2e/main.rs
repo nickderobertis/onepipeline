@@ -237,7 +237,14 @@ mod surface;
 mod templates;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod turns;
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] these journeys read
+// `docs/stop-guard.md` and `docs/contract-divergences.md` (the synopsis and shape drift
+// checks) and drive `src/unpublished.rs`, `src/stopguard.rs` and `src/unwatched.rs`, so the
+// documentation and source `e2eSource` names are exactly what should select them; the
+// full-size workloads are the part that is expensive, and they are on their own edge in
+// `tests/stop_verdict/`.
 mod unpublished;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] these journeys reach
 // every caller of the workspace-listing operations across `src/`, so the crate's edge is
 // the narrowest they fit behind.

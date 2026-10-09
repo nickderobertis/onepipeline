@@ -1158,6 +1158,9 @@ path = "tests/smoke/main.rs"
 name = "release_channel"
 path = "tests/release_channel/main.rs"
 
+# llmlint: ignore[new_command_or_client_gets_its_own_project] a budget-journey test binary of
+# the existing `onepipeline` binary, not a command or client: `unpublished` is a verb of that
+# binary beside `unwatched` and `stop-guard`, suppressed with them in `src/cli.rs`.
 # The stop-verdict budget journeys: both full host-shaped workloads, built once per
 # gate, timing the release binary's native Stop hook and writing the telemetry the
 # read-only budget commands validate. Their own binary and their own Nx project
