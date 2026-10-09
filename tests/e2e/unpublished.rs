@@ -1022,6 +1022,15 @@ fn a_malformed_entry_a_duplicate_and_another_version_apply_nothing_and_say_so() 
             json!({"version": 2, "acknowledged": [entry("ok", "2026-09-30T08:15:00Z", &tip)]}),
             "not a version 1 acknowledgement file",
         ),
+        (json!({"version": 1}), "carries no `acknowledged` array"),
+        (
+            json!({"version": 1, "acknowledged": {"work/kept": entry("ok", "2026-09-30T08:15:00Z", &tip)}}),
+            "carries no `acknowledged` array",
+        ),
+        (
+            json!({"version": 1, "acknowledged": [entry("ok", "2026-09-30T08:15:00Z", &tip)], "extra": 1}),
+            "a field the format does not name",
+        ),
     ] {
         std::fs::write(&file, document.to_string()).expect("written");
         let (run, listing) = listed(&world, &["--session", MANAGER]);
@@ -2073,6 +2082,18 @@ fn acknowledge_refuses_a_file_it_cannot_read_whole_or_a_directory_it_cannot_writ
     std::fs::create_dir_all(file.parent().expect("parent")).expect("dir");
     for (written, said) in [
         ("not json".to_owned(), "repair or remove it"),
+        (
+            json!({"version": 1}).to_string(),
+            "carries no `acknowledged` array",
+        ),
+        (
+            json!({"version": 1, "acknowledged": {}}).to_string(),
+            "carries no `acknowledged` array",
+        ),
+        (
+            json!({"version": 1, "acknowledged": [], "extra": 1}).to_string(),
+            "a field the format does not name",
+        ),
         (
             json!({"version": 1, "acknowledged": [{"branch": "work/a"}]}).to_string(),
             "an entry cannot be read",
