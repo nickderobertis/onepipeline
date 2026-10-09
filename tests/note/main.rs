@@ -710,6 +710,17 @@ fn a_note_waiting_on_a_held_turn_leaves_the_run_journalling_its_dispatch() {
         "{}",
         journal[shown]
     );
+    // The delivery and its presentation both name the envelope the note came
+    // in, which is what a driver taking the run over reads to know the note is
+    // not owed a second time.
+    let envelope = json!(queued_id_of(&world, run, NOTE));
+    assert_eq!(journal[delivered]["payload"]["envelope"], envelope);
+    assert_eq!(operation["envelope"], envelope, "{operation}");
+    assert_eq!(
+        journal[shown]["payload"]["envelope"], envelope,
+        "{}",
+        journal[shown]
+    );
 
     world.until("the run to settle", |world| {
         !world.events_of(run, "node-settled").is_empty()

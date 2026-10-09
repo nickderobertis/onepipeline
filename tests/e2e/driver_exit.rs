@@ -686,16 +686,18 @@ fn deliveries_of(world: &World, run: &str, text: &str) -> usize {
 
 const RECOVERED_NOTE: &str = "the fixture moved to fixtures/v2; start from there";
 const RECOVERED_RULING: &str = "build only what fixtures/v2 needs";
+const LATER_RULING: &str = "build only what fixtures/v3 needs";
 
 /// **The envelopes a dead driver claimed are its adopter's first work.** A
 /// driver claims a live note into a node whose worker turn is held — handed to
 /// a delivery thread, waiting on that turn — and an `amend` of the same node,
 /// held behind the note; then it is killed before it answers either. Both
 /// submitters are still waiting, and `status` names both as claimed with no
-/// outcome. The driver that adopts the run takes them back ahead of anything
-/// new: the note is delivered once, the amend is applied — journalled under its
-/// envelope id — and each waiting `reply` is told so, with no envelope left
-/// unanswered.
+/// outcome. A later `amend` of the node reaches the queue behind them. The
+/// driver that adopts the run takes the two back ahead of it: the note is
+/// delivered once, the claimed amend is applied — journalled under its envelope
+/// id — before the later one, whose text is the one that stands, and each
+/// waiting `reply` is told so, with no envelope left unanswered.
 #[cfg(unix)]
 #[test]
 fn an_adopter_answers_the_envelopes_its_dead_driver_claimed_and_never_answered() {
@@ -738,6 +740,16 @@ fn an_adopter_answers_the_envelopes_its_dead_driver_claimed_and_never_answered()
         "{:?}",
         unanswered_line(&world, run)
     );
+    // Envelope 2: a later amend of the same node, queued as a host's channel
+    // server queues one, with nothing driving the run to claim it.
+    crate::malformed_envelopes::sent_through_the_bus(
+        &world,
+        run,
+        &json!({"version": 3, "commands": [
+            {"op": "amend", "id": "build", "text": LATER_RULING}
+        ]}),
+    );
+    assert_eq!(crate::malformed_envelopes::queued(&world, run).len(), 3);
 
     let mut adopt = world.agentgraph_cmd(&["adopt", run]);
     adopt
@@ -748,8 +760,8 @@ fn an_adopter_answers_the_envelopes_its_dead_driver_claimed_and_never_answered()
 
     // The amend commits, under its envelope's id, with the worker's turn still
     // held: nothing of it waits on a turn.
-    world.until("the adopter to apply the amend", |world| {
-        !committed_from(world, run, 1).is_empty()
+    world.until("the adopter to apply both amends", |world| {
+        !committed_from(world, run, 2).is_empty()
     });
     assert!(world.events_of(run, "node-settled").is_empty());
     let (code, said) = receipt(amend);
@@ -772,8 +784,15 @@ fn an_adopter_answers_the_envelopes_its_dead_driver_claimed_and_never_answered()
         .iter()
         .filter_map(|outcome| outcome["id"].as_u64())
         .collect();
-    assert_eq!(answered, [0, 1]);
+    assert_eq!(answered, [0, 1, 2]);
     assert_eq!(unanswered_line(&world, run), None);
+    let amended: Vec<Value> = world
+        .events_of(run, "edit-committed")
+        .into_iter()
+        .filter(|event| event["payload"]["command"]["op"] == "amend")
+        .map(|event| event["payload"]["command"]["text"].clone())
+        .collect();
+    assert_eq!(amended, [json!(RECOVERED_RULING), json!(LATER_RULING)]);
 
     world.release("turn.go");
     world.release("turn.settle");
@@ -811,13 +830,25 @@ fn validator_refusing_its_second_offer(world: &World) -> (String, PathBuf) {
 }
 
 /// **An envelope whose effects were journalled and whose answer was not is
-/// answered from the journal.** A driver applies one envelope and refuses
-/// another — its node validator passes the add at submission and refuses it
-/// when the driver offers it — and dies between journalling each one's effects
-/// and writing its outcome line, which is the window the two writes leave. The
-/// adopter answers both from what the journal holds under their envelope ids:
-/// the applied one `applied`, committed exactly once, and the refused one with
-/// the reason recorded beside its rejection, with no command of it judged again.
+/// answered from the journal.** A driver answers six envelopes and dies between
+/// journalling each one's effects and writing its outcome line, which is the
+/// window those two writes leave. What its adopter answers each with is read
+/// off the records naming it:
+///
+/// - an applied edit is answered `applied`, and committed exactly once;
+/// - a refusal — its node validator passes the add at submission and refuses it
+///   when the driver offers it, beside a command that validated — gets the very
+///   outcome it was given, sibling's `validated` included, with no second
+///   `edit-rejected` and no second offer to the validator;
+/// - a `finding`, which commits nothing and is journalled `command-accepted`, is
+///   answered `applied` and accepted once;
+/// - a record no build decodes, refused as it was claimed, gets its refusal
+///   again with nothing journalled a second time;
+/// - a two-command envelope whose second record never reached the journal is
+///   answered `applied` from its first, and its second is not committed — the
+///   window `docs/contract-divergences.md` entry 113 names;
+/// - and an edit whose record names no envelope, as a build before the field
+///   wrote it, is nobody's evidence, so it is judged and committed again.
 #[cfg(unix)]
 #[test]
 fn an_envelope_journalled_and_never_answered_is_answered_from_the_journal_and_not_applied_again() {
@@ -834,34 +865,74 @@ fn an_envelope_journalled_and_never_answered_is_answered_from_the_journal_and_no
     world.until("the held node to be dispatched", |world| {
         !world.events_of(run, "node-dispatched").is_empty()
     });
+    let reply = |commands: Value| {
+        world.run_with_stdin(
+            &["reply", run],
+            &json!({"version": 3, "commands": commands}).to_string(),
+        )
+    };
+    let model = |model: &str| json!({"op": "set-run-node-sets", "sets": [format!("members.worker.agent.model={model}")]});
     // Envelope 0: applied.
     an_applied_edit(&world, run, "journalled-once");
-    // Envelope 1: refused by the driver, after its submission passed.
-    world
-        .run_with_stdin(
-            &["reply", run],
-            &json!({"version": 3, "commands": [
-                {"op": "add", "node": agent("fresh", &[])}
-            ]})
-            .to_string(),
-        )
+    // Envelope 1: refused by the driver after its submission passed, beside a
+    // command that validated.
+    reply(json!([model("beside-the-refusal"), {"op": "add", "node": agent("fresh", &[])}]))
         .exited(crate::harness::REFUSED)
         .err_has("the second look refuses it");
-    let rejected = world.events_of(run, "edit-rejected");
-    assert_eq!(rejected.len(), 1, "{rejected:?}");
-    assert_eq!(rejected[0]["payload"]["envelope"], json!(1));
-    let refused = world.command_outcomes(run)[1].clone();
+    // Envelope 2: a finding, accepted and committing nothing.
+    reply(json!([{"op": "finding", "id": "build", "message": "the fixture moved"}])).exited(0);
+    // Envelope 3: a record no build decodes, refused as it is claimed.
+    let undecodable = u64::try_from(crate::malformed_envelopes::queued(&world, run).len())
+        .expect("a queue length");
+    crate::malformed_envelopes::appended_beneath_the_layout(
+        &world,
+        run,
+        &json!({"id": undecodable, "commands": [{"op": "drop", "id": "build"}]}),
+    );
+    world.until("the undecodable record to be refused", |world| {
+        world.command_outcomes(run).len() == 4
+    });
+    // Envelope 4: two commands, both applied.
+    reply(json!([model("first-half"), model("second-half")])).exited(0);
+    // Envelope 5: applied.
+    reply(json!([model("from-an-older-build")])).exited(0);
+    let answered_first = world.command_outcomes(run);
+    assert_eq!(answered_first.len(), 6, "{answered_first:?}");
+    let rejections = world.events_of(run, "edit-rejected").len();
     end_process(pid);
 
     // llmlint: ignore-block[tests_mirror_real_usage] a driver killed between journalling an
-    // envelope's effects and appending its outcome line: the two writes are adjacent, so no
-    // signal can be timed into the gap from outside, and taking the two outcome lines back
-    // out of the log is the one way to leave the store a death there leaves.
-    let log = world.run_file(run, "channel/command-outcomes.jsonl");
-    std::fs::write(&log, "").expect("the outcome log is emptied");
+    // envelope's effects and appending its outcome line: the writes are adjacent, so no
+    // signal can be timed into the gap from outside, and taking the outcome lines back out of
+    // the log — and envelope 4's second record and envelope 5's attribution out of the
+    // journal, as a death between two records and a build before the field leave them — is
+    // the one way to leave the store such a death leaves.
+    std::fs::write(world.run_file(run, "channel/command-outcomes.jsonl"), "")
+        .expect("the outcome log is emptied");
+    let journal = world.run_file(run, "events.jsonl");
+    let rewritten: String = std::fs::read_to_string(&journal)
+        .expect("the journal reads")
+        .lines()
+        .filter_map(|line| {
+            let mut record: Value = serde_json::from_str(line).expect("a journal record");
+            let payload = &mut record["payload"];
+            if payload["envelope"] == json!(4) && payload["command"] == model("second-half") {
+                return None;
+            }
+            if payload["envelope"] == json!(5) {
+                payload
+                    .as_object_mut()
+                    .expect("a payload")
+                    .remove("envelope");
+            }
+            Some(format!("{record}\n"))
+        })
+        .collect();
+    std::fs::write(&journal, rewritten).expect("the journal is rewritten");
     // llmlint: ignore-end[tests_mirror_real_usage]
     assert!(
-        unanswered_line(&world, run).is_some_and(|line| line.contains("envelope(s) 0, 1 ")),
+        unanswered_line(&world, run)
+            .is_some_and(|line| line.contains("envelope(s) 0, 1, 2, 3, 4, 5 ")),
         "{:?}",
         unanswered_line(&world, run)
     );
@@ -879,21 +950,111 @@ fn an_envelope_journalled_and_never_answered_is_answered_from_the_journal_and_no
     adopted.exited(0);
 
     let outcomes = world.command_outcomes(run);
-    let answered: Vec<u64> = outcomes
+    let ids: Vec<u64> = outcomes
         .iter()
         .filter_map(|outcome| outcome["id"].as_u64())
         .collect();
-    assert_eq!(answered, [0, 1], "{outcomes:?}");
-    assert_eq!(outcomes[0]["applied"], json!(true), "{}", outcomes[0]);
-    assert_eq!(committed_from(&world, run, 0).len(), 1);
-    assert_eq!(outcomes[1], refused, "the refusal was answered differently");
-    assert_eq!(world.events_of(run, "edit-rejected").len(), 1);
+    assert_eq!(ids, [0, 1, 2, 3, 4, 5], "{outcomes:?}");
+    for applied in [0, 2, 4, 5] {
+        assert_eq!(
+            outcomes[applied]["applied"],
+            json!(true),
+            "{}",
+            outcomes[applied]
+        );
+    }
+    for refused in [1, 3] {
+        assert_eq!(
+            outcomes[refused], answered_first[refused],
+            "a refusal was answered differently"
+        );
+    }
+    assert_eq!(answered_first[1]["results"][0]["outcome"], "validated");
+    assert_eq!(world.events_of(run, "edit-rejected").len(), rejections);
     assert_eq!(
         std::fs::read_to_string(&offers).expect("the validator's log"),
         offered,
         "the refused envelope was offered to its validator again"
     );
+    assert_eq!(committed_from(&world, run, 0).len(), 1);
+    let accepted = world.events_of(run, "command-accepted");
+    assert_eq!(accepted.len(), 1, "{accepted:?}");
+    assert_eq!(accepted[0]["payload"]["envelope"], json!(2));
+    let halves = committed_from(&world, run, 4);
+    assert_eq!(halves.len(), 1, "{halves:?}");
+    assert_eq!(halves[0]["payload"]["command"], model("first-half"));
+    let older: Vec<Value> = world
+        .events_of(run, "edit-committed")
+        .into_iter()
+        .filter(|event| event["payload"]["command"] == model("from-an-older-build"))
+        .map(|event| event["payload"]["envelope"].clone())
+        .collect();
+    assert_eq!(older, [Value::Null, json!(5)]);
     assert_eq!(unanswered_line(&world, run), None);
+}
+
+/// **A `reply` that finds nothing driving answers what the dead driver claimed
+/// first.** A driver claims an `add` and is killed while its validator is still
+/// judging it, with that envelope's `reply` waiting. A second `reply` then
+/// submits the same `add`: nothing drives the run, so it is the run's writer —
+/// and rather than apply its own envelope ahead of the one claimed before it, it
+/// queues it behind that one and reconciles the queue. The claimed `add` is
+/// applied and its waiting `reply` told so; the second, judged after it against
+/// the node it added, is refused.
+#[cfg(unix)]
+#[test]
+fn a_reply_that_takes_the_run_over_answers_what_the_dead_driver_claimed_before_its_own() {
+    let world = hooked_world("exit-reply-recovers");
+    let run = "replyrecovers";
+    world.script("build.wait", "hold");
+    let (validator, holding, go) = validator_holding_its_second_offer(&world);
+    let pid = start_detached(
+        &world,
+        run,
+        vec![agent("build", &[])],
+        &["--node-validator", &validator],
+    );
+    world.until("the held node to be dispatched", |world| {
+        !world.events_of(run, "node-dispatched").is_empty()
+    });
+    let add = json!([{"op": "add", "node": agent("fresh", &[])}]);
+    // Envelope 0: claimed, and held inside the driver's own validation of it.
+    let claimed = waiting_reply_on_agentgraph(&world, run, add.clone());
+    world.until("the driver to be judging the claimed envelope", |_| {
+        holding.is_file()
+    });
+    end_process(pid);
+    std::fs::write(&go, "go").expect("the validator is released");
+    assert!(
+        unanswered_line(&world, run).is_some_and(|line| line.contains("envelope(s) 0 ")),
+        "{:?}",
+        unanswered_line(&world, run)
+    );
+
+    // Envelope 1: the same add, from a reply that finds nothing driving.
+    let second = world.run_with_stdin(
+        &["reply", run],
+        &json!({"version": 3, "commands": add}).to_string(),
+    );
+    second.exited(crate::harness::REFUSED);
+
+    let (code, said) = receipt(claimed);
+    assert_eq!(code, Some(0), "{said}");
+    assert!(said.contains("\"state\":\"applied\""), "{said}");
+    let outcomes = world.command_outcomes(run);
+    let ids: Vec<u64> = outcomes
+        .iter()
+        .filter_map(|outcome| outcome["id"].as_u64())
+        .collect();
+    assert_eq!(ids, [0, 1], "{outcomes:?}");
+    assert_eq!(outcomes[0]["applied"], json!(true));
+    assert_eq!(outcomes[1]["applied"], json!(false));
+    let added = committed_from(&world, run, 0);
+    assert_eq!(added.len(), 1, "{added:?}");
+    assert_eq!(added[0]["payload"]["command"]["op"], "add");
+    assert!(committed_from(&world, run, 1).is_empty());
+    assert_eq!(unanswered_line(&world, run), None);
+    world.release("build.go");
 }
 
 /// **A driver that cannot write its record.** The run's journal stops taking

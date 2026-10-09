@@ -9284,9 +9284,12 @@ by hand against its own receipt's *never send it again*.
    takes every envelope at or below the cursor with no `command-outcomes.jsonl`
    line, the list `status` prints as *claimed with no outcome*, in claim order and
    ahead of every fresh claim, and reconciles each to an outcome. `reply`, when it
-   becomes the run's writer because its driver has gone, does the same first. The
-   cursor never moves back and `onemessagebus` is unchanged: recovery reads the
-   channel's own `commands` log, cursor and outcome log.
+   becomes the run's writer because its driver has gone, does the same first —
+   and one that finds nothing driving while such envelopes stand queues its own
+   behind them and reconciles the queue, rather than applying its own ahead of
+   envelopes submitted before it. The cursor never moves back and `onemessagebus`
+   is unchanged: recovery reads the channel's own `commands` log, cursor and
+   outcome log.
 2. **Each is applied at most once.** `edit-committed`, `command-accepted` and
    `edit-rejected` carry an optional `envelope` — the claimed envelope's id, an
    unsigned integer — as does `note-shown` for a note an envelope delivered, and
@@ -9328,17 +9331,29 @@ and the bundle version to the event bundle paragraph.
 **What this build does.** `tests/e2e/driver_exit.rs`'s
 `an_adopter_answers_the_envelopes_its_dead_driver_claimed_and_never_answered` has a
 driver claim a live note into a node whose worker turn is held and an `amend` of
-that node behind it, and kills the driver with both submitters waiting: the
-adopter commits the amend under its envelope id with the turn still held, records
-the note's delivery exactly once under its id, answers both — each waiting `reply`
-exits `applied` — and `status` names nothing claimed with no outcome. The
-conversation the note was first offered to ran inside the driver that died, so the
-adopter records it `carried`, owed to the node's next dispatch.
+that node behind it, and kills the driver with both submitters waiting; a later
+`amend` of the node is then queued behind them. The adopter commits the claimed
+amend under its envelope id with the turn still held, and the later one after it,
+records the note's delivery exactly once under its id, answers all three — each
+waiting `reply` exits `applied` — and `status` names nothing claimed with no
+outcome. The conversation the note was first offered to ran inside the driver that
+died, so the adopter records it `carried`, owed to the node's next dispatch.
 `an_envelope_journalled_and_never_answered_is_answered_from_the_journal_and_not_applied_again`
-leaves one applied and one driver-refused envelope journalled with no outcome
-line: the adopter answers the first `applied` with exactly one `edit-committed`
-naming it, and the second with the very outcome it was given before, with no
-second `edit-rejected` and no second offer to its node validator.
+leaves six envelopes journalled with no outcome line: an applied edit, answered
+`applied` and committed once; a refusal beside a validated sibling, answered with
+the very outcome it had, with no second `edit-rejected` and no second offer to its
+node validator; a `finding`, accepted once; a record no build decodes, refused
+again with nothing journalled twice; a two-command envelope whose second record is
+missing, answered `applied` with its second command not committed; and an edit
+whose record names no envelope, as an older build wrote it, which is judged and
+committed again.
+`a_reply_that_takes_the_run_over_answers_what_the_dead_driver_claimed_before_its_own`
+kills a driver judging an `add`, then submits the same `add` from a `reply` that
+finds nothing driving: the claimed one is applied and its waiting `reply` told so,
+and the second, judged after it, is refused. `tests/note/main.rs`'s
+`a_note_waiting_on_a_held_turn_leaves_the_run_journalling_its_dispatch` reads the
+envelope id off a live note's `edit-committed`, its `note-delivered` operation and
+its `note-shown`.
 `a_run_journalled_before_records_named_their_envelope_reads_the_same` reads a run
 through `status`, `results`, `runs` and `watch` with every `envelope` key and with
 none, and `src/payload.rs`'s

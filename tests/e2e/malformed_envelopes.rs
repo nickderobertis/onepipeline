@@ -63,7 +63,7 @@ fn queue(name: &str) -> QueueName {
 /// Send a reply envelope the way `onemessagebus send replies` does: offered to
 /// the `replies` queue under the planner channel's layout, which routes its
 /// commands onto the run's command queue without decoding them.
-fn sent_through_the_bus(world: &World, run: &str, envelope: &Value) {
+pub(crate) fn sent_through_the_bus(world: &World, run: &str, envelope: &Value) {
     sent_through(
         Config::local(world.run_file(run, "channel"), Some(PLANNER_CHANNEL)),
         envelope,
@@ -108,7 +108,7 @@ fn offered(config: Config, envelope: &Value) -> Result<(), BusError> {
 // reconciler's answer to a record it cannot read is the behaviour under test. The local
 // transport's append is the real boundary — it takes the queue's lock and lands each
 // record in one write, as `bus_config.rs` says of the same call.
-fn appended_beneath_the_layout(world: &World, run: &str, record: &Value) {
+pub(crate) fn appended_beneath_the_layout(world: &World, run: &str, record: &Value) {
     let transport =
         LocalTransport::open(world.run_file(run, "channel")).expect("the run's channel opens");
     Transport::append(&transport, &queue(COMMANDS), record.to_string().as_bytes())
@@ -116,7 +116,7 @@ fn appended_beneath_the_layout(world: &World, run: &str, record: &Value) {
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 
-fn queued(world: &World, run: &str) -> Vec<Value> {
+pub(crate) fn queued(world: &World, run: &str) -> Vec<Value> {
     std::fs::read_to_string(world.run_file(run, "channel/commands.jsonl"))
         .expect("the command queue is there")
         .lines()

@@ -3343,190 +3343,211 @@ pub(crate) fn submit_envelope(
     // owner letting go of the run takes across its own last look at the queue —
     // so the answer this fork is taken on is still true when the commands land.
     // See [`engine::accept`].
-    match engine::accept(paths, &channel, envelope.author.clone(), &envelope.commands)? {
-        engine::Accepted::NothingIsDriving(lock) => {
-            let mut journal = Journal::open(paths);
-            let mut graph = view.state.graph.clone();
-            let mut compiled: Vec<edits::Operation> = Vec::new();
-            // This pass's own copy, walked forward as each command commits, for
-            // the reason the checking pass above holds one.
-            let mut frontier = frontier.clone();
-            // The same three phases the reconcile loop runs, and for the same
-            // reason: which writer judged an envelope is an accident of whether
-            // anything was driving the run, so an envelope is all of its commands
-            // or none of them on both. **Validate every command first**, touching
-            // no conversation — the checking pass above turns away every refusal
-            // `edits::compile` can raise, but a note's own validation is not one
-            // of those and belongs here rather than beside a delivery.
-            let mut staged: Vec<engine::Staged> = Vec::with_capacity(envelope.commands.len());
-            for command in &envelope.commands {
-                let step = match validate_here(
-                    paths,
-                    &mut graph,
-                    &frontier,
-                    envelope.author.clone(),
-                    command,
-                ) {
-                    Ok(step) => step,
-                    Err(error) => {
-                        engine::record_rejection(
-                            paths,
-                            &mut journal,
-                            envelope.author.clone(),
-                            command,
-                            &error,
-                            // Never queued, so no envelope id names it.
-                            None,
-                        )?;
-                        lock.release();
-                        return Err(error);
+    let (id, answered) =
+        match engine::accept(paths, &channel, envelope.author.clone(), &envelope.commands)? {
+            // Nothing is driving the run, but a driver that was claimed envelopes it
+            // never answered: those were submitted ahead of this one, so this one is
+            // queued behind them and the queue reconciled as the run's writer — which
+            // answers theirs first — rather than applied here ahead of them.
+            engine::Accepted::NothingIsDriving(lock)
+                if !channel.claimed_unanswered().is_empty() =>
+            {
+                let id = match channel.submit(envelope.author.clone(), &envelope.commands) {
+                    Ok(id) => id,
+                    Err(refused) => {
+                        let_go_or_leave_the_claim(paths, lock);
+                        return Err(refused);
                     }
                 };
-                edits::advance(&mut frontier, step.staged());
-                staged.push(step);
+                let reconciled = engine::reconcile_queued(paths);
+                let_go_or_leave_the_claim(paths, lock);
+                reconciled?;
+                (id, channel.outcome_of(id))
             }
-            // Then deliver, which is the first thing here that reaches outside
-            // the run. Nothing is driving it, so nothing of it is in flight — the
-            // note is still asked of the member the node's last dispatch
-            // reported, and the conversation's own account of how it ended is
-            // what refuses it.
-            let mut pending: Vec<Vec<edits::Operation>> =
-                Vec::with_capacity(envelope.commands.len());
-            for (command, step) in envelope.commands.iter().zip(staged) {
-                let operations = match engine::commits_of(step) {
-                    Ok(operations) => operations,
-                    Err(error) => {
-                        // The refusal is the run's record as much as the caller's
-                        // answer: a note that reached nobody is exactly what a
-                        // manager needs to find in the journal afterwards, and
-                        // with nothing driving the run this is the only writer
-                        // that can put it there.
-                        engine::record_rejection(
-                            paths,
-                            &mut journal,
-                            envelope.author.clone(),
-                            command,
-                            &error,
-                            // Never queued, so no envelope id names it.
-                            None,
-                        )?;
-                        lock.release();
-                        return Err(error);
-                    }
-                };
-                pending.push(operations);
-            }
-            // And only then journal, so a refusal in either phase leaves the
-            // record exactly as it was.
-            for (command, operations) in envelope.commands.iter().zip(&pending) {
-                compiled.extend(operations.iter().cloned());
-                journal.emit(
-                    engine::journalled_as(operations),
-                    journal::labels(&paths.run, None),
-                    journal::payload(&[
-                        ("author", json!(envelope.author.clone())),
-                        ("command", json!(command)),
-                        ("operations", json!(operations)),
-                        (
-                            "operation_kinds",
-                            json!(engine::operation_kinds(operations)),
-                        ),
-                    ]),
-                )?;
-                engine::record_operation_facts(
-                    paths,
-                    &mut journal,
-                    envelope.author.clone(),
-                    operations,
-                )?;
-                // The planner is told what any other author did here as well as
-                // in the loop: which of the two applied an edit is an accident of
-                // whether anything was driving the run, and the planner owns the
-                // graph either way.
-                if !envelope.author.is_planner() {
-                    if let Some(raised) =
-                        engine::non_planner_edit(&envelope.author.clone(), command)
-                    {
-                        engine::raise(paths, &mut journal, raised)?;
+            engine::Accepted::NothingIsDriving(lock) => {
+                let mut journal = Journal::open(paths);
+                let mut graph = view.state.graph.clone();
+                let mut compiled: Vec<edits::Operation> = Vec::new();
+                // This pass's own copy, walked forward as each command commits, for
+                // the reason the checking pass above holds one.
+                let mut frontier = frontier.clone();
+                // The same three phases the reconcile loop runs, and for the same
+                // reason: which writer judged an envelope is an accident of whether
+                // anything was driving the run, so an envelope is all of its commands
+                // or none of them on both. **Validate every command first**, touching
+                // no conversation — the checking pass above turns away every refusal
+                // `edits::compile` can raise, but a note's own validation is not one
+                // of those and belongs here rather than beside a delivery.
+                let mut staged: Vec<engine::Staged> = Vec::with_capacity(envelope.commands.len());
+                for command in &envelope.commands {
+                    let step = match validate_here(
+                        paths,
+                        &mut graph,
+                        &frontier,
+                        envelope.author.clone(),
+                        command,
+                    ) {
+                        Ok(step) => step,
+                        Err(error) => {
+                            engine::record_rejection(
+                                paths,
+                                &mut journal,
+                                envelope.author.clone(),
+                                command,
+                                &error,
+                                // Never queued, so no envelope id names it.
+                                None,
+                            )?;
+                            lock.release();
+                            return Err(error);
+                        }
+                    };
+                    edits::advance(&mut frontier, step.staged());
+                    staged.push(step);
+                }
+                // Then deliver, which is the first thing here that reaches outside
+                // the run. Nothing is driving it, so nothing of it is in flight — the
+                // note is still asked of the member the node's last dispatch
+                // reported, and the conversation's own account of how it ended is
+                // what refuses it.
+                let mut pending: Vec<Vec<edits::Operation>> =
+                    Vec::with_capacity(envelope.commands.len());
+                for (command, step) in envelope.commands.iter().zip(staged) {
+                    let operations = match engine::commits_of(step) {
+                        Ok(operations) => operations,
+                        Err(error) => {
+                            // The refusal is the run's record as much as the caller's
+                            // answer: a note that reached nobody is exactly what a
+                            // manager needs to find in the journal afterwards, and
+                            // with nothing driving the run this is the only writer
+                            // that can put it there.
+                            engine::record_rejection(
+                                paths,
+                                &mut journal,
+                                envelope.author.clone(),
+                                command,
+                                &error,
+                                // Never queued, so no envelope id names it.
+                                None,
+                            )?;
+                            lock.release();
+                            return Err(error);
+                        }
+                    };
+                    pending.push(operations);
+                }
+                // And only then journal, so a refusal in either phase leaves the
+                // record exactly as it was.
+                for (command, operations) in envelope.commands.iter().zip(&pending) {
+                    compiled.extend(operations.iter().cloned());
+                    journal.emit(
+                        engine::journalled_as(operations),
+                        journal::labels(&paths.run, None),
+                        journal::payload(&[
+                            ("author", json!(envelope.author.clone())),
+                            ("command", json!(command)),
+                            ("operations", json!(operations)),
+                            (
+                                "operation_kinds",
+                                json!(engine::operation_kinds(operations)),
+                            ),
+                        ]),
+                    )?;
+                    engine::record_operation_facts(
+                        paths,
+                        &mut journal,
+                        envelope.author.clone(),
+                        operations,
+                    )?;
+                    // The planner is told what any other author did here as well as
+                    // in the loop: which of the two applied an edit is an accident of
+                    // whether anything was driving the run, and the planner owns the
+                    // graph either way.
+                    if !envelope.author.is_planner() {
+                        if let Some(raised) =
+                            engine::non_planner_edit(&envelope.author.clone(), command)
+                        {
+                            engine::raise(paths, &mut journal, raised)?;
+                        }
                     }
                 }
-            }
-            // A `settle` stating a landing is a landing with nothing driving the
-            // run to see it, so what it superseded is told to `onevcs` here.
-            crate::supersession::record_landed(paths, &mut journal)?;
-            // This process was the run's writer, so it lets go of it the way a
-            // driver does: under the handover, and not while the queue holds
-            // something another supervisor's edit put there while this one was
-            // being applied.
-            let mut lock = lock;
-            loop {
-                match engine::let_go_of(paths, lock) {
-                    engine::LettingGo::Released => break,
-                    engine::LettingGo::QueueMoved(back) => {
-                        lock = back;
-                        engine::reconcile_queued(paths)?;
-                    }
-                    // The commands were applied; what could not be done is hand
-                    // the run on safely, so the claim is left standing for the
-                    // next writer to reclaim rather than released into the
-                    // window an edit accepted behind it would fall into.
-                    engine::LettingGo::NotHandedOver(held, why) => {
-                        eprintln!(
-                            "onepipeline: run '{}' is being left claimed rather than \
+                // A `settle` stating a landing is a landing with nothing driving the
+                // run to see it, so what it superseded is told to `onevcs` here.
+                crate::supersession::record_landed(paths, &mut journal)?;
+                // This process was the run's writer, so it lets go of it the way a
+                // driver does: under the handover, and not while the queue holds
+                // something another supervisor's edit put there while this one was
+                // being applied.
+                let mut lock = lock;
+                loop {
+                    match engine::let_go_of(paths, lock) {
+                        engine::LettingGo::Released => break,
+                        engine::LettingGo::QueueMoved(back) => {
+                            lock = back;
+                            engine::reconcile_queued(paths)?;
+                        }
+                        // The commands were applied; what could not be done is hand
+                        // the run on safely, so the claim is left standing for the
+                        // next writer to reclaim rather than released into the
+                        // window an edit accepted behind it would fall into.
+                        engine::LettingGo::NotHandedOver(held, why) => {
+                            eprintln!(
+                                "onepipeline: run '{}' is being left claimed rather than \
                              released: {why}",
-                            paths.run
-                        );
-                        held.abandon();
+                                paths.run
+                            );
+                            held.abandon();
+                            break;
+                        }
+                    }
+                }
+                deliver_verdict_half(paths, &channel, correlation, envelope)?;
+                return Ok(Submitted::AppliedHere {
+                    operations: compiled,
+                });
+            }
+            engine::Accepted::Queued(id) => {
+                let deadline = Instant::now() + Duration::from_secs(reply_timeout_seconds());
+                let mut answered = None;
+                while Instant::now() < deadline {
+                    if let Some(outcome) = channel.outcome_of(id) {
+                        answered = Some(outcome);
                         break;
                     }
+                    std::thread::sleep(ATTACH_POLL);
                 }
+                // The wait ran out with nothing answering, so the question this fork
+                // was taken on is asked again: is anything still driving this run?
+                // It is a different question now than it was — a driver that held the
+                // run when these commands were accepted can have died holding it
+                // since — and the answer is taken the only way it cannot be raced.
+                let answered = match answered {
+                    Some(outcome) => Some(outcome),
+                    None => take_the_run_over_and_answer(paths, &channel, id)?,
+                };
+                (id, answered)
             }
-            deliver_verdict_half(paths, &channel, correlation, envelope)?;
-            Ok(Submitted::AppliedHere {
-                operations: compiled,
-            })
+        };
+    if let Some(outcome) = answered {
+        deliver_verdict_half(paths, &channel, correlation, envelope)?;
+        if outcome.applied {
+            return Ok(Submitted::AppliedByRun { reply: id });
         }
-        engine::Accepted::Queued(id) => {
-            let deadline = Instant::now() + Duration::from_secs(reply_timeout_seconds());
-            let mut answered = None;
-            while Instant::now() < deadline {
-                if let Some(outcome) = channel.outcome_of(id) {
-                    answered = Some(outcome);
-                    break;
-                }
-                std::thread::sleep(ATTACH_POLL);
-            }
-            // The wait ran out with nothing answering, so the question this fork
-            // was taken on is asked again: is anything still driving this run?
-            // It is a different question now than it was — a driver that held the
-            // run when these commands were accepted can have died holding it
-            // since — and the answer is taken the only way it cannot be raced.
-            let answered = match answered {
-                Some(outcome) => Some(outcome),
-                None => take_the_run_over_and_answer(paths, &channel, id)?,
-            };
-            if let Some(outcome) = answered {
-                deliver_verdict_half(paths, &channel, correlation, envelope)?;
-                if outcome.applied {
-                    return Ok(Submitted::AppliedByRun { reply: id });
-                }
-                return Err(Error::Refused(
-                    outcome
-                        .reason
-                        .unwrap_or_else(|| "the reconciler rejected the edit".into()),
-                ));
-            }
-
-            // Accepted and durable, but not reconciled: they remain queued, and
-            // this is not an instruction to resend. The verdict half does not
-            // wait on that — it answers a question rather than the graph, and the
-            // reader waiting for it is not the reader waiting for the edits — so
-            // it is delivered here as it is on every other path, and only the
-            // edits are reported still queued.
-            deliver_verdict_half(paths, &channel, correlation, envelope)?;
-            Ok(Submitted::Queued { reply: id })
-        }
+        return Err(Error::Refused(
+            outcome
+                .reason
+                .unwrap_or_else(|| "the reconciler rejected the edit".into()),
+        ));
     }
+
+    // Accepted and durable, but not reconciled: they remain queued, and
+    // this is not an instruction to resend. The verdict half does not
+    // wait on that — it answers a question rather than the graph, and the
+    // reader waiting for it is not the reader waiting for the edits — so
+    // it is delivered here as it is on every other path, and only the
+    // edits are reported still queued.
+    deliver_verdict_half(paths, &channel, correlation, envelope)?;
+    Ok(Submitted::Queued { reply: id })
 }
 
 /// Take the run over and reconcile its queue where nothing is driving it any
@@ -3538,10 +3559,12 @@ pub(crate) fn submit_envelope(
 ///
 /// **It never resubmits and never applies anything twice**: the envelope stays
 /// the one copy of itself on the durable queue and what runs here is the
-/// reconciler, behind that queue's own cursor. So an envelope another writer
-/// already claimed answers `None`, which reports it still queued rather than
-/// applying a second copy of commands that may be half applied — and so does a
-/// run something is still driving, because the lock is what says so.
+/// reconciler, behind that queue's own cursor. An envelope a writer that went
+/// claimed and never answered is taken back first, and answered from what the
+/// journal already holds of it where it holds anything — see
+/// [`engine::reconcile_queued`] — so commands that may be half applied are not
+/// applied a second time. A run something is still driving answers `None`,
+/// which reports the envelope still queued, because the lock is what says so.
 // llmlint: ignore-block[changed_behavior_has_e2e] the two answers this can give are
 // driven end to end — applied by
 // `driver::an_edit_the_dead_drivers_queue_still_holds_is_applied_by_the_reply_that_accepted_it`

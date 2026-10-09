@@ -2948,6 +2948,13 @@ fn recover_claimed(
                     reason: Some(record.reason.clone()),
                     results: Vec::new(),
                 })?,
+                // llmlint: ignore[changed_behavior_has_e2e] a record claimed with nothing
+                // of its refusal journalled is a driver killed between the claim and the
+                // first write of `refuse_undecodable`, two adjacent statements no signal can
+                // be timed into from outside the binary. The arm is the refusal every
+                // claimed record already gets — `malformed_envelopes`' journeys drive it —
+                // and `a_claimed_undecodable_record_is_answered_once_whether_or_not_its_refusal_was_journalled`
+                // drives this call over a real channel and journal on disk.
                 None => refuse_undecodable(paths, journal, channel, &record)?,
             },
         }
@@ -3004,6 +3011,12 @@ impl EnvelopeEffects {
             } else if [
                 journal::PipelineKind::EditCommitted,
                 journal::PipelineKind::CommandAccepted,
+                // llmlint: ignore[changed_behavior_has_e2e] a `note-shown` is written only
+                // after the `edit-committed` of the delivery it confirms, so no journal a
+                // build writes holds one naming an envelope without that envelope's commit,
+                // which `an_envelope_journalled_and_never_answered_is_answered_from_the_journal_and_not_applied_again`
+                // already answers from. It is read as evidence so a note shown is never
+                // delivered again whatever else of its record survived.
                 journal::PipelineKind::NoteShown,
             ]
             .iter()
@@ -8137,6 +8150,53 @@ mod tests {
         assert_eq!(rejected, [json!(0), json!(1)]);
         assert!(channel.claimed_unanswered().is_empty());
         std::fs::remove_dir_all(&paths.dir).ok();
+    }
+
+    /// A refusal rebuilt from the journal answers each command as the first answer
+    /// did: an envelope repeating a command has one rejection recorded per copy,
+    /// matched to the copies in order, and a command no rejection names is the
+    /// sibling that validated and went down with them.
+    #[test]
+    fn a_refusal_rebuilt_from_the_journal_matches_each_rejection_to_one_command() {
+        let cancel = |id: &str| Command::Cancel {
+            id: id.to_owned(),
+            reason: None,
+        };
+        let commands = [cancel("build"), cancel("lint"), cancel("build")];
+        let rebuilt = refused_again(
+            7,
+            &commands,
+            vec![
+                (json!(cancel("build")), "refused: the first copy".to_owned()),
+                (
+                    json!(cancel("build")),
+                    "refused: the second copy".to_owned(),
+                ),
+            ],
+        );
+        assert_eq!(rebuilt.id, 7);
+        assert!(!rebuilt.applied);
+        assert_eq!(rebuilt.reason.as_deref(), Some("refused: the first copy"));
+        let answered: Vec<(crate::channel::CommandVerdict, Option<&str>)> = rebuilt
+            .results
+            .iter()
+            .map(|result| (result.outcome, result.reason.as_deref()))
+            .collect();
+        assert_eq!(
+            answered[0],
+            (
+                crate::channel::CommandVerdict::Refused,
+                Some("refused: the first copy")
+            )
+        );
+        assert_eq!(answered[1].0, crate::channel::CommandVerdict::Validated);
+        assert_eq!(
+            answered[2],
+            (
+                crate::channel::CommandVerdict::Refused,
+                Some("refused: the second copy")
+            )
+        );
     }
 
     /// Long enough that a section of two file operations would have finished
