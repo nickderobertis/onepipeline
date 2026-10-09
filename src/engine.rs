@@ -2747,12 +2747,27 @@ fn reconcile_edits(
     let mut held_names = BTreeSet::new();
     while let Some(envelope) = claimed.pop_front() {
         if let Some(deliveries) = deliveries.as_deref_mut() {
+            // Only a cancel its own envelope's validation would apply preempts
+            // anything: one its author may not send, or one the record refuses,
+            // is held and answered exactly as any other envelope naming its node.
+            // Judged again in its turn, against what is released ahead of it.
             let cancelled = cancelled_in(&envelope.commands);
+            let preempts = !cancelled.is_empty()
+                && validate_envelope(
+                    paths,
+                    state,
+                    envelope.author.clone(),
+                    &envelope.commands,
+                    launch,
+                    in_flight,
+                )
+                .iter()
+                .all(std::result::Result::is_ok);
             // Every node an envelope held this pass names that the cancel
             // overtakes, which an envelope claimed after the cancel still
             // waits behind.
             let mut overtaken = BTreeSet::new();
-            if !cancelled.is_empty() {
+            if preempts {
                 for preempted in deliveries.preempt(&cancelled) {
                     refuse_preempted(
                         paths,
@@ -2840,7 +2855,12 @@ fn reconcile_edits(
 /// answer its refusal — or, where it offers a note, hand it to `deliveries`.
 ///
 /// `true` where it was applied on this pass, which moves the run.
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the body `reconcile_edits` ran inline: the run's record, journal, state and \
+              channel, the launch it validates against, the dispatches in flight, the \
+              delivery threads, and the envelope"
+)]
 fn reconcile_envelope(
     paths: &RunPaths,
     journal: &mut Journal,
@@ -10767,7 +10787,8 @@ mod tests {
 
     /// A `cancel` answers the outstanding note into its node in that note's
     /// place, and judges what was held behind it ahead of itself — except an
-    /// envelope also waiting on another node's note, which it overtakes.
+    /// envelope also waiting on another node's note, which it overtakes. A
+    /// cancel its own envelope refuses preempts nothing.
     ///
     /// Answering one of two outstanding notes and not the other is not a state
     /// a CLI journey can arrange, for the reason the test below gives; so this
@@ -10779,38 +10800,26 @@ mod tests {
         let paths = RunPaths::under(&root, "demo");
         paths.create().expect("the run directory");
         let launch = bare_launch(&root, "preempt");
-        let requeue = |id: &str| Command::Requeue {
-            id: id.to_owned(),
-            amend: None,
-        };
         let planner = crate::channel::Author::planner;
         let channel = ChannelState::new(&paths);
         let submit = |commands: &[Command]| channel.submit(planner(), commands).expect("queued");
-        let behind = submit(&[requeue("build")]);
-        let second_note = submit(&[serde_json::from_value(json!({
-            "op": "note", "id": "build", "addressee": "worker", "text": "and the second fixture",
-        }))
-        .expect("a note command")]);
-        let overtaken = submit(&[requeue("build"), requeue("lint")]);
-        let unrelated = submit(&[requeue("other")]);
-        let cancel = submit(&[Command::Cancel {
-            id: "build".to_owned(),
-            reason: None,
-        }]);
-        let after = submit(&[requeue("build")]);
-        let in_flight = DeliveriesInFlight::default();
-        let mut deliveries = NoteDeliveries {
-            answering: mpsc::channel().0,
-            in_flight: in_flight.clone(),
-            outstanding: BTreeMap::from([
-                (100, outstanding_note(&in_flight, 100, "build")),
-                (200, outstanding_note(&in_flight, 200, "lint")),
-            ]),
-            behind: std::collections::VecDeque::new(),
+        let command =
+            |value: Value| -> Command { serde_json::from_value(value).expect("a command") };
+        let requeue = |id: &str| command(json!({"op": "requeue", "id": id}));
+        let cancel = |id: &str| command(json!({"op": "cancel", "id": id}));
+        let amend_docs = || command(json!({"op": "amend", "id": "docs", "text": "keep it short"}));
+        let note = |id: &str| {
+            command(json!({
+                "op": "note", "id": id, "addressee": "worker", "text": "and the second fixture",
+            }))
         };
         let mut journal = Journal::open(&paths);
         let mut state = Projected::open(&paths);
-        let mut pass = |deliveries: &mut NoteDeliveries| {
+        let mut pass = |deliveries: Option<&mut NoteDeliveries>| {
+            // A run's concurrency comes from the plan it launched with, which
+            // this one, seeded by `add`s alone, has none of; every record the
+            // pass folds in re-derives it.
+            state.graph.concurrency = 4;
             reconcile_edits(
                 &paths,
                 &mut journal,
@@ -10818,35 +10827,88 @@ mod tests {
                 &channel,
                 &launch,
                 &mut BTreeMap::new(),
-                Some(deliveries),
+                deliveries,
             )
             .expect("the pass runs");
             channel.outcomes()
         };
+        let seeded = submit(&["build", "lint", "other", "docs"].map(|id| {
+            command(
+                json!({"op": "add", "node": {"id": id, "persona": "engineer",
+                    "task": "## What\nDo it.\n\n## Why\nSo the run settles.\n\n## Acceptance criteria\n- It is done."}}),
+            )
+        }));
+        let outcomes = pass(None);
+        assert!(
+            outcomes
+                .iter()
+                .all(|outcome| outcome.id == seeded && outcome.applied),
+            "the graph was not seeded: {outcomes:?}"
+        );
 
-        let outcomes = pass(&mut deliveries);
-        let answered: Vec<u64> = outcomes.iter().map(|outcome| outcome.id).collect();
+        let behind = submit(&[requeue("build")]);
+        let second_note = submit(&[note("build"), amend_docs()]);
+        let overtaken = submit(&[requeue("build"), requeue("lint")]);
+        let unrelated = submit(&[requeue("other")]);
+        let refused_cancel = submit(&[cancel("build"), requeue("nothing-by-this-name")]);
+        let in_flight = DeliveriesInFlight::default();
+        let mut on_build = outstanding_note(&in_flight, 100, "build");
+        on_build.envelope.commands.push(amend_docs());
+        let mut deliveries = NoteDeliveries {
+            answering: mpsc::channel().0,
+            in_flight: in_flight.clone(),
+            outstanding: BTreeMap::from([
+                (100, on_build),
+                (200, outstanding_note(&in_flight, 200, "lint")),
+            ]),
+            behind: std::collections::VecDeque::new(),
+        };
+        let answered = |outcomes: &[CommandOutcome]| -> Vec<u64> {
+            outcomes.iter().map(|outcome| outcome.id).skip(1).collect()
+        };
         assert_eq!(
-            answered,
-            [unrelated, 100, behind, second_note, cancel],
+            answered(&pass(Some(&mut deliveries))),
+            [unrelated],
+            "a cancel its own envelope refuses preempted the note, or what was held behind it"
+        );
+        assert!(in_flight.outstanding_since("build").is_some());
+
+        let cancel = submit(&[cancel("build")]);
+        let after = submit(&[requeue("build")]);
+        let outcomes = pass(Some(&mut deliveries));
+        assert_eq!(
+            answered(&outcomes),
+            [unrelated, 100, behind, second_note, refused_cancel, cancel],
             "the cancel did not answer its node's note, then what was held behind it in \
              claim order, then itself"
         );
-        for preempted in [100, second_note] {
-            let outcome = outcomes
+        let outcome_of = |id: u64| {
+            outcomes
                 .iter()
-                .find(|outcome| outcome.id == preempted)
-                .expect("answered");
-            let result = &outcome.results[0];
-            assert_eq!(result.outcome, crate::channel::CommandVerdict::Refused);
+                .find(|outcome| outcome.id == id)
+                .expect("answered")
+        };
+        for preempted in [100, second_note] {
+            let outcome = outcome_of(preempted);
+            assert!(!outcome.applied, "{outcome:?}");
+            let [note, other] = &outcome.results[..] else {
+                panic!("{outcome:?}");
+            };
+            assert_eq!(note.outcome, crate::channel::CommandVerdict::Refused);
             assert!(
-                result
-                    .reason
+                note.reason
                     .as_deref()
                     .is_some_and(|reason| reason.contains(&format!("envelope {cancel}"))),
                 "{outcome:?}"
             );
+            assert_eq!(
+                other.outcome,
+                crate::channel::CommandVerdict::Validated,
+                "{outcome:?}"
+            );
         }
+        assert!(!outcome_of(refused_cancel).applied);
+        assert!(outcome_of(cancel).applied, "{:?}", outcome_of(cancel));
         assert!(
             deliveries.answered(100).is_none(),
             "a late answer to the preempted delivery would be recorded"
@@ -10855,17 +10917,14 @@ mod tests {
         assert!(in_flight.outstanding_since("lint").is_some());
 
         drop(deliveries.answered(200).expect("outstanding"));
-        let answered: Vec<u64> = pass(&mut deliveries)
-            .iter()
-            .map(|outcome| outcome.id)
-            .collect();
         assert_eq!(
-            answered,
+            answered(&pass(Some(&mut deliveries))),
             [
                 unrelated,
                 100,
                 behind,
                 second_note,
+                refused_cancel,
                 cancel,
                 overtaken,
                 after
