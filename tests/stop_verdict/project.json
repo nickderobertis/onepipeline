@@ -15,7 +15,12 @@
     "build": {
       "command": "just _tier-build stop_verdict",
       "inputs": [
-        "stopVerdictSource"
+        "rustBuild",
+        "{workspaceRoot}/tests/stop_verdict/**/*",
+        "{workspaceRoot}/tests/golden/**/*",
+        "{workspaceRoot}/tests/recorded/registry/**/*",
+        "{workspaceRoot}/clippy.toml",
+        "{workspaceRoot}/rustfmt.toml"
       ]
     },
     "format": {
@@ -24,20 +29,39 @@
     "format-check": {
       "command": "just _tier-fmt-check tests/stop_verdict/main.rs",
       "inputs": [
-        "stopVerdictSource"
+        "rustBuild",
+        "{workspaceRoot}/tests/stop_verdict/**/*",
+        "{workspaceRoot}/tests/golden/**/*",
+        "{workspaceRoot}/tests/recorded/registry/**/*",
+        "{workspaceRoot}/clippy.toml",
+        "{workspaceRoot}/rustfmt.toml"
       ]
     },
     "lint": {
       "command": "just _tier-lint stop_verdict",
       "inputs": [
-        "stopVerdictSource"
+        "rustBuild",
+        "{workspaceRoot}/tests/stop_verdict/**/*",
+        "{workspaceRoot}/tests/golden/**/*",
+        "{workspaceRoot}/tests/recorded/registry/**/*",
+        "{workspaceRoot}/clippy.toml",
+        "{workspaceRoot}/rustfmt.toml"
       ]
     },
     "test": {
       "command": "just stop-verdict-journeys",
+      "//": "llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this tier times the release binary, so its inputs are what that binary is built from and nothing narrower: the budget reader refuses a record whose build fingerprint (scripts/stop-guard-unpublished-build-inputs.json, the same set) differs from the tree, so an input left out here would replay a record the reader then refuses as stale, and a module left out of both would let a changed binary be judged by an old one's timings.",
       "inputs": [
-        "stopVerdictSource"
+        "rustBuild",
+        "{workspaceRoot}/tests/stop_verdict/**/*",
+        "{workspaceRoot}/tests/golden/**/*",
+        "{workspaceRoot}/tests/recorded/registry/**/*",
+        "{workspaceRoot}/tests/recorded/run-root/onemessagebus-repair-2/**/*",
+        "{workspaceRoot}/scripts/stop-guard-unpublished-*",
+        "{workspaceRoot}/clippy.toml",
+        "{workspaceRoot}/rustfmt.toml"
       ],
+      "//end": "llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]",
       "outputs": [
         "{workspaceRoot}/target/budget-records/stop-guard-unpublished.json",
         "{workspaceRoot}/target/budget-records/stop-guard-unpublished-invocation.json",

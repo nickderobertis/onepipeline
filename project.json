@@ -133,7 +133,10 @@
         "{workspaceRoot}/package-lock.json",
         "{workspaceRoot}/scripts/linear-writeback-budget.sh",
         "{workspaceRoot}/scripts/stop-guard-unpublished-*",
-        "stopVerdictSource",
+        "{workspaceRoot}/tests/stop_verdict/**/*",
+        "{workspaceRoot}/tests/golden/**/*",
+        "{workspaceRoot}/tests/recorded/registry/**/*",
+        "{workspaceRoot}/tests/recorded/run-root/onemessagebus-repair-2/**/*",
         {
           "dependentTasksOutputFiles": "target/budget-records/**/*",
           "transitive": false
