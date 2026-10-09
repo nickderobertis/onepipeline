@@ -9310,12 +9310,27 @@ by hand against its own receipt's *never send it again*.
    written before it reads as it did. `status`'s *claimed with no outcome* line
    says the run's next driver answers each.
 
-**Where the two writes still leave a window.** An envelope's commands are
-journalled one record each and its outcome line after them. A driver that dies
-after the first of a several-command envelope's records and before its last
-leaves the rest of that envelope unjournalled; its adopter answers it `applied`
-from the record it finds, and does not commit the rest — re-judging only some of
-an envelope is not one of the answers an envelope can get.
+**An envelope journalled part way is finished, not dropped.** An envelope's
+commands are journalled one record each and its outcome line after them, so a
+driver can die between two of an envelope's records. Its writer writes down, in a
+private file of the run's directory, every operation an envelope of several
+commands commits — each note's disposition included — before the first record; the
+adopter answers such an envelope `applied` only after committing, in command
+order, the operations of every command without a record, so each command has
+exactly one record and no note is offered again.
+
+**A recovered live note reaches the adopter's dispatch.** A conversation that ran
+inside the dead driver answers nothing, so the adopter offers it the note, is told
+nobody took it, and records it `carried`. Any dispatch of a node — the adopter's
+first included, not only a resumed one — now waits, as a re-dispatch already
+waited, for a note delivery to that node still being answered to reach the record,
+for at most the same patience; so the adopter's dispatch is composed with the note,
+and its worker's opening turn carries it.
+
+**In claim order.** An envelope the journal holds evidence of is answered in its
+turn among the envelopes taken back, never ahead of an earlier one still to be
+judged, so effects land in the order the envelopes were claimed. A record no build
+decodes is refused as it is taken back, ahead of them, since nothing of it applies.
 
 **The published bundle.** `schemas/events.json` is regenerated with the optional
 key in those four documents, at the bundle version `1.1.0` the contract's event
@@ -9333,20 +9348,21 @@ and the bundle version to the event bundle paragraph.
 driver claim a live note into a node whose worker turn is held and an `amend` of
 that node behind it, and kills the driver with both submitters waiting; a later
 `amend` of the node is then queued behind them. The adopter commits the claimed
-amend under its envelope id with the turn still held, and the later one after it,
-records the note's delivery exactly once under its id, answers all three — each
-waiting `reply` exits `applied` — and `status` names nothing claimed with no
-outcome. The conversation the note was first offered to ran inside the driver that
-died, so the adopter records it `carried`, owed to the node's next dispatch.
+amend under its envelope id, and the later one after it, records the note's
+delivery exactly once under its id, answers all three — each waiting `reply` exits
+`applied` — and `status` names nothing claimed with no outcome; the adopter's own
+dispatch of the node is composed after the note's answer, and its worker's opening
+turn is the one turn of the run carrying the note.
 `an_envelope_journalled_and_never_answered_is_answered_from_the_journal_and_not_applied_again`
 leaves six envelopes journalled with no outcome line: an applied edit, answered
 `applied` and committed once; a refusal beside a validated sibling, answered with
 the very outcome it had, with no second `edit-rejected` and no second offer to its
 node validator; a `finding`, accepted once; a record no build decodes, refused
-again with nothing journalled twice; a two-command envelope whose second record is
-missing, answered `applied` with its second command not committed; and an edit
-whose record names no envelope, as an older build wrote it, which is judged and
-committed again.
+again with nothing journalled twice; an edit whose record names no envelope, as an
+older build wrote it, which is judged and committed again; and a two-command
+envelope whose driver died between its two records, whose second command the
+adopter commits after the adoption, each command recorded exactly once, in command
+order.
 `a_reply_that_takes_the_run_over_answers_what_the_dead_driver_claimed_before_its_own`
 kills a driver judging an `add`, then submits the same `add` from a `reply` that
 finds nothing driving: the claimed one is applied and its waiting `reply` told so,

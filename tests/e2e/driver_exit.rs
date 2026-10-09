@@ -694,10 +694,13 @@ const LATER_RULING: &str = "build only what fixtures/v3 needs";
 /// held behind the note; then it is killed before it answers either. Both
 /// submitters are still waiting, and `status` names both as claimed with no
 /// outcome. A later `amend` of the node reaches the queue behind them. The
-/// driver that adopts the run takes the two back ahead of it: the note is
-/// delivered once, the claimed amend is applied — journalled under its envelope
-/// id — before the later one, whose text is the one that stands, and each
-/// waiting `reply` is told so, with no envelope left unanswered.
+/// driver that adopts the run takes the two back ahead of it: the claimed amend
+/// is applied — journalled under its envelope id — before the later one, whose
+/// text is the one that stands, and each waiting `reply` is told so, with no
+/// envelope left unanswered. The conversation the note was first offered to
+/// died with the driver, so the adopter's own dispatch of the node waits for the
+/// note's answer and is composed with it: the worker's opening turn carries the
+/// note, and no other turn of the run does.
 #[cfg(unix)]
 #[test]
 fn an_adopter_answers_the_envelopes_its_dead_driver_claimed_and_never_answered() {
@@ -760,8 +763,8 @@ fn an_adopter_answers_the_envelopes_its_dead_driver_claimed_and_never_answered()
 
     // The amend commits, under its envelope's id, with the worker's turn still
     // held: nothing of it waits on a turn.
-    world.until("the adopter to apply both amends", |world| {
-        !committed_from(world, run, 2).is_empty()
+    world.until("the adopter to apply and answer both amends", |world| {
+        !committed_from(world, run, 2).is_empty() && world.command_outcomes(run).len() == 3
     });
     assert!(world.events_of(run, "node-settled").is_empty());
     let (code, said) = receipt(amend);
@@ -793,6 +796,46 @@ fn an_adopter_answers_the_envelopes_its_dead_driver_claimed_and_never_answered()
         .map(|event| event["payload"]["command"]["text"].clone())
         .collect();
     assert_eq!(amended, [json!(RECOVERED_RULING), json!(LATER_RULING)]);
+
+    // And the note reached the adopter's own dispatch: that dispatch was composed
+    // once the note's answer was on the record, so the worker's opening turn
+    // carries it — the one turn of the run that does.
+    let journal = world.journal(run);
+    let adopted_at = journal
+        .iter()
+        .position(|event| event["kind"] == "driver-adopted")
+        .expect("the adoption is journalled");
+    let carrying: Vec<(usize, &Value)> = journal
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| {
+            event["kind"] == "turn-started"
+                && event["payload"]["role"] == "assistant"
+                && event["payload"]["instruction"]
+                    .as_str()
+                    .is_some_and(|said| said.contains(RECOVERED_NOTE))
+        })
+        .collect();
+    assert_eq!(carrying.len(), 1, "{carrying:?}");
+    let instruction = carrying[0].1["payload"]["instruction"]
+        .as_str()
+        .expect("an instruction");
+    assert_eq!(
+        instruction.matches(RECOVERED_NOTE).count(),
+        1,
+        "{instruction}"
+    );
+    let dispatched = journal
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| event["kind"] == "node-dispatched")
+        .map(|(at, _)| at)
+        .next_back()
+        .expect("the adopter dispatched the node");
+    assert!(
+        adopted_at < dispatched && dispatched < carrying[0].0,
+        "the note reached a turn other than the adopter's dispatch's opening one"
+    );
 
     world.release("turn.go");
     world.release("turn.settle");
@@ -844,11 +887,12 @@ fn validator_refusing_its_second_offer(world: &World) -> (String, PathBuf) {
 ///   answered `applied` and accepted once;
 /// - a record no build decodes, refused as it was claimed, gets its refusal
 ///   again with nothing journalled a second time;
-/// - a two-command envelope whose second record never reached the journal is
-///   answered `applied` from its first, and its second is not committed — the
-///   window `docs/contract-divergences.md` entry 113 names;
-/// - and an edit whose record names no envelope, as a build before the field
-///   wrote it, is nobody's evidence, so it is judged and committed again.
+/// - an edit whose record names no envelope, as a build before the field wrote
+///   it, is nobody's evidence, so it is judged and committed again;
+/// - and a two-command envelope the driver died between journalling — its first
+///   command's record written and its second's not — is finished: its second
+///   command is committed after the adoption, from what the driver wrote down
+///   before its first record, and each command has exactly one record.
 #[cfg(unix)]
 #[test]
 fn an_envelope_journalled_and_never_answered_is_answered_from_the_journal_and_not_applied_again() {
@@ -892,10 +936,10 @@ fn an_envelope_journalled_and_never_answered_is_answered_from_the_journal_and_no
     world.until("the undecodable record to be refused", |world| {
         world.command_outcomes(run).len() == 4
     });
-    // Envelope 4: two commands, both applied.
-    reply(json!([model("first-half"), model("second-half")])).exited(0);
-    // Envelope 5: applied.
+    // Envelope 4: applied.
     reply(json!([model("from-an-older-build")])).exited(0);
+    // Envelope 5: two commands, both applied — the last the driver commits.
+    reply(json!([model("first-half"), model("second-half")])).exited(0);
     let answered_first = world.command_outcomes(run);
     assert_eq!(answered_first.len(), 6, "{answered_first:?}");
     let rejections = world.events_of(run, "edit-rejected").len();
@@ -904,9 +948,10 @@ fn an_envelope_journalled_and_never_answered_is_answered_from_the_journal_and_no
     // llmlint: ignore-block[tests_mirror_real_usage] a driver killed between journalling an
     // envelope's effects and appending its outcome line: the writes are adjacent, so no
     // signal can be timed into the gap from outside, and taking the outcome lines back out of
-    // the log — and envelope 4's second record and envelope 5's attribution out of the
+    // the log — and envelope 5's second record and envelope 4's attribution out of the
     // journal, as a death between two records and a build before the field leave them — is
-    // the one way to leave the store such a death leaves.
+    // the one way to leave the store such a death leaves. What the driver wrote down before
+    // envelope 5's first record is left exactly as it wrote it.
     std::fs::write(world.run_file(run, "channel/command-outcomes.jsonl"), "")
         .expect("the outcome log is emptied");
     let journal = world.run_file(run, "events.jsonl");
@@ -916,10 +961,10 @@ fn an_envelope_journalled_and_never_answered_is_answered_from_the_journal_and_no
         .filter_map(|line| {
             let mut record: Value = serde_json::from_str(line).expect("a journal record");
             let payload = &mut record["payload"];
-            if payload["envelope"] == json!(4) && payload["command"] == model("second-half") {
+            if payload["envelope"] == json!(5) && payload["command"] == model("second-half") {
                 return None;
             }
-            if payload["envelope"] == json!(5) {
+            if payload["envelope"] == json!(4) {
                 payload
                     .as_object_mut()
                     .expect("a payload")
@@ -950,11 +995,24 @@ fn an_envelope_journalled_and_never_answered_is_answered_from_the_journal_and_no
     adopted.exited(0);
 
     let outcomes = world.command_outcomes(run);
-    let ids: Vec<u64> = outcomes
+    // A record no build decodes is refused as it is taken back, ahead of the
+    // envelopes around it: nothing of it applies, so nothing is judged against it.
+    let mut ids: Vec<u64> = outcomes
         .iter()
         .filter_map(|outcome| outcome["id"].as_u64())
         .collect();
+    assert_eq!(ids[0], 3, "{outcomes:?}");
+    ids.sort_unstable();
     assert_eq!(ids, [0, 1, 2, 3, 4, 5], "{outcomes:?}");
+    let outcomes: Vec<Value> = (0..6)
+        .map(|id| {
+            outcomes
+                .iter()
+                .find(|outcome| outcome["id"] == json!(id))
+                .cloned()
+                .expect("answered")
+        })
+        .collect();
     for applied in [0, 2, 4, 5] {
         assert_eq!(
             outcomes[applied]["applied"],
@@ -980,16 +1038,33 @@ fn an_envelope_journalled_and_never_answered_is_answered_from_the_journal_and_no
     let accepted = world.events_of(run, "command-accepted");
     assert_eq!(accepted.len(), 1, "{accepted:?}");
     assert_eq!(accepted[0]["payload"]["envelope"], json!(2));
-    let halves = committed_from(&world, run, 4);
-    assert_eq!(halves.len(), 1, "{halves:?}");
-    assert_eq!(halves[0]["payload"]["command"], model("first-half"));
+    // Each half once, in command order, the second committed by the adopter.
+    let journal = world.journal(run);
+    let halves: Vec<(usize, Value)> = journal
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| {
+            event["kind"] == "edit-committed" && event["payload"]["envelope"] == json!(5)
+        })
+        .map(|(at, event)| (at, event["payload"]["command"].clone()))
+        .collect();
+    let commands: Vec<&Value> = halves.iter().map(|(_, command)| command).collect();
+    assert_eq!(commands, [&model("first-half"), &model("second-half")]);
+    let adopted_at = journal
+        .iter()
+        .position(|event| event["kind"] == "driver-adopted")
+        .expect("the adoption is journalled");
+    assert!(
+        halves[0].0 < adopted_at && adopted_at < halves[1].0,
+        "{halves:?}"
+    );
     let older: Vec<Value> = world
         .events_of(run, "edit-committed")
         .into_iter()
         .filter(|event| event["payload"]["command"] == model("from-an-older-build"))
         .map(|event| event["payload"]["envelope"].clone())
         .collect();
-    assert_eq!(older, [Value::Null, json!(5)]);
+    assert_eq!(older, [Value::Null, json!(4)]);
     assert_eq!(unanswered_line(&world, run), None);
 }
 
@@ -1236,7 +1311,16 @@ fn readings(world: &World, run: &str) -> Vec<String> {
     }
     let watched = world.run(&["watch", run, "--timeout", "1"]);
     read.push(format!("watch exited {}", watched.code));
-    read
+    // How long an update has waited unread is the clock, not the run.
+    read.iter()
+        .map(|line| match line.split_once("unread for ") {
+            Some((before, after)) => format!(
+                "{before}unread for _{}",
+                after.trim_start_matches(|c: char| c.is_ascii_digit())
+            ),
+            None => line.clone(),
+        })
+        .collect()
 }
 
 /// **The record changes no reading.** The same run read with its

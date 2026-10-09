@@ -1154,17 +1154,28 @@ pub(crate) fn reconcile_queued(paths: &RunPaths) -> Result<()> {
     let mut state = Projected::open(paths);
     let channel = ChannelState::of_run(paths, &launch);
     // What the driver that went claimed and never answered comes first.
-    for envelope in recover_claimed(paths, &mut journal, &channel)? {
-        reconcile_envelope(
-            paths,
-            &mut journal,
-            &mut state,
-            &channel,
-            &launch,
-            &mut BTreeMap::new(),
-            None,
-            envelope,
-        )?;
+    let Recovered {
+        envelopes,
+        mut evidence,
+    } = recover_claimed(paths, &mut journal, &channel)?;
+    for envelope in envelopes {
+        match evidence.remove(&envelope.id) {
+            Some(effect) => {
+                answer_recovered(paths, &mut journal, &mut state, &channel, &envelope, effect)?;
+            }
+            None => {
+                reconcile_envelope(
+                    paths,
+                    &mut journal,
+                    &mut state,
+                    &channel,
+                    &launch,
+                    &mut BTreeMap::new(),
+                    None,
+                    envelope,
+                )?;
+            }
+        }
     }
     reconcile_edits(
         paths,
@@ -1206,7 +1217,9 @@ fn converge(
     let mut deliveries = NoteDeliveries::new(&tx, &notes_in_flight);
     // What a driver before this one claimed and never answered, ahead of
     // anything this one claims: held envelopes are judged first on every pass.
-    deliveries.behind = recover_claimed(paths, journal, &channel)?;
+    let recovered = recover_claimed(paths, journal, &channel)?;
+    deliveries.behind = recovered.envelopes;
+    deliveries.recovered = recovered.evidence;
     let mut in_flight: BTreeMap<String, Dispatch> = BTreeMap::new();
     let stall_after = Duration::from_secs(stall_after_seconds());
     let mut upstreams = crate::crossdag::Observer::of_run(paths, state);
@@ -2777,7 +2790,10 @@ fn reconcile_edits(
             // is held and answered exactly as any other envelope naming its node.
             // Judged again in its turn, against what is released ahead of it.
             let cancelled = cancelled_in(&envelope.commands);
-            let preempts = !cancelled.is_empty()
+            // One the journal shows already applied or refused is answered from
+            // that, and preempts nothing a second time.
+            let preempts = !deliveries.recovered.contains_key(&envelope.id)
+                && !cancelled.is_empty()
                 && validate_envelope(
                     paths,
                     state,
@@ -2810,6 +2826,11 @@ fn reconcile_edits(
                 held_names.clear();
                 for earlier in std::mem::take(&mut held) {
                     let names = names_of(&earlier.commands);
+                    if let Some(effect) = deliveries.evidence_of(earlier.id) {
+                        changed |=
+                            answer_recovered(paths, journal, state, channel, &earlier, effect)?;
+                        continue;
+                    }
                     if offers_a_live_note_into(&earlier.commands, &cancelled) {
                         let staged = validate_envelope(
                             paths,
@@ -2867,6 +2888,13 @@ fn reconcile_edits(
                 continue;
             }
         }
+        if let Some(effect) = deliveries
+            .as_deref_mut()
+            .and_then(|deliveries| deliveries.evidence_of(envelope.id))
+        {
+            changed |= answer_recovered(paths, journal, state, channel, &envelope, effect)?;
+            continue;
+        }
         changed |= reconcile_envelope(
             paths,
             journal,
@@ -2885,9 +2913,8 @@ fn reconcile_edits(
 }
 
 /// Take back every command envelope a driver before this one claimed and never
-/// answered, answering each whose effects the journal already holds and
-/// handing back the rest, in claim order, for this driver to reconcile ahead of
-/// anything it claims itself.
+/// answered, in claim order, with what the journal already holds of each, for
+/// this driver to answer ahead of anything it claims itself — see [`Recovered`].
 ///
 /// What a driver starting on a run calls once, before its first pass — and
 /// what `reply` calls when it becomes the run's writer itself — because a
@@ -2902,10 +2929,14 @@ fn reconcile_edits(
 /// names it — `edit-committed`, `command-accepted` and `edit-rejected` beside
 /// their command, `note-shown` beside its note — so an envelope the journal
 /// already carries a record of got as far as its effects and no further than
-/// its outcome line: it is answered from that record — `applied` for a commit,
-/// `refused` with the recorded reasons for a rejection — and nothing of it is
-/// applied or offered to a conversation again. An envelope with no such record
-/// had no effect, so judging it now is its first judgment. A note a `cancel`
+/// its outcome line: in its turn it is answered from that record — `applied`
+/// for a commit, `refused` with the recorded reasons for a rejection — and
+/// nothing of it is judged or offered to a conversation again. Where only its
+/// first commands have their record, the rest are committed from what its
+/// writer wrote down before the first — see [`resume_committing`] — so every
+/// command of it is committed exactly once. An envelope with no such record had
+/// no effect, so judging it now is its first judgment. A record no build
+/// decodes is refused here, as it would be when claimed. A note a `cancel`
 /// preempted is not among these: its refusal is already its outcome line.
 ///
 /// Called only by the run's writer, holding the ownership lock, and only
@@ -2916,26 +2947,23 @@ fn recover_claimed(
     paths: &RunPaths,
     journal: &mut Journal,
     channel: &ChannelState,
-) -> Result<std::collections::VecDeque<crate::channel::QueuedCommands>> {
-    let mut owed = std::collections::VecDeque::new();
+) -> Result<Recovered> {
+    let mut recovered = Recovered::default();
     let claimed = channel.claimed_unanswered_records();
     if claimed.is_empty() {
-        return Ok(owed);
+        return Ok(recovered);
     }
     let effects = EnvelopeEffects::of(paths);
     for record in claimed {
         match record {
-            Claimed::Envelope(envelope) => match effects.of_envelope(envelope.id) {
-                Some(Effect::Applied) => {
-                    channel.answer_commands(&applied_envelope(envelope.id, &envelope.commands))?;
+            Claimed::Envelope(envelope) => {
+                if let Some(effect) = effects.of_envelope(envelope.id) {
+                    recovered.evidence.insert(envelope.id, effect);
                 }
-                Some(Effect::Refused(rejections)) => channel.answer_commands(&refused_again(
-                    envelope.id,
-                    &envelope.commands,
-                    rejections,
-                ))?,
-                None => owed.push_back(envelope),
-            },
+                recovered.envelopes.push_back(envelope);
+            }
+            // Refused whole wherever it falls: nothing of it applies, so no envelope
+            // around it is judged against anything it did.
             Claimed::Undecodable(record) => match record
                 .carries_id
                 .then(|| effects.of_envelope(record.id))
@@ -2959,14 +2987,57 @@ fn recover_claimed(
             },
         }
     }
-    Ok(owed)
+    Ok(recovered)
+}
+
+/// What a driver starting on a run takes back — see [`recover_claimed`]: every
+/// envelope claimed before it and never answered, in claim order, and what the
+/// journal already holds of each that got as far as its effects.
+///
+/// They are reconciled in that order, ahead of anything the driver claims, and an
+/// envelope the journal holds evidence of is answered from it in its turn rather
+/// than judged — so one that got as far as its effects never lands ahead of an
+/// earlier one that did not.
+#[derive(Debug, Default)]
+pub(crate) struct Recovered {
+    envelopes: std::collections::VecDeque<crate::channel::QueuedCommands>,
+    evidence: BTreeMap<u64, Effect>,
+}
+
+/// Answer, in its turn, a recovered envelope the journal already holds `effect`
+/// of: `applied`, after committing whatever of it was not journalled yet, or
+/// `refused` with the reasons recorded. `true` where it committed anything now.
+fn answer_recovered(
+    paths: &RunPaths,
+    journal: &mut Journal,
+    state: &mut Projected,
+    channel: &ChannelState,
+    envelope: &crate::channel::QueuedCommands,
+    effect: Effect,
+) -> Result<bool> {
+    match effect {
+        Effect::Applied(committed) => {
+            let resumed = committed < envelope.commands.len();
+            if resumed {
+                resume_committing(paths, journal, state, envelope, committed)?;
+            }
+            channel.answer_commands(&applied_envelope(envelope.id, &envelope.commands))?;
+            Ok(resumed)
+        }
+        Effect::Refused(rejections) => {
+            channel.answer_commands(&refused_again(envelope.id, &envelope.commands, rejections))?;
+            Ok(false)
+        }
+    }
 }
 
 /// What the journal says one command envelope's effects were.
 #[derive(Debug, Clone, PartialEq)]
 enum Effect {
-    /// A command of it committed, or a note of it was shown: it applied.
-    Applied,
+    /// A command of it committed, or a note of it was shown: it applied, and
+    /// this many of its commands — the first ones, since they are journalled in
+    /// command order — have their record.
+    Applied(usize),
     /// Its commands were refused, each recorded as sent with the reason its
     /// submitter was owed, in the order they were recorded.
     Refused(Vec<(Value, String)>),
@@ -3006,7 +3077,7 @@ impl EnvelopeEffects {
                     .or_insert_with(|| Effect::Refused(Vec::new()))
                 {
                     Effect::Refused(rejections) => rejections.push(rejection),
-                    Effect::Applied => {}
+                    Effect::Applied(_) => {}
                 }
             } else if [
                 journal::PipelineKind::EditCommitted,
@@ -3022,7 +3093,11 @@ impl EnvelopeEffects {
             .iter()
             .any(|applied| applied.as_str() == kind)
             {
-                effects.insert(id, Effect::Applied);
+                let records = usize::from(kind != journal::PipelineKind::NoteShown.as_str());
+                match effects.entry(id).or_insert(Effect::Applied(0)) {
+                    Effect::Applied(committed) => *committed += records,
+                    refused @ Effect::Refused(_) => *refused = Effect::Applied(records),
+                }
             }
         }
         Self(effects)
@@ -3384,22 +3459,36 @@ fn record_delivered(
         }
     };
 
-    for (command, delivery) in commands.iter().zip(&delivered) {
-        let operations = from_envelope(delivery.committed(), envelope.id);
+    // Everything the envelope commits, written down before the first record of
+    // it is: its commands are journalled one record each, and a driver that dies
+    // between two of them leaves its successor the rest to commit from here —
+    // see [`resume_committing`]. One command is one record, which nothing can
+    // leave half written, so only an envelope of several is written down.
+    let committing = Committing {
+        envelope: envelope.id,
+        operations: delivered
+            .iter()
+            .map(|delivery| from_envelope(delivery.committed(), envelope.id))
+            .collect(),
+    };
+    if commands.len() > 1 {
+        ledger::write_json(&paths.dir.join(COMMITTING), &committing)?;
+    }
+    for (command, operations) in commands.iter().zip(&committing.operations) {
         commit_command(
             paths,
             journal,
             state,
             author.clone(),
             command,
-            &operations,
+            operations,
             in_flight,
             envelope.id,
         )?;
         watch_presentations(
             paths,
             journal,
-            &operations,
+            operations,
             in_flight,
             Presented {
                 offered_at,
@@ -3410,6 +3499,75 @@ fn record_delivered(
     }
     channel.answer_commands(&applied_envelope(envelope.id, commands))?;
     Ok(!commands.is_empty())
+}
+
+/// Where an envelope of several commands is written down before its first record,
+/// under the run's own directory: one at a time, because one writer commits one
+/// envelope at a time. It stays until the next replaces it, and names its
+/// envelope, so a copy left from an envelope already answered is never read for
+/// another.
+const COMMITTING: &str = "committing.json";
+
+/// The operations each command of one envelope commits, in command order, as
+/// the delivery phase answered them — what a driver taking the run over commits
+/// the rest of an envelope from when its predecessor died part way through.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Committing {
+    envelope: u64,
+    operations: Vec<Vec<edits::Operation>>,
+}
+
+/// Commit the commands of `envelope` from the `committed`th on, from what its
+/// writer wrote down before journalling its first record: a driver that died
+/// between two of an envelope's records left the rest of it unjournalled, and
+/// these are exactly the operations it would have committed — each note among
+/// them already delivered, so nothing is offered to a conversation again and
+/// nothing is judged again.
+fn resume_committing(
+    paths: &RunPaths,
+    journal: &mut Journal,
+    state: &mut Projected,
+    envelope: &crate::channel::QueuedCommands,
+    committed: usize,
+) -> Result<()> {
+    let written: Option<Committing> = ledger::read_json_opt(&paths.dir.join(COMMITTING));
+    let Some(written) = written.filter(|written| {
+        written.envelope == envelope.id && written.operations.len() == envelope.commands.len()
+    }) else {
+        // llmlint: ignore-block[changed_behavior_has_e2e] this build writes the
+        // envelope down before its first record and refuses to journal any record of
+        // it when that write fails, so a partly journalled envelope with nothing
+        // written down is one a store fault or a hand edit made, never a verb.
+        eprintln!(
+            "onepipeline: run '{}': envelope {} was journalled through command {} of {} and \
+             nothing says what the rest committed, so it is answered as journalled",
+            paths.run,
+            envelope.id,
+            committed,
+            envelope.commands.len()
+        );
+        return Ok(());
+        // llmlint: ignore-end[changed_behavior_has_e2e]
+    };
+    for (command, operations) in envelope
+        .commands
+        .iter()
+        .zip(&written.operations)
+        .skip(committed)
+    {
+        commit_command(
+            paths,
+            journal,
+            state,
+            envelope.author.clone(),
+            command,
+            operations,
+            &BTreeMap::new(),
+            envelope.id,
+        )?;
+    }
+    Ok(())
 }
 
 /// What an envelope every command of which applied is answered.
@@ -3833,6 +3991,10 @@ pub(crate) struct NoteDeliveries {
     /// Claimed behind an outstanding envelope, naming a node it names, and not
     /// judged yet.
     behind: std::collections::VecDeque<crate::channel::QueuedCommands>,
+    /// What the journal holds of each envelope among `behind` a driver before
+    /// this one claimed, got as far as its effects, and never answered: answered
+    /// from it in its turn rather than judged — see [`Recovered`].
+    recovered: BTreeMap<u64, Effect>,
 }
 
 struct Outstanding {
@@ -3951,11 +4113,18 @@ impl NoteDeliveries {
             in_flight: in_flight.clone(),
             outstanding: BTreeMap::new(),
             behind: std::collections::VecDeque::new(),
+            recovered: BTreeMap::new(),
         }
     }
 
     fn idle(&self) -> bool {
         self.outstanding.is_empty() && self.behind.is_empty()
+    }
+
+    /// Take what the journal holds of a recovered envelope, if it holds anything:
+    /// that envelope is answered from it rather than judged.
+    fn evidence_of(&mut self, id: u64) -> Option<Effect> {
+        self.recovered.remove(&id)
     }
 
     /// Whether an envelope naming `names` waits behind an outstanding one.
@@ -5213,31 +5382,30 @@ fn start_ready(
         // the same attempt, pinned to the preserved branch — so it is that
         // request, and not the plan node's, the identity is asked about.
         let mut resume = workspaces.resuming(&node.id);
-        // llmlint: ignore-block[changed_behavior_has_e2e] a resumed re-dispatch meets an outstanding delivery only
-        // when a workspace refusal lands between a conversation's answer and the loop recording
-        // it, an ordering of three threads no CLI journey can force. The refusal and resume are
-        // driven by `lifecycle.rs`'s exhausted-refusal journeys, and what decides the hold is the
-        // outstanding set `a_delivery_stops_being_outstanding_once_recorded_or_abandoned` drives.
-        // A resumed re-dispatch is composed below from what the record says the
-        // node holds, and a note the attempt before it read may still be on its
-        // way there — answered, and waiting for this loop to journal it. This
-        // loop is the writer it would wait for, so it waits by leaving the node
-        // for a later pass rather than by blocking, for as long as a dispatch
-        // thread would.
-        if resume.is_some() {
-            if let Some(since) = notes_in_flight.outstanding_since(&node.id) {
-                if since.elapsed() < DELIVERY_RECORD_PATIENCE {
-                    workspaces.keep_resuming(&node.id, resume);
-                    continue;
-                }
-                eprintln!(
-                    "onepipeline: node '{}': a note delivered to it was still not on the run's \
-                     record after {}s, so its resumed re-dispatch is composed from the record \
-                     as it stands",
-                    node.id,
-                    DELIVERY_RECORD_PATIENCE.as_secs()
-                );
+        // A dispatch is composed below from what the record says the node holds,
+        // and a note to it may still be on its way there — answered, and waiting
+        // for this loop to journal it. A resumed re-dispatch meets one where the
+        // attempt before it read a note, and a driver's first dispatch of a node
+        // meets one where it took back a note its dead predecessor claimed and
+        // offered the node's last conversation, which died with that driver: the
+        // note is answered `carried`, owed to this very dispatch. This loop is the
+        // writer it would wait for, so it waits by leaving the node for a later
+        // pass rather than by blocking, for as long as a dispatch thread would.
+        if let Some(since) = notes_in_flight.outstanding_since(&node.id) {
+            if since.elapsed() < DELIVERY_RECORD_PATIENCE {
+                workspaces.keep_resuming(&node.id, resume);
+                continue;
             }
+            // llmlint: ignore-block[changed_behavior_has_e2e] reached only where a delivery
+            // thread has not answered within `DELIVERY_RECORD_PATIENCE`; the wait above is
+            // driven by `driver_exit`'s `an_adopter_answers_the_envelopes_its_dead_driver_claimed_and_never_answered`,
+            // and the patience by `a_redispatch_whose_delivery_never_arrives_is_composed_from_the_record_after_its_patience`.
+            eprintln!(
+                "onepipeline: node '{}': a note delivered to it was still not on the run's \
+                 record after {}s, so its dispatch is composed from the record as it stands",
+                node.id,
+                DELIVERY_RECORD_PATIENCE.as_secs()
+            );
         }
         // llmlint: ignore-end[changed_behavior_has_e2e]
         let opens = resume
@@ -8127,9 +8295,9 @@ mod tests {
             .expect("the refusal is journalled");
         assert_eq!(channel.claimed_unanswered(), [0, 1]);
 
-        let owed = recover_claimed(&paths, &mut journal, &channel).expect("recovered");
+        let recovered = recover_claimed(&paths, &mut journal, &channel).expect("recovered");
 
-        assert!(owed.is_empty(), "{owed:?}");
+        assert!(recovered.envelopes.is_empty(), "{recovered:?}");
         let outcomes = channel.outcomes();
         assert_eq!(
             outcomes
@@ -11117,6 +11285,7 @@ mod tests {
             in_flight: in_flight.clone(),
             outstanding: BTreeMap::from([(1, outstanding_note(in_flight, 1, "build"))]),
             behind: std::collections::VecDeque::new(),
+            recovered: BTreeMap::new(),
         };
 
         // Answered: outstanding until the caller has recorded the answer, which
@@ -11342,6 +11511,7 @@ mod tests {
                 .claim_commands()
                 .expect("both envelopes are claimed")
                 .into(),
+            recovered: BTreeMap::new(),
         };
         let mut journal = Journal::open(&paths);
         let mut state = Projected::open(&paths);
@@ -11503,6 +11673,7 @@ mod tests {
                 (300, read_then_build),
             ]),
             behind: std::collections::VecDeque::new(),
+            recovered: BTreeMap::new(),
         };
         let answered = |outcomes: &[CommandOutcome]| -> Vec<u64> {
             outcomes.iter().map(|outcome| outcome.id).skip(1).collect()
@@ -11642,6 +11813,7 @@ mod tests {
                 (2, outstanding_note(&in_flight, 2, "docs")),
             ]),
             behind: std::collections::VecDeque::new(),
+            recovered: BTreeMap::new(),
         };
         let mut journal = Journal::open(&paths);
         let mut state = Projected::open(&paths);
