@@ -566,7 +566,6 @@ fn workload(scale: Scale, scratch: &Path, preparation_ms: &mut u64) -> Workload 
             assert_eq!(stdout, verdict, "the counted cold call's verdict");
             count
         });
-        // A prime, then the counted warm call.
         host.counted_call(&acknowledgements, false);
         let (warm_git, stdout) = host.counted_call(&acknowledgements, false);
         assert_eq!(stdout, verdict, "the counted warm call's verdict");

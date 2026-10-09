@@ -701,10 +701,34 @@ fn allocated(root: &Path, unresolved: &mut Vec<String>) -> u64 {
                 continue;
             }
         };
-        for entry in entries.flatten() {
-            let Ok(meta) = std::fs::symlink_metadata(entry.path()) else {
-                continue;
+        // llmlint: ignore-block[changed_behavior_has_e2e] an entry the listing names and
+        // then cannot describe is one removed between the two reads, a race no journey
+        // stages deterministically; what matters is that it is said rather than read as
+        // nothing, so the total is known to be partial.
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    unresolved.push(format!(
+                        "{}: an entry could not be listed while measuring disk, so the \
+                         reading is partial: {error}",
+                        directory.display()
+                    ));
+                    continue;
+                }
             };
+            let meta = match std::fs::symlink_metadata(entry.path()) {
+                Ok(meta) => meta,
+                Err(error) => {
+                    unresolved.push(format!(
+                        "{}: could not be described while measuring disk, so the reading is \
+                         partial: {error}",
+                        entry.path().display()
+                    ));
+                    continue;
+                }
+            };
+            // llmlint: ignore-end[changed_behavior_has_e2e]
             if meta.file_type().is_symlink() {
                 continue;
             }
@@ -891,6 +915,19 @@ fn read_acknowledgements(path: &Path, unresolved: &mut Vec<String>) -> Vec<Ackno
             return Vec::new();
         }
     };
+    // Pairs are counted over every entry naming one, valid or not, before any is
+    // left out: a pair written twice applies neither, whichever of the two is sound.
+    let mut seen: BTreeMap<(String, String), usize> = BTreeMap::new();
+    for value in &entries {
+        if let (Some(identity), Some(branch)) = (
+            value.get("identity").and_then(serde_json::Value::as_str),
+            value.get("branch").and_then(serde_json::Value::as_str),
+        ) {
+            *seen
+                .entry((identity.to_owned(), branch.to_owned()))
+                .or_default() += 1;
+        }
+    }
     let mut kept: Vec<AcknowledgedBranch> = Vec::new();
     for value in entries {
         let entry: AcknowledgedBranch = match serde_json::from_value(value.clone()) {
@@ -913,12 +950,6 @@ fn read_acknowledgements(path: &Path, unresolved: &mut Vec<String>) -> Vec<Ackno
             continue;
         }
         kept.push(entry);
-    }
-    let mut seen: BTreeMap<(String, String), usize> = BTreeMap::new();
-    for entry in &kept {
-        *seen
-            .entry((entry.identity.clone(), entry.branch.clone()))
-            .or_default() += 1;
     }
     for ((identity, branch), times) in &seen {
         if *times > 1 {

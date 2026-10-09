@@ -759,6 +759,28 @@ fn acknowledge_refuses_before_writing_and_answers_as_the_session_listing() {
             (
                 vec![
                     "--acknowledge",
+                    "work/a",
+                    "--reason",
+                    "\u{2066}",
+                    "--session",
+                    MANAGER,
+                ],
+                "no visible",
+            ),
+            (
+                vec![
+                    "--acknowledge",
+                    "work/a",
+                    "--reason",
+                    "kept\u{e000}",
+                    "--session",
+                    MANAGER,
+                ],
+                "not visible text on one line",
+            ),
+            (
+                vec![
+                    "--acknowledge",
                     "work/nowhere",
                     "--reason",
                     "r",
@@ -988,6 +1010,12 @@ fn a_malformed_entry_a_duplicate_and_another_version_apply_nothing_and_say_so() 
             json!({"version": 1, "acknowledged": [
                 entry("one", "2026-09-30T08:15:00Z", &tip),
                 entry("two", "2026-09-30T08:16:00Z", &tip)]}),
+            "none of them applies",
+        ),
+        (
+            json!({"version": 1, "acknowledged": [
+                entry("one", "2026-09-30T08:15:00Z", &tip),
+                entry("two", "not a stamp", &tip)]}),
             "none of them applies",
         ),
         (
