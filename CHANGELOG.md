@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.63.4](https://github.com/nickderobertis/onepipeline/compare/v0.63.3...v0.63.4) - 2026-10-09
+
+### Fixed
+
+- *(deps)* link the onevcs release whose reclaim never removes a live run root ([#813](https://github.com/nickderobertis/onepipeline/pull/813))
+
 ## [0.63.3](https://github.com/nickderobertis/onepipeline/compare/v0.63.2...v0.63.3) - 2026-10-08
 
 ### Fixed
