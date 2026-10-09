@@ -8922,13 +8922,15 @@ that envelope's own validation — its author's grants included — would apply 
 the record as it stands, so that a cancel its envelope refuses preempts nothing and is
 held and answered as any envelope naming X is:
 
-1. **It preempts X's outstanding live-note delivery.** Each envelope awaiting a live
-   note's answer from X is answered in its conversation's place, with the existing
-   `refused` command verdict on each live note into X and a reason naming the
+1. **It preempts X's outstanding live-note delivery.** Each envelope whose delivery is
+   waiting on X's conversation is answered in its place, with the existing `refused`
+   command verdict on each live note into X not yet taken and a reason naming the
    cancelling envelope by id — `preempted by envelope <id>, which cancels node '<X>'` —
    and journalled as any refused envelope is, through `edit-rejected` and its surface.
-   Its other commands are reported `validated`, as a refused envelope's are. A late
-   answer from the preempted delivery writes no second outcome and no second record.
+   Its other commands are answered as a refused envelope's are: a note another
+   conversation already took is `delivered`, and a command the delivery never reached
+   is `validated`. A late answer from the preempted delivery writes no second outcome
+   and no second record.
 2. **It breaks the indirect hold, in order.** Every envelope held naming X that was
    claimed before the cancel is reconciled in claim order, ahead of it, through normal
    validation, and gets its usual outcome and record — except a held live note to X,
@@ -8942,8 +8944,9 @@ held and answered as any envelope naming X is:
    the cancel still wait behind it, as they would have.
 5. **Everything else keeps the ordering above**: envelopes claimed after the cancel, and
    every envelope that cancels nothing. An envelope already outstanding that names X but
-   offers its note to another node was validated before it was handed and cannot be
-   judged again, so a cancel of X still waits for its answer.
+   whose delivery is waiting on another node's conversation was validated before it was
+   handed and cannot be judged again, so a cancel of X still waits for that answer — and
+   preempts it once the delivery reaches a note into X.
 
 No `CommandVerdict` and no journal kind is added: a preempted note is `refused`, and its
 reason is what tells it from any other refusal.
@@ -8953,13 +8956,16 @@ these five points state it.
 
 **What this build does.** `tests/note/main.rs`'s
 `a_cancel_preempts_the_unanswered_note_to_its_node_and_what_waits_behind_it` holds
-`build`'s turn for the whole journey with a note to it unanswered, an `amend` of `build`,
-a second note to it and a cancel of it in an envelope that refuses queued behind, and
-then cancels `build`: the refused cancel preempts nothing; within thirty seconds of the
-valid one the amend is applied ahead of it and the refused cancel refused ahead of it,
-both notes are answered `refused` naming the cancel and journalled once each, the
-`amend` of `lint` each carries reported `validated` and never applied, the second note
-never reaches the worker, the cancel is applied, `build` settles cancelled and `status`
+`build`'s turn for the whole journey with a note to it unanswered — in an envelope also
+carrying a note to `lint` and an amend of it — and an `amend` of `build`, a second note
+to it beside a command that refuses on its own, and a cancel of it in an envelope that
+refuses queued behind, and then cancels `build`: the refused cancel preempts nothing;
+within thirty seconds of the valid one the amend is applied ahead of it and the refused
+cancel refused ahead of it, both notes are answered `refused` naming the cancel and
+journalled once each, the first envelope's other commands are reported `validated` and
+never applied, the second's own refusal is kept and journalled, neither the second note
+nor the note to `lint` reaches a worker, the cancel is applied, `build` settles
+cancelled and `status`
 names no envelope claimed with no outcome — and the preempted delivery's late answer,
 read while another node's held turn keeps the run driven, records nothing a second time.
 `a_cancel_overtakes_an_envelope_also_waiting_on_another_nodes_note` is point 4: the
@@ -8968,7 +8974,9 @@ judged after it once that note is answered.
 `a_cancel_waits_on_an_envelope_naming_its_node_and_delivering_elsewhere` is point 5's
 last sentence. `src/engine.rs`'s
 `a_cancel_preempts_its_nodes_note_and_overtakes_only_what_waits_elsewhere` drives the
-real reconciler with two deliveries outstanding and answers them one at a time.
+real reconciler with deliveries outstanding — one of them past a note another
+conversation already read, which is answered `delivered` — and answers them one at a
+time.
 
 ## 109. A dispatch that died after its work landed was said to leave a branch that may carry finished work — RESOLVED
 

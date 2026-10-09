@@ -1146,6 +1146,12 @@ const BUILD_RULING: &str = "build: keep the public API unchanged";
 /// A ruling on `lint` carried in the envelope a cancel of `build` overtakes.
 const LINT_RULING: &str = "lint: check only the files this change touched";
 
+/// A note to `lint` carried behind a note to `build` in one envelope.
+const LINT_NOTE: &str = "lint: the fixture moved to fixtures/v2";
+
+/// A ruling on a node the graph does not hold, which refuses on its own merits.
+const NOWHERE_RULING: &str = "a ruling on a node nobody added";
+
 /// The reason a cancel in an envelope the run refuses carries.
 const REFUSED_CANCEL: &str = "cancelled in an envelope that refuses";
 
@@ -1239,14 +1245,17 @@ fn assert_preempted(world: &World, run: &str, id: u64, cancel: u64, text: &str) 
 /// delivery offering it cannot be interrupted — so a cancel of that node, the
 /// one lever for stopping it, used to wait behind the note with every envelope
 /// naming the node, claimed and unanswered, until the run was stopped and
-/// adopted. Here `build`'s turn is held for the whole journey. Behind its note
-/// are an `amend` of `build`, a second live note to it, and a cancel of it in an
-/// envelope whose other command refuses — which preempts nothing. Then `build`
-/// is cancelled. The amend is applied ahead of the cancel and the refused cancel
-/// is refused ahead of it, both notes are answered `refused` naming the cancel
-/// with the `amend` of `lint` each carries reported validated and never applied,
-/// the second note never reaches the worker, and the cancel parks the node — all
-/// without the held turn being released. `lint`'s
+/// adopted. Here `build`'s turn is held for the whole journey, and its note's
+/// envelope carries a note to `lint` and an amend of it that the delivery never
+/// reaches. Behind it are an `amend` of `build`, a second live note to `build`
+/// beside a command that refuses on its own, and a cancel of `build` in an
+/// envelope that refuses — which preempts nothing. Then `build` is cancelled.
+/// The amend is applied ahead of the cancel and the refused cancel refused ahead
+/// of it; both notes are answered `refused` naming the cancel, the first
+/// envelope's other commands reported validated and never applied and the
+/// second's own refusal kept and journalled; neither the second note nor the
+/// note to `lint` reaches a worker; and the cancel parks the node — all without
+/// the held turn being released. `lint`'s
 /// held turn keeps the run driven afterwards, so whatever the preempted
 /// delivery's conversation says once its member is reaped reaches the writer,
 /// and is shown to record nothing a second time.
@@ -1262,16 +1271,19 @@ fn a_cancel_preempts_the_unanswered_note_to_its_node_and_what_waits_behind_it() 
         move |_: &World| std::fs::read_to_string(&queue).is_ok_and(|held| held.contains(&text))
     };
 
-    // Each note's envelope carries an amend of `lint` too, which is reported
-    // validated and not applied when the note is preempted.
-    let with_a_ruling_on_lint = |text: &str| {
-        json!({"version": 2, "commands": [
-            note_op("build", "worker", text, None),
+    // The note's envelope carries a note to `lint` and an amend of it too, which
+    // its delivery never reaches: each is reported validated and not applied
+    // when the note to `build` is preempted.
+    let note = submitted(
+        &world,
+        run,
+        &json!({"version": 2, "commands": [
+            note_op("build", "worker", NOTE, None),
+            note_op("lint", "worker", LINT_NOTE, None),
             {"op": "amend", "id": "lint", "text": LINT_RULING},
         ]})
-        .to_string()
-    };
-    let note = submitted(&world, run, &with_a_ruling_on_lint(NOTE));
+        .to_string(),
+    );
     world.until("the note to wait in build's inbox", |world| {
         awaiting_an_answer(world) == 1
     });
@@ -1282,7 +1294,17 @@ fn a_cancel_preempts_the_unanswered_note_to_its_node_and_what_waits_behind_it() 
         &envelope(json!({"op": "amend", "id": "build", "text": BUILD_RULING})),
     );
     world.until("the amend of build to be queued", queued(BUILD_RULING));
-    let second = submitted(&world, run, &with_a_ruling_on_lint(PREEMPTED_NOTE));
+    // Held, and carrying a command that refuses on its own merits — which the
+    // preemption leaves refused for its own reason. Sent through the bus, since
+    // `reply` refuses it before it is queued.
+    sent_through_the_bus(
+        &world,
+        run,
+        &json!({"version": 2, "commands": [
+            note_op("build", "worker", PREEMPTED_NOTE, None),
+            {"op": "amend", "id": "nothing-by-this-name", "text": NOWHERE_RULING},
+        ]}),
+    );
     world.until(
         "the second note to build to be queued",
         queued(PREEMPTED_NOTE),
@@ -1338,25 +1360,49 @@ fn a_cancel_preempts_the_unanswered_note_to_its_node_and_what_waits_behind_it() 
         amended < cancelled,
         "the amend claimed ahead of the cancel was committed after it"
     );
-    for (text, id, reply) in [(NOTE, note_id, note), (PREEMPTED_NOTE, second_id, second)] {
-        let output = reply.wait_with_output().expect("the binary runs");
-        assert_eq!(
-            output.status.code(),
-            Some(REFUSED),
-            "the reply carrying {text:?} did not end refused: {}",
-            String::from_utf8_lossy(&output.stdout)
-        );
+    let output = note.wait_with_output().expect("the binary runs");
+    assert_eq!(
+        output.status.code(),
+        Some(REFUSED),
+        "the reply carrying the note did not end refused: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    for (text, id) in [(NOTE, note_id), (PREEMPTED_NOTE, second_id)] {
         assert_preempted(&world, run, id, cancel_id, text);
-        let outcome = outcome_of(&world, run, id).expect("answered");
-        assert_eq!(
-            outcome["results"][1]["outcome"],
-            json!("validated"),
-            "{outcome}"
-        );
     }
+    let outcome = outcome_of(&world, run, note_id).expect("answered");
+    assert_eq!(
+        outcome["results"][1]["outcome"],
+        json!("validated"),
+        "{outcome}"
+    );
+    assert_eq!(
+        outcome["results"][2]["outcome"],
+        json!("validated"),
+        "{outcome}"
+    );
     assert!(
         committed_at(&world.journal(run), "amend", "text", LINT_RULING).is_none(),
         "an amend of lint in a preempted envelope was applied"
+    );
+    let outcome = outcome_of(&world, run, second_id).expect("answered");
+    assert_eq!(
+        outcome["results"][1]["outcome"],
+        json!("refused"),
+        "{outcome}"
+    );
+    assert!(
+        outcome["results"][1]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("nothing-by-this-name")),
+        "the held envelope's own refusal was not kept beside the preemption: {outcome}"
+    );
+    assert!(
+        world
+            .events_of(run, "edit-rejected")
+            .iter()
+            .any(|event| event["payload"]["command"]["text"] == NOWHERE_RULING),
+        "the held envelope's own refusal was not journalled"
     );
     let outcomes = world.command_outcomes(run);
     let answered_at = |id: u64| {
@@ -1384,8 +1430,8 @@ fn a_cancel_preempts_the_unanswered_note_to_its_node_and_what_waits_behind_it() 
     assert!(
         worked(&world)
             .iter()
-            .all(|prompt| !prompt.contains(PREEMPTED_NOTE)),
-        "the second note was delivered to the worker it was preempted from"
+            .all(|prompt| !prompt.contains(PREEMPTED_NOTE) && !prompt.contains(LINT_NOTE)),
+        "a note a preempted envelope carried reached a worker"
     );
     assert_eq!(
         claimed_with_no_outcome(&world, run),
