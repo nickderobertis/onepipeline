@@ -3,12 +3,12 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { sourceFingerprint } from "./stop-guard-unpublished-build.mjs";
+import { inputFiles, sourceFingerprint } from "./stop-guard-unpublished-build.mjs";
 import { readRecord, slowest } from "./stop-guard-unpublished-record.mjs";
 
 const schema = JSON.parse(
@@ -161,6 +161,74 @@ const refusals = [
     "another binary",
     (dir) => writeFileSync(join(dir, schema["x-binary"]), "another"),
     /not the one that produced it/,
+  ],
+  [
+    "a foreign version",
+    (_dir, doc) => {
+      doc.version = 2;
+    },
+    /foreign telemetry version/,
+  ],
+  [
+    "a missing binary",
+    (dir) => rmSync(join(dir, schema["x-binary"])),
+    /producing binary is missing/,
+  ],
+  [
+    "no preparation time",
+    (_dir, doc) => {
+      doc.preparation_ms = 0;
+    },
+    /preparation\/total timing/,
+  ],
+  [
+    "a total shorter than its preparation",
+    (_dir, doc) => {
+      doc.total_ms = 1;
+    },
+    /preparation\/total timing/,
+  ],
+  [
+    "no own runs",
+    (_dir, doc) => {
+      doc.workloads[0].own_runs = 0;
+    },
+    /measured no own runs/,
+  ],
+  [
+    "no verdict digest",
+    (_dir, doc) => {
+      doc.workloads[0].scenarios[0].verdict_sha256 = "x";
+    },
+    /carries no verdict/,
+  ],
+  [
+    "a cold sample at scale 10",
+    (_dir, doc) => {
+      doc.workloads[1].scenarios[0].cold = sample(1);
+    },
+    /cold sample no budget reads/,
+  ],
+  [
+    "a call that took no time",
+    (_dir, doc) => {
+      doc.workloads[0].scenarios[0].warm.calls_us[0] = 0;
+    },
+    /a call took no time/,
+  ],
+  [
+    "a wrong median",
+    (_dir, doc) => {
+      doc.workloads[0].scenarios[0].warm.median_us += 1;
+    },
+    /median or maximum/,
+  ],
+  [
+    "a wrong maximum",
+    (_dir, doc) => {
+      doc.workloads[0].scenarios[0].warm.max_us += 1;
+    },
+    /median or maximum/,
   ],
   [
     "a debug binary",
@@ -375,4 +443,91 @@ test("an invocation that cannot reset or mark its records says so, naming the jo
   assert.match(locking.stderr, /remove it before reading budgets/);
   rmSync(dir, { recursive: true });
   rmSync(scratch, { recursive: true });
+});
+
+test("the reader refuses a producing binary it cannot read, keeping the cause", () => {
+  const dir = directory();
+  const binary = join(dir, schema["x-binary"]);
+  spawnSync("chmod", ["000", binary]);
+  assert.throws(
+    () => readRecord(dir),
+    /producing binary beside its record is unreadable: .*EACCES/,
+  );
+  spawnSync("chmod", ["644", binary]);
+  rmSync(dir, { recursive: true });
+});
+
+/** A scratch root carrying one build-input manifest and the files it names. */
+function manifestRoot(manifest) {
+  const root = mkdtempSync(join(tmpdir(), "stop-verdict-inputs-"));
+  mkdirSync(join(root, "scripts"), { recursive: true });
+  mkdirSync(join(root, "src"), { recursive: true });
+  writeFileSync(join(root, "src", "lib.rs"), "fn main() {}\n");
+  writeFileSync(join(root, "Cargo.toml"), "[package]\n");
+  writeFileSync(
+    join(root, "scripts", "stop-guard-unpublished-build-inputs.json"),
+    JSON.stringify(manifest),
+  );
+  return root;
+}
+
+test("the build-input manifest is refused unless every entry is a repository-relative path", () => {
+  const good = {
+    version: 1,
+    files: ["Cargo.toml"],
+    directories: ["src"],
+    prefixes: [{ directory: "scripts", prefix: "stop-guard-unpublished" }],
+  };
+  const root = manifestRoot(good);
+  assert.deepEqual(inputFiles(root), [
+    "Cargo.toml",
+    "scripts/stop-guard-unpublished-build-inputs.json",
+    "src/lib.rs",
+  ]);
+  rmSync(root, { recursive: true });
+  for (const [spoil, said] of [
+    [{ version: 2 }, /unsupported build-input manifest version/],
+    [{ extra: true }, /unknown fields extra/],
+    [{ files: "Cargo.toml" }, /files is not a list/],
+    [{ files: ["/etc/passwd"] }, /not a repository-relative path/],
+    [{ directories: ["src/../.."] }, /not a repository-relative path/],
+    [
+      { prefixes: [{ directory: "scripts", prefix: "a/b" }] },
+      /needs exactly a directory and a non-empty prefix/,
+    ],
+    [
+      { prefixes: [{ directory: "scripts", prefix: "x", more: 1 }] },
+      /needs exactly a directory and a non-empty prefix/,
+    ],
+  ]) {
+    const root = manifestRoot({ ...good, ...spoil });
+    assert.throws(() => inputFiles(root), said, JSON.stringify(spoil));
+    rmSync(root, { recursive: true });
+  }
+  const linked = manifestRoot(good);
+  symlinkSync("/etc", join(linked, "src", "linked"));
+  assert.throws(() => inputFiles(linked), /unsupported build input src\/linked/);
+  rmSync(linked, { recursive: true });
+});
+
+test("the fingerprint and the producing tier's Nx inputs name one set of files", () => {
+  const root = fileURLToPath(new URL("../", import.meta.url));
+  const nx = JSON.parse(readFileSync(join(root, "nx.json"), "utf8"));
+  const tier = JSON.parse(readFileSync(join(root, "tests/stop_verdict/project.json"), "utf8"));
+  const expand = (input) =>
+    nx.namedInputs[input] ? nx.namedInputs[input].flatMap(expand) : [input];
+  const declared = new Set(
+    tier.targets.test.inputs
+      .flatMap(expand)
+      .map((input) => input.replace("{workspaceRoot}/", "").replace(/\/\*\*\/\*$/, "")),
+  );
+  const manifest = JSON.parse(
+    readFileSync(join(root, "scripts/stop-guard-unpublished-build-inputs.json"), "utf8"),
+  );
+  const fingerprinted = new Set([
+    ...manifest.files,
+    ...manifest.directories,
+    ...manifest.prefixes.map(({ directory, prefix }) => `${directory}/${prefix}*`),
+  ]);
+  assert.deepEqual([...declared].sort(), [...fingerprinted].sort());
 });

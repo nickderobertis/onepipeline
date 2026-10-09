@@ -25,7 +25,7 @@
   "prefixes": [
     {
       "directory": "scripts",
-      "prefix": "stop-guard-unpublished"
+      "prefix": "stop-guard-unpublished-"
     }
   ]
 }
