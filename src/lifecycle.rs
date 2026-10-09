@@ -2706,6 +2706,7 @@ mod tests {
                         shown_to: reached.shown_at_delivery().to_vec(),
                         routed_to: reached.routed_to().to_vec(),
                         reached,
+                        envelope: None,
                     }]),
                 )]),
             )

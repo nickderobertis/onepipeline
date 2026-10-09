@@ -11,14 +11,14 @@ owns the contract**, and `docs/contract.md` was amended to carry each ruling. Th
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22, 33, 35–40, 46–73, 76, 80, 84–88, 92, 93, 95, 98 and 111 are open**, except **52**, which entry 60
+Entries **10–22, 33, 35–40, 46–73, 76, 80, 84–88, 92, 93, 95, 98, 111 and 113 are open**, except **52**, which entry 60
 supersedes: that proposal added a second manager-note op beside `context`, and 60
 collapses the two into one, so the shape lives in 60 and 52 keeps only the
 history that produced it. Each open entry states what the code does today and the
 proposal it is waiting on. Most are questions for a *producer* rather than for
 this crate, because `oneagentgraph` and `onevcs` are independent tools that expose
 general integration hooks only and nothing in them may know about this one; the
-rest — 36 to 40, 46 to 73, 80, 84 to 88, 92, 93, 95, 98 and 111 — are for the planner who owns the contract, and
+rest — 36 to 40, 46 to 73, 80, 84 to 88, 92, 93, 95, 98, 111 and 113 — are for the planner who owns the contract, and
 name the sentence in it they would change. Entry 40 is for both: its plan-schema and event-kind
 halves are the contract owner's, and the two things it could not compile are
 `onevcs`'s. Entry 76 is for `onemessagebus` and for a node of this crate's own. An
@@ -9255,3 +9255,141 @@ This compatible relaxation follows engine v0.61.0: the first engine release cont
   "base_conflict_reason": "two answers to where its session starts"
 }
 ```
+
+## 113. A driver that took over a run never answered what its predecessor claimed — OPEN
+
+**Proposal, for the planner who owns the contract: the Channel paragraph's
+*Every envelope the reconciler claims is answered* extends across a driver's
+death, and the records an envelope's effects leave name it.** The sentence this
+would amend is that paragraph's own: it promises an answer to every claimed
+envelope but says nothing of an envelope claimed by a driver that died before
+answering it. The rule below is the one the user accepted under onepipeline#795
+and this build implements; the contract's wording is unchanged until it is ruled
+on.
+
+**What was wrong.** A claim moves the `commands` queue's cursor past an envelope
+before anything answers it, and until it is answered the envelope lives only in
+the driver's memory — held behind a live note, or on the thread delivering one.
+A driver that dies there takes the only copy with it, and the next driver claims
+only what is past the cursor. In the recorded incident the host killed a
+manager's attached driver holding four envelopes — two live notes, a monitor
+reply and an `amend`. The adopting driver applied none of them, `status` went on
+listing them as claimed with no outcome, and the manager rebuilt and resent each
+by hand against its own receipt's *never send it again*.
+
+**The rule this build applies.**
+
+1. **A driver starting on a run answers what was claimed before it.** Before it
+   claims anything itself — on adoption, and on every driver's first pass — it
+   takes every envelope at or below the cursor with no `command-outcomes.jsonl`
+   line, the list `status` prints as *claimed with no outcome*, in claim order and
+   ahead of every fresh claim, and reconciles each to an outcome. `reply`, when it
+   becomes the run's writer because its driver has gone, does the same first —
+   and one that finds nothing driving while such envelopes stand queues its own
+   behind them and reconciles the queue, rather than applying its own ahead of
+   envelopes submitted before it. The cursor never moves back and `onemessagebus`
+   is unchanged: recovery reads the channel's own `commands` log, cursor and
+   outcome log.
+2. **Each is applied at most once.** `edit-committed`, `command-accepted` and
+   `edit-rejected` carry an optional `envelope` — the claimed envelope's id, an
+   unsigned integer — as does `note-shown` for a note an envelope delivered, and
+   the `note-delivered` operation inside `edit-committed`. Before reconciling a
+   recovered envelope the driver reads the journal for a record naming it: one the
+   journal holds an `edit-committed`, `command-accepted` or `note-shown` for is
+   answered `applied`; one it holds only `edit-rejected` records for is answered
+   `refused`, each command recorded refused with the reason recorded beside it and
+   every other `validated`; neither is applied, judged, or offered to a
+   conversation again, so a note already delivered or shown is never delivered
+   twice. Only an envelope with no such record is judged, which is its first
+   judgment. Only a record of this engine's that decodes as its kind's payload
+   is evidence: one missing a field or carrying one of the wrong kind is a record
+   of no envelope's, and a record written before the field existed names none.
+3. **A note `cancel` preempted is not recovered**: its `refused` answer is already
+   its outcome line (entry 108).
+4. **Nothing else moves.** No command, no reply-envelope field and no journal kind
+   is added; the new key is optional, omitted where absent, and every record
+   written before it reads as it did. `status`'s *claimed with no outcome* line
+   says the run's next driver answers each.
+
+**An envelope journalled part way is finished, not dropped.** An envelope's
+commands are journalled one record each and its outcome line after them, so a
+driver can die between two of an envelope's records. Its writer writes down, in a
+private file of the run's directory named by the envelope's id, every operation an
+envelope of several commands commits — each note's disposition included — before
+the first record, and that file stays until a driver starting on the run finds the
+envelope answered. The adopter answers such an envelope `applied` only after
+committing, in command order, the operations of every command without a record, so
+each command has exactly one record and no note is offered again. Where that file
+is missing, unreadable, or names another envelope, nothing more of the envelope is
+committed and it is **not answered**: `status` goes on naming it claimed with no
+outcome, its submitter is told nothing false, the planner is surfaced an
+`envelope-unrecovered` naming the command it was journalled through, and the next
+driver starting on the run tries again.
+
+**A recovered live note reaches the adopter's dispatch.** A conversation that ran
+inside the dead driver answers nothing, so the adopter offers it the note, is told
+nobody took it, and records it `carried`. Any dispatch of a node — the adopter's
+first included, not only a resumed one — now waits, as a re-dispatch already
+waited, for a note delivery to that node still being answered to reach the record,
+for at most the same patience; so the adopter's dispatch is composed with the note,
+and its worker's opening turn carries it.
+
+**In claim order.** An envelope the journal holds evidence of is answered in its
+turn among the envelopes taken back, never ahead of an earlier one still to be
+judged, so effects land in the order the envelopes were claimed. A record no build
+decodes is refused as it is taken back, ahead of them, since nothing of it applies.
+
+**The published bundle.** `schemas/events.json` is regenerated with the optional
+key in those four documents, at the bundle version `1.1.0` the contract's event
+bundle paragraph names and `tests/contract.rs` holds to `EVENTS_BUNDLE_VERSION`.
+Each payload id stays `agent.pipeline.<kind>@2`, and a reader of the earlier
+documents reads every record this build writes. **Proposed beside the rule:** the
+paragraph raises the bundle to `1.2.0` for the additive key, so a host linking the
+bundle by its pin can tell the two documents apart.
+
+**What would close it.** A ruling adding points 1 to 3 to the Channel paragraph,
+and the bundle version to the event bundle paragraph.
+
+**What this build does.** `tests/e2e/driver_exit.rs`'s
+`an_adopter_answers_the_envelopes_its_dead_driver_claimed_and_never_answered` has a
+driver claim a live note into a node whose worker turn is held and an `amend` of
+that node behind it, and kills the driver with both submitters waiting; a later
+`amend` of the node is then queued behind them. The adopter commits the claimed
+amend under its envelope id, and the later one after it, records the note's
+delivery exactly once under its id, answers all three — each waiting `reply` exits
+`applied` — and `status` names nothing claimed with no outcome; the adopter's own
+dispatch of the node is composed after the note's answer, and its worker's opening
+turn is the one turn of the run carrying the note.
+`an_envelope_journalled_and_never_answered_is_answered_from_the_journal_and_not_applied_again`
+leaves six envelopes journalled with no outcome line: an applied edit, answered
+`applied` and committed once; a refusal beside a validated sibling, answered with
+the very outcome it had, with no second `edit-rejected` and no second offer to its
+node validator; a `finding`, accepted once; a record no build decodes, refused
+again with nothing journalled twice; an edit whose record names no envelope, as an
+older build wrote it, which is judged and committed again; and a two-command
+envelope whose driver died between its two records, whose second command the
+adopter commits after the adoption, each command recorded exactly once, in command
+order.
+`an_envelope_whose_write_ahead_cannot_be_read_is_left_unanswered_and_surfaced`
+leaves four half-journalled envelopes whose files are removed, torn, replaced by
+another envelope's, and cut one command short: none is answered, none commits its
+second command, each is surfaced and keeps its file, and the file of an envelope
+answered before the driver died is removed. `a_recovered_envelope_committed_ahead_keeps_what_a_later_half_journalled_one_needs`
+has a `reply` take the run over and reconcile, with no delivery thread, a held
+two-command envelope ahead of a half-journalled one: the later one is still
+finished from its own file, each command recorded once.
+`a_reply_that_takes_the_run_over_answers_what_the_dead_driver_claimed_before_its_own`
+kills a driver judging an `add`, then submits the same `add` from a `reply` that
+finds nothing driving: the claimed one is applied and its waiting `reply` told so,
+and the second, judged after it, is refused. `tests/note/main.rs`'s
+`a_note_waiting_on_a_held_turn_leaves_the_run_journalling_its_dispatch` reads the
+envelope id off a live note's `edit-committed`, its `note-delivered` operation and
+its `note-shown`.
+`a_journalled_record_that_does_not_read_as_its_payload_is_no_proof_an_envelope_applied`
+damages the record of an applied edit so it names its envelope and no command: the
+adopter judges the envelope again and commits it under its id.
+`a_run_journalled_before_records_named_their_envelope_reads_the_same` reads a run
+through `status`, `results`, `runs` and `watch` with every `envelope` key and with
+none, and `src/payload.rs`'s
+`a_record_written_before_records_named_their_envelope_still_reads` holds each of the
+four documents to an older record and a newer one.
