@@ -381,9 +381,10 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             // run's refusal stands.
             let on = match (crate::ask::run_id(), crate::flow::inherited()) {
                 (Ok(run), _) => crate::ask::On::Run(resolve(run.as_str())?),
-                (Err(_), Some(flow)) => {
-                    crate::ask::On::Flow(crate::flow::Flow::open(&ledger::runs_root(), &flow)?)
-                }
+                (Err(_), Some(flow)) => crate::ask::On::Flow(Box::new(crate::flow::Flow::open(
+                    &ledger::runs_root(),
+                    &flow,
+                )?)),
                 (Err(refused), None) => return Err(refused),
             };
             let asker = crate::ask::asker()?;
@@ -531,8 +532,8 @@ fn said(receipt: &crate::verbs::Receipt) -> Result<i32> {
 enum Target {
     /// A run under the runs root.
     Run(RunPaths),
-    /// A flow under the runs root.
-    Flow(crate::flow::Flow),
+    /// A flow under the runs root, boxed for [`crate::ask::On::Flow`]'s reason.
+    Flow(Box<crate::flow::Flow>),
 }
 
 /// The run or flow a `reply` or a `surface` names, and the file it reads.
@@ -559,7 +560,7 @@ fn target_and_file(
             }
             let file = file.cloned().or_else(|| run.map(PathBuf::from));
             Ok((
-                Target::Flow(crate::flow::Flow::open(&ledger::runs_root(), id)?),
+                Target::Flow(Box::new(crate::flow::Flow::open(&ledger::runs_root(), id)?)),
                 file,
             ))
         }

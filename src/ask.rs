@@ -209,8 +209,9 @@ pub(crate) enum Question {
 pub(crate) enum On {
     /// The run `ONEPIPELINE_RUN_ID` names.
     Run(RunPaths),
-    /// The flow `ONEPIPELINE_FLOW` names.
-    Flow(crate::flow::Flow),
+    /// The flow `ONEPIPELINE_FLOW` names, boxed: its record carries a bus
+    /// configuration, and a run is two paths.
+    Flow(Box<crate::flow::Flow>),
 }
 
 impl On {
