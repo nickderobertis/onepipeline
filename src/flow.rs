@@ -107,9 +107,10 @@ pub(crate) struct FlowRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) bus_config: Option<RecordedBusConfig>,
 }
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// How a flow's program ended, as its holder recorded it.
-// llmlint: ignore[invalid_states_unrepresentable] the id and the instant are `String`s for `FlowRecord`'s reason, and checked where they are read.
+// llmlint: ignore-block[invalid_states_unrepresentable] the id and the instant are `String`s for `FlowRecord`'s reason, and checked where they are read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct FlowEnding {
@@ -121,11 +122,12 @@ pub(crate) struct FlowEnding {
     #[serde(deserialize_with = "an_instant")]
     at: String,
 }
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// A session's word that a flow it owns is owed nothing further:
 /// `onepipeline unwatched --acknowledge-flow ID --reason TEXT`, kept beside the
 /// flow.
-// llmlint: ignore[invalid_states_unrepresentable] the id, the session and the instant are `String`s for `FlowRecord`'s reason, and checked where they are read.
+// llmlint: ignore-block[invalid_states_unrepresentable] the id, the session and the instant are `String`s for `FlowRecord`'s reason, and checked where they are read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct FlowAcknowledgement {
@@ -139,6 +141,7 @@ pub(crate) struct FlowAcknowledgement {
     #[serde(deserialize_with = "an_instant")]
     at: String,
 }
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 impl FlowAcknowledgement {
     /// The line the binary prints for a recorded acknowledgement.
@@ -151,7 +154,7 @@ impl FlowAcknowledgement {
 }
 
 /// One run launched in a flow, as `start` recorded it in the flow's `members/`.
-// llmlint: ignore[invalid_states_unrepresentable] the run id and the instant are `String`s for `FlowRecord`'s reason; a member is read back by its file name, which is checked as a run id.
+// llmlint: ignore-block[invalid_states_unrepresentable] the run id and the instant are `String`s for `FlowRecord`'s reason; a member is read back by its file name, which is checked as a run id.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Member {
@@ -161,6 +164,7 @@ struct Member {
     #[serde(deserialize_with = "an_instant")]
     at: String,
 }
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// Whether a flow id names one flow under the runs root and nothing else: the
 /// alphabet a minted id is spelled in, `[A-Za-z0-9._-]`, and not only dots.
