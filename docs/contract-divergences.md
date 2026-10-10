@@ -9426,8 +9426,8 @@ run launched in a live flow is watched by the flow's qualifying watch while the
 flow lives, and judged on its own after. `watch --flow` records a lease and terms
 beside the flow exactly as a run watch does beside a run, and wakes on the flow's
 own channel, on its member runs' surfaces and settlements, on a run joining, and
-on the flow's ending. Its cursor is `flow:1:<flow>:<run>@<byte>/...`, one place per
-member run in that run's own journal.
+on the flow's ending. Its cursor names the flow and one place per member run in
+that run's own journal.
 
 **Two departures from the task's wording, ruled by the manager.**
 
@@ -9444,10 +9444,10 @@ member run in that run's own journal.
    record carries.
 
 **The wake reserve applies to a run's watch too.** A `watch` given no `--timeout`
-under a wake budget now gives up the reserve (2 seconds) before the budget rather
-than at it, and every watch with a deadline checks it at least every 500
-milliseconds. The run-watch qualifying rule of entry 98 is unchanged, so a run
-watch armed with the budget as its timeout still qualifies.
+under a wake budget now gives up the reserve before the budget rather than at it,
+and every watch with a deadline checks it at the interval the Flows section
+states. The run-watch qualifying rule of entry 98 is unchanged, so a run watch
+armed with the budget as its timeout still qualifies.
 
 **Nothing else moves.** `stop-guard`'s flags, input and verdicts are unchanged;
 `watch`'s run endings and their codes are unchanged; a run launched outside any

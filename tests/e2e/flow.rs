@@ -435,6 +435,9 @@ fn a_flow_that_ends_non_zero_is_owed_closure_until_acknowledged() {
         failed.human
     );
     assert_eq!(flow.ended(), 3);
+    let read = world.run(&["next", "--flow", "ship"]);
+    read.exited(0);
+    assert_eq!(read.json()["status"], json!("finished"), "{}", read.stdout);
 
     let owed = unwatched(&world, &[]);
     owed.exited(RUNS_UNWATCHED);
@@ -868,10 +871,13 @@ fn flow_run_forwards_signals_mints_free_ids_and_registers_nothing_without_a_sess
             "printf %s \"${ONEPIPELINE_FLOW-none}\"; exit 4",
         ])
         .env_remove("ONEPIPELINE_LAUNCHER_SESSION")
+        // The flow this process was started in, if any, is handed back to the
+        // program rather than dropped: its environment is this process's.
+        .env(FLOW_ENV, "inherited")
         .output()
         .expect("flow run runs");
     assert_eq!(unowned.status.code(), Some(4), "{unowned:?}");
-    assert_eq!(String::from_utf8_lossy(&unowned.stdout), "none");
+    assert_eq!(String::from_utf8_lossy(&unowned.stdout), "inherited");
     let said = String::from_utf8_lossy(&unowned.stderr);
     assert_eq!(said.lines().count(), 1, "{said}");
     assert!(
@@ -1699,4 +1705,182 @@ fn a_flow_watch_qualifies_only_on_every_term_and_a_run_watch_keeps_the_reserve()
         took <= Duration::from_secs(4) && took >= Duration::from_secs(1),
         "a run watch under a 4s budget returned after {took:?}"
     );
+    // A budget no longer than the reserve leaves `0`, which reads once and
+    // returns: it neither underflows into a wait no clock reaches nor waits the
+    // budget out. Bounded loosely, because what is measured is a process start
+    // on a loaded host, and a wait that had not saturated would not return at
+    // all.
+    let spent = world
+        .as_session(&world.session)
+        .with_env(WAKE_BUDGET_ENV, "1");
+    let spawned = Instant::now();
+    let watch = spent
+        .cmd(&["watch", "reserved", "--tick-interval", "0"])
+        .output()
+        .expect("the watch runs");
+    assert_eq!(watch.status.code(), Some(WATCH_ELAPSED), "{watch:?}");
+    let records = String::from_utf8_lossy(&watch.stdout);
+    assert_eq!(records.lines().count(), 1, "{records}");
+    assert!(
+        spawned.elapsed() < Duration::from_secs(30),
+        "a watch under a budget the reserve spends whole waited {:?}",
+        spawned.elapsed()
+    );
+}
+
+/// A flow's reply is judged under the bus configuration the flow was registered
+/// with, and refused whole — with nothing queued — when it is not an envelope,
+/// carries no verdict, names an author the configuration does not declare,
+/// declares a completion its author may not, is refused by a validator the
+/// configuration names, or names a question nobody asked. A check-in raised on a
+/// flow is the scheduled kind's source.
+#[test]
+fn a_flows_reply_is_judged_under_its_own_bus_configuration() {
+    let world = World::new("flow-judged");
+    let validator = crate::harness::double("bus-validator")
+        .to_string_lossy()
+        .into_owned();
+    let config = world.root.join("bus.yaml");
+    std::fs::write(
+        &config,
+        format!(
+            "version: 1\ntransport: {{kind: local}}\nauthors:\n  sentinel: {{capabilities: \
+             [finding]}}\nvalidators:\n  - {{on: replies, kind: command, command: \
+             [{validator:?}]}}\n"
+        ),
+    )
+    .expect("a bus configuration");
+    let flow = Flowing::start_with(
+        &world,
+        "judged",
+        &["--bus-config", config.to_str().expect("a path")],
+        &[gate(&world, "end")],
+    );
+    let replies = world.runs.join(".flows/judged/channel/replies.jsonl");
+    let queued = || std::fs::read_to_string(&replies).unwrap_or_default();
+
+    world.script("bus-validator.refuse", "this ruling names no evidence");
+    for (envelope, said) in [
+        ("not an envelope".to_owned(), "malformed"),
+        (json!({"version": 2}).to_string(), "carries no verdict"),
+        (
+            json!({"author": "stranger", "message": "x"}).to_string(),
+            "stranger",
+        ),
+        (
+            json!({"author": "sentinel", "completion": true, "reason": "done"}).to_string(),
+            "not something the sentinel may do",
+        ),
+        (
+            json!({"completion": false, "reason": "carry on"}).to_string(),
+            "this ruling names no evidence",
+        ),
+    ] {
+        world
+            .run_with_stdin(&["reply", "--flow", "judged"], &envelope)
+            .exited(REFUSED)
+            .err_has(said);
+        assert_eq!(queued(), "", "a refused reply was queued: {envelope}");
+    }
+    world.unscript("bus-validator.refuse");
+    world
+        .run_with_stdin(
+            &[
+                "reply",
+                "--flow",
+                "judged",
+                "--correlation",
+                "c-nobody-asked",
+            ],
+            &json!({"completion": false, "message": "x"}).to_string(),
+        )
+        .exited(REFUSED);
+    assert_eq!(queued(), "");
+    world
+        .run_with_stdin(
+            &["reply", "--flow", "judged"],
+            &json!({"completion": false, "message": "carry on"}).to_string(),
+        )
+        .exited(EXIT_SUCCESS);
+    assert!(queued().contains("carry on"), "{}", queued());
+
+    world
+        .run(&[
+            "surface",
+            "--flow",
+            "judged",
+            "--kind",
+            "check-in",
+            "--message",
+            "half way",
+        ])
+        .exited(EXIT_SUCCESS);
+    let queue = world.run(&["channel", "queue", "--flow", "judged"]);
+    queue.exited(0);
+    assert_eq!(
+        queue.json()["waiting"][0]["source"],
+        json!("check-in"),
+        "{}",
+        queue.stdout
+    );
+    flow.open("end");
+    assert_eq!(flow.ended(), 0);
+}
+
+/// A flow's id is minted from the program's file name — every character outside
+/// the id alphabet a `-`, and `flow` where nothing of it is left — and a SIGTERM
+/// `flow run` was started ignoring stays ignored: it neither ends `flow run` nor
+/// reaches the program.
+#[test]
+fn a_flow_is_named_from_its_program_and_an_ignored_signal_stays_ignored() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let world = World::new("flow-named");
+    let tool = world.root.join("my tool");
+    std::fs::write(&tool, "#!/bin/sh\nprintf %s \"$ONEPIPELINE_FLOW\"\n").expect("a program");
+    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    world
+        .run(&["flow", "run", "--", tool.to_str().expect("a path")])
+        .exited(0)
+        .out_has("my-tool");
+    world
+        .run(&["flow", "run", "--", ".."])
+        .exited(127)
+        .err_has("flow flow: watch it with: onepipeline watch --flow flow");
+
+    let steps = steps(&world);
+    let script = world.root.join("ignoring.sh");
+    std::fs::write(
+        &script,
+        format!("{}\n{}\n", mark(&world, "ignoring"), gate(&world, "end")),
+    )
+    .expect("the program is written");
+    let mut holder = world
+        .cmd_on(
+            std::path::Path::new("sh"),
+            &[
+                "-c",
+                &format!(
+                    "trap '' TERM; exec {CLI} flow run --name ignoring -- sh '{}'",
+                    script.display()
+                ),
+            ],
+        )
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("flow run starts");
+    world.until("the program to start", |_| steps.join("ignoring").is_file());
+    let signalled = std::process::Command::new("kill")
+        .args(["-TERM", &holder.id().to_string()])
+        .status()
+        .expect("kill runs");
+    assert!(signalled.success());
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(
+        holder.try_wait().expect("a status read").is_none(),
+        "an ignored SIGTERM ended `flow run`"
+    );
+    std::fs::write(steps.join("end.go"), "go").expect("the gate opens");
+    assert_eq!(holder.wait().expect("flow run ends").code(), Some(0));
 }
