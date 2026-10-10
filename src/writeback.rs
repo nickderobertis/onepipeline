@@ -639,7 +639,7 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         // llmlint: ignore[changed_behavior_has_e2e] unreachable from a write-back: only `project graph` raises these, and a write-back reads and copies but never draws a graph; `writeback::tests` holds each word.
         EngineError::GraphGroupNotText { .. } => decided("graph-group"),
         EngineError::DependencyCycle { .. } => decided("dependency-cycle"),
-        // llmlint: ignore-block[changed_behavior_has_e2e] a write-back meets these only where the `onetaskgraph.yaml` it reads opts into the store's public boundary (a `write_policy` or a declared `visibility`), which no onepipeline journey configures; what this adds is the word each is recorded under, and that is the store's own: `writeback::tests::every_engine_failure_is_named_as_the_store_names_it` holds every arm here, `visibility-unreadable`'s class included, to `onetaskgraph_core::Failure::from` for the same error, so a journey reaching one would prove nothing that comparison does not.
+        // llmlint: ignore-block[changed_behavior_has_e2e] reached only when the `onetaskgraph.yaml` opts into the store's public boundary, which no journey configures; `writeback::tests::every_engine_failure_is_named_as_the_store_names_it` holds each word to `onetaskgraph_core::Failure::from`.
         EngineError::NotPrivateDestination { .. } => decided("not-private-destination"),
         EngineError::DestinationNotPrivate { .. } => decided("destination-not-private"),
         EngineError::BoundaryRefused { .. } => decided("boundary-refused"),

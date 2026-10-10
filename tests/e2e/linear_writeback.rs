@@ -1378,8 +1378,7 @@ fn a_github_source_projecting_a_follow_ups_host_is_read_and_settled_without_writ
             .expect("a request log")
             .clone()
     };
-    // Settle one task, and answer what the endpoint was sent from the reply until the write-back
-    // came to rest, once its status and its evidence are both on the board.
+    // The requests one task's settlement sent.
     let settled = |id: &str| -> (String, Vec<Value>) {
         let sent = requests().len();
         let evidence = format!("{id} settled on the board");
