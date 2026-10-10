@@ -402,6 +402,339 @@ impl onetaskgraph_core::boundary::WritePolicy for WritePolicy {
     }
 }
 
+/// Whether `dep` → `node` is an export edge of the run as it stands now.
+pub(crate) fn is_export_edge(state: &crate::projection::RunState, dep: &str, node: &str) -> bool {
+    state.plan.as_ref().is_some_and(|plan| {
+        edges_now(&plan.export_edges, &state.superseded)
+            .iter()
+            .any(|edge| edge.from == dep && edge.to == node)
+    })
+}
+
+/// What one dispatch is told and given because of the boundary.
+///
+/// Every field but the term scope is empty outside a mixed plan, so a
+/// single-visibility plan's dispatch is composed exactly as it always was.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Dispatching {
+    /// The run's term scope, which every check this dispatch's closeout asks derives
+    /// its terms from.
+    pub(crate) term_scope: onevcs::TermScope,
+    /// The section appended to the task this dispatch is handed: the template context
+    /// and the guidance for its side of the boundary. Mixed plans only.
+    pub(crate) section: Option<String>,
+    /// The neutral name proposed for a branch this node's session cuts, in place of the
+    /// plan-derived one: a public node's and an export producer's. The host's branch
+    /// prefix is put in front of it by `onevcs`.
+    pub(crate) branch_name: Option<String>,
+    /// The export this consumer's session starts from.
+    pub(crate) export: Option<Export>,
+    /// Whether this node is public in a mixed plan, so what is rendered for it names
+    /// nothing of the run beyond the node itself.
+    pub(crate) public: bool,
+}
+
+/// The template context a mixed plan's dispatch receives.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct Context {
+    /// Always `true`: a single-visibility plan has no context at all.
+    pub(crate) mixed: bool,
+    /// The dispatching node's clearance.
+    pub(crate) clearance: Clearance,
+    /// The directory an export producer writes its generic example under.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) export_directory: Option<String>,
+    /// The directory an export lands in, in the consumer's repository.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) target_directory: Option<String>,
+}
+
+/// One export a consumer's session starts from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Export {
+    /// The producer's node id, which only the private record names.
+    pub(crate) producer: String,
+    /// The producer's repository.
+    pub(crate) from: String,
+    /// The producer's kept branch.
+    pub(crate) branch: String,
+    /// The commit that branch was kept at, where the settlement recorded one.
+    pub(crate) head: Option<String>,
+    /// The directory exported.
+    pub(crate) source_directory: String,
+    /// The consumer's repository.
+    pub(crate) to: String,
+    /// Where the directory lands there.
+    pub(crate) target_directory: String,
+    /// The consumer's position in the plan, from one, which its branch is named by.
+    pub(crate) ordinal: usize,
+}
+
+/// The heading of the boundary section a mixed plan's task carries.
+pub(crate) const SECTION_HEADING: &str = "## Repository boundary";
+
+/// A fresh opaque id: twelve hex characters that say nothing about the run, the plan or
+/// the node they name a branch for.
+fn opaque() -> String {
+    use sha2::Digest;
+    static MINTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+            .to_le_bytes(),
+    );
+    hasher.update(std::process::id().to_le_bytes());
+    hasher.update(
+        MINTED
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .to_le_bytes(),
+    );
+    hasher
+        .finalize()
+        .iter()
+        .take(6)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// What one dispatch of `node` is told and given, in a plan resolved as `resolved`.
+///
+/// Refused — the node settles as an infrastructure failure, before anything is
+/// dispatched — where it consumes an export whose producer recorded no kept branch: its
+/// session starts from the export or not at all, and never from the default base.
+pub(crate) fn dispatching(
+    resolved: &Resolved,
+    plan: &Plan,
+    node: &Node,
+    kept: &BTreeMap<String, String>,
+    heads: &BTreeMap<String, String>,
+) -> Result<Dispatching, String> {
+    let mut dispatching = Dispatching {
+        term_scope: resolved.term_scope(),
+        ..Dispatching::default()
+    };
+    if !resolved.mixed() {
+        return Ok(dispatching);
+    }
+    let clearance = resolved.clearance(&node.id);
+    let ordinal = plan
+        .tasks
+        .iter()
+        .position(|candidate| candidate.id == node.id)
+        .map_or(plan.tasks.len() + 1, |index| index + 1);
+    let produced = plan.export_edges.iter().find(|edge| edge.from == node.id);
+    let consumed = consumed_by(plan, &node.id);
+    let mut context = Context {
+        mixed: true,
+        clearance,
+        export_directory: None,
+        target_directory: None,
+    };
+    let mut lines: Vec<String> = Vec::new();
+    match (clearance, produced, consumed) {
+        (Clearance::Private, Some(edge), _) => {
+            context.export_directory = Some(edge.source_directory.clone());
+            context.target_directory = Some(edge.target_directory.clone());
+            dispatching.branch_name = Some(format!("export/{}", opaque()));
+            lines.push(format!(
+                "This node is an export producer. Write the generic example under `{}`; \
+                 after this node's branch is kept, exactly that directory is exported into a \
+                 public repository under `{}`.",
+                edge.source_directory, edge.target_directory
+            ));
+            lines.extend(PRODUCER.iter().map(|line| format!("- {line}")));
+        }
+        (Clearance::Private, None, _) => {
+            lines.push(
+                "This node is private. Its work reaches a public node only through an export \
+                 edge."
+                    .to_owned(),
+            );
+            lines.push(summary());
+        }
+        (Clearance::Public, _, consumed) => {
+            dispatching.public = true;
+            if node.repo.is_some() {
+                dispatching.branch_name = Some(format!("public/{}/task-{ordinal}", opaque()));
+            }
+            if let Some(edge) = consumed {
+                context.target_directory = Some(edge.target_directory.clone());
+                let Some(branch) = kept.get(&edge.from) else {
+                    return Err(
+                        "its export producer settled with no kept branch, so there is nothing \
+                         to export and its session does not start from anything else"
+                            .to_owned(),
+                    );
+                };
+                let producer = plan
+                    .tasks
+                    .iter()
+                    .find(|candidate| candidate.id == edge.from)
+                    .and_then(|producer| producer.repo.clone())
+                    .ok_or_else(|| "its export producer names no repository".to_owned())?;
+                dispatching.export = Some(Export {
+                    producer: edge.from.clone(),
+                    from: producer,
+                    branch: branch.clone(),
+                    head: heads.get(&edge.from).cloned(),
+                    source_directory: edge.source_directory.clone(),
+                    to: node.repo.clone().unwrap_or_default(),
+                    target_directory: edge.target_directory.clone(),
+                    ordinal,
+                });
+                lines.push(format!(
+                    "This node is public, and its branch starts from one neutral commit that \
+                     adds generic examples under `{}`; build on them.",
+                    edge.target_directory
+                ));
+            } else {
+                lines.push("This node is public.".to_owned());
+            }
+            lines.push(
+                "Everything it writes is public: name no private repository, project, plan, \
+                 task, path or identifier in files, commit messages, branch names or \
+                 change-request text."
+                    .to_owned(),
+            );
+        }
+    }
+    let rendered = serde_json::to_string(&serde_json::json!({ "boundary": context }))
+        .expect("a context serializes");
+    dispatching.section = Some(format!(
+        "{SECTION_HEADING}\n\nThis plan spans public and private repositories.\n\n```json\n{rendered}\n```\n\n{}",
+        lines.join("\n")
+    ));
+    Ok(dispatching)
+}
+
+/// A task with the boundary section appended, where there is one.
+pub(crate) fn with_section(task: String, section: Option<&str>) -> String {
+    match section {
+        Some(section) => format!("{}\n\n{section}", task.trim_end()),
+        None => task,
+    }
+}
+
+/// The host's branch prefix, resolved as `onevcs` resolves it for a branch it cuts: the
+/// environment over the host's branches file over none. An export's branch is named by
+/// this crate, so the prefix is put in front of it here, and the export screens the
+/// whole name — the prefix included — against the run's terms.
+fn host_prefix() -> String {
+    if let Ok(prefix) = std::env::var(onevcs::branches::PREFIX_ENV) {
+        return prefix;
+    }
+    onevcs::branches::default_path()
+        .ok()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|raw| serde_norway::from_str::<onevcs::branches::BranchesFile>(&raw).ok())
+        .map(|file| file.prefix)
+        .unwrap_or_default()
+}
+
+/// What the run's private record holds about one export: everything about where it came
+/// from, which no public renderer reads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct Recorded {
+    producer: String,
+    from: String,
+    branch: String,
+    head: Option<String>,
+    source_directory: String,
+    to: String,
+    target_directory: String,
+    exported: String,
+    exported_head: String,
+}
+
+/// Where the run keeps its exports: a private file beside its journal.
+fn exports_path(paths: &crate::ledger::RunPaths) -> std::path::PathBuf {
+    paths.dir.join("exports.json")
+}
+
+/// The public branch `export` starts its consumer from, exporting it the first time it
+/// is asked for and answering the recorded one every time after — a re-dispatch, a
+/// retry's replacement and a resumed driver all start from the same commit, never from
+/// the default base. A producer kept again at a new commit is exported anew.
+///
+/// The refusal is the export's own neutral sentence; what it found is kept privately by
+/// `onevcs`.
+pub(crate) fn ensure_export(
+    paths: &crate::ledger::RunPaths,
+    export: &Export,
+    term_scope: &onevcs::TermScope,
+) -> Result<String, String> {
+    let path = exports_path(paths);
+    let mut recorded: Vec<Recorded> = std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default();
+    let same = |held: &Recorded| {
+        held.producer == export.producer
+            && held.branch == export.branch
+            && held.head == export.head
+            && held.source_directory == export.source_directory
+            && held.to == export.to
+            && held.target_directory == export.target_directory
+    };
+    if let Some(held) = recorded.iter().find(|held| same(held)) {
+        return Ok(held.exported.clone());
+    }
+    // The kept branch was pushed from the session's own clone, so it is made reachable
+    // from the producer's registered checkout — which is where an export reads it — first.
+    // Ref plumbing only: nothing is checked out and nothing is published.
+    onevcs::import_branch(&onevcs::ImportRequest {
+        repo: std::path::PathBuf::from(&export.from),
+        branch: export.branch.clone(),
+        from: None,
+        under: None,
+    })
+    .map_err(|refused| {
+        // What was refused names the producer's repository and branch, so it goes to the
+        // driver's own log — private, on this host — and the consumer is told neutrally.
+        eprintln!("onepipeline: an export producer's kept branch could not be imported: {refused}");
+        "the export producer's kept branch could not be made reachable for its export; the \
+         driver's log on this host says why"
+            .to_owned()
+    })?;
+    let branch_name = format!(
+        "{}public/{}/task-{}",
+        host_prefix(),
+        opaque(),
+        export.ordinal
+    );
+    let exported = onevcs::export(
+        &onevcs::Providers::real(),
+        &onevcs::ExportRequest {
+            from: export.from.clone(),
+            branch: export.branch.clone(),
+            directory: export.source_directory.clone(),
+            to: export.to.clone(),
+            target_directory: export.target_directory.clone(),
+            branch_name,
+            term_scope: term_scope.clone(),
+        },
+    )
+    .map_err(|refused| refused.to_string())?;
+    recorded.push(Recorded {
+        producer: export.producer.clone(),
+        from: export.from.clone(),
+        branch: export.branch.clone(),
+        head: export.head.clone(),
+        source_directory: export.source_directory.clone(),
+        to: export.to.clone(),
+        target_directory: export.target_directory.clone(),
+        exported: exported.branch.clone(),
+        exported_head: exported.head,
+    });
+    let bytes = serde_json::to_vec_pretty(&recorded).map_err(|error| error.to_string())?;
+    crate::ledger::write_atomic(&path, &bytes, crate::ledger::Durability::Record)
+        .map_err(|error| format!("the export was made but could not be recorded: {error}"))?;
+    Ok(exported.branch)
+}
+
 /// The engine-owned advice for crossing the boundary: one typed value, rendered into
 /// every refusal this module makes, printed by `onepipeline boundary guidance`, and
 /// read by the host's planner injection and plan check, so no host restates the rule.

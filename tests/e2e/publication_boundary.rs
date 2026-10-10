@@ -346,3 +346,232 @@ fn a_live_edit_adding_an_ordinary_private_to_public_dependency_is_refused_before
         world.run_file("edited", "result.json").is_file()
     });
 }
+
+/// The task prose every dispatch of a node was handed, read off the `--task` the
+/// sibling's own launch carried — what its worker and its judge both read.
+pub(crate) fn tasks_of(world: &World, node: &str) -> Vec<String> {
+    let mine = format!("## What\nShip {node}.");
+    world
+        .invocations()
+        .into_iter()
+        .filter(|call| call["tool"] == "oneagentgraph")
+        .filter_map(|call| {
+            let args = call["args"].as_array()?.clone();
+            let at = args.iter().position(|arg| arg == "--task")?;
+            args.get(at + 1)?.as_str().map(str::to_owned)
+        })
+        .filter(|task| task.starts_with(&mine))
+        .collect()
+}
+
+/// `git` in `dir`, answering its stdout trimmed.
+pub(crate) fn git_out(world: &World, dir: &std::path::Path, args: &[&str]) -> String {
+    crate::harness::git(world, dir, args).trim().to_owned()
+}
+
+/// One settled node of a run's `result.json`.
+pub(crate) fn settled(world: &World, run: &str, node: &str) -> Value {
+    let result = world.run_json(run, "result.json");
+    result["nodes"]
+        .as_array()
+        .expect("nodes")
+        .iter()
+        .find(|settled| settled["id"] == node)
+        .cloned()
+        .unwrap_or_else(|| panic!("no node {node} in {result}\n{}", world.dump()))
+}
+
+/// A valid mixed plan: `generalize` keeps a generic example under `examples/generic`
+/// in the private repository, and the public `examples` builds on its export.
+pub(crate) fn exported_plan(name: &str) -> Value {
+    mixed_plan(
+        name,
+        vec![
+            producer("generalize", &[]),
+            public("examples", &["generalize"]),
+        ],
+        vec![edge("generalize", "examples")],
+    )
+}
+
+#[test]
+fn a_public_consumer_starts_from_one_neutral_export_commit_and_the_edge_adds_no_dispatch() {
+    let (world, private, public) = mixed_world("boundary-export");
+    world.script("generalize.work-at", "examples/generic/sample.md");
+    world.script("generalize.work", "a generic example\n");
+    world.script("examples.work", "what the public node built on it\n");
+    let project = world.plan("exported", &exported_plan("exported"));
+    world.run(&["start", &project, "--attach"]).settled();
+
+    let producer = settled(&world, "exported", "generalize");
+    assert_eq!(
+        producer["outcome"],
+        "preserved",
+        "{producer}\n{}",
+        world.dump()
+    );
+    let consumer = settled(&world, "exported", "examples");
+    assert_eq!(consumer["status"], "done", "{consumer}\n{}", world.dump());
+
+    // Each node is dispatched once, and nothing else is: keeping the producer's work,
+    // exporting it and opening the consumer's session spend no model turn.
+    let dispatched: Vec<String> = world
+        .events_of("exported", "node-dispatched")
+        .iter()
+        .map(|event| {
+            event["labels"]["node"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(dispatched, ["generalize", "examples"], "{}", world.dump());
+    let runs = world
+        .invocations()
+        .iter()
+        .filter(|call| call["tool"] == "oneagentgraph" && call["args"][0] == "run")
+        .count();
+    assert_eq!(runs, 2, "{:?}", world.invocations());
+
+    // Both branches are neutral: neither names the plan or a node.
+    let kept = producer["branch"].as_str().expect("a kept branch");
+    assert!(
+        kept.starts_with("export/") && kept.len() == "export/".len() + 12,
+        "{kept}"
+    );
+    let landed_on = consumer["branch"].as_str().unwrap_or_default().to_owned();
+    let segments: Vec<&str> = landed_on.split('/').collect();
+    assert_eq!(segments.len(), 3, "{landed_on}");
+    assert_eq!(segments[0], "public");
+    assert_eq!(segments[1].len(), 12, "{landed_on}");
+    assert_eq!(segments[2], "task-2", "{landed_on}");
+
+    // The export is one commit on the public base, under one neutral subject and
+    // author, on the branch the consumer's session continued — and what landed on the
+    // public base carries the exported file, which the default base never had.
+    git_out(&world, &public.checkout, &["fetch", "origin"]);
+    // Read off the run's private record of the export, which is the one place that
+    // names where it came from as well as what it made.
+    let recorded = world.run_json("exported", "exports.json");
+    let recorded = recorded.as_array().expect("a list of exports");
+    assert_eq!(recorded.len(), 1, "{recorded:?}");
+    assert_eq!(recorded[0]["producer"], "generalize");
+    assert_eq!(recorded[0]["exported"], consumer["branch"]);
+    let export_commit = recorded[0]["exported_head"]
+        .as_str()
+        .expect("the export's head")
+        .to_owned();
+    let shown = git_out(
+        &world,
+        &public.checkout,
+        &[
+            "show",
+            "--no-patch",
+            "--format=%an <%ae>|%cn <%ce>|%s|%P",
+            &export_commit,
+        ],
+    );
+    let parents = shown.rsplit('|').next().unwrap_or_default();
+    assert_eq!(parents.split_whitespace().count(), 1, "{shown}");
+    assert!(
+        shown.starts_with(
+            "Example Export <export@example.invalid>|Example Export <export@example.invalid>|Add generic example fixtures|"
+        ),
+        "{shown}"
+    );
+    let base_then = git_out(
+        &world,
+        &public.checkout,
+        &["log", "--format=%H", "-1", "origin/main~1"],
+    );
+    assert_eq!(parents, base_then, "the export is not on the public base");
+    let exported = git_out(
+        &world,
+        &public.checkout,
+        &["show", "origin/main:examples/sample.md"],
+    );
+    assert_eq!(exported, "a generic example");
+    let private_head = producer["head"].as_str().expect("a kept head");
+    let reachable = std::process::Command::new("git")
+        .args(["cat-file", "-e", &format!("{private_head}^{{commit}}")])
+        .current_dir(&public.origin)
+        .status()
+        .expect("git runs");
+    assert!(
+        !reachable.success(),
+        "the producer's commit reached the public repository"
+    );
+    let whole = git_out(
+        &world,
+        &public.checkout,
+        &["log", "--all", "--format=%B%an%ae"],
+    );
+    for private_name in ["service", "generalize", "exported", kept] {
+        assert!(
+            !whole.contains(private_name),
+            "the public history names {private_name}:\n{whole}"
+        );
+    }
+    drop(private);
+
+    // The template context, mixed plans only: each side is told which it is on, the
+    // producer where to write and where it lands, the consumer where its base put it.
+    let producer_task = tasks_of(&world, "generalize")
+        .pop()
+        .expect("a producer dispatch");
+    assert!(
+        producer_task.contains(
+            r#"{"boundary":{"mixed":true,"clearance":"private","export_directory":"examples/generic","target_directory":"examples"}}"#
+        ),
+        "{producer_task}"
+    );
+    assert!(producer_task.contains("commit subject"), "{producer_task}");
+    let consumer_task = tasks_of(&world, "examples")
+        .pop()
+        .expect("a consumer dispatch");
+    assert!(
+        consumer_task.contains(
+            r#"{"boundary":{"mixed":true,"clearance":"public","target_directory":"examples"}}"#
+        ),
+        "{consumer_task}"
+    );
+    for private_name in ["service", "generalize", "exported", kept, private_head] {
+        assert!(
+            !consumer_task.contains(private_name),
+            "the public task names {private_name}:\n{consumer_task}"
+        );
+    }
+    assert!(
+        !consumer_task.contains("## Cross-repository references"),
+        "{consumer_task}"
+    );
+}
+
+#[test]
+fn a_single_visibility_plan_is_dispatched_without_any_boundary_context() {
+    for (name, repo) in [("only-private", "service"), ("only-public", "library")] {
+        let (world, _, _) = mixed_world(&format!("boundary-{name}"));
+        let mut first = lifecycle("first", &[]);
+        first["repo"] = json!(repo);
+        let mut second = lifecycle("second", &["first"]);
+        second["repo"] = json!(repo);
+        world.script("first.work", "one\n");
+        world.script("second.work", "two\n");
+        let project = world.plan(name, &mixed_plan(name, vec![first, second], vec![]));
+        world.run(&["start", &project, "--attach"]).settled();
+        for node in ["first", "second"] {
+            let tasks = tasks_of(&world, node);
+            assert!(!tasks.is_empty(), "{name}: {node} was not dispatched");
+            for task in tasks {
+                assert!(
+                    !task.contains("Repository boundary") && !task.contains("\"boundary\""),
+                    "{name}: a single-visibility dispatch carries boundary context:\n{task}"
+                );
+                assert!(
+                    task.ends_with(&format!("- {node} is published.")),
+                    "{name}: the task is not composed as it always was:\n{task}"
+                );
+            }
+        }
+    }
+}

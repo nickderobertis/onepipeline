@@ -1689,10 +1689,17 @@ fn compile_retry(
     }
     // Before anything is inherited, so what is refused is what the edit stated.
     refuse_stated_task_record("retry", replacement)?;
-    let replacement = pin_retry_branch(inherit_preserved_branch(
-        validate_retry_pin(replacement)?,
-        &target,
-    ));
+    // An export's consumer is never pinned to the branch it was working on: its session
+    // starts from the export the run recorded, which a replacement is handed the same way.
+    let consumes_an_export = frontier.export_edges.iter().any(|edge| edge.to == id);
+    let replacement = if consumes_an_export {
+        validate_retry_pin(replacement)?
+    } else {
+        pin_retry_branch(inherit_preserved_branch(
+            validate_retry_pin(replacement)?,
+            &target,
+        ))
+    };
     graph::validate_node(&replacement).map_err(|e| refuse(e.to_string()))?;
     refuse_breaking_c6b(&replacement)?;
 

@@ -1482,6 +1482,12 @@ impl Watch {
         let mut resolved: Vec<Dependency> = Vec::new();
         let mut unresolved: Vec<Unresolved> = Vec::new();
         for dep in &node.deps {
+            // An export edge carries no reference across it: what the consumer builds on
+            // is the export its session starts from, and the producer's repository,
+            // branch and commit are exactly what its public task may not name.
+            if crate::boundary::is_export_edge(state, dep, &node.id) {
+                continue;
+            }
             match self.dependency(paths, state, node, dep, mine.as_deref()) {
                 // A dependency this run cannot describe leaves the whole set
                 // unfrozen: it is answered again next pass rather than the node

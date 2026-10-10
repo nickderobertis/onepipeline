@@ -769,7 +769,18 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     }
 
     if let Some(body) = fake::node_script(dir, &key, "work") {
-        write_work(args, &fake::segment(&key), &body);
+        // `<key>.work-at` names where, relative to the workspace, the work is written:
+        // a directory an export carries, say. Absent, it is `<key>.md` at the root.
+        match fake::node_script(dir, &key, "work-at") {
+            Some(at) => write_work_at(args, at.trim(), &body),
+            None => write_work(args, &fake::segment(&key), &body),
+        }
+    }
+
+    // A worker that commits what it wrote itself, under the message scripted as
+    // `<key>.commit-saying`: the subject an export screens with the files.
+    if let Some(message) = fake::node_script(dir, &key, "commit-saying") {
+        commit_saying(args, message.trim());
     }
 
     // A worker that leaves a process of its own working inside its worktree when
@@ -1864,6 +1875,47 @@ fn linger_in_the_worktree(args: &[String], dir: &std::path::Path, key: &str, sec
             }
         }
         Err(error) => fake::fail(&format!("cannot linger in {workspace}: {error}")),
+    }
+}
+
+/// Write one document at `at`, relative to the dispatch's workspace, making the
+/// directories it is under.
+fn write_work_at(args: &[String], at: &str, body: &str) {
+    let Some(workspace) = fake::flag(args, "--dir") else {
+        fake::fail("writing a dispatch's work needs its --dir to write into");
+    };
+    let path = std::path::Path::new(&workspace).join(at);
+    if let Some(parent) = path.parent() {
+        if let Err(error) = std::fs::create_dir_all(parent) {
+            fake::fail(&format!("cannot make {}: {error}", parent.display()));
+        }
+    }
+    if let Err(error) = std::fs::write(&path, body) {
+        fake::fail(&format!("cannot write {}: {error}", path.display()));
+    }
+}
+
+/// Commit everything in the dispatch's workspace under `message`.
+fn commit_saying(args: &[String], message: &str) {
+    let Some(workspace) = fake::flag(args, "--dir") else {
+        fake::fail("committing a dispatch's work needs its --dir");
+    };
+    for argv in [vec!["add", "-A"], vec!["commit", "-q", "-m", message]] {
+        let ran = std::process::Command::new("git")
+            .args(&argv)
+            .current_dir(&workspace)
+            .stdin(std::process::Stdio::null())
+            .output();
+        match ran {
+            Ok(ran) if ran.status.success() => {}
+            Ok(ran) => fake::fail(&format!(
+                "`git {}` exited {}: {}",
+                argv.join(" "),
+                ran.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&ran.stderr).trim()
+            )),
+            Err(error) => fake::fail(&format!("cannot run `git {}`: {error}", argv.join(" "))),
+        }
     }
 }
 

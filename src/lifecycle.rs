@@ -58,9 +58,10 @@ pub struct Launch {
     /// The note deliveries the loop has handed off and not yet recorded, which
     /// a re-dispatch waits for before it reads the notes it is composed with.
     pub(crate) notes_in_flight: engine::DeliveriesInFlight,
-    /// Which private repositories every public boundary check this node's
-    /// closeout asks derives its terms from: the run's term scope.
-    pub(crate) term_scope: onevcs::TermScope,
+    /// What the publication boundary tells and gives this node's dispatches: the run's
+    /// term scope, which every check its closeout asks derives its terms from, and in a
+    /// mixed plan its side of the boundary.
+    pub(crate) boundary: crate::boundary::Dispatching,
 }
 
 /// Run one lifecycle node to settlement, re-dispatching it while its
@@ -491,6 +492,26 @@ fn attempt_once(
     // that follows them belongs to none.
     let whose = engine::dispatch_labels(run, &node.id, None, node.persona.as_deref());
     let mut branch: Option<String> = node.branch.clone();
+    // An export's consumer starts from the export: one neutral commit on the public
+    // base, made the first time it is asked for and answered from the run's record
+    // every time after. Its session continues that branch, so nothing here ever falls
+    // back to the default base, and a refused export refuses the node before any
+    // dispatch, in the export's own neutral words.
+    if let (None, Some(export)) = (&branch, &launch.boundary.export) {
+        match crate::boundary::ensure_export(paths, export, &launch.boundary.term_scope) {
+            Ok(exported) => branch = Some(exported),
+            Err(why) => {
+                return Attempt::settled(Settlement {
+                    detail: Some(why),
+                    ..Settlement::plain(
+                        &node.id,
+                        NodeStatus::Failed,
+                        Some(engine::INFRASTRUCTURE_FAILURE),
+                    )
+                })
+            }
+        }
+    }
     // The steps the preserved branch already carries, plus the ones this attempt
     // adds. Carried forward whole, because the branch a later attempt preserves
     // is the same branch: a step skipped on one attempt is still on it.
@@ -551,6 +572,13 @@ fn attempt_once(
             // where the template has to name it. One that cannot is settled before
             // any session opens: nothing has run, so there is no work to lose, and
             // the branch is never cut under some other name.
+            // A public node of a mixed plan, and an export producer, cut a neutral name
+            // in place of the plan-derived one: what names the plan or its nodes is
+            // exactly what neither may carry.
+            None if launch.boundary.branch_name.is_some() => SessionRequest {
+                branch_name: launch.boundary.branch_name.clone(),
+                ..request.clone()
+            },
             None => {
                 match crate::vcs::opening_for(request.clone(), node, launch.branch_naming.as_ref())
                 {
@@ -585,7 +613,10 @@ fn attempt_once(
         );
         let build = |attempt| DispatchRequest {
             graph: graph.clone(),
-            task: step.rendered_task_carrying(node, references, notes),
+            task: crate::boundary::with_section(
+                step.rendered_task_carrying(node, references, notes),
+                launch.boundary.section.as_deref(),
+            ),
             labels: engine::dispatch_labels(
                 run,
                 &node.id,
@@ -671,7 +702,7 @@ fn attempt_once(
             tx,
             &whose,
             vcs_filter,
-            &launch.term_scope,
+            &launch.boundary.term_scope,
         );
     }
 
@@ -1008,7 +1039,7 @@ fn publish(
                 token,
                 node.title.as_deref(),
                 body,
-                &launch.term_scope,
+                &launch.boundary.term_scope,
             ) {
                 Ok(_) => (true, None),
                 Err(error) => {
@@ -1072,7 +1103,7 @@ fn publish(
         opening_body,
         draft.as_ref(),
         cancel,
-        &launch.term_scope,
+        &launch.boundary.term_scope,
     );
     match publication.answered {
         Ok(published) => {
@@ -2310,7 +2341,18 @@ fn drafted(
         executor,
         DispatchRequest {
             graph: oneagentgraph::config::ConfigRef(graph.to_owned()),
-            task: drafting_task(node, &paths.run, held),
+            // A public node of a mixed plan's drafter is handed nothing of the run beyond
+            // the node itself: its run is named by the variable its environment carries
+            // rather than spelled out, and it reads the same boundary section its worker
+            // did, since what it drafts is public.
+            task: if launch.boundary.public {
+                crate::boundary::with_section(
+                    drafting_task(node, &format!("${}", crate::agentgraph::RUN_ID_ENV), held),
+                    launch.boundary.section.as_deref(),
+                )
+            } else {
+                drafting_task(node, &paths.run, held)
+            },
             labels: engine::dispatch_labels(&paths.run, &node.id, None, Some(PR_AUTHOR_PERSONA)),
             // None of the node's own: the drafting dispatch is not the node's work,
             // and a turn budget written for that work would be spent twice — once on
