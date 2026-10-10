@@ -815,6 +815,11 @@ impl RunState {
             run_node_sets: self.run_node_sets.clone(),
             graph_validation: None,
             stated_landings: self.stated_landings.clone(),
+            export_edges: self
+                .plan
+                .as_ref()
+                .map(|plan| crate::boundary::edges_now(&plan.export_edges, &self.superseded))
+                .unwrap_or_default(),
         }
     }
 

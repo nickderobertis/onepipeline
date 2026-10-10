@@ -483,7 +483,13 @@ pub struct Frontier {
     /// The effective run-wide node overrides, where a journal edit replaced them.
     pub run_node_sets: Option<Vec<String>>,
     /// Graph validation inputs supplied together by the driver.
+    ///
+    /// Present only where a caller holds the launch record, which is also where the
+    /// repository publication boundary is judged: it asks `onevcs` about every
+    /// repository the graph names, which a judgement off the ledger alone does not.
     pub graph_validation: Option<GraphValidation>,
+    /// The plan's export edges as they stand, each end following its retries.
+    pub export_edges: Vec<crate::plan::ExportEdge>,
     /// Where an operator has already stated each node's work landed.
     ///
     /// Carried because a `settle` at the outcome a node already holds is a
@@ -676,9 +682,14 @@ pub fn compile(
             name: None,
             concurrency: candidate.concurrency,
             tasks: Vec::new(),
-            export_edges: Vec::new(),
+            export_edges: edges_after(command, &frontier.export_edges),
         });
         graph::validate_edited(&plan).map_err(|e| Error::Refused(e.to_string()))?;
+        // And the publication boundary, by the same rules a plan is loaded under.
+        if frontier.graph_validation.is_some() {
+            crate::boundary::check(&plan, &mut crate::boundary::Onevcs::default())
+                .map_err(|refusal| Error::Refused(refusal.message))?;
+        }
     }
     if let Some(context) = &frontier.graph_validation {
         let run_sets = match command {
@@ -1635,6 +1646,21 @@ fn compile_drop(
     Ok(operations)
 }
 
+/// The export edges after `command`: a `retry` re-points every edge naming the node it
+/// supersedes at its replacement, as it re-points that node's dependents.
+fn edges_after(
+    command: &Command,
+    edges: &[crate::plan::ExportEdge],
+) -> Vec<crate::plan::ExportEdge> {
+    match command {
+        Command::Retry { id, node } => crate::boundary::edges_now(
+            edges,
+            &std::iter::once((id.clone(), node.id.clone())).collect(),
+        ),
+        _ => edges.to_vec(),
+    }
+}
+
 fn compile_retry(
     graph: &mut Graph,
     frontier: &Frontier,
@@ -1695,6 +1721,8 @@ fn compile_retry(
     if replacement.task_record.is_none() {
         replacement.task_record.clone_from(&target.task_record);
     }
+    // A replacement is the same work, so it is never less private than what it replaces.
+    replacement.classification = replacement.classification.strictest(target.classification);
 
     let direct = graph.dependents_of(id);
     let mut reset: BTreeSet<String> = direct.iter().cloned().collect();

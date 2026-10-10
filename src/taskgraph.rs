@@ -280,7 +280,7 @@ impl Store {
                     self.dir.display()
                 ),
             })?;
-        Reader::over(built)?.load(project)
+        Reader::over(built)?.load(project, &mut crate::boundary::Onevcs::default())
     }
 }
 
@@ -352,7 +352,11 @@ impl Reader {
         self.runtime.block_on(future)
     }
 
-    fn load(&self, project: &QualifiedId) -> std::result::Result<Read, Load> {
+    fn load(
+        &self,
+        project: &QualifiedId,
+        oracle: &mut dyn crate::boundary::Oracle,
+    ) -> std::result::Result<Read, Load> {
         let held = self.project(project)?;
         let members = members_of(&held.id, &held.item.metadata.clone().into_iter().collect())
             .map_err(|why| Error::Sibling {
@@ -477,6 +481,7 @@ impl Reader {
         // before anything is dispatched.
         crate::graph::check(&plan)?;
         crate::destination::check(&plan)?;
+        crate::boundary::check(&plan, oracle)?;
         // Keyed by node id, which the walk above has already established is
         // unique within the project: a plan that got this far has one task per
         // node and one node per task.
@@ -1363,7 +1368,25 @@ mod tests {
     fn load(built: Built) -> std::result::Result<Read, Load> {
         Reader::over(built)
             .expect("a runtime")
-            .load(&"plans:ship".parse().expect("a qualified id"))
+            .load(&"plans:ship".parse().expect("a qualified id"), &mut Hosted)
+    }
+
+    /// The boundary as a fixture host answers it, without reading this host's registry: a
+    /// repository under `acme/widget` is public and every other one private, and every term
+    /// check passes.
+    struct Hosted;
+
+    impl crate::boundary::Oracle for Hosted {
+        fn repository(&mut self, repo: &str) -> crate::boundary::Repository {
+            crate::boundary::Repository {
+                public: repo.ends_with("acme/widget"),
+                identity: repo.to_owned(),
+            }
+        }
+
+        fn check(&mut self, _input: onevcs::BoundaryInput) -> onevcs::BoundaryVerdict {
+            onevcs::BoundaryVerdict::Pass
+        }
     }
 
     fn refusal(load: std::result::Result<Read, Load>) -> String {
@@ -1465,7 +1488,11 @@ mod tests {
             vec![
                 task(
                     "t-generalize",
-                    node("generalize"),
+                    json!({
+                        "onepipeline.id": "generalize",
+                        "onepipeline.persona": "engineer",
+                        "onepipeline.publish": "preserve",
+                    }),
                     json!({
                         "classification": "private",
                         "repositories": ["github.com/acme/inner", "github.com/acme/notes"],
@@ -1961,7 +1988,10 @@ mod tests {
         // And a project the store answers nothing for is one that is not there.
         let missing = Reader::over(store(json!({}), vec![], vec![]))
             .expect("a runtime")
-            .load(&"plans:elsewhere".parse().expect("a qualified id"));
+            .load(
+                &"plans:elsewhere".parse().expect("a qualified id"),
+                &mut Hosted,
+            );
         match missing {
             Err(Load::Unreadable(Error::Invalid(message))) => {
                 assert!(message.contains("names nothing"), "{message}");

@@ -179,6 +179,13 @@ pub enum Command {
     /// Registered task templates: list them, state one resolved, check one.
     #[command(subcommand)]
     Template(TemplateCommand),
+    // llmlint: ignore[new_command_or_client_gets_its_own_project] a verb group of this one
+    // binary rather than a new command or client: it reads the boundary rules the loader
+    // and the reconciler already hold a plan to, through the same private module, and
+    // ships in the same artifact on the same three registries.
+    /// The repository publication boundary: the guidance for crossing it.
+    #[command(subcommand)]
+    Boundary(BoundaryCommand),
     /// Attach a fresh driver to a run whose ledger is intact.
     Adopt(AdoptArgs),
     /// Inspect the channel command group.
@@ -272,6 +279,24 @@ pub enum PlanCommand {
     /// Run the engine's own plan loader, and every registered check, over one
     /// project.
     Check(PlanCheckArgs),
+}
+
+/// What the repository publication boundary may be asked.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+#[command(rename_all = "kebab-case")]
+pub enum BoundaryCommand {
+    /// Print the engine-owned guidance for carrying private work into a public node:
+    /// generalize, preserve, export, consume. It is the advice every boundary refusal
+    /// carries, written once.
+    Guidance(BoundaryGuidanceArgs),
+}
+
+/// `onepipeline boundary guidance`.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct BoundaryGuidanceArgs {
+    /// Print the typed guidance as one JSON object rather than as prose.
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// What the registered task templates may be asked. None of these writes to a store.

@@ -96,6 +96,10 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
     match cli.command {
         Verb::Start(args) => start(&args),
         Verb::Plan(crate::cli::PlanCommand::Check(args)) => crate::plancheck::check(&args),
+        Verb::Boundary(crate::cli::BoundaryCommand::Guidance(args)) => {
+            println!("{}", crate::boundary::render_guidance(args.json)?);
+            Ok(EXIT_SUCCESS)
+        }
         Verb::Template(command) => {
             println!("{}", template(command)?);
             Ok(EXIT_SUCCESS)
