@@ -19,13 +19,14 @@ if [ -z "$bin" ]; then
 fi
 
 export HOSTNAME=devbox-01
-root=/tmp/onepipeline-spike-host-view/runs
-rm -rf "$root"
+# A directory only this invocation owns, inside the dispatch's scratch dir.
+scratch="$(mktemp -d "${ONEPIPELINE_NODE_SCRATCH_DIR:?set ONEPIPELINE_NODE_SCRATCH_DIR to a writable directory}/spike-host-view.XXXXXX")"
+root="$scratch/runs"
 export ONEPIPELINE_RUNS_DIR="$root"
 
 # One live dispatch: a process this script starts, registered as the executor does.
 sleep 600 & live=$!
-trap 'kill "$live" 2>/dev/null || true; rm -rf "$(dirname "$root")"' EXIT
+trap 'kill "$live" 2>/dev/null || true; rm -rf "$scratch"' EXIT
 python3 "$here/fixture.py" "$root" "$live"
 
 "$bin" host > "$out/before-text.txt" 2>&1 || true
