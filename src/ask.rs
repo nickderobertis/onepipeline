@@ -204,25 +204,59 @@ pub(crate) enum Question {
     Refused(String),
 }
 
+/// Whose channel a question is raised on: a run's, or — where the asker names no
+/// run and runs in a flow — the flow's own.
+pub(crate) enum On {
+    /// The run `ONEPIPELINE_RUN_ID` names.
+    Run(RunPaths),
+    /// The flow `ONEPIPELINE_FLOW` names.
+    Flow(crate::flow::Flow),
+}
+
+impl On {
+    /// What `onepipeline reply` is told to answer this channel by: the run, or
+    /// `--flow` and the flow.
+    pub(crate) fn reply_to(&self) -> String {
+        match self {
+            Self::Run(paths) => paths.run.clone(),
+            Self::Flow(flow) => format!("--flow {}", flow.id()),
+        }
+    }
+}
+
 impl Question {
-    /// Raise `request` on the run's `surfaces` queue, under the bus policy its
-    /// launch record carries, and hand back the handle its answer arrives on.
+    /// Raise `request` on the `surfaces` queue of the run or flow `on` names,
+    /// under the bus policy its record carries, and hand back the handle its
+    /// answer arrives on.
     ///
-    /// The launch record is read first, because it is what the policy comes
+    /// A run's launch record is read first, because it is what the policy comes
     /// from: a run whose record cannot be read is refused before anything is
-    /// raised.
+    /// raised. A flow's record was read when it was opened.
     ///
     /// # Errors
     ///
     /// A launch record that cannot be read.
-    pub(crate) fn raise(paths: &RunPaths, request: Request) -> Result<Self> {
-        let launch: LaunchRecord = ledger::read_json(&paths.launch())?;
+    pub(crate) fn raise_on(on: &On, request: Request) -> Result<Self> {
+        let (config, channel) = match on {
+            On::Run(paths) => {
+                let launch: LaunchRecord = ledger::read_json(&paths.launch())?;
+                let channel = ChannelState::of_run(paths, &launch);
+                (
+                    launch
+                        .bus_config
+                        .as_ref()
+                        .map(RecordedBusConfig::config)
+                        .cloned(),
+                    channel,
+                )
+            }
+            On::Flow(flow) => (flow.bus_config().cloned(), flow.channel()),
+        };
         let window = request
             .timeout
             .map(|seconds| Duration::from_secs(seconds.get()))
-            .or_else(|| reply_window(launch.bus_config.as_ref().map(RecordedBusConfig::config)))
+            .or_else(|| reply_window(config.as_ref()))
             .unwrap_or(onemessagebus::DEFAULT_REPLY_WINDOW);
-        let channel = ChannelState::of_run(paths, &launch);
         let question = Surface {
             id: 0,
             kind: QUESTION_KIND.to_owned(),
@@ -361,6 +395,9 @@ impl Asked {
     }
 
     /// What to do next, for standard error, where the answer is not a reply.
+    ///
+    /// `run` is what `onepipeline reply` is told to answer the channel by: a run
+    /// id, or `--flow` and a flow's.
     pub(crate) fn advice(&self, run: &str, window: Duration) -> Option<String> {
         match &self.wire {
             Wire::Reply { .. } => None,

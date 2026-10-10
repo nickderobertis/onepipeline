@@ -829,6 +829,17 @@ away. And `--timeout none` does not bound the wait at
 all, which is a different value from `--timeout 0`, whose published meaning is
 unchanged: read the run once and return.
 
+**`--flow ID` watches a flow instead of a run** — a process `onepipeline flow run`
+started, and every run it launched — and returns `4` on a surface on the flow's
+own channel or a member run's, `6` on a member run's node settling, `8`
+(`run-joined`, a word a run's watch refuses) on a run joining the flow,
+`0` when the flow ends cleanly and `9` when it fails or dies; `--until run-joined`
+alone returns on a run joining and nothing else of the three. `--filter` and
+`--all` are a run's alone. [`docs/stop-guard.md`](docs/stop-guard.md#flows)
+states it, with the flow's own channel and what `unwatched` owes a flow. Under a
+wake budget a watch given no `--timeout` gives up two seconds before the budget,
+so it has returned by the time the budget is spent.
+
 ## Where a dispatch runs
 
 The [executor seam](docs/contract.md) decides. v1 ships the local executor only;

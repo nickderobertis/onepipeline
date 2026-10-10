@@ -23,9 +23,7 @@ use serde_json::json;
 
 use crate::agentgraph;
 use crate::channel::{Author, ChannelState, Command, Reply};
-use crate::cli::{
-    Cli, ReadArgs, ReplyArgs, StartArgs, SurfaceArgs, TelemetryArgs, ADOPT_FLAG, DAG_GRAPH_OFF,
-};
+use crate::cli::{Cli, StartArgs, TelemetryArgs, ADOPT_FLAG, DAG_GRAPH_OFF};
 use crate::concurrency::{self, Liveness, State};
 use crate::edits::{self, Frontier};
 use crate::engine;
@@ -129,7 +127,13 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             "the channel exposes no engine-owned verb".to_owned(),
         )),
         Verb::Channel(crate::cli::ChannelCommand::Queue(args)) => {
-            let queue = verbs::channel(&resolve(&args.run)?)?;
+            let paths = match (&args.run, &args.flow) {
+                (_, Some(flow)) => crate::flow::Flow::open(&ledger::runs_root(), flow)?.paths,
+                (Some(run), None) => resolve(run)?,
+                // The parser's required group is what makes this unreachable.
+                (None, None) => return Err(named_neither()),
+            };
+            let queue = verbs::channel(&paths)?;
             println!("{}", verbs::render_channel(&queue)?);
             Ok(EXIT_SUCCESS)
         }
@@ -142,25 +146,41 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             },
         ),
         Verb::Next(args) => {
-            let paths = resolve(&args.run)?;
-            let filter = read_filter(&paths, &args)?;
-            let next = verbs::next(&paths, &filter)?;
+            let next = match (&args.run, &args.flow) {
+                (_, Some(flow)) => {
+                    crate::flow::next(&crate::flow::Flow::open(&ledger::runs_root(), flow)?)?
+                }
+                (Some(run), None) => {
+                    let paths = resolve(run)?;
+                    let filter = read_filter(&paths, args.filter.as_deref(), args.all)?;
+                    verbs::next(&paths, &filter)?
+                }
+                (None, None) => return Err(named_neither()),
+            };
             println!("{}", verbs::render_next(&next));
             Ok(EXIT_SUCCESS)
         }
         Verb::Reply(args) => {
-            let paths = resolve(&args.run)?;
-            let text = reply_text(&args)?;
-            let receipt = verbs::reply(&paths, args.correlation.as_ref(), &text)?;
+            let (target, file) =
+                target_and_file(args.run.as_ref(), args.file.as_ref(), args.flow.as_deref())?;
+            let text = reply_text(file.as_ref())?;
+            let receipt = match target {
+                Target::Run(paths) => verbs::reply(&paths, args.correlation.as_ref(), &text)?,
+                Target::Flow(flow) => crate::flow::reply(&flow, args.correlation.as_ref(), &text)?,
+            };
             said(&receipt)
         }
         Verb::Surface(args) => {
-            let paths = resolve(&args.run)?;
+            let (target, file) =
+                target_and_file(args.run.as_ref(), args.file.as_ref(), args.flow.as_deref())?;
             // Read the body before anything is queued, so an unreadable file or
             // an empty stdin refuses the command rather than queuing a surface
             // with nothing in it.
-            let message = surface_message(&args)?;
-            let surfaced = verbs::surface(&paths, args.kind, message)?;
+            let message = surface_message(args.message.as_ref(), file.as_ref())?;
+            let surfaced = match target {
+                Target::Run(paths) => verbs::surface(&paths, args.kind, message)?,
+                Target::Flow(flow) => crate::flow::surface(&flow, args.kind, message)?,
+            };
             println!("{}", verbs::render_surfaced(&surfaced));
             Ok(EXIT_SUCCESS)
         }
@@ -235,7 +255,7 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
         }
         Verb::Monitor(args) => {
             let paths = resolve(&args.read.run)?;
-            let filter = read_filter(&paths, &args.read)?;
+            let filter = read_filter(&paths, args.read.filter.as_deref(), args.read.all)?;
             let monitored = verbs::monitor(&paths, &filter, args.cursor.as_deref())?;
             // One write of the whole document, and a failed one refused rather than
             // panicked on: a caller that closed the pipe early is not this run's failure,
@@ -259,8 +279,13 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             // `--timeout` defaults to, and a watch cannot say which wait it was
             // given.
             crate::cli::wake_budget_from_environment().map_err(Error::Invalid)?;
-            let paths = resolve(&args.read.run)?;
-            let filter = read_filter(&paths, &args.read)?;
+            let run = match (&args.read.run, &args.read.flow) {
+                (_, Some(flow)) => return watch_flow(flow, &args),
+                (Some(run), None) => run,
+                (None, None) => return Err(named_neither()),
+            };
+            let paths = resolve(run)?;
+            let filter = read_filter(&paths, args.read.filter.as_deref(), args.read.all)?;
             let request = verbs::WatchRequest {
                 filter,
                 timeout: args.timeout,
@@ -285,6 +310,16 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
         }
         Verb::Unwatched(args) => {
             let session = crate::unwatched::session(&args)?;
+            if let Some(flow) = &args.acknowledge_flow {
+                let acknowledged = crate::unwatched::acknowledge_flow(
+                    &ledger::runs_root(),
+                    flow,
+                    &session,
+                    args.reason.as_deref().unwrap_or_default(),
+                )?;
+                print!("{}", acknowledged.line());
+                return Ok(EXIT_SUCCESS);
+            }
             if let Some(run) = &args.acknowledge {
                 let acknowledged = verbs::Acknowledgement::record(
                     &ledger::runs_root(),
@@ -341,12 +376,20 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             // run that is not there or whose launch record cannot be read is
             // refused with nothing on its channel.
             let question = crate::ask::question(&args)?;
-            let run = crate::ask::run_id()?;
+            // A run named through `ONEPIPELINE_RUN_ID` wins; with none, the flow
+            // this process was started in is asked on, and with neither the
+            // run's refusal stands.
+            let on = match (crate::ask::run_id(), crate::flow::inherited()) {
+                (Ok(run), _) => crate::ask::On::Run(resolve(run.as_str())?),
+                (Err(_), Some(flow)) => {
+                    crate::ask::On::Flow(crate::flow::Flow::open(&ledger::runs_root(), &flow)?)
+                }
+                (Err(refused), None) => return Err(refused),
+            };
             let asker = crate::ask::asker()?;
             let about = crate::ask::about(&args)?;
-            let paths = resolve(run.as_str())?;
-            let raised = crate::ask::Question::raise(
-                &paths,
+            let raised = crate::ask::Question::raise_on(
+                &on,
                 crate::ask::Request {
                     message: question,
                     asker,
@@ -368,11 +411,14 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             // whole of standard output, by contract, and the advice beside it goes on standard
             // error where it changes nothing an asker parses.
             println!("{}", asked.render());
-            if let Some(advice) = asked.advice(&paths.run, window) {
+            if let Some(advice) = asked.advice(&on.reply_to(), window) {
                 eprintln!("onepipeline: {advice}");
             }
             // llmlint: ignore-end[cli_output_contract]
             Ok(asked.exit_code())
+        }
+        Verb::Flow(crate::cli::FlowCommand::Run(args)) => {
+            crate::flow::run(&ledger::runs_root(), &args)
         }
         Verb::PublishBranch(args) => crate::land::land(crate::land::Verb::PublishBranch, args.args),
         Verb::RepoRecover(args) => crate::land::land(crate::land::Verb::Recover, args.args),
@@ -481,9 +527,75 @@ fn said(receipt: &crate::verbs::Receipt) -> Result<i32> {
 }
 // llmlint: ignore-end[no_panics_on_recoverable_errors]
 
+/// What a verb that takes a run or `--flow` was pointed at.
+enum Target {
+    /// A run under the runs root.
+    Run(RunPaths),
+    /// A flow under the runs root.
+    Flow(crate::flow::Flow),
+}
+
+/// The run or flow a `reply` or a `surface` names, and the file it reads.
+///
+/// `--flow` takes the place of the run, so with it the one positional the
+/// parser read as the run is the file.
+fn target_and_file(
+    run: Option<&String>,
+    file: Option<&PathBuf>,
+    flow: Option<&str>,
+) -> Result<(Target, Option<PathBuf>)> {
+    match flow {
+        None => {
+            let run = run.ok_or_else(named_neither)?;
+            Ok((Target::Run(resolve(run)?), file.cloned()))
+        }
+        Some(id) => {
+            if run.is_some() && file.is_some() {
+                return Err(Error::Invalid(
+                    "`--flow` takes the place of the run, so the one positional it takes is the \
+                     file; two were given"
+                        .to_owned(),
+                ));
+            }
+            let file = file.cloned().or_else(|| run.map(PathBuf::from));
+            Ok((
+                Target::Flow(crate::flow::Flow::open(&ledger::runs_root(), id)?),
+                file,
+            ))
+        }
+    }
+}
+
+/// The refusal for a command naming neither a run nor `--flow`, which the
+/// parser's required group already makes.
+fn named_neither() -> Error {
+    Error::Invalid("name a run, or a flow with `--flow <ID>`".to_owned())
+}
+
+/// `watch --flow`: the flow, the wait and the log resolved exactly as a run's
+/// watch resolves its own, and the status the flow watch answers.
+fn watch_flow(flow: &str, args: &crate::cli::WatchArgs) -> Result<i32> {
+    let root = ledger::runs_root();
+    let flow = crate::flow::Flow::open(&root, flow)?;
+    let request = crate::flowwatch::Request {
+        timeout: args.timeout,
+        tick: Duration::from_secs(args.tick_interval),
+        cursor: args.cursor.clone(),
+        until: args.until.clone(),
+    };
+    let mut log = match &args.log {
+        Some(path) => Some((crate::watch::open_log(path)?, path.display().to_string())),
+        None => None,
+    };
+    crate::flowwatch::watch(&root, &flow, &request, &mut |lines| match &mut log {
+        Some((file, called)) => crate::watch::say_to(lines, file, called),
+        None => crate::watch::say(lines),
+    })
+}
+
 /// The envelope's text: the named file, or stdin.
-fn reply_text(args: &ReplyArgs) -> Result<String> {
-    match &args.file {
+fn reply_text(file: Option<&PathBuf>) -> Result<String> {
+    match file {
         Some(path) => std::fs::read_to_string(path).map_err(|e| Error::Ledger {
             path: path.clone(),
             source: e,
@@ -701,11 +813,11 @@ fn declared_filters(
 /// Off the run's **launch record** alone — the profiles a run has are declared
 /// there — so resolving a reader's flags costs one small file and never the fold
 /// the verb it is parsed for is about to make.
-fn read_filter(paths: &RunPaths, args: &ReadArgs) -> Result<EventFilter> {
-    if args.all {
+fn read_filter(paths: &RunPaths, named: Option<&str>, all: bool) -> Result<EventFilter> {
+    if all {
         return Ok(EventFilter::default());
     }
-    let named = args.filter.as_deref().unwrap_or(filter::DEFAULT_PROFILE);
+    let named = named.unwrap_or(filter::DEFAULT_PROFILE);
     if named.trim_start().starts_with('{') {
         return Ok(EventFilter::read(named)?);
     }
@@ -1123,6 +1235,9 @@ fn start(args: &StartArgs) -> Result<i32> {
     let paths = RunPaths::under(&root, &run);
     paths.create()?;
     ledger::write_json(&paths.plan(), &plan)?;
+    // The flow this launch is a member of, recorded in the flow before the run's
+    // own record names it, so no record names a flow that cannot see the run.
+    let flow = crate::flow::join(&root, &run, &sys::launching_session());
     // Before anything could project: the first projection carries the difference from this.
     crate::writeback::seed_landed(&paths.dir, &project, &read);
 
@@ -1201,6 +1316,7 @@ fn start(args: &StartArgs) -> Result<i32> {
         require_rendered: templates.require_rendered,
         // llmlint: ignore-end[changed_behavior_has_e2e]
         oneharness_sessions: Some(sessions_file(&paths)?),
+        flow: flow.unwrap_or_default(),
     };
     record.driven_by_this_process();
     // The record is durable *before* anything that reads it exists. The engine
@@ -2903,8 +3019,13 @@ fn lock_held_on(paths: &RunPaths) -> Option<ledger::LockRecord> {
 ///
 /// Trimmed at its ends as `reply` trims the envelope it reads, so `echo` and a
 /// heredoc do not queue a trailing newline; nothing inside it is touched.
-fn surface_message(args: &SurfaceArgs) -> Result<String> {
-    let (body, whence) = match (&args.message, &args.file) {
+fn surface_message(message: Option<&String>, file: Option<&PathBuf>) -> Result<String> {
+    if message.is_some() && file.is_some() {
+        return Err(Error::Invalid(
+            "a surface's text is `--message` or a file, never both".to_owned(),
+        ));
+    }
+    let (body, whence) = match (message, file) {
         (Some(message), _) => (message.clone(), "`--message`"),
         (None, Some(path)) => (
             std::fs::read_to_string(path).map_err(|e| Error::Ledger {
@@ -4004,6 +4125,7 @@ mod tests {
             template_root: String::new(),
             require_rendered: false,
             oneharness_sessions: None,
+            flow: String::new(),
             envelope_reviewer_bar: Default::default(),
         }
     }

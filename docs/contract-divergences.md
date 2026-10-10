@@ -3869,8 +3869,10 @@ the frontier and not one the planner made.
 
 **Proposal (for the contract this repository implements): add `onepipeline watch
 RUN [--filter NAME|SPEC] [--all] [--timeout SECONDS|none] [--tick-interval SECONDS]
-[--cursor CURSOR] [--until CONDITION]... [--log PATH]` to the views line, with the three exit
-codes it needs beside the three the contract already assigns.**
+[--cursor CURSOR] [--until CONDITION]... [--log PATH] [--flow ID]` to the views line, with the three exit
+codes it needs beside the three the contract already assigns.** `--flow ID` takes
+the place of `RUN` and watches a flow; entry 114 proposes it, its `run-joined`
+condition and its two exits, and it is not restated here.
 
 `docs/contract.md` fixes the read surface as `Views (CLI): runs, status, host,
 monitor RUN [--filter NAME|SPEC] [--all], results, goals, transcript RUN [NODE],
@@ -3915,6 +3917,8 @@ each change is argued:
   wait returns on the first of them to fire and the return record says which one
   did. The vocabulary is `settled`, `surface`, `nothing-driving`, `node-settled`
   and `node=<ID>`, and it is validated when the command is invoked — see below.
+  A fifth word, `run-joined`, is a flow watch's alone (entry 114) and refused on
+  a run's.
   Given none, the wait returns on `surface` and `node-settled`; given any, those
   named replace that set.
 
@@ -5246,7 +5250,7 @@ person.
   "record_name": "<pid>-<nonce>.json",
   "record_directory": "watchers",
   "nonce_hex_at_least": 8,
-  "options": ["session", "wake-budget", "acknowledge", "reason"],
+  "options": ["session", "wake-budget", "acknowledge", "acknowledge-flow", "reason"],
   "exit_reported": 6,
   "exit_none_reported": 0,
   "exit_refused": 2
@@ -9393,3 +9397,69 @@ through `status`, `results`, `runs` and `watch` with every `envelope` key and wi
 none, and `src/payload.rs`'s
 `a_record_written_before_records_named_their_envelope_still_reads` holds each of the
 four documents to an older record and a newer one.
+
+## 114. A launcher that starts runs between stages of its own held no session, so the stop guard let the turn end between them — OPEN
+
+**Proposal, for the planner who owns the contract: add the flow — `onepipeline
+flow run`, the launch record's optional `flow`, the flow lines of `unwatched`
+and `--acknowledge-flow`, `watch --flow` with its `run-joined` (`8`) and
+`flow-failed` (`9`) exits, the wake reserve, and the flow's own channel through
+`--flow` on `surface`, `next`, `reply` and `channel queue` and through `ask`
+under `ONEPIPELINE_FLOW` — exactly as the Flows section of
+[`docs/stop-guard.md`](stop-guard.md) states it.** That section is the one
+statement of the surface and is not restated here; this entry records why it
+exists and where it departs from the task that specified it.
+
+**What was wrong.** Ownership and watch leases existed only per run root (entries
+68, 85 and 98). A manager session that started a multi-stage launcher — a planning
+flow that launches a draft run, reviews it, then launches a spikes run and a
+finalize run — owed nothing whenever no run happened to exist, so the stop guard
+let the turn end between two stages, and the runs and blocking questions the
+launcher created after that woke nobody. On 2026-10-10 a finalize planner's
+question sat unread for 32 minutes and the user had no update for over an hour.
+A deploy or CI wait that launches no run was never owed anything at all.
+
+**What this build does.** A flow is registered by `flow run`, owned by its
+session, live while its holder process is alive (the watch lease's rule), and
+owed a qualifying watch while live and closure once it ends non-zero or dies. A
+run launched in a live flow is watched by the flow's qualifying watch while the
+flow lives, and judged on its own after. `watch --flow` records a lease and terms
+beside the flow exactly as a run watch does beside a run, and wakes on the flow's
+own channel, on its member runs' surfaces and settlements, on a run joining, and
+on the flow's ending. Its cursor is `flow:1:<flow>:<run>@<byte>/...`, one place per
+member run in that run's own journal.
+
+**Two departures from the task's wording, ruled by the manager.**
+
+1. *Where flows are kept.* The task asked for flow records under the runs root
+   "where run-root discovery as of v0.63.7 does not read them as run roots, so an
+   older engine lists exactly the runs it listed before". No such place exists:
+   v0.63.7's discovery treats every directory under the runs root as a claim to be
+   a run and names one without a launch record as a skipped root, and a flow needs
+   directories. The manager ruled for one `.flows/` directory: this engine's
+   discovery passes it over, an older engine lists exactly the same runs and names
+   `.flows` once as a skipped root with no launch record.
+2. *Watch-terms `until`.* A flow watch's terms record its conditions in the words
+   `--until` takes, which now include `run-joined`, beside the two every terms
+   record carries.
+
+**The wake reserve applies to a run's watch too.** A `watch` given no `--timeout`
+under a wake budget now gives up the reserve (2 seconds) before the budget rather
+than at it, and every watch with a deadline checks it at least every 500
+milliseconds. The run-watch qualifying rule of entry 98 is unchanged, so a run
+watch armed with the budget as its timeout still qualifies.
+
+**Nothing else moves.** `stop-guard`'s flags, input and verdicts are unchanged;
+`watch`'s run endings and their codes are unchanged; a run launched outside any
+flow has no `flow` key, and every record written before the key reads unchanged.
+
+**What would close it.** A ruling adding the Flows section's surface to the
+contract's views and channel paragraphs, and `EXIT_RUN_JOINED` and
+`EXIT_FLOW_FAILED` beside the watch exits.
+
+**How it is held.** `tests/e2e/flow.rs` drives every journey the section states
+through the compiled binary — a flow whose program launches real runs with a
+non-run step between them, one whose program launches none and asks its manager
+on the flow's own channel, a holder killed with SIGKILL, a nested `flow run`, and
+the wake reserve measured on the wall clock — and runs launched outside any flow
+read through `unwatched`, `stop-guard` and `watch` exactly as before.

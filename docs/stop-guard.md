@@ -75,14 +75,143 @@ To have the guard ask whether each run the session owes will **wake it** in
 time, rather than whether anything is watching it, export
 `ONEPIPELINE_WAKE_BUDGET=<SECONDS>` in the environment the session and its hook
 run in, or pass `--wake-budget <SECONDS>` on the hook's command line. Setting the
-variable also makes it `onepipeline watch`'s default `--timeout`, so the bare
-`onepipeline watch <RUN>` a blocked line names, run from that session, is the
-watch that clears it. Leave both unset and nothing changes.
+variable also makes it, less the [wake reserve](#the-wake-reserve),
+`onepipeline watch`'s default `--timeout`, so the bare `onepipeline watch <RUN>`
+a blocked line names, run from that session, is the watch that clears it. Leave
+both unset and nothing changes.
 
 A blocked line names what clears it; a `warn` names a run whose watch or closure
 the guard could not judge. A run that has settled is cleared by closing it —
 `onepipeline reply <RUN>` with a `complete` verdict, or
 `onepipeline unwatched --acknowledge <RUN> --reason <TEXT>`.
+
+## Flows
+
+A **flow** is a launched process a manager must supervise that is not itself a
+run: a planning launcher that starts a draft run, reviews it, then starts more
+runs, or a deploy or CI wait that starts none. It is owned by the session that
+started it, so `unwatched` — and through it this guard — holds that session for
+the flow's whole life, including between its runs, and `watch --flow` can wake
+the session on anything the flow or its runs need.
+
+```
+onepipeline flow run [--name <NAME>] [--session <ID>] [--bus-config <PATH>] -- <PROGRAM> [<ARG>]...
+```
+
+- **Session.** `--session`, else `ONEPIPELINE_LAUNCHER_SESSION`. With neither,
+  or blank, the program runs with no flow registered, and one line on standard
+  error says nothing will hold a session for it.
+- **Id.** Minted from `--name` (letters, digits, `.`, `_` and `-`; default: the
+  program's file name) as the first free of `<NAME>`, `<NAME>-2`, ... among the
+  flows of the runs root every verb resolves (`ONEPIPELINE_RUNS_DIR`, or its
+  default). Flow ids and run ids are separate namespaces.
+- **What it says.** Before the program starts, exactly one line on standard
+  error: `flow <ID>: watch it with: onepipeline watch --flow <ID>`.
+- **Environment.** The program's is this process's plus `ONEPIPELINE_FLOW=<ID>`.
+  A node dispatch never carries `ONEPIPELINE_FLOW`.
+- **Nesting.** Where `ONEPIPELINE_FLOW` already names a live flow of the same
+  session under the same runs root, the program runs in that flow: nothing is
+  registered and nothing is printed.
+- **Signals and status.** SIGINT, SIGTERM and SIGHUP are forwarded to the
+  program, and the verb waits for it. It records the program's exit status — a
+  signal-terminated program's as 128 + the signal; one that could not be started
+  as 127 — and exits with that same status.
+- **Liveness.** A flow is **live** while its holder — the `flow run` process — is
+  alive, on the rule a watch lease is (its pid and start token). One whose holder
+  is gone with no ending recorded has **died**.
+
+**Runs launched in a flow.** `onepipeline start` under `ONEPIPELINE_FLOW` naming
+a live flow of the launching session under the same runs root records
+`"flow": "<ID>"` in the run's `launch.json`; otherwise the key is absent and the
+run belongs to no flow.
+
+**Where flows are kept.** Every flow sits under one directory of the runs root,
+`.flows/`, whose layout is this repository's alone. Run-root discovery passes it
+over; an engine before flows lists the same runs it always did, and names
+`.flows` once as a skipped root with no launch record.
+
+### What a session owes a flow
+
+`onepipeline unwatched` — and so this guard, whose flags and verdicts do not
+change — answers, per session, beside its run lines:
+
+- A **live** flow with no qualifying live watch of it: one line, in
+  `unwatched`'s own columns with `flow <ID>` where a run id goes, naming the flow,
+  `LIVE`, why nothing counts as watching it, and
+  `onepipeline watch --flow <ID>` — followed, where the wake budget was given as
+  `--wake-budget <SECONDS>`, by ` --timeout <S>`, `<S>` being the budget less the
+  [wake reserve](#the-wake-reserve), so the command named is one that qualifies.
+  A flow id wider than the run-id column pushes the later columns right exactly as
+  a long run id does.
+- A **run** launched in a flow counts as watched while that flow is live and a
+  qualifying live watch of the flow exists. Once the flow is not live, the run is
+  judged on its own.
+- A flow that **ended with status 0** is owed nothing.
+- A flow that **ended non-zero, or died**, is owed **closure**: one line naming
+  the flow, `ENDED` and `it ended with status <N>` or `DIED` and `it died`, and
+  `onepipeline unwatched --acknowledge-flow <ID> --reason <TEXT>`, which closes
+  it. `--acknowledge-flow` requires `--reason`, refuses a flow that is still live,
+  and is recorded beside the flow, never in a run's journal.
+- Exit status `6` whenever any run or flow line is reported, and as before
+  otherwise.
+
+A **qualifying** flow watch is decided by the wake-budget rule a run watch is
+(divergence entry 98): with no budget, any live watch of the flow; under one, a
+live watch of this session's that returns on a surface and whose recorded terms
+give up within the budget **less the wake reserve**, counted from the instant it
+armed. So a `watch --flow` whose `--timeout` equals the budget never qualifies,
+and the line saying so names the reserve. The run-watch rule is unchanged.
+
+### `watch --flow`
+
+```
+onepipeline watch --flow <ID> [--timeout <SECONDS|none>] [--tick-interval <SECONDS>] [--cursor <CURSOR>] [--until <CONDITION>]... [--log <PATH>]
+```
+
+`<RUN>` and `--flow` are mutually exclusive, and `--filter` and `--all` are a
+run's alone. The watch records its lease and terms on the flow exactly as a run
+watch does on a run, so `unwatched` counts it. It returns on the first of:
+
+| Exit | Condition | When |
+| --- | --- | --- |
+| `4` | `surface` | A planner surface is waiting on the flow's own channel or on any member run's; the line names the flow or the run. |
+| `6` | `node-settled` | A member run's node settled; the line names the run and the node. |
+| `8` | `run-joined` | A member run was launched after the watch armed, or is past its cursor; the line names the run. |
+| `0` | `ended` | The flow ended with status 0. |
+| `9` | `flow-failed` | The flow ended non-zero, or died; the line names the status or the death and the `--acknowledge-flow` command. |
+| `5` | `elapsed` | Its timeout elapsed. |
+
+`--until` accepts `surface`, `node-settled` and `run-joined`, all three by
+default; the flow's ending always ends the wait. Every ending line carries
+`cursor <cursor>` to re-arm from, and each heartbeat carries the unread-surface
+count summed over the flow's own channel and its member runs. Each line is written
+twice, as a run watch's is: the human line on standard error (or `--log`), and one
+JSON record on standard output — `{"watch":"return","flow_id":…,"condition":…,"exit":…,"cursor":…,"unread":{"count":…}}`,
+with `run_id`, `node`, `status` or `died` where the condition names one.
+
+### The wake reserve
+
+Under a wake budget a watch must actually *return* within the budget, not only
+be configured to. So `watch` — a run's and `--flow` alike — given no `--timeout`
+gives up at the wake budget less a fixed **wake reserve of 2 seconds**
+(`WAKE_RESERVE_SECONDS`). While it waits it checks its deadline at least every
+**500 milliseconds** (`DEADLINE_CHECK_MILLIS`), whatever `--tick-interval` says,
+and its exit after the deadline does no work but writing its ending line and
+removing its lease.
+
+### The flow's own channel
+
+Every registered flow has a planner channel of its own, laid out exactly as a
+run's, under the bus configuration it was registered with (`--bus-config`,
+checked as `start` checks its own), and kept with the flow. `onepipeline surface`,
+`next`, `reply` and `channel queue` take `--flow <ID>` in place of `<RUN>` — with
+it, the one positional `surface` and `reply` take is the file — and the two are
+mutually exclusive. A reply to a flow is a verdict alone: a flow has no graph to
+edit, so one carrying commands is refused whole. `next --flow` answers `events`
+empty. `onepipeline ask` asks on the flow's channel where it names no run and
+`ONEPIPELINE_FLOW` is set; a run named through `ONEPIPELINE_RUN_ID` still wins. That
+is how a flow that launches no run reports to its manager and asks a blocking
+question.
 
 ## Declared sources
 
