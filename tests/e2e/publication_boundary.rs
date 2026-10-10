@@ -1134,3 +1134,60 @@ fn a_direct_reply_and_note_meet_the_same_check_without_any_bus() {
     );
     world.release("generalize.go");
 }
+
+/// What the reconciler answered each queued envelope with, by envelope id.
+fn outcome_of(world: &World, run: &str, id: u64) -> Option<Value> {
+    world
+        .command_outcomes(run)
+        .into_iter()
+        .find(|outcome| outcome["id"].as_u64() == Some(id))
+}
+
+#[cfg(unix)]
+#[test]
+fn an_envelope_queued_past_every_submission_check_and_one_replayed_by_an_adopter_meet_the_check() {
+    let (world, _) = held_mixed_run("replayed", &["zephyrine"]);
+    // Queued straight onto the run's own bus, as a host's channel server queues one:
+    // no `reply` judged it, so the reconciler is the first to.
+    crate::malformed_envelopes::sent_through_the_bus(
+        &world,
+        "replayed",
+        &json!({"version": 3, "commands": [note("examples", "follow the zephyrine layout")]}),
+    );
+    world.until("the driver to answer the queued envelope", |world| {
+        outcome_of(world, "replayed", 0).is_some()
+    });
+    let answered = outcome_of(&world, "replayed", 0).expect("an outcome");
+    assert!(
+        answered.to_string().contains("public node examples"),
+        "the queued leak was not refused by the boundary: {answered}"
+    );
+
+    // With the driver gone, a second one waits in the queue for whoever takes the run
+    // over; the adopter replays it through the same check.
+    crate::harness::end_driver(&world, "replayed");
+    crate::malformed_envelopes::sent_through_the_bus(
+        &world,
+        "replayed",
+        &json!({"version": 3, "commands": [
+            {"op": "amend", "id": "examples", "text": "match the zephyrine output"}
+        ]}),
+    );
+    world.run(&["adopt", "replayed", "--detach"]).exited(0);
+    world.until("the adopter to answer the replayed envelope", |world| {
+        outcome_of(world, "replayed", 1).is_some()
+    });
+    let answered = outcome_of(&world, "replayed", 1).expect("an outcome");
+    assert!(
+        answered.to_string().contains("public node examples"),
+        "the replayed leak was not refused by the boundary: {answered}"
+    );
+    assert!(
+        world
+            .events_of("replayed", "edit-committed")
+            .iter()
+            .all(|event| !event["payload"].to_string().contains("zephyrine")),
+        "a refused leak was committed"
+    );
+    world.release("generalize.go");
+}
