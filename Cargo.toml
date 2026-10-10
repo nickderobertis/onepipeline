@@ -904,9 +904,9 @@ onevcs-testing = "0.13.4"
 # updates it, source values winning shared keys (onetaskgraph #3567), so re-copying a
 # plan no longer deletes the design approvals recorded on the board's document.
 # `justfile`'s `onetaskgraph-version` moves with this release.
-onetaskgraph-core = "=0.3.10"
-onetaskgraph-plugin-api = "=0.3.10"
-onetaskgraph-local-md = "=0.3.10"
+onetaskgraph-core = "=0.3.11"
+onetaskgraph-plugin-api = "=0.3.11"
+onetaskgraph-local-md = "=0.3.11"
 # Not engines: two crates both members use, pinned once so they build against one version.
 # `just engines-current` reads only the engines its script names.
 sha2 = "0.10"
