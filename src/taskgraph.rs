@@ -481,7 +481,7 @@ impl Reader {
         // before anything is dispatched.
         crate::graph::check(&plan)?;
         crate::destination::check(&plan)?;
-        crate::boundary::check(&plan, oracle)?;
+        crate::boundary::check(&plan, crate::boundary::Stage::Load, oracle)?;
         // Keyed by node id, which the walk above has already established is
         // unique within the project: a plan that got this far has one task per
         // node and one node per task.

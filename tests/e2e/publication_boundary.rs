@@ -396,7 +396,7 @@ pub(crate) fn exported_plan(name: &str) -> Value {
 
 #[test]
 fn a_public_consumer_starts_from_one_neutral_export_commit_and_the_edge_adds_no_dispatch() {
-    let (world, private, public) = mixed_world("boundary-export");
+    let (world, private, library) = mixed_world("boundary-export");
     world.script("generalize.work-at", "examples/generic/sample.md");
     world.script("generalize.work", "a generic example\n");
     world.script("examples.work", "what the public node built on it\n");
@@ -449,7 +449,7 @@ fn a_public_consumer_starts_from_one_neutral_export_commit_and_the_edge_adds_no_
     // The export is one commit on the public base, under one neutral subject and
     // author, on the branch the consumer's session continued — and what landed on the
     // public base carries the exported file, which the default base never had.
-    git_out(&world, &public.checkout, &["fetch", "origin"]);
+    git_out(&world, &library.checkout, &["fetch", "origin"]);
     // Read off the run's private record of the export, which is the one place that
     // names where it came from as well as what it made.
     let recorded = world.run_json("exported", "exports.json");
@@ -463,7 +463,7 @@ fn a_public_consumer_starts_from_one_neutral_export_commit_and_the_edge_adds_no_
         .to_owned();
     let shown = git_out(
         &world,
-        &public.checkout,
+        &library.checkout,
         &[
             "show",
             "--no-patch",
@@ -481,20 +481,20 @@ fn a_public_consumer_starts_from_one_neutral_export_commit_and_the_edge_adds_no_
     );
     let base_then = git_out(
         &world,
-        &public.checkout,
+        &library.checkout,
         &["log", "--format=%H", "-1", "origin/main~1"],
     );
     assert_eq!(parents, base_then, "the export is not on the public base");
     let exported = git_out(
         &world,
-        &public.checkout,
+        &library.checkout,
         &["show", "origin/main:examples/sample.md"],
     );
     assert_eq!(exported, "a generic example");
     let private_head = producer["head"].as_str().expect("a kept head");
     let reachable = std::process::Command::new("git")
         .args(["cat-file", "-e", &format!("{private_head}^{{commit}}")])
-        .current_dir(&public.origin)
+        .current_dir(&library.origin)
         .status()
         .expect("git runs");
     assert!(
@@ -503,7 +503,7 @@ fn a_public_consumer_starts_from_one_neutral_export_commit_and_the_edge_adds_no_
     );
     let whole = git_out(
         &world,
-        &public.checkout,
+        &library.checkout,
         &["log", "--all", "--format=%B%an%ae"],
     );
     for private_name in ["service", "generalize", "exported", kept] {
@@ -574,4 +574,297 @@ fn a_single_visibility_plan_is_dispatched_without_any_boundary_context() {
             }
         }
     }
+}
+
+/// Reply to a run with `commands`, taken whether the driver applied or queued them.
+pub(crate) fn reply(world: &World, run: &str, commands: Value) {
+    let replied = world.run_with_stdin(
+        &["reply", run],
+        &json!({"version": 3, "commands": commands}).to_string(),
+    );
+    assert!(
+        [0, onepipeline::error::EXIT_QUEUED].contains(&replied.code),
+        "the reply was not taken: {}\n{}",
+        replied.stderr,
+        world.dump()
+    );
+}
+
+/// Wait until `node` has a settlement in `run`'s journal.
+fn until_settled(world: &World, run: &str, node: &str) {
+    world.until(&format!("{node} to settle"), |world| {
+        world
+            .events_of(run, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == node)
+    });
+}
+
+#[test]
+fn the_export_base_holds_through_supersession_retry_and_resume() {
+    let (world, _, library) = mixed_world("boundary-lineage");
+    // The first producer fails its task; its replacement keeps the example.
+    world.script("generalize.fail", "1");
+    world.script("generalize-2.work-at", "examples/generic/sample.md");
+    world.script("generalize-2.work", "the replacement's generic example\n");
+    // The first consumer fails its task; its replacement is cancelled while it holds
+    // its session, requeued, and then finishes.
+    world.script("examples.fail", "1");
+    world.script("examples-2.wait", "hold");
+    world.script("examples-2.work", "built on the export\n");
+    // A node held open for the whole journey keeps the driver attending the run while
+    // each failure waits for its retry.
+    world.script("keep.wait", "hold");
+    let mut plan = exported_plan("lineage");
+    plan["tasks"]
+        .as_array_mut()
+        .expect("the plan's nodes")
+        .push(crate::harness::agent("keep", &[]));
+    let project = world.plan("lineage", &plan);
+    world.run(&["start", &project, "--detach"]).exited(0);
+
+    until_settled(&world, "lineage", "generalize");
+    reply(
+        &world,
+        "lineage",
+        json!([{"op": "retry", "id": "generalize", "node": producer("generalize-2", &[])}]),
+    );
+    until_settled(&world, "lineage", "examples");
+    reply(
+        &world,
+        "lineage",
+        json!([{"op": "retry", "id": "examples", "node": public("examples-2", &[])}]),
+    );
+    world.until("the replacement consumer to hold its session", |world| {
+        world
+            .events_of("lineage", "session-opened")
+            .iter()
+            .any(|event| event["labels"]["node"] == "examples-2")
+    });
+    reply(
+        &world,
+        "lineage",
+        json!([{"op": "cancel", "id": "examples-2", "reason": "resume it later"}]),
+    );
+    world.release("examples-2.go");
+    until_settled(&world, "lineage", "examples-2");
+    std::fs::remove_file(world.fakes.join("examples-2.go")).expect("the release is taken back");
+    reply(
+        &world,
+        "lineage",
+        json!([{"op": "requeue", "id": "examples-2"}]),
+    );
+    world.until("the resumed consumer to reopen its session", |world| {
+        world
+            .events_of("lineage", "session-opened")
+            .iter()
+            .filter(|event| event["labels"]["node"] == "examples-2")
+            .count()
+            >= 2
+    });
+    world.release("examples-2.go");
+    until_settled(&world, "lineage", "examples-2");
+    world.release("keep.go");
+    world.until("the run to settle", |world| {
+        world.run_file("lineage", "result.json").is_file()
+    });
+    let consumer = settled(&world, "lineage", "examples-2");
+    assert_eq!(consumer["status"], "done", "{consumer}\n{}", world.dump());
+
+    // One export, of the replacement producer's kept work — the failed producer kept
+    // nothing to export — and every session of every consumer attempt opened on it.
+    let recorded = world.run_json("lineage", "exports.json");
+    let recorded = recorded.as_array().expect("a list of exports");
+    assert_eq!(recorded.len(), 1, "{recorded:?}");
+    assert_eq!(recorded[0]["producer"], "generalize-2");
+    let exported = recorded[0]["exported"]
+        .as_str()
+        .expect("a branch")
+        .to_owned();
+    let opened: Vec<Value> = world
+        .events_of("lineage", "session-opened")
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                event["labels"]["node"].as_str(),
+                Some("examples" | "examples-2")
+            )
+        })
+        .collect();
+    assert!(opened.len() >= 3, "{opened:?}");
+    for event in &opened {
+        assert_eq!(event["payload"]["branch"], exported, "{event}");
+    }
+
+    // What landed carries the replacement producer's example, so the consumer built on
+    // the export and never on the default base alone.
+    git_out(&world, &library.checkout, &["fetch", "origin"]);
+    assert_eq!(
+        git_out(
+            &world,
+            &library.checkout,
+            &["show", "origin/main:examples/sample.md"]
+        ),
+        "the replacement's generic example"
+    );
+}
+
+#[test]
+fn an_export_that_changes_a_path_outside_its_directory_is_refused_and_its_consumer_never_starts() {
+    let (world, _, library) = mixed_world("boundary-outside");
+    // The producer writes outside the edge's source directory.
+    world.script("generalize.work-at", "elsewhere/notes.md");
+    world.script("generalize.work", "not a generic example\n");
+    world.script("examples.work", "never written\n");
+    let project = world.plan("outside", &exported_plan("outside"));
+    world.run(&["start", &project, "--attach"]).settled();
+
+    assert_eq!(
+        settled(&world, "outside", "generalize")["outcome"],
+        "preserved"
+    );
+    let consumer = settled(&world, "outside", "examples");
+    assert_eq!(consumer["status"], "failed", "{consumer}\n{}", world.dump());
+    assert_eq!(consumer["outcome"], "infrastructure-failure");
+    let detail = world
+        .events_of("outside", "node-settled")
+        .into_iter()
+        .find(|event| event["labels"]["node"] == "examples")
+        .map(|event| {
+            event["payload"]["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .unwrap_or_default();
+    assert!(detail.contains("outside the export directory"), "{detail}");
+    for private_name in ["service", "generalize", "elsewhere"] {
+        assert!(!detail.contains(private_name), "{detail}");
+    }
+    // Nothing was dispatched for the consumer, and nothing reached the public repository.
+    assert!(tasks_of(&world, "examples").is_empty());
+    assert!(!world.run_file("outside", "exports.json").is_file());
+    let branches = git_out(
+        &world,
+        &library.checkout,
+        &["branch", "--list", "*public/*"],
+    );
+    assert!(
+        branches.is_empty(),
+        "a partial export branch was left: {branches}"
+    );
+}
+
+/// Commit a `private-terms.toml` declaring `terms` at the root of `repository`, and push
+/// it, so its committed declaration is what a term check reads.
+pub(crate) fn declare_terms(world: &World, repository: &Repository, terms: &[&str]) {
+    let listed: Vec<String> = terms.iter().map(|term| format!("{term:?}")).collect();
+    std::fs::write(
+        repository.checkout.join("private-terms.toml"),
+        format!("schema_version = 1\nterms = [{}]\n", listed.join(", ")),
+    )
+    .expect("the declaration is written");
+    crate::harness::git(world, &repository.checkout, &["add", "-A"]);
+    crate::harness::git(
+        world,
+        &repository.checkout,
+        &["commit", "-m", "chore: declare private terms"],
+    );
+    crate::harness::git(world, &repository.checkout, &["push", "origin", "main"]);
+}
+
+#[test]
+fn a_producer_named_with_a_private_term_is_given_a_neutral_branch_and_exports_only_clean_metadata()
+{
+    let (world, private, library) = mixed_world("boundary-terms");
+    // A synthetic term of the private repository, which its plan and node names carry.
+    declare_terms(&world, &private, &["zephyrine"]);
+    world.script("zephyrine-generalize.work-at", "examples/generic/sample.md");
+    world.script("zephyrine-generalize.work", "a generic example\n");
+    world.script("examples.work", "built on it\n");
+    let clean = mixed_plan(
+        "zephyrine-clean",
+        vec![
+            producer("zephyrine-generalize", &[]),
+            public("examples", &["zephyrine-generalize"]),
+        ],
+        vec![edge("zephyrine-generalize", "examples")],
+    );
+    let project = world.plan("zephyrine-clean", &clean);
+    world.run(&["start", &project, "--attach"]).settled();
+
+    // The producer cut a neutral branch, so the commit its session's close left — which
+    // names that branch — is clean, and the export went through.
+    let producer_node = settled(&world, "zephyrine-clean", "zephyrine-generalize");
+    let kept = producer_node["branch"]
+        .as_str()
+        .expect("a kept branch")
+        .to_owned();
+    assert!(
+        kept.starts_with("export/") && !kept.contains("zephyrine"),
+        "{kept}"
+    );
+    let producer_task = tasks_of(&world, "zephyrine-generalize")
+        .pop()
+        .expect("a producer dispatch");
+    assert!(
+        producer_task.contains("`<host prefix>/export/<opaque id>`"),
+        "{producer_task}"
+    );
+    assert!(producer_task.contains("commit subject"), "{producer_task}");
+    let consumer = settled(&world, "zephyrine-clean", "examples");
+    assert_eq!(consumer["status"], "done", "{consumer}\n{}", world.dump());
+    let consumer_task = tasks_of(&world, "examples")
+        .pop()
+        .expect("a consumer dispatch");
+    assert!(!consumer_task.contains("zephyrine"), "{consumer_task}");
+    git_out(&world, &library.checkout, &["fetch", "origin"]);
+    let public_history = git_out(&world, &library.checkout, &["log", "--all", "--format=%B"]);
+    assert!(!public_history.contains("zephyrine"), "{public_history}");
+
+    // A producer whose own commit subject carries the term is refused at the export, and
+    // its consumer never starts: the export's check is not weakened for what the run
+    // itself named.
+    world.script("zephyrine-dirty.work-at", "examples/generic/other.md");
+    world.script("zephyrine-dirty.work", "another generic example\n");
+    world.script(
+        "zephyrine-dirty.commit-saying",
+        "feat: add the zephyrine example",
+    );
+    let dirty = mixed_plan(
+        "zephyrine-dirty",
+        vec![
+            producer("zephyrine-dirty", &[]),
+            public("more-examples", &["zephyrine-dirty"]),
+        ],
+        vec![edge("zephyrine-dirty", "more-examples")],
+    );
+    let project = world.plan("zephyrine-dirty", &dirty);
+    world.run(&["start", &project, "--attach"]).settled();
+    assert_eq!(
+        settled(&world, "zephyrine-dirty", "zephyrine-dirty")["outcome"],
+        "preserved"
+    );
+    let refused = settled(&world, "zephyrine-dirty", "more-examples");
+    assert_eq!(refused["outcome"], "infrastructure-failure", "{refused}");
+    let detail = world
+        .events_of("zephyrine-dirty", "node-settled")
+        .into_iter()
+        .find(|event| event["labels"]["node"] == "more-examples")
+        .map(|event| {
+            event["payload"]["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .unwrap_or_default();
+    assert!(
+        detail.contains("public output carries a term of a private repository in a commit message"),
+        "{detail}"
+    );
+    assert!(
+        !detail.contains("zephyrine"),
+        "the refusal named the term: {detail}"
+    );
+    assert!(tasks_of(&world, "more-examples").is_empty());
 }

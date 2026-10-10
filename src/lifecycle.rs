@@ -497,6 +497,22 @@ fn attempt_once(
     // every time after. Its session continues that branch, so nothing here ever falls
     // back to the default base, and a refused export refuses the node before any
     // dispatch, in the export's own neutral words.
+    if let (Some(pinned), Some(_)) = (&branch, &launch.boundary.export) {
+        if !crate::boundary::is_recorded_export(paths, pinned) {
+            return Attempt::settled(Settlement {
+                detail: Some(
+                    "an export's consumer is pinned to a branch that is not its export, and its \
+                     session starts from its export or not at all"
+                        .to_owned(),
+                ),
+                ..Settlement::plain(
+                    &node.id,
+                    NodeStatus::Failed,
+                    Some(engine::INFRASTRUCTURE_FAILURE),
+                )
+            });
+        }
+    }
     if let (None, Some(export)) = (&branch, &launch.boundary.export) {
         match crate::boundary::ensure_export(paths, export, &launch.boundary.term_scope) {
             Ok(exported) => branch = Some(exported),

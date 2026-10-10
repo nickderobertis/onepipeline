@@ -687,8 +687,12 @@ pub fn compile(
         graph::validate_edited(&plan).map_err(|e| Error::Refused(e.to_string()))?;
         // And the publication boundary, by the same rules a plan is loaded under.
         if frontier.graph_validation.is_some() {
-            crate::boundary::check(&plan, &mut crate::boundary::Onevcs::default())
-                .map_err(|refusal| Error::Refused(refusal.message))?;
+            crate::boundary::check(
+                &plan,
+                crate::boundary::Stage::Edit,
+                &mut crate::boundary::Onevcs::default(),
+            )
+            .map_err(|refusal| Error::Refused(refusal.message))?;
         }
     }
     if let Some(context) = &frontier.graph_validation {

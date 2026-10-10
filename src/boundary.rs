@@ -45,16 +45,6 @@ pub(crate) enum Clearance {
     Private,
 }
 
-impl Clearance {
-    /// The word a template context and a refusal spell it with.
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Public => "public",
-            Self::Private => "private",
-        }
-    }
-}
-
 /// What a repository spelling resolves to, as far as the boundary is concerned.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Repository {
@@ -649,6 +639,15 @@ struct Recorded {
     exported_head: String,
 }
 
+/// Whether `branch` is an export this run recorded, which is the one branch an export's
+/// consumer may be pinned to.
+pub(crate) fn is_recorded_export(paths: &crate::ledger::RunPaths, branch: &str) -> bool {
+    std::fs::read(exports_path(paths))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Vec<Recorded>>(&bytes).ok())
+        .is_some_and(|recorded| recorded.iter().any(|held| held.exported == branch))
+}
+
 /// Where the run keeps its exports: a private file beside its journal.
 fn exports_path(paths: &crate::ledger::RunPaths) -> std::path::PathBuf {
     paths.dir.join("exports.json")
@@ -969,11 +968,24 @@ pub(crate) fn check_edges(plan: &Plan) -> Result<(), Refusal> {
     Ok(())
 }
 
+/// Where a plan is judged: as a document is loaded, or as a live edit leaves the graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Stage {
+    /// `start`, `plan check` and `adopt`, over what a planner wrote.
+    Load,
+    /// Every accepted live edit, over a graph the engine has also pinned branches on.
+    Edit,
+}
+
 /// Judge `plan` against the boundary's rules, asking `oracle` what its repositories are
 /// and whether a consumer's public fields are neutral.
 ///
 /// A single-visibility plan with no export edges is accepted at once.
-pub(crate) fn check(plan: &Plan, oracle: &mut dyn Oracle) -> Result<Resolved, Refusal> {
+pub(crate) fn check(
+    plan: &Plan,
+    stage: Stage,
+    oracle: &mut dyn Oracle,
+) -> Result<Resolved, Refusal> {
     let resolved = resolve(plan, oracle);
     let ids: BTreeSet<&str> = plan.tasks.iter().map(|node| node.id.as_str()).collect();
     let nodes: BTreeMap<&str, &Node> = plan
@@ -1006,8 +1018,12 @@ pub(crate) fn check(plan: &Plan, oracle: &mut dyn Oracle) -> Result<Resolved, Re
                  every repository it names public.",
             ));
         }
-        if consumer.base_branch.is_some() || consumer.branch.is_some() || consumer.resume.is_some()
-        {
+        // A `branch` or a `resume` the engine pins on a consumer it cancelled and requeued is
+        // the export's own branch, so only a document's — what a plan was loaded with — is
+        // judged here; a dispatch refuses any pinned branch that is not a recorded export.
+        let authored = matches!(stage, Stage::Load)
+            && (consumer.branch.is_some() || consumer.resume.is_some());
+        if consumer.base_branch.is_some() || authored {
             return Err(refused(
                 &consumer.id,
                 "an export consumer's session starts from its export, so it may not name an \
@@ -1167,7 +1183,8 @@ mod tests {
             ],
             vec![],
         );
-        let resolved = check(&all_private, &mut table).expect("an all-private plan is fine");
+        let resolved =
+            check(&all_private, Stage::Load, &mut table).expect("an all-private plan is fine");
         assert!(!resolved.mixed());
         assert_eq!(resolved.clearance("review"), Clearance::Private);
         assert_eq!(
@@ -1186,7 +1203,8 @@ mod tests {
             ],
             vec![],
         );
-        let resolved = check(&all_public, &mut table).expect("an all-public plan is fine");
+        let resolved =
+            check(&all_public, Stage::Load, &mut table).expect("an all-public plan is fine");
         assert!(!resolved.mixed());
         assert!(
             resolved.scope.is_empty(),
@@ -1205,7 +1223,7 @@ mod tests {
             ],
             vec![],
         );
-        let refusal = check(&direct, &mut table).expect_err("refused");
+        let refusal = check(&direct, Stage::Load, &mut table).expect_err("refused");
         assert!(
             refusal.message.contains("ordinary dependency"),
             "{refusal:?}"
@@ -1225,7 +1243,7 @@ mod tests {
             ],
             vec![],
         );
-        let refusal = check(&through, &mut table).expect_err("refused");
+        let refusal = check(&through, Stage::Load, &mut table).expect_err("refused");
         assert!(
             refusal.message.contains("private node relay"),
             "{refusal:?}"
@@ -1242,7 +1260,7 @@ mod tests {
             ],
             vec![],
         );
-        assert!(check(&classified, &mut table).is_err());
+        assert!(check(&classified, Stage::Load, &mut table).is_err());
     }
 
     #[test]
@@ -1255,7 +1273,7 @@ mod tests {
             ],
             vec![edge("generalize", "examples")],
         );
-        let resolved = check(&valid, &mut table).expect("a valid edge");
+        let resolved = check(&valid, Stage::Load, &mut table).expect("a valid edge");
         assert!(resolved.mixed());
         assert_eq!(table.asked.len(), 1);
         assert_eq!(
@@ -1273,7 +1291,7 @@ mod tests {
             ],
             ..valid.clone()
         };
-        let refusal = check(&leaky, &mut table).expect_err("refused");
+        let refusal = check(&leaky, Stage::Load, &mut table).expect_err("refused");
         assert!(refusal.message.contains("must be neutral"), "{refusal:?}");
     }
 
@@ -1347,7 +1365,7 @@ mod tests {
             ),
         ];
         for (tasks, edges, expected) in cases {
-            let refusal = check(&plan(tasks, edges), &mut table).expect_err(expected);
+            let refusal = check(&plan(tasks, edges), Stage::Load, &mut table).expect_err(expected);
             assert!(
                 refusal.message.contains(expected),
                 "{expected}: {refusal:?}"
