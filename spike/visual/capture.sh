@@ -71,7 +71,11 @@ for side in before after; do
   shot "$side" unwatched onepipeline unwatched --session "$session"
 done
 
-# Watching: before is the gallery's `watch` scene, after the mock's flow watch
+# Watching: before is the gallery's `watch` scene (`watch tracked-release
+# --tick-interval 5 --timeout none --until node=docs`); after is the mock's
+# `watch --flow plan-stop-guard --tick-interval 5 --timeout none` (the manager's
+# ruling: same verb and flags, the run argument replaced by `--flow`, no
+# `--until node=` because a flow has no node),
 # rendered the way capture.py renders that scene (its human stderr lines only).
 want=$(python3 -c 'import json;print([s["hash"] for s in json.load(open("shots/baseline/x86_64.json"))["shots"] if s["name"]=="watch"][0])')
 git fetch -q origin gh-pages
@@ -85,7 +89,7 @@ else
   cp "$work/shots/watch.svg" "$work/before-watch.svg"
 fi
 rasterize "$work/before-watch.svg" "$out/before-watch.png"
-PATH="$work/after-bin:$PATH" onepipeline watch --flow plan-stop-guard 2> "$work/after-watch.txt" >/dev/null || true
+PATH="$work/after-bin:$PATH" onepipeline watch --flow plan-stop-guard --tick-interval 5 --timeout none 2> "$work/after-watch.txt" >/dev/null || true
 render "$work/after-watch.txt" "$out/after-watch.png"
 
 ls -1 "$out"/*.png
