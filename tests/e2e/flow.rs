@@ -2094,3 +2094,39 @@ fn a_run_that_joins_as_its_flow_ends_is_examined_before_the_ending() {
     after.ended_on(NODE_SETTLED, "node-settled");
     assert_eq!(after.record["run_id"], json!("last"), "{}", after.record);
 }
+
+/// The agent double reads `ONEPIPELINE_FLOW` by the spelling the engine exports,
+/// so its report of none is a reading rather than a misspelling: a dispatch the
+/// double runs with the variable set — through a wrapper that sets it, since the
+/// engine never does — reports it on the run's own record.
+#[test]
+fn the_agent_double_reports_a_flow_a_dispatch_is_handed() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let world = World::new("flow-double");
+    let wrapper = world.root.join("oneagentgraph-in-a-flow");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\n{FLOW_ENV}=wrapped exec '{}' \"$@\"\n",
+            crate::harness::double("fake-oneagentgraph").display()
+        ),
+    )
+    .expect("a wrapper");
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let wrapped = world.as_session(&world.session).with_env(
+        "ONEPIPELINE_ONEAGENTGRAPH_BIN",
+        wrapper.to_str().expect("a path"),
+    );
+    let plan = wrapped.plan("handed", &plan_of("handed", vec![agent("handedwork", &[])]));
+    wrapped.run(&["start", &plan, "--attach"]).settled();
+    let turns: Vec<Value> = world
+        .journal("handed")
+        .into_iter()
+        .filter(|event| event["kind"] == "turn-activity")
+        .collect();
+    assert!(!turns.is_empty(), "the run dispatched no turn");
+    for turn in &turns {
+        assert_eq!(turn["payload"]["flow"], json!("wrapped"), "{turn}");
+    }
+}
