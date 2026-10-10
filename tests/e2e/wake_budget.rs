@@ -701,7 +701,8 @@ fn with_no_budget_anywhere_any_live_watch_still_counts() {
 }
 
 /// `watch`'s default `--timeout` is the wake budget where the environment names
-/// one, and 300 seconds where it names none.
+/// one, less the wake reserve so the watch has returned by the time the budget is
+/// spent (entry 114), and 300 seconds where it names none.
 #[test]
 fn a_watch_given_no_timeout_waits_the_budget_the_environment_names() {
     let world = World::new("wake-default");
@@ -709,7 +710,8 @@ fn a_watch_given_no_timeout_waits_the_budget_the_environment_names() {
     let budgeted = world
         .as_session(&world.session)
         .with_env(WAKE_BUDGET_ENV, "900");
-    for (asker, seconds) in [(&budgeted, 900), (&world, 300)] {
+    let reserve = i64::try_from(onepipeline::cli::WAKE_RESERVE_SECONDS).expect("a few seconds");
+    for (asker, seconds) in [(&budgeted, 900 - reserve), (&world, 300)] {
         let before = now_ms();
         let watch = watching(asker, &run, &[]);
         let after = now_ms();
