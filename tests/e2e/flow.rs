@@ -650,6 +650,13 @@ fn a_flow_that_launches_no_run_reports_and_asks_on_its_own_channel() {
     let correlation = question["correlation"]
         .as_str()
         .expect("a blocking question carries its correlation");
+    // Handed out by `next`, and unanswered, it is still a question: a watch of
+    // the flow still wakes on it.
+    let read = world.run(&["next", "--flow", "deploy"]);
+    read.exited(0);
+    assert_eq!(read.json()["surface"]["kind"], json!("planner-question"));
+    let watch = watching(&world, "deploy", &["--timeout", "600"]);
+    watch.returned().ended_on(SURFACE_WAITING, "surface");
     world
         .run_with_stdin(
             &["reply", "--flow", "deploy", "--correlation", correlation],
@@ -1930,4 +1937,94 @@ fn a_flow_is_named_from_its_program_and_an_ignored_signal_stays_ignored() {
     );
     std::fs::write(steps.join("end.go"), "go").expect("the gate opens");
     assert_eq!(holder.wait().expect("flow run ends").code(), Some(0));
+}
+
+/// Two settlements, or two runs joining, between one watch and the next are two
+/// returns, each in turn: a watch reports one and its cursor is past that one
+/// alone, so the watch armed on that cursor reports the other.
+#[test]
+fn a_flow_watch_reports_each_settlement_and_each_join_in_turn() {
+    let world = World::new("flow-in-turn");
+    world.script("pairone.wait", "hold");
+    world.script("pairtwo.wait", "hold");
+    let pair = world.plan(
+        "pair",
+        &plan_of("pair", vec![agent("pairone", &[]), agent("pairtwo", &[])]),
+    );
+    let one = held_plan(&world, "joinone", "joinonework");
+    let two = held_plan(&world, "jointwo", "jointwowork");
+    let flow = Flowing::start(
+        &world,
+        "turns",
+        &[
+            launch(&pair),
+            mark(&world, "paired"),
+            gate(&world, "join"),
+            launch(&one),
+            launch(&two),
+            mark(&world, "joined"),
+            gate(&world, "end"),
+        ],
+    );
+    flow.reached(&world, "paired");
+    world.until("both nodes to dispatch", |world| {
+        world.events_of("pair", "node-dispatched").len() >= 2
+    });
+    let look = |cursor: Option<&str>, until: &str| -> Returned {
+        let mut args = vec!["--until", until];
+        match cursor {
+            Some(cursor) => args.extend(["--timeout", "600", "--cursor", cursor]),
+            None => args.extend(["--timeout", "0"]),
+        }
+        watching(&world, "turns", &args).returned()
+    };
+    let before = look(None, "node-settled");
+    before.ended_on(WATCH_ELAPSED, "elapsed");
+
+    world.release("pairone.go");
+    world.release("pairtwo.go");
+    world.until("both nodes to settle", |world| {
+        world.events_of("pair", "node-settled").len() >= 2
+    });
+    let first = look(Some(&before.cursor()), "node-settled");
+    first.ended_on(NODE_SETTLED, "node-settled");
+    let second = look(Some(&first.cursor()), "node-settled");
+    second.ended_on(NODE_SETTLED, "node-settled");
+    let settled: std::collections::BTreeSet<String> = [&first, &second]
+        .iter()
+        .filter_map(|returned| returned.record["node"].as_str().map(str::to_owned))
+        .collect();
+    assert_eq!(
+        settled,
+        ["pairone", "pairtwo"]
+            .map(str::to_owned)
+            .into_iter()
+            .collect(),
+        "{} / {}",
+        first.record,
+        second.record
+    );
+
+    flow.open("join");
+    flow.reached(&world, "joined");
+    let first = look(Some(&second.cursor()), "run-joined");
+    first.ended_on(EXIT_RUN_JOINED, "run-joined");
+    let second = look(Some(&first.cursor()), "run-joined");
+    second.ended_on(EXIT_RUN_JOINED, "run-joined");
+    let joined: std::collections::BTreeSet<String> = [&first, &second]
+        .iter()
+        .filter_map(|returned| returned.record["run_id"].as_str().map(str::to_owned))
+        .collect();
+    assert_eq!(
+        joined,
+        ["joinone", "jointwo"]
+            .map(str::to_owned)
+            .into_iter()
+            .collect(),
+        "{} / {}",
+        first.record,
+        second.record
+    );
+    flow.open("end");
+    assert_eq!(flow.ended(), 0);
 }

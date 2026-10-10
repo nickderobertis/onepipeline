@@ -289,6 +289,32 @@ pub(crate) fn finished_after(path: &Path, from: u64) -> (Vec<Envelope>, u64) {
     (events, at)
 }
 
+/// [`finished_after`], stopping just past the first record `stop` answers
+/// `true` for — so a reader that reports one record at a time resumes from
+/// where it stopped rather than past everything it read.
+pub(crate) fn finished_through_first(
+    path: &Path,
+    from: u64,
+    stop: impl Fn(&Envelope) -> bool,
+) -> (Vec<Envelope>, u64) {
+    let mut at = from;
+    let mut events = Vec::new();
+    for line in ledger::read_envelope_lines(path, from) {
+        if !line.terminated {
+            break;
+        }
+        at += line.bytes + 1;
+        if let Reading::Whole(envelope) | Reading::Glued { envelope, .. } = reading(line, path) {
+            let stopped = stop(&envelope);
+            events.push(envelope);
+            if stopped {
+                break;
+            }
+        }
+    }
+    (events, at)
+}
+
 /// Whether the journal holds a line this build could not read.
 ///
 /// Strict replay needs to know: an unreadable line might have been an

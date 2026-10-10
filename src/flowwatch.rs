@@ -359,31 +359,40 @@ fn pass(
             return Ok((Some(Ending::SurfaceOnRun(run.clone())), unread));
         }
     }
-    let mut settled: Option<Ending> = None;
+    // One settlement at a time: each member is read up to and including its
+    // first settlement and no further, and the members after it not at all, so
+    // the cursor this ends on is past exactly what it reported and a second
+    // settlement is the next watch's to report rather than lost behind it.
     for (run, cursor) in known.iter_mut() {
-        let fresh = crate::watch::tail(&RunPaths::under(root, run), cursor);
-        if settled.is_none() && selected.node_settled {
-            settled = fresh
-                .iter()
-                .find_map(crate::watch::settlement_of)
-                .map(|node| Ending::NodeSettled {
+        let journal = RunPaths::under(root, run).journal();
+        if !selected.node_settled {
+            crate::watch::tail(&RunPaths::under(root, run), cursor);
+            continue;
+        }
+        let (fresh, at) = crate::journal::finished_through_first(&journal, cursor.at, |event| {
+            crate::watch::settlement_of(event).is_some()
+        });
+        cursor.at = at;
+        if let Some(node) = fresh.iter().find_map(crate::watch::settlement_of) {
+            return Ok((
+                Some(Ending::NodeSettled {
                     run: run.clone(),
                     node: node.to_owned(),
-                });
+                }),
+                unread,
+            ));
         }
     }
-    if settled.is_some() {
-        return Ok((settled, unread));
-    }
-    let mut joined: Option<String> = None;
+    // And one join at a time, for the same reason: a run this watch has not
+    // reported joining stays out of its cursor, so the next watch reports it.
     for run in members {
-        if !known.contains_key(&run) {
-            known.insert(run.clone(), Cursor::start(&run));
-            joined.get_or_insert(run);
+        if known.contains_key(&run) {
+            continue;
         }
-    }
-    if let Some(run) = joined.filter(|_| selected.run_joined) {
-        return Ok((Some(Ending::RunJoined(run)), unread));
+        known.insert(run.clone(), Cursor::start(&run));
+        if selected.run_joined {
+            return Ok((Some(Ending::RunJoined(run)), unread));
+        }
     }
     let ending = match flow.standing() {
         Ok(Standing::Ended(0)) => Some(Ending::Ended),
@@ -607,26 +616,66 @@ mod tests {
             .collect();
         assert_eq!(stated, built, "the exit table is not this build's endings");
 
-        let documented = section
+        // The return record as the section spells it: the keys every return
+        // carries, as one object in one span, and the ones a condition adds,
+        // named after it. Each emitted record is held to both, both ways.
+        let (_, after) = section
             .split_once("`{\"watch\":\"return\"")
-            .expect("the section states the return record")
-            .1
-            .split_once('`')
-            .expect("the record is one span")
+            .expect("the section states the return record");
+        let (span, after) = after.split_once('`').expect("the record is one span");
+        let spelled: serde_json::Value =
+            serde_json::from_str(&format!("{{\"watch\":\"return\"{span}").replace('…', "0"))
+                .expect("the documented record is an object once its values are filled in");
+        let always: BTreeSet<String> = spelled
+            .as_object()
+            .expect("an object")
+            .keys()
+            .cloned()
+            .collect();
+        let optional: BTreeSet<String> = after
+            .split_once("with ")
+            .and_then(|(_, rest)| rest.split_once(" where"))
+            .expect("the section names the keys a condition adds")
             .0
-            .to_owned();
-        let mut keys: BTreeSet<String> = BTreeSet::new();
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .map(str::to_owned)
+            .collect();
+        let mut added: BTreeSet<String> = BTreeSet::new();
         for ending in endings.iter().chain([&Ending::Died]) {
             let lines = ending_lines("plan", ending, "c", 0).expect("lines");
             let record: serde_json::Value = serde_json::from_str(&lines.machine).expect("JSON");
-            keys.extend(record.as_object().expect("an object").keys().cloned());
-        }
-        for key in &keys {
+            let keys: BTreeSet<String> = record
+                .as_object()
+                .expect("an object")
+                .keys()
+                .cloned()
+                .collect();
             assert!(
-                documented.contains(&format!("\"{key}\"")) || section.contains(&format!("`{key}`")),
-                "the section does not state the return record's `{key}`"
+                keys.is_superset(&always),
+                "{ending:?} returns without a key the section says every return carries: {record}"
+            );
+            let extra: BTreeSet<String> = keys.difference(&always).cloned().collect();
+            assert!(
+                extra.is_subset(&optional),
+                "{ending:?} returns a key the section does not name: {record}"
+            );
+            added.extend(extra);
+            assert_eq!(
+                record["unread"]
+                    .as_object()
+                    .map(|unread| unread.keys().cloned().collect::<BTreeSet<_>>()),
+                spelled["unread"]
+                    .as_object()
+                    .map(|unread| unread.keys().cloned().collect::<BTreeSet<_>>()),
+                "{record}"
             );
         }
+        assert_eq!(
+            added, optional,
+            "the section names a key no return carries, or misses one that does"
+        );
 
         for stated in [
             format!(
