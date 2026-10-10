@@ -322,7 +322,7 @@ fn cursor_of(flow: &str, known: &BTreeMap<String, Cursor>) -> String {
 }
 
 /// One look at the flow and every member, in the order the conditions are
-/// answered: a waiting surface, a settled node, a joined run, and the flow's
+/// answered: a joined run, a waiting surface, a settled node, and the flow's
 /// own ending. Answers the ending this look reached, if any, and how many
 /// planner surfaces are unread across the flow's channel and its members'.
 ///
@@ -335,8 +335,6 @@ fn pass(
     selected: Selected,
     known: &mut BTreeMap<String, Cursor>,
 ) -> Result<(Option<Ending>, usize)> {
-    // Read before the members are, so a run that joins while this pass runs is
-    // the next pass's to report, with its settlements from byte zero.
     let members = flow.members()?;
     let unread = flow.channel().queue().waiting.len()
         + known
@@ -348,6 +346,21 @@ fn pass(
                     .len()
             })
             .sum::<usize>();
+    // A run that joined is entered before anything else is asked. Told to return
+    // on a join, the watch returns on the first one at once — one at a time, so
+    // a run this watch has not reported joining stays out of its cursor and the
+    // next watch reports it. Told not to, every run that joined is entered here,
+    // so its surfaces and its settlements are this very pass's to answer rather
+    // than lost behind a flow that ended in the same instant.
+    for run in members {
+        if known.contains_key(&run) {
+            continue;
+        }
+        known.insert(run.clone(), Cursor::start(&run));
+        if selected.run_joined {
+            return Ok((Some(Ending::RunJoined(run)), unread));
+        }
+    }
     if selected.surface {
         if crate::watch::surface_waiting(&flow.paths).is_some() {
             return Ok((Some(Ending::SurfaceOnFlow), unread));
@@ -381,17 +394,6 @@ fn pass(
                 }),
                 unread,
             ));
-        }
-    }
-    // And one join at a time, for the same reason: a run this watch has not
-    // reported joining stays out of its cursor, so the next watch reports it.
-    for run in members {
-        if known.contains_key(&run) {
-            continue;
-        }
-        known.insert(run.clone(), Cursor::start(&run));
-        if selected.run_joined {
-            return Ok((Some(Ending::RunJoined(run)), unread));
         }
     }
     let ending = match flow.standing() {

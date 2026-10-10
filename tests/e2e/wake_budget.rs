@@ -704,7 +704,7 @@ fn with_no_budget_anywhere_any_live_watch_still_counts() {
 /// one, less the wake reserve so the watch has returned by the time the budget is
 /// spent (entry 114), and 300 seconds where it names none.
 #[test]
-fn a_watch_given_no_timeout_waits_the_budget_the_environment_names() {
+fn a_watch_given_no_timeout_waits_the_environments_budget_less_the_reserve() {
     let world = World::new("wake-default");
     let run = held(&world, "wakedefault", "build");
     let budgeted = world

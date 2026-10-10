@@ -1131,6 +1131,36 @@ fn the_flow_flags_refuse_what_a_flow_cannot_be_asked() {
             .err_has(said);
     }
 
+    // Membership is the document `start` writes, naming its own run: written
+    // by hand, one that is not that document and one naming another run are no
+    // run of the flow, and no watch reports either joining.
+    let members = flows.join("live").join("members");
+    std::fs::write(members.join("forged.json"), "{").expect("a forged membership");
+    std::fs::write(
+        members.join("ghost.json"),
+        json!({"schema_version": 1, "run_id": "member", "at": "2026-10-10T00:00:00.000Z"})
+            .to_string(),
+    )
+    .expect("a membership naming another run");
+    let placed = format!(
+        "flow:1:live:member@{}",
+        std::fs::metadata(world.run_file("member", "events.jsonl"))
+            .map_or(0, |journal| journal.len())
+    );
+    world
+        .run(&[
+            "watch",
+            "--flow",
+            "live",
+            "--timeout",
+            "0",
+            "--until",
+            "run-joined",
+            "--cursor",
+            &placed,
+        ])
+        .exited(WATCH_ELAPSED);
+
     // A flow's surface and reply read the file `--flow` leaves the positional
     // to name; a second positional, or a file beside `--message`, is refused.
     let text = world.root.join("finding.txt");
@@ -2027,4 +2057,40 @@ fn a_flow_watch_reports_each_settlement_and_each_join_in_turn() {
     );
     flow.open("end");
     assert_eq!(flow.ended(), 0);
+}
+
+/// A run that joins a flow which then ends, both before the next watch looks,
+/// is examined before the ending is: told not to return on a join, the watch
+/// returns on that run's settlement rather than on the flow's clean exit.
+#[test]
+fn a_run_that_joins_as_its_flow_ends_is_examined_before_the_ending() {
+    let world = World::new("flow-last-run");
+    let last = world.plan("last", &plan_of("last", vec![agent("lastwork", &[])]));
+    let flow = Flowing::start(
+        &world,
+        "closing",
+        &[
+            gate(&world, "go"),
+            format!("{CLI} start '{last}' --attach >/dev/null || exit 70"),
+        ],
+    );
+    let before = watching(&world, "closing", &["--timeout", "0"]).returned();
+    before.ended_on(WATCH_ELAPSED, "elapsed");
+    flow.open("go");
+    assert_eq!(flow.ended(), 0);
+    let after = watching(
+        &world,
+        "closing",
+        &[
+            "--timeout",
+            "600",
+            "--until",
+            "node-settled",
+            "--cursor",
+            &before.cursor(),
+        ],
+    )
+    .returned();
+    after.ended_on(NODE_SETTLED, "node-settled");
+    assert_eq!(after.record["run_id"], json!("last"), "{}", after.record);
 }

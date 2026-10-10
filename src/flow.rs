@@ -346,8 +346,10 @@ impl Flow {
 
     /// Every run launched in this flow, by id, in id order.
     ///
-    /// Only a `<run>.json` names a member: a writer's temporary sibling, or
-    /// anything else left in the directory, is passed over.
+    /// Only a `<run>.json` that reads as the membership `start` writes, naming
+    /// that same run, names a member: a writer's temporary sibling, a document
+    /// this build did not write, and anything else left in the directory are
+    /// passed over.
     ///
     /// # Errors
     ///
@@ -372,6 +374,12 @@ impl Flow {
             .filter_map(|entry| entry.file_name().into_string().ok())
             .filter_map(|name| name.strip_suffix(".json").map(str::to_owned))
             .filter(|run| ledger::is_valid_run_id(run))
+            .filter(|run| {
+                std::fs::read_to_string(dir.join(format!("{run}.json")))
+                    .ok()
+                    .and_then(|text| serde_json::from_str::<Member>(&text).ok())
+                    .is_some_and(|member| member.run_id == *run)
+            })
             .collect();
         members.sort();
         Ok(members)
