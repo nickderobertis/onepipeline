@@ -10120,3 +10120,74 @@ fn preserve_stacking_prose_is_the_contract_at_every_documented_surface() {
         );
     }
 }
+
+/// The publication boundary's block is the plan schema's own: its plan parses through
+/// the public types into the export edges, the classification and the record's
+/// repositories it shows, and writes back as it reads; its context is the shape a mixed
+/// dispatch carries; and its guidance steps are the ones the binary prints.
+#[test]
+fn the_publication_boundary_block_is_the_schema_and_the_guidance_the_binary_prints() {
+    let block: Value = serde_json::from_str(&fenced_block_naming("json", "boundary_plan"))
+        .expect("the boundary block is JSON");
+    let plan: Plan = serde_json::from_value(block["boundary_plan"].clone())
+        .expect("the boundary plan is a plan of this schema");
+    assert_eq!(plan.export_edges.len(), 1);
+    let edge = &plan.export_edges[0];
+    assert_eq!(
+        (
+            edge.from.as_str(),
+            edge.to.as_str(),
+            edge.source_directory.as_str(),
+            edge.target_directory.as_str()
+        ),
+        ("generalize", "examples", "examples/generic", "examples")
+    );
+    let producer = plan
+        .tasks
+        .iter()
+        .find(|node| node.id == "generalize")
+        .expect("the producer");
+    assert_eq!(
+        producer.classification,
+        onetaskgraph_plugin_api::Classification::Private
+    );
+    assert_eq!(
+        producer
+            .task_record
+            .as_ref()
+            .map(|record| record.repositories.len()),
+        Some(2)
+    );
+    assert_eq!(
+        serde_json::to_value(&plan).expect("a plan serializes"),
+        block["boundary_plan"],
+        "the boundary plan does not round-trip as the contract writes it"
+    );
+    let context = &block["boundary_context"]["boundary"];
+    assert_eq!(context["mixed"], json!(true));
+    assert!(["public", "private"].contains(&context["clearance"].as_str().unwrap_or_default()));
+
+    let printed = std::process::Command::new(env!("CARGO_BIN_EXE_onepipeline"))
+        .args(["boundary", "guidance", "--json"])
+        .output()
+        .expect("the binary runs");
+    assert!(printed.status.success());
+    let guidance: Value = serde_json::from_slice(&printed.stdout).expect("one JSON object");
+    let steps: Vec<Value> = guidance["steps"]
+        .as_array()
+        .expect("steps")
+        .iter()
+        .map(|step| step["step"].clone())
+        .collect();
+    assert_eq!(Value::Array(steps), block["boundary_guidance_steps"]);
+    assert_contract_names(
+        "the publication boundary",
+        &[
+            "onepipeline.export_edges",
+            "onepipeline boundary validate-envelope --run RUN",
+            "onepipeline boundary guidance [--json]",
+            "## Repository boundary",
+            "<host prefix>public/<opaque id>/task-<ordinal>",
+        ],
+    );
+}

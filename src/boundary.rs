@@ -798,7 +798,7 @@ fn commands_of(document: &serde_json::Value) -> Vec<serde_json::Value> {
 }
 
 /// The text a document carries that no command addresses to a node: a verdict's message
-/// and reason, and a surface's message — what a monitor or a manager says to nobody in
+/// and reason, and a surface's message — what an observer or the planner says to nobody in
 /// particular, which a public node may yet be shown.
 fn untargeted_of(document: &serde_json::Value) -> Vec<String> {
     let mut text = Vec::new();
@@ -874,24 +874,40 @@ fn prospective(plan: &Plan, commands: &[serde_json::Value]) -> Plan {
     prospective
 }
 
+/// What a command naming a node the plan does not hold is, to the boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Unknown {
+    /// Unavailable: the bus validator, which nothing judges after, cannot pass a command
+    /// it has no clearance to judge by.
+    Unavailable,
+    /// Left to the engine's own validation, which refuses a command naming no node in
+    /// words that say so, before anything is applied.
+    Elsewhere,
+}
+
 /// Judge one document — a reply envelope, a routed command record, a surface — against
 /// the run whose plan stands at `plan`.
 ///
-/// Every command addressed to a public node is checked over its whole prospective
-/// payload, in the run's own term scope; one addressed to a private node passes. Text
-/// addressed to no node is checked as public wherever the plan has a public node at all.
-/// A command naming a node the plan does not hold has no clearance to judge it by, and
-/// is unavailable rather than passed.
-pub(crate) fn judge(plan: &Plan, document: &serde_json::Value, oracle: &mut dyn Oracle) -> Judged {
+/// Only a mixed plan is judged: an all-public one derives no term and an all-private one
+/// has nowhere public for anything to reach. In one, every command addressed to a public
+/// node is checked over its whole prospective payload, in the run's own term scope; one
+/// addressed to a private node passes; and text addressed to no node is checked as
+/// public. A command naming a node the plan does not hold has no clearance to judge it
+/// by, and is what `unknown` says.
+pub(crate) fn judge(
+    plan: &Plan,
+    document: &serde_json::Value,
+    oracle: &mut dyn Oracle,
+    unknown: Unknown,
+) -> Judged {
     let commands = commands_of(document);
     let prospective = prospective(plan, &commands);
     // Asked afresh every time, never from memory: a repository whose visibility changed
     // since the last envelope is judged by what it is now.
     let resolved = resolve(&prospective, oracle);
-    let any_public = resolved
-        .clearances
-        .values()
-        .any(|clearance| *clearance == Clearance::Public);
+    if !resolved.mixed() {
+        return Judged::Pass;
+    }
     let mut ask = |text: Vec<String>, about: &str| -> Option<Judged> {
         if text.is_empty() {
             return None;
@@ -921,31 +937,33 @@ pub(crate) fn judge(plan: &Plan, document: &serde_json::Value, oracle: &mut dyn 
         let mut text = Vec::new();
         strings_of(command, &mut text);
         match target_of(command) {
-            Some(target) => {
-                if !prospective.tasks.iter().any(|node| node.id == target) {
-                    return Judged::Unavailable(format!(
-                        "the publication boundary could not judge `{op}`: the node it names has \
-                         no clearance in this run"
-                    ));
+            Some(target) if !prospective.tasks.iter().any(|node| node.id == target) => {
+                match unknown {
+                    Unknown::Unavailable => {
+                        return Judged::Unavailable(format!(
+                            "the publication boundary could not judge `{op}`: the node it names \
+                             has no clearance in this run"
+                        ))
+                    }
+                    Unknown::Elsewhere => {}
                 }
+            }
+            Some(target) => {
                 if resolved.clearance(&target) == Clearance::Public {
                     if let Some(judged) = ask(text, &format!("`{op}` for public node {target}")) {
                         return judged;
                     }
                 }
             }
-            None if any_public => {
+            None => {
                 if let Some(judged) = ask(text, &format!("`{op}`, which names no node")) {
                     return judged;
                 }
             }
-            None => {}
         }
     }
-    if any_public {
-        if let Some(judged) = ask(untargeted_of(document), "text addressed to no node") {
-            return judged;
-        }
+    if let Some(judged) = ask(untargeted_of(document), "text addressed to no node") {
+        return judged;
     }
     Judged::Pass
 }
@@ -953,12 +971,18 @@ pub(crate) fn judge(plan: &Plan, document: &serde_json::Value, oracle: &mut dyn 
 /// Refuse what [`judge`] does not pass, for the engine's own submissions and the commands
 /// its reconciler takes up — a direct `reply`, `note` or `attest`, a queued envelope, and
 /// one a dead driver had claimed — so a caller that never meets the bus meets the same
-/// rule.
+/// rule. A command naming a node the run does not hold is left to the engine's own
+/// refusal of it.
 pub(crate) fn guard(
     state: &crate::projection::RunState,
     document: &serde_json::Value,
 ) -> crate::Result<()> {
-    match judge(&plan_now(state), document, &mut Onevcs::default()) {
+    match judge(
+        &plan_now(state),
+        document,
+        &mut Onevcs::default(),
+        Unknown::Elsewhere,
+    ) {
         Judged::Pass => Ok(()),
         judged => Err(crate::Error::Refused(
             judged.reason().unwrap_or_default().to_owned(),
@@ -981,6 +1005,7 @@ pub(crate) fn validate_envelope(
         &plan_now(&view.state),
         &document,
         &mut Onevcs::default(),
+        Unknown::Unavailable,
     ))
 }
 
@@ -1674,7 +1699,8 @@ mod tests {
             judge(
                 &mixed,
                 &note("examples", "use the plain fixtures"),
-                &mut table
+                &mut table,
+                Unknown::Unavailable
             ),
             Judged::Pass
         );
@@ -1682,6 +1708,7 @@ mod tests {
             &mixed,
             &note("examples", "copy the secret layout"),
             &mut table,
+            Unknown::Unavailable,
         );
         assert!(matches!(&refused, Judged::Refuse(reason) if !reason.contains("secret")));
         assert_eq!(refused.exit_code(), 1);
@@ -1689,18 +1716,24 @@ mod tests {
             judge(
                 &mixed,
                 &note("generalize", "copy the secret layout"),
-                &mut table
+                &mut table,
+                Unknown::Unavailable
             ),
             Judged::Pass
         );
         // A node the plan does not hold has no clearance to judge by.
-        let unknown = judge(&mixed, &note("nowhere", "anything"), &mut table);
+        let unknown = judge(
+            &mixed,
+            &note("nowhere", "anything"),
+            &mut table,
+            Unknown::Unavailable,
+        );
         assert!(matches!(unknown, Judged::Unavailable(_)));
         assert_eq!(unknown.exit_code(), 2);
         // Text addressed to no node is public wherever any node is.
         let verdict = serde_json::json!({"completion": false, "message": "a secret aside"});
         assert!(matches!(
-            judge(&mixed, &verdict, &mut table),
+            judge(&mixed, &verdict, &mut table, Unknown::Unavailable),
             Judged::Refuse(_)
         ));
         // A node an envelope adds is judged by the clearance it will have.
@@ -1708,7 +1741,7 @@ mod tests {
             "id": "more", "repo": "lib-public", "title": "feat: secret things",
         }}]});
         assert!(matches!(
-            judge(&mixed, &added, &mut table),
+            judge(&mixed, &added, &mut table, Unknown::Unavailable),
             Judged::Refuse(_)
         ));
         // An all-private plan has nothing public to protect.
@@ -1717,7 +1750,8 @@ mod tests {
             judge(
                 &private,
                 &serde_json::json!({"message": "a secret aside"}),
-                &mut table
+                &mut table,
+                Unknown::Unavailable
             ),
             Judged::Pass
         );

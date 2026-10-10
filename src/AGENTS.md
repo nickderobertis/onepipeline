@@ -85,6 +85,14 @@ Rules:
   `<project>/<task>`: a copy rewrites an edge to the destination's own id only
   where its far end is a **member of the copied set**, and a bare file name —
   which resolves to `<shadow-source>:<file>` — is not one.
+- `boundary.rs` is the repository publication boundary: each node's clearance, the
+  run's term scope, the export-edge rules `taskgraph` and `edits` refuse by, the
+  dispatch-time context and export, the envelope judge both the bus validator and
+  the engine's own submissions run, and the store `WritePolicy` over the linked
+  `onevcs`. A plan that is not mixed pays nothing here — no prompt text, no
+  judgement — so a new call into it keeps that true. Its graph-shape half,
+  `check_edges`, runs inside `graph::check_edited` *before* the dependency rules,
+  so a refusal about an edge is about the edge.
 - `agentgraph.rs` and `vcs.rs` are the sibling CLIs, reached as subprocesses.
   Nothing here reimplements what they own.
 - `summary.rs` writes the per-run summary document a listing reads instead of a

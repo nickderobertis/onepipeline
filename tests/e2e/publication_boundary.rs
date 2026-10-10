@@ -48,7 +48,8 @@ pub(crate) fn declare_visibility(world: &World, declared: &[(&str, &str)]) {
     std::fs::write(
         world.onevcs_home().join("rules.yml"),
         format!(
-            "version: 4\nrules:\n{rules}default:\n  publication: local-direct\n  approvals: none\n"
+            "version: 4\nrules:\n{rules}  - match: {{owner: owner}}\n    visibility: private\n\
+             default:\n  publication: local-direct\n  approvals: none\n"
         ),
     )
     .expect("the rules file is written");
@@ -1241,8 +1242,8 @@ fn detail_of(world: &World, run: &str, node: &str) -> String {
     world
         .events_of(run, "node-settled")
         .into_iter()
-        .filter(|event| event["labels"]["node"] == node)
-        .last()
+        .rev()
+        .find(|event| event["labels"]["node"] == node)
         .map(|event| {
             event["payload"]["detail"]
                 .as_str()
