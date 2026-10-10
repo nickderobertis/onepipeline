@@ -911,30 +911,77 @@ fn flow_run_forwards_signals_mints_free_ids_and_registers_nothing_without_a_sess
         .exited(REFUSED)
         .err_has("--name ../escape");
 
-    // A SIGTERM is the program's: it traps it, and its status is recorded.
-    let flow = Flowing::start(
-        &world,
-        "trapped",
-        &[
-            "trap 'exit 42' TERM".to_owned(),
-            mark(&world, "trapping"),
-            format!(
-                "while :; do sleep 0.05; done; touch '{}'",
-                steps.join("unreachable").display()
-            ),
-        ],
+    // Each terminating signal is the program's: it traps it, and its status —
+    // not the signal's — is what `flow run` records and exits with.
+    for (signal, status) in [("INT", 41), ("TERM", 42), ("HUP", 43)] {
+        let id = format!("trapped-{}", signal.to_lowercase());
+        let flow = Flowing::start(
+            &world,
+            &id,
+            &[
+                format!("trap 'exit {status}' {signal}"),
+                mark(&world, &id),
+                format!(
+                    "while :; do sleep 0.05; done; touch '{}'",
+                    steps.join("unreachable").display()
+                ),
+            ],
+        );
+        flow.reached(&world, &id);
+        let signalled = std::process::Command::new("kill")
+            .args([&format!("-{signal}"), &flow.child.id().to_string()])
+            .status()
+            .expect("kill runs");
+        assert!(signalled.success());
+        assert_eq!(
+            flow.ended(),
+            status,
+            "SIG{signal} did not reach the program"
+        );
+        unwatched(&world, &[])
+            .exited(RUNS_UNWATCHED)
+            .out_has(&format!("flow {id}"))
+            .out_has(&format!("it ended with status {status}"));
+    }
+
+    // A flow that cannot be registered is refused, and its program never runs.
+    permissions_bind(&world);
+    let flows = world.runs.join(".flows");
+    let ran = world.root.join("ran");
+    chmod(&flows, 0o555);
+    let refused = world.run(&[
+        "flow",
+        "run",
+        "--name",
+        "unregistered",
+        "--",
+        "touch",
+        ran.to_str().expect("a path"),
+    ]);
+    chmod(&flows, 0o755);
+    refused.exited(REFUSED);
+    assert!(
+        !ran.exists(),
+        "the program of a flow that was never registered ran"
     );
-    flow.reached(&world, "trapping");
-    let signalled = std::process::Command::new("kill")
-        .args(["-TERM", &flow.child.id().to_string()])
-        .status()
-        .expect("kill runs");
-    assert!(signalled.success());
-    assert_eq!(flow.ended(), 42, "SIGTERM did not reach the program");
+    assert!(!flows.join("unregistered").exists());
+
+    // An acknowledgement that cannot be written is refused, and the closure it
+    // would have made is still owed.
+    let held = flows.join("trapped-int");
+    chmod(&held, 0o555);
+    let refused = world.run(&[
+        "unwatched",
+        "--acknowledge-flow",
+        "trapped-int",
+        "--reason",
+        "seen",
+    ]);
+    chmod(&held, 0o755);
+    refused.exited(REFUSED);
     unwatched(&world, &[])
         .exited(RUNS_UNWATCHED)
-        .out_has("flow trapped")
-        .out_has("it ended with status 42");
+        .out_has("flow trapped-int");
 }
 
 /// Set a path's Unix permission bits, for the journeys that make a directory

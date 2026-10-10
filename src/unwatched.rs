@@ -379,7 +379,7 @@ pub(crate) fn asked(root: &Path, session: &str, budget: Option<WakeBudget>) -> R
         }
     }
     for (paths, flow) in owned.runs {
-        if flow.is_some_and(|flow| watched_flows.contains(&flow)) {
+        if flow.is_some_and(|flow| watched_flows.contains(flow.as_str())) {
             continue;
         }
         let summary = match decide(&paths, session) {
@@ -745,7 +745,7 @@ fn discover_owned_runs(root: &Path, session: &str) -> Result<Discovered> {
         if launch.owned_by(session) {
             owned
                 .runs
-                .push((paths, (!launch.flow.is_empty()).then_some(launch.flow)));
+                .push((paths, crate::flow::FlowId::parse(&launch.flow)));
         }
     }
     Ok(owned)
@@ -762,8 +762,8 @@ fn discover_owned_runs(root: &Path, session: &str) -> Result<Discovered> {
 #[derive(Default)]
 struct Discovered {
     /// The run roots whose launch record names the resolved session, each with
-    /// the flow its launch record names, where it names one.
-    runs: Vec<(RunPaths, Option<String>)>,
+    /// the flow its launch record names, where it names one that is a flow id.
+    runs: Vec<(RunPaths, Option<crate::flow::FlowId>)>,
     /// What could not be resolved, each already worded for standard error.
     unresolved: Vec<String>,
 }

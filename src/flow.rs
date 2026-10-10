@@ -509,31 +509,52 @@ pub(crate) fn of_session(root: &Path, session: &str) -> Result<Vec<Flow>> {
 }
 
 /// The flow this process was started in, as `ONEPIPELINE_FLOW` named it.
-static INHERITED: OnceLock<Option<String>> = OnceLock::new();
+static INHERITED: OnceLock<Option<OsString>> = OnceLock::new();
 
-/// Read `ONEPIPELINE_FLOW` once and take it out of this process's environment.
+/// A flow id: one that names a flow under the runs root and nothing else, in
+/// the alphabet a minted one is spelled in. See [`is_valid_flow_id`].
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct FlowId(String);
+
+impl FlowId {
+    /// `text` as a flow id, or nothing where it is not one.
+    pub(crate) fn parse(text: &str) -> Option<Self> {
+        is_valid_flow_id(text).then(|| Self(text.to_owned()))
+    }
+
+    /// The id, as `flow run` printed it.
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Read `ONEPIPELINE_FLOW` once and take it out of this process's environment,
+/// whatever it holds.
 ///
 /// Called by the binary's entry before anything could spawn, so nothing this
 /// process starts inherits it — a node dispatch above all — and the one child
 /// that has to carry it, a flow's program, is handed it by [`run`] explicitly.
 pub(crate) fn take_inherited() {
-    let named = inherited();
-    if named.is_some() {
+    if INHERITED
+        .get_or_init(|| std::env::var_os(FLOW_ENV))
+        .is_some()
+    {
         // Before any thread this process starts exists: the binary's entry.
         std::env::remove_var(FLOW_ENV);
     }
 }
 
-/// The flow this process was started in, where `ONEPIPELINE_FLOW` named one that
-/// says something.
-pub(crate) fn inherited() -> Option<String> {
+/// `ONEPIPELINE_FLOW` as this process was started with it, whatever it holds.
+fn inherited_as_started() -> Option<&'static OsString> {
     INHERITED
-        .get_or_init(|| {
-            std::env::var(FLOW_ENV)
-                .ok()
-                .filter(|named| !named.trim().is_empty())
-        })
-        .clone()
+        .get_or_init(|| std::env::var_os(FLOW_ENV))
+        .as_ref()
+}
+
+/// The flow this process was started in, where `ONEPIPELINE_FLOW` named one: a
+/// value that is not a flow id names none.
+pub(crate) fn inherited() -> Option<FlowId> {
+    FlowId::parse(inherited_as_started()?.to_str()?)
 }
 
 /// The live flow `session` is launching in under `root`, where this process was
@@ -544,7 +565,7 @@ pub(crate) fn inherited() -> Option<String> {
 /// run launched there belongs to no flow, and is owed its own watch.
 pub(crate) fn launching_in(root: &Path, session: &str) -> Option<Flow> {
     let id = inherited()?;
-    let flow = Flow::open(root, &id).ok()?;
+    let flow = Flow::open(root, id.as_str()).ok()?;
     (flow.record.session == session && flow.is_live()).then_some(flow)
 }
 
@@ -606,10 +627,20 @@ pub(crate) fn run(root: &Path, args: &FlowRunArgs) -> Result<i32> {
         );
         // This process's environment, as it was started: the flow it was in, if
         // any, is handed back rather than dropped.
-        return supervise(program, arguments, inherited().as_deref(), None);
+        return supervise(
+            program,
+            arguments,
+            inherited_as_started().map(OsString::as_os_str),
+            None,
+        );
     };
     if let Some(parent) = launching_in(root, &session) {
-        return supervise(program, arguments, Some(parent.id()), None);
+        return supervise(
+            program,
+            arguments,
+            Some(std::ffi::OsStr::new(parent.id())),
+            None,
+        );
     }
     let name = match &args.name {
         Some(name) if is_valid_flow_id(name) => name.clone(),
@@ -630,7 +661,12 @@ pub(crate) fn run(root: &Path, args: &FlowRunArgs) -> Result<i32> {
         "flow {id}: watch it with: onepipeline watch --flow {id}",
         id = flow.id()
     );
-    supervise(program, arguments, Some(flow.id()), Some(&flow))
+    supervise(
+        program,
+        arguments,
+        Some(std::ffi::OsStr::new(flow.id())),
+        Some(&flow),
+    )
 }
 
 /// The name a flow is minted from when `--name` gives none: the program's file
@@ -727,7 +763,7 @@ fn register(
 fn supervise(
     program: &OsString,
     arguments: &[OsString],
-    flow: Option<&str>,
+    flow: Option<&std::ffi::OsStr>,
     registered: Option<&Flow>,
 ) -> Result<i32> {
     let mut command = std::process::Command::new(program);

@@ -383,7 +383,7 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
                 (Some(run), _) => crate::ask::On::Run(resolve(run.as_str())?),
                 (None, Some(flow)) => crate::ask::On::Flow(Box::new(crate::flow::Flow::open(
                     &ledger::runs_root(),
-                    &flow,
+                    flow.as_str(),
                 )?)),
                 (None, None) => return Err(crate::ask::no_run()),
             };
