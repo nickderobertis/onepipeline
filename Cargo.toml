@@ -922,19 +922,11 @@ onevcs-testing = "0.13.4"
 # across copies. 0.3.10 keeps the metadata only a destination holds when a copy
 # updates it, source values winning shared keys (onetaskgraph #3567), so re-copying a
 # plan no longer deletes the design approvals recorded on the board's document.
-# 0.3.11 prints a project's dependency graph (`onetaskgraph project graph`).
 #
-# **0.4.0 lets a `github-projects` source project a metadata value onto a board text
-# field**: each `metadata_fields` entry (`{field, key, path}`) names the field, a top-level
-# metadata key and a path inside it, and a write that sets that key — the copy that files
-# an item, or an update naming it — sets the field to the string found there or clears it.
-# The host's `followups` source carries one (`{field: Host, key: orchestrator.follow-up,
-# path: [host]}`), which an earlier store refuses as an unknown field. A settlement names
-# only `onepipeline.*` keys, so it never writes that field:
-# `tests/e2e/linear_writeback.rs`'s
-# `a_github_source_projecting_a_follow_ups_host_is_read_and_settled_without_writing_host`
-# reads and settles a plan through such a source. Its new public-boundary failures are classed by `src/writeback.rs`'s `cause_of` in
-# the store's own words. A new minor, so a breaking change to `Config`, which
+# **0.4.0 reads a `github-projects` source's `metadata_fields`**, which the host's
+# `followups` source carries (`{field: Host, key: orchestrator.follow-up, path: [host]}`)
+# and an earlier store refuses as an unknown field; `tests/e2e/linear_writeback.rs` reads and
+# settles a plan through such a source. A new minor, so a breaking change to the `Config`
 # `src/taskgraph.rs` exposes. `justfile`'s `onetaskgraph-version` moves with this release.
 onetaskgraph-core = "=0.4.0"
 onetaskgraph-plugin-api = "=0.4.0"

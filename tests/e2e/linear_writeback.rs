@@ -1158,7 +1158,6 @@ impl GitHubEndpoint {
         Self { child, dir, url }
     }
 
-    /// The board and the request log as they stand.
     fn state(&self) -> Value {
         serde_json::from_str(
             &std::fs::read_to_string(self.dir.join("state.json")).expect("endpoint state"),
@@ -1297,32 +1296,14 @@ graphql(mutation, {"input":{"id":"work","title":"work"}})
 const FOLLOW_UP_HOST: &str = "build-box-7.example";
 
 /// Every board-field write in `requests` to one item, in order: the field's id and the value
-/// written, `Value::Null` for a clear. Single field writes and the batched field-update document
-/// are both read, each aliased write counted only where its flag sent it.
+/// written, `Value::Null` for a clear. The batched field-update document is refused by the
+/// endpoint, so a write the store batched fails the journey rather than passing unread here.
 fn field_writes(requests: &[Value], item: &str) -> Vec<(String, Value)> {
-    const BATCHED: [(&str, &str, bool); 9] = [
-        ("input", "writeFirst", false),
-        ("second", "writeSecond", false),
-        ("third", "writeThird", false),
-        ("fourth", "writeFourth", false),
-        ("fifth", "writeFifth", false),
-        ("sixth", "writeSixth", false),
-        ("clear", "writeClear", true),
-        ("clearSecond", "writeClearSecond", true),
-        ("clearThird", "writeClearThird", true),
-    ];
     let mut writes = Vec::new();
     for request in requests {
         let query = request["query"].as_str().unwrap_or_default();
         let variables = &request["variables"];
-        let inputs: Vec<(&Value, bool)> = if query.contains("second:updateProjectV2ItemFieldValue(")
-        {
-            BATCHED
-                .iter()
-                .filter(|(_, flag, _)| variables[*flag] == true)
-                .map(|(name, _, clear)| (&variables[*name], *clear))
-                .collect()
-        } else if query.contains("updateProjectV2ItemFieldValue(") {
+        let inputs: Vec<(&Value, bool)> = if query.contains("updateProjectV2ItemFieldValue(") {
             vec![(&variables["input"], false)]
         } else if query.contains("clearProjectV2ItemFieldValue(") {
             vec![(&variables["input"], true)]
@@ -1346,7 +1327,6 @@ fn field_writes(requests: &[Value], item: &str) -> Vec<(String, Value)> {
     writes
 }
 
-/// The bodies `requests` wrote to one issue, in order.
 fn body_writes(requests: &[Value], issue: &str) -> Vec<String> {
     requests
         .iter()
@@ -1370,8 +1350,7 @@ fn body_writes(requests: &[Value], issue: &str) -> Vec<String> {
 /// write-back reaches its own item through the linked store, and neither writes `Host`: the field
 /// follows the value only when a write changes it, and a settlement changes no
 /// `orchestrator.follow-up` — the copy that files a follow-up is what puts it there. The log's
-/// reader is shown able to see a `Host` write in either document shape, so its silence is
-/// evidence.
+/// reader is shown able to see a `Host` write, so its silence is evidence.
 #[test]
 fn a_github_source_projecting_a_follow_ups_host_is_read_and_settled_without_writing_host() {
     let world = World::new("github-host-field")
@@ -1471,37 +1450,21 @@ fn a_github_source_projecting_a_follow_ups_host_is_read_and_settled_without_writ
         world.run_file(run, "result.json").is_file()
     });
 
-    // The reader above is not blind to a Host write: one sent alone and one batched beside a
-    // Status move, as the store sends them, are both read back as what they set.
+    // The reader above is not blind to a Host write: one sent as the store sends a lone field
+    // write is read back as what it set.
     let wrote = std::process::Command::new("python3").args(["-c", r#"
 import json, sys, urllib.request
-def send(query, variables):
-    body = json.dumps({"query": query, "variables": variables}).encode()
-    urllib.request.urlopen(urllib.request.Request(sys.argv[1] + "/graphql", data=body)).read()
 host = {"projectId": "BOARD", "itemId": "ITEM-other", "fieldId": "HOST", "value": {"text": sys.argv[2]}}
-send("mutation($input:UpdateProjectV2ItemFieldValueInput!){updateProjectV2ItemFieldValue(input:$input){projectV2Item{id}}}", {"input": host})
-status = {"projectId": "BOARD", "itemId": "ITEM-other", "fieldId": "STATUS", "value": {"singleSelectOptionId": "Done"}}
-flags = {name: False for name in ["writeThird", "writeFourth", "writeFifth", "writeSixth", "writeClear", "writeClearSecond", "writeClearThird"]}
-send("mutation{updateProjectV2ItemFieldValue(input:$input) @include(if:$writeFirst){projectV2Item{id}} second:updateProjectV2ItemFieldValue(input:$second) @include(if:$writeSecond){projectV2Item{id}}}",
-     {"input": status, "second": dict(host, value={"text": sys.argv[2] + "-batched"}), "writeFirst": True, "writeSecond": True, **flags})
-"#, &served.url, FOLLOW_UP_HOST]).status().expect("the Host writes reach the endpoint");
+query = "mutation($input:UpdateProjectV2ItemFieldValueInput!){updateProjectV2ItemFieldValue(input:$input){projectV2Item{id}}}"
+body = json.dumps({"query": query, "variables": {"input": host}}).encode()
+urllib.request.urlopen(urllib.request.Request(sys.argv[1] + "/graphql", data=body)).read()
+"#, &served.url, FOLLOW_UP_HOST]).status().expect("the Host write reaches the endpoint");
     assert!(wrote.success());
-    let hosts: Vec<Value> = field_writes(&requests(), "other")
-        .into_iter()
-        .filter(|(field, _)| field == "HOST")
-        .map(|(_, value)| value)
-        .collect();
     assert_eq!(
-        hosts,
-        [
-            json!({"text": FOLLOW_UP_HOST}),
-            json!({"text": format!("{FOLLOW_UP_HOST}-batched")}),
-        ]
+        field_writes(&requests(), "other").last(),
+        Some(&("HOST".to_owned(), json!({"text": FOLLOW_UP_HOST})))
     );
-    assert_eq!(
-        served.state()["issues"]["other"]["host"],
-        format!("{FOLLOW_UP_HOST}-batched")
-    );
+    assert_eq!(served.state()["issues"]["other"]["host"], FOLLOW_UP_HOST);
 }
 
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]

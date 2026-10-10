@@ -12,6 +12,12 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 root = pathlib.Path(sys.argv[1])
 seeded = json.loads(pathlib.Path(sys.argv[2]).read_text()) if len(sys.argv) > 2 else {}
+if (not isinstance(seeded, dict)
+        or set(seeded) - {"plan", "anchor", "work", "other"}
+        or not all(isinstance(metadata, dict) and all(isinstance(key, str) for key in metadata)
+                   and not any(key.startswith(("onepipeline.", "onetaskgraph.")) for key in metadata)
+                   for metadata in seeded.values())):
+    raise SystemExit("seeded metadata must map issue names to objects of caller keys")
 options = ["Todo", "Queued", "In Progress", "Needs Attention", "Done", "Canceled"]
 host = {"__typename": "ProjectV2Field", "id": "HOST", "name": "Host", "dataType": "TEXT"}
 
@@ -60,7 +66,6 @@ def issue(name):
 
 
 def write_field(supplied, clear=False):
-    """Apply one field write or clear to the board item it names, after validating it."""
     keys = {"projectId", "itemId", "fieldId"} if clear else {"projectId", "itemId", "fieldId", "value"}
     if (not isinstance(supplied, dict) or set(supplied) != keys
             or supplied["projectId"] != "BOARD"
@@ -83,15 +88,6 @@ def write_field(supplied, clear=False):
     else:
         raise ValueError("invalid Status mutation input")
     return {"projectV2Item": {"id": supplied["itemId"]}}
-
-
-# The aliased writes of one ordered field-update document, each sent only when its flag is set.
-BATCHED = [("updateProjectV2ItemFieldValue", "input", "writeFirst", False),
-           ("second", "second", "writeSecond", False), ("third", "third", "writeThird", False),
-           ("fourth", "fourth", "writeFourth", False), ("fifth", "fifth", "writeFifth", False),
-           ("sixth", "sixth", "writeSixth", False), ("cleared", "clear", "writeClear", True),
-           ("clearedSecond", "clearSecond", "writeClearSecond", True),
-           ("clearedThird", "clearThird", "writeClearThird", True)]
 
 
 def save():
@@ -171,13 +167,7 @@ class Handler(BaseHTTPRequestHandler):
                 held["state"] = movement["value"]
             return {"data": {"updateIssue": {"issue": {"id": supplied["id"]}}}}
         if "second:updateProjectV2ItemFieldValue(" in query:
-            answer = {}
-            for alias, name, flag, clear in BATCHED:
-                if variables.get(flag) is True:
-                    answer[alias] = write_field(variables.get(name), clear)
-                elif variables.get(flag) is not False:
-                    raise ValueError(flag + " must be a boolean")
-            return {"data": answer}
+            raise ValueError("the batched field update is not served here")
         if "updateProjectV2ItemFieldValue(" in query:
             return {"data": {"updateProjectV2ItemFieldValue": write_field(variables.get("input"))}}
         if "clearProjectV2ItemFieldValue(" in query:

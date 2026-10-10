@@ -639,6 +639,7 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         // llmlint: ignore[changed_behavior_has_e2e] unreachable from a write-back: only `project graph` raises these, and a write-back reads and copies but never draws a graph; `writeback::tests` holds each word.
         EngineError::GraphGroupNotText { .. } => decided("graph-group"),
         EngineError::DependencyCycle { .. } => decided("dependency-cycle"),
+        // llmlint: ignore-block[changed_behavior_has_e2e] a write-back meets these only where the `onetaskgraph.yaml` it reads opts into the store's public boundary (a `write_policy` or a declared `visibility`), which no onepipeline journey configures; what this adds is the word each is recorded under, and that is the store's own: `writeback::tests::every_engine_failure_is_named_as_the_store_names_it` holds every arm here, `visibility-unreadable`'s class included, to `onetaskgraph_core::Failure::from` for the same error, so a journey reaching one would prove nothing that comparison does not.
         EngineError::NotPrivateDestination { .. } => decided("not-private-destination"),
         EngineError::DestinationNotPrivate { .. } => decided("destination-not-private"),
         EngineError::BoundaryRefused { .. } => decided("boundary-refused"),
@@ -649,11 +650,10 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         EngineError::ReferenceUnclassified { .. } => decided("reference-unclassified"),
         EngineError::ProjectUnclassified { .. } => decided("project-unclassified"),
         EngineError::PrivateMemberOfPublicProject { .. } => decided("private-member"),
-        // A visibility a source could not read is the store's own kind, classed by why the
-        // read failed, as the store classes it.
         EngineError::VisibilityUnreadable { error, .. } => {
             ("visibility-unreadable".to_owned(), Some(error))
         }
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         EngineError::DestinationUnavailable { error, .. }
         | EngineError::SourceRefused { error, .. }
         | EngineError::SourceUnavailable { error, .. }
@@ -5122,9 +5122,6 @@ mod tests {
             EngineError::DependencyCycle {
                 tasks: vec![id(), id()],
             },
-            // The public-boundary failures 0.4.0 added, which a write-back meets only where the
-            // configuration it reads opts into the boundary: each is the store's own word, and a
-            // visibility no source could read is classed by the read's own failure.
             EngineError::NotPrivateDestination {
                 item: "plans:a".into(),
                 destination: "plans".into(),
