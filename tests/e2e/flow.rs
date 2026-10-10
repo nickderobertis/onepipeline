@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use crate::harness::{
-    agent, plan_of, World, REFUSED, RUNS_UNWATCHED, SURFACE_WAITING, WATCH_ELAPSED,
+    agent, plan_of, World, NODE_SETTLED, REFUSED, RUNS_UNWATCHED, SURFACE_WAITING, WATCH_ELAPSED,
 };
 
 use onepipeline::cli::{FLOW_ENV, WAKE_BUDGET_ENV, WAKE_RESERVE_SECONDS};
@@ -356,31 +356,61 @@ fn a_flow_holds_its_session_between_runs_and_its_watch_wakes_on_each() {
     assert_eq!(surfaced.record["run_id"], json!("finalize"));
     world.run(&["next", "finalize"]).exited(0);
 
-    // The program ends cleanly: the watch returns `0`, and so does `flow run`.
+    // A member run's node settling wakes it, naming the run and the node.
     let watch = watching(
         &world,
         "plan",
         &["--timeout", "600", "--cursor", &surfaced.cursor()],
+    );
+    world.release("finalizing.go");
+    let settled = watch.returned();
+    settled.ended_on(NODE_SETTLED, "node-settled");
+    assert_eq!(
+        (&settled.record["run_id"], &settled.record["node"]),
+        (&json!("finalize"), &json!("finalizing")),
+        "{}",
+        settled.record
+    );
+
+    // The program ends cleanly: the watch returns `0`, and so does `flow run`.
+    // Told `--until run-joined` alone, so nothing the settled run says after
+    // ends it first: the flow's ending ends every wait.
+    let watch = watching(
+        &world,
+        "plan",
+        &[
+            "--timeout",
+            "600",
+            "--until",
+            "run-joined",
+            "--cursor",
+            &settled.cursor(),
+        ],
     );
     flow.open("done");
     watch.returned().ended_on(EXIT_SUCCESS, "ended");
     assert_eq!(flow.ended(), 0);
 
     // Not live, the flow is owed nothing, and each member run is judged on its
-    // own: owed a watch of its own.
+    // own: the one still working owed a watch of its own, the settled one its
+    // closure.
     let after = unwatched(&world, &[]);
     after.exited(RUNS_UNWATCHED);
     assert!(!after.stdout.contains("flow plan"), "{}", after.stdout);
-    for run in ["draft", "finalize"] {
-        assert!(
-            after
-                .stdout
-                .lines()
-                .any(|line| line.starts_with(run) && line.ends_with(&format!("watch {run}"))),
-            "{run} was not owed its own watch once its flow ended: {}",
-            after.stdout
-        );
-    }
+    let line = |run: &str| {
+        after
+            .stdout
+            .lines()
+            .find(|line| line.starts_with(&format!("{run} ")))
+            .unwrap_or_else(|| panic!("{run} was not judged on its own: {}", after.stdout))
+            .to_owned()
+    };
+    assert!(line("draft").ends_with("watch draft"), "{}", after.stdout);
+    assert!(
+        line("finalize").contains("--acknowledge finalize"),
+        "{}",
+        after.stdout
+    );
 }
 
 /// A flow whose program ends non-zero wakes its watch with `flow-failed` (9),
@@ -813,4 +843,90 @@ fn a_run_outside_any_flow_reads_as_before_and_flows_are_no_run_roots() {
     assert!(!owed.stdout.contains("elsewhere"), "{}", owed.stdout);
     flow.open("end");
     assert_eq!(flow.ended(), 0);
+}
+
+/// The edges of `flow run` itself: with no session it registers nothing and
+/// says so, still running the program and exiting with its status; ids are
+/// minted as the first free of `<NAME>`, `<NAME>-2`, ..., from the program's
+/// file name where `--name` gives none; a `--name` outside the id alphabet is
+/// refused with nothing run; and a SIGTERM to `flow run` is forwarded to the
+/// program, whose status — not the signal's — is what `flow run` records and
+/// exits with.
+#[test]
+fn flow_run_forwards_signals_mints_free_ids_and_registers_nothing_without_a_session() {
+    let world = World::new("flow-edges");
+    let steps = steps(&world);
+
+    // No session: the program runs as no flow, and one line says so.
+    let unowned = world
+        .cmd(&[
+            "flow",
+            "run",
+            "--",
+            "sh",
+            "-c",
+            "printf %s \"${ONEPIPELINE_FLOW-none}\"; exit 4",
+        ])
+        .env_remove("ONEPIPELINE_LAUNCHER_SESSION")
+        .output()
+        .expect("flow run runs");
+    assert_eq!(unowned.status.code(), Some(4), "{unowned:?}");
+    assert_eq!(String::from_utf8_lossy(&unowned.stdout), "none");
+    let said = String::from_utf8_lossy(&unowned.stderr);
+    assert_eq!(said.lines().count(), 1, "{said}");
+    assert!(
+        said.contains("nothing will hold a session for it"),
+        "{said}"
+    );
+    assert!(!world.runs.join(".flows").exists(), "a flow was registered");
+
+    // Ids: the program's file name, then the first free of the name.
+    for expected in ["sh", "sh-2"] {
+        let ran = world
+            .cmd(&[
+                "flow",
+                "run",
+                "--",
+                "sh",
+                "-c",
+                "printf %s \"$ONEPIPELINE_FLOW\"",
+            ])
+            .output()
+            .expect("flow run runs");
+        assert_eq!(ran.status.code(), Some(0), "{ran:?}");
+        assert_eq!(String::from_utf8_lossy(&ran.stdout), expected);
+        assert_eq!(
+            String::from_utf8_lossy(&ran.stderr),
+            format!("flow {expected}: watch it with: onepipeline watch --flow {expected}\n")
+        );
+    }
+    world
+        .run(&["flow", "run", "--name", "../escape", "--", "true"])
+        .exited(REFUSED)
+        .err_has("--name ../escape");
+
+    // A SIGTERM is the program's: it traps it, and its status is recorded.
+    let flow = Flowing::start(
+        &world,
+        "trapped",
+        &[
+            "trap 'exit 42' TERM".to_owned(),
+            mark(&world, "trapping"),
+            format!(
+                "while :; do sleep 0.05; done; touch '{}'",
+                steps.join("unreachable").display()
+            ),
+        ],
+    );
+    flow.reached(&world, "trapping");
+    let signalled = std::process::Command::new("kill")
+        .args(["-TERM", &flow.child.id().to_string()])
+        .status()
+        .expect("kill runs");
+    assert!(signalled.success());
+    assert_eq!(flow.ended(), 42, "SIGTERM did not reach the program");
+    unwatched(&world, &[])
+        .exited(RUNS_UNWATCHED)
+        .out_has("flow trapped")
+        .out_has("it ended with status 42");
 }
