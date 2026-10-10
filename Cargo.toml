@@ -903,10 +903,12 @@ onevcs-testing = "0.13.4"
 # across copies. 0.3.10 keeps the metadata only a destination holds when a copy
 # updates it, source values winning shared keys (onetaskgraph #3567), so re-copying a
 # plan no longer deletes the design approvals recorded on the board's document.
+# 0.3.11 adds `onetaskgraph project graph`, so the `onetaskgraph` CLI a host pins
+# beside this engine renders a plan's dependency graph.
 # `justfile`'s `onetaskgraph-version` moves with this release.
-onetaskgraph-core = "=0.3.10"
-onetaskgraph-plugin-api = "=0.3.10"
-onetaskgraph-local-md = "=0.3.10"
+onetaskgraph-core = "=0.3.11"
+onetaskgraph-plugin-api = "=0.3.11"
+onetaskgraph-local-md = "=0.3.11"
 # Not engines: two crates both members use, pinned once so they build against one version.
 # `just engines-current` reads only the engines its script names.
 sha2 = "0.10"

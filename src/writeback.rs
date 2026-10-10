@@ -636,6 +636,9 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         EngineError::AssetNotHeld { .. } => decided("asset-not-held"),
         // llmlint: ignore[changed_behavior_has_e2e] unreachable from a write-back: the store raises it only for an asset its source hands over, and `write_shadow` writes a creation's Markdown alone, so a reference is refused `asset-not-held` first (`store::a_live_add_referencing_an_asset_its_task_does_not_hold_is_refused_as_asset_not_held`); `writeback::tests` holds the word.
         EngineError::AssetsUnsupported { .. } => decided("assets-unsupported"),
+        // llmlint: ignore[changed_behavior_has_e2e] unreachable from a write-back: only `project graph` raises these, and a write-back reads and copies but never draws a graph; `writeback::tests` holds each word.
+        EngineError::GraphGroupNotText { .. } => decided("graph-group"),
+        EngineError::DependencyCycle { .. } => decided("dependency-cycle"),
         EngineError::DestinationUnavailable { error, .. }
         | EngineError::SourceRefused { error, .. }
         | EngineError::SourceUnavailable { error, .. }
@@ -5093,6 +5096,16 @@ mod tests {
                 kind: "linear".into(),
                 record: "plans:a".into(),
                 asset: "diagram.png".into(),
+            },
+            // The graph failures 0.3.11 added, which only `project graph` raises: a group value
+            // that is not text, and tasks that depend on each other in a cycle.
+            EngineError::GraphGroupNotText {
+                task: id(),
+                key: onetaskgraph_core::GroupKey::new("phase").expect("a group key"),
+                value: serde_json::json!(3),
+            },
+            EngineError::DependencyCycle {
+                tasks: vec![id(), id()],
             },
             // A copy that could not be undone takes the class and kind of the failure it wraps.
             EngineError::CopyNotUndone {
