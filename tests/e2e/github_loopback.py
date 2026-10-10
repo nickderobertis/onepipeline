@@ -1,7 +1,9 @@
-"""Loopback GitHub GraphQL for the reused-store write-back journey.
+"""Loopback GitHub GraphQL for the GitHub Projects write-back journeys.
 
 Every answer is built from current endpoint state. Unknown operations fail loudly;
-no request reaches GitHub or reads a production credential.
+no request reaches GitHub or reads a production credential. The board carries a
+`Host` text field a source's `metadata_fields` can project onto, and an optional
+second argument names a JSON file of caller metadata to seed onto issues by name.
 """
 import json
 import pathlib
@@ -9,7 +11,9 @@ import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 root = pathlib.Path(sys.argv[1])
+seeded = json.loads(pathlib.Path(sys.argv[2]).read_text()) if len(sys.argv) > 2 else {}
 options = ["Todo", "Queued", "In Progress", "Needs Attention", "Done", "Canceled"]
+host = {"__typename": "ProjectV2Field", "id": "HOST", "name": "Host", "dataType": "TEXT"}
 
 
 def connection(nodes):
@@ -30,18 +34,20 @@ for name in ["plan", "anchor", "work", "other"]:
     metadata = ({"onepipeline.schema_version": 3, "onepipeline.concurrency": 1,
                  "onepipeline.goal": {"text": "Keep people's board edits"}}
                 if name == "plan" else
-                {"onepipeline.id": name, "onepipeline.persona": "engineer"})
+                {"onepipeline.id": name, "onepipeline.persona": "engineer", **seeded.get(name, {})})
     content = "" if name == "plan" else (
         f"## What\nDo {name}.\n\n## Why\nSo the run can settle.\n\n## Acceptance criteria\n- {name} is done.")
     state["issues"][name] = {"body": described(content, metadata), "status": "Todo", "state": "OPEN",
-                              "title": "github-edits" if name == "plan" else name}
+                              "title": "github-edits" if name == "plan" else name, "host": None}
 
 
 def issue(name):
     held = state["issues"][name]
+    values = [{"name": held["status"], "optionId": held["status"], "field": field()}]
+    if held["host"] is not None:
+        values.append({"text": held["host"], "field": {"id": host["id"], "name": host["name"]}})
     membership = {"id": "ITEM-" + name, "project": {"id": "BOARD", "number": 1},
-                  "fieldValues": connection([{"name": held["status"], "optionId": held["status"],
-                                               "field": field()}])}
+                  "fieldValues": connection(values)}
     value = {"__typename": "Issue", "id": name, "title": held["title"],
              "body": held["body"], "state": held["state"], "stateReason": None, "number": 1,
              "url": None, "parent": None if name == "plan" else {"id": "plan"},
@@ -51,6 +57,41 @@ def issue(name):
     if name == "plan":
         value["subIssues"] = connection([issue("anchor"), issue("work"), issue("other")])
     return value
+
+
+def write_field(supplied, clear=False):
+    """Apply one field write or clear to the board item it names, after validating it."""
+    keys = {"projectId", "itemId", "fieldId"} if clear else {"projectId", "itemId", "fieldId", "value"}
+    if (not isinstance(supplied, dict) or set(supplied) != keys
+            or supplied["projectId"] != "BOARD"
+            or supplied["itemId"] not in ["ITEM-" + name for name in state["issues"]]):
+        raise ValueError("invalid field mutation input")
+    held = state["issues"][supplied["itemId"].removeprefix("ITEM-")]
+    if supplied["fieldId"] == host["id"]:
+        if clear:
+            held["host"] = None
+        elif (isinstance(supplied["value"], dict) and set(supplied["value"]) == {"text"}
+                and isinstance(supplied["value"]["text"], str)):
+            held["host"] = supplied["value"]["text"]
+        else:
+            raise ValueError("invalid Host mutation input")
+    elif (supplied["fieldId"] == "STATUS" and not clear
+            and isinstance(supplied["value"], dict)
+            and set(supplied["value"]) == {"singleSelectOptionId"}
+            and supplied["value"]["singleSelectOptionId"] in options):
+        held["status"] = supplied["value"]["singleSelectOptionId"]
+    else:
+        raise ValueError("invalid Status mutation input")
+    return {"projectV2Item": {"id": supplied["itemId"]}}
+
+
+# The aliased writes of one ordered field-update document, each sent only when its flag is set.
+BATCHED = [("updateProjectV2ItemFieldValue", "input", "writeFirst", False),
+           ("second", "second", "writeSecond", False), ("third", "third", "writeThird", False),
+           ("fourth", "fourth", "writeFourth", False), ("fifth", "fifth", "writeFifth", False),
+           ("sixth", "sixth", "writeSixth", False), ("cleared", "clear", "writeClear", True),
+           ("clearedSecond", "clearSecond", "writeClearSecond", True),
+           ("clearedThird", "clearThird", "writeClearThird", True)]
 
 
 def save():
@@ -129,26 +170,25 @@ class Handler(BaseHTTPRequestHandler):
             if movement is not None:
                 held["state"] = movement["value"]
             return {"data": {"updateIssue": {"issue": {"id": supplied["id"]}}}}
+        if "second:updateProjectV2ItemFieldValue(" in query:
+            answer = {}
+            for alias, name, flag, clear in BATCHED:
+                if variables.get(flag) is True:
+                    answer[alias] = write_field(variables.get(name), clear)
+                elif variables.get(flag) is not False:
+                    raise ValueError(flag + " must be a boolean")
+            return {"data": answer}
         if "updateProjectV2ItemFieldValue(" in query:
-            supplied = variables.get("input")
-            if (not isinstance(supplied, dict)
-                    or set(supplied) != {"projectId", "itemId", "fieldId", "value"}
-                    or supplied["projectId"] != "BOARD" or supplied["fieldId"] != "STATUS"
-                    or supplied["itemId"] not in ["ITEM-" + name for name in state["issues"]]
-                    or not isinstance(supplied["value"], dict)
-                    or set(supplied["value"]) != {"singleSelectOptionId"}
-                    or supplied["value"]["singleSelectOptionId"] not in options):
-                raise ValueError("invalid Status mutation input")
-            name = supplied["itemId"].removeprefix("ITEM-")
-            state["issues"][name]["status"] = supplied["value"]["singleSelectOptionId"]
-            return {"data": {"updateProjectV2ItemFieldValue": {"projectV2Item": {"id": supplied["itemId"]}}}}
+            return {"data": {"updateProjectV2ItemFieldValue": write_field(variables.get("input"))}}
+        if "clearProjectV2ItemFieldValue(" in query:
+            return {"data": {"clearProjectV2ItemFieldValue": write_field(variables.get("input"), True)}}
         if "node(id:" in query:
             name = variables.get("id")
             if not isinstance(name, str) or name not in state["issues"]:
                 raise ValueError("unknown issue id")
             return {"data": {"node": issue(name)}}
         if "repositoryOwner(" in query:
-            board = {"id": "BOARD", "title": "Board", "fields": connection([field()]),
+            board = {"id": "BOARD", "title": "Board", "fields": connection([field(), host]),
                      "items": connection([{"id": "ITEM-" + name, "content": issue(name),
                                             "fieldValues": issue(name)["projectItems"]["nodes"][0]["fieldValues"]}
                                            for name in state["issues"]])}
