@@ -1225,7 +1225,7 @@ fn scoped_world(name: &str) -> (World, Repository, Repository, Repository) {
         )
         .with_env(
             "ONETASKGRAPH_WRITE_POLICY__VISIBILITY_COMMAND",
-            &json!([onevcs, "boundary", "inspect", "--input", "-", "--json"]).to_string(),
+            &format!("{onevcs},boundary,inspect,--input,-,--json"),
         );
     (world, a, b, library)
 }
@@ -1544,4 +1544,247 @@ fn a_live_edit_naming_b_puts_b_in_the_run_scope_for_every_check_after_it() {
         .run_with_stdin(&["reply", "grown"], &naming_b.to_string())
         .exited(REFUSED);
     world.release("generalize.go");
+}
+
+/// One task written through the standalone store's own command line — its configured
+/// `write_policy` commands, run as the `onevcs` binary — under the world's environment.
+fn store_cli_create(
+    world: &World,
+    project: &str,
+    title: &str,
+    body: &str,
+    extra: &[&str],
+) -> crate::harness::Run {
+    let template = world.cmd(&[]);
+    let mut command = std::process::Command::new(crate::harness::onetaskgraph_binary());
+    for (key, value) in template.get_envs() {
+        match value {
+            Some(value) => command.env(key, value),
+            None => command.env_remove(key),
+        };
+    }
+    if let Some(dir) = template.get_current_dir() {
+        command.current_dir(dir);
+    }
+    // The `onevcs` the policy commands name, linked into place again now: a world this
+    // process dropped earlier may have taken the directory its alias was first put in.
+    let onevcs = crate::harness::onevcs_binary()
+        .to_string_lossy()
+        .into_owned();
+    command
+        .env(
+            "ONETASKGRAPH_WRITE_POLICY__CHECK_COMMAND",
+            format!("{onevcs},boundary,check,--destination,public,--input,-"),
+        )
+        .env(
+            "ONETASKGRAPH_WRITE_POLICY__VISIBILITY_COMMAND",
+            format!("{onevcs},boundary,inspect,--input,-,--json"),
+        );
+    let body_file = world.root.join(format!("{title}.md"));
+    std::fs::write(&body_file, body).expect("the body is written");
+    let native = project.strip_prefix("plans:").unwrap_or(project);
+    let body_path = body_file.to_string_lossy().into_owned();
+    let mut args = vec![
+        "task",
+        "create",
+        "plans",
+        "--project",
+        native,
+        "--title",
+        title,
+        "--body-file",
+        &body_path,
+        "--no-interactive",
+    ];
+    args.extend_from_slice(extra);
+    command.args(&args);
+    world.run_on(command, &format!("onetaskgraph {}", args.join(" ")))
+}
+
+/// Launch `nodes` as a run named `name`, held open by an agent node of its own, so a
+/// live edit's projection has a driver to make it.
+fn held_run(world: &World, name: &str, nodes: Vec<Value>) -> String {
+    let keep = format!("keep-{name}");
+    world.script(&format!("{keep}.wait"), "hold");
+    let mut nodes = nodes;
+    nodes.push(crate::harness::agent(&keep, &[]));
+    let project = world.plan(name, &mixed_plan(name, nodes, vec![]));
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the run's keeper to be in flight", |world| {
+        world
+            .events_of(name, "node-dispatched")
+            .iter()
+            .any(|event| event["labels"]["node"] == keep.as_str())
+    });
+    project
+}
+
+/// A parked node whose task cites `cited`, in `repo`.
+fn citing(id: &str, repo: &str, cited: &str) -> Value {
+    let mut node = lifecycle(id, &[]);
+    node["repo"] = json!(repo);
+    node["parked"] = json!(true);
+    node["task"] = json!(format!(
+        "## What\nShip {id}.\n\n## Why\nIt cites {cited}.\n\n## Acceptance criteria\n- {id} is published."
+    ));
+    node
+}
+
+#[test]
+fn the_store_cli_and_the_engine_refuse_and_pass_the_same_writes_in_the_same_words() {
+    let (world, _, _, _) = scoped_world("parity");
+    let scope = ["--term-scope", "github.com/owner/service"];
+
+    // The engine: a run naming A, projecting nodes its edits add onto the store.
+    let anchored = held_run(
+        &world,
+        "anchored",
+        vec![citing("anchor", "service", "nothing")],
+    );
+    reply(
+        &world,
+        "anchored",
+        json!([{"op": "add", "node": citing("cites-b", "service", "owner/beta")}]),
+    );
+    world.until("the allowed write to land", |world| {
+        world
+            .store_tasks(&anchored)
+            .iter()
+            .any(|task| task.to_string().contains("It cites owner/beta."))
+    });
+    reply(
+        &world,
+        "anchored",
+        json!([{"op": "add", "node": citing("cites-a", "service", "owner/service")}]),
+    );
+    world.until("the denied write to be refused", |world| {
+        projections(world, "anchored").contains("boundary-refused")
+    });
+    let engine_denied = projections(&world, "anchored");
+
+    // The store's own command line, over the same scope: the same two decisions, the
+    // refusal in the same words, before anything is written.
+    let allowed = store_cli_create(
+        &world,
+        &anchored,
+        "cli-cites-b",
+        "## Why\nIt cites owner/beta.\n",
+        &scope,
+    );
+    allowed.exited(0);
+    let denied = store_cli_create(
+        &world,
+        &anchored,
+        "cli-cites-a",
+        "## Why\nIt cites owner/service.\n",
+        &scope,
+    );
+    assert_ne!(denied.code, 0, "{}", denied.stdout);
+    let sentence = "it carries a term of a private repository in its text";
+    assert!(denied.stderr.contains(sentence), "{}", denied.stderr);
+    assert!(engine_denied.contains(sentence), "{engine_denied}");
+    let stored = world.store_tasks(&anchored).to_vec();
+    assert!(stored
+        .iter()
+        .any(|task| task.to_string().contains("cli-cites-b")));
+    assert!(
+        stored
+            .iter()
+            .all(|task| !task.to_string().contains("It cites owner/service.")),
+        "a refused write reached the store: {stored:?}"
+    );
+    world.release("keep-anchored.go");
+
+    // A repository's visibility decides an item's classification the same way: an item
+    // naming A's repository is private, which a store not declared private never takes.
+    let named = held_run(&world, "named", vec![citing("plain", "service", "nothing")]);
+    reply(
+        &world,
+        "named",
+        json!([{"op": "add", "node": citing("in-a", "github.com/owner/service", "nothing")}]),
+    );
+    world.until("the private item to be refused", |world| {
+        projections(world, "named").contains("not-private-destination")
+    });
+    let in_a = store_cli_create(
+        &world,
+        &named,
+        "cli-in-a",
+        "## Why\nIt cites nothing.\n",
+        &[
+            "--repository",
+            "github.com/owner/service",
+            "--term-scope",
+            "github.com/owner/service",
+        ],
+    );
+    assert_ne!(in_a.code, 0, "{}", in_a.stdout);
+    // One decision on both sides — the item is private, so a destination not verified
+    // private never takes it — met by each verb's own first rule: the CLI files it under
+    // a public project, the engine's copy reaches a source not declared private.
+    let private_sentence = "is private, and ";
+    assert!(in_a.stderr.contains(private_sentence), "{}", in_a.stderr);
+    assert!(
+        in_a.stderr.contains("nothing was written"),
+        "{}",
+        in_a.stderr
+    );
+    assert!(projections(&world, "named").contains(private_sentence));
+    assert!(
+        world
+            .store_tasks(&named)
+            .iter()
+            .all(|task| !task.to_string().contains("cli-in-a") && task["id"] != "in-a"),
+        "a private item reached the store"
+    );
+    world.release("keep-named.go");
+
+    // And a scope whose private identity's committed declaration cannot be read is
+    // unavailable on both, which is never a pass.
+    let c = world.extra_repository("gamma");
+    declare_visibility(
+        &world,
+        &[
+            ("service", "private"),
+            ("beta", "private"),
+            ("gamma", "private"),
+            ("library", "public"),
+        ],
+    );
+    std::fs::write(
+        c.checkout.join("private-terms.toml"),
+        "schema_version = 1\nterms = [\n",
+    )
+    .expect("a broken declaration");
+    crate::harness::git(&world, &c.checkout, &["add", "-A"]);
+    crate::harness::git(&world, &c.checkout, &["commit", "-qm", "chore: break it"]);
+    let unregistered = held_run(
+        &world,
+        "unregistered",
+        vec![citing("elsewhere", "gamma", "nothing")],
+    );
+    reply(
+        &world,
+        "unregistered",
+        json!([{"op": "add", "node": citing("more", "gamma", "nothing")}]),
+    );
+    world.until("the write to be unavailable", |world| {
+        projections(world, "unregistered").contains("boundary-unavailable")
+    });
+    let cli_unavailable = store_cli_create(
+        &world,
+        &unregistered,
+        "cli-unregistered",
+        "## Why\nIt cites nothing.\n",
+        &["--term-scope", "github.com/owner/gamma"],
+    );
+    assert_ne!(cli_unavailable.code, 0, "{}", cli_unavailable.stdout);
+    let unavailable = "the public boundary check is unavailable";
+    assert!(
+        cli_unavailable.stderr.contains(unavailable),
+        "{}",
+        cli_unavailable.stderr
+    );
+    assert!(projections(&world, "unregistered").contains(unavailable));
+    world.release("keep-unregistered.go");
 }
