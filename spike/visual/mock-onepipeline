@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# THROWAWAY MOCK (spike-visual, stop-guard-flow-coverage-2026-10-10). Not the
+# implementation: it prints, by hand, what the `engine-flow` contract says the
+# three changed surfaces will print, and hands every other call to the real
+# base binary ($REAL_ONEPIPELINE). Flow ids, pids and cursors are hard-coded.
+set -uo pipefail
+real="${REAL_ONEPIPELINE:?REAL_ONEPIPELINE names the base binary}"
+flow="plan-stop-guard"
+run="plan-spikes"
+
+case "${1:-}" in
+  stop-guard)
+    # The flow `plan-stop-guard` is live (its holder runs) and nothing watches
+    # it; the session's only run is closed, so the run lines are the real ones
+    # (none) and the flow line is the new part.
+    budget=""; prev=""
+    for a in "$@"; do [ "$prev" = "--wake-budget" ] && budget="$a"; prev="$a"; done
+    line=$(printf '%-24s %-12s %s — %s' "flow $flow" "LIVE" \
+      "nothing has recorded a watch on it" \
+      "watch it with: onepipeline watch --flow $flow${budget:+ --wake-budget $budget}")
+    python3 -c 'import json,sys; print(json.dumps({"verdict":"block","reason":sys.argv[1]+"\n"}, ensure_ascii=False, separators=(",",":")))' "$line"
+    exit 0
+    ;;
+  unwatched)
+    # The flow died: its holder (pid 48211) is gone with no ending recorded.
+    "$real" "$@"
+    printf '%-24s %-12s %s — %s\n' "flow $flow" "DIED" \
+      "its holder, pid 48211, is gone with no ending recorded" \
+      "close it: onepipeline unwatched --acknowledge-flow $flow --reason <TEXT>"
+    exit 6
+    ;;
+  watch)
+    if [ "${2:-}" = "--flow" ]; then
+      # Armed after the flow's draft run settled, while the flow is in its
+      # review step (no run); it wakes when the spikes run is launched.
+      # Human lines on stderr, as a run watch prints them.
+      {
+        echo "-- watching flow $flow  LIVE  no member run active  0 unread planner surfaces"
+        sleep 0.2
+        echo "-- watching flow $flow  LIVE  no member run active  0 unread planner surfaces"
+        echo "2026-05-04T11:20:05.000Z  flow:$flow          run-joined $run"
+        echo "-- watch flow $flow run-joined $run  0 unread planner surfaces  cursor 2:$flow:48219"
+      } >&2
+      exit 8
+    fi
+    exec "$real" "$@"
+    ;;
+  *) exec "$real" "$@" ;;
+esac
