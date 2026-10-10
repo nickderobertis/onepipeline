@@ -10287,6 +10287,7 @@ mod tests {
             name: Some("demo".into()),
             concurrency: 4,
             tasks: nodes,
+            export_edges: Vec::new(),
         };
         RunState {
             graph: Graph::from_plan(&plan),

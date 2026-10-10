@@ -824,9 +824,7 @@ fn preserve(
         (Some(why), _, _) => Err(format!(
             "the session would not close ({why}), so nothing was pushed from it"
         )),
-        (None, Some(branch), Some(repo)) => {
-            crate::vcs::preserve_branch(repo, branch, term_scope)
-        }
+        (None, Some(branch), Some(repo)) => crate::vcs::preserve_branch(repo, branch, term_scope),
         // llmlint: ignore[changed_behavior_has_e2e] every session `onevcs` opens names
         // its branch and every lifecycle node names its `repo`, so no invocation reaches
         // a kept branch with neither; it settles as the infrastructure failure it would
@@ -1006,7 +1004,12 @@ fn publish(
     // reason it is not on the change request.
     let (described, undescribed) = match (&held, &body) {
         (Some(change), Some(body)) => {
-            match crate::vcs::describe_change(token, node.title.as_deref(), body, &launch.term_scope) {
+            match crate::vcs::describe_change(
+                token,
+                node.title.as_deref(),
+                body,
+                &launch.term_scope,
+            ) {
                 Ok(_) => (true, None),
                 Err(error) => {
                     let why = format!(
@@ -1063,15 +1066,14 @@ fn publish(
     } else {
         body.as_deref()
     };
-    let publication =
-        publish_rereading_the_merge_path(
-            node,
-            token,
-            opening_body,
-            draft.as_ref(),
-            cancel,
-            &launch.term_scope,
-        );
+    let publication = publish_rereading_the_merge_path(
+        node,
+        token,
+        opening_body,
+        draft.as_ref(),
+        cancel,
+        &launch.term_scope,
+    );
     match publication.answered {
         Ok(published) => {
             // A publication that did not land is an ending of the publication,

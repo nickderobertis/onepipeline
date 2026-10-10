@@ -364,6 +364,7 @@ impl Graph {
             name: source.name.clone(),
             concurrency: self.concurrency,
             tasks: self.iter().cloned().collect(),
+            export_edges: source.export_edges.clone(),
         }
     }
 
@@ -1838,6 +1839,7 @@ mod tests {
                 persona: Some("engineer".into()),
                 ..Node::default()
             }],
+            export_edges: Vec::new(),
         };
         assert!(validate(&plan).is_err(), "a blank node id was accepted");
     }
@@ -1913,6 +1915,7 @@ mod tests {
             name: Some("test".into()),
             concurrency: 4,
             tasks,
+            export_edges: Vec::new(),
         }
     }
 

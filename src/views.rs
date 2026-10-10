@@ -4756,6 +4756,7 @@ mod tests {
                 task: Some("## What\ndo it".into()),
                 ..Node::default()
             }],
+            export_edges: Vec::new(),
         }
     }
 

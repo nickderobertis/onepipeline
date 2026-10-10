@@ -3341,7 +3341,17 @@ fn task_document(
     // What the node was read out of rather than anything it says: the destination task's
     // own id, key and title are that task's, and a relaunch of a project this run projected
     // onto refuses `onepipeline.task_record` as a key no plan may state.
-    wire.remove("task_record");
+    let record_repositories = wire
+        .remove("task_record")
+        .and_then(|record| {
+            record
+                .get("repositories")
+                .and_then(Value::as_array)
+                .cloned()
+        })
+        .unwrap_or_default();
+    // The store's own field, as `delivers` is: a private node is a private task.
+    let classification = wire.remove("classification");
     let mut metadata = Map::new();
     metadata.insert(ID_KEY.into(), json!(root));
     metadata.insert(NODE_KEY.into(), json!(head));
@@ -3437,8 +3447,13 @@ fn task_document(
     front.insert("labels".into(), json!([]));
     front.insert("depends_on".into(), json!(local_deps));
     front.insert("metadata".into(), Value::Object(metadata));
+    if let Some(classification) = classification {
+        front.insert("classification".into(), classification);
+    }
     if let Some(repo) = repo {
-        if repo.starts_with("github.com/") {
+        if !record_repositories.is_empty() && repo.starts_with("github.com/") {
+            front.insert("repositories".into(), Value::Array(record_repositories));
+        } else if repo.starts_with("github.com/") {
             front.insert("repositories".into(), json!([repo]));
         } else if let Some(Value::Object(metadata)) = front.get_mut("metadata") {
             metadata.insert("onepipeline.repo".into(), json!(repo));
@@ -5262,6 +5277,7 @@ mod tests {
             name: Some("stop-mid-wait".into()),
             concurrency: 1,
             tasks: vec![serde_json::from_value(json!({"id": "node"})).expect("a node")],
+            export_edges: Vec::new(),
         };
         let state = RunState {
             graph: crate::graph::Graph::from_plan(&plan),
@@ -6612,6 +6628,7 @@ mod tests {
             key: None,
             title: "Build".to_owned(),
             source: None,
+            repositories: Vec::new(),
         });
         let empty = Baseline {
             path: known.dir.join(crate::cli::WRITEBACK_LANDED_FILE),
@@ -6915,6 +6932,7 @@ mod tests {
             key: None,
             title: node.to_owned(),
             source: None,
+            repositories: Vec::new(),
         });
     }
 

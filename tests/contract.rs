@@ -1720,6 +1720,12 @@ fn every_reserved_metadata_key_the_contract_names_is_a_field_of_this_schema() {
         name: Some("named".into()),
         concurrency: 2,
         tasks: Vec::new(),
+        export_edges: vec![onepipeline::plan::ExportEdge {
+            from: "producer".into(),
+            to: "consumer".into(),
+            source_directory: "examples/generic".into(),
+            target_directory: "examples".into(),
+        }],
     })
     .expect("a plan serialises");
     // Every optional field set, so the serialized shape names all of them: an
@@ -1765,7 +1771,12 @@ fn every_reserved_metadata_key_the_contract_names_is_a_field_of_this_schema() {
             key: Some("ENG-1".into()),
             title: "feat: x".into(),
             source: None,
+            repositories: vec![
+                "github.com/owner/name".into(),
+                "github.com/owner/other".into(),
+            ],
         }),
+        classification: onetaskgraph_plugin_api::Classification::Private,
     })
     .expect("a node serialises");
     let fields: BTreeSet<String> = plan
@@ -1813,12 +1824,18 @@ fn every_reserved_metadata_key_the_contract_names_is_a_field_of_this_schema() {
     // of the plan.
     assert!(
         CONTRACT.contains(
-            "The plan-level fields — `schema_version`, `goal`, `name`, `concurrency` — are \
-             reserved metadata keys `onepipeline.<field>` on the **project**"
+            "The plan-level fields — `schema_version`, `goal`, `name`, `concurrency`, \
+             `export_edges` — are reserved metadata keys `onepipeline.<field>` on the **project**"
         ),
         "the contract no longer states which fields the project carries"
     );
-    for field in ["schema_version", "goal", "name", "concurrency"] {
+    for field in [
+        "schema_version",
+        "goal",
+        "name",
+        "concurrency",
+        "export_edges",
+    ] {
         assert!(
             plan.as_object().expect("a mapping").contains_key(field),
             "the contract reserves `{field}` on the project, which is not a plan field"

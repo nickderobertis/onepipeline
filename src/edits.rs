@@ -676,6 +676,7 @@ pub fn compile(
             name: None,
             concurrency: candidate.concurrency,
             tasks: Vec::new(),
+            export_edges: Vec::new(),
         });
         graph::validate_edited(&plan).map_err(|e| Error::Refused(e.to_string()))?;
     }
@@ -1104,6 +1105,7 @@ impl EnvelopeReview {
             name: None,
             concurrency: edited.concurrency,
             tasks: Vec::new(),
+            export_edges: Vec::new(),
         });
         let under_review = EnvelopeUnderReview {
             goal: source.goal.as_ref().map(|goal| goal.text.as_str()),
@@ -2685,6 +2687,7 @@ mod tests {
             name: None,
             concurrency: 4,
             tasks: nodes,
+            export_edges: Vec::new(),
         })
     }
 
@@ -4761,6 +4764,7 @@ mod tests {
             name: Some("cover".into()),
             concurrency: 4,
             tasks: vec![agent("build", &[])],
+            export_edges: Vec::new(),
         };
         let mut graph = Graph::from_plan(&launched_with);
         let commands = vec![
@@ -5317,6 +5321,7 @@ mod tests {
             key: Some("ENG-7".into()),
             title: "Build it".into(),
             source: None,
+            repositories: Vec::new(),
         };
         let mut read = agent("build", &[]);
         read.task_record = Some(record.clone());
@@ -5346,6 +5351,7 @@ mod tests {
             key: Some("ENG-999".into()),
             title: "Not this task".into(),
             source: None,
+            repositories: Vec::new(),
         };
         let claiming = |id: &str| {
             let mut node = agent(id, &[]);

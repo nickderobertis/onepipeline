@@ -44,7 +44,8 @@ use onetaskgraph_core::{
     TaskRequest,
 };
 use onetaskgraph_plugin_api::{
-    DependencyKind, Direction, ItemKind, MetadataKey, NativeId, Project, SourceName, Task,
+    Classification, DependencyKind, Direction, ItemKind, MetadataKey, NativeId, Project,
+    SourceName, Task,
 };
 use serde_json::{Map, Value};
 
@@ -110,6 +111,10 @@ const FILLED_FROM_THE_TASK: &[(&str, &str)] = &[
     (
         "task_record",
         "the task itself — its native id, its `key` and its `title`",
+    ),
+    (
+        "classification",
+        "the task's own `classification`, tightened by its project's",
     ),
 ];
 
@@ -401,7 +406,7 @@ impl Reader {
 
         let mut nodes = Vec::with_capacity(tasks.len());
         for task in &tasks {
-            nodes.push(self.node(task, project, &ids)?);
+            nodes.push(self.node(task, project, held.item.classification, &ids)?);
         }
         document.insert("tasks".to_owned(), Value::Array(nodes));
 
@@ -516,6 +521,7 @@ impl Reader {
         &self,
         task: &Qualified<Task>,
         home: &QualifiedId,
+        project_classification: Classification,
         ids: &Ids,
     ) -> std::result::Result<Value, Load> {
         let whole = task.id.to_string();
@@ -591,7 +597,29 @@ impl Reader {
             record.insert("key".to_owned(), Value::String(key.clone()));
         }
         record.insert("title".to_owned(), Value::String(task.item.title.clone()));
+        // Every repository the task names, where it names more than the one the node's
+        // `repo` carries: each is one the work concerns, so each decides its clearance.
+        if task.item.repositories.len() > 1 {
+            record.insert(
+                "repositories".to_owned(),
+                Value::Array(
+                    task.item
+                        .repositories
+                        .iter()
+                        .map(|repository| Value::String(repository.as_str().to_owned()))
+                        .collect(),
+                ),
+            );
+        }
         node.insert("task_record".to_owned(), Value::Object(record));
+        // A private project keeps every task in it private, whatever the task says.
+        let classification = task.item.classification.strictest(project_classification);
+        if !classification.is_public() {
+            node.insert(
+                "classification".to_owned(),
+                Value::String(classification.as_str().to_owned()),
+            );
+        }
         match (task.item.repositories.first(), node.get("repo")) {
             (Some(_), Some(_)) => {
                 return Err(refused(
@@ -1418,6 +1446,117 @@ mod tests {
         );
         // Each task's own metadata, verbatim, keys this engine does not read included.
         assert_eq!(read.metadata["test"]["team.owner"], json!("qa"));
+    }
+
+    /// The boundary's three record fields reach the plan from where the store keeps them:
+    /// the export edges from the project's reserved key, a node's classification from its
+    /// task's own field — tightened by a private project — and every repository a task
+    /// names beyond its `repo` onto its record.
+    #[test]
+    fn the_boundary_fields_reconcile_with_the_records_they_are_read_from() {
+        let edge = json!({
+            "from": "generalize",
+            "to": "consume",
+            "source_directory": "examples/generic",
+            "target_directory": "examples",
+        });
+        let read = load(store(
+            json!({"onepipeline.export_edges": [edge]}),
+            vec![
+                task(
+                    "t-generalize",
+                    node("generalize"),
+                    json!({
+                        "classification": "private",
+                        "repositories": ["github.com/acme/inner", "github.com/acme/notes"],
+                    }),
+                ),
+                task(
+                    "t-consume",
+                    node("consume"),
+                    json!({"repositories": ["github.com/acme/widget"]}),
+                ),
+            ],
+            vec![json!({"from": "t-consume", "to": "t-generalize", "kind": "blocks"})],
+        ))
+        .unwrap_or_else(|_| panic!("the project reads as a plan"));
+        let plan = &read.plan;
+        assert_eq!(
+            serde_json::to_value(&plan.export_edges).expect("edges serialize"),
+            json!([edge]),
+            "the edge is the record's own, field for field"
+        );
+        let nodes: BTreeMap<&str, &Node> = plan
+            .tasks
+            .iter()
+            .map(|node| (node.id.as_str(), node))
+            .collect();
+        assert_eq!(nodes["generalize"].classification, Classification::Private);
+        assert_eq!(nodes["consume"].classification, Classification::Public);
+        assert_eq!(
+            nodes["generalize"]
+                .task_record
+                .as_ref()
+                .map(|record| record.repositories.clone()),
+            Some(vec![
+                "github.com/acme/inner".to_owned(),
+                "github.com/acme/notes".to_owned()
+            ])
+        );
+        assert!(
+            nodes["consume"]
+                .task_record
+                .as_ref()
+                .is_some_and(|record| record.repositories.is_empty()),
+            "one repository is the node's `repo` and nothing more"
+        );
+        // A public node writes no classification, so a plan with none round-trips as it did.
+        let written = serde_json::to_value(nodes["consume"]).expect("a node serializes");
+        assert!(written.get("classification").is_none(), "{written}");
+
+        // A private project keeps every task in it private, whatever the task says.
+        let mut private = store(json!({}), vec![task("t-a", node("a"), json!({}))], vec![]);
+        private.config = Config::from_document(json!({
+            "sources": {"plans": {"plugin": "in-memory", "config": {
+                "projects": [{
+                    "id": "ship",
+                    "title": "Ship the widget",
+                    "status": todo(),
+                    "labels": [],
+                    "classification": "private",
+                    "metadata": {"onepipeline.schema_version": crate::plan::PLAN_SCHEMA_VERSION},
+                }],
+                "tasks": [task("t-a", node("a"), json!({}))],
+                "task_dependencies": [],
+            }}},
+        }))
+        .expect("the fixture configuration is one the store accepts");
+        private.engine = Engine::build(
+            &private.config,
+            &onetaskgraph_core::Secrets::load(Environment::default()).expect("no secrets"),
+        );
+        let read = load(private).unwrap_or_else(|_| panic!("the project reads as a plan"));
+        assert_eq!(read.plan.tasks[0].classification, Classification::Private);
+
+        // And the field is the task's, never a reserved key.
+        let refused = load(store(
+            json!({}),
+            vec![task(
+                "t-a",
+                json!({"onepipeline.id": "a", "onepipeline.classification": "public"}),
+                json!({}),
+            )],
+            vec![],
+        ));
+        let Err(Load::Refused(refusal)) = refused else {
+            panic!("a reserved classification key is refused");
+        };
+        assert!(
+            refusal
+                .message
+                .contains("`onepipeline.classification` is not a node field"),
+            "{refusal:?}"
+        );
     }
 
     /// A body's surrounding whitespace is the store's layout, so a step is handed the body
