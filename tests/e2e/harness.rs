@@ -2608,10 +2608,14 @@ impl World {
         if let Some(delivers) = node.get("delivers") {
             front.push(("delivers", delivers.clone()));
         }
+        // And so is who may read it.
+        if let Some(classification) = node.get("classification") {
+            front.push(("classification", classification.clone()));
+        }
         for (key, value) in node {
             if matches!(
                 key.as_str(),
-                "id" | "title" | "task" | "deps" | "repo" | "delivers"
+                "id" | "title" | "task" | "deps" | "repo" | "delivers" | "classification"
             ) {
                 continue;
             }

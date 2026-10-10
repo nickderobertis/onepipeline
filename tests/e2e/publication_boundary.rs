@@ -1788,3 +1788,184 @@ fn the_store_cli_and_the_engine_refuse_and_pass_the_same_writes_in_the_same_word
     assert!(projections(&world, "unregistered").contains(unavailable));
     world.release("keep-unregistered.go");
 }
+
+#[test]
+fn every_public_surface_of_a_mixed_run_names_nothing_of_its_private_side() {
+    let (world, private, library) = mixed_world("boundary-surfaces");
+    declare_terms(&world, &private, &["zephyrine"]);
+    // Every private identifier the run holds, synthetic: its plan, its producer's id and
+    // title, the private repository, and what the producer's branch is kept as.
+    let mut generalize = producer("zephyrine-gen", &[]);
+    generalize["title"] = json!("feat: the zephyrine generalizer");
+    world.script("zephyrine-gen.work-at", "examples/generic/sample.md");
+    world.script("zephyrine-gen.work", "a generic example\n");
+    world.script("examples.work", "built on it\n");
+    let mut consumer = public("examples", &["zephyrine-gen"]);
+    // A consumer waiting for its dependencies' releases waits for none across the edge.
+    consumer["adoption"] = json!("published");
+    let plan = mixed_plan(
+        "zephyrine-plan",
+        vec![generalize, consumer],
+        vec![edge("zephyrine-gen", "examples")],
+    );
+    let project = world.plan("zephyrine-plan", &plan);
+    let graph = world.pr_author_graph();
+    world.script(
+        "pr-author.body",
+        "## What\nGeneric examples, and what built on them.\n",
+    );
+    world
+        .run(&["start", &project, "--pr-author-graph", &graph, "--attach"])
+        .settled();
+    let producer_node = settled(&world, "zephyrine-plan", "zephyrine-gen");
+    let consumer_node = settled(&world, "zephyrine-plan", "examples");
+    assert_eq!(
+        consumer_node["status"],
+        "done",
+        "{consumer_node}\n{}",
+        world.dump()
+    );
+    let private_names: Vec<String> = vec![
+        "zephyrine".to_owned(),
+        "owner/service".to_owned(),
+        "zephyrine-plan-board".to_owned(),
+        producer_node["branch"]
+            .as_str()
+            .expect("a kept branch")
+            .to_owned(),
+        producer_node["head"]
+            .as_str()
+            .expect("a kept head")
+            .to_owned(),
+        private.checkout.to_string_lossy().into_owned(),
+    ];
+    let clean = |surface: &str, text: &str| {
+        for name in &private_names {
+            assert!(
+                !text.contains(name.as_str()),
+                "{surface} names {name}:\n{text}"
+            );
+        }
+    };
+
+    // What the consumer's worker and its judge were handed.
+    let tasks = tasks_of(&world, "examples");
+    assert!(!tasks.is_empty());
+    for task in &tasks {
+        clean("the consumer's task", task);
+        assert!(!task.contains("## Cross-repository references"), "{task}");
+        assert!(!task.contains("have arrived"), "{task}");
+    }
+    // What its drafter was handed: the run is named by its environment, not spelled out.
+    let drafts: Vec<String> = world
+        .invocations()
+        .into_iter()
+        .filter(|call| {
+            call["tool"] == "oneagentgraph"
+                && call["args"].as_array().is_some_and(|args| {
+                    args.iter()
+                        .any(|arg| arg == "onepipeline.persona=pr-author")
+                        && args.iter().any(|arg| arg == "onepipeline.node=examples")
+                })
+        })
+        .filter_map(|call| {
+            let args = call["args"].as_array()?.clone();
+            let at = args.iter().position(|arg| arg == "--task")?;
+            args.get(at + 1)?.as_str().map(str::to_owned)
+        })
+        .collect();
+    assert!(
+        !drafts.is_empty(),
+        "the consumer was not drafted for: {}",
+        world.dump()
+    );
+    for draft in &drafts {
+        clean("the consumer's drafter context", draft);
+        assert!(draft.contains("$ONEPIPELINE_RUN_ID"), "{draft}");
+        assert!(draft.contains("## Repository boundary"), "{draft}");
+    }
+    // Its branch, every session event its run relayed, and its settlement.
+    clean(
+        "the consumer's branch",
+        consumer_node["branch"].as_str().unwrap_or_default(),
+    );
+    for event in world
+        .journal("zephyrine-plan")
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == "examples")
+        .filter(|event| event["source"] == "vcs" || event["kind"] == "node-settled")
+    {
+        let payload = event["payload"].to_string();
+        clean("a consumer's session event", &payload);
+    }
+    // The public repository's whole history.
+    git_out(&world, &library.checkout, &["fetch", "origin"]);
+    clean(
+        "the public history",
+        &git_out(
+            &world,
+            &library.checkout,
+            &["log", "--all", "--format=%an %ae %s%n%b"],
+        ),
+    );
+    // The run's own `results` line for the consumer.
+    let results = world.run(&["results", "zephyrine-plan"]);
+    results.exited(0);
+    for line in results
+        .stdout
+        .lines()
+        .filter(|line| line.contains("examples"))
+    {
+        clean("the consumer's results line", line);
+    }
+}
+
+#[test]
+fn a_stricter_clearance_is_never_downgraded() {
+    let (world, _, _) = mixed_world("boundary-strict");
+    // A task classified private, in a public repository, is private: a public node may
+    // not depend on it, and a retry stating nothing about it keeps it private.
+    let mut classified = public("classified", &[]);
+    classified["classification"] = json!("private");
+    let reason = refused_by_check(
+        &world,
+        "strict",
+        &mixed_plan(
+            "strict",
+            vec![classified.clone(), public("downstream", &["classified"])],
+            vec![],
+        ),
+    );
+    assert!(reason.contains("private node classified"), "{reason}");
+
+    world.script("classified.fail", "1");
+    world.script("held.wait", "hold");
+    let project = world.plan(
+        "retried-strict",
+        &mixed_plan(
+            "retried-strict",
+            vec![classified, crate::harness::agent("held", &[])],
+            vec![],
+        ),
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
+    until_settled(&world, "retried-strict", "classified");
+    reply(
+        &world,
+        "retried-strict",
+        json!([{"op": "retry", "id": "classified", "node": public("classified-2", &[])}]),
+    );
+    // The replacement is as private as what it replaced: a public node depending on it
+    // is still an ordinary private-to-public dependency.
+    world
+        .run_with_stdin(
+            &["reply", "retried-strict"],
+            &json!({"version": 3, "commands": [
+                {"op": "add", "node": public("downstream", &["classified-2"])}
+            ]})
+            .to_string(),
+        )
+        .exited(REFUSED)
+        .err_has("private node classified-2");
+    world.release("held.go");
+}
