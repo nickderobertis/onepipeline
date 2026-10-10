@@ -4139,6 +4139,250 @@ fn a_persona_naming_artifacts_gives_its_judge_a_prompt_naming_them() {
     }
 }
 
+/// The heading onejudge opens the one evidence contract under, whatever mode the
+/// judge resolves.
+const EVIDENCE_CONTRACT: &str = "EVIDENCE CONTRACT\n";
+
+/// Replace the node-scope graph with a two-party worker judged by `judge` — the
+/// graph's own `judge:` value, as YAML flow — at graph schema `version`, and
+/// write each `(file, mode)` as a harness judge config resolving that mode.
+fn write_judged_node_graph(world: &World, version: u32, judge: &str, configs: &[(&str, &str)]) {
+    for (file, mode) in configs {
+        std::fs::write(
+            world.graphs().join(file),
+            format!("run_mode = \"fallback\"\nharnesses = [\"claude-code\"]\nmode = \"{mode}\"\n"),
+        )
+        .expect("the judge config is written");
+    }
+    std::fs::write(
+        world.graphs().join("node-scope.yaml"),
+        format!(
+            "version: {version}\nname: node-scope\nmembers:\n  worker:\n    kind: onejudge\n    \
+             base_config: ./onejudge.base.yaml\n    agent:\n      \
+             oneharness_config: ./oneharness.toml\n    judge: {judge}\n    mode: bypass\n"
+        ),
+    )
+    .expect("the node-scope graph is written");
+}
+
+/// Dispatch one persona-carrying agent node as plan `run` through the real
+/// sibling, with `extra` launch arguments, and return the launch.
+fn dispatch_judged(world: &World, run: &str, extra: &[&str]) -> crate::harness::Run {
+    let mut node = agent(run, &[]);
+    node["persona"] = Value::from("./plain.yaml");
+    let path = world.plan(run, &plan_of(run, vec![node]));
+    let mut args = vec!["start", path.as_str(), "--attach"];
+    args.extend_from_slice(extra);
+    world.run_on_agentgraph(&args)
+}
+
+/// The onejudge report the one dispatch in `run` settled on.
+fn settled_report(world: &World, run: &str) -> Value {
+    let settled = world.events_of(run, "member-settled");
+    let stored = settled
+        .first()
+        .and_then(|event| event["payload"]["report_path"].as_str())
+        .unwrap_or_else(|| panic!("the settle named no stored report: {settled:#?}"));
+    serde_json::from_str(&std::fs::read_to_string(stored).expect("the stored report is readable"))
+        .expect("the stored report is JSON")
+}
+
+/// The provider block onejudge read the dispatch of the worker in `run` from.
+fn provider_block(world: &World, run: &str) -> Value {
+    let effective: Value = serde_norway::from_str(&config_of(world, run, "worker"))
+        .expect("the member's effective onejudge config parses");
+    effective["provider"].clone()
+}
+
+/// A dispatched member judged by a **panel** whose harness judges each resolve
+/// `read-only` runs without `allow_writable_judges`, settles its node `done`, and
+/// the onejudge report records what each judge decided under that posture.
+///
+/// onejudge refuses a panel holding a writable harness judge unless the split
+/// allows it, so a posture that did not reach the linked onejudge as `read-only`
+/// would refuse this dispatch rather than settle it.
+#[test]
+fn a_panel_of_read_only_judges_settles_its_node_with_each_judges_decision_recorded() {
+    let world = World::new("real-judge-panel");
+    world.write_graphs();
+    world.write_supervised_node_graph();
+    write_persona(&world, "plain");
+    write_judged_node_graph(
+        &world,
+        1,
+        "[{oneharness_config: ./judge-reader.toml, label: reader}, \
+         {oneharness_config: ./judge-checker.toml, label: checker}]",
+        &[
+            ("judge-reader.toml", "read-only"),
+            ("judge-checker.toml", "read-only"),
+        ],
+    );
+
+    dispatch_judged(&world, "panel", &[]).exited(0).settled();
+
+    let block = provider_block(&world, "panel");
+    assert_eq!(block["kind"], "split", "the panel was not split: {block}");
+    assert!(
+        block.get("allow_writable_judges").is_none(),
+        "the panel was dispatched already allowing writable judges: {block}"
+    );
+    let settled = world.events_of("panel", "node-settled");
+    assert_eq!(
+        settled.first().map(|event| &event["payload"]["status"]),
+        Some(&json!("done")),
+        "the panel's node did not settle done: {settled:#?}\n{}",
+        world.dump()
+    );
+
+    let report = settled_report(&world, "panel");
+    let turns: Vec<onejudge::JudgedTurn> =
+        serde_json::from_value(report["judge_decisions"].clone())
+            .expect("the report carries onejudge's per-judge decisions");
+    let last = turns
+        .last()
+        .unwrap_or_else(|| panic!("the report records no judged turn: {report}"));
+    let judged: Vec<(&str, &str)> = last
+        .decisions
+        .iter()
+        .map(|decision| {
+            (
+                decision.judge.as_str(),
+                decision
+                    .posture
+                    .as_ref()
+                    .map_or("(none)", |posture| posture.mode.as_str()),
+            )
+        })
+        .collect();
+    assert_eq!(
+        judged,
+        vec![("reader", "read-only"), ("checker", "read-only")],
+        "{turns:#?}"
+    );
+    assert!(
+        last.decisions
+            .iter()
+            .all(|decision| decision.decision == onejudge::Decision::Done),
+        "a judge did not call the work done: {turns:#?}"
+    );
+}
+
+/// The judge prompt a dispatch hands the harness carries onejudge's one evidence
+/// contract — inspect, verify, and the closed `git_status`/`git_diff` requests —
+/// the same whether the judge config resolves `read-only` or `default`, and
+/// neither tells the judge what its permissions are.
+#[test]
+fn a_read_only_and_a_default_judge_are_handed_the_same_evidence_contract() {
+    let world = World::new("real-evidence-contract");
+    world.write_graphs();
+    world.write_supervised_node_graph();
+    write_persona(&world, "plain");
+
+    let contract_of = |run: &str, mode: &str| -> String {
+        let file = format!("judge-{mode}.toml");
+        write_judged_node_graph(
+            &world,
+            1,
+            &format!("{{oneharness_config: ./{file}}}"),
+            &[(&file, mode)],
+        );
+        let before = judge_prompts(&world).len();
+        dispatch_judged(&world, run, &[]).exited(0).settled();
+        let mut prompts = judge_prompts(&world);
+        let asked = prompts.split_off(before);
+        assert!(
+            !asked.is_empty(),
+            "the {mode} judge was never asked, so nothing here is proven: {:?}",
+            world.invocations()
+        );
+        let mut contracts = asked.iter().map(|prompt| {
+            for absent in ["READ-ONLY", "read-only", "MODE:", "permission"] {
+                assert!(
+                    !prompt.contains(absent),
+                    "the {mode} judge's prompt carries {absent:?}:\n{prompt}"
+                );
+            }
+            let start = prompt
+                .find(EVIDENCE_CONTRACT)
+                .unwrap_or_else(|| panic!("the {mode} judge's prompt has no contract:\n{prompt}"));
+            let contract = &prompt[start..];
+            contract[..contract.find("Worktree:").unwrap_or(contract.len())].to_owned()
+        });
+        let contract = contracts.next().expect("one prompt at least");
+        assert!(
+            contracts.all(|other| other == contract),
+            "the {mode} judge was handed two contracts"
+        );
+        contract
+    };
+
+    let read_only = contract_of("reader", "read-only");
+    let default = contract_of("writer", "default");
+    for instruction in [
+        "Inspect files, git state, and full history",
+        "verify the work yourself",
+        "`{\"tool\":\"git_status\"}` or `{\"tool\":\"git_diff\"}`; no other member is allowed",
+    ] {
+        assert!(
+            read_only.contains(instruction),
+            "the contract does not say {instruction:?}:\n{read_only}"
+        );
+    }
+    assert_eq!(
+        read_only, default,
+        "the read-only and the default judge were handed different contracts"
+    );
+}
+
+/// `--node-set members.worker.judge_settings.<key>=<value>` reaches the provider
+/// block the dispatched member is handed, through no engine code of its own:
+/// the engine forwards the override, and the linked oneagentgraph composes it.
+///
+/// The fields are graph schema 10's, so the shipped version-1 default refuses
+/// the same override at launch, naming the version it needs.
+#[test]
+fn node_scope_judge_settings_reach_the_provider_block_a_dispatch_is_handed() {
+    let world = World::new("real-judge-settings");
+    world.write_graphs();
+    world.write_supervised_node_graph();
+    write_persona(&world, "plain");
+    let set = "members.worker.judge_settings.instructions=Read the commit log first.";
+
+    let refused = dispatch_judged(&world, "unversioned", &["--node-set", set]);
+    assert_ne!(refused.code, 0, "the version-1 graph took the override");
+    assert!(
+        refused.stderr.contains(
+            "`judge_settings` or a judge's `settings`, which requires graph schema version 10"
+        ),
+        "the refusal does not name the version the field needs:\n{}",
+        refused.stderr
+    );
+
+    write_judged_node_graph(
+        &world,
+        10,
+        "{oneharness_config: ./judge.toml}",
+        &[("judge.toml", "read-only")],
+    );
+    let before = judge_prompts(&world).len();
+    dispatch_judged(&world, "versioned", &["--node-set", set])
+        .exited(0)
+        .settled();
+    let block = provider_block(&world, "versioned");
+    assert_eq!(
+        block["instructions"], "Read the commit log first.",
+        "the override never reached the provider block: {block}"
+    );
+    let asked = judge_prompts(&world).split_off(before);
+    assert!(
+        !asked.is_empty()
+            && asked
+                .iter()
+                .all(|prompt| prompt.contains("Read the commit log first.")),
+        "the setting never reached the judge onejudge ran: {asked:#?}"
+    );
+}
+
 /// A node's turn budget reaches the configuration its dispatch is handed, and
 /// beats the run-wide override an operator set.
 ///
