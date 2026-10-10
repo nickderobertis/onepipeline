@@ -1191,3 +1191,357 @@ fn an_envelope_queued_past_every_submission_check_and_one_replayed_by_an_adopter
     );
     world.release("generalize.go");
 }
+
+/// A world for the run term scope: the private `service` (identity A) and `beta`
+/// (identity B), the public `library`, and a plan store whose configuration opts into
+/// the public boundary, so every write a run projects onto it is checked.
+fn scoped_world(name: &str) -> (World, Repository, Repository, Repository) {
+    let (world, a, library) = mixed_world(name);
+    let b = world.extra_repository("beta");
+    declare_visibility(
+        &world,
+        &[
+            ("service", "private"),
+            ("beta", "private"),
+            ("library", "public"),
+        ],
+    );
+    let onevcs = crate::harness::onevcs_binary()
+        .to_string_lossy()
+        .into_owned();
+    let world = world
+        .with_env(
+            "ONETASKGRAPH_WRITE_POLICY__CHECK_COMMAND",
+            &json!([
+                onevcs,
+                "boundary",
+                "check",
+                "--destination",
+                "public",
+                "--input",
+                "-"
+            ])
+            .to_string(),
+        )
+        .with_env(
+            "ONETASKGRAPH_WRITE_POLICY__VISIBILITY_COMMAND",
+            &json!([onevcs, "boundary", "inspect", "--input", "-", "--json"]).to_string(),
+        );
+    (world, a, b, library)
+}
+
+/// A public node in `library` whose work is a file saying `said`.
+fn saying(world: &World, id: &str, said: &str) -> Value {
+    world.script(&format!("{id}.work"), &format!("{said}\n"));
+    public(id, &[])
+}
+
+/// The detail a node settled with.
+fn detail_of(world: &World, run: &str, node: &str) -> String {
+    world
+        .events_of(run, "node-settled")
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == node)
+        .last()
+        .map(|event| {
+            event["payload"]["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .unwrap_or_default()
+}
+
+/// What the write-back recorded of each attempt to project the run onto its store.
+fn projections(world: &World, run: &str) -> String {
+    std::fs::read_to_string(world.run_file(run, "writeback-projections.jsonl")).unwrap_or_default()
+}
+
+#[test]
+fn a_run_naming_a_but_not_b_refuses_as_owner_name_and_passes_bs_through_every_check() {
+    let (world, _, _, library) = scoped_world("scope-a-not-b");
+    // Two exports: one whose example names A, one whose example names only B.
+    world.script("gen-a.work-at", "examples/generic/a.md");
+    world.script("gen-a.work", "copied from owner/service\n");
+    world.script("gen-b.work-at", "examples/generic/b.md");
+    world.script("gen-b.work", "copied from owner/beta\n");
+    let mut edge_a = edge("gen-a", "cons-a");
+    edge_a["target_directory"] = json!("examples/a");
+    let mut edge_b = edge("gen-b", "cons-b");
+    edge_b["target_directory"] = json!("examples/b");
+    let plan = mixed_plan(
+        "scoped",
+        vec![
+            producer("gen-a", &[]),
+            producer("gen-b", &[]),
+            public("cons-a", &["gen-a"]),
+            public("cons-b", &["gen-b"]),
+            // Two publications: one naming A, one naming only B.
+            saying(&world, "pub-a", "names owner/service"),
+            saying(&world, "pub-b", "names owner/beta"),
+        ],
+        vec![edge_a, edge_b],
+    );
+    let project = world.plan("scoped", &plan);
+    world.run(&["start", &project, "--attach"]).settled();
+
+    // Export: A's name refused, B's passed.
+    assert_eq!(
+        settled(&world, "scoped", "cons-a")["outcome"],
+        "infrastructure-failure"
+    );
+    assert!(
+        detail_of(&world, "scoped", "cons-a").contains("public output carries a term"),
+        "{}",
+        detail_of(&world, "scoped", "cons-a")
+    );
+    assert_eq!(
+        settled(&world, "scoped", "cons-b")["status"],
+        "done",
+        "{}",
+        world.dump()
+    );
+    // Publication: A's name refused, B's passed.
+    assert_ne!(settled(&world, "scoped", "pub-a")["status"], "done");
+    assert!(
+        detail_of(&world, "scoped", "pub-a").contains("public output carries a term"),
+        "{}",
+        detail_of(&world, "scoped", "pub-a")
+    );
+    assert_eq!(
+        settled(&world, "scoped", "pub-b")["status"],
+        "done",
+        "{}",
+        world.dump()
+    );
+
+    // The bus validator, over the same run: A's name refused, B's passed.
+    validated(
+        &world,
+        "scoped",
+        &json!({"version": 3, "commands": [note("cons-b", "keep owner/service out")]}),
+    )
+    .exited(1);
+    validated(
+        &world,
+        "scoped",
+        &json!({"version": 3, "commands": [note("cons-b", "owner/beta is fine to name")]}),
+    )
+    .exited(0);
+
+    // Plan-store writes, in a second run naming A: a node an edit adds is created on the
+    // store by the write-back, so its whole task is a write the store checks. One citing
+    // only B is created; one citing A is refused before the store is written.
+    world.script("gen-c.wait", "hold");
+    let leaking = world.plan(
+        "leaking",
+        &mixed_plan(
+            "leaking",
+            vec![producer("gen-c", &[]), public("cons-c", &["gen-c"])],
+            vec![edge("gen-c", "cons-c")],
+        ),
+    );
+    world.run(&["start", &leaking, "--detach"]).exited(0);
+    world.until("the producer to be in flight", |world| {
+        !world.events_of("leaking", "node-dispatched").is_empty()
+    });
+    let citing = |id: &str, cited: &str| {
+        let mut node = lifecycle(id, &[]);
+        node["parked"] = json!(true);
+        node["task"] = json!(format!(
+            "## What\nShip {id}.\n\n## Why\nIt cites {cited}.\n\n## Acceptance criteria\n- {id} is published."
+        ));
+        node
+    };
+    reply(
+        &world,
+        "leaking",
+        json!([{"op": "add", "node": citing("cites-b", "owner/beta")}]),
+    );
+    world.until("the node citing B to reach the store", |world| {
+        world
+            .store_tasks(&leaking)
+            .iter()
+            .any(|task| task.to_string().contains("It cites owner/beta."))
+    });
+    reply(
+        &world,
+        "leaking",
+        json!([{"op": "add", "node": citing("cites-a", "owner/service")}]),
+    );
+    world.until("the write-back to be refused", |world| {
+        projections(world, "leaking").contains("boundary-refused")
+    });
+    let projected = projections(&world, "leaking");
+    assert!(
+        !projected.contains("owner/service"),
+        "the refusal named the term: {projected}"
+    );
+    assert!(
+        world
+            .store_tasks(&leaking)
+            .iter()
+            .all(|task| !task.to_string().contains("It cites owner/service.")),
+        "the refused write reached the store"
+    );
+    world.release("gen-c.go");
+    world.until("the second run to settle", |world| {
+        world.run_file("leaking", "result.json").is_file()
+            || world
+                .events_of("leaking", "driver-exited")
+                .iter()
+                .any(|_| true)
+    });
+
+    // Outside any run, the host's registered private identities decide: B is one, so a
+    // public branch naming it is refused although no run ever named B.
+    crate::harness::git(
+        &world,
+        &library.checkout,
+        &["checkout", "-q", "-b", "notes"],
+    );
+    std::fs::write(library.checkout.join("NOTES.md"), "see owner/beta\n").expect("a note");
+    crate::harness::git(&world, &library.checkout, &["add", "-A"]);
+    crate::harness::git(
+        &world,
+        &library.checkout,
+        &["commit", "-qm", "docs: add notes"],
+    );
+    crate::harness::git(&world, &library.checkout, &["checkout", "-q", "main"]);
+    let outside = world.run(&[
+        "publish-branch",
+        "notes",
+        "--repo",
+        "library",
+        "--title",
+        "docs: add notes",
+    ]);
+    assert_ne!(outside.code, 0, "{}", outside.stdout);
+    assert!(
+        format!("{}{}", outside.stdout, outside.stderr).contains("public output carries a term"),
+        "{}\n{}",
+        outside.stdout,
+        outside.stderr
+    );
+}
+
+#[test]
+fn a_plan_naming_no_private_repository_derives_no_term_even_where_the_registry_cannot() {
+    let (world, a, _, _) = scoped_world("scope-empty");
+    // A third registered private identity whose committed declaration cannot be read:
+    // every check scoped to the whole registry is unavailable while it stands.
+    let c = world.extra_repository("gamma");
+    declare_visibility(
+        &world,
+        &[
+            ("service", "private"),
+            ("beta", "private"),
+            ("gamma", "private"),
+            ("library", "public"),
+        ],
+    );
+    std::fs::write(
+        c.checkout.join("private-terms.toml"),
+        "schema_version = 1\nterms = [\n",
+    )
+    .expect("a broken declaration");
+    crate::harness::git(&world, &c.checkout, &["add", "-A"]);
+    crate::harness::git(&world, &c.checkout, &["commit", "-qm", "chore: break it"]);
+    let registry_scoped = std::process::Command::new(crate::harness::onevcs_binary())
+        .args([
+            "boundary",
+            "check",
+            "--destination",
+            "public",
+            "--input",
+            "-",
+        ])
+        .env("ONEVCS_HOME", world.onevcs_home())
+        .env("GIT_CONFIG_GLOBAL", world.gitconfig())
+        .env("ONEVCS_GH", crate::harness::double("fake-gh"))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child
+                .stdin
+                .take()
+                .expect("a stdin")
+                .write_all(br#"{"destination":"public","text":["nothing at all"]}"#)?;
+            child.wait_with_output()
+        })
+        .expect("onevcs runs");
+    assert!(
+        !matches!(registry_scoped.status.code(), Some(0 | 1)),
+        "a registry-scoped check decided: {}",
+        String::from_utf8_lossy(&registry_scoped.stdout)
+    );
+    drop(a);
+
+    // An all-public plan: its node's task and its publication name both A and B.
+    let mut named = saying(&world, "notes", "names owner/service and owner/beta");
+    named["task"] = json!(
+        "## What\nShip notes.\n\n## Why\nIt cites owner/service and owner/beta.\n\n\
+         ## Acceptance criteria\n- notes is published."
+    );
+    let project = world.plan(
+        "public-only",
+        &mixed_plan("public-only", vec![named], vec![]),
+    );
+    world.run(&["start", &project, "--attach"]).settled();
+    assert_eq!(
+        settled(&world, "public-only", "notes")["status"],
+        "done",
+        "{}",
+        world.dump()
+    );
+    let projected = projections(&world, "public-only");
+    assert!(
+        !projected.contains("boundary"),
+        "a plan-store write met the boundary: {projected}"
+    );
+    let stored = world.store_tasks(&project);
+    assert!(
+        stored
+            .iter()
+            .any(|task| task.to_string().contains("owner/service and owner/beta")),
+        "the plan store does not hold the run's task: {stored:?}"
+    );
+    validated(
+        &world,
+        "public-only",
+        &json!({"version": 3, "commands": [note("notes", "owner/service and owner/beta")]}),
+    )
+    .exited(0);
+}
+
+#[test]
+fn a_live_edit_naming_b_puts_b_in_the_run_scope_for_every_check_after_it() {
+    let (world, _, _, _) = scoped_world("scope-edit");
+    world.script("generalize.wait", "hold");
+    let project = world.plan("grown", &exported_plan("grown"));
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the producer to be in flight", |world| {
+        !world.events_of("grown", "node-dispatched").is_empty()
+    });
+    let naming_b = json!({"version": 3, "commands": [note("examples", "cite owner/beta")]});
+    validated(&world, "grown", &naming_b).exited(0);
+
+    // A node in B's repository joins the plan.
+    let mut in_b = lifecycle("in-beta", &[]);
+    in_b["repo"] = json!("beta");
+    in_b["parked"] = json!(true);
+    reply(&world, "grown", json!([{"op": "add", "node": in_b}]));
+    world.until("the edit to commit", |world| {
+        world
+            .events_of("grown", "edit-committed")
+            .iter()
+            .any(|event| event["payload"]["command"]["op"] == "add")
+    });
+    validated(&world, "grown", &naming_b).exited(1);
+    world
+        .run_with_stdin(&["reply", "grown"], &naming_b.to_string())
+        .exited(REFUSED);
+    world.release("generalize.go");
+}
