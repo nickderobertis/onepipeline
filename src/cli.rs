@@ -183,7 +183,8 @@ pub enum Command {
     // binary rather than a new command or client: it reads the boundary rules the loader
     // and the reconciler already hold a plan to, through the same private module, and
     // ships in the same artifact on the same three registries.
-    /// The repository publication boundary: the guidance for crossing it.
+    /// The repository publication boundary: the guidance for crossing it, and the
+    /// validator a message bus runs.
     #[command(subcommand)]
     Boundary(BoundaryCommand),
     /// Attach a fresh driver to a run whose ledger is intact.
@@ -289,6 +290,24 @@ pub enum BoundaryCommand {
     /// generalize, preserve, export, consume. It is the advice every boundary refusal
     /// carries, written once.
     Guidance(BoundaryGuidanceArgs),
+    /// Judge one message bus envelope, read from stdin, against a run's boundary: exit 0
+    /// to pass it, 1 to refuse it with a neutral reason on stderr, and 2 where the check
+    /// cannot decide, which a bus never sends. The `command` validator a bus
+    /// configuration names.
+    ValidateEnvelope(ValidateEnvelopeArgs),
+}
+
+/// `onepipeline boundary validate-envelope`.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct ValidateEnvelopeArgs {
+    /// The run whose plan the envelope is judged against.
+    #[arg(long)]
+    pub run: String,
+    /// Print the digest a bus pass cache keys a pass by — the run's term scope, its
+    /// nodes' clearances and the terms each scoped repository contributes — instead of
+    /// judging anything.
+    #[arg(long)]
+    pub fingerprint: bool,
 }
 
 /// `onepipeline boundary guidance`.

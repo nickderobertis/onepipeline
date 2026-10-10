@@ -868,3 +868,269 @@ fn a_producer_named_with_a_private_term_is_given_a_neutral_branch_and_exports_on
     );
     assert!(tasks_of(&world, "more-examples").is_empty());
 }
+
+/// Judge `document` with the compiled validator, as a bus's `command` validator runs it.
+fn validated(world: &World, run: &str, document: &Value) -> crate::harness::Run {
+    world.run_with_stdin(
+        &["boundary", "validate-envelope", "--run", run],
+        &document.to_string(),
+    )
+}
+
+/// One note command to `id`.
+fn note(id: &str, text: &str) -> Value {
+    json!({"op": "note", "id": id, "addressee": "worker", "text": text, "deliver": "next"})
+}
+
+/// A mixed run held open with its producer in flight, its private repository declaring
+/// `terms`.
+fn held_mixed_run(name: &str, terms: &[&str]) -> (World, Repository) {
+    let (world, private, _) = mixed_world(&format!("boundary-{name}"));
+    declare_terms(&world, &private, terms);
+    world.script("generalize.wait", "hold");
+    let project = world.plan(name, &exported_plan(name));
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the producer to be in flight", |world| {
+        !world.events_of(name, "node-dispatched").is_empty()
+    });
+    (world, private)
+}
+
+#[test]
+fn the_compiled_validator_judges_targeted_and_untargeted_content_and_refuses_what_it_cannot_judge()
+{
+    let (world, private) = held_mixed_run("validated", &["zephyrine", "lanternfish"]);
+
+    // A note to the public consumer carrying a private term is refused, in words that
+    // do not repeat it; the same note without it passes.
+    let refused = validated(
+        &world,
+        "validated",
+        &json!({"version": 3, "commands": [note("examples", "follow the zephyrine layout")]}),
+    );
+    refused.exited(1).err_has("public node examples");
+    assert!(!refused.stderr.contains("zephyrine"), "{}", refused.stderr);
+    validated(
+        &world,
+        "validated",
+        &json!({"version": 3, "commands": [note("examples", "follow the plain layout")]}),
+    )
+    .exited(0);
+    // The private producer may be told anything.
+    validated(
+        &world,
+        "validated",
+        &json!({"version": 3, "commands": [note("generalize", "follow the zephyrine layout")]}),
+    )
+    .exited(0);
+    // Text addressed to no node — a verdict's message, a surface — is checked as public,
+    // and so is a node an envelope adds and a ruling it amends a public node with.
+    validated(
+        &world,
+        "validated",
+        &json!({"completion": false, "message": "keep the zephyrine names out"}),
+    )
+    .exited(1);
+    validated(
+        &world,
+        "validated",
+        &json!({"id": "s-1", "kind": "check-in", "message": "the zephyrine step is slow"}),
+    )
+    .exited(1);
+    let mut added = public("more-examples", &[]);
+    added["title"] = json!("feat: zephyrine examples");
+    validated(
+        &world,
+        "validated",
+        &json!({"version": 3, "commands": [{"op": "add", "node": added}]}),
+    )
+    .exited(1);
+    validated(
+        &world,
+        "validated",
+        &json!({"version": 3, "commands": [
+            {"op": "amend", "id": "examples", "text": "match the zephyrine output"}
+        ]}),
+    )
+    .exited(1);
+    // A command naming a node the run does not hold has no clearance to judge it by.
+    validated(
+        &world,
+        "validated",
+        &json!({"version": 3, "commands": [note("nowhere", "anything at all")]}),
+    )
+    .exited(2)
+    .err_has("no clearance");
+
+    // An exception the private repository declares is honoured.
+    let excepted = json!({"version": 3, "commands": [note("examples", "mind the lanternfish")]});
+    validated(&world, "validated", &excepted).exited(1);
+    std::fs::write(
+        private.checkout.join("private-terms.toml"),
+        "schema_version = 1\nterms = [\"zephyrine\", \"lanternfish\"]\n\
+         exceptions = [{term = \"lanternfish\", action = \"drop\"}]\n",
+    )
+    .expect("the declaration is rewritten");
+    crate::harness::git(
+        &world,
+        &private.checkout,
+        &["commit", "-qam", "chore: except a word"],
+    );
+    validated(&world, "validated", &excepted).exited(0);
+
+    // A declaration the check cannot read makes it unavailable, never a pass.
+    std::fs::write(
+        private.checkout.join("private-terms.toml"),
+        "schema_version = 1\nterms = [\n",
+    )
+    .expect("the declaration is broken");
+    crate::harness::git(
+        &world,
+        &private.checkout,
+        &["commit", "-qam", "chore: break it"],
+    );
+    validated(
+        &world,
+        "validated",
+        &json!({"version": 3, "commands": [note("examples", "follow the plain layout")]}),
+    )
+    .exited(2)
+    .err_has("could not judge");
+    world.release("generalize.go");
+}
+
+#[test]
+fn a_payload_once_passed_is_judged_again_after_the_terms_change_whatever_a_bus_cached() {
+    let (world, private, _) = mixed_world("boundary-revalidated");
+    declare_terms(&world, &private, &["zephyrine"]);
+    world.script("generalize.wait", "hold");
+    // The bus this run launched under runs the compiled validator on its reply queue,
+    // keeping passes in a cache keyed by the validator's own fingerprint.
+    let validator = crate::harness::binary().to_string_lossy().into_owned();
+    let cache = world.root.join("validator-passes");
+    let config = world.root.join("onemessagebus.yaml");
+    std::fs::write(
+        &config,
+        format!(
+            "version: 1\ntransport: {{kind: local}}\nvalidators:\n  - on: replies\n    kind: \
+             command\n    command: [{validator:?}, boundary, validate-envelope, --run, \
+             bussed]\n    cache:\n      dir: {cache:?}\n      bar_fingerprint: [{validator:?}, \
+             boundary, validate-envelope, --run, bussed, --fingerprint]\n"
+        ),
+    )
+    .expect("the bus configuration is written");
+    world.script("held.wait", "hold");
+    let project = world.plan(
+        "bussed",
+        &mixed_plan(
+            "bussed",
+            vec![
+                crate::harness::agent("held", &[]),
+                producer("generalize", &[]),
+                public("examples", &["generalize"]),
+            ],
+            vec![edge("generalize", "examples")],
+        ),
+    );
+    world
+        .run(&[
+            "start",
+            &project,
+            "--bus-config",
+            &config.to_string_lossy(),
+            "--detach",
+        ])
+        .exited(0);
+    world.until("the held node to be in flight", |world| {
+        world
+            .events_of("bussed", "node-dispatched")
+            .iter()
+            .any(|event| event["labels"]["node"] == "held")
+    });
+
+    let payload =
+        json!({"version": 3, "commands": [note("examples", "reuse the quillwort fixtures")]});
+    let before = world
+        .run(&[
+            "boundary",
+            "validate-envelope",
+            "--run",
+            "bussed",
+            "--fingerprint",
+        ])
+        .stdout
+        .trim()
+        .to_owned();
+    let replied = world.run_with_stdin(&["reply", "bussed"], &payload.to_string());
+    assert!(
+        [0, onepipeline::error::EXIT_QUEUED].contains(&replied.code),
+        "{}",
+        replied.stderr
+    );
+    let cached = std::fs::read_dir(&cache)
+        .map(|dir| dir.count())
+        .unwrap_or(0);
+    assert!(
+        cached > 0,
+        "the bus kept no pass, so it never ran the validator"
+    );
+
+    // The private repository now declares the word the payload carries.
+    declare_terms(&world, &private, &["zephyrine", "quillwort"]);
+    let after = world
+        .run(&[
+            "boundary",
+            "validate-envelope",
+            "--run",
+            "bussed",
+            "--fingerprint",
+        ])
+        .stdout
+        .trim()
+        .to_owned();
+    assert_ne!(before, after, "the fingerprint did not move with the terms");
+    // The same bytes are judged again, through the bus and directly, and refused.
+    world
+        .run_with_stdin(&["reply", "bussed"], &payload.to_string())
+        .exited(REFUSED)
+        .err_has("public node examples");
+    validated(&world, "bussed", &payload).exited(1);
+    let committed: Vec<Value> = world.events_of("bussed", "edit-committed");
+    let notes = committed
+        .iter()
+        .filter(|event| event["payload"]["command"]["op"] == "note")
+        .count();
+    assert!(notes <= 1, "the refused note was committed: {committed:?}");
+    world.release("held.go");
+    world.release("generalize.go");
+}
+
+#[test]
+fn a_direct_reply_and_note_meet_the_same_check_without_any_bus() {
+    let (world, _) = held_mixed_run("direct", &["zephyrine"]);
+    let leaking =
+        json!({"version": 3, "commands": [note("examples", "follow the zephyrine layout")]});
+    world
+        .run_with_stdin(&["reply", "direct"], &leaking.to_string())
+        .exited(REFUSED)
+        .err_has("public node examples");
+    let unknown = json!({"version": 3, "commands": [note("nowhere", "anything")]});
+    world
+        .run_with_stdin(&["reply", "direct"], &unknown.to_string())
+        .exited(REFUSED);
+    assert!(
+        world
+            .events_of("direct", "edit-committed")
+            .iter()
+            .all(|event| event["payload"]["command"]["op"] != "note"),
+        "a refused note was committed"
+    );
+    let clean = json!({"version": 3, "commands": [note("examples", "follow the plain layout")]});
+    let replied = world.run_with_stdin(&["reply", "direct"], &clean.to_string());
+    assert!(
+        [0, onepipeline::error::EXIT_QUEUED].contains(&replied.code),
+        "{}",
+        replied.stderr
+    );
+    world.release("generalize.go");
+}

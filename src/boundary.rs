@@ -734,6 +734,285 @@ pub(crate) fn ensure_export(
     Ok(exported.branch)
 }
 
+/// What the boundary decided about one envelope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Judged {
+    /// Nothing in it reaches a public node carrying a private term.
+    Pass,
+    /// Something in it would, and it must not be appended or delivered.
+    Refuse(String),
+    /// The check could not decide, which is never a pass.
+    Unavailable(String),
+}
+
+impl Judged {
+    /// The exit code `onepipeline boundary validate-envelope` answers this with: the bus
+    /// validator protocol's `0` for a pass and `1` for a refusal, and anything else —
+    /// here `2` — for a check that could not decide, which the bus never sends.
+    pub(crate) fn exit_code(&self) -> i32 {
+        match self {
+            Self::Pass => 0,
+            Self::Refuse(_) => 1,
+            Self::Unavailable(_) => 2,
+        }
+    }
+
+    /// The neutral sentence it is reported in, where it is not a pass.
+    pub(crate) fn reason(&self) -> Option<&str> {
+        match self {
+            Self::Pass => None,
+            Self::Refuse(reason) | Self::Unavailable(reason) => Some(reason),
+        }
+    }
+}
+
+/// Every string inside `value`, keys excepted, in document order.
+fn strings_of(value: &serde_json::Value, out: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(text) => out.push(text.clone()),
+        serde_json::Value::Array(values) => values.iter().for_each(|value| strings_of(value, out)),
+        serde_json::Value::Object(fields) => fields
+            .iter()
+            .filter(|(key, _)| key.as_str() != "op")
+            .for_each(|(_, value)| strings_of(value, out)),
+        _ => {}
+    }
+}
+
+/// The commands a document carries: a reply envelope's, a routed record's, or a reply
+/// a record wraps.
+fn commands_of(document: &serde_json::Value) -> Vec<serde_json::Value> {
+    let mut commands = Vec::new();
+    for found in [
+        document.get("commands"),
+        document.pointer("/reply/commands"),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Some(listed) = found.as_array() {
+            commands.extend(listed.iter().cloned());
+        }
+    }
+    commands
+}
+
+/// The text a document carries that no command addresses to a node: a verdict's message
+/// and reason, and a surface's message — what a monitor or a manager says to nobody in
+/// particular, which a public node may yet be shown.
+fn untargeted_of(document: &serde_json::Value) -> Vec<String> {
+    let mut text = Vec::new();
+    for pointer in [
+        "/message",
+        "/reason",
+        "/reply/message",
+        "/reply/reason",
+        "/text",
+    ] {
+        if let Some(found) = document.pointer(pointer) {
+            strings_of(found, &mut text);
+        }
+    }
+    text
+}
+
+/// The node a command is about: the node it adds or retries in, else the one it names.
+fn target_of(command: &serde_json::Value) -> Option<String> {
+    command
+        .pointer("/node/id")
+        .or_else(|| command.get("id"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+}
+
+/// `plan` with `commands`' added and replacement nodes in it, so a node an envelope
+/// introduces is judged by the clearance it will have.
+fn prospective(plan: &Plan, commands: &[serde_json::Value]) -> Plan {
+    let mut prospective = plan.clone();
+    for command in commands {
+        let Some(node) = command
+            .get("node")
+            .and_then(|node| serde_json::from_value::<Node>(node.clone()).ok())
+        else {
+            continue;
+        };
+        let op = command.get("op").and_then(serde_json::Value::as_str);
+        if let (Some("retry"), Some(old)) = (op, command.get("id").and_then(|id| id.as_str())) {
+            let superseded = prospective
+                .tasks
+                .iter()
+                .find(|held| held.id == old)
+                .cloned();
+            let mut node = node;
+            if let Some(superseded) = superseded {
+                if node.deps.is_empty() {
+                    node.deps = superseded.deps.clone();
+                }
+                if node.task_record.is_none() {
+                    node.task_record = superseded.task_record.clone();
+                }
+                node.classification = node.classification.strictest(superseded.classification);
+            }
+            prospective.export_edges = edges_now(
+                &prospective.export_edges,
+                &std::iter::once((old.to_owned(), node.id.clone())).collect(),
+            );
+            for held in &mut prospective.tasks {
+                for dep in &mut held.deps {
+                    if dep == old {
+                        dep.clone_from(&node.id);
+                    }
+                }
+            }
+            prospective.tasks.retain(|held| held.id != old);
+            prospective.tasks.push(node);
+        } else {
+            prospective.tasks.retain(|held| held.id != node.id);
+            prospective.tasks.push(node);
+        }
+    }
+    prospective
+}
+
+/// Judge one document — a reply envelope, a routed command record, a surface — against
+/// the run whose plan stands at `plan`.
+///
+/// Every command addressed to a public node is checked over its whole prospective
+/// payload, in the run's own term scope; one addressed to a private node passes. Text
+/// addressed to no node is checked as public wherever the plan has a public node at all.
+/// A command naming a node the plan does not hold has no clearance to judge it by, and
+/// is unavailable rather than passed.
+pub(crate) fn judge(plan: &Plan, document: &serde_json::Value, oracle: &mut dyn Oracle) -> Judged {
+    let commands = commands_of(document);
+    let prospective = prospective(plan, &commands);
+    // Asked afresh every time, never from memory: a repository whose visibility changed
+    // since the last envelope is judged by what it is now.
+    let resolved = resolve(&prospective, oracle);
+    let any_public = resolved
+        .clearances
+        .values()
+        .any(|clearance| *clearance == Clearance::Public);
+    let mut ask = |text: Vec<String>, about: &str| -> Option<Judged> {
+        if text.is_empty() {
+            return None;
+        }
+        let verdict = oracle.check(onevcs::BoundaryInput {
+            destination: onevcs::Visibility::Public,
+            text,
+            paths: Vec::new(),
+            metadata: Vec::new(),
+            scope: resolved.term_scope(),
+        });
+        let reason = verdict.reason()?;
+        Some(match verdict {
+            onevcs::BoundaryVerdict::Refuse { .. } => Judged::Refuse(format!(
+                "the publication boundary refused {about}: {reason}"
+            )),
+            _ => Judged::Unavailable(format!(
+                "the publication boundary could not judge {about}: {reason}"
+            )),
+        })
+    };
+    for command in &commands {
+        let op = command
+            .get("op")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("a command");
+        let mut text = Vec::new();
+        strings_of(command, &mut text);
+        match target_of(command) {
+            Some(target) => {
+                if !prospective.tasks.iter().any(|node| node.id == target) {
+                    return Judged::Unavailable(format!(
+                        "the publication boundary could not judge `{op}`: the node it names has \
+                         no clearance in this run"
+                    ));
+                }
+                if resolved.clearance(&target) == Clearance::Public {
+                    if let Some(judged) = ask(text, &format!("`{op}` for public node {target}")) {
+                        return judged;
+                    }
+                }
+            }
+            None if any_public => {
+                if let Some(judged) = ask(text, &format!("`{op}`, which names no node")) {
+                    return judged;
+                }
+            }
+            None => {}
+        }
+    }
+    if any_public {
+        if let Some(judged) = ask(untargeted_of(document), "text addressed to no node") {
+            return judged;
+        }
+    }
+    Judged::Pass
+}
+
+/// Refuse what [`judge`] does not pass, for the engine's own submissions and the commands
+/// its reconciler takes up — a direct `reply`, `note` or `attest`, a queued envelope, and
+/// one a dead driver had claimed — so a caller that never meets the bus meets the same
+/// rule.
+pub(crate) fn guard(
+    state: &crate::projection::RunState,
+    document: &serde_json::Value,
+) -> crate::Result<()> {
+    match judge(&plan_now(state), document, &mut Onevcs::default()) {
+        Judged::Pass => Ok(()),
+        judged => Err(crate::Error::Refused(
+            judged.reason().unwrap_or_default().to_owned(),
+        )),
+    }
+}
+
+/// `onepipeline boundary validate-envelope --run RUN`: judge the document on `stdin`
+/// against the run's current plan, answering the bus validator protocol's exit code and
+/// the neutral reason to print.
+pub(crate) fn validate_envelope(
+    paths: &crate::ledger::RunPaths,
+    stdin: &str,
+) -> crate::Result<Judged> {
+    let document: serde_json::Value = serde_json::from_str(stdin).map_err(|error| {
+        crate::Error::Invalid(format!("the envelope on stdin is not JSON: {error}"))
+    })?;
+    let view = crate::views::RunView::open(paths)?;
+    Ok(judge(
+        &plan_now(&view.state),
+        &document,
+        &mut Onevcs::default(),
+    ))
+}
+
+/// What a bus pass cache keys a pass by beside the payload's bytes: a digest of the run's
+/// term scope, every node's clearance, and the terms each scoped repository contributes
+/// now. A changed term, a changed visibility or a changed scope is a different key, so a
+/// payload cached as passing is judged again rather than passed on its bytes.
+pub(crate) fn fingerprint(paths: &crate::ledger::RunPaths) -> crate::Result<String> {
+    use sha2::Digest;
+    let view = crate::views::RunView::open(paths)?;
+    let plan = plan_now(&view.state);
+    let resolved = resolve(&plan, &mut Onevcs::default());
+    let terms: Vec<serde_json::Value> = resolved
+        .scope
+        .iter()
+        .map(|identity| match onevcs::repository_boundary(identity) {
+            Ok(boundary) => serde_json::json!({"identity": identity, "boundary": boundary}),
+            Err(error) => {
+                serde_json::json!({"identity": identity, "unreadable": error.to_string()})
+            }
+        })
+        .collect();
+    let document = serde_json::json!({
+        "scope": resolved.scope,
+        "clearances": resolved.clearances,
+        "public_destinations": resolved.public_destinations,
+        "terms": terms,
+    });
+    let digest = sha2::Sha256::digest(document.to_string().as_bytes());
+    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
 /// The engine-owned advice for crossing the boundary: one typed value, rendered into
 /// every refusal this module makes, printed by `onepipeline boundary guidance`, and
 /// read by the host's planner injection and plan check, so no host restates the rule.
@@ -1372,6 +1651,76 @@ mod tests {
             );
             assert!(refusal.message.contains(&summary()), "{refusal:?}");
         }
+    }
+
+    #[test]
+    fn an_envelope_is_judged_by_where_each_command_lands() {
+        let mut table = Table::default();
+        let mixed = plan(
+            vec![
+                producer(),
+                lifecycle("examples", "lib-public", &["generalize"]),
+            ],
+            vec![edge("generalize", "examples")],
+        );
+        let note = |id: &str, text: &str| {
+            serde_json::json!({"commands": [
+                {"op": "note", "id": id, "addressee": "worker", "text": text}
+            ]})
+        };
+        // A public node's note is checked, and one carrying a term refused naming only
+        // where it was found; a private node's is not.
+        assert_eq!(
+            judge(
+                &mixed,
+                &note("examples", "use the plain fixtures"),
+                &mut table
+            ),
+            Judged::Pass
+        );
+        let refused = judge(
+            &mixed,
+            &note("examples", "copy the secret layout"),
+            &mut table,
+        );
+        assert!(matches!(&refused, Judged::Refuse(reason) if !reason.contains("secret")));
+        assert_eq!(refused.exit_code(), 1);
+        assert_eq!(
+            judge(
+                &mixed,
+                &note("generalize", "copy the secret layout"),
+                &mut table
+            ),
+            Judged::Pass
+        );
+        // A node the plan does not hold has no clearance to judge by.
+        let unknown = judge(&mixed, &note("nowhere", "anything"), &mut table);
+        assert!(matches!(unknown, Judged::Unavailable(_)));
+        assert_eq!(unknown.exit_code(), 2);
+        // Text addressed to no node is public wherever any node is.
+        let verdict = serde_json::json!({"completion": false, "message": "a secret aside"});
+        assert!(matches!(
+            judge(&mixed, &verdict, &mut table),
+            Judged::Refuse(_)
+        ));
+        // A node an envelope adds is judged by the clearance it will have.
+        let added = serde_json::json!({"commands": [{"op": "add", "node": {
+            "id": "more", "repo": "lib-public", "title": "feat: secret things",
+        }}]});
+        assert!(matches!(
+            judge(&mixed, &added, &mut table),
+            Judged::Refuse(_)
+        ));
+        // An all-private plan has nothing public to protect.
+        let private = plan(vec![lifecycle("a", "inner", &[])], vec![]);
+        assert_eq!(
+            judge(
+                &private,
+                &serde_json::json!({"message": "a secret aside"}),
+                &mut table
+            ),
+            Judged::Pass
+        );
     }
 
     #[test]

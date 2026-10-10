@@ -3924,6 +3924,11 @@ fn validate_envelope(
             .and_then(|()| channel.allows_completion(author.clone(), None))
             .and_then(|()| channel.allows(author.clone(), command))
             .and_then(|()| {
+                // The publication boundary, for a command this loop takes up — queued, or
+                // claimed by a driver that died — exactly as for one submitted directly.
+                crate::boundary::guard(&staged_state, &serde_json::json!({ "commands": [command] }))
+            })
+            .and_then(|()| {
                 validate_command(
                     paths,
                     &staged_state,
