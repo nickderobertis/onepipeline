@@ -639,6 +639,21 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         // llmlint: ignore[changed_behavior_has_e2e] unreachable from a write-back: only `project graph` raises these, and a write-back reads and copies but never draws a graph; `writeback::tests` holds each word.
         EngineError::GraphGroupNotText { .. } => decided("graph-group"),
         EngineError::DependencyCycle { .. } => decided("dependency-cycle"),
+        EngineError::NotPrivateDestination { .. } => decided("not-private-destination"),
+        EngineError::DestinationNotPrivate { .. } => decided("destination-not-private"),
+        EngineError::BoundaryRefused { .. } => decided("boundary-refused"),
+        EngineError::BoundaryUnavailable { .. } => decided("boundary-unavailable"),
+        EngineError::PrivateReference { .. } | EngineError::PrivateItemReference { .. } => {
+            decided("private-reference")
+        }
+        EngineError::ReferenceUnclassified { .. } => decided("reference-unclassified"),
+        EngineError::ProjectUnclassified { .. } => decided("project-unclassified"),
+        EngineError::PrivateMemberOfPublicProject { .. } => decided("private-member"),
+        // A visibility a source could not read is the store's own kind, classed by why the
+        // read failed, as the store classes it.
+        EngineError::VisibilityUnreadable { error, .. } => {
+            ("visibility-unreadable".to_owned(), Some(error))
+        }
         EngineError::DestinationUnavailable { error, .. }
         | EngineError::SourceRefused { error, .. }
         | EngineError::SourceUnavailable { error, .. }
@@ -5106,6 +5121,58 @@ mod tests {
             },
             EngineError::DependencyCycle {
                 tasks: vec![id(), id()],
+            },
+            // The public-boundary failures 0.4.0 added, which a write-back meets only where the
+            // configuration it reads opts into the boundary: each is the store's own word, and a
+            // visibility no source could read is classed by the read's own failure.
+            EngineError::NotPrivateDestination {
+                item: "plans:a".into(),
+                destination: "plans".into(),
+                declared: onetaskgraph_core::config::SourceVisibility::Public,
+            },
+            EngineError::DestinationNotPrivate {
+                item: "plans:a".into(),
+                destination: "plans".into(),
+                reality: onetaskgraph_plugin_api::Visibility::Public,
+            },
+            EngineError::VisibilityUnreadable {
+                item: "plans:a".into(),
+                destination: "plans".into(),
+                error: source.clone(),
+            },
+            EngineError::BoundaryRefused {
+                item: "plans:a".into(),
+                destination: "plans".into(),
+                reason: words(),
+            },
+            EngineError::BoundaryUnavailable {
+                item: "plans:a".into(),
+                destination: "plans".into(),
+                reason: words(),
+            },
+            EngineError::PrivateReference {
+                item: "plans:a".into(),
+                destination: "plans".into(),
+                named: "vault".into(),
+            },
+            EngineError::PrivateItemReference {
+                item: "plans:a".into(),
+                destination: "plans".into(),
+                reference: "vault:b".into(),
+            },
+            EngineError::ReferenceUnclassified {
+                item: "plans:a".into(),
+                reference: "vault:b".into(),
+                destination: "plans".into(),
+                why: words(),
+            },
+            EngineError::ProjectUnclassified {
+                project: "plans:p".into(),
+                why: words(),
+            },
+            EngineError::PrivateMemberOfPublicProject {
+                item: "plans:a".into(),
+                project: "plans:p".into(),
             },
             // A copy that could not be undone takes the class and kind of the failure it wraps.
             EngineError::CopyNotUndone {

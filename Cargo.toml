@@ -922,10 +922,20 @@ onevcs-testing = "0.13.4"
 # across copies. 0.3.10 keeps the metadata only a destination holds when a copy
 # updates it, source values winning shared keys (onetaskgraph #3567), so re-copying a
 # plan no longer deletes the design approvals recorded on the board's document.
-# `justfile`'s `onetaskgraph-version` moves with this release.
-onetaskgraph-core = "=0.3.11"
-onetaskgraph-plugin-api = "=0.3.11"
-onetaskgraph-local-md = "=0.3.11"
+# 0.3.11 prints a project's dependency graph (`onetaskgraph project graph`).
+#
+# **0.4.0 lets a `github-projects` source project a metadata value onto a board text
+# field**: each `metadata_fields` entry (`{field, key, path}`) names the field, a top-level
+# metadata key and a path inside it, and every write of an item sets that field to the
+# string found there or clears it when nothing is. The host's `followups` source carries
+# one (`{field: Host, key: orchestrator.follow-up, path: [host]}`), which an earlier store
+# refuses as an unknown field; `tests/e2e/github_writeback.rs` drives a settlement through
+# it. Its new public-boundary failures are classed by `src/writeback.rs`'s `cause_of` in
+# the store's own words. A new minor, so a breaking change to `Config`, which
+# `src/taskgraph.rs` exposes. `justfile`'s `onetaskgraph-version` moves with this release.
+onetaskgraph-core = "=0.4.0"
+onetaskgraph-plugin-api = "=0.4.0"
+onetaskgraph-local-md = "=0.4.0"
 # Not engines: two crates both members use, pinned once so they build against one version.
 # `just engines-current` reads only the engines its script names.
 sha2 = "0.10"
