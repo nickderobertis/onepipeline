@@ -295,6 +295,9 @@ struct Snapshot {
     project_metadata: BTreeMap<String, Value>,
     /// Whether a node the run has not started is written as claimed or released.
     claim: Claim,
+    /// The run's term scope: the private repositories its plan names, which every
+    /// public boundary check a write of this snapshot asks derives its terms from.
+    term_scope: Vec<String>,
 }
 
 /// What a node the run has not started says about the work it names.
@@ -1005,10 +1008,16 @@ fn snapshot_of(
                 if let Some(name) = &plan.name {
                     metadata.insert("onepipeline.name".into(), json!(name));
                 }
+                // The edges as they stand: an end a retry replaced names its replacement.
+                let edges = crate::boundary::edges_now(&plan.export_edges, &state.superseded);
+                if !edges.is_empty() {
+                    metadata.insert("onepipeline.export_edges".into(), json!(edges));
+                }
                 metadata
             })
             .unwrap_or_default(),
         claim,
+        term_scope: crate::boundary::of_run(&crate::boundary::plan_now(state)).scope,
     })
 }
 
@@ -1694,6 +1703,8 @@ struct Attempt {
     cancelled: std::cell::Cell<bool>,
     calls: std::cell::RefCell<BTreeMap<StoreCall, u64>>,
     written: std::cell::RefCell<BTreeMap<UpdatedField, u64>>,
+    /// The term scope this attempt's store checks its writes over.
+    term_scope: Vec<String>,
 }
 
 impl Attempt {
@@ -1737,15 +1748,27 @@ impl Attempt {
                 Classified::of_config(&error),
             )
         })?;
+        // A store whose configuration opted into the public boundary has its writes
+        // checked by the linked `onevcs` rather than by the commands it names — the same
+        // check, answered in process — over the run's own term scope.
+        let engine = if built.engine.boundary_active() {
+            built
+                .engine
+                .with_write_policy(std::sync::Arc::new(crate::boundary::WritePolicy))
+                .with_term_scope(Some(snapshot.term_scope.clone()))
+        } else {
+            built.engine
+        };
         Ok(Self {
             runtime: crate::taskgraph::runtime()
                 .map_err(|error| format!("the store cannot be called: {error}"))?,
-            engine: built.engine,
+            engine,
             config: built.config,
             flags,
             cancelled: std::cell::Cell::new(false),
             calls: std::cell::RefCell::default(),
             written: std::cell::RefCell::default(),
+            term_scope: snapshot.term_scope.clone(),
         })
     }
 
@@ -1907,8 +1930,10 @@ fn project(
             .collect::<BTreeSet<_>>(),
     );
     let checked = if let Some(attempt) = retained.as_ref() {
-        validated_within(store, &attempt.flags)
-            .map(|loaded| loaded.map(|config| config == attempt.config))
+        validated_within(store, &attempt.flags).map(|loaded| {
+            loaded
+                .map(|config| config == attempt.config && attempt.term_scope == snapshot.term_scope)
+        })
     } else {
         Ok(Ok(true))
     };
@@ -5837,6 +5862,7 @@ mod tests {
                         json!(4),
                     )]),
                     claim: Claim::Held,
+                    term_scope: Vec::new(),
                 },
                 // Only `build`. A node the plan has just added has no destination
                 // task at all, and holding both kinds in one fixture is what makes an edge

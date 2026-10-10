@@ -1496,6 +1496,7 @@ dependencies = [
 name = "onepipeline"
 version = "0.63.7"
 dependencies = [
+ "async-trait",
  "clap",
  "fs4",
  "libc",

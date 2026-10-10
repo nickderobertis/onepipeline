@@ -1066,6 +1066,10 @@ onetaskgraph-plugin-api = { workspace = true }
 # its deadline (divergence entry 71). Already in the graph through the store's network
 # plugins, so it adds nothing to what this build resolves.
 tokio = { workspace = true, features = ["rt", "time"] }
+# The store's `WritePolicy` is an async trait declared through this macro, and the
+# engine implements it over the linked `onevcs` (`src/boundary.rs`). Already in the
+# graph through the store itself, so it adds nothing to what this build resolves.
+async-trait = "0.1"
 
 # Process liveness is the one host fact this crate cannot get from `std` on the
 # MSRV floor, and every `DRIVER DEAD` / `PARKED` verdict rests on it. Both are

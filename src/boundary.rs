@@ -245,6 +245,163 @@ pub(crate) fn resolve(plan: &Plan, oracle: &mut dyn Oracle) -> Resolved {
     resolved
 }
 
+/// The plan a run stands at now: its live graph, written with the launch plan's fields
+/// and its export edges following every retry.
+pub(crate) fn plan_now(state: &crate::projection::RunState) -> Plan {
+    let launched = state.plan.clone().unwrap_or_else(|| Plan {
+        schema_version: crate::plan::PLAN_SCHEMA_VERSION,
+        goal: None,
+        name: None,
+        concurrency: state.graph.concurrency.max(1),
+        tasks: Vec::new(),
+        export_edges: Vec::new(),
+    });
+    let mut plan = state.graph.to_plan(&launched);
+    plan.export_edges = edges_now(&launched.export_edges, &state.superseded);
+    plan
+}
+
+/// What a resolution reads of a plan: each node's id, the repositories it names, its
+/// classification and its dependencies, and the export edges. Two plans with one shape
+/// resolve alike, so a shape already resolved is not asked of `onevcs` again.
+type Shape = (
+    Vec<(String, Vec<String>, Classification, Vec<String>)>,
+    Vec<ExportEdge>,
+);
+
+fn shape(plan: &Plan) -> Shape {
+    (
+        plan.tasks
+            .iter()
+            .map(|node| {
+                (
+                    node.id.clone(),
+                    repositories_of(node)
+                        .into_iter()
+                        .map(str::to_owned)
+                        .collect(),
+                    node.classification,
+                    node.deps.clone(),
+                )
+            })
+            .collect(),
+        plan.export_edges.clone(),
+    )
+}
+
+/// The resolutions this process has made, by shape. A run's shape changes only where an
+/// accepted edit changes what a node names or depends on, so this holds one or two
+/// entries a run; it is bounded all the same, and the oldest goes first.
+static RESOLVED: std::sync::Mutex<Vec<(Shape, Resolved)>> = std::sync::Mutex::new(Vec::new());
+
+/// How many shapes [`RESOLVED`] keeps.
+const RESOLVED_KEPT: usize = 8;
+
+/// How the boundary stands for a run's plan, asked of the linked `onevcs` the first time
+/// the plan takes this shape — at launch, and again after every accepted edit that changes
+/// a repository, a classification, a dependency or an edge.
+pub(crate) fn of_run(plan: &Plan) -> Resolved {
+    let key = shape(plan);
+    if let Ok(cached) = RESOLVED.lock() {
+        if let Some((_, resolved)) = cached.iter().find(|(shape, _)| *shape == key) {
+            return resolved.clone();
+        }
+    }
+    let resolved = resolve(plan, &mut Onevcs::default());
+    if let Ok(mut cached) = RESOLVED.lock() {
+        if cached.len() >= RESOLVED_KEPT {
+            cached.remove(0);
+        }
+        cached.push((key, resolved.clone()));
+    }
+    resolved
+}
+
+/// The store's `WritePolicy`, answered by the linked `onevcs` rather than by the two
+/// commands a standalone store runs: the same visibility and the same check, with the
+/// verdict read through the store's own reading of a check's answer
+/// ([`onetaskgraph_core::boundary::check_verdict`]), so a write the engine makes and one
+/// the store's command line makes are refused in the same words.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct WritePolicy;
+
+impl WritePolicy {
+    /// The verdict `input` earns, as the store reads one.
+    fn verdict(
+        input: &onetaskgraph_core::boundary::PublicWriteInput,
+    ) -> onetaskgraph_core::boundary::WriteVerdict {
+        let destination = match input.destination {
+            onetaskgraph_core::boundary::RepositoryVisibility::Public => onevcs::Visibility::Public,
+            onetaskgraph_core::boundary::RepositoryVisibility::Private => {
+                onevcs::Visibility::Private
+            }
+            onetaskgraph_core::boundary::RepositoryVisibility::Unknown => {
+                onevcs::Visibility::Unknown
+            }
+        };
+        let checked = onevcs::check_public_output(onevcs::BoundaryInput {
+            destination,
+            text: input.text.clone(),
+            paths: input.paths.clone(),
+            metadata: input.metadata.clone(),
+            scope: input
+                .scope
+                .clone()
+                .map_or(onevcs::TermScope::Registry, onevcs::TermScope::Identities),
+        });
+        // The exit code `onevcs boundary check` gives each verdict, so the one reading of an
+        // answer reads this one too.
+        let (code, answer) = match checked {
+            Ok(verdict @ onevcs::BoundaryVerdict::Pass) => (0, verdict),
+            Ok(verdict @ onevcs::BoundaryVerdict::Refuse { .. }) => (1, verdict),
+            Ok(verdict) => (2, verdict),
+            Err(_) => (
+                2,
+                onevcs::BoundaryVerdict::Unavailable {
+                    reason: onevcs::boundary::Unavailability::Registry,
+                },
+            ),
+        };
+        let stdout = serde_json::to_vec(&answer).unwrap_or_default();
+        onetaskgraph_core::boundary::check_verdict(Some(code), &stdout)
+    }
+}
+
+#[async_trait::async_trait]
+impl onetaskgraph_core::boundary::WritePolicy for WritePolicy {
+    async fn repository_visibility(
+        &self,
+        repository: &onetaskgraph_plugin_api::Repository,
+    ) -> Result<
+        onetaskgraph_core::boundary::RepositoryVisibility,
+        onetaskgraph_core::boundary::PolicyError,
+    > {
+        let answered = onevcs::inspect_repository(&onevcs::boundary::InspectRequest {
+            repository: repository.as_str().to_owned(),
+        })
+        .map_err(|error| onetaskgraph_core::boundary::PolicyError {
+            message: error.to_string(),
+        })?;
+        Ok(match answered.visibility {
+            onevcs::Visibility::Public => onetaskgraph_core::boundary::RepositoryVisibility::Public,
+            onevcs::Visibility::Private => {
+                onetaskgraph_core::boundary::RepositoryVisibility::Private
+            }
+            onevcs::Visibility::Unknown => {
+                onetaskgraph_core::boundary::RepositoryVisibility::Unknown
+            }
+        })
+    }
+
+    async fn check_public_write(
+        &self,
+        input: &onetaskgraph_core::boundary::PublicWriteInput,
+    ) -> Result<onetaskgraph_core::boundary::WriteVerdict, onetaskgraph_core::boundary::PolicyError>
+    {
+        Ok(Self::verdict(input))
+    }
+}
+
 /// The engine-owned advice for crossing the boundary: one typed value, rendered into
 /// every refusal this module makes, printed by `onepipeline boundary guidance`, and
 /// read by the host's planner injection and plan check, so no host restates the rule.

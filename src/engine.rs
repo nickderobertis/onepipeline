@@ -5459,6 +5459,7 @@ fn start_ready(
         .collect();
 
     let mut settled_here = false;
+    let mut boundary: Option<crate::boundary::Resolved> = None;
     for mut node in actionable {
         if node.kind != NodeKind::Human && in_flight.len() >= concurrency {
             break;
@@ -5637,6 +5638,11 @@ fn start_ready(
         // every node a plan naming neither new field carries — and the dispatch
         // is then composed exactly as it always was.
         let references = releases.references(&node);
+        // How the publication boundary stands for the run, read once a pass and only on
+        // a pass that dispatches: the graph is written out and resolved only when its
+        // shape has changed since the last dispatch asked.
+        let boundary = boundary
+            .get_or_insert_with(|| crate::boundary::of_run(&crate::boundary::plan_now(state)));
         spawn(
             paths,
             rules,
@@ -5647,6 +5653,7 @@ fn start_ready(
             tx.clone(),
             resume,
             notes_in_flight,
+            boundary,
         )?;
         let now = Instant::now();
         in_flight.insert(
@@ -5784,6 +5791,7 @@ fn spawn(
     tx: Sender<Message>,
     resume: Option<Box<crate::lifecycle::Continuation>>,
     notes_in_flight: &DeliveriesInFlight,
+    boundary: &crate::boundary::Resolved,
 ) -> Result<()> {
     // The labels a `node_label` rule selects on. An executor is chosen once per
     // node, before its steps run, so a node's own labels are what exists here.
@@ -5822,7 +5830,7 @@ fn spawn(
             .as_ref()
             .and_then(|_| crate::branchname::Naming::of_run(&paths, launch)),
         notes_in_flight: notes_in_flight.clone(),
-        term_scope: onevcs::TermScope::Registry,
+        term_scope: boundary.term_scope(),
     };
     std::thread::Builder::new()
         .name(format!("dispatch-{}", node.id))

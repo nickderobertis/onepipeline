@@ -3331,14 +3331,17 @@ fn a_project_reads_as_the_plan_document_of_the_same_content() {
             Some("audit") => "001-audit",
             other => panic!("an unexpected node {other:?}"),
         };
-        assert_eq!(
-            record,
-            json!({
-                "id": format!("mapping-board/{file}"),
-                "title": node["title"].as_str().unwrap_or_default(),
-            }),
-            "{node}"
-        );
+        let mut expected = json!({
+            "id": format!("mapping-board/{file}"),
+            "title": node["title"].as_str().unwrap_or_default(),
+        });
+        // Every repository a task names beyond its `repo` is on its record, where the
+        // publication boundary reads it: the work lands in the first alone.
+        if file == "000-publish" {
+            expected["repositories"] =
+                json!(["github.com/owner/service", "github.com/owner/ignored"]);
+        }
+        assert_eq!(record, expected, "{node}");
     }
     assert_eq!(
         by_id(&read),
