@@ -59,6 +59,9 @@ fn every_operation_this_crate_performs_is_served_by_the_provider_seam() {
         identities: vec![Identity {
             origin: "github.com/owner/repo".to_owned(),
             gate: "true".to_owned(),
+            visibility: Default::default(),
+            observation: Default::default(),
+            observed_at: None,
         }],
         // `change-auto` is the repository's own, so section 5's draft is held
         // under the one policy that would otherwise have armed the host's merge
@@ -134,6 +137,7 @@ fn every_operation_this_crate_performs_is_served_by_the_provider_seam() {
             // Not a draft: this publication is the ordinary one, and section 5
             // below is where a reason is carried.
             draft: None,
+            term_scope: Default::default(),
         },
     )
     .expect("the seam publishes a session it opened");
@@ -233,6 +237,7 @@ fn every_operation_this_crate_performs_is_served_by_the_provider_seam() {
             title: Some("feat: adopt early".parse().expect("a usable subject")),
             body: None,
             draft: Some(reason.clone()),
+            term_scope: Default::default(),
         },
     )
     .expect("the seam publishes a draft");
@@ -270,6 +275,7 @@ fn every_operation_this_crate_performs_is_served_by_the_provider_seam() {
             title: Some("feat: adopt early".parse().expect("a usable subject")),
             body: None,
             draft: None,
+            term_scope: Default::default(),
         },
     )
     .expect("the seam lifts the draft it held");
@@ -367,6 +373,7 @@ fn published_through_the_lifecycle(
             title: Some("feat: land it".parse().expect("a usable subject")),
             body: None,
             draft: None,
+            term_scope: Default::default(),
         },
     )
     .expect("the seam publishes through the lifecycle");
@@ -387,6 +394,9 @@ fn lifecycle_vcs(
         identities: vec![Identity {
             origin: "github.com/owner/repo".to_owned(),
             gate: "true".to_owned(),
+            visibility: Default::default(),
+            observation: Default::default(),
+            observed_at: None,
         }],
         policy: Some(policy),
         approvals: Some(approvals),

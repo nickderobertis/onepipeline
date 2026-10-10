@@ -1151,6 +1151,7 @@ fn preserve_every_branch(view: &RunView, now: Option<&RunView>) -> Vec<BranchPre
         let request = onevcs::PreserveRequest {
             repo: repo.clone(),
             branch: branch.clone(),
+            term_scope: onevcs::TermScope::Registry,
         };
         preserved.push(match onevcs::preserve(&request) {
             Ok(done) => BranchPreserved {

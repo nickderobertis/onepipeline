@@ -863,6 +863,9 @@ dependencies = [
  "icu_properties",
  "icu_provider",
  "smallvec",
+ "utf16_iter",
+ "utf8_iter",
+ "write16",
  "zerovec",
 ]
 
@@ -1541,9 +1544,9 @@ dependencies = [
 
 [[package]]
 name = "onetaskgraph-core"
-version = "0.3.11"
+version = "0.3.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9235b20a2faa445726f4dd775adbd16baf0cfa62263d9b2cf3c4242adeb4eb67"
+checksum = "2e631e9d21cbe03171ded38431c76cdbfcd42d37ffb85467ace4fcf1c270df6d"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1567,9 +1570,9 @@ dependencies = [
 
 [[package]]
 name = "onetaskgraph-github-projects"
-version = "0.3.11"
+version = "0.3.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b2500d51f8a493723c2e969958738004dc09390619d415510e5a20aa5b6c9274"
+checksum = "9b1e4c7c1e90070b4bb1e7b10bf0383b4f427e8ad1a287869ca5ca802b0702bf"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1585,9 +1588,9 @@ dependencies = [
 
 [[package]]
 name = "onetaskgraph-in-memory"
-version = "0.3.11"
+version = "0.3.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "768d91c66f8d88d94909a68e0cf95d14f2f67f95620d473faaa5f63dac186e37"
+checksum = "eafc88cf0c653cc7e402e38da09d73dd19692933ac1e08e70328fe5b82d7d308"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1599,9 +1602,9 @@ dependencies = [
 
 [[package]]
 name = "onetaskgraph-linear"
-version = "0.3.11"
+version = "0.3.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b9284392c2b675ade6061d96c344aa161673d96304009bc9cd8eac6f1bebd22b"
+checksum = "c931304f9f917f13db6dfd033ac2d75023506aef78f44ba1d711e0bd027fe54b"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1615,9 +1618,9 @@ dependencies = [
 
 [[package]]
 name = "onetaskgraph-local-md"
-version = "0.3.11"
+version = "0.3.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4b8a57a0d80a79704eada937c0f3c8cf6fdba2414f94a01a2b35755cdf784b1"
+checksum = "7e643bd9513736497f179ff2ccf3d62251f45f9236ef6b12a0ee0c62e24863d0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1631,9 +1634,9 @@ dependencies = [
 
 [[package]]
 name = "onetaskgraph-plugin-api"
-version = "0.3.11"
+version = "0.3.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c8fc911d4674dd6d4fd78da4923957b4179fa9d0224384e253f7c8f2fa1ad07"
+checksum = "09d1b98a6ec54347a6d55ae63f4c0bf783676f3674f7a7b98f870a9d33338e9e"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1650,15 +1653,17 @@ dependencies = [
 
 [[package]]
 name = "onevcs"
-version = "0.43.1"
+version = "0.44.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e62740168e3c5390992d88fcb74ec1b426eb40f67f2145c60c4bc5a302e8efea"
+checksum = "2cf0e32a0c47aa3cc6cab8578581cb45d3c9f21c1d021e7babdfeebf7c1b59cd"
 dependencies = [
+ "aho-corasick",
  "clap",
  "dunce",
  "filetime",
  "fs4",
  "git2",
+ "icu_normalizer",
  "icu_properties",
  "libc",
  "minijinja",
@@ -1679,9 +1684,9 @@ dependencies = [
 
 [[package]]
 name = "onevcs-testing"
-version = "0.13.4"
+version = "0.13.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "852311c800ad9de40afb5e89e610d29920e515de427e990d52a993d2a9cd283a"
+checksum = "86b3d06cfc1536ff8eb6ed84b05ac7eb1954d42d511338edfcf44c0887f9b220"
 dependencies = [
  "onevcs",
  "serde",
@@ -2799,6 +2804,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "utf16_iter"
+version = "1.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c8232dd3cdaed5356e0f716d285e4b40b932ac434100fe9b7e0e8e935b9e6246"
+
+[[package]]
 name = "utf8-zero"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3203,6 +3214,12 @@ name = "wit-bindgen"
 version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
+
+[[package]]
+name = "write16"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1890f4022759daae28ed4fe62859b1236caebfc61ede2f63ed4e695f3f6d936"
 
 [[package]]
 name = "writeable"

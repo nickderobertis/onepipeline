@@ -58,6 +58,9 @@ pub struct Launch {
     /// The note deliveries the loop has handed off and not yet recorded, which
     /// a re-dispatch waits for before it reads the notes it is composed with.
     pub(crate) notes_in_flight: engine::DeliveriesInFlight,
+    /// Which private repositories every public boundary check this node's
+    /// closeout asks derives its terms from: the run's term scope.
+    pub(crate) term_scope: onevcs::TermScope,
 }
 
 /// Run one lifecycle node to settlement, re-dispatching it while its
@@ -668,6 +671,7 @@ fn attempt_once(
             tx,
             &whose,
             vcs_filter,
+            &launch.term_scope,
         );
     }
 
@@ -784,6 +788,7 @@ fn preserve(
     tx: &Sender<Message>,
     whose: &Labels,
     filter: Option<&EventFilter>,
+    term_scope: &onevcs::TermScope,
 ) -> Attempt {
     let Opened {
         worktree,
@@ -819,7 +824,9 @@ fn preserve(
         (Some(why), _, _) => Err(format!(
             "the session would not close ({why}), so nothing was pushed from it"
         )),
-        (None, Some(branch), Some(repo)) => crate::vcs::preserve_branch(repo, branch),
+        (None, Some(branch), Some(repo)) => {
+            crate::vcs::preserve_branch(repo, branch, term_scope)
+        }
         // llmlint: ignore[changed_behavior_has_e2e] every session `onevcs` opens names
         // its branch and every lifecycle node names its `repo`, so no invocation reaches
         // a kept branch with neither; it settles as the infrastructure failure it would
@@ -999,7 +1006,7 @@ fn publish(
     // reason it is not on the change request.
     let (described, undescribed) = match (&held, &body) {
         (Some(change), Some(body)) => {
-            match crate::vcs::describe_change(token, node.title.as_deref(), body) {
+            match crate::vcs::describe_change(token, node.title.as_deref(), body, &launch.term_scope) {
                 Ok(_) => (true, None),
                 Err(error) => {
                     let why = format!(
@@ -1057,7 +1064,14 @@ fn publish(
         body.as_deref()
     };
     let publication =
-        publish_rereading_the_merge_path(node, token, opening_body, draft.as_ref(), cancel);
+        publish_rereading_the_merge_path(
+            node,
+            token,
+            opening_body,
+            draft.as_ref(),
+            cancel,
+            &launch.term_scope,
+        );
     match publication.answered {
         Ok(published) => {
             // A publication that did not land is an ending of the publication,
@@ -1458,6 +1472,7 @@ fn publish_rereading_the_merge_path(
     body: Option<&str>,
     draft: Option<&onevcs::DraftReason>,
     cancel: &crate::executor::CancellationToken,
+    term_scope: &onevcs::TermScope,
 ) -> Published {
     let publish = || {
         crate::vcs::publish(
@@ -1467,6 +1482,7 @@ fn publish_rereading_the_merge_path(
             body,
             draft,
             cancel,
+            term_scope,
         )
     };
     let budget = engine::merge_path_reads();

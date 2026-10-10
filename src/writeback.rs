@@ -639,6 +639,21 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         // llmlint: ignore[changed_behavior_has_e2e] unreachable from a write-back: only `project graph` raises these, and a write-back reads and copies but never draws a graph; `writeback::tests` holds each word.
         EngineError::GraphGroupNotText { .. } => decided("graph-group"),
         EngineError::DependencyCycle { .. } => decided("dependency-cycle"),
+        // The public boundary's refusals, in the store's own words for each: every one of
+        // them is decided before the write's first mutation, so none is worth asking again.
+        EngineError::NotPrivateDestination { .. } => decided("not-private-destination"),
+        EngineError::DestinationNotPrivate { .. } => decided("destination-not-private"),
+        EngineError::VisibilityUnreadable { error, .. } => {
+            ("visibility-unreadable".to_owned(), Some(error))
+        }
+        EngineError::BoundaryRefused { .. } => decided("boundary-refused"),
+        EngineError::BoundaryUnavailable { .. } => decided("boundary-unavailable"),
+        EngineError::PrivateReference { .. } | EngineError::PrivateItemReference { .. } => {
+            decided("private-reference")
+        }
+        EngineError::ReferenceUnclassified { .. } => decided("reference-unclassified"),
+        EngineError::ProjectUnclassified { .. } => decided("project-unclassified"),
+        EngineError::PrivateMemberOfPublicProject { .. } => decided("private-member"),
         EngineError::DestinationUnavailable { error, .. }
         | EngineError::SourceRefused { error, .. }
         | EngineError::SourceUnavailable { error, .. }

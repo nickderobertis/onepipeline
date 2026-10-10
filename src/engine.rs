@@ -5822,6 +5822,7 @@ fn spawn(
             .as_ref()
             .and_then(|_| crate::branchname::Naming::of_run(&paths, launch)),
         notes_in_flight: notes_in_flight.clone(),
+        term_scope: onevcs::TermScope::Registry,
     };
     std::thread::Builder::new()
         .name(format!("dispatch-{}", node.id))
