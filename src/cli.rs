@@ -831,7 +831,7 @@ pub fn default_watch_timeout() -> WatchTimeout {
 /// A `watch` given no `--timeout` under a wake budget gives up this long before
 /// the budget, and a `watch --flow` counts as waking its session in time only
 /// where its recorded terms give up at least this long before the budget. Stated
-/// in `docs/stop-guard.md`, which `tests/e2e/flow.rs` reads it out of.
+/// in `docs/stop-guard.md`, which `flowwatch`'s own tests hold to this value.
 pub const WAKE_RESERVE_SECONDS: u64 = 2;
 
 /// How often a `watch` with a deadline checks it while it waits, in

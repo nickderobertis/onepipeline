@@ -291,28 +291,36 @@ impl Flow {
     }
 
     /// Whether the flow is live now: its standing, with an ending that cannot be
-    /// read taken as no evidence it ended.
+    /// read taken as no evidence it ended — so such a flow is still owed a watch
+    /// rather than closed, and `unwatched` names the ending it could not read.
     pub(crate) fn is_live(&self) -> bool {
-        matches!(self.standing(), Ok(Standing::Live))
+        !matches!(self.standing(), Ok(Standing::Ended(_) | Standing::Died))
     }
 
     fn ending(&self) -> std::result::Result<Option<i32>, String> {
         let path = ending_path(&self.paths);
-        match std::fs::read_to_string(&path) {
-            Ok(text) => serde_json::from_str::<FlowEnding>(&text)
-                .map(|ending| Some(ending.status))
-                .map_err(|error| {
-                    format!(
-                        "its ending cannot be read, so whether it ended cannot be said: {}: \
-                         {error}",
-                        path.display()
-                    )
-                }),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(format!(
-                "its ending cannot be read, so whether it ended cannot be said: {}: {error}",
+        let unreadable = |why: String| {
+            format!(
+                "its ending cannot be read, so whether it ended cannot be said: {}: {why}",
                 path.display()
-            )),
+            )
+        };
+        match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                let ending = serde_json::from_str::<FlowEnding>(&text)
+                    .map_err(|error| unreadable(error.to_string()))?;
+                // An ending another flow wrote is not this flow's: read as its
+                // status it could close a flow whose program is still running.
+                if ending.flow_id != self.id() {
+                    return Err(unreadable(format!(
+                        "it is flow '{}''s ending, not this flow's",
+                        ending.flow_id
+                    )));
+                }
+                Ok(Some(ending.status))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(unreadable(error.to_string())),
         }
     }
 
@@ -337,9 +345,27 @@ impl Flow {
     }
 
     /// Every run launched in this flow, by id, in id order.
-    pub(crate) fn members(&self) -> Vec<String> {
-        let Ok(entries) = std::fs::read_dir(members_dir(&self.paths)) else {
-            return Vec::new();
+    ///
+    /// Only a `<run>.json` names a member: a writer's temporary sibling, or
+    /// anything else left in the directory, is passed over.
+    ///
+    /// # Errors
+    ///
+    /// A membership directory that is there and cannot be read: a watch that
+    /// went on without it could never see a run join, so it is said instead.
+    pub(crate) fn members(&self) -> Result<Vec<String>> {
+        let dir = members_dir(&self.paths);
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(Error::Invalid(format!(
+                    "flow '{}''s runs cannot be read, so whether one joined cannot be said: {}: \
+                     {error}",
+                    self.id(),
+                    dir.display()
+                )))
+            }
         };
         let mut members: Vec<String> = entries
             .filter_map(std::result::Result::ok)
@@ -348,7 +374,7 @@ impl Flow {
             .filter(|run| ledger::is_valid_run_id(run))
             .collect();
         members.sort();
-        members
+        Ok(members)
     }
 
     /// Whether `session` has acknowledged this flow.
@@ -723,7 +749,7 @@ fn supervise(
                         "onepipeline: flow: {} could not be waited for: {error}",
                         Path::new(program).display()
                     );
-                    NOT_STARTED
+                    NO_STATUS
                 } // llmlint: ignore-end[changed_behavior_has_e2e]
             }
         }
@@ -732,7 +758,7 @@ fn supervise(
                 "onepipeline: flow: {} could not be started: {error}",
                 Path::new(program).display()
             );
-            NOT_STARTED
+            NO_STATUS
         }
     };
     if let Some(flow) = registered {
@@ -755,9 +781,10 @@ fn supervise(
     Ok(status)
 }
 
-/// The status a program that could not be started, or waited for, is recorded
-/// with: the shell's own for a command it could not run.
-const NOT_STARTED: i32 = 127;
+/// The status recorded for a program this process has no status of — one that
+/// could not be started, or not waited for: the shell's own for a command it
+/// could not run.
+const NO_STATUS: i32 = 127;
 
 /// A program's exit status as a number: its code, or `128 + the signal` for one
 /// a signal ended.
@@ -768,11 +795,11 @@ fn status_of(status: std::process::ExitStatus) -> i32 {
         status
             .code()
             .or_else(|| status.signal().map(|signal| 128 + signal))
-            .unwrap_or(NOT_STARTED)
+            .unwrap_or(NO_STATUS)
     }
     #[cfg(not(unix))]
     {
-        status.code().unwrap_or(NOT_STARTED)
+        status.code().unwrap_or(NO_STATUS)
     }
 }
 

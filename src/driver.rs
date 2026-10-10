@@ -379,13 +379,13 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             // A run named through `ONEPIPELINE_RUN_ID` wins; with none, the flow
             // this process was started in is asked on, and with neither the
             // run's refusal stands.
-            let on = match (crate::ask::run_id(), crate::flow::inherited()) {
-                (Ok(run), _) => crate::ask::On::Run(resolve(run.as_str())?),
-                (Err(_), Some(flow)) => crate::ask::On::Flow(Box::new(crate::flow::Flow::open(
+            let on = match (crate::ask::named_run(), crate::flow::inherited()) {
+                (Some(run), _) => crate::ask::On::Run(resolve(run.as_str())?),
+                (None, Some(flow)) => crate::ask::On::Flow(Box::new(crate::flow::Flow::open(
                     &ledger::runs_root(),
                     &flow,
                 )?)),
-                (Err(refused), None) => return Err(refused),
+                (None, None) => return Err(crate::ask::no_run()),
             };
             let asker = crate::ask::asker()?;
             let about = crate::ask::about(&args)?;

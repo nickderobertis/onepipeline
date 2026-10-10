@@ -124,23 +124,22 @@ impl RunId {
     }
 }
 
-/// The run to ask on, from `ONEPIPELINE_RUN_ID`.
-///
-/// # Errors
-///
-/// A variable that is absent or blank, named: a question with no run to ask on
-/// is refused before anything is raised.
-pub(crate) fn run_id() -> Result<RunId> {
+/// The run `ONEPIPELINE_RUN_ID` names, where it names one: present and not
+/// blank. Absent and blank are the one answer, a question naming no run.
+pub(crate) fn named_run() -> Option<RunId> {
     std::env::var(RUN_ID_ENV)
         .ok()
         .filter(|run| !run.trim().is_empty())
         .map(RunId)
-        .ok_or_else(|| {
-            Error::Invalid(format!(
-                "{RUN_ID_ENV} is not set, so there is no run whose channel to ask on; run this \
-                 from inside a dispatch, which exports it, or export the run id yourself"
-            ))
-        })
+}
+
+/// The refusal of a question that names no run and runs in no flow: absent or
+/// blank, `ONEPIPELINE_RUN_ID` is named, and nothing is raised.
+pub(crate) fn no_run() -> Error {
+    Error::Invalid(format!(
+        "{RUN_ID_ENV} is not set, so there is no run whose channel to ask on; run this from \
+         inside a dispatch, which exports it, or export the run id yourself"
+    ))
 }
 
 /// Who asks, from `ONEPIPELINE_CHANNEL_ASKER`: `None` when it is unset, and a

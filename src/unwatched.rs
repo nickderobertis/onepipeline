@@ -376,13 +376,10 @@ pub(crate) fn asked(root: &Path, session: &str, budget: Option<WakeBudget>) -> R
             }
             FlowOwes::Line(line) => reported.push(line),
             FlowOwes::Unknown(why) => unknown.push(format!("flow {}: {why}\n", flow.id())),
-            FlowOwes::Undecidable(why) => {
-                unresolved.push(format!("flow {}: {why}\n", flow.id()));
-            }
         }
     }
     for (paths, flow) in owned.runs {
-        if watched_flows.contains(&flow) {
+        if flow.is_some_and(|flow| watched_flows.contains(&flow)) {
             continue;
         }
         let summary = match decide(&paths, session) {
@@ -481,22 +478,48 @@ enum FlowOwes {
     /// A line to report: a live flow nothing qualifying watches, or one owed
     /// closure.
     Line(UnwatchedRun),
-    /// Whether a live watch of it wakes the session in time cannot be said.
+    /// Whether it ended, was closed, or is watched in time cannot be said — an
+    /// unknown, which a guard warns on rather than passing in silence.
     Unknown(String),
-    /// Whether it ended, or was closed, cannot be said.
-    Undecidable(String),
+}
+
+/// How a flow owed closure ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Closure {
+    /// Its program ended with this non-zero status.
+    Ended(i32),
+    /// Its holder is gone with no ending recorded.
+    Died,
+}
+
+impl Closure {
+    /// The standing word its line carries.
+    const fn word(self) -> &'static str {
+        match self {
+            Self::Ended(_) => "ENDED",
+            Self::Died => "DIED",
+        }
+    }
+
+    /// Why it is owed closure, as its line says it.
+    fn why(self) -> String {
+        match self {
+            Self::Ended(status) => format!("it ended with status {status}"),
+            Self::Died => "it died: its holder is gone with no ending recorded".to_owned(),
+        }
+    }
 }
 
 /// What `session` owes `flow` under `budget`, on the rule the Flows section of
 /// `docs/stop-guard.md` states.
 fn owed_by_flow(flow: &crate::flow::Flow, session: &str, budget: Option<WakeBudget>) -> FlowOwes {
     let id = flow.id();
-    let closure = |why: String, standing: &'static str| match flow.acknowledged_by(session) {
+    let closure = |ended: Closure| match flow.acknowledged_by(session) {
         Ok(true) => FlowOwes::Nothing,
         Ok(false) => FlowOwes::Line(UnwatchedRun {
             run: format!("flow {id}"),
-            standing,
-            why_not_watched: why,
+            standing: ended.word(),
+            why_not_watched: ended.why(),
             remedy: format!(
                 "close it with: onepipeline unwatched --acknowledge-flow {id} --reason <TEXT>"
             ),
@@ -504,15 +527,10 @@ fn owed_by_flow(flow: &crate::flow::Flow, session: &str, budget: Option<WakeBudg
         Err(why) => FlowOwes::Unknown(why),
     };
     match flow.standing() {
-        Err(why) => FlowOwes::Undecidable(why),
+        Err(why) => FlowOwes::Unknown(why),
         Ok(crate::flow::Standing::Ended(0)) => FlowOwes::Nothing,
-        Ok(crate::flow::Standing::Ended(status)) => {
-            closure(format!("it ended with status {status}"), "ENDED")
-        }
-        Ok(crate::flow::Standing::Died) => closure(
-            "it died: its holder is gone with no ending recorded".to_owned(),
-            "DIED",
-        ),
+        Ok(crate::flow::Standing::Ended(status)) => closure(Closure::Ended(status)),
+        Ok(crate::flow::Standing::Died) => closure(Closure::Died),
         Ok(crate::flow::Standing::Live) => {
             let leases = Leases::of(&flow.paths);
             let watchers = &leases.watchers;
@@ -725,7 +743,9 @@ fn discover_owned_runs(root: &Path, session: &str) -> Result<Discovered> {
             continue;
         };
         if launch.owned_by(session) {
-            owned.runs.push((paths, launch.flow));
+            owned
+                .runs
+                .push((paths, (!launch.flow.is_empty()).then_some(launch.flow)));
         }
     }
     Ok(owned)
@@ -742,8 +762,8 @@ fn discover_owned_runs(root: &Path, session: &str) -> Result<Discovered> {
 #[derive(Default)]
 struct Discovered {
     /// The run roots whose launch record names the resolved session, each with
-    /// the flow its launch record names — empty for a run of no flow.
-    runs: Vec<(RunPaths, String)>,
+    /// the flow its launch record names, where it names one.
+    runs: Vec<(RunPaths, Option<String>)>,
     /// What could not be resolved, each already worded for standard error.
     unresolved: Vec<String>,
 }

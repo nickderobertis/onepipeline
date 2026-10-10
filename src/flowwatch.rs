@@ -204,7 +204,7 @@ pub(crate) fn watch(
     let deadline = crate::watch::deadline(request.timeout)?;
     let mut known = match &request.cursor {
         Some(token) => resume(root, flow, token)?,
-        None => armed_at(root, flow),
+        None => armed_at(root, flow)?,
     };
     let _armed = crate::watchers::Armed::arm(&flow.paths, request.timeout, until);
     let mut quiet_since = Instant::now();
@@ -231,7 +231,7 @@ pub(crate) fn watch(
             return ended(Ending::Elapsed, &known, unread, say);
         }
         first = false;
-        let (ending, waiting) = pass(root, flow, selected, &mut known);
+        let (ending, waiting) = pass(root, flow, selected, &mut known)?;
         unread = waiting;
         if let Some(ending) = ending {
             return ended(ending, &known, unread, say);
@@ -252,15 +252,16 @@ pub(crate) fn watch(
 /// Every member run positioned at the end of its journal as it stands, which is
 /// what a watch given no cursor waits past: what was journalled before it armed
 /// is history, and answers no condition.
-fn armed_at(root: &std::path::Path, flow: &Flow) -> BTreeMap<String, Cursor> {
-    flow.members()
+fn armed_at(root: &std::path::Path, flow: &Flow) -> Result<BTreeMap<String, Cursor>> {
+    Ok(flow
+        .members()?
         .into_iter()
         .map(|run| {
             let mut cursor = Cursor::start(&run);
             crate::watch::tail(&RunPaths::under(root, &run), &mut cursor);
             (run, cursor)
         })
-        .collect()
+        .collect())
 }
 
 /// The member runs a cursor token names, each placed against its own journal.
@@ -287,7 +288,7 @@ fn resume(root: &std::path::Path, flow: &Flow, token: &str) -> Result<BTreeMap<S
             flow.id()
         )));
     }
-    let members = flow.members();
+    let members = flow.members()?;
     let mut known = BTreeMap::new();
     for place in places.split('/').filter(|place| !place.is_empty()) {
         // The byte follows the last `@`, so a run id carrying one reads back.
@@ -324,15 +325,19 @@ fn cursor_of(flow: &str, known: &BTreeMap<String, Cursor>) -> String {
 /// answered: a waiting surface, a settled node, a joined run, and the flow's
 /// own ending. Answers the ending this look reached, if any, and how many
 /// planner surfaces are unread across the flow's channel and its members'.
+///
+/// # Errors
+///
+/// The flow's membership becoming unreadable while the watch waits.
 fn pass(
     root: &std::path::Path,
     flow: &Flow,
     selected: Selected,
     known: &mut BTreeMap<String, Cursor>,
-) -> (Option<Ending>, usize) {
+) -> Result<(Option<Ending>, usize)> {
     // Read before the members are, so a run that joins while this pass runs is
     // the next pass's to report, with its settlements from byte zero.
-    let members = flow.members();
+    let members = flow.members()?;
     let unread = flow.channel().queue().waiting.len()
         + known
             .keys()
@@ -345,13 +350,13 @@ fn pass(
             .sum::<usize>();
     if selected.surface {
         if crate::watch::surface_waiting(&flow.paths).is_some() {
-            return (Some(Ending::SurfaceOnFlow), unread);
+            return Ok((Some(Ending::SurfaceOnFlow), unread));
         }
         if let Some(run) = known
             .keys()
             .find(|run| crate::watch::surface_waiting(&RunPaths::under(root, run)).is_some())
         {
-            return (Some(Ending::SurfaceOnRun(run.clone())), unread);
+            return Ok((Some(Ending::SurfaceOnRun(run.clone())), unread));
         }
     }
     let mut settled: Option<Ending> = None;
@@ -368,7 +373,7 @@ fn pass(
         }
     }
     if settled.is_some() {
-        return (settled, unread);
+        return Ok((settled, unread));
     }
     let mut joined: Option<String> = None;
     for run in members {
@@ -378,7 +383,7 @@ fn pass(
         }
     }
     if let Some(run) = joined.filter(|_| selected.run_joined) {
-        return (Some(Ending::RunJoined(run)), unread);
+        return Ok((Some(Ending::RunJoined(run)), unread));
     }
     let ending = match flow.standing() {
         Ok(Standing::Ended(0)) => Some(Ending::Ended),
@@ -388,7 +393,7 @@ fn pass(
         // it did not, and `unwatched` names it: the wait goes on.
         Ok(Standing::Live) | Err(_) => None,
     };
-    (ending, unread)
+    Ok((ending, unread))
 }
 
 /// How many unread planner surfaces, as one clause, a zero said out loud.
@@ -512,6 +517,130 @@ mod tests {
             "{}",
             failed.human
         );
+    }
+
+    /// The Flows section of `docs/stop-guard.md` is the one statement of this
+    /// surface, so it is held to the code both ways: each synopsis names exactly
+    /// the flags clap offers, the exit table exactly the endings and their codes,
+    /// the return record exactly the keys a return can carry, and the wake reserve
+    /// and the deadline check the constants the verbs use.
+    #[test]
+    fn the_flows_section_states_exactly_this_surface() {
+        use clap::CommandFactory;
+        use std::collections::BTreeSet;
+
+        let page = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("docs")
+                .join("stop-guard.md"),
+        )
+        .expect("the page ships");
+        let section = page
+            .split_once("\n## Flows\n")
+            .expect("the page has a Flows section")
+            .1
+            .split_once("\n## ")
+            .map_or(String::new(), |(section, _)| section.to_owned());
+        let flags_of = |synopsis: &str| -> BTreeSet<String> {
+            synopsis
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+                .filter_map(|word| word.strip_prefix("--"))
+                .filter(|word| !word.is_empty())
+                .map(str::to_owned)
+                .collect()
+        };
+        let synopsis = |opening: &str| -> String {
+            section
+                .lines()
+                .find(|line| line.starts_with(opening))
+                .unwrap_or_else(|| panic!("the section states `{opening}`"))
+                .to_owned()
+        };
+        let command = crate::cli::Cli::command();
+        let offered = |path: &[&str]| -> BTreeSet<String> {
+            let mut verb = command.clone();
+            for name in path {
+                verb = verb
+                    .find_subcommand(name)
+                    .unwrap_or_else(|| panic!("the binary offers `{name}`"))
+                    .clone();
+            }
+            verb.get_arguments()
+                .filter_map(|arg| arg.get_long().map(str::to_owned))
+                .collect()
+        };
+        assert_eq!(
+            flags_of(&synopsis("onepipeline flow run ")),
+            offered(&["flow", "run"])
+        );
+        // A run's own two are what `--flow` refuses beside it.
+        let mut watch = offered(&["watch"]);
+        watch.remove("filter");
+        watch.remove("all");
+        assert_eq!(flags_of(&synopsis("onepipeline watch --flow ")), watch);
+
+        let endings = [
+            Ending::SurfaceOnFlow,
+            Ending::NodeSettled {
+                run: "r".into(),
+                node: "n".into(),
+            },
+            Ending::RunJoined("r".into()),
+            Ending::Ended,
+            Ending::Failed(3),
+            Ending::Elapsed,
+        ];
+        let stated: BTreeSet<(String, String)> = section
+            .lines()
+            .filter_map(|row| {
+                let cells: Vec<&str> = row.split('|').map(str::trim).collect();
+                let code = cells.get(1)?.strip_prefix('`')?.strip_suffix('`')?;
+                let word = cells.get(2)?.strip_prefix('`')?.strip_suffix('`')?;
+                code.parse::<i32>()
+                    .ok()
+                    .map(|_| (code.to_owned(), word.to_owned()))
+            })
+            .collect();
+        let built: BTreeSet<(String, String)> = endings
+            .iter()
+            .map(|ending| (ending.exit_code().to_string(), ending.as_str().to_owned()))
+            .collect();
+        assert_eq!(stated, built, "the exit table is not this build's endings");
+
+        let documented = section
+            .split_once("`{\"watch\":\"return\"")
+            .expect("the section states the return record")
+            .1
+            .split_once('`')
+            .expect("the record is one span")
+            .0
+            .to_owned();
+        let mut keys: BTreeSet<String> = BTreeSet::new();
+        for ending in endings.iter().chain([&Ending::Died]) {
+            let lines = ending_lines("plan", ending, "c", 0).expect("lines");
+            let record: serde_json::Value = serde_json::from_str(&lines.machine).expect("JSON");
+            keys.extend(record.as_object().expect("an object").keys().cloned());
+        }
+        for key in &keys {
+            assert!(
+                documented.contains(&format!("\"{key}\"")) || section.contains(&format!("`{key}`")),
+                "the section does not state the return record's `{key}`"
+            );
+        }
+
+        for stated in [
+            format!(
+                "**wake reserve of {} seconds**",
+                crate::cli::WAKE_RESERVE_SECONDS
+            ),
+            format!("**{} milliseconds**", crate::cli::DEADLINE_CHECK_MILLIS),
+            format!("`{}`", crate::cli::FLOW_ENV),
+        ] {
+            assert!(
+                section.contains(&stated),
+                "the section does not state {stated}"
+            );
+        }
     }
 
     /// A run watch's conditions are refused on a flow watch, naming the three it

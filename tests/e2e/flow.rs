@@ -77,20 +77,20 @@ impl Flowing {
     /// Start `flow run --name <id> -- sh <script>` from `world`, and return once
     /// the flow is registered.
     fn start(world: &World, id: &str, script: &[String]) -> Self {
+        Self::start_with(world, id, &[], script)
+    }
+
+    /// [`start`](Self::start), with more of `flow run`'s own flags before `--`.
+    fn start_with(world: &World, id: &str, flags: &[&str], script: &[String]) -> Self {
         let steps = steps(world);
         let path = world.root.join(format!("{id}.sh"));
         std::fs::write(&path, script.join("\n") + "\n").expect("the program is written");
         let stderr = world.root.join(format!("{id}.stderr"));
+        let mut argv = vec!["flow", "run", "--name", id];
+        argv.extend_from_slice(flags);
+        argv.extend(["--", "sh", path.to_str().expect("a path")]);
         let child = world
-            .cmd(&[
-                "flow",
-                "run",
-                "--name",
-                id,
-                "--",
-                "sh",
-                path.to_str().expect("a path"),
-            ])
+            .cmd(&argv)
             // A manager's flow, started outside any dispatch: the run id this
             // suite's own dispatch may carry is not the program's, and `ask`
             // inside it asks on the flow because it names no run.
@@ -929,4 +929,774 @@ fn flow_run_forwards_signals_mints_free_ids_and_registers_nothing_without_a_sess
         .exited(RUNS_UNWATCHED)
         .out_has("flow trapped")
         .out_has("it ended with status 42");
+}
+
+/// Set a path's Unix permission bits, for the journeys that make a directory
+/// this host refuses to read or write — and put back once they are done.
+fn chmod(path: &std::path::Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("chmod");
+}
+
+/// A journey running as root is not refused by permission bits, so a journey
+/// whose refusals rest on them fails saying so — never passes having staged
+/// nothing.
+fn permissions_bind(world: &World) {
+    let probe = world.root.join("probe-permissions");
+    std::fs::create_dir_all(&probe).expect("a probe directory");
+    chmod(&probe, 0o000);
+    let binds = std::fs::read_dir(&probe).is_err();
+    chmod(&probe, 0o755);
+    assert!(
+        binds,
+        "this journey runs where permission bits refuse nothing (as root?), so the refusals it \
+         stages cannot be staged"
+    );
+}
+
+/// What `--flow` cannot be asked, refused by the parser or before anything
+/// moves: a run and a flow at once, a run's profile flags on a flow, an id that
+/// is not one, a flow that is not there, a record this build did not write, a
+/// run watch's condition, a cursor this flow cannot place, and a positional too
+/// many. A flow's surface and reply read the file `--flow` leaves the positional
+/// to name.
+#[test]
+fn the_flow_flags_refuse_what_a_flow_cannot_be_asked() {
+    let world = World::new("flow-refusals");
+    let member = held_plan(&world, "member", "memberwork");
+    let flow = Flowing::start(
+        &world,
+        "live",
+        &[
+            launch(&member),
+            mark(&world, "launched"),
+            gate(&world, "end"),
+        ],
+    );
+    flow.reached(&world, "launched");
+    let solo = held_plan(&world, "solo", "solowork");
+    world.run(&["start", &solo, "--detach"]).exited(0);
+
+    for argv in [
+        vec!["next"],
+        vec!["next", "solo", "--flow", "live"],
+        vec!["watch", "--flow", "live", "--all"],
+        vec!["watch", "--flow", "live", "--filter", "planner"],
+        vec!["channel", "queue", "solo", "--flow", "live"],
+        vec![
+            "unwatched",
+            "--acknowledge-flow",
+            "live",
+            "--acknowledge",
+            "solo",
+            "--reason",
+            "r",
+        ],
+    ] {
+        world.run(&argv).exited(REFUSED);
+    }
+    world
+        .run(&["next", "--flow", "../live"])
+        .exited(REFUSED)
+        .err_has("is not a flow id");
+    world
+        .run(&["watch", "--flow", "nope", "--timeout", "0"])
+        .exited(REFUSED)
+        .err_has("no flow 'nope'");
+
+    // Records this build did not write, each written by hand: one that is not a
+    // record, and one naming another flow.
+    let flows = world.runs.join(".flows");
+    std::fs::create_dir_all(flows.join("broken")).expect("a directory");
+    std::fs::write(flows.join("broken").join("flow.json"), "{").expect("a torn record");
+    world
+        .run(&["next", "--flow", "broken"])
+        .exited(REFUSED)
+        .err_has("record cannot be read");
+    std::fs::create_dir_all(flows.join("copied")).expect("a directory");
+    std::fs::copy(
+        flows.join("live").join("flow.json"),
+        flows.join("copied").join("flow.json"),
+    )
+    .expect("a copied record");
+    world
+        .run(&["next", "--flow", "copied"])
+        .exited(REFUSED)
+        .err_has("names flow 'live'");
+    // Ownership is a positive claim: neither is anybody's to report.
+    let asked = unwatched(&world, &[]);
+    assert!(
+        !asked.stdout.contains("broken") && !asked.stderr.contains("broken"),
+        "{}\n{}",
+        asked.stdout,
+        asked.stderr
+    );
+
+    // Conditions belong to their own kind of watch.
+    world
+        .run(&[
+            "watch",
+            "--flow",
+            "live",
+            "--until",
+            "settled",
+            "--timeout",
+            "0",
+        ])
+        .exited(REFUSED)
+        .err_has("run watch's condition");
+    world
+        .run(&["watch", "solo", "--until", "run-joined", "--timeout", "0"])
+        .exited(REFUSED)
+        .err_has("flow watch's condition");
+
+    // Cursors this flow cannot place.
+    for (cursor, said) in [
+        ("1:solo:0", "not a cursor this build reads for a flow"),
+        ("flow:1:other:", "printed by a watch of flow 'other'"),
+        ("flow:1:live:solo@0", "not a run of flow 'live'"),
+        ("flow:1:live:member@99999999", "whose store holds"),
+    ] {
+        world
+            .run(&[
+                "watch",
+                "--flow",
+                "live",
+                "--timeout",
+                "0",
+                "--cursor",
+                cursor,
+            ])
+            .exited(REFUSED)
+            .err_has(said);
+    }
+
+    // A flow's surface and reply read the file `--flow` leaves the positional
+    // to name; a second positional, or a file beside `--message`, is refused.
+    let text = world.root.join("finding.txt");
+    std::fs::write(&text, "the review found two gaps").expect("a message file");
+    let text = text.to_str().expect("a path");
+    world
+        .run(&["surface", "--flow", "live", "--kind", "finding", text, text])
+        .exited(REFUSED)
+        .err_has("one positional");
+    world
+        .run(&[
+            "surface",
+            "--flow",
+            "live",
+            "--kind",
+            "finding",
+            "--message",
+            "x",
+            text,
+        ])
+        .exited(REFUSED)
+        .err_has("never both");
+    world
+        .run(&["surface", "--flow", "live", "--kind", "finding", text])
+        .exited(EXIT_SUCCESS);
+    let read = world.run(&["next", "--flow", "live"]);
+    read.exited(0);
+    assert_eq!(
+        read.json()["surface"]["message"],
+        json!("the review found two gaps")
+    );
+    let verdict_file = world.root.join("verdict.json");
+    std::fs::write(
+        &verdict_file,
+        json!({"version": 2, "completion": false, "message": "address both"}).to_string(),
+    )
+    .expect("an envelope file");
+    world
+        .run(&[
+            "reply",
+            "--flow",
+            "live",
+            verdict_file.to_str().expect("a path"),
+        ])
+        .exited(EXIT_SUCCESS);
+    let queue = world.run(&["channel", "queue", "--flow", "live"]);
+    queue.exited(0);
+    assert_eq!(
+        queue.json()["replies"][0]["reply"]["message"],
+        json!("address both"),
+        "{}",
+        queue.stdout
+    );
+    flow.open("end");
+    assert_eq!(flow.ended(), 0);
+}
+
+/// What a flow's evidence cannot say is never passed in silence: an ending that
+/// cannot be read — or another flow's — leaves the flow live and unknown, which
+/// the guard warns on; an acknowledgement that cannot be read leaves a died flow
+/// unknown until a readable one closes it; an acknowledgement is refused with a
+/// blank reason, from another session, and for a flow still live; and a flows
+/// directory this host will not read refuses the question.
+#[test]
+fn a_flow_whose_evidence_cannot_be_read_is_named_and_never_passed() {
+    let world = World::new("flow-unreadable");
+    let flows = world.runs.join(".flows");
+    let garbled = Flowing::start(&world, "garbled", &[gate(&world, "end")]);
+    // Written by hand: an ending no holder wrote, while the holder lives.
+    std::fs::write(flows.join("garbled").join("ending.json"), "not a record")
+        .expect("a torn ending");
+    let asked = unwatched(&world, &[]);
+    asked.exited(EXIT_SUCCESS);
+    assert!(asked.stdout.is_empty(), "{}", asked.stdout);
+    assert!(
+        asked
+            .stderr
+            .contains("flow garbled: its ending cannot be read"),
+        "{}",
+        asked.stderr
+    );
+    let warned = verdict(&world, &[]);
+    assert_eq!(warned["verdict"], json!("warn"), "{warned}");
+    let read = world.run(&["next", "--flow", "garbled"]);
+    read.exited(0);
+    assert_eq!(read.json()["status"], json!("running"));
+    world
+        .run(&["watch", "--flow", "garbled", "--timeout", "0"])
+        .exited(WATCH_ELAPSED);
+    // Another flow's ending is not this one's.
+    std::fs::write(
+        flows.join("garbled").join("ending.json"),
+        json!({"schema_version": 1, "flow_id": "elsewhere", "status": 0,
+               "at": "2026-10-10T00:00:00.000Z"})
+        .to_string(),
+    )
+    .expect("another flow's ending");
+    unwatched(&world, &[])
+        .exited(EXIT_SUCCESS)
+        .err_has("flow 'elsewhere''s ending, not this flow's");
+    world
+        .run(&[
+            "unwatched",
+            "--acknowledge-flow",
+            "garbled",
+            "--reason",
+            "x",
+        ])
+        .exited(REFUSED)
+        .err_has("is live");
+    std::fs::remove_file(flows.join("garbled").join("ending.json")).expect("the ending goes");
+    garbled.open("end");
+    assert_eq!(garbled.ended(), 0);
+
+    let mut gone = Flowing::start(&world, "gone", &[gate(&world, "never")]);
+    gone.child.kill().expect("SIGKILL reaches the holder");
+    let _ = gone.child.wait();
+    let acknowledgements = flows.join("gone").join("acknowledgements");
+    std::fs::create_dir_all(&acknowledgements).expect("a directory");
+    // Written by hand: an acknowledgement no verb wrote.
+    std::fs::write(acknowledgements.join("torn.json"), "{").expect("a torn acknowledgement");
+    let asked = unwatched(&world, &[]);
+    asked.exited(EXIT_SUCCESS);
+    assert!(asked.stdout.is_empty(), "{}", asked.stdout);
+    assert!(
+        asked
+            .stderr
+            .contains("flow gone: whether it is closed cannot be said"),
+        "{}",
+        asked.stderr
+    );
+    assert_eq!(verdict(&world, &[])["verdict"], json!("warn"));
+    world
+        .run(&["unwatched", "--acknowledge-flow", "gone", "--reason", "  "])
+        .exited(REFUSED)
+        .err_has("blank");
+    // Held for the journey: a view removes the world's root when it is dropped.
+    let stranger = world.as_session("a-stranger");
+    stranger
+        .run(&[
+            "unwatched",
+            "--acknowledge-flow",
+            "gone",
+            "--reason",
+            "mine now",
+        ])
+        .exited(REFUSED)
+        .err_has("belongs to session");
+    world
+        .run(&[
+            "unwatched",
+            "--acknowledge-flow",
+            "gone",
+            "--reason",
+            "redone by hand",
+        ])
+        .exited(EXIT_SUCCESS);
+    unwatched(&world, &[]).exited(EXIT_SUCCESS);
+    gone.open("never");
+
+    permissions_bind(&world);
+    {
+        chmod(&flows, 0o000);
+        let refused = unwatched(&world, &[]);
+        chmod(&flows, 0o755);
+        refused.exited(REFUSED).err_has(".flows");
+    }
+}
+
+/// `start` records a flow only where `ONEPIPELINE_FLOW` names a **live** flow of
+/// the launching session under **its own** runs root: a flow that died, one
+/// that is not there, another session's and one under another runs root each
+/// leave the run in no flow.
+#[test]
+fn start_records_only_a_live_flow_of_its_own_session_under_its_own_root() {
+    let world = World::new("flow-joins");
+    let mut gone = Flowing::start(&world, "gone", &[gate(&world, "never")]);
+    gone.child.kill().expect("SIGKILL reaches the holder");
+    let _ = gone.child.wait();
+    let stranger = world.as_session("a-stranger");
+    let theirs = Flowing::start(&stranger, "theirs", &[gate(&world, "end")]);
+    let mut elsewhere = world.as_session(&world.session);
+    elsewhere.runs = world.root.join("other-runs");
+    std::fs::create_dir_all(&elsewhere.runs).expect("another runs root");
+    let away = Flowing::start(&elsewhere, "away", &[gate(&world, "end")]);
+    let ours = Flowing::start(&world, "ours", &[gate(&world, "end")]);
+
+    for (named, run, recorded) in [
+        ("gone", "joingone", None),
+        ("nope", "joinnope", None),
+        ("theirs", "jointheirs", None),
+        ("away", "joinaway", None),
+        ("ours", "joinours", Some("ours")),
+    ] {
+        let plan = world.plan(run, &plan_of(run, vec![agent(&format!("{run}work"), &[])]));
+        let launched = world
+            .cmd(&["start", &plan, "--attach"])
+            .env(FLOW_ENV, named)
+            .output()
+            .expect("start runs");
+        assert!(launched.status.success(), "{launched:?}");
+        assert_eq!(
+            world.run_json(run, "launch.json").get("flow"),
+            recorded.map(|flow| json!(flow)).as_ref(),
+            "a run launched under {FLOW_ENV}={named}"
+        );
+    }
+    gone.open("never");
+    for flow in [theirs, away, ours] {
+        flow.open("end");
+        assert_eq!(flow.ended(), 0);
+    }
+}
+
+/// `ask` asks on the flow's own channel only where it names no run: a run named
+/// through `ONEPIPELINE_RUN_ID` wins, and a blank one names none. A flow's
+/// question waits the window its own bus configuration names, and the advice on
+/// a timeout names `reply --flow`. A configuration this build refuses refuses
+/// the flow before its program runs.
+#[test]
+fn ask_gives_way_to_a_named_run_and_waits_the_flows_own_window() {
+    let world = World::new("flow-ask");
+    let config = world.root.join("bus.yaml");
+    std::fs::write(
+        &config,
+        "version: 1\ntransport: {kind: local}\nprofile: planner-channel\ncodecs:\n  asked:\n    \
+         queue: surfaces\n    reply_window_seconds: 3\n    select: kind\n    frames:\n      \
+         planner-question:\n        schema: agent.planner-surface@1\n        bindings: \
+         [{do: answer, response: {}}]\n",
+    )
+    .expect("a bus configuration");
+    let flow = Flowing::start_with(
+        &world,
+        "asking",
+        &["--bus-config", config.to_str().expect("a path")],
+        &[gate(&world, "end")],
+    );
+    let named = held_plan(&world, "named", "namedwork");
+    world.run(&["start", &named, "--detach"]).exited(0);
+
+    let on_the_run = world
+        .cmd(&[
+            "ask",
+            "--timeout",
+            "1",
+            "Is the run's own question asked on the run?",
+        ])
+        .env(FLOW_ENV, "asking")
+        .env("ONEPIPELINE_RUN_ID", "named")
+        .output()
+        .expect("ask runs");
+    assert_eq!(on_the_run.status.code(), Some(1), "{on_the_run:?}");
+    let questions = |queue: &str| -> usize {
+        let argv: Vec<&str> = queue.split(' ').collect();
+        let read = world.run(&argv);
+        read.exited(0);
+        read.json()["surfaces"].as_array().map_or(0, |surfaces| {
+            surfaces
+                .iter()
+                .filter(|surface| surface["kind"] == "planner-question")
+                .count()
+        })
+    };
+    assert_eq!(questions("channel queue named"), 1);
+    assert_eq!(questions("channel queue --flow asking"), 0);
+
+    let on_the_flow = world
+        .cmd(&["ask", "Is the flow's own question asked on the flow?"])
+        .env(FLOW_ENV, "asking")
+        .env("ONEPIPELINE_RUN_ID", " ")
+        .output()
+        .expect("ask runs");
+    assert_eq!(on_the_flow.status.code(), Some(1), "{on_the_flow:?}");
+    let said = String::from_utf8_lossy(&on_the_flow.stderr);
+    assert!(said.contains("waiting up to 3 seconds"), "{said}");
+    assert!(
+        said.contains("onepipeline reply --flow asking --correlation"),
+        "{said}"
+    );
+    assert_eq!(questions("channel queue --flow asking"), 1);
+
+    let bad = world.root.join("bad-bus.yaml");
+    std::fs::write(
+        &bad,
+        "version: 1\ntransport: {kind: memory}\nprofile: planner-channel\n",
+    )
+    .expect("a configuration this build refuses");
+    let ran = world.root.join("ran");
+    world
+        .run(&[
+            "flow",
+            "run",
+            "--name",
+            "refused",
+            "--bus-config",
+            bad.to_str().expect("a path"),
+            "--",
+            "touch",
+            ran.to_str().expect("a path"),
+        ])
+        .exited(REFUSED)
+        .err_has("--bus-config");
+    assert!(
+        !ran.exists(),
+        "the program ran under a refused configuration"
+    );
+    assert!(!world.runs.join(".flows").join("refused").exists());
+    flow.open("end");
+    assert_eq!(flow.ended(), 0);
+}
+
+/// The rest of `flow run`'s edges: `--session` names the owner over the
+/// environment, and a blank one is none; a program that cannot be started is
+/// recorded as 127 and owed closure; a program a signal ends is recorded as
+/// 128 + the signal; and an ending its holder cannot write leaves the flow died.
+#[test]
+fn flow_run_records_every_ending_its_program_can_have() {
+    let world = World::new("flow-endings");
+    world
+        .run(&[
+            "flow",
+            "run",
+            "--name",
+            "owned",
+            "--session",
+            "explicit",
+            "--",
+            "true",
+        ])
+        .exited(0);
+    // Held for the journey: a view removes the world's root when it is dropped.
+    let explicit = world.as_session("explicit");
+    unwatched(&explicit, &[]).exited(EXIT_SUCCESS);
+    let record: Value = serde_json::from_str(
+        &std::fs::read_to_string(world.runs.join(".flows/owned/flow.json")).expect("a record"),
+    )
+    .expect("JSON");
+    assert_eq!(record["session"], json!("explicit"));
+    world
+        .run(&[
+            "flow",
+            "run",
+            "--name",
+            "blank",
+            "--session",
+            "",
+            "--",
+            "true",
+        ])
+        .exited(0)
+        .err_has("nothing will hold a session for it");
+    assert!(!world.runs.join(".flows/blank").exists());
+
+    world
+        .run(&["flow", "run", "--name", "missing", "--", "/no/such/program"])
+        .exited(127)
+        .err_has("could not be started");
+    world
+        .run(&[
+            "flow",
+            "run",
+            "--name",
+            "killed",
+            "--",
+            "sh",
+            "-c",
+            "kill -9 $$",
+        ])
+        .exited(137);
+    let owed = unwatched(&world, &[]);
+    owed.exited(RUNS_UNWATCHED);
+    assert!(
+        owed.stdout.contains("flow missing") && owed.stdout.contains("it ended with status 127"),
+        "{}",
+        owed.stdout
+    );
+    assert!(
+        owed.stdout.contains("flow killed") && owed.stdout.contains("it ended with status 137"),
+        "{}",
+        owed.stdout
+    );
+
+    permissions_bind(&world);
+    {
+        let flow = Flowing::start(&world, "unkept", &[gate(&world, "end")]);
+        let dir = world.runs.join(".flows").join("unkept");
+        chmod(&dir, 0o555);
+        flow.open("end");
+        let said_before = flow.stderr.clone();
+        assert_eq!(flow.ended(), 0);
+        chmod(&dir, 0o755);
+        let said = std::fs::read_to_string(said_before).unwrap_or_default();
+        assert!(said.contains("could not be recorded"), "{said}");
+        unwatched(&world, &[])
+            .exited(RUNS_UNWATCHED)
+            .out_has("flow unkept")
+            .out_has("DIED");
+    }
+}
+
+/// What a flow watch says while it waits, and where: a heartbeat per quiet tick
+/// carrying the unread count summed over the flow's channel and its runs', none
+/// at `--tick-interval 0`, its human lines in `--log` when given one; it returns
+/// only on what `--until` names; a cursor printed before a run joined answers
+/// `run-joined` for it at once; and a flow whose runs cannot be read is refused.
+#[test]
+fn a_flow_watch_says_what_it_waits_on_and_where() {
+    let world = World::new("flow-says");
+    let first = held_plan(&world, "talkrun", "talkwork");
+    let second = held_plan(&world, "laterrun", "laterwork");
+    let flow = Flowing::start(
+        &world,
+        "talky",
+        &[
+            launch(&first),
+            mark(&world, "first"),
+            gate(&world, "second"),
+            launch(&second),
+            mark(&world, "launched-second"),
+            gate(&world, "end"),
+        ],
+    );
+    flow.reached(&world, "first");
+    world.until("the first run to dispatch", |world| {
+        !world.events_of("talkrun", "node-dispatched").is_empty()
+    });
+    for argv in [
+        vec![
+            "surface",
+            "--flow",
+            "talky",
+            "--kind",
+            "finding",
+            "--message",
+            "one",
+        ],
+        vec![
+            "surface",
+            "talkrun",
+            "--kind",
+            "finding",
+            "--message",
+            "two",
+        ],
+    ] {
+        world.run(&argv).exited(0);
+    }
+    let heard = world
+        .cmd(&[
+            "watch",
+            "--flow",
+            "talky",
+            "--timeout",
+            "3",
+            "--tick-interval",
+            "1",
+            "--until",
+            "run-joined",
+        ])
+        .output()
+        .expect("the watch runs");
+    assert_eq!(heard.status.code(), Some(WATCH_ELAPSED), "{heard:?}");
+    let human = String::from_utf8_lossy(&heard.stderr);
+    assert!(
+        human.contains("-- watching flow talky  LIVE  2 unread planner surface(s)"),
+        "{human}"
+    );
+    let records: Vec<Value> = String::from_utf8_lossy(&heard.stdout)
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("one JSON record per line"))
+        .collect();
+    assert!(
+        records
+            .iter()
+            .any(|record| record["watch"] == "heartbeat" && record["unread"]["count"] == 2),
+        "{records:?}"
+    );
+    let before_the_join = records
+        .last()
+        .and_then(|record| record["cursor"].as_str())
+        .expect("a return carries a cursor")
+        .to_owned();
+
+    let log = world.root.join("watch.log");
+    let quiet = world
+        .cmd(&[
+            "watch",
+            "--flow",
+            "talky",
+            "--timeout",
+            "1",
+            "--tick-interval",
+            "0",
+            "--until",
+            "run-joined",
+            "--log",
+            log.to_str().expect("a path"),
+        ])
+        .output()
+        .expect("the watch runs");
+    assert_eq!(quiet.status.code(), Some(WATCH_ELAPSED));
+    assert!(quiet.stderr.is_empty(), "{quiet:?}");
+    let stdout = String::from_utf8_lossy(&quiet.stdout);
+    assert_eq!(stdout.lines().count(), 1, "{stdout}");
+    let logged = std::fs::read_to_string(&log).expect("the log");
+    assert!(
+        logged.starts_with("-- watch flow talky elapsed"),
+        "{logged}"
+    );
+
+    // Told `node-settled` alone, a run joining does not end it; a settlement does.
+    let settling = watching(
+        &world,
+        "talky",
+        &["--timeout", "600", "--until", "node-settled"],
+    );
+    flow.open("second");
+    flow.reached(&world, "launched-second");
+    world.release("talkwork.go");
+    let settled = settling.returned();
+    settled.ended_on(NODE_SETTLED, "node-settled");
+    assert_eq!(settled.record["run_id"], json!("talkrun"));
+
+    // A cursor from before the second run joined answers it at once.
+    let replayed = watching(
+        &world,
+        "talky",
+        &[
+            "--timeout",
+            "600",
+            "--until",
+            "run-joined",
+            "--cursor",
+            &before_the_join,
+        ],
+    );
+    let joined = replayed.returned();
+    joined.ended_on(EXIT_RUN_JOINED, "run-joined");
+    assert_eq!(joined.record["run_id"], json!("laterrun"));
+
+    permissions_bind(&world);
+    {
+        let members = world.runs.join(".flows").join("talky").join("members");
+        chmod(&members, 0o000);
+        let refused = world.run(&["watch", "--flow", "talky", "--timeout", "0"]);
+        chmod(&members, 0o755);
+        refused.exited(REFUSED).err_has("runs cannot be read");
+    }
+    flow.open("end");
+    assert_eq!(flow.ended(), 0);
+}
+
+/// Under a wake budget a flow watch qualifies only on every term a run watch's
+/// does: one of another session's, one with no deadline, and one that does not
+/// return on a surface each fail, in their own words; one whose terms are gone
+/// is an unknown the guard warns on. And a run's watch given no `--timeout`
+/// gives up the reserve before the budget too, measured on the wall clock.
+#[test]
+fn a_flow_watch_qualifies_only_on_every_term_and_a_run_watch_keeps_the_reserve() {
+    let world = World::new("flow-terms");
+    let flow = Flowing::start(&world, "rules", &[gate(&world, "end")]);
+    let budget = ["--wake-budget", "600"];
+    let stranger = world.as_session("a-stranger");
+    for (watcher, args, why) in [
+        (
+            &stranger,
+            vec!["--timeout", "60"],
+            "it is another session's",
+        ),
+        (&world, vec!["--timeout", "none"], "it has no deadline"),
+        (
+            &world,
+            vec!["--timeout", "60", "--until", "run-joined"],
+            "it does not return on a surface",
+        ),
+    ] {
+        let armed = watching(watcher, "rules", &args);
+        unwatched(&world, &budget)
+            .exited(RUNS_UNWATCHED)
+            .out_has("flow rules")
+            .out_has(why);
+        armed.end();
+    }
+    let armed = watching(&world, "rules", &["--timeout", "60"]);
+    unwatched(&world, &budget).exited(EXIT_SUCCESS);
+    // Removed by hand: the terms beside the live lease, as an engine before the
+    // terms record leaves a lease.
+    let terms = world.runs.join(".flows").join("rules").join("watch-terms");
+    for entry in std::fs::read_dir(&terms)
+        .expect("the terms directory")
+        .flatten()
+    {
+        std::fs::remove_file(entry.path()).expect("the terms go");
+    }
+    let asked = unwatched(&world, &budget);
+    asked.exited(EXIT_SUCCESS);
+    assert!(asked.stdout.is_empty(), "{}", asked.stdout);
+    assert!(
+        asked
+            .stderr
+            .contains("flow rules: whether a live watch wakes this session"),
+        "{}",
+        asked.stderr
+    );
+    assert_eq!(verdict(&world, &budget)["verdict"], json!("warn"));
+    armed.end();
+    flow.open("end");
+    assert_eq!(flow.ended(), 0);
+
+    let run = held_plan(&world, "reserved", "reservedwork");
+    world.run(&["start", &run, "--detach"]).exited(0);
+    world.until("the run to dispatch", |world| {
+        !world.events_of("reserved", "node-dispatched").is_empty()
+    });
+    let budgeted = world
+        .as_session(&world.session)
+        .with_env(WAKE_BUDGET_ENV, "4");
+    let spawned = Instant::now();
+    let watch = budgeted
+        .cmd(&["watch", "reserved", "--tick-interval", "600"])
+        .output()
+        .expect("the watch runs");
+    let took = spawned.elapsed();
+    assert_eq!(watch.status.code(), Some(WATCH_ELAPSED), "{watch:?}");
+    assert!(
+        took <= Duration::from_secs(4) && took >= Duration::from_secs(1),
+        "a run watch under a 4s budget returned after {took:?}"
+    );
 }
