@@ -5250,6 +5250,38 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
+    /// A runs root holding flows lists exactly its runs, and names no skipped
+    /// root for the directory the flows are kept in: it is no claim to be a run.
+    #[test]
+    fn a_runs_root_holding_flows_lists_exactly_its_runs() {
+        let root = scratch("index-flows");
+        for name in ["b-run", "a-run"] {
+            let paths = RunPaths::under(&root, name);
+            paths.create().expect("a run directory");
+            write_json(&paths.launch(), &serde_json::json!({})).expect("a launch record");
+        }
+        let flow = crate::flow::paths(&root, "plan");
+        fs::create_dir_all(flow.channel_dir()).expect("a flow's channel");
+        fs::create_dir_all(flow.watchers()).expect("a flow's leases");
+        write_json(
+            &flow.dir.join("flow.json"),
+            &serde_json::json!({"flow_id": "plan"}),
+        )
+        .expect("a flow record");
+
+        let index = all_runs(&root);
+        assert_eq!(
+            index
+                .runs
+                .iter()
+                .map(|run| run.run.as_str())
+                .collect::<Vec<_>>(),
+            ["a-run", "b-run"]
+        );
+        assert!(index.skipped.is_empty(), "{:?}", index.skipped);
+        fs::remove_dir_all(&root).ok();
+    }
+
     /// A directory that is not a run is a **rejection**, and it comes back named.
     ///
     /// The reading it replaces: the same root reported two runs and said nothing
