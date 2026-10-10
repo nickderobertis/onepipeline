@@ -664,6 +664,16 @@ resolver = "2"
 # store's history lock. Nothing here reads anything new from it; it requires
 # `oneharness-core` 0.24.0 and `onejudge` 0.17.1 exactly, so the three move as one.
 #
+# `oneagentgraph` 0.5.6 is the floor because it carries **graph schema version
+# 10**: a two-party member's `judge_settings` and each judge's `settings`, handed
+# to onejudge verbatim in the provider block and the judge's entry. The engine
+# composes nothing from them — a node reaches them through `--node-set` — so a
+# plan's graph can hand onejudge any setting it needs without another release
+# here. `tests/e2e/dispatch.rs`'s
+# `node_scope_judge_settings_reach_the_provider_block_a_dispatch_is_handed` holds
+# it. It requires `onejudge` 0.19.0, which `^0.17.1` admits no version of, so the
+# two requirements move as one.
+#
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
 # second with no registry at all. A newer release one of these pins **holds back**
@@ -684,7 +694,7 @@ resolver = "2"
 rust-version = "1.97"
 
 [workspace.dependencies]
-oneagentgraph = "0.5.5"
+oneagentgraph = "0.5.6"
 onevcs = "0.43.1"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
@@ -789,7 +799,16 @@ onemessagebus = "0.9.0"
 # member records its history through the core that never scans the store.
 # Nothing here reads anything new from it; `oneagentgraph` 0.5.5 requires exactly
 # it.
-onejudge = "0.17.1"
+#
+# 0.19.0 frames every judge-side prompt with **one evidence contract**, headed
+# `EVIDENCE CONTRACT` whatever mode the judge resolves, so a read-only judge is
+# told to inspect and verify the work rather than told what it may not do.
+# `tests/e2e/dispatch.rs`'s
+# `a_read_only_and_a_default_judge_are_handed_the_same_evidence_contract` reads
+# the prompt the harness double is handed under each. A **requirement** for the
+# same pre-1.0 reason as every raise above: `^0.17` admits no 0.19.x.
+# `oneagentgraph` 0.5.6 requires it.
+onejudge = "0.19.0"
 # **Test-support only**, and named for one reason: `crates/testfakes`'s
 # `oneharness` double writes the report onejudge reads back, and that report is
 # oneharness's own typed contract. Written by hand it would be fifty fields of
