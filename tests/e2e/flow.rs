@@ -2306,3 +2306,58 @@ fn the_agent_double_reports_a_flow_a_dispatch_is_handed() {
         assert_eq!(turn["payload"]["flow"], json!("wrapped"), "{turn}");
     }
 }
+
+/// A run that joins a flow holding a planner surface, the flow then ending, both
+/// before the next watch looks: told to return on a surface, the watch returns
+/// `surface` (4) naming that run rather than the flow's clean exit.
+#[test]
+fn a_surface_on_a_run_that_joins_as_its_flow_ends_is_returned_before_the_ending() {
+    let world = World::new("flow-last-surface");
+    let last = held_plan(&world, "lastsurface", "lastsurfacework");
+    let flow = Flowing::start(
+        &world,
+        "surfacing",
+        &[
+            gate(&world, "go"),
+            launch(&last),
+            mark(&world, "launched"),
+            gate(&world, "end"),
+        ],
+    );
+    let before = watching(&world, "surfacing", &["--timeout", "0"]).returned();
+    before.ended_on(WATCH_ELAPSED, "elapsed");
+    flow.open("go");
+    flow.reached(&world, "launched");
+    world
+        .run(&[
+            "surface",
+            "lastsurface",
+            "--kind",
+            "finding",
+            "--message",
+            "the last stage has a finding",
+        ])
+        .exited(0);
+    flow.open("end");
+    assert_eq!(flow.ended(), 0);
+    let after = watching(
+        &world,
+        "surfacing",
+        &[
+            "--timeout",
+            "600",
+            "--until",
+            "surface",
+            "--cursor",
+            &before.cursor(),
+        ],
+    )
+    .returned();
+    after.ended_on(SURFACE_WAITING, "surface");
+    assert_eq!(
+        after.record["run_id"],
+        json!("lastsurface"),
+        "{}",
+        after.record
+    );
+}
