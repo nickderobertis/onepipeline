@@ -5627,6 +5627,40 @@ mod tests {
     /// the code from parting: a word or a key the document does not name is one
     /// nobody proposed.
     #[test]
+    fn the_rework_record_is_the_shape_entry_116_documents() {
+        let record = include_str!("../docs/contract-divergences.md");
+        let block: Value = record
+            .split("\n## ")
+            .find(|entry| entry.starts_with("116."))
+            .and_then(|entry| entry.split("```json").nth(1))
+            .and_then(|rest| rest.split("```").next())
+            .map(|block| serde_json::from_str(block).expect("entry 116's block is JSON"))
+            .expect("the record carries entry 116's block");
+        let op = &block["ops"][0];
+        let mut state = RunState::default();
+        state.reworks.insert(
+            op["id"].as_str().expect("an id").to_owned(),
+            crate::projection::ReworkRecord {
+                replacement: op["replacement"]
+                    .as_str()
+                    .expect("a replacement")
+                    .to_owned(),
+                reason: op["reason"].as_str().expect("a reason").to_owned(),
+                instruction: op["instruction"]
+                    .as_str()
+                    .expect("an instruction")
+                    .to_owned(),
+                comments: serde_json::from_value(op["comments"].clone()).expect("comments"),
+                title: None,
+            },
+        );
+        let projected = super::reworks_of(&state);
+        let replacement = op["replacement"].as_str().expect("a replacement");
+        assert_eq!(json!(projected[replacement]), block["rework_metadata"]);
+        assert_eq!(block["rework_metadata_key"], crate::taskgraph::REWORK_KEY);
+    }
+
+    #[test]
     fn every_word_and_key_this_projection_writes_is_named_by_the_divergence() {
         let divergence = include_str!("../docs/contract-divergences.md");
         let words = every_projected_word();
