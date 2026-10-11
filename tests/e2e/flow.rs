@@ -477,6 +477,9 @@ fn a_flow_whose_holder_is_killed_is_reported_died_until_acknowledged() {
     let world = World::new("flow-dies");
     let mut flow = Flowing::start(&world, "deploy", &[gate(&world, "never")]);
     flow.child.kill().expect("SIGKILL reaches the holder");
+    // Reaped before anything reads it: a SIGKILL is sent when `kill` returns,
+    // and on a loaded host the holder can still be running a moment later.
+    let _ = flow.child.wait();
 
     let died = unwatched(&world, &[]);
     died.exited(RUNS_UNWATCHED)
@@ -488,11 +491,6 @@ fn a_flow_whose_holder_is_killed_is_reported_died_until_acknowledged() {
     let returned = watch.returned();
     returned.ended_on(EXIT_FLOW_FAILED, "flow-failed");
     assert_eq!(returned.record["died"], json!(true));
-    // Reaped now, and still died: the holder is gone with no ending recorded.
-    let _ = flow.child.wait();
-    unwatched(&world, &[])
-        .exited(RUNS_UNWATCHED)
-        .out_has("DIED");
 
     world
         .run(&[
@@ -1130,6 +1128,61 @@ fn the_flow_flags_refuse_what_a_flow_cannot_be_asked() {
             .exited(REFUSED)
             .err_has(said);
     }
+
+    // Each document a flow keeps is read closed. Written by hand: records at
+    // another version, naming nobody, and stamped with no instant are each
+    // refused, naming what they were refused for; an ending at another version
+    // leaves its flow unknown rather than ended.
+    let record: Value = serde_json::from_str(
+        &std::fs::read_to_string(flows.join("live").join("flow.json")).expect("the record"),
+    )
+    .expect("JSON");
+    for (id, key, value) in [
+        ("versioned", "schema_version", json!(2)),
+        ("nobodys", "session", json!("  ")),
+        ("unstamped", "began_at", json!("yesterday")),
+    ] {
+        let mut written = record.clone();
+        written["flow_id"] = json!(id);
+        written[key] = value;
+        std::fs::create_dir_all(flows.join(id)).expect("a directory");
+        std::fs::write(flows.join(id).join("flow.json"), written.to_string()).expect("a record");
+        world
+            .run(&["next", "--flow", id])
+            .exited(REFUSED)
+            .err_has("record cannot be read");
+    }
+    let mut ended = Flowing::start(&world, "versioned-ending", &[gate(&world, "never")]);
+    ended.child.kill().expect("SIGKILL reaches the holder");
+    let _ = ended.child.wait();
+    std::fs::write(
+        flows.join("versioned-ending").join("ending.json"),
+        json!({"schema_version": 2, "flow_id": "versioned-ending", "status": 0,
+               "at": "2026-10-10T00:00:00.000Z"})
+        .to_string(),
+    )
+    .expect("an ending at another version");
+    unwatched(&world, &[])
+        .err_has("flow versioned-ending: its ending cannot be read")
+        .err_has("schema_version");
+    ended.open("never");
+
+    // A surface that says nothing is refused, and nothing is queued.
+    world
+        .run(&[
+            "surface",
+            "--flow",
+            "live",
+            "--kind",
+            "finding",
+            "--message",
+            "   ",
+        ])
+        .exited(REFUSED)
+        .err_has("carried nothing");
+    let queue = world.run(&["channel", "queue", "--flow", "live"]);
+    queue.exited(0);
+    assert_eq!(queue.json()["surfaces"], json!([]), "{}", queue.stdout);
 
     // Membership is the document `start` writes, naming its own run: written
     // by hand, one that is not that document and one naming another run are no
@@ -2037,8 +2090,30 @@ fn a_flow_watch_reports_each_settlement_and_each_join_in_turn() {
 
     flow.open("join");
     flow.reached(&world, "joined");
+    // The run that joins first is holding a surface: the line its join ends on
+    // counts it.
+    world.until("the first joined run's channel", |world| {
+        world.run_file("joinone", "launch.json").is_file()
+    });
+    world
+        .run(&[
+            "surface",
+            "joinone",
+            "--kind",
+            "finding",
+            "--message",
+            "held",
+        ])
+        .exited(0);
     let first = look(Some(&second.cursor()), "run-joined");
     first.ended_on(EXIT_RUN_JOINED, "run-joined");
+    assert_eq!(first.record["run_id"], json!("joinone"));
+    assert_eq!(
+        first.record["unread"]["count"],
+        json!(1),
+        "{}",
+        first.record
+    );
     let second = look(Some(&first.cursor()), "run-joined");
     second.ended_on(EXIT_RUN_JOINED, "run-joined");
     let joined: std::collections::BTreeSet<String> = [&first, &second]

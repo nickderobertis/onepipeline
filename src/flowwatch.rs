@@ -336,6 +336,25 @@ fn pass(
     known: &mut BTreeMap<String, Cursor>,
 ) -> Result<(Option<Ending>, usize)> {
     let members = flow.members()?;
+    // A run that joined is entered before anything else is asked. Told to return
+    // on a join, the watch returns on the first one — one at a time, so a run
+    // this watch has not reported joining stays out of its cursor and the next
+    // watch reports it. Told not to, every run that joined is entered here, so
+    // its surfaces and its settlements are this very pass's to answer rather
+    // than lost behind a flow that ended in the same instant.
+    let mut joined: Option<String> = None;
+    for run in members {
+        if known.contains_key(&run) {
+            continue;
+        }
+        known.insert(run.clone(), Cursor::start(&run));
+        if selected.run_joined {
+            joined = Some(run);
+            break;
+        }
+    }
+    // Counted over every run entered so far, the one that just joined among
+    // them, so the line a join ends on counts what that run is holding too.
     let unread = flow.channel().queue().waiting.len()
         + known
             .keys()
@@ -346,20 +365,8 @@ fn pass(
                     .len()
             })
             .sum::<usize>();
-    // A run that joined is entered before anything else is asked. Told to return
-    // on a join, the watch returns on the first one at once — one at a time, so
-    // a run this watch has not reported joining stays out of its cursor and the
-    // next watch reports it. Told not to, every run that joined is entered here,
-    // so its surfaces and its settlements are this very pass's to answer rather
-    // than lost behind a flow that ended in the same instant.
-    for run in members {
-        if known.contains_key(&run) {
-            continue;
-        }
-        known.insert(run.clone(), Cursor::start(&run));
-        if selected.run_joined {
-            return Ok((Some(Ending::RunJoined(run)), unread));
-        }
+    if let Some(run) = joined {
+        return Ok((Some(Ending::RunJoined(run)), unread));
     }
     if selected.surface {
         if crate::watch::surface_waiting(&flow.paths).is_some() {
