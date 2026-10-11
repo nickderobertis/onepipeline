@@ -29,3 +29,16 @@ budgets:
     direction: max
     threshold: 2
     timeout_seconds: 1800
+  - id: host-view-time
+    measure: reported
+    command: [node, scripts/host-view-budget.mjs]
+    unit: milliseconds
+    direction: max
+    threshold: 100
+    description: >-
+      Wall clock of one `onepipeline host` process, spawn to exit, of the release build over
+      the generated 100-run fixture runs root at steady state, every ended run's journal
+      unreadable to it. Each of five single reads is judged, so the value is the slowest; the
+      median, the phase breakdown, the e2e tier's own debug build, the cold read and the
+      100/400/800-root scaling reads are its detail. Read from the record
+      `tests/e2e/host_view.rs` writes, never re-measured.

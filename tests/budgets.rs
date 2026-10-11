@@ -6,6 +6,10 @@
 //! everything around that journey — the file loading as the budget it states, the result the
 //! journey writes being one the checker parses as a value, and the command refusing to report a
 //! measurement it did not take.
+//!
+//! `host-view-time` is held here the same way: its entry, and its command — which runs no
+//! journey at all, only reads the record `tests/e2e/host_view.rs` leaves — reporting that
+//! record and refusing one it cannot vouch for.
 
 #[cfg(unix)]
 #[path = "e2e/budget_result.rs"]
@@ -227,4 +231,182 @@ fn the_budget_command_names_a_journey_the_e2e_binary_holds() {
         script.contains(&format!("journey='{JOURNEY}'")),
         "the command runs another journey than {JOURNEY}"
     );
+}
+
+/// The view budget, as `budgets.yaml` registers it: one `onepipeline host` read, reported by
+/// its command off the record the host-view journeys write, at most 100 milliseconds.
+#[test]
+fn the_budgets_file_registers_the_host_view_budget() {
+    let loaded = onebudgetspec_core::load(&[root().join("budgets.yaml")], false)
+        .unwrap_or_else(|error| panic!("budgets.yaml does not load: {error}"));
+    let budget = loaded
+        .files()
+        .iter()
+        .flat_map(|file| &file.contents.budgets)
+        .find(|budget| budget.id == "host-view-time")
+        .expect("budgets.yaml registers host-view-time");
+    assert_eq!(budget.measure, Measure::Reported);
+    assert_eq!(budget.unit, "milliseconds");
+    assert_eq!(budget.direction, Direction::Max);
+    assert!(
+        (budget.threshold - 100.0).abs() < f64::EPSILON,
+        "{}",
+        budget.threshold
+    );
+    assert_eq!(
+        budget.command,
+        ["node", "scripts/host-view-budget.mjs"],
+        "the budget's command is not the committed reporter"
+    );
+}
+
+/// The reporter, run from `cwd` with the result going to `result` when one is named.
+fn host_view_report(
+    cwd: &std::path::Path,
+    result: Option<&std::path::Path>,
+) -> std::process::Output {
+    let mut command = std::process::Command::new("node");
+    command
+        .arg(root().join("scripts/host-view-budget.mjs"))
+        .current_dir(cwd)
+        .env_remove("ONEBUDGETSPEC_RESULT");
+    if let Some(result) = result {
+        command.env("ONEBUDGETSPEC_RESULT", result);
+    }
+    command.output().expect("node runs the committed reporter")
+}
+
+/// A record shaped as `tests/e2e/host_view.rs` writes one.
+fn host_view_record() -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": 1,
+        "budget_ms": 100.0,
+        "runs_root": {"run_roots": 100, "live_dispatches": 5, "stale_entries": 4},
+        "steady": {
+            "build": "release",
+            "reads_ms": [12.5, 31.0, 9.5, 14.0, 13.0],
+            "median_ms": 13.0,
+            "load1": 2.5,
+            "breakdown": {"event_registry_ms": 2.0, "live_runs_folded": 3, "live_fold_ms": 4.0},
+            "ended_journal_bytes_opened": 0,
+            "runs_opened": ["live-0", "live-1", "live-2"],
+        },
+        "steady_debug": {"reads_ms": [70.0], "median_ms": 70.0, "breakdown": {"event_registry_ms": 47.0}},
+        "cold": {"read_ms": 3600.0, "breakdown": {"cold_journal_bytes": 1000, "read_bytes": 3000}},
+        "scaling": {
+            "sizes": [
+                {"run_roots": 100, "median_ms": 10.0, "ended_journal_bytes_opened": 0, "runs_opened": ["live-0"]},
+                {"run_roots": 400, "median_ms": 18.0, "ended_journal_bytes_opened": 0, "runs_opened": ["live-0"]},
+            ],
+            "increments": [{"from": 100, "to": 400, "ms_per_ended_run": 0.03}],
+        },
+    })
+}
+
+/// The reporter reports only what the journeys recorded: the slowest steady single read as
+/// the value, since each is judged, and the rest as detail. A record that is missing, that a
+/// journey did not write, or that times anything but the release build is refused, and so is a
+/// run outside the checker — never a value nobody measured.
+#[cfg(unix)]
+#[test]
+fn the_host_view_reporter_reports_the_slowest_steady_read_of_the_record_alone() {
+    let dir = scratch("host-view-report");
+    let record = dir.join("target/budget-records/host-view.json");
+    std::fs::create_dir_all(record.parent().expect("a directory")).expect("the record's directory");
+    let result = dir.join("result.json");
+
+    let mut malformed: Vec<Option<String>> =
+        vec![None, Some("{".to_owned()), Some("{}".to_owned())];
+    for (path, value) in [
+        ("/schema_version", serde_json::json!(2)),
+        ("/steady/build", serde_json::json!("debug")),
+        ("/steady/reads_ms", serde_json::json!([])),
+        ("/steady/reads_ms", serde_json::json!([12.0, -1.0])),
+        ("/steady/reads_ms", serde_json::json!(["12"])),
+        (
+            "/steady/ended_journal_bytes_opened",
+            serde_json::json!(4096),
+        ),
+    ] {
+        let mut held = host_view_record();
+        *held.pointer_mut(path).expect("a field") = value;
+        malformed.push(Some(held.to_string()));
+    }
+    for body in malformed {
+        let _ = std::fs::remove_file(&record);
+        if let Some(body) = &body {
+            std::fs::write(&record, body).expect("a record");
+        }
+        let output = host_view_report(&dir, Some(&result));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{body:?} was reported: {stderr}");
+        assert!(!result.exists(), "a refused record reported a value");
+        assert!(
+            stderr.contains("target/budget-records/host-view.json")
+                && stderr.contains("just test-e2e 'test(/^host_view::the_host_view/)'"),
+            "{stderr}"
+        );
+    }
+
+    std::fs::write(&record, host_view_record().to_string()).expect("a record");
+    let outside = host_view_report(&dir, None);
+    assert!(!outside.status.success());
+    assert!(
+        String::from_utf8_lossy(&outside.stderr).contains("ONEBUDGETSPEC_RESULT is missing"),
+        "{}",
+        String::from_utf8_lossy(&outside.stderr)
+    );
+
+    let reported = host_view_report(&dir, Some(&result));
+    assert!(
+        reported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reported.stderr)
+    );
+    let result: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&result).expect("a result")).expect("JSON");
+    assert_eq!(
+        result["value"], 31.0,
+        "the slowest single read is the value: {result}"
+    );
+    let detail = result["detail"].as_str().expect("a detail");
+    for expected in [
+        "12.5, 31.0, 9.5, 14.0, 13.0 ms; median 13.0 ms (reported, not the budget)",
+        "event registry 2.0 ms",
+        "folding 3 live run(s)",
+        "ended-run journal bytes opened: 0",
+        "cold read (release, every ended run's derived documents absent): 3600.0 ms",
+        "of which the event registry 47.0 ms",
+        "400 roots median 18.0 ms",
+        "30.0 µs per ended run 100→400",
+    ] {
+        assert!(
+            detail.contains(expected),
+            "the detail lacks {expected:?}: {detail}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The reporter names the journeys that write its record, and the e2e binary holds them.
+#[test]
+fn the_host_view_reporter_names_journeys_the_e2e_binary_holds() {
+    let journeys =
+        std::fs::read_to_string(root().join("tests/e2e/host_view.rs")).expect("the journeys read");
+    for name in [
+        "the_host_view_answers_a_host_sized_root_steady_cold_and_steady_again",
+        "the_host_views_cost_over_a_host_sized_root_does_not_grow_with_ended_history",
+    ] {
+        assert!(
+            journeys.contains(&format!("#[test]\nfn {name}()")),
+            "tests/e2e/host_view.rs holds no journey {name}"
+        );
+        assert!(
+            name.starts_with("the_host_view"),
+            "the reporter's filter misses {name}"
+        );
+    }
+    let script = std::fs::read_to_string(root().join("scripts/host-view-budget.mjs"))
+        .expect("the reporter reads");
+    assert!(script.contains("just test-e2e 'test(/^host_view::the_host_view/)'"));
 }
