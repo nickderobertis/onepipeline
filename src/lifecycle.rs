@@ -133,10 +133,6 @@ pub fn execute(
 /// stamped onto the settlement [`execute`] returns, so a failure settled after a
 /// spent re-dispatch budget names them exactly as a success does.
 #[derive(Debug, Default)]
-// llmlint: ignore-block[invalid_states_unrepresentable] each is the value `Settlement`
-// carries the same field as, `Option<String>` beside every other of its fields, and this
-// is a holder for what goes onto one: a newtype here would be unwrapped at the one place
-// it is read.
 struct Placed {
     /// The base the node's session opened on, once one did.
     base: Option<String>,
@@ -150,7 +146,6 @@ struct Placed {
     /// The stack it was drafted on, where it had stack parents.
     stack: Option<Box<crate::payload::SettledStack>>,
 }
-// llmlint: ignore-end[invalid_states_unrepresentable]
 
 impl Placed {
     /// `settlement`, with what it did not say itself filled in from here.
@@ -905,12 +900,9 @@ struct Merging<'a> {
 
 /// The stack base a node is placed on, as its placement named it.
 struct StackBaseOf<'a> {
-    // llmlint: ignore-block[invalid_states_unrepresentable] borrowed from
-    // `stack::Stack::OnStackBase`, whose own suppression says why these are strings.
     root: &'a str,
     branch: &'a str,
     parents: &'a [crate::stack::Parent],
-    // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
 /// Assemble the stack base `base` names, handing any merge that stops on a
