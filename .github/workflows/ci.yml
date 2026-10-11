@@ -331,6 +331,7 @@ jobs:
           # The continuation journey's board, onetaskgraph's live lane, read and
           # written with the token that lane reads it with. GH_PROJECTS_TOKEN, not
           # GITHUB_PROJECTS_TOKEN: GitHub refuses a secret name beginning GITHUB_.
+          # llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the journey's own refusal is the drift gate: continuation.rs fails naming its TOKEN when this variable is absent, and this job never skips, so a name spelled differently on either side turns this job red naming the variable rather than passing green, as onetaskgraph's CI states for the same variable.
           GH_PROJECTS_TOKEN: ${{ secrets.GH_PROJECTS_TOKEN }}
           # No ONEPIPELINE_SMOKE_REPO: the journey's own default is the scratch
           # repository, and naming it here again would be a second place for it

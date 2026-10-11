@@ -941,7 +941,17 @@ impl World {
             .env_remove(onepipeline::agents::HISTORY_ENV)
             .env_remove(onepipeline::agents::HISTORY_DIR_ENV)
             .env_remove(onepipeline::agents::POINTER_FILE_ENV)
-            .env_remove(onepipeline::agents::LABELS_ENV)
+            .env_remove(onepipeline::agents::LABELS_ENV);
+        // And nothing of the operator's own `onetaskgraph` environment layer: a
+        // `ONETASKGRAPH_SOURCES__…` in the shell that ran the suite would add the
+        // operator's sources to this world's store — or, half-declared, refuse its
+        // configuration outright — so a world reads only the sources it sets below.
+        for (name, _) in std::env::vars_os() {
+            if name.to_string_lossy().starts_with("ONETASKGRAPH_") {
+                command.env_remove(name);
+            }
+        }
+        command
             .env("ONETASKGRAPH_DEFAULT_SOURCES", STORE_SOURCE)
             .envs(self.plans_source())
             .env(
