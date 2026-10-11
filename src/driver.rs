@@ -229,8 +229,20 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             }
             Ok(EXIT_SUCCESS)
         }
-        Verb::Host => {
-            print!("{}", verbs::render_host(&verbs::host(&ledger::runs_root())));
+        Verb::Host(args) => {
+            let host = verbs::host(&ledger::runs_root());
+            {
+                let _render = crate::hostphases::phase("render");
+                if args.json {
+                    let reading = serde_json::to_string(&host.reading).map_err(|e| {
+                        Error::Invalid(format!("the host's reading could not be rendered: {e}"))
+                    })?;
+                    println!("{reading}");
+                } else {
+                    print!("{}", verbs::render_host(&host));
+                }
+            }
+            crate::hostphases::flush();
             Ok(EXIT_SUCCESS)
         }
         Verb::Monitor(args) => {

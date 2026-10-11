@@ -9778,6 +9778,76 @@ fn the_supervision_flags_are_what_divergence_95_and_the_readme_name() {
     }
 }
 
+/// **Spike** (`spike-host-profile`): the reading `host --json` prints is the
+/// document `schemas/host-reading.schema.json` states, generated from
+/// `views::HostReading` and held to it exactly as the run reading is — and its
+/// keys are the version-1 keys the plan's contract lists, every one required.
+#[test]
+fn the_host_reading_is_the_committed_schema_with_the_version_1_keys() {
+    use onepipeline::views::{HostReading, HOST_READING_SCHEMA_VERSION};
+
+    let generated = schemars::generate::SchemaSettings::draft2020_12()
+        .for_serialize()
+        .into_generator()
+        .into_root_schema_for::<HostReading>()
+        .to_value();
+    let committed: Value = serde_json::from_str(
+        &std::fs::read_to_string(repo_root().join("schemas/host-reading.schema.json"))
+            .expect("schemas/host-reading.schema.json ships"),
+    )
+    .expect("the committed schema is JSON");
+    assert_eq!(
+        committed,
+        generated,
+        "schemas/host-reading.schema.json is not the schema of views::HostReading; if the \
+         document changed deliberately, regenerate it from the type:\n{}",
+        serde_json::to_string_pretty(&generated).expect("a schema renders")
+    );
+    assert_eq!(HOST_READING_SCHEMA_VERSION, 1);
+    let keys = |schema: &Value| -> BTreeSet<String> {
+        serde_json::from_value(schema["required"].clone()).expect("the schema states its keys")
+    };
+    let defs = &generated["$defs"];
+    for (schema, expected) in [
+        (
+            &generated,
+            &[
+                "schema_version",
+                "host",
+                "root",
+                "root_error",
+                "free_space",
+                "dispatches",
+                "gone",
+                "skipped",
+            ][..],
+        ),
+        (
+            &defs["FreeSpace"],
+            &["roots", "free_bytes", "total_bytes", "error"][..],
+        ),
+        (&defs["FreeSpaceRoot"], &["role", "path", "measured_at"][..]),
+        (
+            &defs["DispatchRow"],
+            &["run", "node", "launcher", "age_ms", "proof", "unproven"][..],
+        ),
+        (&defs["Gone"], &["run", "node", "reason"][..]),
+        (&defs["SkippedRoot"], &["path", "reason"][..]),
+    ] {
+        assert_eq!(
+            keys(schema),
+            expected.iter().map(|k| (*k).to_owned()).collect()
+        );
+    }
+    let words = |def: &str| generated["$defs"][def].to_string();
+    for word in ["\"held\"", "\"unproven\""] {
+        assert!(words("ProofWord").contains(word), "ProofWord lacks {word}");
+    }
+    for word in ["\"runs-root\"", "\"workspaces\""] {
+        assert!(words("Role").contains(word), "Role lacks {word}");
+    }
+}
+
 /// The run reading `status <RUN> --json` prints is the document
 /// `schemas/run-reading.schema.json` states, and the contract names it and the
 /// SDK items behind it.

@@ -1129,12 +1129,34 @@ const ZOMBIE_STATE: &str = "Z";
 /// before this field existed carries, and what a host that would not answer
 /// leaves behind, and reading either as agreement would let two absences prove
 /// each other.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct StartToken {
     recorded: String,
+    /// The pid the legacy spelling is asked of, only when a record needs it.
     #[cfg(target_os = "linux")]
-    legacy_ps: Option<String>,
+    pid: u32,
+    /// `ps lstart` for that pid, asked **lazily**: a
+    /// record carrying the procfs spelling is decided by procfs alone, and asking
+    /// `ps` for every live pid regardless was the bulk of `onepipeline host`'s
+    /// steady-state wall clock — one process spawned per live dispatch.
+    #[cfg(target_os = "linux")]
+    legacy_ps: std::cell::OnceCell<Option<String>>,
 }
+
+impl PartialEq for StartToken {
+    fn eq(&self, other: &Self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            self.recorded == other.recorded && self.pid == other.pid
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.recorded == other.recorded
+        }
+    }
+}
+
+impl Eq for StartToken {}
 
 impl StartToken {
     /// The token as a record on disk carries it.
@@ -1150,7 +1172,14 @@ impl StartToken {
             && (self.recorded == recorded || {
                 #[cfg(target_os = "linux")]
                 {
-                    self.legacy_ps.as_deref() == Some(recorded)
+                    // A procfs token that differs is a different process; only a
+                    // record in the older `ps` spelling is worth a `ps`.
+                    !recorded.starts_with(PROC_STAT_TOKEN)
+                        && self
+                            .legacy_ps
+                            .get_or_init(|| ps_process_start_token(self.pid))
+                            .as_deref()
+                            == Some(recorded)
                 }
                 #[cfg(not(target_os = "linux"))]
                 {
@@ -1274,14 +1303,15 @@ fn platform_process_start_token(pid: u32) -> Option<StartToken> {
     let recorded = started
         .parse::<u64>()
         .ok()
-        .map(|ticks| format!("linux-proc-stat:{ticks}"))?;
+        .map(|ticks| format!("{PROC_STAT_TOKEN}{ticks}"))?;
     Some(StartToken {
         recorded,
         // Older Linux builds persisted `ps lstart`. Keep reading that spelling
         // so an in-flight pre-upgrade run remains stoppable. This compatibility
         // path inherits the old token's one-second PID-reuse resolution and
         // clock drift, but new records always use the stable procfs value.
-        legacy_ps: ps_process_start_token(pid),
+        pid,
+        legacy_ps: std::cell::OnceCell::new(),
     })
 }
 
@@ -1319,6 +1349,10 @@ fn platform_process_start_token(pid: u32) -> Option<StartToken> {
 fn platform_process_start_token(pid: u32) -> Option<StartToken> {
     ps_process_start_token(pid).map(|recorded| StartToken { recorded })
 }
+
+/// How a Linux start token is spelled ahead of its clock ticks.
+#[cfg(target_os = "linux")]
+const PROC_STAT_TOKEN: &str = "linux-proc-stat:";
 
 #[cfg(unix)]
 fn ps_process_start_token(pid: u32) -> Option<String> {

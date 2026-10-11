@@ -475,7 +475,7 @@ fn plan_name(paths: &RunPaths) -> Option<String> {
 /// A journal that is not there stamps as `(0, 0)`: a run with no store yet is a
 /// real state — a directory and a launch record, written before the first record
 /// — and it is one a summary describes exactly as well as any other.
-fn journal_stamp(paths: &RunPaths) -> (u64, u64) {
+pub(crate) fn journal_stamp(paths: &RunPaths) -> (u64, u64) {
     let Ok(about) = std::fs::metadata(paths.journal()) else {
         return (0, 0);
     };
