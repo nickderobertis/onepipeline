@@ -301,7 +301,8 @@ fn host_view_record() -> serde_json::Value {
         "binary": "/usr/local/bin/onepipeline",
         "runs_root": {"run_roots": 100, "live_dispatches": 5, "stale_entries": 4},
         "steady": {
-            "build": "stripped",
+            "built_by": "ci.yml install job: cargo install --path . --locked",
+            "strip_guard": "stripped",
             "reads_ms": [12.5, 31.0, 9.5, 14.0, 13.0],
             "median_ms": 13.0,
             "load1": 2.5,
@@ -328,7 +329,8 @@ fn host_view_record() -> serde_json::Value {
 
 /// The reporter reports only what the measurement recorded: the slowest steady single read
 /// as the value, since each is judged, and the rest as detail. A record that is missing, that
-/// the measurement did not write, or that times an unstripped build is refused,
+/// the measurement did not write, that names no binary or no step that built it, or that
+/// fails the strip guard is refused,
 /// and so is a run outside the checker — never a value nobody measured.
 #[cfg(unix)]
 #[test]
@@ -342,7 +344,9 @@ fn the_host_view_reporter_reports_the_slowest_steady_read_of_the_record_alone() 
         vec![None, Some("{".to_owned()), Some("{}".to_owned())];
     for (path, value) in [
         ("/schema_version", serde_json::json!(2)),
-        ("/steady/build", serde_json::json!("debug")),
+        ("/steady/strip_guard", serde_json::json!("unstripped")),
+        ("/steady/built_by", serde_json::json!("")),
+        ("/binary", serde_json::json!(null)),
         ("/steady/reads_ms", serde_json::json!([])),
         ("/steady/reads_ms", serde_json::json!([12.0, -1.0])),
         ("/steady/reads_ms", serde_json::json!(["12"])),
@@ -458,6 +462,8 @@ fn the_host_view_reporter_reports_the_slowest_steady_read_of_the_record_alone() 
     let detail = result["detail"].as_str().expect("a detail");
     for expected in [
         "12.5, 31.0, 9.5, 14.0, 13.0 ms; median 13.0 ms (reported, not the budget)",
+        "reads of /usr/local/bin/onepipeline (built by ci.yml install job: cargo install \
+         --path . --locked)",
         "event registry 2.0 ms",
         "folding 3 live run(s)",
         "every ended run's journal unreadable to the reads",
@@ -824,17 +830,18 @@ fn the_host_view_measurement_counts_the_journals_a_traced_read_opened() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Whether the timed binary is stripped is read from the binary itself, so a debug build
-/// passed for the release one is named as what it is and the reporter refuses its record.
+/// The strip guard reads the binary itself, so a debug build passed for the release one is
+/// named as what it is and the reporter refuses its record. A guard, not provenance: that is
+/// the step the record names as having built the binary.
 #[cfg(target_os = "linux")]
 #[test]
-fn the_host_view_measurement_reads_the_build_from_the_binary() {
+fn the_host_view_strip_guard_reads_the_binary() {
     let dir = scratch("host-view-build");
-    let build = |binary: &std::path::Path| -> String {
+    let guard = |binary: &std::path::Path| -> String {
         let read = std::process::Command::new("node")
             .args(["--input-type=module", "-e"])
             .arg(format!(
-                "import {{ buildOf }} from {:?}; console.log(buildOf(process.argv[1]))",
+                "import {{ stripGuardOf }} from {:?}; console.log(stripGuardOf(process.argv[1]))",
                 root()
                     .join("scripts/host-view-budget.mjs")
                     .display()
@@ -842,7 +849,7 @@ fn the_host_view_measurement_reads_the_build_from_the_binary() {
             ))
             .arg(binary)
             .output()
-            .expect("node reads the build");
+            .expect("node reads the strip guard");
         assert!(
             read.status.success(),
             "{}",
@@ -851,7 +858,7 @@ fn the_host_view_measurement_reads_the_build_from_the_binary() {
         String::from_utf8_lossy(&read.stdout).trim().to_owned()
     };
     let debug = std::path::Path::new(env!("CARGO_BIN_EXE_onepipeline"));
-    assert_eq!(build(debug), "unstripped");
+    assert_eq!(guard(debug), "unstripped");
     // Stripped as the release profile's `strip = true` leaves it.
     let stripped = dir.join("onepipeline");
     std::fs::copy(debug, &stripped).expect("a copy of the binary");
@@ -860,19 +867,21 @@ fn the_host_view_measurement_reads_the_build_from_the_binary() {
         .status()
         .expect("binutils' strip runs");
     assert!(strip.success());
-    assert_eq!(build(&stripped), "stripped");
+    assert_eq!(guard(&stripped), "stripped");
     let script = dir.join("onepipeline.sh");
     std::fs::write(&script, "#!/bin/sh\n").expect("a script");
-    assert_eq!(build(&script), "not an ELF executable");
+    assert_eq!(guard(&script), "not an ELF executable");
 
     // And a record of the unstripped build is one the reporter refuses.
     let record = dir.join("target/budget-records/host-view.json");
     std::fs::create_dir_all(record.parent().expect("a parent")).expect("the record's directory");
     let mut held = host_view_record();
-    held["steady"]["build"] = serde_json::json!("unstripped");
+    held["steady"]["strip_guard"] = serde_json::json!("unstripped");
     std::fs::write(&record, held.to_string()).expect("a record");
     let result = dir.join("result.json");
     let refused = host_view_report(&dir, Some(&result));
     assert!(!refused.status.success());
-    assert!(String::from_utf8_lossy(&refused.stderr).contains("steady.build must be stripped"));
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("steady.strip_guard must be stripped")
+    );
 }

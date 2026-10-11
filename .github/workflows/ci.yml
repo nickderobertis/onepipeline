@@ -420,7 +420,7 @@ jobs:
           tool: just
       - name: Measure and check host-view-time against the installed binary
         if: matrix.os == 'ubuntu-latest'
-        run: just host-view-budget "$(command -v onepipeline)"
+        run: just host-view-budget "$(command -v onepipeline)" "ci.yml install job ($RUNNER_OS/$RUNNER_ARCH): cargo install --path . --locked"
 
   # The README's from-source one-liner, read out of README.md and run verbatim.
   # The command is not spelled again here: the README is its one source, so this

@@ -80,14 +80,15 @@ function readRecord() {
 }
 
 /**
- * Whether a binary is stripped, read from its own ELF section table rather than
- * taken from whoever passed it: `stripped` when it carries neither a symbol table
- * nor debug info, as this crate's release profile (`strip = true`) leaves the
- * binary a user runs; `unstripped` when it carries either, as a debug build does;
- * `not an ELF executable` for anything else, a malformed section table included.
- * Stripping is what the binary shows; it does not prove the optimisation level.
+ * A cheap guard against timing an obviously wrong file, not a proof of the build
+ * profile: where the binary came from is the step that built it, which the record
+ * names as `steady.built_by`. Read from the binary's ELF section table: `stripped`
+ * when it carries neither a symbol table nor debug info, as this crate's release
+ * profile (`strip = true`) leaves it; `unstripped` when it carries either, as a
+ * debug build does; `not an ELF executable` for anything else, a malformed section
+ * table included.
  */
-export function buildOf(path) {
+export function stripGuardOf(path) {
   const elf = readFileSync(path);
   const unreadable = "not an ELF executable";
   // ELF64, little-endian: the only shape the Linux runners the budget is taken on build.
@@ -121,9 +122,15 @@ export function validateRecord(held) {
   if (held === null || typeof held !== "object" || held.schema_version !== 1) {
     fail("schema_version must be 1");
   }
-  if (held.steady?.build !== "stripped") {
+  if (typeof held.binary !== "string" || held.binary === "") {
+    fail("binary must name the binary the reads timed");
+  }
+  if (typeof held.steady?.built_by !== "string" || held.steady.built_by === "") {
+    fail("steady.built_by must name the step that built the timed binary");
+  }
+  if (held.steady.strip_guard !== "stripped") {
     fail(
-      "steady.build must be stripped: the budget times the binary a user runs, which the release profile strips",
+      "steady.strip_guard must be stripped: an unstripped binary is not the one the release profile builds",
     );
   }
   if (reads(held.steady.reads_ms, "steady.reads_ms").length !== READS) {
@@ -236,7 +243,7 @@ function breakdown(phases) {
 function detail(held) {
   const steady = held.steady;
   const parts = [
-    `slowest of ${steady.reads_ms.length} steady single reads of the stripped build over the ${held.runs_root.run_roots}-run fixture, each judged: ` +
+    `slowest of ${steady.reads_ms.length} steady single reads of ${held.binary} (built by ${steady.built_by}) over the ${held.runs_root.run_roots}-run fixture, each judged: ` +
       `${steady.reads_ms.map(fixed).join(", ")} ms; median ${fixed(steady.median_ms)} ms (reported, not the budget); load1 ${fixed(steady.load1)}`,
     `breakdown: ${breakdown(steady.breakdown)}`,
     "every ended run's journal unreadable to the reads; that none is opened is held under strace by tests/e2e/host_view.rs",

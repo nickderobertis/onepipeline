@@ -35,7 +35,7 @@ import {
   stampSparse,
   startToken,
 } from "../tests/e2e/host_view_fixture.mjs";
-import { BREAKDOWN, buildOf, READS, SCALING, validateRecord } from "./host-view-budget.mjs";
+import { BREAKDOWN, READS, SCALING, stripGuardOf, validateRecord } from "./host-view-budget.mjs";
 import { journalOpens, steadyOpens } from "./host-view-trace.mjs";
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -44,6 +44,11 @@ const binary = process.argv[2];
 // `tests/e2e/host_view.rs` does to measure this tree's build without standing in for the
 // release binary's record.
 const RECORD = process.argv[3] ?? join(REPO, "target", "budget-records", "host-view.json");
+// The step that built the binary, which is its provenance: CI's `install` job names its
+// `cargo install --path . --locked` through `just host-view-budget`. A binary passed by
+// hand is recorded as that.
+const BUILT_BY =
+  process.env.ONEPIPELINE_HOST_VIEW_BUILT_BY || "no step named: the binary was passed by hand";
 if (!binary) {
   console.error(
     "usage: node scripts/host-view-measure.mjs BINARY [RECORD] (an installed release build of onepipeline)",
@@ -277,9 +282,10 @@ try {
       stale_entries: manifest.expected.stale.length,
     },
     steady: {
-      // Read from the binary, so the reporter's check refuses a measurement of an
-      // unstripped build such as a debug one.
-      build: buildOf(binary),
+      built_by: BUILT_BY,
+      // A guard against timing an obviously wrong file, such as a debug build; the
+      // binary's provenance is `built_by`.
+      strip_guard: stripGuardOf(binary),
       reads_ms: measured.walls,
       median_ms: median(measured.walls),
       load1: measured.load,

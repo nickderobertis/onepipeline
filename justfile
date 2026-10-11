@@ -562,11 +562,13 @@ budgets:
 # check, through the prebuilt checker `npm ci` installs with the SDK. Linux only, where the
 # fixture's live dispatches prove their start tokens. One further, untimed read per
 # scaling size runs under `strace`, so the record says which journals each size opened.
+# `built_by` names the step that built the binary, which the record and report carry
+# as its provenance.
 # Measure `host-view-time` against an installed release binary, and check it.
-host-view-budget binary:
+host-view-budget binary built_by="":
     @just _ensure-strace
     @just _ensure-node-modules
-    @node scripts/host-view-measure.mjs "$1"
+    @ONEPIPELINE_HOST_VIEW_BUILT_BY="$2" node scripts/host-view-measure.mjs "$1"
     @node_modules/.bin/onebudgetspec check budgets.yaml --id host-view-time
 
 # Both are outside `check` for the reason `deps-check` is: they read the
