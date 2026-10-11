@@ -1263,28 +1263,18 @@ fn well_formed(document: &serde_json::Value) -> Result<(), String> {
     // misspelled field is not quietly read as an envelope carrying nothing to judge.
     // The reply envelope refuses an unknown field itself; the three queue records read the
     // way a durable record must — a newer build's field skipped — so what a validator is
-    // handed of them is held to exactly their fields here.
-    let only = |known: &[&str]| fields.keys().all(|key| known.contains(&key.as_str()));
+    // handed of them is held to exactly the fields the channel's layout registers for each.
+    let only = |known: Vec<String>| fields.keys().all(|key| known.contains(key));
     let reads_as = |document: &serde_json::Value| {
         serde_json::from_value::<crate::channel::Reply>(document.clone()).is_ok()
-            || (only(&["id", "reply", "at", "correlation"])
+            || (only(fields_of::<crate::channel::layout::QueuedReply>())
                 && serde_json::from_value::<crate::channel::QueuedReply>(document.clone()).is_ok())
-            || (only(&["id", "author", "commands"])
+            || (only(fields_of::<crate::channel::layout::QueuedCommands>())
                 && serde_json::from_value::<crate::channel::QueuedCommands>(document.clone())
                     .is_ok())
-            || (only(&[
-                "id",
-                "kind",
-                "message",
-                "source",
-                "blocking",
-                "queued_at",
-                "workstream",
-                "abandoned",
-                "asker",
-                "correlation",
-            ]) && serde_json::from_value::<crate::channel::layout::Surface>(document.clone())
-                .is_ok())
+            || (only(fields_of::<crate::channel::layout::Surface>())
+                && serde_json::from_value::<crate::channel::layout::Surface>(document.clone())
+                    .is_ok())
     };
     if reads_as(document) {
         Ok(())
@@ -1294,6 +1284,17 @@ fn well_formed(document: &serde_json::Value) -> Result<(), String> {
                 .to_owned(),
         )
     }
+}
+
+/// Every field one of the channel layout's registered records carries, read off the
+/// schema the layout publishes it under — so the set is that record's own, not a copy.
+fn fields_of<T: schemars::JsonSchema>() -> Vec<String> {
+    schemars::schema_for!(T)
+        .as_value()
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+        .map(|properties| properties.keys().cloned().collect())
+        .unwrap_or_default()
 }
 
 /// What a bus pass cache keys a pass by beside the payload's bytes: a digest of the run's

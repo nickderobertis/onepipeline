@@ -1711,7 +1711,7 @@ fn a_plan_naming_no_private_repository_derives_no_term_even_where_the_registry_c
 }
 
 #[test]
-fn a_live_edit_naming_b_puts_b_in_the_run_scope_for_every_check_after_it() {
+fn a_live_edit_naming_b_puts_b_in_the_run_scope_for_the_validator_replies_and_store_writes() {
     let (world, _, _, _) = scoped_world("scope-edit");
     world.script("generalize.wait", "hold");
     let project = world.plan("grown", &exported_plan("grown"));
@@ -1719,6 +1719,10 @@ fn a_live_edit_naming_b_puts_b_in_the_run_scope_for_every_check_after_it() {
     world.until("the producer to be in flight", |world| {
         !world.events_of("grown", "node-dispatched").is_empty()
     });
+    world.until("the write-back to project the run", |world| {
+        !projections(world, "grown").is_empty()
+    });
+    assert!(!projections(&world, "grown").contains("boundary"));
     let naming_b = json!({"version": 3, "commands": [note("examples", "cite owner/beta")]});
     validated(&world, "grown", &naming_b).exited(0);
 
@@ -1737,7 +1741,45 @@ fn a_live_edit_naming_b_puts_b_in_the_run_scope_for_every_check_after_it() {
     world
         .run_with_stdin(&["reply", "grown"], &naming_b.to_string())
         .exited(REFUSED);
+    // The write-back's retained store checks over the new scope too: the node it creates
+    // names B's repository, which the store, now deriving B's terms, refuses to put on a
+    // plans source that is not private.
+    world.until("the write-back to meet the new scope", |world| {
+        projections(world, "grown").contains("boundary-refused")
+    });
     world.release("generalize.go");
+}
+
+#[test]
+fn every_task_of_a_private_project_is_private_whatever_it_says() {
+    let (world, _, _) = mixed_world("boundary-private-project");
+    // The plan that loads as a mixed one in a public project …
+    let public_project = world.plan("open-board", &exported_plan("open-board"));
+    world.run(&["plan", "check", &public_project]).exited(0);
+    // … has no public node in a private one: its consumer, in the public repository, is
+    // private by its project, which no export consumer may be.
+    let project = world.plan("closed-board", &exported_plan("closed-board"));
+    let identifier = project
+        .strip_prefix("plans:")
+        .expect("a plans project")
+        .to_owned();
+    let file = world
+        .store()
+        .join("projects")
+        .join(format!("{identifier}.md"));
+    let held = std::fs::read_to_string(&file).expect("the project document");
+    let classified = held.replacen("---\n", "---\nclassification: private\n", 1);
+    assert_ne!(held, classified, "the project document has no front matter");
+    std::fs::write(&file, classified).expect("the project is classified private");
+    let checked = world.run(&["plan", "check", &project, "--json"]);
+    checked.exited(HAS_REFUSALS);
+    assert!(
+        checked
+            .stdout
+            .contains("an export consumer must be a public lifecycle node"),
+        "{}",
+        checked.stdout
+    );
 }
 
 /// One task written through the standalone store's own command line — its configured
