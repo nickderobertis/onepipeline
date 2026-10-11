@@ -312,13 +312,13 @@ fn a_green_branch_landed_on_a_team_repository_reports_the_review_draft_word() {
     }
 }
 
-/// How many `gh` invocations the host has been asked so far.
-fn gh_call_count(world: &World) -> usize {
+/// Every `gh` invocation the host has been asked so far, in order.
+fn gh_calls(world: &World) -> Vec<Value> {
     world
         .invocations()
-        .iter()
+        .into_iter()
         .filter(|call| call["tool"] == "gh")
-        .count()
+        .collect()
 }
 
 /// Where the origin holds `branch`, or `None` where it holds no such branch.
@@ -378,7 +378,7 @@ fn an_unusable_bound_is_refused_before_a_landing_pushes_or_touches_the_host() {
         };
         for bound in BOUNDS {
             let (world, repository) = prepared();
-            let asked_before = gh_call_count(&world);
+            let asked_before = gh_calls(&world).len();
             let pushed_before = origin_ref(&repository, BRANCH);
             let checkout = repository.checkout.to_string_lossy().into_owned();
             let args = [
@@ -400,10 +400,13 @@ fn an_unusable_bound_is_refused_before_a_landing_pushes_or_touches_the_host() {
                 stderr.contains(bound) && stderr.contains("\"soon\""),
                 "{verb} {bound}: the refusal does not name the bound and its value: {stderr}"
             );
-            assert_eq!(
-                gh_call_count(&world),
-                asked_before,
-                "{verb} {bound}: the host was asked something before the refusal"
+            // Nothing about the work reached the host. The one call allowed is
+            // `onevcs`'s own read-only read of the repository's visibility, which
+            // its public boundary makes ahead of the watch bounds from 0.44.0 on.
+            let asked: Vec<Value> = gh_calls(&world).split_off(asked_before);
+            assert!(
+                asked.len() <= 1 && asked.iter().all(crate::harness::is_visibility_probe),
+                "{verb} {bound}: the host was asked about the work before the refusal: {asked:?}"
             );
             assert_eq!(
                 origin_ref(&repository, BRANCH),
