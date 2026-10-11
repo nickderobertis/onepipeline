@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Take the `host-view-time` measurement against an installed release binary.
 //
-//   node scripts/host-view-measure.mjs BINARY
+//   node scripts/host-view-measure.mjs BINARY [RECORD]
 //
 // CI's `install` job runs this, through `just host-view-budget`, on the binary its
 // `cargo install --path .` has just put on PATH: the binary users run, already
@@ -39,12 +39,14 @@ import { BREAKDOWN, READS, SCALING, validateRecord } from "./host-view-budget.mj
 import { journalOpens, steadyOpens } from "./host-view-trace.mjs";
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
-const RECORD = join(REPO, "target", "budget-records", "host-view.json");
-
 const binary = process.argv[2];
+// Where the record goes: the budget's own place unless a caller names another, as
+// `tests/budgets.rs` does to measure this tree's build without standing in for the
+// release binary's record.
+const RECORD = process.argv[3] ?? join(REPO, "target", "budget-records", "host-view.json");
 if (!binary) {
   console.error(
-    "usage: node scripts/host-view-measure.mjs BINARY (an installed release build of onepipeline)",
+    "usage: node scripts/host-view-measure.mjs BINARY [RECORD] (an installed release build of onepipeline)",
   );
   process.exit(2);
 }

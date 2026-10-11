@@ -616,6 +616,25 @@ fn the_host_view_measurement_counts_the_journals_a_traced_read_opened() {
         "{steady}"
     );
 
+    // A journal opened by a path relative to its own run root is that run's.
+    let relative = traced_opens(&dir, "cd live-0 && cat events.jsonl", &[]);
+    assert_eq!(
+        relative["opened"],
+        serde_json::json!({"live-0": live_bytes}),
+        "{relative}"
+    );
+
+    // A journal under a name the tracer had to escape cannot be read back to its run: refused.
+    std::fs::create_dir_all(dir.join("we\u{1}ird")).expect("a run root");
+    std::fs::write(dir.join("we\u{1}ird/events.jsonl"), "x\n").expect("a journal");
+    let escaped = traced_opens(&dir, "cat we*ird/events.jsonl", &[]);
+    assert!(
+        escaped["error"].as_str().is_some_and(
+            |error| error.contains("a journal path strace escaped cannot be read back")
+        ),
+        "{escaped}"
+    );
+
     // Twenty readers at once: every byte each read is counted, whichever calls the tracer split.
     let many = traced_opens(
         &dir,
@@ -743,9 +762,14 @@ fn the_host_view_measurement_counts_the_journals_a_traced_read_opened() {
             .is_some_and(|error| error.contains("exited 1: ptrace refused")),
         "{refused}"
     );
-    let open = "1 openat(AT_FDCWD, \"live-0/events.jsonl\", O_RDONLY";
+    let open = "1 openat(AT_FDCWD</r>, \"live-0/events.jsonl\", O_RDONLY";
     for (name, trace, says) in [
         ("none", None, "the tracer left no trace"),
+        (
+            "unannotated",
+            Some("1 openat(AT_FDCWD, \"live-0/events.jsonl\", O_RDONLY) = 3\n".to_owned()),
+            "a traced call names a journal unreadably",
+        ),
         (
             "no-open",
             Some("1 read(0</dev/null>, \"\", 64) = 0\n".to_owned()),

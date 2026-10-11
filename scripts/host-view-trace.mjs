@@ -7,9 +7,25 @@
 
 import { spawnSync } from "node:child_process";
 import { readFileSync, rmSync } from "node:fs";
-import { basename, dirname } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 
-const runOf = (path) => (path.endsWith("/events.jsonl") ? basename(dirname(path)) : null);
+const JOURNAL = "events.jsonl";
+// `openat`'s directory, as `-y` annotates it, and its quoted path.
+const OPENAT = /^openat\((?:AT_FDCWD|\d+)<([^>]*)>, "((?:[^"\\]|\\.)*)"/;
+// A read's descriptor, as `-y` annotates it with the file it names.
+const READ_FD = /^\w+\(\d+<([^>]*)>/;
+
+/**
+ * The run whose journal `path` names, relative to `dir` where it is not absolute,
+ * or null where it names no journal. Throws for a journal path strace escaped,
+ * which this cannot read back to the file it was.
+ */
+function runOf(path, dir = "/") {
+  if (basename(path) !== JOURNAL) return null;
+  const full = resolve(dir, path);
+  if (full.includes("\\")) throw new Error(`a journal path strace escaped cannot be read back: ${full}`);
+  return basename(dirname(full));
+}
 
 // `-f` follows every thread and child; a call one thread was in when another's
 // was written is split into an `<unfinished ...>` line and a `<... resumed>` one,
@@ -81,9 +97,12 @@ export function journalOpens(command, args, into, options = {}) {
     const isOpen = body.startsWith("openat(");
     const isRead = body.startsWith("read(") || body.startsWith("pread64(");
     if (!isOpen && !isRead) continue;
-    const run = isOpen
-      ? runOf(body.split('"')[1] ?? "")
-      : runOf(body.match(/^\w+\(\d+<([^>]*)>/)?.[1] ?? "");
+    const named = body.match(isOpen ? OPENAT : READ_FD);
+    if (!named) {
+      if (body.includes(JOURNAL)) throw new Error(`a traced call names a journal unreadably: ${raw}`);
+      continue;
+    }
+    const run = isOpen ? runOf(named[2], named[1]) : runOf(named[1]);
     if (run === null) continue;
     const result = body.match(RESULT);
     if (!result) throw new Error(`a traced call on ${run}'s journal has no result: ${raw}`);
@@ -91,7 +110,7 @@ export function journalOpens(command, args, into, options = {}) {
     if (isOpen && count < 0) refused.add(run);
     else opened.set(run, (opened.get(run) ?? 0) + (isRead && count > 0 ? count : 0));
   }
-  const cut = [...pending.values()].filter((call) => /events\.jsonl/.test(call));
+  const cut = [...pending.values()].filter((call) => call.includes(JOURNAL));
   if (cut.length > 0) throw new Error(`a traced call on a journal never finished: ${cut.join("; ")}`);
   return { stdout: done.stdout, opened, refused };
 }

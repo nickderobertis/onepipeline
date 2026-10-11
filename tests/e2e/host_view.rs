@@ -23,9 +23,12 @@
 // writes — the journals are a recorded run's own records — and the view under test is the
 // real compiled binary, read the way an operator reads it.
 
-// llmlint: ignore-file[expensive_tests_stay_behind_their_own_edge] measured: the module's six
-// journeys take two to three minutes on a loaded host, nearly all of it one cold read of the
-// generated 100-run root's ~260 MB of journals by this suite's debug build. They exercise
+// llmlint: ignore-file[expensive_tests_stay_behind_their_own_edge] measured: the module's eight
+// journeys take about five minutes on a loaded host (290 s at load1 about 17), nearly all of it three cold reads of the
+// generated 100-run root's ~260 MB of journals by this suite's debug build — one by the
+// journey over the root, two by the budget measurement's own journey (168 s run alone at load1
+// about 17), which runs `scripts/host-view-measure.mjs` whole, once to its record and once to
+// a refused trace. They exercise
 // `hostview`, `checkpoint`, `summary`, `views`, `sys` and `freespace` through the compiled
 // binary, and read the recorded run under `tests/recorded/` through the generator, so any
 // change under `src/` can move what they hold; the narrowest edge they can honestly sit behind
@@ -1752,4 +1755,113 @@ fn a_live_dispatch_recorded_with_a_legacy_ps_start_token_is_held() {
         .insert(("legacy".to_owned(), "plan".to_owned()));
     let (reading, _) = both_forms(&world, "a legacy token");
     holds(&fixture.expected, &reading, "a legacy token");
+}
+
+/// The `host-view-time` measurement, run whole over this suite's build, records for
+/// each scaling size what the kernel says that size's read opened — no ended-journal
+/// byte, and the live runs' journals alone — and records nothing when a traced read
+/// cannot be observed, even after earlier sizes were.
+///
+/// Its tracer is the real `strace`, behind a stand-in on `PATH` that notes every
+/// trace it is asked for and, where `REFUSE_TRACE` names a read, refuses that one as
+/// a host without ptrace would.
+#[test]
+fn the_budget_measurement_records_what_each_scaling_read_opened() {
+    let world = World::new("host-view-measure");
+    let real = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|dir| dir.join("strace"))
+        .find(|strace| strace.is_file())
+        .expect("strace on PATH: this journey's claim is what the tracer saw");
+    let bin = world.root.join("bin");
+    std::fs::create_dir_all(&bin).expect("a bin directory");
+    let asked = world.root.join("traces-asked");
+    std::fs::write(
+        bin.join("strace"),
+        format!(
+            "#!/bin/sh\n\
+             for arg; do case $prev in -o) into=$arg;; esac; prev=$arg; done\n\
+             echo \"$into\" >> {asked:?}\n\
+             case $into in *\"${{REFUSE_TRACE:-unset}}\"*) echo 'ptrace refused' >&2; exit 1;; esac\n\
+             exec {real:?} \"$@\"\n"
+        ),
+    )
+    .expect("the stand-in tracer");
+    std::fs::set_permissions(bin.join("strace"), std::fs::Permissions::from_mode(0o755))
+        .expect("executable");
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let measure = |record: &Path, refuse: Option<&str>| {
+        let mut command = Command::new("node");
+        command
+            .arg(crate::harness::repo_file("scripts/host-view-measure.mjs"))
+            .arg(crate::harness::binary())
+            .arg(record)
+            .env("PATH", &path)
+            .stdin(Stdio::null());
+        if let Some(refuse) = refuse {
+            command.env("REFUSE_TRACE", refuse);
+        }
+        command.output().expect("node runs the measurement")
+    };
+    let traces = || -> Vec<String> {
+        std::fs::read_to_string(&asked)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| Path::new(line).file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .collect()
+    };
+
+    let record = world.root.join("host-view.json");
+    let measured = measure(&record, None);
+    assert!(
+        measured.status.success(),
+        "{}",
+        String::from_utf8_lossy(&measured.stderr)
+    );
+    assert_eq!(
+        traces(),
+        [
+            "steady-traced.strace",
+            "scaling-400-traced.strace",
+            "scaling-800-traced.strace"
+        ],
+        "one traced read per size"
+    );
+    let held = read_json(&record);
+    let sizes = held["scaling"]["sizes"].as_array().expect("the sizes");
+    assert_eq!(sizes.len(), 3, "{held}");
+    for (size, roots) in sizes.iter().zip([100, 400, 800]) {
+        assert_eq!(size["run_roots"], roots, "{size}");
+        assert_eq!(size["ended_journal_bytes_opened"], 0, "{size}");
+        assert_eq!(
+            size["runs_opened"],
+            json!(["live-0", "live-1", "live-2"]),
+            "{size}"
+        );
+        assert_eq!(size["reads_ms"].as_array().map(Vec::len), Some(5), "{size}");
+    }
+
+    std::fs::remove_file(&asked).expect("the noted traces");
+    let refused_record = world.root.join("refused.json");
+    let refused = measure(&refused_record, Some("scaling-400"));
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert_eq!(refused.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("scaling-400-traced: `strace ")
+            && stderr.contains(" host --json` exited 1: ptrace refused"),
+        "{stderr}"
+    );
+    assert_eq!(
+        traces(),
+        ["steady-traced.strace", "scaling-400-traced.strace"],
+        "the measurement stopped at the read it could not observe"
+    );
+    assert!(
+        !refused_record.exists(),
+        "a measurement whose read went unobserved recorded it"
+    );
 }
