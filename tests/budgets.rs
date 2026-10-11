@@ -334,6 +334,15 @@ fn the_host_view_reporter_reports_the_slowest_steady_read_of_the_record_alone() 
         ("/runs_root/run_roots", serde_json::json!(50)),
         ("/runs_root/live_dispatches", serde_json::json!(0)),
         ("/runs_root/stale_entries", serde_json::json!(null)),
+        ("/steady/runs_opened", serde_json::json!("live-0")),
+        ("/steady_debug/reads_ms", serde_json::json!([-1.0])),
+        ("/cold/read_ms", serde_json::json!("slow")),
+        ("/scaling/sizes", serde_json::json!("all of them")),
+        ("/scaling/sizes/0/runs_opened", serde_json::json!([1])),
+        (
+            "/scaling/increments/0/ms_per_ended_run",
+            serde_json::json!(null),
+        ),
     ] {
         let mut held = host_view_record();
         *held.pointer_mut(path).expect("a field") = value;

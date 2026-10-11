@@ -63,7 +63,65 @@ function readRecord() {
   if (held.steady.ended_journal_bytes_opened !== 0) {
     fail("steady.ended_journal_bytes_opened must be 0: a steady read that opened one failed its journey");
   }
+  validateDetail(held);
   return held;
+}
+
+const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+
+function names(value, name) {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+    fail(`${name} must be an array of run names`);
+  }
+}
+
+function count(value, name) {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    fail(`${name} must be a nonnegative integer`);
+  }
+}
+
+function object(value, name) {
+  if (value !== undefined && !isObject(value)) {
+    fail(`${name} must be an object`);
+  }
+}
+
+// The detail's fields are each optional — a record holds what the journeys that ran
+// wrote — but each one present has the shape the detail reads it as.
+function validateDetail(held) {
+  object(held.steady.breakdown, "steady.breakdown");
+  if (held.steady.runs_opened !== undefined) names(held.steady.runs_opened, "steady.runs_opened");
+  object(held.steady_debug, "steady_debug");
+  if (held.steady_debug !== undefined) {
+    reads(held.steady_debug.reads_ms, "steady_debug.reads_ms");
+    object(held.steady_debug.breakdown, "steady_debug.breakdown");
+  }
+  object(held.cold, "cold");
+  if (held.cold !== undefined) {
+    milliseconds(held.cold.read_ms, "cold.read_ms");
+    object(held.cold.breakdown, "cold.breakdown");
+  }
+  object(held.scaling, "scaling");
+  if (held.scaling !== undefined) {
+    if (!Array.isArray(held.scaling.sizes)) fail("scaling.sizes must be an array");
+    held.scaling.sizes.forEach((size, n) => {
+      if (!isObject(size)) fail(`scaling.sizes[${n}] must be an object`);
+      count(size.run_roots, `scaling.sizes[${n}].run_roots`);
+      milliseconds(size.median_ms, `scaling.sizes[${n}].median_ms`);
+      count(size.ended_journal_bytes_opened, `scaling.sizes[${n}].ended_journal_bytes_opened`);
+      names(size.runs_opened, `scaling.sizes[${n}].runs_opened`);
+    });
+    if (!Array.isArray(held.scaling.increments)) fail("scaling.increments must be an array");
+    held.scaling.increments.forEach((step, n) => {
+      if (!isObject(step)) fail(`scaling.increments[${n}] must be an object`);
+      count(step.from, `scaling.increments[${n}].from`);
+      count(step.to, `scaling.increments[${n}].to`);
+      if (typeof step.ms_per_ended_run !== "number" || !Number.isFinite(step.ms_per_ended_run)) {
+        fail(`scaling.increments[${n}].ms_per_ended_run must be a finite number`);
+      }
+    });
+  }
 }
 
 const fixed = (value) => (typeof value === "number" && Number.isFinite(value) ? value.toFixed(1) : "n/a");
