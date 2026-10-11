@@ -90,6 +90,11 @@ pub struct HostReading {
 }
 
 /// One dispatch row.
+// llmlint: ignore-block[invalid_states_unrepresentable] `proof` and `unproven` are two keys
+// because version 1 of the reading the plan fixed states them as two, and this type is what
+// `schemas/host-reading.schema.json` is generated from, so its shape is the document's. The
+// one place a row is built, `push`, derives both from a single `Proof`, so a held row with a
+// reason or an unproven one without cannot be made by this crate.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct DispatchRow {
     /// The run.
@@ -105,6 +110,7 @@ pub struct DispatchRow {
     /// Why it could not, non-null exactly when `proof` is `unproven`.
     pub unproven: Option<String>,
 }
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// What a row's proof established.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]

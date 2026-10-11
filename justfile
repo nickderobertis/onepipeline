@@ -379,11 +379,12 @@ _e2e-test: _strace-preflight _onetaskgraph-preflight _host-view-release (_tier-t
 # debug or coverage-instrumented one measures its build flavour instead. Built here,
 # ahead of the suite, because a release build from cold outlasts the per-test bound
 # in `.config/nextest.toml`; the journey asks cargo again, which is a fingerprint
-# check when this build is current. Both asks drop the coverage tier's compiler
-# flags, so they are one build. Linux only, where those journeys run.
+# check when this build is current. Both asks replace the coverage tier's compiler
+# flags with the one every gate build carries, `-D warnings`, so they are one build.
+# Linux only, where those journeys run.
 _host-view-release:
     @[ "$(uname -s)" = Linux ] || exit 0; \
-      env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS -u RUSTC_WORKSPACE_WRAPPER \
+      env -u CARGO_ENCODED_RUSTFLAGS -u RUSTC_WORKSPACE_WRAPPER RUSTFLAGS="-D warnings" \
       cargo build --release --locked --quiet --bin onepipeline --target-dir target
 
 _contract-test: (_tier-test "contract" contract-tier)

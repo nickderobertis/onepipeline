@@ -9778,7 +9778,7 @@ fn the_supervision_flags_are_what_divergence_95_and_the_readme_name() {
     }
 }
 
-/// **Spike** (`spike-host-profile`): the reading `host --json` prints is the
+/// The reading `host --json` prints is the
 /// document `schemas/host-reading.schema.json` states, generated from
 /// `views::HostReading` and held to it exactly as the run reading is — and its
 /// keys are the version-1 keys the plan's contract lists, every one required.

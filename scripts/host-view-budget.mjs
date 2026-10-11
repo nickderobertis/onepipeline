@@ -9,6 +9,9 @@ import { readFileSync } from "node:fs";
 import { report } from "@onebudgetspec/sdk";
 
 const record = "target/budget-records/host-view.json";
+// What the budget's workload states, and so what a record has to have measured.
+const READS = 5;
+const FIXTURE = { run_roots: 100, live_dispatches: 5, stale_entries: 4 };
 const journeys = "just test-e2e 'test(/^host_view::the_host_view/)'";
 let next = `run ${journeys} to regenerate the record, then run 'onebudgetspec check budgets.yaml'`;
 
@@ -49,7 +52,14 @@ function readRecord() {
   if (held.steady?.build !== "release") {
     fail("steady.build must be release: the budget times the binary a user runs");
   }
-  reads(held.steady.reads_ms, "steady.reads_ms");
+  if (reads(held.steady.reads_ms, "steady.reads_ms").length !== READS) {
+    fail(`steady.reads_ms must hold the ${READS} single reads the budget judges`);
+  }
+  for (const [key, value] of Object.entries(FIXTURE)) {
+    if (held.runs_root?.[key] !== value) {
+      fail(`runs_root.${key} must be ${value}: the budget's workload is that fixture`);
+    }
+  }
   if (held.steady.ended_journal_bytes_opened !== 0) {
     fail("steady.ended_journal_bytes_opened must be 0: a steady read that opened one failed its journey");
   }

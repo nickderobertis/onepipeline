@@ -66,6 +66,21 @@ const ENTRY_AFTER_MS: u64 = 1_000;
 const BUDGET_MS: f64 = 100.0;
 /// The variable asking `onepipeline host` to append its phase breakdown to a file.
 const PHASES_ENV: &str = "ONEPIPELINE_HOST_PHASES";
+/// The phases a steady read over a fixture records, by the names `src/hostview.rs`,
+/// `src/lib.rs` and `src/driver.rs` give them, and the quantity it counts: held
+/// here so a phase renamed there fails these journeys rather than dropping out of
+/// the budget's detail.
+const STEADY_PHASES: [&str; 9] = [
+    "event-registry",
+    "list",
+    "launch-and-summary",
+    "registry",
+    "pid-proofs",
+    "decide-ended",
+    "live-fold",
+    "free-space",
+    "render",
+];
 /// Where the journeys leave what `scripts/host-view-budget.mjs` reports.
 const RECORD: &str = "target/budget-records/host-view.json";
 
@@ -123,6 +138,14 @@ fn stamp(ms: u64) -> String {
     )
 }
 
+// llmlint: ignore-block[tests_mirror_real_usage] the subject is `onepipeline host` over a runs
+// root as a host accumulates one over weeks — hundreds of ended runs, long-dead drivers, a
+// 3.6 GiB journal, engines older than the dispatch registry — which no journey can produce
+// through the engine in a test's lifetime. So the root is generated: every journal is the
+// recorded run's own records renamed, the launch records and registry entries are in the
+// shapes the engine writes, a summary stamp moved stands in for the writer that keeps it
+// current, and every read of it is the real binary's. The task that added this view's budget
+// states this fixture; the adoption that races the view is driven through the real engine.
 /// The recorded store, split into what a run starts with, the records its body is
 /// padded with, and how it settles.
 struct Seed {
@@ -198,7 +221,10 @@ impl Seed {
 
     /// One run's store: the recorded head, a body padded to `size` bytes, and the
     /// ending — the recorded settlement where `settled`, then `tail`.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "each is one fact the generated journal varies by: who, how big, when it began, whether it settled, what it ends in, which extra nodes its plan names, and the draw"
+    )]
     fn journal(
         &self,
         draw: &mut Draw,
@@ -626,7 +652,10 @@ impl Fixture {
         (pid, start_token(pid))
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "each is one document of the run root it writes: its journal, its registry, the launch record's driver and start token, and its plan's extra nodes"
+    )]
     fn write_run(
         &self,
         seed: &Seed,
@@ -784,6 +813,7 @@ impl Fixture {
     }
 }
 
+// llmlint: ignore-end[tests_mirror_real_usage]
 fn write(path: &Path, value: &Value) {
     std::fs::write(path, serde_json::to_string_pretty(value).expect("JSON")).expect("a write");
 }
@@ -1205,9 +1235,11 @@ fn read_state(
         !traced.opened.contains_key(&fixture.sparse_run),
         "{label}: the 3.6 GiB journal was opened"
     );
+    let phases = phases_of(&phases, &last);
+    recorded(&phases, &STEADY_PHASES, "live-journal-bytes", label);
     StateRead {
         walls_ms,
-        phases: phases_of(&phases, &last),
+        phases,
         verdicts: verdicts(&reading),
         traced,
         load1: load,
@@ -1229,6 +1261,28 @@ fn phases_of(phases: &Path, invocation: &Invocation) -> Option<Value> {
         line["exit_ms"] = json!(exited.saturating_sub(flushed) as f64 / 1e6);
     }
     Some(line)
+}
+
+/// Fail a read whose phase line is missing, or lacks a phase or the quantity it
+/// was expected to record.
+fn recorded(phases: &Option<Value>, names: &[&str], quantity: &str, label: &str) {
+    let line = phases
+        .as_ref()
+        .unwrap_or_else(|| panic!("{label}: the read recorded no phase line"));
+    for name in names {
+        assert!(
+            line["phases"][name]["wall_ms"].is_number(),
+            "{label}: the read recorded no `{name}` phase: {line}"
+        );
+    }
+    assert!(
+        line["quantities"][quantity].is_u64(),
+        "{label}: the read counted no `{quantity}`: {line}"
+    );
+    assert!(
+        line["process_start_ms"].is_number() && line["exit_ms"].is_number(),
+        "{label}: the read marked no start or end of its work: {line}"
+    );
 }
 
 /// Fail a read that opened any ended run's journal, even one it read nothing
@@ -1312,8 +1366,8 @@ fn breakdown(phases: &Option<Value>) -> Value {
 /// justfile), because a build from cold outlasts a test's own bound; here cargo is
 /// asked again, which costs a fingerprint check when that build is current and
 /// rebuilds it when it is not, so the binary timed is always this tree's. Asked
-/// with the coverage tier's flags taken out, exactly as the recipe asks, so the two
-/// builds are one build. The copy handed back is this test's own, so a later
+/// with the coverage tier's flags replaced by `-D warnings`, exactly as the recipe
+/// asks, so the two builds are one build. The copy handed back is this test's own, so a later
 /// rebuild's uplift cannot take the file away under a spawn.
 fn release_binary(world: &World) -> PathBuf {
     static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
@@ -1349,6 +1403,8 @@ fn release_binary(world: &World) -> PathBuf {
                 cargo.env_remove(name.as_ref());
             }
         }
+        // And the one flag every gate build carries, as the recipe gives it.
+        cargo.env("RUSTFLAGS", "-D warnings");
         let output = cargo.output().expect("cargo runs");
         assert!(
             output.status.success(),
@@ -1377,6 +1433,12 @@ fn cold_read(world: &World, program: &Path, fixture: &Fixture) -> Traced {
         Some(&phases),
     );
     holds(&fixture.expected, &cold.reading, "the cold read");
+    recorded(
+        &cold.phases,
+        &["cold-fold"],
+        "cold-journal-bytes",
+        "the cold read",
+    );
     assert!(
         !cold.opened.contains_key(&fixture.sparse_run)
             && !cold.refused.contains(&fixture.sparse_run),
@@ -1495,7 +1557,7 @@ fn the_host_view_answers_a_host_sized_root_steady_cold_and_steady_again() {
 /// to the budget's record as evidence: no threshold applies to them beyond the
 /// budget's own at 100.
 #[test]
-fn the_host_views_cost_over_a_host_sized_root_does_not_grow_with_ended_history() {
+fn the_host_view_over_a_host_sized_root_opens_only_live_runs_whatever_its_ended_history() {
     let world = World::new("host-view-scaling").with_env("HOSTNAME", HOST);
     let release = release_binary(&world);
     let mut fixture = Fixture::generate(&world.runs);
@@ -1545,6 +1607,8 @@ fn the_host_views_cost_over_a_host_sized_root_does_not_grow_with_ended_history()
     record(json!({"scaling": {"build": "release", "sizes": sizes, "increments": increments}}));
 }
 
+// llmlint: ignore-block[tests_mirror_real_usage] the same generated root, run by run: see the
+// reason on the generator above.
 /// A small root, built run by run, for the journeys about one verdict each.
 impl Fixture {
     fn empty(runs: &Path) -> Self {
@@ -1598,6 +1662,7 @@ fn adopted(run: &str, at: u64) -> Value {
     )
 }
 
+// llmlint: ignore-end[tests_mirror_real_usage]
 /// The keys version 1 of the reading states, at each level, every one present.
 fn has_the_version_1_keys(reading: &Value) {
     let keys = |value: &Value| -> BTreeSet<String> {
@@ -1687,6 +1752,9 @@ fn both_forms(world: &World, label: &str) -> (Value, String) {
 fn a_registry_less_runs_last_stop_decides_whether_its_dispatch_is_gone() {
     let world = World::new("host-view-stops").with_env("HOSTNAME", HOST);
     let seed = Seed::read();
+    // llmlint: ignore-block[tests_mirror_real_usage] runs as engines before the dispatch registry
+    // left them, and the adoption appended to one, are the generated root's: see the reason on
+    // the generator. `an_adoption_racing_the_view…` drives a real adoption through the engine.
     let mut fixture = Fixture::empty(&world.runs);
     let plan = |run: &str| (run.to_owned(), "plan".to_owned());
 
@@ -1882,6 +1950,7 @@ fn a_registry_less_runs_last_stop_decides_whether_its_dispatch_is_gone() {
     std::io::Write::write_all(&mut file, appended.as_bytes()).expect("appended");
     fixture.expected.stopped.remove(&plan("stopped-signalled"));
     fixture.expected.unproven.insert(plan("stopped-signalled"));
+    // llmlint: ignore-end[tests_mirror_real_usage]
     let (reading, _) = both_forms(&world, "after an adoption");
     holds(&fixture.expected, &reading, "after an adoption");
 }
@@ -1899,6 +1968,8 @@ fn a_registry_less_runs_last_stop_decides_whether_its_dispatch_is_gone() {
 fn a_journal_past_the_bound_is_never_opened_and_a_run_it_leaves_undecided_is_refused() {
     let world = World::new("host-view-bound").with_env("HOSTNAME", HOST);
     let seed = Seed::read();
+    // llmlint: ignore-block[tests_mirror_real_usage] journals past the bound are the generated
+    // root's, grown sparse: see the reason on the generator.
     let mut fixture = Fixture::empty(&world.runs);
     let mut draw = Draw(11);
     let started = now_millis() - 86_400_000;
@@ -1975,6 +2046,7 @@ fn a_journal_past_the_bound_is_never_opened_and_a_run_it_leaves_undecided_is_ref
     );
     fixture.readable(&["unreadable".to_owned()], false);
 
+    // llmlint: ignore-end[tests_mirror_real_usage]
     let read = traced(
         &world,
         &crate::harness::binary(),

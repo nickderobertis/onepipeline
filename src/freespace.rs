@@ -45,6 +45,12 @@ pub(crate) fn lines(runs_root: &Path) -> String {
 
 /// One `free space:` line, as data: the document `onepipeline host --json`
 /// carries, and what [`render`] prints.
+// llmlint: ignore-block[invalid_states_unrepresentable] the byte counts and the error, and a
+// root's role, path and ancestor, are separate nullable keys because version 1 of the
+// `host --json` reading the plan fixed states them so, and these types are what its schema is
+// generated from, so their shape is the document's. Only `readings` and `readings_of` build
+// them, each from one `Filesystem::holding` answer, so a line both read and refused, or a
+// runs root with no path, is not one this crate makes.
 #[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
 pub struct FreeSpace {
     /// The roots this filesystem holds, in the order first named.
@@ -67,6 +73,7 @@ pub struct FreeSpaceRoot {
     /// The nearest existing ancestor it was measured at, when the root itself is absent.
     pub measured_at: Option<PathBuf>,
 }
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// Which root a line names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]

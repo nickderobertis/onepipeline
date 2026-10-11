@@ -327,6 +327,13 @@ fn the_host_view_reporter_reports_the_slowest_steady_read_of_the_record_alone() 
             "/steady/ended_journal_bytes_opened",
             serde_json::json!(4096),
         ),
+        (
+            "/steady/reads_ms",
+            serde_json::json!([12.0, 13.0, 14.0, 15.0]),
+        ),
+        ("/runs_root/run_roots", serde_json::json!(50)),
+        ("/runs_root/live_dispatches", serde_json::json!(0)),
+        ("/runs_root/stale_entries", serde_json::json!(null)),
     ] {
         let mut held = host_view_record();
         *held.pointer_mut(path).expect("a field") = value;
@@ -355,6 +362,16 @@ fn the_host_view_reporter_reports_the_slowest_steady_read_of_the_record_alone() 
         String::from_utf8_lossy(&outside.stderr).contains("ONEBUDGETSPEC_RESULT is missing"),
         "{}",
         String::from_utf8_lossy(&outside.stderr)
+    );
+
+    // A result that cannot be written is a failure, and names what to fix.
+    let unwritable = host_view_report(&dir, Some(&dir));
+    assert!(!unwritable.status.success());
+    assert!(
+        String::from_utf8_lossy(&unwritable.stderr)
+            .contains("ensure ONEBUDGETSPEC_RESULT names a writable file"),
+        "{}",
+        String::from_utf8_lossy(&unwritable.stderr)
     );
 
     let reported = host_view_report(&dir, Some(&result));
@@ -395,7 +412,7 @@ fn the_host_view_reporter_names_journeys_the_e2e_binary_holds() {
         std::fs::read_to_string(root().join("tests/e2e/host_view.rs")).expect("the journeys read");
     for name in [
         "the_host_view_answers_a_host_sized_root_steady_cold_and_steady_again",
-        "the_host_views_cost_over_a_host_sized_root_does_not_grow_with_ended_history",
+        "the_host_view_over_a_host_sized_root_opens_only_live_runs_whatever_its_ended_history",
     ] {
         assert!(
             journeys.contains(&format!("#[test]\nfn {name}()")),
