@@ -4178,7 +4178,6 @@ impl FromTheStore {
     }
 }
 
-/// `count` of `what`, pluralised.
 fn counted(count: usize, what: &str) -> String {
     match count {
         1 => format!("1 {what}"),

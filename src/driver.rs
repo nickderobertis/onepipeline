@@ -1541,7 +1541,6 @@ fn start(args: &StartArgs) -> Result<i32> {
     Ok(settlement.exit_code())
 }
 
-/// `count` of `what`, pluralised the way a line an operator reads says it.
 fn plural(count: usize, what: &str) -> String {
     match count {
         1 => format!("1 {what}"),

@@ -309,6 +309,7 @@ enum DriverWrite {
     /// The run is letting go: where what landed is this run's claim, read the store's, and
     /// write it `null` if it still names `run` on `host` — or, where it names another run,
     /// write **nothing** at all, because that run drives the project now.
+    // llmlint: ignore[invalid_states_unrepresentable] the run is `RunPaths::run`'s `String` and the host `sys::hostname`'s or a launch record's, compared only against a claim's own strings; `src/error.rs` records why this crate carries no `RunId` newtype the contract does not name.
     Release { run: String, host: String },
     /// Touch no claim: a driver that has none to write.
     Leave,

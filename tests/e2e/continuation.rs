@@ -331,6 +331,9 @@ fn a_node_added_on_a_continued_node_is_drafted_on_its_recorded_branch() {
     for id in ["a", "b", "c"] {
         assert_eq!(as_stored(&settled(&cold, run, id)), stored[id], "{id}");
     }
+    let line = "launched on this host from the store: 3 nodes continued, 1 node dispatched";
+    cold.run(&["status", run]).exited(0).out_has(line);
+    cold.run(&["results", run]).exited(0).out_has(line);
     drop(cold);
 }
 
@@ -653,6 +656,11 @@ fn an_in_flight_dispatch_left_on_the_store_is_continued_by_a_host_that_takes_the
     assert!(held_as_draft(&world, &opened[0]["number"]), "{opened:?}");
     let b = settled(&cold, run, "b");
     assert_eq!(b["outcome"], "change-review-draft", "{b}");
+    // What it continued, it continued from the run whose claim it took over.
+    cold.run(&["status", run]).exited(0).out_has(&format!(
+        "launched on this host from the store: 1 node continued from run '{held}', 1 node \
+         dispatched"
+    ));
     let item = item_metadata(&world, &project, "b");
     assert!(
         item.get("onepipeline.dispatch").is_none(),
@@ -1633,4 +1641,27 @@ fn a_withheld_publication_puts_its_branch_on_the_origin_when_nothing_else_has() 
     successor.run(&["stop", "kept", "--force"]).exited(0);
     drop(theirs);
     drop(successor);
+}
+
+/// A claim the closeout's projection and the driver's own release both fail to land in time
+/// is left standing, and the driver says so — the next launch elsewhere is refused over it
+/// until it is taken over — rather than the run hanging on its store.
+#[test]
+fn a_claim_neither_release_can_land_is_left_standing_and_said() {
+    let world = World::new("claim-unreleased").through_scripted_source();
+    world.script("work.wait", "hold");
+    let project = launch_detached(&world, "unreleased", vec![agent("work", &[])]);
+    let claim = until_claimed_by(&world, &project, "unreleased");
+    let writes = world.store_holds("set_project_metadata");
+    world.release("work.go");
+    let projection = writes.arrived();
+    let release = writes.arrived();
+    world.until("the run to settle", |world| {
+        world.run_file("unreleased", "result.json").is_file()
+    });
+    world.until_run_file_holds("unreleased", "driver.log", "could not release its claim on");
+    assert_eq!(stored_claim(&world, &project), claim, "the claim moved");
+    world.store_stops_holding("set_project_metadata");
+    drop(release);
+    drop(projection);
 }

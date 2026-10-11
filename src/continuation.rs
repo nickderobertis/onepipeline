@@ -49,10 +49,6 @@ pub(crate) const CLAIM_READ_DEADLINE: Duration = Duration::from_secs(20);
 /// The keys a claim carries, and the only ones: the store's copy is external input.
 const CLAIM_KEYS: [&str; 5] = ["run", "host", "session", "pid", "claimed_at"];
 
-/// The settlement statuses that leave a node's branch to be continued rather than its
-/// work to be kept: the node ran, did not finish, and left its work on a branch.
-const PINNING: [&str; 3] = ["failed", "cancelled", "parked"];
-
 /// The project's claim, out of its metadata: `None` where the key is absent or `null` —
 /// the two read the same, because a release writes `null` — and a refusal naming the key
 /// where it holds anything that is not a claim.
@@ -156,10 +152,7 @@ const SETTLEMENT_KEYS: [&str; 12] = [
 /// One node's stored settlement, read at the store boundary: `None` where the task carries
 /// none, and a refusal naming the node where it carries anything that is not a settlement —
 /// a value that is not a mapping, a key no settlement carries, or a field of the wrong shape.
-fn settlement_of(
-    node: &str,
-    metadata: Option<&Map<String, Value>>,
-) -> Result<Option<Map<String, Value>>> {
+fn settlement_of(node: &str, metadata: Option<&Map<String, Value>>) -> Result<Option<Stored>> {
     let refused = |why: String| {
         Error::Invalid(format!(
             "node '{node}': `{SETTLEMENT_KEY}` is not a settlement: {why}"
@@ -182,9 +175,51 @@ fn settlement_of(
             "it carries `{key}`, which no settlement does"
         )));
     }
-    serde_json::from_value::<crate::payload::NodeSettled>(stored.clone())
+    let read = serde_json::from_value::<crate::payload::NodeSettled>(stored.clone())
         .map_err(|why| refused(why.to_string()))?;
-    Ok(Some(settlement.clone()))
+    // What the document cannot say in a type: a stack is at least one usable parent, and a
+    // `remote` is one of the words putting a branch on an origin answers with.
+    if read.stack.as_ref().is_some_and(|stack| !stack.is_usable()) {
+        return Err(refused("its `stack` names no usable parent".to_owned()));
+    }
+    if let Some(remote) = settlement.get("remote") {
+        if remote
+            .as_str()
+            .and_then(crate::vcs::preservation_of)
+            .is_none()
+        {
+            return Err(refused(format!(
+                "its `remote` is {remote}, not a word putting a branch on an origin answers with"
+            )));
+        }
+    }
+    Ok(Some(Stored {
+        status: read.status,
+        fields: settlement.clone(),
+    }))
+}
+
+/// A stored settlement as the boundary read it: its status, typed, and every field it
+/// carries, verbatim, for a continuation to journal whole.
+#[derive(Debug)]
+struct Stored {
+    status: crate::payload::Status,
+    fields: Map<String, Value>,
+}
+
+impl Stored {
+    /// The branch a node that ran and did not finish left its work on: a failed, cancelled
+    /// or parked one's, and no other's.
+    fn left_on(&self) -> Option<String> {
+        use crate::payload::Status;
+        matches!(
+            self.status,
+            Status::Failed | Status::Cancelled | Status::Parked
+        )
+        .then(|| self.fields.get("branch")?.as_str())
+        .flatten()
+        .and_then(crate::vcs::usable)
+    }
 }
 
 /// Whether a launch may go ahead over the claim its read found: any claim refuses it, by
@@ -216,8 +251,8 @@ pub(crate) fn refuse_fresh_over_unlanded(project: &str, read: &Read) -> Result<(
         .map(|node| {
             let settlement = settlement_of(&node.id, read.metadata.get(&node.id))?;
             Ok(settlement.and_then(|settlement| {
-                let url = settlement.get("change_url")?.as_str()?;
-                (settlement.get("landing").and_then(Value::as_str) != Some("landed"))
+                let url = settlement.fields.get("change_url")?.as_str()?;
+                (settlement.fields.get("landing").and_then(Value::as_str) != Some("landed"))
                     .then(|| format!("'{}' ({url})", node.id))
             }))
         })
@@ -254,7 +289,6 @@ pub(crate) struct Continuation {
 pub(crate) struct Continued(Map<String, Value>);
 
 impl Continued {
-    /// The payload the `node-settled` carries.
     pub(crate) fn payload(&self) -> Map<String, Value> {
         self.0.clone()
     }
@@ -278,12 +312,11 @@ pub(crate) fn continuation_of(read: &Read, claim: Option<&DriverClaim>) -> Resul
             Some(metadata) => dispatch_of(&node.id, metadata)?,
             None => None,
         };
-        let status = settlement
+        if let Some(done) = settlement
             .as_ref()
-            .and_then(|settlement| settlement.get("status"))
-            .and_then(Value::as_str);
-        if status == Some("done") {
-            let mut payload = settlement.clone().unwrap_or_default();
+            .filter(|settlement| settlement.status == crate::payload::Status::Done)
+        {
+            let mut payload = done.fields.clone();
             payload.insert("continued".to_owned(), from.clone());
             continued
                 .settled
@@ -297,12 +330,7 @@ pub(crate) fn continuation_of(read: &Read, claim: Option<&DriverClaim>) -> Resul
         }
         // A dispatch the store still holds opened after the settlement beside it, since a
         // settlement removes the key: its branch is the one the work was last on.
-        let left = settlement
-            .as_ref()
-            .filter(|_| status.is_some_and(|status| PINNING.contains(&status)))
-            .and_then(|settlement| settlement.get("branch"))
-            .and_then(Value::as_str)
-            .and_then(crate::vcs::usable);
+        let left = settlement.as_ref().and_then(Stored::left_on);
         if let Some(branch) = dispatch.map(|dispatch| dispatch.branch).or(left) {
             continued.pinned.push((node.id.clone(), branch));
         }
@@ -318,8 +346,13 @@ pub(crate) fn continuation_of(read: &Read, claim: Option<&DriverClaim>) -> Resul
 pub(crate) struct ClaimWatch {
     store: Store,
     project: QualifiedId,
+    // llmlint: ignore-block[invalid_states_unrepresentable] a run id is `RunPaths::run`'s own
+    // `String` and a host `sys::hostname`'s, each validated where it was minted or read, and
+    // compared here only against a claim's — itself a wire document of strings; `src/error.rs`
+    // records why this crate carries no `RunId` newtype the contract does not name.
     run: String,
     host: String,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
     /// The run's own directory, where the store's request to be left alone is kept.
     run_dir: std::path::PathBuf,
     /// Whether this driver is a launch's, whose own read of the claim — the one that let it
@@ -407,7 +440,6 @@ impl ClaimWatch {
         })
     }
 
-    /// Whether the idle check is due.
     pub(crate) fn idle_check_due(&self) -> bool {
         self.until_idle_check() == Duration::ZERO
     }
@@ -674,6 +706,14 @@ mod tests {
             (json!("done"), "not a mapping"),
             (json!({"status": "done", "brnach": "me/b"}), "`brnach`"),
             (json!({"status": "finished"}), "unknown variant"),
+            (
+                json!({"status": "done", "base": "me/a", "stack": {"parents": [], "stack_base": null}}),
+                "no usable parent",
+            ),
+            (
+                json!({"status": "failed", "remote": "teleported"}),
+                "`remote`",
+            ),
         ] {
             let refused = settlement_of("b", Some(&settlement(bad)))
                 .expect_err("refused")
