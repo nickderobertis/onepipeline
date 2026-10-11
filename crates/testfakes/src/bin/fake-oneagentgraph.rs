@@ -756,6 +756,17 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         commit_on_a_branch_of_its_own(args, &branch);
     }
 
+    // A worker handed a merge that is all it is there to conclude — a stack base's,
+    // which is not the node's own branch — concludes it with `<key>.resolves-merge`
+    // and writes nothing else there. Scripted `<key>.merges-only`; a dispatch whose
+    // worktree holds no merge in progress is untouched by it and does its work.
+    if dir.join(format!("{key}.merges-only")).exists() && merging(args) {
+        if let Some(body) = fake::node_script(dir, &key, "resolves-merge") {
+            resolve_merge(args, &body);
+        }
+        return ExitCode::SUCCESS;
+    }
+
     if let Some(file) = fake::node_script(dir, &key, "requires-file") {
         let Some(workspace) = fake::flag(args, "--dir") else {
             fake::fail("checking a dependency file requires --dir");
@@ -768,8 +779,24 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         }
     }
 
+    // `<key>.work-file`, where present, names the file the work is written to in
+    // place of `<key>.md` — a stem, `.md` added — so two nodes can write one path
+    // and conflict where their branches meet.
     if let Some(body) = fake::node_script(dir, &key, "work") {
-        write_work(args, &fake::segment(&key), &body);
+        let name = fake::node_script(dir, &key, "work-file")
+            .map(|stem| {
+                let stem = stem.trim().to_owned();
+                // A stem and nothing more: a separator or a parent reference would
+                // write outside the worktree the dispatch was handed.
+                if stem.is_empty() || stem.contains(['/', '\\']) || stem.contains("..") {
+                    fake::fail(&format!(
+                        "{key}.work-file holds {stem:?}, which is not a file stem"
+                    ));
+                }
+                stem
+            })
+            .unwrap_or_else(|| fake::segment(&key));
+        write_work(args, &name, &body);
     }
 
     // A worker that leaves a process of its own working inside its worktree when
@@ -1514,6 +1541,33 @@ fn commit_and_land_on_base(args: &[String], name: &str, base: &str) {
                 String::from_utf8_lossy(&ran.stderr).trim()
             ));
         }
+    }
+}
+
+/// Whether the dispatch's worktree holds a merge in progress.
+///
+/// `git rev-parse -q --verify` exits 0 when `MERGE_HEAD` exists and 1 when it does
+/// not; anything else — git not starting, or exiting otherwise because the worktree
+/// is no repository — fails the dispatch rather than reading as no merge.
+fn merging(args: &[String]) -> bool {
+    let worktree = session_worktree(args, "asking whether a merge is in progress");
+    let ran = std::process::Command::new("git")
+        .args(["rev-parse", "-q", "--verify", "MERGE_HEAD"])
+        .current_dir(&worktree)
+        .stdin(std::process::Stdio::null())
+        // What git prints to stdout goes nowhere, since this process's own stdout is
+        // the envelope stream it relays.
+        .stdout(std::process::Stdio::null())
+        .output();
+    match ran {
+        Ok(ran) if ran.status.success() => true,
+        Ok(ran) if ran.status.code() == Some(1) => false,
+        Ok(ran) => fake::fail(&format!(
+            "`git rev-parse -q --verify MERGE_HEAD` exited {}: {}",
+            ran.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&ran.stderr).trim()
+        )),
+        Err(why) => fake::fail(&format!("`git` could not be started: {why}")),
     }
 }
 

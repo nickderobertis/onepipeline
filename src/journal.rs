@@ -706,9 +706,24 @@ pub const SETTLED_CAUSE: &str = "cause";
 /// The `node-settled` payload field naming the commit the node's branch was left
 /// at.
 ///
-/// Named once for the same reason, and absent wherever `onevcs` recorded no
-/// commit — a node that produced no branch, and a branch nothing committed to.
+/// Named once for the same reason. A lifecycle node writes it once its session
+/// has cut a branch, on success as on failure, and it is absent from a settlement
+/// whose branch never existed.
 pub const SETTLED_HEAD: &str = "head";
+
+/// The `node-settled` payload field naming the branch the node's change request
+/// is based on: the root, a stack parent's branch, or the stack base merging its
+/// stack parents.
+///
+/// Named once for the reason [`SETTLED_LANDING`] is, and absent from a settlement
+/// reached before the node's base was resolved — a lifecycle node refused before
+/// its session opened, and every node that opens none.
+pub const SETTLED_BASE: &str = "base";
+
+/// The `node-settled` payload field naming the stack a lifecycle node was drafted
+/// on — `{parents: [{node, branch, head}], stack_base}` — present exactly when the
+/// node had stack parents.
+pub const SETTLED_STACK: &str = "stack";
 
 /// The `node-settled` payload field saying what putting a kept branch on its
 /// identity's origin found to do: `pushed`, `already-on-origin` or `no-remote`,

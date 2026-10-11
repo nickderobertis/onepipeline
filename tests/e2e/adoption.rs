@@ -2002,8 +2002,8 @@ fn an_arrival_note_with_no_live_turn_to_reach_is_owed_to_the_next_dispatch() {
 /// ledger**.
 ///
 /// It is out-of-repository whatever repository it lands in: the branch belongs to
-/// another run, so the stacked-branch machinery this crate has cannot reach it
-/// and a git pin is the only thing a worker can hold.
+/// another run, so the stack placement this crate makes from its own run's
+/// settlements cannot reach it and a git pin is the only thing a worker can hold.
 #[test]
 fn a_cross_dag_dependency_is_pinned_against_git_and_named_from_the_upstreams_ledger() {
     let world = watching("adoption-crossdag");
@@ -3072,9 +3072,10 @@ fn a_published_node_readied_in_the_pass_its_dependency_is_found_landed_is_held_f
          \x20 approvals: none\n",
     )
     .expect("the rules file is written");
-    // The closeout's read and the publication's own are refused; every read
-    // after them meets a host that answers.
-    world.script("gh.outage", "2");
+    // The closeout's read, the visibility probe the publication's public boundary
+    // asks before it pushes, and the publication's own read are refused; every
+    // read after them meets a host that answers.
+    world.script("gh.outage", "3");
     let (script, answer) = world.probe_in(&engine_repo, ENGINE);
     world.releases(&automated(&script));
     releases_at(&answer, "0.1.0");
@@ -4822,9 +4823,13 @@ fn a_settled_landing_is_what_the_release_is_correlated_through(name: &str, spell
     // dependency's work is out.
     let mut landed = engine();
     landed["id"] = json!("landed");
+    // No edge from `broken` to `landed`: a dependent of `landed`'s unlanded change
+    // is placed on its branch (`docs/contract-divergences.md` entry 115), and then
+    // the commit this journey states as the landing would be on `broken`'s branch
+    // too — a commit two pieces of work answer to, which `onevcs` refuses to
+    // resolve. `broken` keeps a branch of its own, and the journey waits for both.
     let mut broken = engine();
     broken["id"] = json!("broken");
-    broken["deps"] = json!(["landed"]);
     let mut consumer = consumer(Some("published"));
     consumer["deps"] = json!(["broken"]);
     world.script("broken.fail", "1");
@@ -4835,9 +4840,13 @@ fn a_settled_landing_is_what_the_release_is_correlated_through(name: &str, spell
         vec![landed, broken, consumer, agent("hold", &[])],
     );
 
-    world.until("the broken node to settle", |world| {
-        settled_status(world, &run, "broken") == Some("failed".to_owned())
-    });
+    world.until(
+        "the broken node to fail and the landed one to settle",
+        |world| {
+            settled_status(world, &run, "broken") == Some("failed".to_owned())
+                && settled_status(world, &run, "landed") == Some("done".to_owned())
+        },
+    );
     assert!(
         !dispatched(&world, &run, "consumer"),
         "a node whose dependency failed was dispatched"
@@ -6212,9 +6221,10 @@ fn a_cross_dag_dependency_settled_from_evidence_is_correlated_through_its_landin
     // record goes wrong.
     let mut landed = engine();
     landed["id"] = json!("landed");
+    // No edge from `broken` to `landed`, for the reason the single-run journey
+    // gives: `broken` keeps a branch of its own.
     let mut broken = engine();
     broken["id"] = json!("broken");
-    broken["deps"] = json!(["landed"]);
     world.script("broken.fail", "1");
     // A node held open, so the upstream run is still being driven when the
     // settle reaches it — the ordinary path, where the loop applies a queued
@@ -6225,8 +6235,9 @@ fn a_cross_dag_dependency_settled_from_evidence_is_correlated_through_its_landin
         "adoption-settled-upstream",
         vec![landed, broken, agent("hold", &[])],
     );
-    world.until("the upstream node to settle", |world| {
+    world.until("the upstream nodes to settle", |world| {
         settled_status(world, &upstream, "broken") == Some("failed".to_owned())
+            && settled_status(world, &upstream, "landed") == Some("done".to_owned())
     });
     let branch = branch_of(&world, &upstream, "landed");
     bring_the_branch_here(&world, &engine_repo.checkout, &branch);

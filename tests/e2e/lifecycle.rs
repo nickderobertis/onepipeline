@@ -1480,6 +1480,13 @@ fn a_title_the_sibling_will_not_commit_under_is_refused_before_any_dispatch() {
 /// the journey a repository's own rejecting gate drove, and `onevcs` 0.11.0 runs
 /// no gate — a merge path that refuses is `push-rejected` and preserving. What
 /// still reaches the terminal side is a request the sibling will not take at all.
+///
+/// From `onevcs` 0.44.0 the first thing to refuse it is the public boundary, ahead
+/// of the `NotImplemented` seam: the identity's visibility cannot be asked of a
+/// host this build has no implementation for, so the boundary cannot be screened
+/// and refuses as unavailable. That is the same kind of answer — one no attempt
+/// changes — and it is held to the same two properties: said in `onevcs`'s words,
+/// and asked once.
 #[test]
 fn a_publication_onevcs_refuses_outright_settles_the_residual_and_is_not_retried() {
     let world = World::new("lifecycle-residual");
@@ -1512,7 +1519,7 @@ fn a_publication_onevcs_refuses_outright_settles_the_residual_and_is_not_retried
         .expect("the settlement says why")
         .to_string();
     assert!(
-        detail.contains("onevcs:") && detail.contains("not implemented"),
+        detail.contains("onevcs:") && detail.contains("the public boundary check is unavailable"),
         "the settlement does not say what onevcs refused: {detail}"
     );
 
@@ -1647,11 +1654,14 @@ const RED: &str = "llmlint completed failure required";
 /// The closeout asks the host whether the session already holds a change
 /// request before anything is drafted or published — that is what decides
 /// whether it finishes a change request the worker opened or opens one — and
-/// that read is the first invocation a lifecycle node makes. So an outage that
-/// ends after one call ends on the closeout's read, and the publication after it
-/// meets a host that answers; two is the closeout's read and the publication's
-/// own, which is the ending every journey scripting this is about.
-const PUBLICATION_READ_OUTAGE: &str = "2";
+/// that read is the first invocation a lifecycle node makes. From `onevcs`
+/// 0.44.0 the publication then asks the repository's visibility, for its public
+/// boundary, before it pushes. So an outage that ends after one call ends on the
+/// closeout's read, two on the visibility probe — which, refused, reads as a
+/// private destination and screens nothing — and three is the closeout's read,
+/// the probe, and the publication's own read, which is the ending every journey
+/// scripting this is about.
+const PUBLICATION_READ_OUTAGE: &str = "3";
 
 /// The name of a required check reported the way every GitHub matrix job is
 /// named: with a space in it.
@@ -2469,6 +2479,10 @@ fn a_cancelled_run_reads_no_merge_path_once_its_push_has_landed() {
     let settled = &world.events_of(&run, "node-settled")[0]["payload"];
     // It settles as the stop, saying the push ran and where the work is.
     assert_eq!(settled["status"], "cancelled", "{settled}");
+    // And, like every lifecycle settlement past its session's open, what it was
+    // based on and the commit its branch stands at.
+    assert_eq!(settled["base"], "main", "{settled}");
+    assert!(settled["head"].is_string(), "{settled}");
     let detail = settled["detail"]
         .as_str()
         .expect("the settlement says why")
@@ -2489,7 +2503,14 @@ fn a_cancelled_run_reads_no_merge_path_once_its_push_has_landed() {
     // And the host was asked exactly once, which is the same fact from the far
     // side: by the closeout, asking whether the session already holds a change
     // request. A second call would be the publication reading its merge path.
-    let asked: Vec<String> = gh_calls(&world)
+    // The visibility probe the push's public boundary asks is about the
+    // repository rather than the work, and is left out.
+    let asked: Vec<String> = world
+        .invocations()
+        .into_iter()
+        .filter(|call| call["tool"] == "gh" && !crate::harness::is_visibility_probe(call))
+        .map(|call| serde_json::from_value::<Vec<String>>(call["args"].clone()).expect("the argv"))
+        .collect::<Vec<_>>()
         .iter()
         .map(|call| call.iter().take(2).cloned().collect::<Vec<_>>().join(" "))
         .collect();

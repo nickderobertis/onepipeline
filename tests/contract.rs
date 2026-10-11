@@ -2220,6 +2220,60 @@ fn divergence_block(number: &str) -> Value {
     serde_json::from_str(block).unwrap_or_else(|e| panic!("entry {number}'s block is JSON: {e}"))
 }
 
+/// The stacked settlement entry 115 proposes is what this build registers for
+/// `node-settled`: the record its block writes — `base`, `head`, and a `stack` of
+/// parents with a stack base — is admitted by the published document, a stack parent
+/// missing its head or a stack whose parents are not a list is refused at its own
+/// pointer, and a settlement carrying none of the three keys still reads.
+#[test]
+fn the_stacked_settlement_is_what_the_divergence_record_names() {
+    use onepipeline::event::PipelineKind;
+    use onepipeline::payload::{registry, schema_of};
+    let block = divergence_block("115.");
+    let id = schema_of(PipelineKind::NodeSettled);
+    let registry = registry();
+    let settlement = block["settlement"].clone();
+    registry
+        .check(&id, &settlement)
+        .unwrap_or_else(|why| panic!("entry 115's settlement is refused: {why}"));
+    assert_eq!(
+        settlement["base"], settlement["stack"]["stack_base"],
+        "the entry's node is placed on its stack base"
+    );
+    let mut headless = settlement.clone();
+    headless["stack"]["parents"][0]
+        .as_object_mut()
+        .expect("a parent")
+        .remove("head");
+    assert!(
+        registry.check(&id, &headless).is_err(),
+        "a stack parent with no head was admitted"
+    );
+    let mut flat = settlement.clone();
+    flat["stack"]["parents"] = Value::String("me/a".into());
+    assert!(
+        registry.check(&id, &flat).is_err(),
+        "a stack with no parent list was admitted"
+    );
+    let mut parentless = settlement.clone();
+    parentless["stack"]["parents"] = serde_json::json!([]);
+    assert!(
+        registry.check(&id, &parentless).is_err(),
+        "a stack with no parents was admitted"
+    );
+    let mut earlier = settlement.as_object().expect("a settlement").clone();
+    for key in ["base", "head", "stack"] {
+        earlier.remove(key);
+    }
+    registry
+        .check(&id, &Value::Object(earlier))
+        .expect("a settlement written before the three keys still reads");
+    assert_eq!(
+        block["block_markers"],
+        serde_json::json!(["<!-- onepipeline:stack -->", "<!-- /onepipeline:stack -->"])
+    );
+}
+
 /// The release-adoption surface this build carries **beyond** the contract is
 /// exactly what the divergence record proposes.
 ///
