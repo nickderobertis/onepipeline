@@ -3992,8 +3992,9 @@ fn driver_exit_lines(view: &RunView) -> String {
     let unanswered = crate::channel::ChannelState::new(&view.paths).claimed_unanswered();
     if !unanswered.is_empty() {
         out.push_str(&format!(
-            "  claimed with no outcome: command envelope(s) {} — taken off the queue and never \
-             answered, so nothing applies them and their submitters were told nothing\n",
+            "  claimed with no outcome: command envelope(s) {} — taken off the queue and not \
+             answered yet, so their submitters have been told nothing; the run's next driver \
+             answers each before anything it claims itself\n",
             unanswered
                 .iter()
                 .map(u64::to_string)

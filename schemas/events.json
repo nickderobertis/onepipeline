@@ -1191,6 +1191,15 @@
               "type": "string"
             },
             "description": "Each operation's kind, in order."
+          },
+          "envelope": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0,
+            "description": "The command envelope it came in. Absent from a record written before the\nfield existed, and from one no queued envelope produced."
           }
         },
         "required": [
@@ -1238,6 +1247,15 @@
               "type": "string"
             },
             "description": "Each operation's kind, in order."
+          },
+          "envelope": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0,
+            "description": "The command envelope it came in. Absent from a record written before the\nfield existed, and from one no queued envelope produced."
           }
         },
         "required": [
@@ -1274,6 +1292,15 @@
           "reason": {
             "type": "string",
             "description": "Why it was refused."
+          },
+          "envelope": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0,
+            "description": "The command envelope it came in. Absent from a record written before the\nfield existed, and from one no queued envelope produced."
           }
         },
         "required": [
@@ -2188,6 +2215,15 @@
           "evidence": {
             "$ref": "#/$defs/EvidenceWord",
             "description": "What showed the presentation happening."
+          },
+          "envelope": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0,
+            "description": "The command envelope that delivered the note. Absent from a record\nwritten before the field existed, and for a note a dispatch's task was\ncomposed with."
           }
         },
         "required": [

@@ -982,6 +982,9 @@ impl Claimed {
 pub(crate) struct Undecodable {
     /// The record's `id` where it is an unsigned integer, else `0`.
     pub(crate) id: u64,
+    /// Whether that `id` is the record's own rather than the `0` it is answered
+    /// under for want of one: only then does a record of its refusal name it.
+    pub(crate) carries_id: bool,
     /// The record's `author` where it is one this build reads, else the planner.
     pub(crate) author: Author,
     /// Each command the record carried, exactly as sent — one that is not an
@@ -1011,8 +1014,10 @@ impl Undecodable {
                 .collect(),
             _ => vec![unreadable(record.clone())],
         };
+        let id = record.get("id").and_then(Value::as_u64);
         Self {
-            id: record.get("id").and_then(Value::as_u64).unwrap_or_default(),
+            id: id.unwrap_or_default(),
+            carries_id: id.is_some(),
             author: record
                 .get("author")
                 .and_then(|author| serde_json::from_value(author.clone()).ok())
@@ -2174,11 +2179,34 @@ impl ChannelState {
     /// queue's cursor — that has no outcome line, in claim order.
     ///
     /// An envelope taken off the queue and never answered is one whose submitter
-    /// was told nothing, and one no later writer claims again: the cursor is
-    /// already past it. Read leniently, as every view of the channel is: a
+    /// was told nothing, and one no later claim takes again: the cursor is
+    /// already past it. So a driver starting on the run takes these from here
+    /// rather than from the queue — see
+    /// [`claimed_unanswered_records`](Self::claimed_unanswered_records). Read leniently, as every view of the channel is: a
     /// channel this reader cannot open names nothing, and neither does one whose
     /// outcome log it cannot read — that would name every envelope ever answered.
     pub(crate) fn claimed_unanswered(&self) -> Vec<u64> {
+        self.unanswered_claims()
+            .iter()
+            .filter_map(|record| record.get("id").and_then(Value::as_u64))
+            .collect()
+    }
+
+    /// The records [`claimed_unanswered`](Self::claimed_unanswered) names, each
+    /// read as the reconciler reads a record it claims: what a driver taking the
+    /// run over owes an answer, in claim order.
+    ///
+    /// Read no more strictly than that list, for the same reason: an outcome log
+    /// this reader cannot read names nothing, rather than every envelope ever
+    /// answered — which a driver would then apply a second time.
+    pub(crate) fn claimed_unanswered_records(&self) -> Vec<Claimed> {
+        self.unanswered_claims()
+            .into_iter()
+            .map(Claimed::of)
+            .collect()
+    }
+
+    fn unanswered_claims(&self) -> Vec<Value> {
         if !self.paths.channel_dir().is_dir() {
             return Vec::new();
         }
@@ -2193,8 +2221,8 @@ impl ChannelState {
         };
         let mut claimed = Vec::new();
         for (record, after) in commands.log(None).unwrap_or_default() {
-            if let Some(id) = record.get("id").and_then(Value::as_u64) {
-                claimed.push(id);
+            if record.get("id").and_then(Value::as_u64).is_some() {
+                claimed.push(record);
             }
             if after == cursor {
                 break;
@@ -2207,7 +2235,12 @@ impl ChannelState {
             .iter()
             .filter_map(|(record, _)| record.get("id").and_then(Value::as_u64))
             .collect();
-        claimed.retain(|id| !answered.contains(id));
+        claimed.retain(|record| {
+            record
+                .get("id")
+                .and_then(Value::as_u64)
+                .is_some_and(|id| !answered.contains(&id))
+        });
         claimed
     }
 

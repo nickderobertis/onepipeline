@@ -1136,7 +1136,7 @@ pub struct StopGuardArgs {
 ///
 /// The listing — one target of three — or, with `--acknowledge`, the record that
 /// the session has seen and deliberately left one branch. What it promises is
-/// entry 113 of `docs/contract-divergences.md`.
+/// entry 114 of `docs/contract-divergences.md`.
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 pub struct UnpublishedArgs {
     /// The manager session: list the branches of every session its runs opened,

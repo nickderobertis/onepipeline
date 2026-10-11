@@ -543,6 +543,10 @@ pub(crate) struct EditCommitted {
     pub(crate) operations: Vec<Object>,
     /// Each operation's kind, in order.
     pub(crate) operation_kinds: Vec<String>,
+    /// The command envelope it came in. Absent from a record written before the
+    /// field existed, and from one no queued envelope produced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) envelope: Option<u64>,
 }
 
 /// `command-accepted`: an accepted command that committed nothing a reader folds.
@@ -556,6 +560,10 @@ pub(crate) struct CommandAccepted {
     pub(crate) operations: Vec<Object>,
     /// Each operation's kind, in order.
     pub(crate) operation_kinds: Vec<String>,
+    /// The command envelope it came in. Absent from a record written before the
+    /// field existed, and from one no queued envelope produced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) envelope: Option<u64>,
 }
 
 /// `edit-rejected`: a refused command and the reason its submitter was told.
@@ -567,6 +575,10 @@ pub(crate) struct EditRejected {
     pub(crate) command: Object,
     /// Why it was refused.
     pub(crate) reason: String,
+    /// The command envelope it came in. Absent from a record written before the
+    /// field existed, and from one no queued envelope produced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) envelope: Option<u64>,
 }
 
 /// `planner-surface-queued`: a surface sent.
@@ -1099,6 +1111,11 @@ pub(crate) struct NoteShown {
     pub(crate) turn: u64,
     /// What showed the presentation happening.
     pub(crate) evidence: EvidenceWord,
+    /// The command envelope that delivered the note. Absent from a record
+    /// written before the field existed, and for a note a dispatch's task was
+    /// composed with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) envelope: Option<u64>,
 }
 /// The word a run-end hook record names its hook by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1848,6 +1865,57 @@ mod tests {
         registry()
             .check(&id, &attributed)
             .unwrap_or_else(|refusal| panic!("an attributed record is refused: {refusal}"));
+    }
+
+    /// Each record an envelope's effects leave — `edit-committed`,
+    /// `command-accepted`, `edit-rejected` and `note-shown` — leaves `envelope`
+    /// optional: a record written before the field existed reads, writes back
+    /// without it, and validates, and one naming its envelope validates too.
+    #[test]
+    fn a_record_written_before_records_named_their_envelope_still_reads() {
+        let command = serde_json::json!({"op": "amend", "id": "build", "text": "smaller"});
+        let accepted = serde_json::json!({
+            "author": "planner", "command": command,
+            "operations": [{"kind": "task-amended", "node": "build", "text": "smaller"}],
+            "operation_kinds": ["task-amended"],
+        });
+        let rejected = serde_json::json!({
+            "author": "planner", "command": command, "reason": "refused: no such node",
+        });
+        let shown = serde_json::json!({
+            "addressee": "worker", "text": "stop", "reached": "worker",
+            "party": "worker", "turn": 3, "evidence": "delivered-origin",
+        });
+        fn written_back<T: serde::de::DeserializeOwned + Serialize>(older: &Value) -> T {
+            let read: T = serde_json::from_value(older.clone()).expect("an older record reads");
+            assert_eq!(&serde_json::to_value(&read).expect("it writes"), older);
+            read
+        }
+        assert_eq!(written_back::<EditCommitted>(&accepted).envelope, None);
+        assert_eq!(written_back::<CommandAccepted>(&accepted).envelope, None);
+        assert_eq!(written_back::<EditRejected>(&rejected).envelope, None);
+        assert_eq!(written_back::<NoteShown>(&shown).envelope, None);
+        for (kind, older) in [
+            (PipelineKind::EditCommitted, &accepted),
+            (PipelineKind::CommandAccepted, &accepted),
+            (PipelineKind::EditRejected, &rejected),
+            (PipelineKind::NoteShown, &shown),
+        ] {
+            let id = schema_of(kind);
+            registry()
+                .check(&id, older)
+                .unwrap_or_else(|refusal| panic!("an older {kind} is refused: {refusal}"));
+            let mut named = older.clone();
+            named["envelope"] = serde_json::json!(4);
+            registry().check(&id, &named).unwrap_or_else(|refusal| {
+                panic!("a {kind} naming its envelope is refused: {refusal}")
+            });
+            named["envelope"] = serde_json::json!("four");
+            assert!(
+                registry().check(&id, &named).is_err(),
+                "a {kind} naming its envelope by a word was admitted"
+            );
+        }
     }
 
     /// `pool-maintenance` and `branches-retired` each declare `cut_short` and

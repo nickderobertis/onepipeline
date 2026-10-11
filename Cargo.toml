@@ -643,7 +643,16 @@ resolver = "2"
 # requirement moves so the floor says the fix is in, and `onevcs-testing` 0.13.2
 # requires exactly `=0.42.2`, so the pair moves as one.
 #
-# `onevcs` 0.43.1 is the floor because it reads recovery rows at `Detail::Decision`
+# `onevcs` 0.43.1 is the floor because a publication watch reads the host's
+# declared required checks and keeps a required context with no run yet pending
+# (onevcs #339): an empty or partial rollup no longer reads as passed, so a change
+# is not recorded `checks-settled` before its aggregate gates have started.
+# `tests/onevcs_seam.rs` publishes through the simulated host with such a context
+# declared and reads the publication unsettled. A **requirement**, because `^0.42`
+# admits no 0.43.x; `onevcs-testing` 0.13.4 requires exactly `=0.43.1`, so the pair
+# moves as one.
+#
+# `onevcs` 0.43.1 also reads recovery rows at `Detail::Decision`
 # and reuses its proofs across calls: `src/unpublished.rs` decides whether a manager
 # session owes a preserved branch through `recoverable_matching` in process, inside
 # the Stop hook's budget. A **requirement**, because `^0.42` admits no 0.43.x;
@@ -898,10 +907,13 @@ onevcs-testing = "0.13.4"
 # repository installs as an `onetaskgraph` binary names another.
 #
 # 0.3.9 links the plan store that carries image assets in tasks and documents
-# across copies. `justfile`'s `onetaskgraph-version` moves with this release.
-onetaskgraph-core = "=0.3.9"
-onetaskgraph-plugin-api = "=0.3.9"
-onetaskgraph-local-md = "=0.3.9"
+# across copies. 0.3.10 keeps the metadata only a destination holds when a copy
+# updates it, source values winning shared keys (onetaskgraph #3567), so re-copying a
+# plan no longer deletes the design approvals recorded on the board's document.
+# `justfile`'s `onetaskgraph-version` moves with this release.
+onetaskgraph-core = "=0.3.10"
+onetaskgraph-plugin-api = "=0.3.10"
+onetaskgraph-local-md = "=0.3.10"
 # Not engines: two crates both members use, pinned once so they build against one version.
 # `just engines-current` reads only the engines its script names.
 sha2 = "0.10"

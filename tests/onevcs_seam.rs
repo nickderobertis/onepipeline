@@ -527,4 +527,39 @@ fn the_draft_lifecycle_answers_what_a_node_settles_on(root: &std::path::Path) {
         CheckState::Skipped
     );
     assert!(!check("lint", "skipped", "ready").green());
+
+    // A ready change whose host declares two required checks, only one of which
+    // has run: the one with no run yet is pending, not passed, so the watch does
+    // not settle — the publication ends `checks-unsettled`, naming the check
+    // nothing has vouched for, and no `checks-settled` is recorded. Before the
+    // linked `onevcs` 0.43.1 the reported check alone read as the whole set.
+    let host = MemoryHost::seeded(HostState {
+        checks: [(first.clone(), vec![check("lint", "success", "ready")])].into(),
+        required_checks: Some(onevcs::RequiredChecks {
+            checks: ["lint".to_owned(), "test".to_owned()].into(),
+            unconsulted: Default::default(),
+        }),
+        ..HostState::default()
+    });
+    let vcs = lifecycle_vcs(
+        MergePolicy::ChangeOpen,
+        Approvals::None,
+        Some(onevcs::rules::Drafts {
+            disabled: Some(true),
+            warn_on_early_lift: None,
+        }),
+    );
+    let (published, events) = published_through_the_lifecycle(root, "unstarted", &vcs, &host);
+    let PublishOutcome::Failed { kind, reason, .. } = &published.outcome else {
+        panic!(
+            "a change whose required check never ran ended as {:?}",
+            published.outcome
+        );
+    };
+    assert_eq!(*kind, onevcs::FailureKind::ChecksUnsettled, "{reason}");
+    assert!(reason.contains("test"), "{reason}");
+    assert!(
+        of_kind(&events, onevcs::EventKind::ChecksSettled).is_empty(),
+        "{events:?}"
+    );
 }
