@@ -1688,6 +1688,32 @@ fn a_runs_root_that_cannot_be_read_is_the_readings_root_error() {
     );
 }
 
+/// A reading that cannot reach standard output is the CLI's refusal, said on
+/// stderr, never a panic: `/dev/full` refuses every write with `ENOSPC`, in both
+/// forms.
+#[test]
+fn a_reading_that_cannot_be_written_is_refused_not_panicked_on() {
+    let world = World::new("host-view-full").with_env("HOSTNAME", HOST);
+    for args in [&["host"][..], &["host", "--json"][..]] {
+        let mut command = world.cmd(args);
+        command.stdout(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open("/dev/full")
+                .expect("/dev/full"),
+        );
+        let refused = world.run_on(command, &args.join(" "));
+        assert!(
+            refused.code != 0 && refused.code != 101,
+            "`{}` exited {} onto a full stdout: {}",
+            args.join(" "),
+            refused.code,
+            refused.stderr
+        );
+        refused.err_has("`host` could not write to standard output");
+    }
+}
+
 /// The phase record is measurement, never a condition of the answer: asked to
 /// append to a path it cannot write, `host` still answers and exits as it always
 /// does; asked to append to a file, it appends one line of its phases.

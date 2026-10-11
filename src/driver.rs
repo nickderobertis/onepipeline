@@ -253,14 +253,21 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             let host = verbs::host(&ledger::runs_root());
             {
                 let _render = crate::hostphases::phase("render");
-                if args.json {
+                let document = if args.json {
                     let reading = serde_json::to_string(&host.reading).map_err(|e| {
                         Error::Invalid(format!("the host's reading could not be rendered: {e}"))
                     })?;
-                    println!("{reading}");
+                    format!("{reading}\n")
                 } else {
-                    print!("{}", verbs::render_host(&host));
-                }
+                    verbs::render_host(&host)
+                };
+                // A reader that closed the pipe early gets the CLI's error exit, not a panic.
+                let mut out = std::io::stdout();
+                out.write_all(document.as_bytes())
+                    .and_then(|()| out.flush())
+                    .map_err(|e| {
+                        Error::Invalid(format!("`host` could not write to standard output: {e}"))
+                    })?;
             }
             crate::hostphases::flush();
             Ok(EXIT_SUCCESS)
