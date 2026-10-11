@@ -1219,12 +1219,14 @@ pub(crate) enum TokenReading {
 /// A record that is not procfs's spelling against what `ps` says now. One in
 /// `ps lstart`'s is the same within the one second it is spelled to, and
 /// otherwise [`TokenReading::Inexact`], never [`TokenReading::Different`]; one in
-/// neither spelling is no start this host could have given, so it is different.
+/// neither spelling is no start this host could have given, so it is different —
+/// unless `ps` answers it word for word, when it proves neither and is inexact.
 #[cfg(target_os = "linux")]
 fn legacy_reading(now: Option<&str>, recorded: &str) -> TokenReading {
     match (now.and_then(lstart_seconds), lstart_seconds(recorded)) {
-        _ if now == Some(recorded) => TokenReading::Same,
+        (_, None) if now == Some(recorded) => TokenReading::Inexact,
         (_, None) => TokenReading::Different,
+        _ if now == Some(recorded) => TokenReading::Same,
         (Some(now), Some(then)) if now.abs_diff(then) <= 1 => TokenReading::Same,
         _ => TokenReading::Inexact,
     }
@@ -2140,6 +2142,12 @@ mod tests {
         assert_eq!(
             legacy_reading(Some(recorded), "a token in no spelling this host writes"),
             TokenReading::Different
+        );
+        // A malformed record proves nothing even when `ps` repeats it word for word,
+        // and since `ps` did give it, it is not proof the process ended either.
+        assert_eq!(
+            legacy_reading(Some("not a time"), "not a time"),
+            TokenReading::Inexact
         );
     }
 
