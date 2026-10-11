@@ -472,6 +472,13 @@ pub(crate) fn restacks_owed(
         let Some(moved) = moved else {
             continue;
         };
+        // llmlint: ignore-block[changed_behavior_has_e2e] the two arms that owe nothing — a
+        // stack base whose root the record cannot name, and a stack base and parents that
+        // disagree — need a settlement this build never writes: every stacked settlement it
+        // records names its base, from which a root is read, and a stack base exactly when it
+        // has several parents. Reaching either end to end means a hand-edited journal, which
+        // would prove the fixture; `a_draft_owes_a_restack_only_on_a_record_it_can_restack_on`
+        // holds both over a run state, beside the owed case every restack journey drives.
         let stack =
             match (&recorded.stack_base, Several::of(parents)) {
                 (None, Err(mut one)) if one.len() == 1 => Stack::OnParent(one.remove(0)),
@@ -490,9 +497,9 @@ pub(crate) fn restacks_owed(
                 // A record whose stack base and parents disagree is not one this build
                 // writes, and restacking on it would be restacking on a guess.
                 _ => continue,
-            };
-        // A parent whose own restack moved it says so, and every other move is the
-        // rework that republished it.
+            }; // llmlint: ignore-end[changed_behavior_has_e2e]
+               // A parent whose own restack moved it says so, and every other move is the
+               // rework that republished it.
         let cause = if state.restacking.contains_key(&moved) || state.restacks.contains_key(&moved)
         {
             crate::payload::RestackCause::Restack
@@ -580,6 +587,94 @@ mod tests {
                 parents: Several::of(parents).expect("a stack base of two parents"),
             },
         }
+    }
+
+    /// A run state holding `nodes`, each lifecycle node settled `done` and unlanded
+    /// on `me/<id>` at `old-<id>`.
+    fn settled(nodes: Vec<Node>) -> (RunState, BTreeMap<String, NodeStatus>) {
+        let mut state = RunState::default();
+        let mut statuses = BTreeMap::new();
+        for node in nodes {
+            let id = node.id.clone();
+            state.graph.insert(node);
+            statuses.insert(id.clone(), NodeStatus::Done);
+            state.landings.insert(id.clone(), Landing::Unlanded);
+            state.branches.insert(id.clone(), format!("me/{id}"));
+            state.heads.insert(id.clone(), format!("old-{id}"));
+            state
+                .branch_heads
+                .insert(format!("me/{id}"), format!("old-{id}"));
+        }
+        (state, statuses)
+    }
+
+    fn node(id: &str, deps: &[&str]) -> Node {
+        Node {
+            id: id.into(),
+            repo: Some("service".into()),
+            deps: deps.iter().map(|dep| (*dep).to_owned()).collect(),
+            ..Node::default()
+        }
+    }
+
+    fn recorded(parents: &[&str], stack_base: Option<&str>) -> SettledStack {
+        SettledStack {
+            parents: parents
+                .iter()
+                .map(|id| StackParent {
+                    node: (*id).into(),
+                    branch: format!("me/{id}"),
+                    head: format!("old-{id}"),
+                })
+                .collect(),
+            stack_base: stack_base.map(str::to_owned),
+        }
+    }
+
+    /// A draft owes a restack once a stack parent's branch moves, and only onto a
+    /// record it can be restacked on: one parent, or a stack base over several
+    /// whose root the record names. A stack base whose root nothing names, and a
+    /// stack base beside a single parent, owe nothing.
+    #[test]
+    fn a_draft_owes_a_restack_only_on_a_record_it_can_restack_on() {
+        let (mut state, statuses) = settled(vec![
+            node("a", &[]),
+            node("d", &[]),
+            node("b", &["a"]),
+            node("e", &["a", "d"]),
+        ]);
+        state.stacks.insert("b".into(), recorded(&["a"], None));
+        state
+            .stacks
+            .insert("e".into(), recorded(&["a", "d"], Some("me/stack-base/p/e")));
+        assert!(restacks_owed(&state, &statuses, &|_| false).is_empty());
+
+        state.branch_heads.insert("me/a".into(), "new-a".into());
+        // No root on the record for `e`'s stack base: only `b` is owed.
+        let owed = restacks_owed(&state, &statuses, &|_| false);
+        assert_eq!(
+            owed.iter()
+                .map(|owed| owed.node.as_str())
+                .collect::<Vec<_>>(),
+            ["b"]
+        );
+        assert_eq!(owed[0].onto().as_slice()[0].head, "new-a");
+        assert_eq!(owed[0].cause, crate::payload::RestackCause::Rework);
+        // With its root named, `e` is owed too, onto its stack base.
+        state.bases.insert("a".into(), "main".into());
+        let owed = restacks_owed(&state, &statuses, &|_| false);
+        assert_eq!(owed.len(), 2);
+        assert!(matches!(
+            &owed[1].stack,
+            Stack::OnStackBase { root, branch, .. } if root == "main" && branch == "me/stack-base/p/e"
+        ));
+        // A stack base recorded beside one parent disagrees with itself: nothing.
+        state
+            .stacks
+            .insert("e".into(), recorded(&["a"], Some("me/stack-base/p/e")));
+        assert_eq!(restacks_owed(&state, &statuses, &|_| false).len(), 1);
+        // And a node something is busy with is left for later.
+        assert!(restacks_owed(&state, &statuses, &|node| node == "b").is_empty());
     }
 
     #[test]
