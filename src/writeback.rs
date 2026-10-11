@@ -297,6 +297,9 @@ struct Snapshot {
     claim: Claim,
     /// The run's term scope: the private repositories its plan names, which every
     /// public boundary check a write of this snapshot asks derives its terms from.
+    // llmlint: ignore[invalid_states_unrepresentable] the shape the store takes a scope in —
+    // `Engine::with_term_scope(Option<Vec<String>>)` — of identities `onevcs` checks where it
+    // derives terms from them; `boundary::Identity` says why no newtype here could hold more.
     term_scope: Vec<String>,
 }
 
@@ -1704,6 +1707,8 @@ struct Attempt {
     calls: std::cell::RefCell<BTreeMap<StoreCall, u64>>,
     written: std::cell::RefCell<BTreeMap<UpdatedField, u64>>,
     /// The term scope this attempt's store checks its writes over.
+    // llmlint: ignore[invalid_states_unrepresentable] the snapshot's own scope, kept to tell
+    // whether a retained store still checks over it; the reason is at `Snapshot::term_scope`.
     term_scope: Vec<String>,
 }
 

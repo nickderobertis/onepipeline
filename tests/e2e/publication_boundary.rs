@@ -1031,7 +1031,14 @@ fn the_compiled_validator_judges_targeted_and_untargeted_content_and_refuses_wha
     validated(
         &world,
         "validated",
-        &json!({"id": "s-1", "kind": "check-in", "message": "the zephyrine step is slow"}),
+        &json!({
+            "id": 1,
+            "kind": "check-in",
+            "message": "the zephyrine step is slow",
+            "source": "observer",
+            "blocking": false,
+            "queued_at": 0,
+        }),
     )
     .exited(exit_for("refuse"));
     let mut added = public("more-examples", &[]);
@@ -1186,6 +1193,54 @@ fn a_payload_once_passed_is_judged_again_after_the_terms_change_whatever_a_bus_c
         .trim()
         .to_owned();
     assert_ne!(before, after, "the fingerprint did not move with the terms");
+    let fingerprint = || {
+        world
+            .run(&[
+                "boundary",
+                "validate-envelope",
+                "--run",
+                "bussed",
+                "--fingerprint",
+            ])
+            .stdout
+            .trim()
+            .to_owned()
+    };
+    // It moves with a repository's visibility too, and with a declaration that can no
+    // longer be read — each a different key, so nothing cached before it is reused.
+    declare_visibility(&world, &[("service", "private"), ("library", "private")]);
+    let hidden = fingerprint();
+    assert_ne!(
+        after, hidden,
+        "the fingerprint did not move with a visibility"
+    );
+    declare_visibility(&world, &[("service", "private"), ("library", "public")]);
+    std::fs::write(
+        private.checkout.join("private-terms.toml"),
+        "schema_version = 1\nterms = [\n",
+    )
+    .expect("the declaration is broken");
+    crate::harness::git(
+        &world,
+        &private.checkout,
+        &["commit", "-qam", "chore: break it"],
+    );
+    let unreadable = fingerprint();
+    assert_ne!(
+        after, unreadable,
+        "the fingerprint did not move with an unreadable declaration"
+    );
+    assert_ne!(hidden, unreadable);
+    std::fs::write(
+        private.checkout.join("private-terms.toml"),
+        "schema_version = 1\nterms = [\"zephyrine\", \"quillwort\"]\n",
+    )
+    .expect("the declaration is restored");
+    crate::harness::git(
+        &world,
+        &private.checkout,
+        &["commit", "-qam", "chore: restore it"],
+    );
     // The same bytes are judged again, through the bus and directly, and refused.
     world
         .run_with_stdin(&["reply", "bussed"], &payload.to_string())
@@ -2228,7 +2283,13 @@ fn an_export_record_that_cannot_be_read_refuses_the_export_and_is_kept() {
         !world.events_of("recorded", "node-dispatched").is_empty()
     });
     let record = world.run_file("recorded", "exports.json");
+    // llmlint: ignore-block[tests_mirror_real_usage] an export record that cannot be read
+    // is a damaged durable file, which no interface writes — a torn write or a disk fault
+    // leaves it — so it is written here at the real boundary the engine reads it at, as
+    // the preserve-stacking journey damages a journal. Nothing of the engine, a session or
+    // a repository is substituted, and what is asserted is the compiled binary's refusal.
     std::fs::write(&record, "{ not a record").expect("the record is damaged");
+    // llmlint: ignore-end[tests_mirror_real_usage]
     world.release("generalize.go");
     world.until("the run to settle", |world| {
         world.run_file("recorded", "result.json").is_file()
@@ -2450,13 +2511,17 @@ fn the_validator_refuses_to_judge_a_malformed_document_and_reads_commands_as_the
         (json!({"commands": [{"id": "examples"}]}), "names no `op`"),
         (json!({"reply": "not a mapping"}), "not a mapping"),
         (
+            json!({"version": 3, "command": [{"op": "note", "id": "examples"}]}),
+            "none of a reply envelope",
+        ),
+        (
             json!({"commands": [{"op": "summon", "id": "examples"}]}),
-            "not one this build reads",
+            "none of a reply envelope",
         ),
         (
             json!({"commands": [{"op": "note", "id": "examples", "addressee": "worker",
                                  "text": "plain", "colour": "blue"}]}),
-            "not one this build reads",
+            "none of a reply envelope",
         ),
     ] {
         validated(&world, "shaped", &document)
@@ -2474,10 +2539,21 @@ fn the_validator_refuses_to_judge_a_malformed_document_and_reads_commands_as_the
     // scope — whatever a retry below does to the producer.
     let mut keeper = lifecycle("keeper", &[]);
     keeper["parked"] = json!(true);
+    // Two parked nodes naming no repository: one behind the private keeper, which makes it
+    // private, and one behind nothing, which leaves it public.
+    let mut relay = crate::harness::agent("relay", &["keeper"]);
+    relay["parked"] = json!(true);
+    let mut loose = crate::harness::agent("loose", &[]);
+    loose["parked"] = json!(true);
     reply(
         &world,
         "shaped",
-        json!([{"op": "add", "node": approval}, {"op": "add", "node": keeper}]),
+        json!([
+            {"op": "add", "node": approval},
+            {"op": "add", "node": keeper},
+            {"op": "add", "node": relay},
+            {"op": "add", "node": loose},
+        ]),
     );
     world.until("the approval to join the graph", |world| {
         world
@@ -2497,6 +2573,42 @@ fn the_validator_refuses_to_judge_a_malformed_document_and_reads_commands_as_the
         &json!({"version": 3, "commands": [{"op": "attest", "ref": "nowhere"}]}),
     )
     .exited(exit_for("unavailable"));
+
+    // Every edit of an envelope is judged as it would leave the graph: detaching the
+    // relay from the private keeper makes it public, so a note to it in the same envelope
+    // carrying a private term is refused; reparenting the loose node behind the keeper
+    // makes it private, so the same note to it passes.
+    let to = |id: &str| note(id, "follow the zephyrine layout");
+    validated(
+        &world,
+        "shaped",
+        &json!({"version": 3, "commands": [to("relay")]}),
+    )
+    .exited(exit_for("pass"));
+    validated(
+        &world,
+        "shaped",
+        &json!({"version": 3, "commands": [
+            {"op": "drop", "id": "keeper", "dependents": "detach"},
+            to("relay"),
+        ]}),
+    )
+    .exited(exit_for("refuse"));
+    validated(
+        &world,
+        "shaped",
+        &json!({"version": 3, "commands": [to("loose")]}),
+    )
+    .exited(exit_for("refuse"));
+    validated(
+        &world,
+        "shaped",
+        &json!({"version": 3, "commands": [
+            {"op": "reparent", "id": "loose", "deps": ["keeper"]},
+            to("loose"),
+        ]}),
+    )
+    .exited(exit_for("pass"));
 
     // A retry is judged by the replacement it would put in: retried into the public
     // repository, the producer's replacement is public and its private term refused;
@@ -2623,4 +2735,48 @@ fn a_change_request_description_is_written_over_the_run_scope() {
     let detail = detail_of(&world, "cites-a", "described-cites-a");
     assert!(detail.contains("was not written onto"), "{detail}");
     assert!(!detail.contains("owner/service"), "{detail}");
+}
+
+#[cfg(unix)]
+#[test]
+fn an_adopting_driver_resumes_a_consumer_from_the_export_its_predecessor_recorded() {
+    let (world, _, library) = mixed_world("boundary-adopted");
+    world.script("generalize.work-at", "examples/generic/sample.md");
+    world.script("generalize.work", "a generic example\n");
+    world.script("examples.work", "built on it\n");
+    world.script("examples.wait", "hold");
+    let project = world.plan("adopted", &exported_plan("adopted"));
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the consumer to hold its session", |world| {
+        !branches_of(world, "adopted", "examples").is_empty()
+    });
+    let exported = world.run_json("adopted", "exports.json")[0]["exported"]
+        .as_str()
+        .expect("the recorded export")
+        .to_owned();
+    // The driver goes away with the consumer mid-dispatch; another takes the run over.
+    crate::harness::end_driver(&world, "adopted");
+    world.release("examples.go");
+    world.run(&["adopt", "adopted", "--attach"]).settled();
+
+    let consumer = settled(&world, "adopted", "examples");
+    assert_eq!(consumer["status"], "done", "{consumer}\n{}", world.dump());
+    // Every session the consumer opened, under either driver, is the one recorded export;
+    // the record holds that one export and no other.
+    let opened = branches_of(&world, "adopted", "examples");
+    assert!(!opened.is_empty());
+    for branch in &opened {
+        assert_eq!(branch, &exported);
+    }
+    let recorded = world.run_json("adopted", "exports.json");
+    assert_eq!(recorded.as_array().map(Vec::len), Some(1), "{recorded}");
+    git_out(&world, &library.checkout, &["fetch", "origin"]);
+    assert_eq!(
+        git_out(
+            &world,
+            &library.checkout,
+            &["show", "origin/main:examples/sample.md"]
+        ),
+        "a generic example"
+    );
 }

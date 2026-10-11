@@ -56,6 +56,11 @@ pub(crate) struct Repository {
 }
 
 /// How a term scope names a repository.
+// llmlint: ignore-block[invalid_states_unrepresentable] each is the string `onevcs` itself
+// takes a scope as — `TermScope::Identities(Vec<String>)` — and the boundary is the
+// sibling's: it normalizes a key, refuses one it has not registered as unavailable, and
+// names neither, because the name may be private. A newtype here could hold no invariant
+// the sibling does not check at the one place the scope is used.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Identity {
     /// The `onevcs` identity key the host resolved it to.
@@ -64,6 +69,8 @@ pub(crate) enum Identity {
     /// it as it is, and answers it unavailable rather than passing.
     Unresolved(String),
 }
+
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 impl Identity {
     /// The word a term scope carries for it.
@@ -142,6 +149,11 @@ pub(crate) fn repositories_of(node: &Node) -> Vec<&str> {
 }
 
 /// How the boundary stands for one plan.
+// llmlint: ignore-block[invalid_states_unrepresentable] node ids are the plain `String`
+// every map of `RunState` keys by — `branches`, `heads`, `superseded` — validated where the
+// graph took each node, and `scope` is the `onevcs` identity list `Identity` above says
+// why is a string; a newtype on these alone would disagree with every map it is read
+// beside and convert at each read, which `src/AGENTS.md` names as drift.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Resolved {
     /// Every node's clearance, by id.
@@ -151,6 +163,7 @@ pub(crate) struct Resolved {
     /// The run's term scope: the identity of every private repository a node names.
     pub(crate) scope: Vec<String>,
 }
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 impl Resolved {
     /// Whether the plan holds both a private node and a public destination.
@@ -439,6 +452,10 @@ pub(crate) struct Dispatching {
 
 /// One dispatch's side of a mixed plan's boundary: each of the three roles a node can
 /// have there, carrying exactly what that role is given.
+// llmlint: ignore-block[invalid_states_unrepresentable] a branch name here is a
+// *proposal* handed to `onevcs` as `SessionRequest::branch_name: Option<String>`, which the
+// sibling sanitizes into a name git accepts and refuses by naming it; it is composed only
+// in `dispatching` from a fixed shape and an opaque hex id, so no caller can hand one in.
 #[derive(Debug, Clone)]
 enum Side {
     /// A private node that produces no export.
@@ -464,6 +481,7 @@ enum Side {
         export: Option<Export>,
     },
 }
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 impl Dispatching {
     /// The section appended to the task, in a mixed plan.
@@ -510,6 +528,11 @@ impl Serialize for Mixed {
 }
 
 /// The template context a mixed plan's dispatch receives.
+// llmlint: ignore-block[invalid_states_unrepresentable] both directories are an export
+// edge's own, which `check_edges` held to `normalized` — the grammar
+// `the_directory_grammar_is_the_one_onevcs_export_holds_a_directory_to` reconciles with
+// the sibling's — before any plan carrying them could load or be edited in; this value is
+// built from that edge and only serialized, into the contract's JSON shape.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct Context {
     /// Always `true`.
@@ -523,6 +546,7 @@ struct Context {
     #[serde(skip_serializing_if = "Option::is_none")]
     target_directory: Option<String>,
 }
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// One export a consumer's session starts from.
 // llmlint: ignore-block[invalid_states_unrepresentable] every field but the ordinal is a
@@ -1079,6 +1103,19 @@ pub(crate) fn judge(
     if !resolved.mixed() {
         return Judged::Pass;
     }
+    // A node an envelope drops is gone from the graph it leaves, so its own command is
+    // judged by the clearance the node had: resolved only where an envelope drops one.
+    let before = commands
+        .iter()
+        .any(|command| matches!(command, crate::channel::Command::Drop { .. }))
+        .then(|| resolve(&plan_now(state), oracle));
+    let clearance_of = |target: &str| {
+        resolved.clearances.get(target).copied().or_else(|| {
+            before
+                .as_ref()
+                .and_then(|before| before.clearances.get(target).copied())
+        })
+    };
     let mut ask = |text: Vec<String>, about: &str| -> Option<Judged> {
         if text.is_empty() {
             return None;
@@ -1113,16 +1150,16 @@ pub(crate) fn judge(
             crate::channel::Command::Retry { node, .. } => Some(node.id.clone()),
             _ => crate::channel::target_of(command),
         };
-        match target {
-            Some(target) if !resolved.clearances.contains_key(&target) => {
+        match target.map(|target| (clearance_of(&target), target)) {
+            Some((None, _)) => {
                 if let Some(judged) = unjudgeable(&format!(
                     "`{op}`: the node it names has no clearance in this run"
                 )) {
                     return judged;
                 }
             }
-            Some(target) => {
-                if resolved.clearance(&target) == Clearance::Public {
+            Some((Some(clearance), target)) => {
+                if clearance == Clearance::Public {
                     if let Some(judged) = ask(text, &format!("`{op}` for public node {target}")) {
                         return judged;
                     }
@@ -1212,7 +1249,22 @@ fn well_formed(document: &serde_json::Value) -> Result<(), String> {
             return Err("a command in it names no `op`".to_owned());
         }
     }
-    Ok(())
+    // And it is one of the records the channel itself writes, read as that record: a
+    // misspelled field is not quietly read as an envelope carrying nothing to judge.
+    let reads_as = |document: &serde_json::Value| {
+        serde_json::from_value::<crate::channel::Reply>(document.clone()).is_ok()
+            || serde_json::from_value::<crate::channel::QueuedReply>(document.clone()).is_ok()
+            || serde_json::from_value::<crate::channel::QueuedCommands>(document.clone()).is_ok()
+            || serde_json::from_value::<crate::channel::layout::Surface>(document.clone()).is_ok()
+    };
+    if reads_as(document) {
+        Ok(())
+    } else {
+        Err(
+            "it is none of a reply envelope, a routed reply or command record, or a surface"
+                .to_owned(),
+        )
+    }
 }
 
 /// What a bus pass cache keys a pass by beside the payload's bytes: a digest of the run's
