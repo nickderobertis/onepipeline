@@ -451,6 +451,10 @@ fn timed(host: &Host, scenario: &str, acknowledgements: &Path, cold: bool) -> (S
 }
 
 /// Generated load workers, started for a load run alone and ended with it.
+///
+/// `Drop` ends them when the journey returns or panics. A runner that terminates
+/// the journey skips `Drop`, so each worker also stops once the journey process
+/// that started it (`$PPID`) is gone, instead of loading the host indefinitely.
 struct Load(Vec<std::process::Child>);
 
 impl Load {
@@ -461,7 +465,7 @@ impl Load {
                 Command::new("sh")
                     .args([
                         "-c",
-                        "while :; do head -c 4000000 /dev/urandom | gzip -c > /dev/null; done",
+                        "while kill -0 \"$PPID\" 2>/dev/null; do head -c 4000000 /dev/urandom | gzip -c > /dev/null; done",
                     ])
                     // Its own group, so the pipeline it is running ends with it.
                     .process_group(0)
