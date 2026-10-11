@@ -5183,55 +5183,54 @@ mod tests {
             EngineError::DependencyCycle {
                 tasks: vec![id(), id()],
             },
-            // The public boundary's refusals, each under the store's own kind.
             EngineError::NotPrivateDestination {
-                item: "a".into(),
+                item: "plans:a".into(),
                 destination: "plans".into(),
-                declared: onetaskgraph_core::config::SourceVisibility::Unknown,
+                declared: onetaskgraph_core::config::SourceVisibility::Public,
             },
             EngineError::DestinationNotPrivate {
-                item: "a".into(),
+                item: "plans:a".into(),
                 destination: "plans".into(),
                 reality: onetaskgraph_plugin_api::Visibility::Public,
             },
             EngineError::VisibilityUnreadable {
-                item: "a".into(),
+                item: "plans:a".into(),
                 destination: "plans".into(),
                 error: source.clone(),
             },
             EngineError::BoundaryRefused {
-                item: "a".into(),
+                item: "plans:a".into(),
                 destination: "plans".into(),
                 reason: words(),
             },
             EngineError::BoundaryUnavailable {
-                item: "a".into(),
+                item: "plans:a".into(),
                 destination: "plans".into(),
                 reason: words(),
             },
             EngineError::PrivateReference {
-                item: "a".into(),
+                item: "plans:a".into(),
                 destination: "plans".into(),
-                named: "tickets".into(),
+                named: "vault".into(),
             },
             EngineError::PrivateItemReference {
-                item: "a".into(),
+                item: "plans:a".into(),
                 destination: "plans".into(),
-                reference: "tickets:a".into(),
+                reference: "vault:b".into(),
             },
             EngineError::ReferenceUnclassified {
-                item: "a".into(),
-                reference: "tickets:a".into(),
+                item: "plans:a".into(),
+                reference: "vault:b".into(),
                 destination: "plans".into(),
                 why: words(),
             },
             EngineError::ProjectUnclassified {
-                project: "plans:a".into(),
+                project: "plans:p".into(),
                 why: words(),
             },
             EngineError::PrivateMemberOfPublicProject {
-                item: "a".into(),
-                project: "plans:a".into(),
+                item: "plans:a".into(),
+                project: "plans:p".into(),
             },
             // A copy that could not be undone takes the class and kind of the failure it wraps.
             EngineError::CopyNotUndone {
