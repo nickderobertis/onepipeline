@@ -73,9 +73,8 @@ const failure = (done) =>
     ? `could not run: ${done.error.message}`
     : `exited ${done.status ?? `on ${done.signal}`}: ${done.stderr}`;
 
-/** A wall-clock mark the read stamped, in nanoseconds since the epoch, or null where it stamped none. */
+/** A wall-clock mark the read stamped, in nanoseconds since the epoch; every read stamps both. */
 function mark(value, label, name) {
-  if (value === undefined) return null;
   // Nanoseconds since the epoch are past the safe-integer range, and parse as a
   // number to well under a microsecond, which is all a millisecond figure needs.
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0)
@@ -112,19 +111,36 @@ function read(args, label) {
   } catch (error) {
     throw new Error(`${label}: the read's phase line is not JSON (${error.message})`);
   }
-  const marks = line.marks_unix_ns ?? {};
+  // The line every read writes as it ends: its marks, the phases it entered and the
+  // quantities it counted. A phase it never entered and a quantity it never counted
+  // are absent from their maps, which is what reads as unmeasured or zero below; a
+  // line missing any part is not one this binary wrote.
+  const isMap = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+  if (
+    !isMap(line) ||
+    !isMap(line.marks_unix_ns) ||
+    !isMap(line.phases) ||
+    !isMap(line.quantities) ||
+    !Number.isSafeInteger(line.read_bytes) ||
+    line.read_bytes < 0
+  ) {
+    throw new Error(
+      `${label}: the read's phase line lacks its marks, phases, quantities or read bytes: ${text.trim()}`,
+    );
+  }
+  const marks = line.marks_unix_ns;
   const run = mark(marks.run, label, "run");
   const flushed = mark(marks.flushed, label, "flushed");
   const breakdown = Object.fromEntries(
-    BREAKDOWN.map(([key, name]) => [key, line.phases?.[name]?.wall_ms ?? null]),
+    BREAKDOWN.map(([key, name]) => [key, line.phases[name]?.wall_ms ?? null]),
   );
   Object.assign(breakdown, {
-    process_start_ms: run === null ? null : Math.max(0, run / 1e6 - spawnedMs),
-    exit_ms: flushed === null ? null : Math.max(0, spawnedMs + wallMs - flushed / 1e6),
-    live_runs_folded: line.phases?.["live-fold"]?.count ?? 0,
-    live_journal_bytes: line.quantities?.["live-journal-bytes"] ?? 0,
-    cold_journal_bytes: line.quantities?.["cold-journal-bytes"] ?? null,
-    read_bytes: line.read_bytes ?? null,
+    process_start_ms: Math.max(0, run / 1e6 - spawnedMs),
+    exit_ms: Math.max(0, spawnedMs + wallMs - flushed / 1e6),
+    live_runs_folded: line.phases["live-fold"]?.count ?? 0,
+    live_journal_bytes: line.quantities["live-journal-bytes"] ?? 0,
+    cold_journal_bytes: line.quantities["cold-journal-bytes"] ?? null,
+    read_bytes: line.read_bytes,
   });
   return { wallMs, stdout: done.stdout, breakdown };
 }
@@ -261,8 +277,8 @@ try {
       stale_entries: manifest.expected.stale.length,
     },
     steady: {
-      // Read from the binary, so the reporter's release-only check refuses a
-      // measurement of any other build.
+      // Read from the binary, so the reporter's check refuses a measurement of an
+      // unstripped build such as a debug one.
       build: buildOf(binary),
       reads_ms: measured.walls,
       median_ms: median(measured.walls),

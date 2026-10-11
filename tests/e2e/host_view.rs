@@ -1793,11 +1793,21 @@ fn the_budget_measurement_records_what_each_scaling_read_opened() {
         bin.display(),
         std::env::var("PATH").unwrap_or_default()
     );
+    // The measurement times only a stripped binary, as the release profile leaves the
+    // one a user runs, so it is handed a stripped copy of this suite's build.
+    let stripped = world.root.join("stripped").join("onepipeline");
+    std::fs::create_dir_all(stripped.parent().expect("a parent")).expect("a directory");
+    std::fs::copy(crate::harness::binary(), &stripped).expect("a copy of the binary");
+    let strip = Command::new("strip")
+        .arg(&stripped)
+        .status()
+        .expect("binutils' strip runs");
+    assert!(strip.success(), "strip refused the suite's build");
     let measure = |record: &Path, refuse: Option<&str>| {
         let mut command = Command::new("node");
         command
             .arg(crate::harness::repo_file("scripts/host-view-measure.mjs"))
-            .arg(crate::harness::binary())
+            .arg(&stripped)
             .arg(record)
             .env("PATH", &path)
             .stdin(Stdio::null());
@@ -1832,6 +1842,7 @@ fn the_budget_measurement_records_what_each_scaling_read_opened() {
         "one traced read per size"
     );
     let held = read_json(&record);
+    assert_eq!(held["steady"]["build"], "stripped", "{held}");
     let sizes = held["scaling"]["sizes"].as_array().expect("the sizes");
     assert_eq!(sizes.len(), 3, "{held}");
     for (size, roots) in sizes.iter().zip([100, 400, 800]) {

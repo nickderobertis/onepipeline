@@ -301,7 +301,7 @@ fn host_view_record() -> serde_json::Value {
         "binary": "/usr/local/bin/onepipeline",
         "runs_root": {"run_roots": 100, "live_dispatches": 5, "stale_entries": 4},
         "steady": {
-            "build": "release",
+            "build": "stripped",
             "reads_ms": [12.5, 31.0, 9.5, 14.0, 13.0],
             "median_ms": 13.0,
             "load1": 2.5,
@@ -328,7 +328,7 @@ fn host_view_record() -> serde_json::Value {
 
 /// The reporter reports only what the measurement recorded: the slowest steady single read
 /// as the value, since each is judged, and the rest as detail. A record that is missing, that
-/// the measurement did not write, or that times anything but the release build is refused,
+/// the measurement did not write, or that times an unstripped build is refused,
 /// and so is a run outside the checker — never a value nobody measured.
 #[cfg(unix)]
 #[test]
@@ -502,9 +502,9 @@ fn the_host_view_measurement_and_journeys_share_one_generator() {
     );
 }
 
-/// The measurement records a read only when the read answered: a binary that fails, and one
-/// that exits 0 having recorded no phases, each fail the measurement naming what to do next,
-/// and neither leaves a record behind.
+/// The measurement records a read only when the read answered: a binary that fails, one that
+/// exits 0 having recorded no phases, and one whose phase line is empty each fail the
+/// measurement naming what to do next, and none leaves a record behind.
 #[cfg(unix)]
 #[test]
 fn the_host_view_measurement_records_nothing_from_a_read_that_failed() {
@@ -518,6 +518,11 @@ fn the_host_view_measurement_records_nothing_from_a_read_that_failed() {
     for (name, body, says) in [
         ("failing", "echo refused >&2; exit 3", "exited 3"),
         ("silent", "echo '{}'", "recorded no phase line"),
+        (
+            "hollow",
+            "echo '{}' > \"$ONEPIPELINE_HOST_PHASES\"",
+            "lacks its marks, phases, quantities or read bytes",
+        ),
     ] {
         let binary = dir.join(name);
         std::fs::write(&binary, format!("#!/bin/sh\n{body}\n")).expect("a stand-in binary");
@@ -819,7 +824,7 @@ fn the_host_view_measurement_counts_the_journals_a_traced_read_opened() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The build the measurement records is read from the binary it timed, so a debug build
+/// Whether the timed binary is stripped is read from the binary itself, so a debug build
 /// passed for the release one is named as what it is and the reporter refuses its record.
 #[cfg(target_os = "linux")]
 #[test]
@@ -855,7 +860,7 @@ fn the_host_view_measurement_reads_the_build_from_the_binary() {
         .status()
         .expect("binutils' strip runs");
     assert!(strip.success());
-    assert_eq!(build(&stripped), "release");
+    assert_eq!(build(&stripped), "stripped");
     let script = dir.join("onepipeline.sh");
     std::fs::write(&script, "#!/bin/sh\n").expect("a script");
     assert_eq!(build(&script), "not an ELF executable");
@@ -869,5 +874,5 @@ fn the_host_view_measurement_reads_the_build_from_the_binary() {
     let result = dir.join("result.json");
     let refused = host_view_report(&dir, Some(&result));
     assert!(!refused.status.success());
-    assert!(String::from_utf8_lossy(&refused.stderr).contains("steady.build must be release"));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("steady.build must be stripped"));
 }

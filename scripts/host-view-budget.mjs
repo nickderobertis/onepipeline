@@ -80,30 +80,40 @@ function readRecord() {
 }
 
 /**
- * The build a binary is, read from its own ELF section table rather than taken
- * from whoever passed it: `release` when it carries neither a symbol table nor
- * debug info, as this crate's release profile (`strip = true`) leaves it;
- * `unstripped` when it carries either, as a debug build does; `not an ELF
- * executable` for anything else.
+ * Whether a binary is stripped, read from its own ELF section table rather than
+ * taken from whoever passed it: `stripped` when it carries neither a symbol table
+ * nor debug info, as this crate's release profile (`strip = true`) leaves the
+ * binary a user runs; `unstripped` when it carries either, as a debug build does;
+ * `not an ELF executable` for anything else, a malformed section table included.
+ * Stripping is what the binary shows; it does not prove the optimisation level.
  */
 export function buildOf(path) {
   const elf = readFileSync(path);
+  const unreadable = "not an ELF executable";
   // ELF64, little-endian: the only shape the Linux runners the budget is taken on build.
   if (elf.length < 64 || elf.readUInt32BE(0) !== 0x7f454c46 || elf[4] !== 2 || elf[5] !== 1) {
-    return "not an ELF executable";
+    return unreadable;
   }
-  const offset = Number(elf.readBigUInt64LE(0x28));
+  const offset = elf.readBigUInt64LE(0x28);
   const size = elf.readUInt16LE(0x3a);
   const count = elf.readUInt16LE(0x3c);
-  const header = (n) => offset + n * size;
-  if (count === 0 || header(count) > elf.length) return "not an ELF executable";
-  const strings = Number(elf.readBigUInt64LE(header(elf.readUInt16LE(0x3e)) + 0x18));
+  const index = elf.readUInt16LE(0x3e);
+  // A section header is 64 bytes in ELF64, and the table lies wholly inside the file.
+  if (size !== 64 || count === 0 || index >= count) return unreadable;
+  if (offset + BigInt(count * size) > BigInt(elf.length)) return unreadable;
+  const header = (n) => Number(offset) + n * size;
+  const stringsAt = elf.readBigUInt64LE(header(index) + 0x18);
+  const stringsSize = elf.readBigUInt64LE(header(index) + 0x20);
+  if (stringsAt + stringsSize > BigInt(elf.length)) return unreadable;
+  const strings = elf.subarray(Number(stringsAt), Number(stringsAt + stringsSize));
   const names = new Set();
   for (let n = 0; n < count; n += 1) {
-    const start = strings + elf.readUInt32LE(header(n));
-    names.add(elf.toString("latin1", start, elf.indexOf(0, start)));
+    const start = elf.readUInt32LE(header(n));
+    const end = strings.indexOf(0, start);
+    if (start >= strings.length || end === -1) return unreadable;
+    names.add(strings.toString("latin1", start, end));
   }
-  return names.has(".symtab") || names.has(".debug_info") ? "unstripped" : "release";
+  return names.has(".symtab") || names.has(".debug_info") ? "unstripped" : "stripped";
 }
 
 /** Refuse a record this command cannot vouch for; answer it otherwise. */
@@ -111,8 +121,10 @@ export function validateRecord(held) {
   if (held === null || typeof held !== "object" || held.schema_version !== 1) {
     fail("schema_version must be 1");
   }
-  if (held.steady?.build !== "release") {
-    fail("steady.build must be release: the budget times the binary a user runs");
+  if (held.steady?.build !== "stripped") {
+    fail(
+      "steady.build must be stripped: the budget times the binary a user runs, which the release profile strips",
+    );
   }
   if (reads(held.steady.reads_ms, "steady.reads_ms").length !== READS) {
     fail(`steady.reads_ms must hold the ${READS} single reads the budget judges`);
@@ -224,7 +236,7 @@ function breakdown(phases) {
 function detail(held) {
   const steady = held.steady;
   const parts = [
-    `slowest of ${steady.reads_ms.length} steady single reads of the release build over the ${held.runs_root.run_roots}-run fixture, each judged: ` +
+    `slowest of ${steady.reads_ms.length} steady single reads of the stripped build over the ${held.runs_root.run_roots}-run fixture, each judged: ` +
       `${steady.reads_ms.map(fixed).join(", ")} ms; median ${fixed(steady.median_ms)} ms (reported, not the budget); load1 ${fixed(steady.load1)}`,
     `breakdown: ${breakdown(steady.breakdown)}`,
     "every ended run's journal unreadable to the reads; that none is opened is held under strace by tests/e2e/host_view.rs",
