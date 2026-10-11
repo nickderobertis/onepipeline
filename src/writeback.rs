@@ -639,6 +639,21 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         // llmlint: ignore[changed_behavior_has_e2e] unreachable from a write-back: only `project graph` raises these, and a write-back reads and copies but never draws a graph; `writeback::tests` holds each word.
         EngineError::GraphGroupNotText { .. } => decided("graph-group"),
         EngineError::DependencyCycle { .. } => decided("dependency-cycle"),
+        // llmlint: ignore-block[changed_behavior_has_e2e] reached only when the `onetaskgraph.yaml` opts into the store's public boundary, which no journey configures; `writeback::tests::every_engine_failure_is_named_as_the_store_names_it` holds each word to `onetaskgraph_core::Failure::from`.
+        EngineError::NotPrivateDestination { .. } => decided("not-private-destination"),
+        EngineError::DestinationNotPrivate { .. } => decided("destination-not-private"),
+        EngineError::BoundaryRefused { .. } => decided("boundary-refused"),
+        EngineError::BoundaryUnavailable { .. } => decided("boundary-unavailable"),
+        EngineError::PrivateReference { .. } | EngineError::PrivateItemReference { .. } => {
+            decided("private-reference")
+        }
+        EngineError::ReferenceUnclassified { .. } => decided("reference-unclassified"),
+        EngineError::ProjectUnclassified { .. } => decided("project-unclassified"),
+        EngineError::PrivateMemberOfPublicProject { .. } => decided("private-member"),
+        EngineError::VisibilityUnreadable { error, .. } => {
+            ("visibility-unreadable".to_owned(), Some(error))
+        }
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         EngineError::DestinationUnavailable { error, .. }
         | EngineError::SourceRefused { error, .. }
         | EngineError::SourceUnavailable { error, .. }
@@ -5106,6 +5121,55 @@ mod tests {
             },
             EngineError::DependencyCycle {
                 tasks: vec![id(), id()],
+            },
+            EngineError::NotPrivateDestination {
+                item: "plans:a".into(),
+                destination: "plans".into(),
+                declared: onetaskgraph_core::config::SourceVisibility::Public,
+            },
+            EngineError::DestinationNotPrivate {
+                item: "plans:a".into(),
+                destination: "plans".into(),
+                reality: onetaskgraph_plugin_api::Visibility::Public,
+            },
+            EngineError::VisibilityUnreadable {
+                item: "plans:a".into(),
+                destination: "plans".into(),
+                error: source.clone(),
+            },
+            EngineError::BoundaryRefused {
+                item: "plans:a".into(),
+                destination: "plans".into(),
+                reason: words(),
+            },
+            EngineError::BoundaryUnavailable {
+                item: "plans:a".into(),
+                destination: "plans".into(),
+                reason: words(),
+            },
+            EngineError::PrivateReference {
+                item: "plans:a".into(),
+                destination: "plans".into(),
+                named: "vault".into(),
+            },
+            EngineError::PrivateItemReference {
+                item: "plans:a".into(),
+                destination: "plans".into(),
+                reference: "vault:b".into(),
+            },
+            EngineError::ReferenceUnclassified {
+                item: "plans:a".into(),
+                reference: "vault:b".into(),
+                destination: "plans".into(),
+                why: words(),
+            },
+            EngineError::ProjectUnclassified {
+                project: "plans:p".into(),
+                why: words(),
+            },
+            EngineError::PrivateMemberOfPublicProject {
+                item: "plans:a".into(),
+                project: "plans:p".into(),
             },
             // A copy that could not be undone takes the class and kind of the failure it wraps.
             EngineError::CopyNotUndone {
