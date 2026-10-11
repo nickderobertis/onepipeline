@@ -5884,7 +5884,7 @@ fn spawn(
                     &launched.node_graph,
                     &node,
                     &references,
-                    launched.boundary.section.as_deref(),
+                    launched.boundary.section(),
                     &cancel,
                     &tx,
                     &ended,

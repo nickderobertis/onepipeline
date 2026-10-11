@@ -497,14 +497,15 @@ fn attempt_once(
     // every time after. Its session continues that branch, so nothing here ever falls
     // back to the default base, and a refused export refuses the node before any
     // dispatch, in the export's own neutral words.
-    if let (Some(pinned), Some(_)) = (&branch, &launch.boundary.export) {
-        if !crate::boundary::is_recorded_export(paths, pinned) {
+    if let (Some(pinned), Some(export)) = (&branch, launch.boundary.export()) {
+        let held = crate::boundary::pinned_to_its_export(paths, export, pinned);
+        if !matches!(held, Ok(true)) {
             return Attempt::settled(Settlement {
-                detail: Some(
+                detail: Some(held.err().unwrap_or_else(|| {
                     "an export's consumer is pinned to a branch that is not its export, and its \
                      session starts from its export or not at all"
-                        .to_owned(),
-                ),
+                        .to_owned()
+                })),
                 ..Settlement::plain(
                     &node.id,
                     NodeStatus::Failed,
@@ -513,7 +514,7 @@ fn attempt_once(
             });
         }
     }
-    if let (None, Some(export)) = (&branch, &launch.boundary.export) {
+    if let (None, Some(export)) = (&branch, launch.boundary.export()) {
         match crate::boundary::ensure_export(paths, export, &launch.boundary.term_scope) {
             Ok(exported) => branch = Some(exported),
             Err(why) => {
@@ -591,8 +592,8 @@ fn attempt_once(
             // A public node of a mixed plan, and an export producer, cut a neutral name
             // in place of the plan-derived one: what names the plan or its nodes is
             // exactly what neither may carry.
-            None if launch.boundary.branch_name.is_some() => SessionRequest {
-                branch_name: launch.boundary.branch_name.clone(),
+            None if launch.boundary.branch_name().is_some() => SessionRequest {
+                branch_name: launch.boundary.branch_name().map(str::to_owned),
                 ..request.clone()
             },
             None => {
@@ -631,7 +632,7 @@ fn attempt_once(
             graph: graph.clone(),
             task: crate::boundary::with_section(
                 step.rendered_task_carrying(node, references, notes),
-                launch.boundary.section.as_deref(),
+                launch.boundary.section(),
             ),
             labels: engine::dispatch_labels(
                 run,
@@ -2361,10 +2362,10 @@ fn drafted(
             // the node itself: its run is named by the variable its environment carries
             // rather than spelled out, and it reads the same boundary section its worker
             // did, since what it drafts is public.
-            task: if launch.boundary.public {
+            task: if launch.boundary.is_public() {
                 crate::boundary::with_section(
                     drafting_task(node, &format!("${}", crate::agentgraph::RUN_ID_ENV), held),
-                    launch.boundary.section.as_deref(),
+                    launch.boundary.section(),
                 )
             } else {
                 drafting_task(node, &paths.run, held)

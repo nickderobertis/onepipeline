@@ -1379,7 +1379,11 @@ mod tests {
     impl crate::boundary::Oracle for Hosted {
         fn repository(&mut self, repo: &str) -> crate::boundary::Repository {
             crate::boundary::Repository {
-                public: repo.ends_with("acme/widget"),
+                clearance: if repo.ends_with("acme/widget") {
+                    crate::boundary::Clearance::Public
+                } else {
+                    crate::boundary::Clearance::Private
+                },
                 identity: repo.to_owned(),
             }
         }

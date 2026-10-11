@@ -23,6 +23,36 @@ use serde_json::{json, Value};
 
 use crate::harness::{lifecycle, plan_of, Repository, World, REFUSED};
 
+/// The contract's own boundary block, which the journeys hold what the engine emits to.
+fn contract_block() -> Value {
+    let contract = include_str!("../../docs/contract.md");
+    let mut inside = false;
+    let mut block = String::new();
+    for line in contract.lines() {
+        if !inside && line.trim_end() == "```json" {
+            inside = true;
+            block.clear();
+        } else if inside && line.trim_end() == "```" {
+            inside = false;
+            if block.contains("\"boundary_plan\"") {
+                return serde_json::from_str(&block).expect("the boundary block is JSON");
+            }
+        } else if inside {
+            block.push_str(line);
+            block.push('\n');
+        }
+    }
+    panic!("docs/contract.md has no boundary block")
+}
+
+/// The exit code the contract's block gives `validate-envelope`'s `verdict`.
+fn exit_for(verdict: &str) -> i32 {
+    contract_block()["validate_envelope_exits"][verdict]
+        .as_i64()
+        .and_then(|code| i32::try_from(code).ok())
+        .unwrap_or_else(|| panic!("the contract names no exit for {verdict}"))
+}
+
 /// What `plan check` exits with when the plan carries refusals.
 const HAS_REFUSALS: i32 = 1;
 
@@ -123,6 +153,15 @@ fn guidance(world: &World) -> String {
 fn an_ordinary_private_to_public_dependency_is_refused_at_load_carrying_the_hosts_guidance() {
     let (world, _, _) = mixed_world("boundary-load");
     let advice = guidance(&world);
+    // The same guidance as prose, as a person reads it: the summary a refusal carries, and
+    // what a producer is held to.
+    let prose = world.run(&["boundary", "guidance"]);
+    prose.exited(0).out_has(&advice).out_has("A producer:");
+    assert!(
+        prose.stdout.contains("`<host prefix>export/<opaque id>`"),
+        "{}",
+        prose.stdout
+    );
 
     let reason = refused_by_check(
         &world,
@@ -239,6 +278,26 @@ fn every_malformed_export_edge_and_alternate_private_context_is_refused_at_load(
         (
             "alternate-base",
             vec![producer("generalize", &[]), pinned],
+            vec![edge("generalize", "examples")],
+            "alternate private context",
+        ),
+        (
+            "authored-branch",
+            vec![producer("generalize", &[]), {
+                let mut pinned = consumer();
+                pinned["branch"] = json!("topic");
+                pinned
+            }],
+            vec![edge("generalize", "examples")],
+            "alternate private context",
+        ),
+        (
+            "authored-resume",
+            vec![producer("generalize", &[]), {
+                let mut resumed = consumer();
+                resumed["resume"] = json!({"branch": "topic"});
+                resumed
+            }],
             vec![edge("generalize", "examples")],
             "alternate private context",
         ),
@@ -527,14 +586,14 @@ fn a_public_consumer_starts_from_one_neutral_export_commit_and_the_edge_adds_no_
         "{producer_task}"
     );
     assert!(producer_task.contains("commit subject"), "{producer_task}");
+    // The consumer's context is exactly the one the contract's block shows.
     let consumer_task = tasks_of(&world, "examples")
         .pop()
         .expect("a consumer dispatch");
+    let documented = contract_block()["boundary_context"].to_string();
     assert!(
-        consumer_task.contains(
-            r#"{"boundary":{"mixed":true,"clearance":"public","target_directory":"examples"}}"#
-        ),
-        "{consumer_task}"
+        consumer_task.contains(&documented),
+        "{documented}\n{consumer_task}"
     );
     for private_name in ["service", "generalize", "exported", kept, private_head] {
         assert!(
@@ -809,7 +868,7 @@ fn a_producer_named_with_a_private_term_is_given_a_neutral_branch_and_exports_on
         .pop()
         .expect("a producer dispatch");
     assert!(
-        producer_task.contains("`<host prefix>/export/<opaque id>`"),
+        producer_task.contains("`<host prefix>export/<opaque id>`"),
         "{producer_task}"
     );
     assert!(producer_task.contains("commit subject"), "{producer_task}");
@@ -909,21 +968,23 @@ fn the_compiled_validator_judges_targeted_and_untargeted_content_and_refuses_wha
         "validated",
         &json!({"version": 3, "commands": [note("examples", "follow the zephyrine layout")]}),
     );
-    refused.exited(1).err_has("public node examples");
+    refused
+        .exited(exit_for("refuse"))
+        .err_has("public node examples");
     assert!(!refused.stderr.contains("zephyrine"), "{}", refused.stderr);
     validated(
         &world,
         "validated",
         &json!({"version": 3, "commands": [note("examples", "follow the plain layout")]}),
     )
-    .exited(0);
+    .exited(exit_for("pass"));
     // The private producer may be told anything.
     validated(
         &world,
         "validated",
         &json!({"version": 3, "commands": [note("generalize", "follow the zephyrine layout")]}),
     )
-    .exited(0);
+    .exited(exit_for("pass"));
     // Text addressed to no node — a verdict's message, a surface — is checked as public,
     // and so is a node an envelope adds and a ruling it amends a public node with.
     validated(
@@ -931,13 +992,13 @@ fn the_compiled_validator_judges_targeted_and_untargeted_content_and_refuses_wha
         "validated",
         &json!({"completion": false, "message": "keep the zephyrine names out"}),
     )
-    .exited(1);
+    .exited(exit_for("refuse"));
     validated(
         &world,
         "validated",
         &json!({"id": "s-1", "kind": "check-in", "message": "the zephyrine step is slow"}),
     )
-    .exited(1);
+    .exited(exit_for("refuse"));
     let mut added = public("more-examples", &[]);
     added["title"] = json!("feat: zephyrine examples");
     validated(
@@ -945,7 +1006,7 @@ fn the_compiled_validator_judges_targeted_and_untargeted_content_and_refuses_wha
         "validated",
         &json!({"version": 3, "commands": [{"op": "add", "node": added}]}),
     )
-    .exited(1);
+    .exited(exit_for("refuse"));
     validated(
         &world,
         "validated",
@@ -953,19 +1014,19 @@ fn the_compiled_validator_judges_targeted_and_untargeted_content_and_refuses_wha
             {"op": "amend", "id": "examples", "text": "match the zephyrine output"}
         ]}),
     )
-    .exited(1);
+    .exited(exit_for("refuse"));
     // A command naming a node the run does not hold has no clearance to judge it by.
     validated(
         &world,
         "validated",
         &json!({"version": 3, "commands": [note("nowhere", "anything at all")]}),
     )
-    .exited(2)
+    .exited(exit_for("unavailable"))
     .err_has("no clearance");
 
     // An exception the private repository declares is honoured.
     let excepted = json!({"version": 3, "commands": [note("examples", "mind the lanternfish")]});
-    validated(&world, "validated", &excepted).exited(1);
+    validated(&world, "validated", &excepted).exited(exit_for("refuse"));
     std::fs::write(
         private.checkout.join("private-terms.toml"),
         "schema_version = 1\nterms = [\"zephyrine\", \"lanternfish\"]\n\
@@ -977,7 +1038,7 @@ fn the_compiled_validator_judges_targeted_and_untargeted_content_and_refuses_wha
         &private.checkout,
         &["commit", "-qam", "chore: except a word"],
     );
-    validated(&world, "validated", &excepted).exited(0);
+    validated(&world, "validated", &excepted).exited(exit_for("pass"));
 
     // A declaration the check cannot read makes it unavailable, never a pass.
     std::fs::write(
@@ -995,7 +1056,7 @@ fn the_compiled_validator_judges_targeted_and_untargeted_content_and_refuses_wha
         "validated",
         &json!({"version": 3, "commands": [note("examples", "follow the plain layout")]}),
     )
-    .exited(2)
+    .exited(exit_for("unavailable"))
     .err_has("could not judge");
     world.release("generalize.go");
 }
@@ -1969,4 +2030,376 @@ fn a_stricter_clearance_is_never_downgraded() {
         .exited(REFUSED)
         .err_has("private node classified-2");
     world.release("held.go");
+}
+
+/// Every branch a mixed run's public side cuts or exports, as the record names it.
+fn branches_of(world: &World, run: &str, node: &str) -> Vec<String> {
+    world
+        .events_of(run, "session-opened")
+        .iter()
+        .filter(|event| event["labels"]["node"] == node)
+        .filter_map(|event| event["payload"]["branch"].as_str().map(str::to_owned))
+        .collect()
+}
+
+/// A mixed plan with an export and a public node of its own, cutting its own branch.
+fn prefixed_plan(name: &str) -> Value {
+    let mut plan = exported_plan(name);
+    plan["tasks"]
+        .as_array_mut()
+        .expect("nodes")
+        .push(public("plain", &[]));
+    plan
+}
+
+#[test]
+fn the_host_branch_prefix_leads_every_public_branch_and_is_itself_screened() {
+    // The environment's layer: the export's branch, named here, and a public node's,
+    // cut by `onevcs`, carry the one prefix — the two resolutions agree.
+    let (world, _, _) = mixed_world("boundary-prefix-env");
+    let world = world.with_env("ONEVCS_BRANCH_PREFIX", "hostpfx/");
+    world.script("generalize.work-at", "examples/generic/sample.md");
+    world.script("generalize.work", "a generic example\n");
+    world.script("examples.work", "built on it\n");
+    world.script("plain.work", "plain work\n");
+    let project = world.plan("prefixed", &prefixed_plan("prefixed"));
+    world.run(&["start", &project, "--attach"]).settled();
+    let exported = settled(&world, "prefixed", "examples");
+    assert_eq!(exported["status"], "done", "{}", world.dump());
+    assert!(
+        exported["branch"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("hostpfx/public/"),
+        "{exported}"
+    );
+    for branch in branches_of(&world, "prefixed", "plain") {
+        assert!(branch.starts_with("hostpfx/public/"), "{branch}");
+    }
+    assert!(settled(&world, "prefixed", "generalize")["branch"]
+        .as_str()
+        .unwrap_or_default()
+        .starts_with("hostpfx/export/"));
+
+    // The host's branches file's layer, the same way.
+    let (world, private, _) = mixed_world("boundary-prefix-file");
+    std::fs::write(
+        world.onevcs_home().join("branches.yml"),
+        "version: 1\nprefix: filepfx/\n",
+    )
+    .expect("the branches file is written");
+    world.script("generalize.work-at", "examples/generic/sample.md");
+    world.script("generalize.work", "a generic example\n");
+    world.script("examples.work", "built on it\n");
+    world.script("plain.work", "plain work\n");
+    let project = world.plan("filed", &prefixed_plan("filed"));
+    world.run(&["start", &project, "--attach"]).settled();
+    let exported = settled(&world, "filed", "examples");
+    assert!(
+        exported["branch"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("filepfx/public/"),
+        "{exported}\n{}",
+        world.dump()
+    );
+    for branch in branches_of(&world, "filed", "plain") {
+        assert!(branch.starts_with("filepfx/public/"), "{branch}");
+    }
+
+    // A prefix carrying a private term is screened with the rest of the name: the export
+    // is refused, and the consumer never starts.
+    declare_terms(&world, &private, &["zephyrine"]);
+    std::fs::write(
+        world.onevcs_home().join("branches.yml"),
+        "version: 1\nprefix: zephyrine/\n",
+    )
+    .expect("the branches file is rewritten");
+    world.script("generalize-t.work-at", "examples/generic/other.md");
+    world.script("generalize-t.work", "another generic example\n");
+    let project = world.plan(
+        "termed",
+        &mixed_plan(
+            "termed",
+            vec![
+                producer("generalize-t", &[]),
+                public("examples-t", &["generalize-t"]),
+            ],
+            vec![edge("generalize-t", "examples-t")],
+        ),
+    );
+    world.run(&["start", &project, "--attach"]).settled();
+    let refused = settled(&world, "termed", "examples-t");
+    assert_eq!(refused["outcome"], "infrastructure-failure", "{refused}");
+    let detail = detail_of(&world, "termed", "examples-t");
+    assert!(detail.contains("public output carries a term"), "{detail}");
+    assert!(!detail.contains("zephyrine"), "{detail}");
+
+    // And a branches file that is there and cannot be read refuses the export rather than
+    // naming its branch with no prefix: broken once the producer has cut its own branch,
+    // so what it refuses is the export's.
+    std::fs::write(
+        world.onevcs_home().join("branches.yml"),
+        "version: 1\nprefix: filepfx/\n",
+    )
+    .expect("the branches file is restored");
+    world.script("generalize-u.work-at", "examples/generic/third.md");
+    world.script("generalize-u.work", "a third generic example\n");
+    world.script("generalize-u.wait", "hold");
+    let project = world.plan(
+        "unread-prefix",
+        &mixed_plan(
+            "unread-prefix",
+            vec![
+                producer("generalize-u", &[]),
+                public("examples-u", &["generalize-u"]),
+            ],
+            vec![edge("generalize-u", "examples-u")],
+        ),
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the producer to hold its session", |world| {
+        !branches_of(world, "unread-prefix", "generalize-u").is_empty()
+    });
+    std::fs::write(world.onevcs_home().join("branches.yml"), "prefix: [\n")
+        .expect("the branches file is broken");
+    world.release("generalize-u.go");
+    world.until("the run to settle", |world| {
+        world.run_file("unread-prefix", "result.json").is_file()
+    });
+    assert_eq!(
+        settled(&world, "unread-prefix", "generalize-u")["outcome"],
+        "preserved",
+        "{}",
+        world.dump()
+    );
+    let detail = detail_of(&world, "unread-prefix", "examples-u");
+    assert!(
+        detail.contains("branch prefix could not be read"),
+        "{detail}"
+    );
+    assert!(tasks_of(&world, "examples-u").is_empty());
+}
+
+#[test]
+fn an_export_record_that_cannot_be_read_refuses_the_export_and_is_kept() {
+    let (world, _, _) = mixed_world("boundary-record");
+    world.script("generalize.wait", "hold");
+    world.script("generalize.work-at", "examples/generic/sample.md");
+    world.script("generalize.work", "a generic example\n");
+    let project = world.plan("recorded", &exported_plan("recorded"));
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the producer to be in flight", |world| {
+        !world.events_of("recorded", "node-dispatched").is_empty()
+    });
+    let record = world.run_file("recorded", "exports.json");
+    std::fs::write(&record, "{ not a record").expect("the record is damaged");
+    world.release("generalize.go");
+    world.until("the run to settle", |world| {
+        world.run_file("recorded", "result.json").is_file()
+    });
+    let consumer = settled(&world, "recorded", "examples");
+    assert_eq!(consumer["outcome"], "infrastructure-failure", "{consumer}");
+    assert!(
+        detail_of(&world, "recorded", "examples")
+            .contains("record of its exports could not be read"),
+        "{}",
+        detail_of(&world, "recorded", "examples")
+    );
+    assert_eq!(
+        std::fs::read_to_string(&record).expect("the record is still there"),
+        "{ not a record",
+        "the damaged record was overwritten"
+    );
+    assert!(tasks_of(&world, "examples").is_empty());
+}
+
+#[test]
+fn a_consumer_pinned_to_a_branch_that_is_not_its_export_never_opens_a_session() {
+    let (world, _, _) = mixed_world("boundary-pinned");
+    world.script("generalize.work-at", "examples/generic/sample.md");
+    world.script("generalize.work", "a generic example\n");
+    world.script("examples.fail", "1");
+    world.script("held.wait", "hold");
+    let mut plan = exported_plan("pinned");
+    plan["tasks"]
+        .as_array_mut()
+        .expect("nodes")
+        .push(crate::harness::agent("held", &[]));
+    let project = world.plan("pinned", &plan);
+    world.run(&["start", &project, "--detach"]).exited(0);
+    until_settled(&world, "pinned", "examples");
+    let mut elsewhere = public("examples-2", &[]);
+    elsewhere["branch"] = json!("elsewhere");
+    reply(
+        &world,
+        "pinned",
+        json!([{"op": "retry", "id": "examples", "node": elsewhere}]),
+    );
+    until_settled(&world, "pinned", "examples-2");
+    let replacement = world
+        .events_of("pinned", "node-settled")
+        .into_iter()
+        .find(|event| event["labels"]["node"] == "examples-2")
+        .expect("the replacement settled");
+    assert_eq!(
+        replacement["payload"]["outcome"], "infrastructure-failure",
+        "{replacement}"
+    );
+    assert!(
+        detail_of(&world, "pinned", "examples-2").contains("not its export"),
+        "{}",
+        detail_of(&world, "pinned", "examples-2")
+    );
+    assert!(branches_of(&world, "pinned", "examples-2").is_empty());
+    world.release("held.go");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_shutdown_preserves_a_public_branch_over_the_run_scope_and_not_the_whole_registry() {
+    let (world, _, _, library) = scoped_world("scope-shutdown");
+    world.script("generalize.work-at", "examples/generic/sample.md");
+    world.script("generalize.work", "a generic example\n");
+    // The consumer commits work naming B — which this run does not name — and holds.
+    world.script("examples.work", "cites owner/beta\n");
+    world.script("examples.commit-saying", "feat: cite the example");
+    world.script("examples.wait", "hold");
+    let project = world.plan("stopped", &exported_plan("stopped"));
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the consumer to hold its session", |world| {
+        !branches_of(world, "stopped", "examples").is_empty()
+    });
+    world.until("the consumer to have committed", |world| {
+        world.fakes.join("examples.wait").is_file()
+            && world.invocations().iter().any(|call| {
+                call["tool"] == "oneagentgraph" && call.to_string().contains("examples")
+            })
+    });
+    let branch = branches_of(&world, "stopped", "examples")
+        .pop()
+        .expect("the consumer's branch");
+    let shutdown = world.run(&["shutdown", "stopped", "--grace", "1"]);
+    // The public branch went to the public origin: what it carries names only B, which
+    // the run's scope does not hold.
+    let pushed = crate::harness::git(
+        &world,
+        &library.origin,
+        &["ls-remote", ".", &format!("refs/heads/{branch}")],
+    );
+    assert!(
+        !pushed.trim().is_empty(),
+        "the consumer's branch was not preserved:\n{}\n{}\n{}",
+        shutdown.stdout,
+        shutdown.stderr,
+        world.dump()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn publish_branch_and_repo_recover_forward_a_scope_they_are_given() {
+    let (world, _, _, library) = scoped_world("scope-forwarded");
+    // A branch of the public repository that names B, landed by hand.
+    crate::harness::git(
+        &world,
+        &library.checkout,
+        &["checkout", "-q", "-b", "cites-b"],
+    );
+    std::fs::write(library.checkout.join("NOTES.md"), "see owner/beta\n").expect("a note");
+    crate::harness::git(&world, &library.checkout, &["add", "-A"]);
+    crate::harness::git(
+        &world,
+        &library.checkout,
+        &["commit", "-qm", "docs: add notes"],
+    );
+    crate::harness::git(&world, &library.checkout, &["checkout", "-q", "main"]);
+    // Left to the registry, B's name is refused; scoped to A alone, it passes.
+    let unscoped = world.run(&[
+        "publish-branch",
+        "cites-b",
+        "--repo",
+        "library",
+        "--title",
+        "docs: add notes",
+    ]);
+    assert_ne!(
+        unscoped.code, 0,
+        "a registry-scoped publication passed B's name"
+    );
+    assert!(
+        format!("{}{}", unscoped.stdout, unscoped.stderr).contains("public output carries a term"),
+        "{}\n{}",
+        unscoped.stdout,
+        unscoped.stderr
+    );
+    let scoped = world.run(&[
+        "publish-branch",
+        "cites-b",
+        "--repo",
+        "library",
+        "--title",
+        "docs: add notes",
+        "--term-scope",
+        "github.com/owner/service",
+    ]);
+    assert_eq!(scoped.code, 0, "{}\n{}", scoped.stdout, scoped.stderr);
+
+    // A preserved branch naming B, recovered under the same scope. A recovery attests a
+    // bar, so the public repository's merge path runs one.
+    let hooks = world.root.join("library-hooks");
+    std::fs::create_dir_all(&hooks).expect("a hooks directory");
+    onepipeline_testfakes::executable(&hooks.join("pre-push"), b"#!/bin/sh\nexit 0\n");
+    crate::harness::git(
+        &world,
+        &library.checkout,
+        &["config", "core.hooksPath", &hooks.to_string_lossy()],
+    );
+    crate::harness::git(
+        &world,
+        &library.checkout,
+        &["checkout", "-q", "-b", "recovered"],
+    );
+    std::fs::write(library.checkout.join("MORE.md"), "more on owner/beta\n").expect("a note");
+    crate::harness::git(&world, &library.checkout, &["add", "-A"]);
+    crate::harness::git(
+        &world,
+        &library.checkout,
+        &["commit", "-qm", "docs: add more (incomplete step)"],
+    );
+    crate::harness::git(&world, &library.checkout, &["checkout", "-q", "main"]);
+    let preserved = world
+        .cmd_on(
+            &crate::harness::onevcs_binary(),
+            &[
+                "preserve",
+                "recovered",
+                "--repo",
+                "library",
+                "--term-scope-empty",
+            ],
+        )
+        .output()
+        .expect("onevcs runs");
+    assert!(
+        preserved.status.success(),
+        "{}",
+        String::from_utf8_lossy(&preserved.stderr)
+    );
+    // The registry would refuse B's name, as above; recovered under A's scope it lands.
+    let recovered = world.run(&[
+        "repo-recover",
+        "recovered",
+        "--repo",
+        "library",
+        "--title",
+        "docs: add more",
+        "--term-scope",
+        "github.com/owner/service",
+    ]);
+    assert_eq!(
+        recovered.code, 0,
+        "{}\n{}",
+        recovered.stdout, recovered.stderr
+    );
 }

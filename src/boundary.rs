@@ -48,8 +48,9 @@ pub(crate) enum Clearance {
 /// What a repository spelling resolves to, as far as the boundary is concerned.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Repository {
-    /// Its effective visibility: only a verified public repository is public.
-    pub(crate) public: bool,
+    /// Which side its effective visibility puts it on: only a verified public repository
+    /// is public.
+    pub(crate) clearance: Clearance,
     /// The `onevcs` identity key a term scope names it by, or the spelling itself where
     /// the host cannot resolve one — which a scoped check then answers as unavailable
     /// rather than passing.
@@ -88,7 +89,11 @@ impl Oracle for Onevcs {
             .map(|targets| targets.identity)
             .unwrap_or_else(|_| repo.to_owned());
         let answered = Repository {
-            public: visibility.effective() == onevcs::Visibility::Public,
+            clearance: if visibility.effective() == onevcs::Visibility::Public {
+                Clearance::Public
+            } else {
+                Clearance::Private
+            },
             identity,
         };
         self.known.insert(repo.to_owned(), answered.clone());
@@ -171,7 +176,7 @@ pub(crate) fn resolve(plan: &Plan, oracle: &mut dyn Oracle) -> Resolved {
             .or_else(|| (!named.is_empty()).then_some(Clearance::Public));
         for repo in named {
             let repository = oracle.repository(repo);
-            if !repository.public {
+            if repository.clearance == Clearance::Private {
                 clearance = Some(Clearance::Private);
                 scope.insert(repository.identity);
             }
@@ -403,43 +408,93 @@ pub(crate) fn is_export_edge(state: &crate::projection::RunState, dep: &str, nod
 
 /// What one dispatch is told and given because of the boundary.
 ///
-/// Every field but the term scope is empty outside a mixed plan, so a
+/// Outside a mixed plan it is the run's term scope and nothing else, so a
 /// single-visibility plan's dispatch is composed exactly as it always was.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Dispatching {
     /// The run's term scope, which every check this dispatch's closeout asks derives
     /// its terms from.
     pub(crate) term_scope: onevcs::TermScope,
-    /// The section appended to the task this dispatch is handed: the template context
-    /// and the guidance for its side of the boundary. Mixed plans only.
-    pub(crate) section: Option<String>,
-    /// The neutral name proposed for a branch this node's session cuts, in place of the
+    /// Its side of the boundary, in a mixed plan, and nothing in any other.
+    side: Option<Side>,
+}
+
+/// One dispatch's side of a mixed plan's boundary.
+#[derive(Debug, Clone)]
+struct Side {
+    /// The node's clearance.
+    clearance: Clearance,
+    /// The section appended to the task it is handed: the template context and the
+    /// guidance for its side.
+    section: String,
+    /// The neutral name proposed for a branch its session cuts, in place of the
     /// plan-derived one: a public node's and an export producer's. The host's branch
     /// prefix is put in front of it by `onevcs`.
-    pub(crate) branch_name: Option<String>,
+    branch_name: Option<String>,
+    /// The export a consumer's session starts from.
+    export: Option<Export>,
+}
+
+impl Dispatching {
+    /// The section appended to the task, in a mixed plan.
+    pub(crate) fn section(&self) -> Option<&str> {
+        self.side.as_ref().map(|side| side.section.as_str())
+    }
+
+    /// The neutral branch name proposed for a session this node cuts, where it has one.
+    pub(crate) fn branch_name(&self) -> Option<&str> {
+        self.side
+            .as_ref()
+            .and_then(|side| side.branch_name.as_deref())
+    }
+
     /// The export this consumer's session starts from.
-    pub(crate) export: Option<Export>,
+    pub(crate) fn export(&self) -> Option<&Export> {
+        self.side.as_ref().and_then(|side| side.export.as_ref())
+    }
+
     /// Whether this node is public in a mixed plan, so what is rendered for it names
     /// nothing of the run beyond the node itself.
-    pub(crate) public: bool,
+    pub(crate) fn is_public(&self) -> bool {
+        self.side
+            .as_ref()
+            .is_some_and(|side| side.clearance == Clearance::Public)
+    }
+}
+
+/// The one value a context's `mixed` takes: a single-visibility plan has no context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Mixed;
+
+impl Serialize for Mixed {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bool(true)
+    }
 }
 
 /// The template context a mixed plan's dispatch receives.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct Context {
-    /// Always `true`: a single-visibility plan has no context at all.
-    pub(crate) mixed: bool,
+struct Context {
+    /// Always `true`.
+    mixed: Mixed,
     /// The dispatching node's clearance.
-    pub(crate) clearance: Clearance,
+    clearance: Clearance,
     /// The directory an export producer writes its generic example under.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) export_directory: Option<String>,
+    export_directory: Option<String>,
     /// The directory an export lands in, in the consumer's repository.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) target_directory: Option<String>,
+    target_directory: Option<String>,
 }
 
 /// One export a consumer's session starts from.
+// llmlint: ignore-block[invalid_states_unrepresentable] every field but the ordinal is a
+// value handed straight to `onevcs::ExportRequest`, whose own fields are the same strings
+// for the reason its own suppression states: export is the one boundary that decides
+// each — an identity, a branch git accepts, a normalized directory — and refuses one by
+// naming the step, never the value, because the value may be the very private name an
+// export exists to keep out of public output. A newtype here would refuse on
+// construction, and would have to say what it refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Export {
     /// The producer's node id, which only the private record names.
@@ -459,6 +514,7 @@ pub(crate) struct Export {
     /// The consumer's position in the plan, from one, which its branch is named by.
     pub(crate) ordinal: usize,
 }
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// The heading of the boundary section a mixed plan's task carries.
 pub(crate) const SECTION_HEADING: &str = "## Repository boundary";
@@ -502,12 +558,12 @@ pub(crate) fn dispatching(
     kept: &BTreeMap<String, String>,
     heads: &BTreeMap<String, String>,
 ) -> Result<Dispatching, String> {
-    let mut dispatching = Dispatching {
-        term_scope: resolved.term_scope(),
-        ..Dispatching::default()
-    };
+    let term_scope = resolved.term_scope();
     if !resolved.mixed() {
-        return Ok(dispatching);
+        return Ok(Dispatching {
+            term_scope,
+            side: None,
+        });
     }
     let clearance = resolved.clearance(&node.id);
     let ordinal = plan
@@ -518,17 +574,19 @@ pub(crate) fn dispatching(
     let produced = plan.export_edges.iter().find(|edge| edge.from == node.id);
     let consumed = consumed_by(plan, &node.id);
     let mut context = Context {
-        mixed: true,
+        mixed: Mixed,
         clearance,
         export_directory: None,
         target_directory: None,
     };
+    let mut branch_name = None;
+    let mut export = None;
     let mut lines: Vec<String> = Vec::new();
     match (clearance, produced, consumed) {
         (Clearance::Private, Some(edge), _) => {
             context.export_directory = Some(edge.source_directory.clone());
             context.target_directory = Some(edge.target_directory.clone());
-            dispatching.branch_name = Some(format!("export/{}", opaque()));
+            branch_name = Some(format!("export/{}", opaque()));
             lines.push(format!(
                 "This node is an export producer. Write the generic example under `{}`; \
                  after this node's branch is kept, exactly that directory is exported into a \
@@ -546,9 +604,8 @@ pub(crate) fn dispatching(
             lines.push(summary());
         }
         (Clearance::Public, _, consumed) => {
-            dispatching.public = true;
             if node.repo.is_some() {
-                dispatching.branch_name = Some(format!("public/{}/task-{ordinal}", opaque()));
+                branch_name = Some(format!("public/{}/task-{ordinal}", opaque()));
             }
             if let Some(edge) = consumed {
                 context.target_directory = Some(edge.target_directory.clone());
@@ -565,7 +622,7 @@ pub(crate) fn dispatching(
                     .find(|candidate| candidate.id == edge.from)
                     .and_then(|producer| producer.repo.clone())
                     .ok_or_else(|| "its export producer names no repository".to_owned())?;
-                dispatching.export = Some(Export {
+                export = Some(Export {
                     producer: edge.from.clone(),
                     from: producer,
                     branch: branch.clone(),
@@ -593,11 +650,18 @@ pub(crate) fn dispatching(
     }
     let rendered = serde_json::to_string(&serde_json::json!({ "boundary": context }))
         .expect("a context serializes");
-    dispatching.section = Some(format!(
-        "{SECTION_HEADING}\n\nThis plan spans public and private repositories.\n\n```json\n{rendered}\n```\n\n{}",
-        lines.join("\n")
-    ));
-    Ok(dispatching)
+    Ok(Dispatching {
+        term_scope,
+        side: Some(Side {
+            clearance,
+            section: format!(
+                "{SECTION_HEADING}\n\nThis plan spans public and private repositories.\n\n```json\n{rendered}\n```\n\n{}",
+                lines.join("\n")
+            ),
+            branch_name,
+            export,
+        }),
+    })
 }
 
 /// A task with the boundary section appended, where there is one.
@@ -611,22 +675,38 @@ pub(crate) fn with_section(task: String, section: Option<&str>) -> String {
 /// The host's branch prefix, resolved as `onevcs` resolves it for a branch it cuts: the
 /// environment over the host's branches file over none. An export's branch is named by
 /// this crate, so the prefix is put in front of it here, and the export screens the
-/// whole name — the prefix included — against the run's terms.
-fn host_prefix() -> String {
+/// whole name — the prefix included — against the run's terms. A branches file that is
+/// there and cannot be read is refused rather than read as no prefix, exactly as `onevcs`
+/// refuses one; the e2e journeys hold the two to one answer for both layers.
+fn host_prefix() -> Result<String, String> {
     if let Ok(prefix) = std::env::var(onevcs::branches::PREFIX_ENV) {
-        return prefix;
+        return Ok(prefix);
     }
-    onevcs::branches::default_path()
-        .ok()
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .and_then(|raw| serde_norway::from_str::<onevcs::branches::BranchesFile>(&raw).ok())
-        .map(|file| file.prefix)
-        .unwrap_or_default()
+    let unreadable = |why: String| {
+        eprintln!("onepipeline: the host's branches file could not be read: {why}");
+        "the host's branch prefix could not be read, so no export branch could be named; \
+         the driver's log on this host says why"
+            .to_owned()
+    };
+    let path = onevcs::branches::default_path().map_err(|error| unreadable(error.to_string()))?;
+    match std::fs::read_to_string(&path) {
+        Ok(raw) => serde_norway::from_str::<onevcs::branches::BranchesFile>(&raw)
+            .map(|file| file.prefix)
+            .map_err(|error| unreadable(error.to_string())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(error) => Err(unreadable(error.to_string())),
+    }
 }
 
 /// What the run's private record holds about one export: everything about where it came
 /// from, which no public renderer reads.
+// llmlint: ignore-block[invalid_states_unrepresentable] the run's own record of what it
+// asked `onevcs::export` for and what that answered, field for field — the
+// `ExportRequest` strings and the `Exported` branch and head, which are strings in the
+// sibling for the reason `Export` above states. It is written only by `ensure_export`
+// and read back whole, unknown fields refused.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Recorded {
     producer: String,
     from: String,
@@ -638,14 +718,16 @@ struct Recorded {
     exported: String,
     exported_head: String,
 }
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
-/// Whether `branch` is an export this run recorded, which is the one branch an export's
-/// consumer may be pinned to.
-pub(crate) fn is_recorded_export(paths: &crate::ledger::RunPaths, branch: &str) -> bool {
-    std::fs::read(exports_path(paths))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Vec<Recorded>>(&bytes).ok())
-        .is_some_and(|recorded| recorded.iter().any(|held| held.exported == branch))
+impl Recorded {
+    /// Whether this record is an export of `export`'s own edge: the same producer, into
+    /// the same repository and directory.
+    fn of_edge(&self, export: &Export) -> bool {
+        self.producer == export.producer
+            && self.to == export.to
+            && self.target_directory == export.target_directory
+    }
 }
 
 /// Where the run keeps its exports: a private file beside its journal.
@@ -653,10 +735,39 @@ fn exports_path(paths: &crate::ledger::RunPaths) -> std::path::PathBuf {
     paths.dir.join("exports.json")
 }
 
+/// The run's record of its exports: none where it has made none, and a refusal where the
+/// record is there and cannot be read — never an empty record over evidence that exists.
+fn recorded(paths: &crate::ledger::RunPaths) -> Result<Vec<Recorded>, String> {
+    let path = exports_path(paths);
+    let unreadable = |why: String| {
+        eprintln!("onepipeline: {} could not be read: {why}", path.display());
+        "the run's record of its exports could not be read, so nothing is exported over it; \
+         the driver's log on this host says why"
+            .to_owned()
+    };
+    match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| unreadable(error.to_string())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(unreadable(error.to_string())),
+    }
+}
+
+/// Whether `branch` is an export of `export`'s own edge this run recorded — the one
+/// branch that edge's consumer may be pinned to.
+pub(crate) fn pinned_to_its_export(
+    paths: &crate::ledger::RunPaths,
+    export: &Export,
+    branch: &str,
+) -> Result<bool, String> {
+    Ok(recorded(paths)?
+        .iter()
+        .any(|held| held.of_edge(export) && held.exported == branch))
+}
+
 /// The public branch `export` starts its consumer from, exporting it the first time it
 /// is asked for and answering the recorded one every time after — a re-dispatch, a
 /// retry's replacement and a resumed driver all start from the same commit, never from
-/// the default base. A producer kept again at a new commit is exported anew.
+/// the default base. A producer superseded by a replacement is exported anew.
 ///
 /// The refusal is the export's own neutral sentence; what it found is kept privately by
 /// `onevcs`.
@@ -666,17 +777,14 @@ pub(crate) fn ensure_export(
     term_scope: &onevcs::TermScope,
 ) -> Result<String, String> {
     let path = exports_path(paths);
-    let mut recorded: Vec<Recorded> = std::fs::read(&path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default();
+    let mut recorded = recorded(paths)?;
+    // The producer's kept branch is the work: a producer kept again is a replacement under
+    // a new id with a branch of its own, so it is exported anew, and the head is evidence
+    // the record keeps rather than part of what it is looked up by.
     let same = |held: &Recorded| {
-        held.producer == export.producer
+        held.of_edge(export)
             && held.branch == export.branch
-            && held.head == export.head
             && held.source_directory == export.source_directory
-            && held.to == export.to
-            && held.target_directory == export.target_directory
     };
     if let Some(held) = recorded.iter().find(|held| same(held)) {
         return Ok(held.exported.clone());
@@ -700,7 +808,7 @@ pub(crate) fn ensure_export(
     })?;
     let branch_name = format!(
         "{}public/{}/task-{}",
-        host_prefix(),
+        host_prefix()?,
         opaque(),
         export.ordinal
     );
@@ -1000,6 +1108,11 @@ pub(crate) fn validate_envelope(
     let document: serde_json::Value = serde_json::from_str(stdin).map_err(|error| {
         crate::Error::Invalid(format!("the envelope on stdin is not JSON: {error}"))
     })?;
+    if let Err(why) = well_formed(&document) {
+        return Ok(Judged::Unavailable(format!(
+            "the publication boundary could not judge what it was handed: {why}"
+        )));
+    }
     let view = crate::views::RunView::open(paths)?;
     Ok(judge(
         &plan_now(&view.state),
@@ -1007,6 +1120,39 @@ pub(crate) fn validate_envelope(
         &mut Onevcs::default(),
         Unknown::Unavailable,
     ))
+}
+
+/// Whether `document` has the shape of what a bus hands a validator — a reply envelope, a
+/// routed record wrapping one, a command record or a surface: a mapping, whose commands,
+/// wherever it carries them, are a list of mappings each naming its `op`. Anything else is
+/// judged by nothing, so it is never passed.
+fn well_formed(document: &serde_json::Value) -> Result<(), String> {
+    let Some(fields) = document.as_object() else {
+        return Err("it is not a mapping".to_owned());
+    };
+    let reply = match fields.get("reply") {
+        None => None,
+        Some(serde_json::Value::Object(reply)) => Some(reply),
+        Some(_) => return Err("its `reply` is not a mapping".to_owned()),
+    };
+    for commands in [
+        fields.get("commands"),
+        reply.and_then(|reply| reply.get("commands")),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let Some(listed) = commands.as_array() else {
+            return Err("its `commands` is not a list".to_owned());
+        };
+        if !listed
+            .iter()
+            .all(|command| command.get("op").is_some_and(serde_json::Value::is_string))
+        {
+            return Err("a command in it names no `op`".to_owned());
+        }
+    }
+    Ok(())
 }
 
 /// What a bus pass cache keys a pass by beside the payload's bytes: a digest of the run's
@@ -1056,33 +1202,59 @@ pub(crate) struct Guidance {
 /// One step of [`Guidance`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct GuidanceStep {
-    /// The step's name.
-    pub(crate) step: &'static str,
+    /// Which step it is.
+    pub(crate) step: Step,
     /// What it asks.
     pub(crate) text: &'static str,
+}
+
+/// The four steps of crossing the boundary, in the order they happen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum Step {
+    /// The private work is written as a generic example in one directory.
+    Generalize,
+    /// The engine keeps the producer's branch.
+    Preserve,
+    /// The engine exports that directory as one neutral commit.
+    Export,
+    /// The public node starts from that commit.
+    Consume,
+}
+
+impl Step {
+    /// The name the step is spelled with.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Generalize => "generalize",
+            Self::Preserve => "preserve",
+            Self::Export => "export",
+            Self::Consume => "consume",
+        }
+    }
 }
 
 /// The version [`Guidance`] is written at.
 pub(crate) const GUIDANCE_VERSION: u32 = 1;
 
 /// The steps of [`Guidance`], in order.
-const STEPS: [(&str, &str); 4] = [
+const STEPS: [(Step, &str); 4] = [
     (
-        "generalize",
+        Step::Generalize,
         "Write the private work as a generic example inside one neutral directory, on a \
          private node that publishes with `publish: \"preserve\"`.",
     ),
     (
-        "preserve",
+        Step::Preserve,
         "The engine keeps that producer's branch on its own origin rather than landing it.",
     ),
     (
-        "export",
+        Step::Export,
         "The engine exports only that directory, as one neutral commit on the public \
          repository's base, carrying no private history, name, path or author.",
     ),
     (
-        "consume",
+        Step::Consume,
         "The public node depends on the producer through an entry of the project's \
          `onepipeline.export_edges` — `{from, to, source_directory, target_directory}` — and \
          its session starts from that commit; its id, title and task name nothing private.",
@@ -1095,7 +1267,7 @@ const PRODUCER: [&str; 3] = [
      the export.",
     "Keep every commit subject and message neutral — no private repository, project, \
      path or identifier — because the export screens them with the files.",
-    "The engine names the producer's branch `<host prefix>/export/<opaque id>`; do not \
+    "The engine names the producer's branch `<host prefix>export/<opaque id>`; do not \
      rename it.",
 ];
 
@@ -1105,7 +1277,7 @@ pub(crate) fn guidance() -> Guidance {
         schema_version: GUIDANCE_VERSION,
         steps: STEPS
             .iter()
-            .map(|(step, text)| GuidanceStep { step, text })
+            .map(|(step, text)| GuidanceStep { step: *step, text })
             .collect(),
         producer: PRODUCER.iter().map(|line| (*line).to_owned()).collect(),
         summary: summary(),
@@ -1132,7 +1304,7 @@ fn summary() -> String {
          consume: {}",
         STEPS
             .iter()
-            .map(|(step, text)| format!("{step}: {text}"))
+            .map(|(step, text)| format!("{}: {text}", step.as_str()))
             .collect::<Vec<_>>()
             .join(" ")
     )
@@ -1411,7 +1583,11 @@ mod tests {
     impl Oracle for Table {
         fn repository(&mut self, repo: &str) -> Repository {
             Repository {
-                public: repo.ends_with("-public"),
+                clearance: if repo.ends_with("-public") {
+                    Clearance::Public
+                } else {
+                    Clearance::Private
+                },
                 identity: format!("github.com/owner/{repo}"),
             }
         }
@@ -1755,6 +1931,55 @@ mod tests {
             ),
             Judged::Pass
         );
+    }
+
+    /// The directory grammar an edge is refused by at load is the one `onevcs export`
+    /// refuses a directory by: each spelling is put to the sibling's own export, in a
+    /// scratch state root, and is refused there for not being normalized exactly where it
+    /// is refused here.
+    #[test]
+    fn the_directory_grammar_is_the_one_onevcs_export_holds_a_directory_to() {
+        let _home = crate::vcs::scratch_home_held();
+        let root = std::env::temp_dir().join(format!("onepipeline-grammar-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a scratch state root");
+        std::env::set_var("ONEVCS_HOME", &root);
+        for directory in [
+            "examples",
+            "examples/generic",
+            "a/b/c",
+            "",
+            "/examples",
+            "./examples",
+            "examples/./generic",
+            "examples/../elsewhere",
+            "..",
+            "examples//generic",
+            "examples/",
+            ".git",
+            "examples/.git/hooks",
+            "examples\\generic",
+            "examples/.gitkeep",
+        ] {
+            let refused = onevcs::export(
+                &onevcs::Providers::real(),
+                &onevcs::ExportRequest {
+                    from: "nowhere".into(),
+                    branch: "topic".into(),
+                    directory: directory.into(),
+                    to: "elsewhere".into(),
+                    target_directory: "examples".into(),
+                    branch_name: "topic".into(),
+                    term_scope: onevcs::TermScope::Identities(Vec::new()),
+                },
+            )
+            .expect_err("nothing here is registered, so every export is refused")
+            .to_string();
+            let sibling =
+                !refused.contains("its source directory is not a relative, normalized path");
+            assert_eq!(normalized(directory), sibling, "{directory:?}: {refused}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
