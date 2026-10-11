@@ -1467,16 +1467,23 @@ fn a_rework_the_run_cannot_take_is_refused_naming_why() {
     )
     .exited(crate::harness::REFUSED)
     .err_has("replacement id 'a' must be new");
-    reply(
-        &world,
-        run,
-        json!([rework("a-rework-1", "change it again")]),
-    )
-    .exited(0);
+    // A rework naming no review comment says so in both views.
+    let mut uncommented = rework("a-rework-1", "change it again");
+    uncommented
+        .as_object_mut()
+        .expect("an op")
+        .remove("comments");
+    reply(&world, run, json!([uncommented])).exited(0);
     adopt(&world, run);
     let again = settled(&world, run, "a-rework-2");
     assert_eq!(again["outcome"], "change-review-draft", "{again}");
     assert_eq!(again["branch"], settled(&world, run, "a")["branch"]);
+    let said = "reworked — as a-rework-2: a reviewer asked for it on the draft; naming no \
+                review comment";
+    world
+        .run(&["status", run])
+        .out_has(&format!("a-rework-1: {said}"));
+    world.run(&["results", run]).out_has(said);
     // A breaking change's subject is one.
     reply(
         &world,

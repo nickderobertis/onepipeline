@@ -294,7 +294,7 @@ struct Snapshot {
     superseded: BTreeMap<String, String>,
     /// What each rework's replacement answers, keyed by the replacement: the record
     /// `onepipeline.rework` carries on its item.
-    reworks: BTreeMap<String, Value>,
+    reworks: BTreeMap<String, ReworkProjected>,
     project_metadata: BTreeMap<String, Value>,
     /// Whether a node the run has not started is written as claimed or released.
     claim: Claim,
@@ -3259,22 +3259,36 @@ fn write_shadow(
     Ok(())
 }
 
+/// What `onepipeline.rework` says on a rework's replacement: the node it replaces,
+/// the reason, the instruction and each review comment it answers — the record
+/// the fold kept off the `rework-requested` the reconciler judged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ReworkProjected {
+    // llmlint: ignore-block[invalid_states_unrepresentable] the `rework-requested` operation's
+    // own fields, as `projection::ReworkRecord` folds them: a node id and prose the op's
+    // compile refused blank, carried as the `String`s that record holds them as.
+    replaces: String,
+    reason: String,
+    instruction: String,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
+    comments: Vec<crate::channel::ReworkComment>,
+}
+
 /// The `onepipeline.rework` record of each rework's replacement, keyed by the
-/// replacement: the node it replaces, the reason, the instruction and each review
-/// comment's id and URL.
-fn reworks_of(state: &RunState) -> BTreeMap<String, Value> {
+/// replacement.
+fn reworks_of(state: &RunState) -> BTreeMap<String, ReworkProjected> {
     state
         .reworks
         .iter()
         .map(|(replaces, rework)| {
             (
                 rework.replacement.clone(),
-                json!({
-                    "replaces": replaces,
-                    "reason": rework.reason,
-                    "instruction": rework.instruction,
-                    "comments": rework.comments,
-                }),
+                ReworkProjected {
+                    replaces: replaces.clone(),
+                    reason: rework.reason.clone(),
+                    instruction: rework.instruction.clone(),
+                    comments: rework.comments.clone(),
+                },
             )
         })
         .collect()
@@ -3374,7 +3388,7 @@ fn task_document(
         metadata.insert(SUPERSEDES_KEY.into(), json!(superseded));
     }
     if let Some(rework) = snapshot.reworks.get(head.as_str()) {
-        metadata.insert(crate::taskgraph::REWORK_KEY.into(), rework.clone());
+        metadata.insert(crate::taskgraph::REWORK_KEY.into(), json!(rework));
     }
     for (key, value) in wire {
         metadata.insert(format!("onepipeline.{key}"), value);
