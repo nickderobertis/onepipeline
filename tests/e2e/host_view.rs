@@ -1403,7 +1403,6 @@ fn release_binary(world: &World) -> PathBuf {
                 cargo.env_remove(name.as_ref());
             }
         }
-        // And the one flag every gate build carries, as the recipe gives it.
         cargo.env("RUSTFLAGS", "-D warnings");
         let output = cargo.output().expect("cargo runs");
         assert!(
@@ -1909,6 +1908,31 @@ fn a_registry_less_runs_last_stop_decides_whether_its_dispatch_is_gone() {
         row("redispatched")
     );
 
+    // A summary a reader cannot serve — malformed, at another version, or another
+    // run's — is refolded, and the answer does not move.
+    let summary = |run: &str| world.runs.join(run).join("summary.json");
+    std::fs::write(summary("stale"), "{").expect("a malformed summary");
+    let mut other_version = read_json(&summary("stopped-partly"));
+    other_version["schema_version"] = json!(999);
+    write(&summary("stopped-partly"), &other_version);
+    let mut another_run = read_json(&summary("never-stopped"));
+    another_run["run_id"] = json!("someone-else");
+    write(&summary("never-stopped"), &another_run);
+    let (refolded, _) = both_forms(&world, "over summaries it cannot serve");
+    holds(
+        &fixture.expected,
+        &refolded,
+        "over summaries it cannot serve",
+    );
+    for run in ["stale", "stopped-partly", "never-stopped"] {
+        let rewritten = read_json(&summary(run));
+        assert_eq!(rewritten["run_id"], run, "{run}'s summary was not refolded");
+        assert_ne!(
+            rewritten["schema_version"], 999,
+            "{run}'s summary was not refolded"
+        );
+    }
+
     // The read proved `stopped-signalled` ended and left its checkpoint covering
     // its final stop; the next read, every ended journal unreadable, takes the
     // same verdicts off the documents alone.
@@ -1959,7 +1983,8 @@ fn a_registry_less_runs_last_stop_decides_whether_its_dispatch_is_gone() {
 /// readable, and the kernel is asked whether the read touched it — and a run that
 /// bound leaves undecided is refused, flagged, never left out. A registry-less
 /// run past it with no current summary is listed in `skipped` with its reason,
-/// in both forms. A run past it with a registry is decided from its entries: a
+/// in both forms, and so is one whose driver may still be running with no entry
+/// live. A run past it with a registry is decided from its entries otherwise: a
 /// held one is a row, and a stale one is gone.
 ///
 /// And a run under the bound whose journal the read has to fold, and cannot open,
@@ -2032,6 +2057,31 @@ fn a_journal_past_the_bound_is_never_opened_and_a_run_it_leaves_undecided_is_ref
     );
     grown(&fixture, "huge-live");
 
+    // A driver that may still be running and no entry live: what it has running
+    // is not in its registry, and only the journal could say.
+    let (driver, driver_token) = fixture.sleeper();
+    let journal = seed.journal(
+        &mut draw,
+        "huge-driven",
+        40 * 1024,
+        started,
+        false,
+        &[],
+        &[],
+    );
+    let entry = json!({"node": "plan", "pid": reaped_pid(), "host": HOST,
+        "dispatched_at": stamp(started + ENTRY_AFTER_MS), "started": "linux-proc-stat:1"});
+    fixture.write_run(
+        &seed,
+        "huge-driven",
+        &journal,
+        Some(&[entry]),
+        driver,
+        &driver_token,
+        &[],
+    );
+    grown(&fixture, "huge-driven");
+
     // And a run under the bound whose journal the read would have to fold, cold, and
     // cannot open: a fold of nothing would leave its dispatch out.
     let journal = seed.journal(&mut draw, "unreadable", 40 * 1024, started, false, &[], &[]);
@@ -2054,7 +2104,12 @@ fn a_journal_past_the_bound_is_never_opened_and_a_run_it_leaves_undecided_is_ref
         true,
         None,
     );
-    let huge = ["huge-registry-less", "huge-stale", "huge-live"];
+    let huge = [
+        "huge-registry-less",
+        "huge-stale",
+        "huge-live",
+        "huge-driven",
+    ];
     let reached: Vec<&&str> = huge
         .iter()
         .filter(|run| read.opened.contains_key(**run) || read.refused.contains(**run))
@@ -2083,8 +2138,14 @@ fn a_journal_past_the_bound_is_never_opened_and_a_run_it_leaves_undecided_is_ref
         .collect();
     assert_eq!(
         skipped.keys().collect::<Vec<_>>(),
-        ["huge-registry-less", "unreadable"],
+        ["huge-driven", "huge-registry-less", "unreadable"],
         "{reading}"
+    );
+    assert!(
+        skipped["huge-driven"].contains("past the 1073741824 a host read opens")
+            && skipped["huge-driven"].ends_with("its driver is not proved gone"),
+        "{}",
+        skipped["huge-driven"]
     );
     let reason = &skipped["huge-registry-less"];
     assert!(
@@ -2098,7 +2159,7 @@ fn a_journal_past_the_bound_is_never_opened_and_a_run_it_leaves_undecided_is_ref
         skipped["unreadable"]
     );
     assert!(
-        text.contains("2 run root(s) skipped:")
+        text.contains("3 run root(s) skipped:")
             && text.contains("huge-registry-less: its journal is")
             && text.contains("unreadable: its journal cannot be read"),
         "{text}"
@@ -2336,4 +2397,39 @@ fn an_adoption_racing_the_view_loses_no_record_and_its_dispatch_is_never_gone() 
         "{row}"
     );
     world.release("build.go");
+}
+
+/// A runs root that cannot be read is the reading's `root_error`, never one of
+/// its `skipped` roots, and the text form says it was refused rather than that the
+/// host is idle.
+#[test]
+fn a_runs_root_that_cannot_be_read_is_the_readings_root_error() {
+    let world = World::new("host-view-root").with_env("HOSTNAME", HOST);
+    let root = world.root.join("not-a-directory");
+    std::fs::write(&root, "a file where the runs root should be").expect("a file");
+    let mut json = world.cmd(&["host", "--json"]);
+    json.env("ONEPIPELINE_RUNS_DIR", &root);
+    let reading = invoke(json).reading();
+    has_the_version_1_keys(&reading);
+    assert_eq!(reading["root"], json!(root.to_string_lossy()), "{reading}");
+    assert!(
+        reading["root_error"]
+            .as_str()
+            .is_some_and(|why| why.starts_with("the runs root cannot be read")),
+        "{reading}"
+    );
+    assert_eq!(reading["skipped"], json!([]), "{reading}");
+    assert_eq!(reading["dispatches"], json!([]), "{reading}");
+    let mut text = world.cmd(&["host"]);
+    text.env("ONEPIPELINE_RUNS_DIR", &root);
+    let text = invoke(text);
+    assert_eq!(text.code, Some(0), "{}", text.stderr);
+    assert!(
+        text.stdout.contains("1 run root(s) skipped:")
+            && text
+                .stdout
+                .contains("not-a-directory: the runs root cannot be read"),
+        "{}",
+        text.stdout
+    );
 }

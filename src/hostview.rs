@@ -292,7 +292,6 @@ fn read_run(paths: &RunPaths) -> Result<RunRead, String> {
     Ok(rows_of(paths, &launch, &registry, &state, Stops::Evidence))
 }
 
-/// The run's registry, read.
 fn registry_of(paths: &RunPaths) -> Registry {
     let _registry = phase("registry");
     Registry::of(paths)

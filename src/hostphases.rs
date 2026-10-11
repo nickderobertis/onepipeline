@@ -88,7 +88,6 @@ pub(crate) struct Phase {
     began: Option<Sample>,
 }
 
-/// Begin timing `name`.
 pub(crate) fn phase(name: &'static str) -> Phase {
     Phase {
         name,
@@ -111,7 +110,6 @@ impl Drop for Phase {
     }
 }
 
-/// Add `amount` to the quantity `name`.
 pub(crate) fn add(name: &'static str, amount: u64) {
     if target().is_some() {
         QUANTITIES.with_borrow_mut(|quantities| {
