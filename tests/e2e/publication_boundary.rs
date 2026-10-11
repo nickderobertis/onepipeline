@@ -2918,6 +2918,14 @@ fn publish_branch_and_repo_recover_forward_a_scope_they_are_given() {
 #[test]
 fn the_validator_refuses_to_judge_a_malformed_document_and_reads_commands_as_the_engine_does() {
     let (world, _) = held_mixed_run("shaped", &["zephyrine"]);
+    // What is not JSON at all is refused before any plan is read, and passes nothing.
+    let unparsed = world.run_with_stdin(
+        &["boundary", "validate-envelope", "--run", "shaped"],
+        "{\"commands\": [",
+    );
+    unparsed.exited(REFUSED).err_has("the envelope on stdin is not JSON");
+    assert!(unparsed.stdout.is_empty(), "{}", unparsed.stdout);
+    names_no_node(&world, "shaped", &unparsed.stderr);
     // What is not an envelope, a record or a surface is judged by nothing, so it is
     // never passed.
     for (document, said) in [
