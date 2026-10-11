@@ -21,8 +21,8 @@ use std::collections::BTreeMap;
 
 use serde_json::{json, Value};
 
-use crate::draft_lifecycle::{team_repository, GREEN};
-use crate::harness::{agent, lifecycle, plan_of, World};
+use crate::draft_lifecycle::{rules, team_repository, GREEN};
+use crate::harness::{agent, held_publication, lifecycle, plan_of, World};
 
 /// The host's branch prefix every team journey here runs under.
 const PREFIX: &str = "me/";
@@ -831,4 +831,455 @@ fn fresh_is_refused_while_a_node_holds_a_change_request_nothing_has_landed() {
         !world.run_file("unlanded-2", "launch.json").exists(),
         "the refusal minted a run"
     );
+}
+
+/// The claim the store holds for `project` once the host `host` has written it.
+fn until_claimed_on(world: &World, project: &str, host: &str) -> Value {
+    world.until(&format!("{host}'s claim to reach the store"), |world| {
+        stored_claim(world, project)["host"] == host
+    });
+    stored_claim(world, project)
+}
+
+/// What a superseded driver recorded: the one `driver-superseded`, naming the claim that
+/// superseded it, and the non-blocking surface beside it.
+fn superseded_by(world: &World, run: &str, claim: &Value) {
+    let surfaced = |world: &World| -> Vec<Value> {
+        world
+            .events_of(run, "planner-surface-queued")
+            .into_iter()
+            .filter(|event| event["payload"]["kind"] == "driver-superseded")
+            .collect()
+    };
+    // The record first and the surface after it, so a reader holding one may not hold the
+    // other yet.
+    world.until("the superseded driver to raise its surface", |world| {
+        !surfaced(world).is_empty()
+    });
+    let records = world.events_of(run, "driver-superseded");
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0]["payload"]["by"], *claim, "{records:?}");
+    let surfaced = surfaced(world);
+    assert_eq!(surfaced.len(), 1, "{surfaced:?}");
+    assert_eq!(surfaced[0]["payload"]["blocking"], false, "{surfaced:?}");
+}
+
+/// Every branch the shared host was asked to open a change request from, at most once.
+fn one_change_request_per_branch(world: &World) {
+    let created = created_from(world);
+    let distinct: std::collections::BTreeSet<&String> = created.iter().collect();
+    assert_eq!(
+        distinct.len(),
+        created.len(),
+        "a branch got two change requests: {created:?}"
+    );
+}
+
+/// A driver with a node **ready to dispatch** when a host took its project over reads the
+/// claim at the start of the pass that would dispatch it, dispatches nothing, records why,
+/// and ends; the host that took over dispatches it, and publishes the only change request
+/// for its branch.
+#[test]
+fn a_superseded_driver_reads_the_claim_at_the_pass_that_would_dispatch_and_dispatches_nothing() {
+    let world = team_world("superseded-ready");
+    world.script("next.work", "next's change\n");
+    let gate = world.rendezvous("gate");
+    let project = launch_detached(
+        &world,
+        "ready",
+        vec![agent("gate", &[]), lifecycle("next", &["gate"])],
+    );
+    let mine = gate.arrived();
+    until_claimed_by(&world, &project, "ready");
+    let successor = world.on_host("host-b");
+    successor
+        .run_from(
+            &successor.project,
+            &["start", &project, "--detach", "--take-over"],
+        )
+        .exited(0);
+    let theirs = gate.arrived();
+    let claim = until_claimed_on(&world, &project, "host-b");
+
+    // `next` becomes ready in the first driver the moment `gate` settles there.
+    mine.release();
+    world.until("the superseded driver to end", |world| {
+        world.run_file("ready", "result.json").is_file()
+    });
+    superseded_by(&world, "ready", &claim);
+    assert_eq!(dispatched(&world, "ready"), vec!["gate".to_owned()]);
+
+    theirs.release();
+    successor.until("the successor to settle", |world| {
+        world.run_file("ready", "result.json").is_file()
+    });
+    assert_eq!(
+        dispatched(&successor, "ready"),
+        vec!["gate".to_owned(), "next".to_owned()]
+    );
+    assert_eq!(
+        settled(&successor, "ready", "next")["outcome"],
+        "change-review-draft"
+    );
+    one_change_request_per_branch(&world);
+    assert_eq!(created_from(&world).len(), 1);
+    drop(successor);
+}
+
+/// A pass that dispatches three nodes reads the project's claim once, for all three: the
+/// store is asked for the project once between the moment they became ready and the moment
+/// all three were dispatched.
+#[test]
+fn a_pass_that_dispatches_three_nodes_reads_the_claim_once() {
+    let world = World::new("claim-read-once").through_scripted_source();
+    for id in ["x", "y", "z"] {
+        world.script(&format!("{id}.wait"), "hold");
+    }
+    let gate = world.rendezvous("gate");
+    let mut plan = plan_of(
+        "once",
+        vec![
+            agent("gate", &[]),
+            agent("x", &["gate"]),
+            agent("y", &["gate"]),
+            agent("z", &["gate"]),
+        ],
+    );
+    plan["concurrency"] = json!(3);
+    let project = world.plan("once", &plan);
+    world
+        .run_from(&world.project, &["start", &project, "--detach"])
+        .exited(0);
+    let held = gate.arrived();
+    until_claimed_by(&world, &project, "once");
+    let before = world.store_asked("get_project");
+    held.release();
+    world.until("x, y and z to be dispatched", |world| {
+        dispatched(world, "once").len() == 4
+    });
+    assert_eq!(
+        world.store_asked("get_project") - before,
+        1,
+        "the claim was not read exactly once for the pass that dispatched three nodes"
+    );
+    for id in ["x", "y", "z"] {
+        world.release(&format!("{id}.go"));
+    }
+    world.until("the run to settle", |world| {
+        world.run_file("once", "result.json").is_file()
+    });
+}
+
+/// A driver whose node's **publication** falls in the pass after a takeover reads the claim
+/// at the start of that pass and publishes nothing — the node settles `cancelled`, its work
+/// kept rather than published — while a publication the pass before the takeover cleared,
+/// already under way at the host, completes and adopts the change request open from its
+/// branch. The host that took over continues the in-flight node on its branch; the shared
+/// host is asked for one change request per branch across both drivers.
+#[test]
+fn a_superseded_driver_publishes_nothing_after_the_check_but_finishes_a_publication_under_way() {
+    let world = World::new("superseded-publication")
+        .with_env("ONEVCS_BRANCH_PREFIX", PREFIX)
+        .with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "1");
+    let go = world.fakes.join("push.go");
+    let held = held_publication(&world, &go);
+    world.repository("change-open", &held.argv());
+    rules(&world, "change-open", "required", None);
+    world.script("gh.checks", GREEN);
+    // `m` drafts once with its checks red, so the run under test continues it on its branch.
+    world.script("gh.checks.1", RED);
+    world.script("m.work-anew", "m's change");
+    world.script("l.work", "l's change\n");
+    held.release();
+    let run = "pub";
+    let project = author(&world, run, vec![lifecycle("m", &[])]);
+    launch(&world, run, &project, &[]);
+    let stored = stored_settlements(&world, &project);
+    assert_eq!(stored["m"]["status"], "failed", "{stored:#?}");
+    let m_branch = stored["m"]["branch"]
+        .as_str()
+        .expect("m's branch")
+        .to_owned();
+    world.script("gh.checks.1", GREEN);
+    world.add_task(run, "001-l", &lifecycle("l", &[]), &[]);
+    let mut plan = world.store_project(&project)["items"][0]["item"]["metadata"].clone();
+    plan["onepipeline.concurrency"] = json!(2);
+    let key = onetaskgraph_plugin_api::MetadataKey::new("onepipeline.concurrency".to_owned())
+        .expect("a key");
+    let id: onetaskgraph_core::GlobalId = project.parse().expect("a qualified project");
+    world
+        .store_call(|engine| async move { engine.set_project_metadata(&id, &key, &json!(2)).await })
+        .unwrap_or_else(|why| panic!("the store refused the write: {why}"));
+    // Every push from this host is held again until the journey lets it through.
+    for marker in [go.clone(), go.with_extension("go.holding")] {
+        let _ = std::fs::remove_file(marker);
+    }
+    let m = world.rendezvous("m");
+    let l = world.rendezvous("l");
+    world
+        .run_from(&world.project, &["start", &project, "--detach"])
+        .exited(0);
+    let driving = format!("{run}-2");
+    m.arrived().release();
+    let mine_l = l.arrived();
+    // `m`'s publication was cleared and is at the host, held mid-push.
+    world.until("m's publication to be under way", |_| held.holding());
+    world.until("both dispatches to reach the board", |world| {
+        ["m", "l"].iter().all(|node| {
+            item_metadata(world, &project, node)
+                .get("onepipeline.dispatch")
+                .is_some()
+        })
+    });
+    let l_branch = item_metadata(&world, &project, "l")["onepipeline.dispatch"]["branch"]
+        .as_str()
+        .expect("l's branch")
+        .to_owned();
+    let created = created_from(&world);
+
+    let successor = world.on_host("host-b");
+    successor
+        .run_from(
+            &successor.project,
+            &["start", &project, "--detach", "--take-over"],
+        )
+        .exited(0);
+    let theirs_m = m.arrived();
+    let theirs_l = l.arrived();
+    let claim = until_claimed_on(&world, &project, "host-b");
+    // The successor continues `l` on the branch the board named, and drafts it.
+    theirs_l.release();
+    successor.until("the successor to draft l", |world| {
+        world
+            .events_of(run, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "l")
+    });
+    assert_eq!(settled(&successor, run, "l")["branch"], json!(l_branch));
+    assert_eq!(
+        settled(&successor, run, "l")["outcome"],
+        "change-review-draft"
+    );
+
+    // The publication under way completes, onto the draft already open from `m`'s branch.
+    held.release();
+    world.until("m's publication to complete", |world| {
+        world
+            .events_of(&driving, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "m")
+    });
+    let m_settled = settled(&world, &driving, "m");
+    assert_eq!(m_settled["outcome"], "change-review-draft", "{m_settled}");
+    assert_eq!(
+        m_settled["change_url"], stored["m"]["change_url"],
+        "{m_settled}"
+    );
+
+    // And `l`'s, which falls in the pass after the takeover, is never made.
+    mine_l.release();
+    world.until("the superseded driver to end", |world| {
+        world.run_file(&driving, "result.json").is_file()
+    });
+    superseded_by(&world, &driving, &claim);
+    let l_settled = settled(&world, &driving, "l");
+    assert_eq!(l_settled["status"], "cancelled", "{l_settled}");
+    assert!(
+        l_settled["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.starts_with("not published")),
+        "{l_settled}"
+    );
+    let mut now = created.clone();
+    now.push(l_branch.clone());
+    assert_eq!(created_from(&world), now, "{:?}", world.changes_opened());
+    one_change_request_per_branch(&world);
+    let drafts = changes_from(&world, &m_branch);
+    assert_eq!(drafts.len(), 1, "{drafts:?}");
+    assert!(held_as_draft(&world, &drafts[0]["number"]), "{drafts:?}");
+
+    theirs_m.release();
+    successor.until("the successor to settle", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+    assert_eq!(sessions_opened(&successor, run), {
+        let mut both = vec![m_branch.clone(), l_branch.clone()];
+        both.sort();
+        both
+    });
+    one_change_request_per_branch(&world);
+    drop(successor);
+    drop(held);
+}
+
+/// A driver with nothing to dispatch or publish notices a takeover within one idle check —
+/// shortened here through the test seam entry 116 names — records it, and ends once its
+/// dispatch in flight has settled unpublished; the host that took over continues that node
+/// on its branch, and the shared host is asked for one change request for it.
+#[test]
+fn an_idle_superseded_driver_notices_within_one_idle_check_and_publishes_nothing() {
+    let world = team_world("superseded-idle").with_env("ONEPIPELINE_IDLE_CLAIM_CHECK_SECONDS", "2");
+    world.script("l.work", "l's change\n");
+    let l = world.rendezvous("l");
+    let project = launch_detached(&world, "idle", vec![lifecycle("l", &[])]);
+    let mine = l.arrived();
+    until_claimed_by(&world, &project, "idle");
+    world.until("l's dispatch to reach the board", |world| {
+        item_metadata(world, &project, "l")
+            .get("onepipeline.dispatch")
+            .is_some()
+    });
+    let branch = item_metadata(&world, &project, "l")["onepipeline.dispatch"]["branch"]
+        .as_str()
+        .expect("l's branch")
+        .to_owned();
+    let successor = world.on_host("host-b");
+    successor
+        .run_from(
+            &successor.project,
+            &["start", &project, "--detach", "--take-over"],
+        )
+        .exited(0);
+    let theirs = l.arrived();
+    let claim = until_claimed_on(&world, &project, "host-b");
+    let since = std::time::Instant::now();
+    world.until("the idle driver to notice the takeover", |world| {
+        !world.events_of("idle", "driver-superseded").is_empty()
+    });
+    assert!(
+        since.elapsed() < std::time::Duration::from_secs(2 * 2 + 10),
+        "the idle driver took {:?} to notice",
+        since.elapsed()
+    );
+    superseded_by(&world, "idle", &claim);
+
+    theirs.release();
+    successor.until("the successor to settle", |world| {
+        world.run_file("idle", "result.json").is_file()
+    });
+    assert_eq!(sessions_opened(&successor, "idle"), vec![branch.clone()]);
+    assert_eq!(
+        settled(&successor, "idle", "l")["outcome"],
+        "change-review-draft"
+    );
+
+    mine.release();
+    world.until("the superseded driver to end", |world| {
+        world.run_file("idle", "result.json").is_file()
+    });
+    assert_eq!(settled(&world, "idle", "l")["status"], "cancelled");
+    assert_eq!(changes_from(&world, &branch).len(), 1);
+    one_change_request_per_branch(&world);
+    drop(successor);
+}
+
+/// Two cold hosts continue one project whose nodes hold open drafts, launched at the same
+/// moment over the one store: neither opens a change request, each draft is still the only
+/// one for its branch and still a draft, and once each driver has made its next claim check
+/// each has been refused, ended superseded, or is the one driver left — exactly one.
+#[test]
+fn two_cold_hosts_launching_one_project_at_once_leave_one_driver_and_every_draft_alone() {
+    let world = team_world("continue-race");
+    for id in ["a", "b", "c"] {
+        world.script(&format!("{id}.work"), &format!("{id}'s change\n"));
+    }
+    let run = "race";
+    let project = author(
+        &world,
+        run,
+        vec![
+            lifecycle("a", &[]),
+            lifecycle("b", &["a"]),
+            lifecycle("c", &["b"]),
+        ],
+    );
+    launch(&world, run, &project, &[]);
+    let drafts = world.changes_opened();
+    let created = created_from(&world);
+    // A node a planner added that keeps a driver driving, so each has a claim to check.
+    world.add_task(run, "003-hold", &agent("hold", &[]), &[]);
+    world.script("hold.wait", "hold");
+    std::fs::remove_dir_all(&world.runs).expect("the runs root is removed");
+
+    let hosts: Vec<World> = ["host-b", "host-c"]
+        .into_iter()
+        .map(|host| {
+            world
+                .on_host(host)
+                .with_env("ONEPIPELINE_IDLE_CLAIM_CHECK_SECONDS", "2")
+        })
+        .collect();
+    let launches: Vec<std::process::Child> = hosts
+        .iter()
+        .map(|host| {
+            let mut command = host.cmd(&["start", &project, "--detach"]);
+            command
+                .current_dir(&host.project)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+            command.spawn().expect("the launch starts")
+        })
+        .collect();
+    let answered: Vec<std::process::Output> = launches
+        .into_iter()
+        .map(|child| child.wait_with_output().expect("the launch answers"))
+        .collect();
+    let launched: Vec<bool> = answered
+        .iter()
+        .map(|output| match output.status.code() {
+            Some(0) => true,
+            Some(2) => {
+                let said = String::from_utf8_lossy(&output.stderr);
+                assert!(said.contains("project driven elsewhere refused:"), "{said}");
+                false
+            }
+            other => panic!(
+                "a launch exited {other:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        })
+        .collect();
+    assert!(
+        launched.iter().any(|launched| *launched),
+        "both launches were refused"
+    );
+    // Two idle checks and some: every driver has read the claim at least once since both
+    // claims could have reached the store.
+    std::thread::sleep(std::time::Duration::from_secs(6));
+    let left: Vec<&World> = hosts
+        .iter()
+        .zip(&launched)
+        .filter(|(_, launched)| **launched)
+        .map(|(host, _)| host)
+        .filter(|host| host.events_of(run, "driver-superseded").is_empty())
+        .collect();
+    assert_eq!(left.len(), 1, "not exactly one driver is left driving");
+    let claim = stored_claim(&world, &project);
+    let host_of = |host: &World| {
+        host.environment
+            .iter()
+            .find(|(key, _)| key == "HOSTNAME")
+            .map(|(_, name)| json!(name))
+            .expect("a host world names its host")
+    };
+    assert_eq!(
+        claim["host"],
+        host_of(left[0]),
+        "the store's claim is not the driver left's"
+    );
+
+    world.release("hold.go");
+    for (host, launched) in hosts.iter().zip(&launched) {
+        if *launched {
+            host.until("each driver to end", |host| {
+                host.run_file(run, "result.json").is_file()
+            });
+        }
+    }
+    assert_eq!(created_from(&world), created, "a change request was opened");
+    for draft in &drafts {
+        let head = draft["head"].as_str().expect("a head");
+        assert_eq!(changes_from(&world, head).len(), 1, "{head}");
+        assert!(held_as_draft(&world, &draft["number"]), "{draft}");
+    }
 }
