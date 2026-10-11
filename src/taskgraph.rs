@@ -479,7 +479,14 @@ impl Reader {
         // refusals `onepipeline start` and `onepipeline plan check` already make
         // here; running them at the read is what puts the second set of them
         // before anything is dispatched.
-        crate::graph::check(&plan)?;
+        if let Err(refusal) = crate::graph::check(&plan) {
+            // A graph rule names the nodes it refuses. Where the plan also carries private
+            // work into a public node — a public node landing what a private producer
+            // kept, say — that is what the refusal is about, so the boundary's neutral
+            // refusal of the same plan answers instead.
+            crate::boundary::check(&plan, crate::boundary::Stage::Load, oracle)?;
+            return Err(refusal.into());
+        }
         crate::destination::check(&plan)?;
         crate::boundary::check(&plan, crate::boundary::Stage::Load, oracle)?;
         // Keyed by node id, which the walk above has already established is

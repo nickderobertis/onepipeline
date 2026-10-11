@@ -684,16 +684,26 @@ pub fn compile(
             tasks: Vec::new(),
             export_edges: edges_after(command, &frontier.export_edges),
         });
-        graph::validate_edited(&plan).map_err(|e| Error::Refused(e.to_string()))?;
-        // And the publication boundary, by the same rules a plan is loaded under.
-        if frontier.graph_validation.is_some() {
+        // And the publication boundary, by the same rules a plan is loaded under — asked
+        // first where the graph's own rules refuse the edit too, since a graph refusal
+        // names the nodes it concerns and the boundary's is the neutral one.
+        let boundary = || {
+            if frontier.graph_validation.is_none() {
+                return Ok(());
+            }
             crate::boundary::check(
                 &plan,
                 crate::boundary::Stage::Edit,
                 &mut crate::boundary::Onevcs::default(),
             )
-            .map_err(|refusal| Error::Refused(refusal.message))?;
+            .map(|_| ())
+            .map_err(|refusal| Error::Refused(refusal.message))
+        };
+        if let Err(error) = graph::validate_edited(&plan) {
+            boundary()?;
+            return Err(Error::Refused(error.to_string()));
         }
+        boundary()?;
     }
     if let Some(context) = &frontier.graph_validation {
         let run_sets = match command {

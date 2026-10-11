@@ -131,7 +131,25 @@ fn refused_by_check(world: &World, name: &str, plan: &Value) -> String {
         .filter(|refusal| refusal["source"] == json!("engine"))
         .collect();
     assert_eq!(refusals.len(), 1, "{answered}");
+    // A boundary refusal is about no node by name: neither its sentence nor the node it
+    // reports names one, since the ids it concerns are private or may carry a term.
+    assert!(
+        refusals[0]["node"].is_null(),
+        "a boundary refusal reports the node it is about: {answered}"
+    );
     refusals[0]["reason"].as_str().expect("a reason").to_owned()
+}
+
+/// Assert `reason` names none of `ids`, beyond the guidance every refusal carries — whose
+/// own words name the `generalize` step — and say it again for what it does name.
+fn names_none(world: &World, reason: &str, ids: &[&str]) {
+    let said = reason.replace(&guidance(world), "");
+    for id in ids {
+        assert!(
+            !said.contains(id),
+            "a boundary refusal names node {id:?}:\n{reason}"
+        );
+    }
 }
 
 /// The guidance summary, as the host reads it from `onepipeline boundary guidance`.
@@ -177,6 +195,23 @@ fn an_ordinary_private_to_public_dependency_is_refused_at_load_carrying_the_host
         reason.contains(&advice),
         "the refusal does not carry the guidance the host renders:\n{reason}"
     );
+    names_none(&world, &reason, &["inner", "outer"]);
+    // A private producer that keeps its work, depended on with no export edge, is the
+    // same ordinary dependency, refused in the same neutral words.
+    let reason = refused_by_check(
+        &world,
+        "unexported",
+        &mixed_plan(
+            "unexported",
+            vec![
+                producer("generalize", &[]),
+                public("examples", &["generalize"]),
+            ],
+            vec![],
+        ),
+    );
+    assert!(reason.contains("ordinary dependency"), "{reason}");
+    names_none(&world, &reason, &["generalize", "examples"]);
 
     // The same refusal stops a launch before anything is dispatched.
     let project = world.plan(
@@ -314,9 +349,18 @@ fn every_malformed_export_edge_and_alternate_private_context_is_refused_at_load(
         ),
     ];
     for (name, nodes, edges, expected) in cases {
+        let ids: Vec<String> = nodes
+            .iter()
+            .map(|node| node["id"].as_str().expect("an id").to_owned())
+            .collect();
         let reason = refused_by_check(&world, name, &mixed_plan(name, nodes, edges));
         assert!(reason.contains(expected), "{name}: {reason}");
         assert!(reason.contains(&advice), "{name}: {reason}");
+        names_none(
+            &world,
+            &reason,
+            &ids.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
     }
 
     // And a consumer whose public fields or directories carry a private repository's
@@ -371,13 +415,12 @@ fn every_malformed_export_edge_and_alternate_private_context_is_refused_at_load(
             &mixed_plan(name, vec![producer("generalize", &[]), node], vec![edge]),
         );
         assert!(reason.contains("must be neutral"), "{name}: {reason}");
-        // A refusal names the node it refuses, which is what the planner wrote; beyond
-        // that it repeats nothing it found.
-        let said = reason.replace("owner/service-examples", "");
+        // A refusal repeats nothing it found, the consumer's own id included.
         assert!(
-            !said.contains("owner/service"),
+            !reason.contains("owner/service"),
             "{name}: a refusal repeated the private name it found:\n{reason}"
         );
+        names_none(&world, &reason, &["generalize", "examples"]);
     }
 
     // The well-formed edge loads.
@@ -414,7 +457,22 @@ fn a_live_edit_adding_an_ordinary_private_to_public_dependency_is_refused_before
         .run_with_stdin(&["reply", "edited"], &ordinary)
         .exited(REFUSED)
         .err_has("ordinary dependency")
-        .err_has("generalize -> preserve -> export -> consume");
+        .err_has("generalize -> preserve -> export -> consume")
+        .err_lacks("inner")
+        .err_lacks("outer");
+    // A public node landing what a private producer kept, with no export edge, is refused
+    // in the same neutral words rather than by the rule that names a kept dependency.
+    let unexported = json!({"version": 2, "commands": [
+        {"op": "add", "node": producer("keeper", &[])},
+        {"op": "add", "node": public("lander", &["keeper"])},
+    ]})
+    .to_string();
+    world
+        .run_with_stdin(&["reply", "edited"], &unexported)
+        .exited(REFUSED)
+        .err_has("ordinary dependency")
+        .err_lacks("keeper")
+        .err_lacks("lander");
 
     // A node naming no repository inherits the private side, so routing the same
     // dependency through one is refused too.
@@ -426,7 +484,10 @@ fn a_live_edit_adding_an_ordinary_private_to_public_dependency_is_refused_before
     world
         .run_with_stdin(&["reply", "edited"], &relayed)
         .exited(REFUSED)
-        .err_has("private node relay");
+        .err_has("depends on a private node")
+        .err_lacks("relay")
+        .err_lacks("inner")
+        .err_lacks("outer");
     assert!(
         world.events_of("edited", "edit-committed").is_empty(),
         "a refused edit was committed"
@@ -2238,7 +2299,8 @@ fn a_stricter_clearance_is_never_downgraded() {
             vec![],
         ),
     );
-    assert!(reason.contains("private node classified"), "{reason}");
+    assert!(reason.contains("depends on a private node"), "{reason}");
+    names_none(&world, &reason, &["classified", "downstream"]);
 
     world.script("classified.fail", "1");
     world.script("held.wait", "hold");
@@ -2268,7 +2330,8 @@ fn a_stricter_clearance_is_never_downgraded() {
             .to_string(),
         )
         .exited(REFUSED)
-        .err_has("private node classified-2");
+        .err_has("depends on a private node")
+        .err_lacks("classified");
     // Nor does a requeue's amendment stating it public: a parked private node requeued so
     // is as private as it was.
     let mut parked = public("parked-private", &[]);
@@ -2293,7 +2356,8 @@ fn a_stricter_clearance_is_never_downgraded() {
             .to_string(),
         )
         .exited(REFUSED)
-        .err_has("private node parked-private");
+        .err_has("depends on a private node")
+        .err_lacks("parked-private");
     world.release("held.go");
 }
 
@@ -2336,8 +2400,13 @@ fn a_private_repository_a_task_names_beside_its_own_makes_it_private_and_puts_it
     let checked = world.run(&["plan", "check", &refused, "--json"]);
     checked.exited(HAS_REFUSALS);
     assert!(
-        checked.stdout.contains("private node both"),
+        checked.stdout.contains("depends on a private node"),
         "{}",
+        checked.stdout
+    );
+    assert!(
+        !checked.stdout.contains("both"),
+        "a boundary refusal names its private node: {}",
         checked.stdout
     );
 
@@ -3450,7 +3519,11 @@ fn an_unknown_an_unregistered_and_a_local_only_repository_are_each_private() {
             name,
             &mixed_plan(name, vec![upstream, public("after", &["upstream"])], vec![]),
         );
-        assert!(reason.contains("private node upstream"), "{name}: {reason}");
+        assert!(
+            reason.contains("depends on a private node"),
+            "{name}: {reason}"
+        );
+        names_none(&world, &reason, &["upstream", "after"]);
     }
 
     // An unregistered repository in a run's scope makes its checks unavailable, never a

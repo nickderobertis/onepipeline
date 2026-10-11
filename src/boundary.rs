@@ -1476,14 +1476,23 @@ fn summary() -> String {
     )
 }
 
-/// A refusal about `node`, carrying the guidance.
-fn refused(node: &str, what: impl AsRef<str>) -> Refusal {
-    Refusal::node(node, format!("{} {}", what.as_ref(), summary()))
-}
-
-/// A refusal about the plan as a whole, carrying the guidance.
+/// A boundary refusal, carrying the guidance.
+///
+/// It names no node, neither in its sentence nor as the node it is about: a refusal
+/// is shown wherever a planner reads it, and the node ids it concerns are private names or
+/// ids that may carry a private term. It locates what has to change by position instead —
+/// an edge by its place in `export_edges` and a task by its place in the plan, from one —
+/// which says nothing the plan's author does not already hold.
 fn refused_plan(what: impl AsRef<str>) -> Refusal {
     Refusal::plain(format!("{} {}", what.as_ref(), summary()))
+}
+
+/// Where `id` stands in `plan`, from one, as a refusal names a task.
+fn position(plan: &Plan, id: &str) -> usize {
+    plan.tasks
+        .iter()
+        .position(|node| node.id == id)
+        .map_or(plan.tasks.len() + 1, |index| index + 1)
 }
 
 /// Whether `directory` is a relative, normalized path: no root, no `.` or `..`, no
@@ -1556,68 +1565,58 @@ pub(crate) fn is_export(plan: &Plan, dep: &str, node: &str) -> bool {
 /// any other dependency rule, so a refusal about an edge is about the edge.
 pub(crate) fn check_edges(plan: &Plan) -> Result<(), Refusal> {
     let ids: BTreeSet<&str> = plan.tasks.iter().map(|node| node.id.as_str()).collect();
-    let mut seen = BTreeSet::new();
-    let mut consumers: BTreeMap<&str, &str> = BTreeMap::new();
-    for edge in &plan.export_edges {
-        for (end, id) in [("from", &edge.from), ("to", &edge.to)] {
-            if !ids.contains(id.as_str()) {
+    let mut seen: BTreeMap<(&str, &str), usize> = BTreeMap::new();
+    let mut consumers: BTreeMap<&str, usize> = BTreeMap::new();
+    for (index, edge) in plan.export_edges.iter().enumerate() {
+        let number = index + 1;
+        for end in [&edge.from, &edge.to] {
+            if !ids.contains(end.as_str()) {
+                let end = if end == &edge.from { "from" } else { "to" };
                 return Err(refused_plan(format!(
-                    "export edge {} -> {} is dangling: its `{end}` names no node of this plan.",
-                    edge.from, edge.to
-                )));
+                    "export edge {number} is dangling: its `{end}` names no node of this plan."
+                ))
+                .field("export_edges"));
             }
         }
-        if !seen.insert((edge.from.as_str(), edge.to.as_str())) {
-            return Err(refused(
-                &edge.to,
-                format!(
-                    "export edge {} -> {} is declared twice.",
-                    edge.from, edge.to
-                ),
-            ));
+        if let Some(first) = seen.insert((edge.from.as_str(), edge.to.as_str()), number) {
+            return Err(refused_plan(format!(
+                "export edge {number} is declared twice: it repeats export edge {first}."
+            ))
+            .field("export_edges"));
         }
-        if let Some(first) = consumers.insert(edge.to.as_str(), edge.from.as_str()) {
-            return Err(refused(
-                &edge.to,
-                format!(
-                    "it is the consumer of two export edges, from {first} and from {}, which \
-                     is ambiguous: a session starts from one export.",
-                    edge.from
-                ),
-            ));
+        if let Some(first) = consumers.insert(edge.to.as_str(), number) {
+            return Err(refused_plan(format!(
+                "export edges {first} and {number} lead into one consumer, which is ambiguous: \
+                 a session starts from one export."
+            ))
+            .field("export_edges"));
         }
         for (which, directory) in [
             ("source_directory", &edge.source_directory),
             ("target_directory", &edge.target_directory),
         ] {
             if !normalized(directory) {
-                return Err(refused(
-                    &edge.to,
-                    format!(
-                        "its export edge's `{which}` is not a relative, normalized path (no \
-                         root, `.`, `..`, empty segment, `.git` or backslash)."
-                    ),
-                )
+                return Err(refused_plan(format!(
+                    "export edge {number}'s `{which}` is not a relative, normalized path (no \
+                     root, `.`, `..`, empty segment, `.git` or backslash)."
+                ))
                 .field("export_edges"));
             }
         }
     }
 
-    for edge in &plan.export_edges {
+    for (index, edge) in plan.export_edges.iter().enumerate() {
         let consumer = plan
             .tasks
             .iter()
             .find(|node| node.id == edge.to)
             .expect("every end was found above");
         if !consumer.deps.contains(&edge.from) {
-            return Err(refused(
-                &consumer.id,
-                format!(
-                    "its export edge from {} is not a dependency it states, so the plan graph \
-                     and the export edge disagree.",
-                    edge.from
-                ),
-            )
+            return Err(refused_plan(format!(
+                "export edge {} is not a dependency its consumer states, so the plan graph and \
+                 the export edge disagree.",
+                index + 1
+            ))
             .field("deps"));
         }
     }
@@ -1652,27 +1651,26 @@ pub(crate) fn check(
 
     check_edges(plan)?;
 
-    for edge in &plan.export_edges {
+    for (index, edge) in plan.export_edges.iter().enumerate() {
+        let number = index + 1;
         let producer = nodes[edge.from.as_str()];
         let consumer = nodes[edge.to.as_str()];
         if resolved.clearance(&producer.id) != Clearance::Private
             || producer.repo.is_none()
             || producer.publish != Publish::Preserve
         {
-            return Err(refused(
-                &producer.id,
-                "an export producer must be a private lifecycle node that publishes with \
-                 `publish: \"preserve\"`.",
-            ));
+            return Err(refused_plan(format!(
+                "export edge {number}: an export producer must be a private lifecycle node that \
+                 publishes with `publish: \"preserve\"`."
+            )));
         }
         if resolved.clearance(&consumer.id) != Clearance::Public
             || !resolved.public_destinations.contains(&consumer.id)
         {
-            return Err(refused(
-                &consumer.id,
-                "an export consumer must be a public lifecycle node: its classification and \
-                 every repository it names public.",
-            ));
+            return Err(refused_plan(format!(
+                "export edge {number}: an export consumer must be a public lifecycle node: its \
+                 classification and every repository it names public."
+            )));
         }
         // A `branch` or a `resume` the engine pins on a consumer it cancelled and requeued is
         // the export's own branch, so only a document's — what a plan was loaded with — is
@@ -1680,11 +1678,11 @@ pub(crate) fn check(
         let authored = matches!(stage, Stage::Load)
             && (consumer.branch.is_some() || consumer.resume.is_some());
         if consumer.base_branch.is_some() || authored {
-            return Err(refused(
-                &consumer.id,
-                "an export consumer's session starts from its export, so it may not name an \
-                 alternate private context — a `base_branch`, a `branch` or a `resume`.",
-            ));
+            return Err(refused_plan(format!(
+                "export edge {number}: an export consumer's session starts from its export, so \
+                 it may not name an alternate private context — a `base_branch`, a `branch` or \
+                 a `resume`."
+            )));
         }
     }
 
@@ -1698,24 +1696,25 @@ pub(crate) fn check(
             if resolved.clearance(dep) != Clearance::Private || is_export(plan, dep, &node.id) {
                 continue;
             }
+            let task = position(plan, &node.id);
             let what = if consumed_by(plan, &node.id).is_some() {
                 format!(
-                    "it depends on private node {dep} beside its export edge, an alternate \
+                    "task {task} depends on a private node beside its export edge, an alternate \
                      private context its public session may not carry."
                 )
             } else {
                 format!(
-                    "it is public and depends on private node {dep} through an ordinary \
+                    "task {task} is public and depends on a private node through an ordinary \
                      dependency, which would carry private work into public output."
                 )
             };
-            return Err(refused(&node.id, what).field("deps"));
+            return Err(refused_plan(what).field("deps"));
         }
     }
 
     // A consumer's public fields, and the directories an export writes, name nothing
     // private: asked of the term check, over the run's own scope.
-    for edge in &plan.export_edges {
+    for (index, edge) in plan.export_edges.iter().enumerate() {
         let consumer = nodes[edge.to.as_str()];
         let input = onevcs::BoundaryInput {
             destination: onevcs::Visibility::Public,
@@ -1736,13 +1735,12 @@ pub(crate) fn check(
         match oracle.check(input) {
             onevcs::BoundaryVerdict::Pass => {}
             verdict => {
-                return Err(refused(
-                    &consumer.id,
-                    format!(
-                        "an export consumer's id, title, task and directories must be neutral: {}.",
-                        verdict.reason().unwrap_or_default()
-                    ),
-                ))
+                return Err(refused_plan(format!(
+                    "export edge {}: an export consumer's id, title, task and directories must \
+                     be neutral: {}.",
+                    index + 1,
+                    verdict.reason().unwrap_or_default()
+                )))
             }
         }
     }
@@ -1906,9 +1904,13 @@ mod tests {
         );
         let refusal = check(&through, Stage::Load, &mut table).expect_err("refused");
         assert!(
-            refusal.message.contains("private node relay"),
+            refusal
+                .message
+                .contains("task 3 is public and depends on a private node"),
             "{refusal:?}"
         );
+        assert!(refusal.node.is_none(), "{refusal:?}");
+        assert!(!refusal.message.contains("relay"), "{refusal:?}");
 
         // A private classification is never downgraded by a public repository.
         let classified = plan(

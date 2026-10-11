@@ -92,7 +92,9 @@ Rules:
   `onevcs`. A plan that is not mixed pays nothing here — no prompt text, no
   judgement — so a new call into it keeps that true. Its graph-shape half,
   `check_edges`, runs inside `graph::check_edited` *before* the dependency rules,
-  so a refusal about an edge is about the edge.
+  so a refusal about an edge is about the edge. A boundary refusal names no node —
+  an edge by its place in `export_edges`, a task by its place in the plan — and
+  where `graph` refuses a plan the boundary refuses too, the boundary's answers.
 - `agentgraph.rs` and `vcs.rs` are the sibling CLIs, reached as subprocesses.
   Nothing here reimplements what they own.
 - `summary.rs` writes the per-run summary document a listing reads instead of a
