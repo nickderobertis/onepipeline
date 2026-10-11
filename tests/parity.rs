@@ -1284,9 +1284,14 @@ fn unpublished_host(root: &Path) -> Vec<(&'static str, String)> {
     let home = root.join("onevcs-home");
     let gitconfig = root.join("gitconfig");
     std::fs::create_dir_all(&home).expect("a state root");
+    // `maintenance.auto` is off because git 2.47 and later follow every commit with
+    // `git maintenance run --auto --detach`, whose daemonized child is still inside
+    // the worktree when the session closes a moment later, and onevcs rightly refuses
+    // to close a session with a process working in its run root.
     std::fs::write(
         &gitconfig,
-        "[user]\n\tname = Parity\n\temail = parity@example.invalid\n[commit]\n\tgpgsign = false\n",
+        "[user]\n\tname = Parity\n\temail = parity@example.invalid\n[commit]\n\tgpgsign = false\n\
+         [maintenance]\n\tauto = false\n",
     )
     .expect("a git config");
     std::fs::write(
