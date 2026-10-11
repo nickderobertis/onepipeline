@@ -863,6 +863,9 @@ dependencies = [
  "icu_properties",
  "icu_provider",
  "smallvec",
+ "utf16_iter",
+ "utf8_iter",
+ "write16",
  "zerovec",
 ]
 
@@ -1650,17 +1653,20 @@ dependencies = [
 
 [[package]]
 name = "onevcs"
-version = "0.43.1"
+version = "0.45.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e62740168e3c5390992d88fcb74ec1b426eb40f67f2145c60c4bc5a302e8efea"
+checksum = "c2a90ef56e76c76f9bf424151e716aa466761e0295e5a7995c12a9bd09fbafb1"
 dependencies = [
+ "aho-corasick",
  "clap",
  "dunce",
  "filetime",
  "fs4",
  "git2",
+ "icu_normalizer",
  "icu_properties",
  "libc",
+ "libz-sys",
  "minijinja",
  "onemessagebus",
  "schemars",
@@ -1679,9 +1685,9 @@ dependencies = [
 
 [[package]]
 name = "onevcs-testing"
-version = "0.13.4"
+version = "0.13.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "852311c800ad9de40afb5e89e610d29920e515de427e990d52a993d2a9cd283a"
+checksum = "c9e518a86066a8fbb82516c86afb27c449485b2d4a6853fd22efb4bdf7045235"
 dependencies = [
  "onevcs",
  "serde",
@@ -2799,6 +2805,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "utf16_iter"
+version = "1.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c8232dd3cdaed5356e0f716d285e4b40b932ac434100fe9b7e0e8e935b9e6246"
+
+[[package]]
 name = "utf8-zero"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3203,6 +3215,12 @@ name = "wit-bindgen"
 version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
+
+[[package]]
+name = "write16"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1890f4022759daae28ed4fe62859b1236caebfc61ede2f63ed4e695f3f6d936"
 
 [[package]]
 name = "writeable"

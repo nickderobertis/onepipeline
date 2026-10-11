@@ -239,6 +239,7 @@ pub fn publish(
             title,
             body: body.map(str::to_owned),
             draft: draft.cloned(),
+            term_scope: onevcs::TermScope::default(),
         },
         &NodeCancellation(cancel),
     )
@@ -339,9 +340,26 @@ pub fn describe_change(
         &onevcs::ChangeDescription {
             title,
             body: body.to_owned(),
+            term_scope: onevcs::TermScope::default(),
         },
     )
     .map_err(refusal)
+}
+
+/// Assemble, advance or confirm a node's stack base, as `onevcs stack-base` does.
+///
+/// The sibling's own answer, conflict included: a merge that stopped is left in
+/// progress in the session [`onevcs::StackBaseOutcome::Conflicted`] names, for
+/// the node's worker to conclude, and the same request made again then merges
+/// what is left and pushes.
+///
+/// # Errors
+///
+/// The sibling's own refusal: a parent or root the origin does not have, a name
+/// outside the stack-base namespace, a push the origin or the public boundary
+/// turned down.
+pub fn assemble_stack_base(request: &onevcs::StackBaseRequest) -> Result<onevcs::StackBase> {
+    onevcs::assemble_stack_base(&providers(), request).map_err(refusal)
 }
 
 /// The word a node whose change request is held open as a **draft** settles on.
@@ -953,6 +971,7 @@ pub fn preserve_branch(repo: &str, branch: &str) -> std::result::Result<onevcs::
     onevcs::preserve(&onevcs::PreserveRequest {
         repo: repo.to_owned(),
         branch: branch.to_owned(),
+        term_scope: onevcs::TermScope::default(),
     })
     .map_err(|refusal| refusal.to_string())
 }

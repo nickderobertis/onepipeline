@@ -11,14 +11,14 @@ owns the contract**, and `docs/contract.md` was amended to carry each ruling. Th
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22, 33, 35–40, 46–73, 76, 80, 84–88, 92, 93, 95, 98, 111, 113 and 114 are open**, except **52**, which entry 60
+Entries **10–22, 33, 35–40, 46–73, 76, 80, 84–88, 92, 93, 95, 98, 111 and 113–116 are open**, except **52**, which entry 60
 supersedes: that proposal added a second manager-note op beside `context`, and 60
 collapses the two into one, so the shape lives in 60 and 52 keeps only the
 history that produced it. Each open entry states what the code does today and the
 proposal it is waiting on. Most are questions for a *producer* rather than for
 this crate, because `oneagentgraph` and `onevcs` are independent tools that expose
 general integration hooks only and nothing in them may know about this one; the
-rest — 36 to 40, 46 to 73, 80, 84 to 88, 92, 93, 95, 98, 111, 113 and 114 — are for the planner who owns the contract, and
+rest — 36 to 40, 46 to 73, 80, 84 to 88, 92, 93, 95, 98, 111 and 113 to 116 — are for the planner who owns the contract, and
 name the sentence in it they would change. Entry 40 is for both: its plan-schema and event-kind
 halves are the contract owner's, and the two things it could not compile are
 `onevcs`'s. Entry 76 is for `onemessagebus` and for a node of this crate's own. An
@@ -1550,8 +1550,9 @@ default.
 
 Under `fast` the node launches on its dependencies' branch readiness alone — the
 readiness the contract already describes, unchanged — and a dependency inside the
-node's own repository still produces the stacked or merged-stacked branch it
-produces today. A dependency **outside** it gains a row in a trailing block on
+node's own repository places the node as entry 115 states: on that dependency's
+branch while it is unlanded, on the stack base merging several, and on the root
+once they landed. A dependency **outside** it gains a row in a trailing block on
 the node's rendered task, under `onepipeline::plan::CROSS_REPO_REFERENCES_HEADING`
 and appended by the same rendering that appends `## Planner context`, so the
 worker pins against git rather than against a version that does not exist yet.
@@ -9464,7 +9465,144 @@ on the flow's own channel, a holder killed with SIGKILL, a nested `flow run`, an
 the wake reserve measured on the wall clock — and runs launched outside any flow
 read through `unwatched`, `stop-guard` and `watch` exactly as before.
 
-## 115. `onepipeline host` cost every run a root had ever kept, and printed nothing a script reads — OPEN
+## 115. A landing dependent of unlanded work was cut from the root without it — OPEN
+
+**Proposal, for the planner who owns the contract: a landing lifecycle node is
+placed on the unlanded work of its own repository it depends on, and its
+settlement says where.** The contract's plan-schema paragraph places a lifecycle
+node's session on its `base_branch` or the identity's root, and entry 112 stacks
+only `publish: preserve` chains. So a `change-open` child of a parent settled
+`change-review-draft` opened its session from the root and its draft against the
+root, without its parent's work (onepipeline#788): the dependent's change request
+showed none of what it was built on, and no draft stack existed for a reviewer to
+read. The rule below is the one the approved design of `authoring:pr-feedback-rework`
+states and this build implements; the contract's wording is unchanged until it is
+ruled on.
+
+**Placement.** For a lifecycle node N on identity I, its **stack parents** are its
+direct dependencies on I that settled `done` with landing `unlanded` and a recorded
+branch — a parent settled `change-review-draft`, `change-draft` or `change-open`. A
+dependency that is an ancestor of another stack parent collapses into that
+descendant, whose branch already carries it, and a landed dependency is no stack
+parent: its work is on the root. Placement reads the landings the run has recorded
+when N starts and asks no host.
+
+- **None** places N as before: the root, or its `base_branch`.
+- **One** cuts N's session from that parent's branch, and `onevcs`'s stacked
+  publication opens N's change request against it.
+- **Several** has the engine call `onevcs::assemble_stack_base` with `branch` the
+  host's branch prefix followed by `stack-base/<plan name>/<node id>`, `root` N's
+  root, `parents` the stack parents' branches in N's declared dependency order, and
+  the session labels `run` and `node`; N's session and change request are based on
+  that branch. The prefix is the one `onevcs`'s own `session-opened` record reports
+  putting in front of a branch it cut for the run — `onevcs` publishes no resolver
+  of it for a branch it does not cut itself — and none where it reported none. On `Conflicted`, N's own worker is dispatched into the returned
+  session with the merge-in-progress task, and once it concludes the merge the
+  engine assembles again and proceeds. An assembly that fails, or that conflicts
+  again after the worker concluded one merge per parent and the root, settles N
+  `failed` as `infrastructure-failure` before its session opens.
+
+An explicit `base_branch` stays the **root** of assembly, while stack parents set
+the checkout and change-request base. Without one, the root is the base the
+lowest stack's root-placed change was drafted against. A stack parent whose
+settlement recorded no commit for its branch, or several with no root on the
+record, fail N as `infrastructure-failure` before it is dispatched, naming them. `publish: preserve`
+stacking and its fan-in refusal (entry 112) are unchanged.
+
+**What the worker and the drafter read.** N's rendered task ends with a `## Stack`
+section naming each stack parent's node, branch and change request URL and N's
+base. After a publication of N — failed ones included, since the change request
+outlives the attempt — the engine writes into N's change request description,
+through `onevcs::describe_change`, one block between the lines
+`<!-- onepipeline:stack -->` and `<!-- /onepipeline:stack -->`: a `## Stack`
+heading and the base N is drafted against, with each parent's change request URL.
+It is appended where the description holds no block and replaced between its
+markers where it holds one; no other text of the description is touched. The body
+drafter's task carries the same block as a section to read, and the drafter writes
+none.
+
+**The settlement.** `node-settled` gains three optional keys, each omitted where
+absent, so every record written before them reads as it did:
+
+- `base` — the branch N's change request is based on: the root, a parent's branch,
+  or the stack base. Written by every lifecycle settlement once N's session opened.
+- `head` — the commit N's branch stands at, now written on success settlements too
+  and not only on failures, by every lifecycle settlement once its branch exists.
+- `stack` — `{parents: [{node, branch, head}], stack_base}`, present exactly when N
+  had stack parents; `stack_base` is `null` for one parent.
+
+A lifecycle failure before N's session opened carries neither `base` nor `head`.
+The fold keeps them per node, so a later pass reads a node's stack from the journal
+alone, and the store write-back projects them verbatim inside
+`onepipeline.settlement`. A settlement that did not finish the node — failed or
+cancelled — also names the change request a session of the node opened, which a
+publication refused by its checks leaves open.
+
+**Views.** `status` and `results` list every lifecycle node holding a change
+request nothing has landed, in any state, with that change request and what it is
+drafted against: the root, its parent's branch and change request, or the stack
+base and the parents merged into it.
+
+**The published bundle.** `schemas/events.json` is regenerated with the three keys
+in `agent.pipeline.node-settled@2`, at the bundle version `1.1.0` the contract's
+event bundle paragraph names; a reader of the earlier document reads every record
+this build writes. **Proposed beside the rule**, as entry 113 proposes for its key:
+the bundle rises to `1.2.0` for the additive keys.
+
+**What would close it.** A ruling adding the placement rule and the Stack block to
+the plan-schema paragraph, and the three keys to the `node-settled` payload.
+
+```json
+{
+  "settlement": {
+    "status": "done",
+    "outcome": "change-review-draft",
+    "branch": "me/e",
+    "change_url": "https://github.com/owner/service/pull/4",
+    "landing": "unlanded",
+    "head": "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+    "base": "me/stack-base/stack/e",
+    "stack": {
+      "parents": [
+        {"node": "a", "branch": "me/a", "head": "1f2e3d4c5b6a79881726354453627180918a7b6c"},
+        {"node": "c", "branch": "me/c", "head": "2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d"}
+      ],
+      "stack_base": "me/stack-base/stack/e"
+    }
+  },
+  "block_markers": ["<!-- onepipeline:stack -->", "<!-- /onepipeline:stack -->"]
+}
+```
+
+**What this build does.** `tests/e2e/stacked_drafts.rs` drives each rule through
+the compiled binary and the real linked `onevcs` over a real origin, with GitHub at
+`onevcs`'s `ONEVCS_GH` seam:
+`landing_dependents_of_unlanded_parents_are_drafted_on_them` runs `a → b`,
+`a, c → e`, `a, b → g` and `b, c → h` on a team identity, plus `f` stacked on `a`
+whose checks fail; it reads each session's base, each change request's base and description,
+each branch's diff against its base, the worker's and the drafter's tasks, and
+`status` and `results` after the run settled.
+`a_conflicting_stack_base_is_concluded_by_the_node_s_own_worker` has `a` and `c`
+write one file and `e`'s worker conclude the stack base's merge.
+`a_dependent_of_a_landed_parent_is_placed_on_the_root` holds the landed case,
+`a_parent_spelled_by_another_name_for_the_repository_is_stacked_on` a parent named
+by its checkout's path,
+`an_explicit_base_branch_is_the_root_of_the_stack_base` the explicit root and an
+assembly refused before any session opened,
+`a_republished_stack_keeps_one_block_and_the_text_around_it` a second publication
+over a description a reviewer edited, its stack base assembled again over a root
+that moved,
+`a_stack_block_the_host_will_not_take_leaves_the_publication_as_it_settled` a
+refused write of the block, `an_unconcluded_stack_base_merge_fails_the_node_naming_it`,
+`a_worker_that_fails_the_stack_base_merge_fails_the_node` and
+`a_node_cancelled_while_concluding_its_stack_base_settles_cancelled` the three ways a
+conflicted stack base ends without one, and
+`a_stacked_settlement_is_projected_onto_the_store` the store write-back.
+`tests/contract.rs`'s `the_stacked_settlement_is_what_the_divergence_record_names`
+checks the block above against the registered `node-settled` document, and
+`tests/e2e/publish_preserve.rs` keeps every preserve-stacking journey.
+
+## 116. `onepipeline host` cost every run a root had ever kept, and printed nothing a script reads — OPEN
 
 **Proposal, for the planner who owns the contract, approved by the plan
 `host-view-speed` (node `op-host-view`), whose task states the reading below and

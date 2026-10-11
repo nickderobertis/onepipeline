@@ -103,6 +103,7 @@ mod refusal;
 mod release;
 mod rendercost;
 mod shutdown;
+mod stack;
 mod stopguard;
 mod summary;
 mod supersession;

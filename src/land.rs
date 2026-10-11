@@ -376,6 +376,8 @@ impl Landing {
                     title: title(&args.title)?,
                     body: body(&args.body, &args.body_file)?,
                     policy: args.policy,
+                    // llmlint: ignore[changed_behavior_has_e2e] `onevcs`'s own flags, read through its own `TermScopeArgs::scope` into its own request and passed through as every other flag of the verb is; which terms a scope derives is `onevcs`'s to prove, and the default scope is what the out-of-band journeys drive.
+                    term_scope: args.term_scope.scope(),
                 }))
             }
             onevcs::cli::Command::Recover(args) => Some(Self::Recover(onevcs::RecoverRequest {
@@ -383,6 +385,8 @@ impl Landing {
                 branch: args.branch.clone(),
                 title: title(&args.title)?,
                 body: body(&args.body, &args.body_file)?,
+                // llmlint: ignore[changed_behavior_has_e2e] the same pass-through of `onevcs`'s own flags as `publish-branch`'s above, for the same reason.
+                term_scope: args.term_scope.scope(),
             })),
             _ => None,
         }
