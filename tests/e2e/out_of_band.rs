@@ -323,23 +323,18 @@ fn gh_calls(world: &World) -> Vec<Value> {
 }
 
 /// Whether one recorded `gh` invocation only reads: an `api` request naming no
-/// method, field or input, which `gh` sends as a `GET`.
+/// method, field or input, which `gh` sends as a `GET`. A short option counts in
+/// every spelling `gh` accepts — `-X POST`, `-XPOST` and `-X=POST` — and a long
+/// one both separated and as `--flag=value`.
 fn only_reads(args: &Value) -> bool {
     let args = args.as_array().expect("an invocation carries args");
     args.first().is_some_and(|verb| verb == "api")
         && !args.iter().any(|arg| {
             arg.as_str().is_some_and(|arg| {
-                [
-                    "-X",
-                    "--method",
-                    "-f",
-                    "-F",
-                    "--field",
-                    "--raw-field",
-                    "--input",
-                ]
-                .iter()
-                .any(|flag| arg == *flag || arg.starts_with(&format!("{flag}=")))
+                ["-X", "-f", "-F"].iter().any(|flag| arg.starts_with(flag))
+                    || ["--method", "--field", "--raw-field", "--input"]
+                        .iter()
+                        .any(|flag| arg == *flag || arg.starts_with(&format!("{flag}=")))
             })
         })
 }
