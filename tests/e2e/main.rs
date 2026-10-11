@@ -113,6 +113,7 @@ mod driver_exit;
 mod envelope_reviewer;
 mod filter;
 mod holds;
+mod host_view;
 mod journal;
 // llmlint: ignore[expensive_tests_stay_behind_their_own_edge] the reason is at the head of
 // `tests/e2e/landing.rs`, and is carried here too because this declaration is the other

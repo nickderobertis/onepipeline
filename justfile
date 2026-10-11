@@ -370,8 +370,21 @@ _tier-lint bin:
 
 # Each tier's instrumented run, counted by `_crate-coverage` in the one floor.
 # The e2e journeys are the ones that run the binary under `strace` and drive the
-# released `onetaskgraph`, so that tier asks for both up front.
-_e2e-test: _strace-preflight _onetaskgraph-preflight (_tier-test "e2e" e2e-tier)
+# released `onetaskgraph`, so that tier asks for both up front — and the release
+# build `host-view-time` times, below.
+_e2e-test: _strace-preflight _onetaskgraph-preflight _host-view-release (_tier-test "e2e" e2e-tier)
+
+# The release build of `onepipeline` that `tests/e2e/host_view.rs` times for the
+# `host-view-time` budget: what a user waits through is the optimized binary, and a
+# debug or coverage-instrumented one measures its build flavour instead. Built here,
+# ahead of the suite, because a release build from cold outlasts the per-test bound
+# in `.config/nextest.toml`; the journey asks cargo again, which is a fingerprint
+# check when this build is current. Both asks drop the coverage tier's compiler
+# flags, so they are one build. Linux only, where those journeys run.
+_host-view-release:
+    @[ "$(uname -s)" = Linux ] || exit 0; \
+      env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS -u RUSTC_WORKSPACE_WRAPPER \
+      cargo build --release --locked --quiet --bin onepipeline --target-dir target
 
 _contract-test: (_tier-test "contract" contract-tier)
 
@@ -399,7 +412,7 @@ _tier-test-quick filter:
 
 _crate-test-quick: (_tier-test-quick rest-tier)
 
-_e2e-test-quick: _strace-preflight _onetaskgraph-preflight (_tier-test-quick e2e-tier)
+_e2e-test-quick: _strace-preflight _onetaskgraph-preflight _host-view-release (_tier-test-quick e2e-tier)
 
 _contract-test-quick: (_tier-test-quick contract-tier)
 
@@ -491,6 +504,7 @@ _release-compat-run *args:
 test-e2e filter="":
     @just _strace-preflight
     @just _onetaskgraph-preflight
+    @just _host-view-release
     @cargo nextest run --locked -E '{{e2e-tier}}{{ if filter == "" { "" } else { " and (" + filter + ")" } }}'
 
 # Each journey starts a real two-party conversation and holds one side's turn
