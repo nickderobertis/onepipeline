@@ -7443,6 +7443,12 @@ const RULINGS: &[(&str, &str)] = &[
         "112.",
         "several select the candidate whose stacking chain contains every other candidate",
     ),
+    // The repository publication boundary: the manager's rulings on what this build
+    // decided beyond the approved interface, stated by the contract's own paragraph.
+    (
+        "114.",
+        "every write-back write a store whose configuration opts into the boundary makes",
+    ),
 ];
 
 /// A plan spanning sources, as the contract's block states it: the store's own two member
