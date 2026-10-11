@@ -51,10 +51,27 @@ pub(crate) struct Repository {
     /// Which side its effective visibility puts it on: only a verified public repository
     /// is public.
     pub(crate) clearance: Clearance,
-    /// The `onevcs` identity key a term scope names it by, or the spelling itself where
-    /// the host cannot resolve one — which a scoped check then answers as unavailable
-    /// rather than passing.
-    pub(crate) identity: String,
+    /// What a term scope names it by.
+    pub(crate) identity: Identity,
+}
+
+/// How a term scope names a repository.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Identity {
+    /// The `onevcs` identity key the host resolved it to.
+    Registered(String),
+    /// The spelling a node named, which the host could not resolve: a scoped check names
+    /// it as it is, and answers it unavailable rather than passing.
+    Unresolved(String),
+}
+
+impl Identity {
+    /// The word a term scope carries for it.
+    fn into_scope(self) -> String {
+        match self {
+            Self::Registered(key) | Self::Unresolved(key) => key,
+        }
+    }
 }
 
 /// Where the boundary learns about repositories and terms.
@@ -85,9 +102,10 @@ impl Oracle for Onevcs {
         })
         .map(|answer| answer.visibility)
         .unwrap_or(onevcs::Visibility::Unknown);
-        let identity = onevcs::release_targets(repo)
-            .map(|targets| targets.identity)
-            .unwrap_or_else(|_| repo.to_owned());
+        let identity = onevcs::release_targets(repo).map_or_else(
+            |_| Identity::Unresolved(repo.to_owned()),
+            |targets| Identity::Registered(targets.identity),
+        );
         let answered = Repository {
             clearance: if visibility.effective() == onevcs::Visibility::Public {
                 Clearance::Public
@@ -178,7 +196,7 @@ pub(crate) fn resolve(plan: &Plan, oracle: &mut dyn Oracle) -> Resolved {
             let repository = oracle.repository(repo);
             if repository.clearance == Clearance::Private {
                 clearance = Some(Clearance::Private);
-                scope.insert(repository.identity);
+                scope.insert(repository.identity.into_scope());
             }
         }
         if clearance == Some(Clearance::Public) {
@@ -419,46 +437,65 @@ pub(crate) struct Dispatching {
     side: Option<Side>,
 }
 
-/// One dispatch's side of a mixed plan's boundary.
+/// One dispatch's side of a mixed plan's boundary: each of the three roles a node can
+/// have there, carrying exactly what that role is given.
 #[derive(Debug, Clone)]
-struct Side {
-    /// The node's clearance.
-    clearance: Clearance,
-    /// The section appended to the task it is handed: the template context and the
-    /// guidance for its side.
-    section: String,
-    /// The neutral name proposed for a branch its session cuts, in place of the
-    /// plan-derived one: a public node's and an export producer's. The host's branch
-    /// prefix is put in front of it by `onevcs`.
-    branch_name: Option<String>,
-    /// The export a consumer's session starts from.
-    export: Option<Export>,
+enum Side {
+    /// A private node that produces no export.
+    Private {
+        /// The section appended to its task.
+        section: String,
+    },
+    /// A private node that produces an export, cutting a neutral branch.
+    Producer {
+        /// The section appended to its task.
+        section: String,
+        /// The neutral name proposed for the branch its session cuts.
+        branch_name: String,
+    },
+    /// A public node, cutting a neutral branch where it names a repository, and starting
+    /// from an export where it consumes one.
+    Public {
+        /// The section appended to its task.
+        section: String,
+        /// The neutral name proposed for the branch its session cuts.
+        branch_name: Option<String>,
+        /// The export its session starts from.
+        export: Option<Export>,
+    },
 }
 
 impl Dispatching {
     /// The section appended to the task, in a mixed plan.
     pub(crate) fn section(&self) -> Option<&str> {
-        self.side.as_ref().map(|side| side.section.as_str())
+        self.side.as_ref().map(|side| match side {
+            Side::Private { section }
+            | Side::Producer { section, .. }
+            | Side::Public { section, .. } => section.as_str(),
+        })
     }
 
     /// The neutral branch name proposed for a session this node cuts, where it has one.
     pub(crate) fn branch_name(&self) -> Option<&str> {
-        self.side
-            .as_ref()
-            .and_then(|side| side.branch_name.as_deref())
+        match self.side.as_ref()? {
+            Side::Private { .. } => None,
+            Side::Producer { branch_name, .. } => Some(branch_name),
+            Side::Public { branch_name, .. } => branch_name.as_deref(),
+        }
     }
 
     /// The export this consumer's session starts from.
     pub(crate) fn export(&self) -> Option<&Export> {
-        self.side.as_ref().and_then(|side| side.export.as_ref())
+        match self.side.as_ref()? {
+            Side::Public { export, .. } => export.as_ref(),
+            Side::Private { .. } | Side::Producer { .. } => None,
+        }
     }
 
     /// Whether this node is public in a mixed plan, so what is rendered for it names
     /// nothing of the run beyond the node itself.
     pub(crate) fn is_public(&self) -> bool {
-        self.side
-            .as_ref()
-            .is_some_and(|side| side.clearance == Clearance::Public)
+        matches!(self.side, Some(Side::Public { .. }))
     }
 }
 
@@ -650,17 +687,25 @@ pub(crate) fn dispatching(
     }
     let rendered = serde_json::to_string(&serde_json::json!({ "boundary": context }))
         .expect("a context serializes");
-    Ok(Dispatching {
-        term_scope,
-        side: Some(Side {
-            clearance,
-            section: format!(
-                "{SECTION_HEADING}\n\nThis plan spans public and private repositories.\n\n```json\n{rendered}\n```\n\n{}",
-                lines.join("\n")
-            ),
+    let section = format!(
+        "{SECTION_HEADING}\n\nThis plan spans public and private repositories.\n\n```json\n{rendered}\n```\n\n{}",
+        lines.join("\n")
+    );
+    let side = match (clearance, branch_name) {
+        (Clearance::Public, branch_name) => Side::Public {
+            section,
             branch_name,
             export,
-        }),
+        },
+        (Clearance::Private, Some(branch_name)) => Side::Producer {
+            section,
+            branch_name,
+        },
+        (Clearance::Private, None) => Side::Private { section },
+    };
+    Ok(Dispatching {
+        term_scope,
+        side: Some(side),
     })
 }
 
@@ -781,6 +826,12 @@ pub(crate) fn ensure_export(
     // The producer's kept branch is the work: a producer kept again is a replacement under
     // a new id with a branch of its own, so it is exported anew, and the head is evidence
     // the record keeps rather than part of what it is looked up by.
+    // llmlint: ignore[changed_behavior_has_e2e] the one case beyond the lineage journey's — a
+    // producer replaced *after* it was exported — has no input: an exported producer has
+    // settled `done`, and `retry` supersedes only a running, failed or cancelled node, so no
+    // edit can put a replacement behind an export that already happened. The replacement
+    // the record does distinguish, a superseded producer's, is
+    // `publication_boundary::the_export_base_holds_through_supersession_retry_and_resume`.
     let same = |held: &Recorded| {
         held.of_edge(export)
             && held.branch == export.branch
@@ -938,11 +989,14 @@ fn untargeted_of(document: &serde_json::Value) -> Vec<String> {
     text
 }
 
-/// The run as `commands` would leave it, so a node an envelope adds or retries in is
-/// judged by the clearance it will have: each one compiled by the engine's own edit
-/// validator and folded exactly as the reconciler folds it. `Err` names the first command
-/// that would not apply, which is the command the engine refuses.
-fn prospective(
+/// The run as `commands`' graph edits would leave it, so a node is judged by the
+/// clearance it will have: every command that changes which nodes there are, what they
+/// name or what they depend on — an `add`, a `retry`, a `requeue` and its amendment, a
+/// `drop`, a `reparent` — compiled by the engine's own edit validator and folded exactly as
+/// the reconciler folds it. The rest change no clearance and are judged against the run as
+/// it stands. `Err` names the first edit that would not apply, which is one the engine
+/// refuses.
+fn with_graph_edits(
     state: &crate::projection::RunState,
     commands: &[crate::channel::Command],
 ) -> Result<crate::projection::RunState, usize> {
@@ -950,7 +1004,11 @@ fn prospective(
     for (index, command) in commands.iter().enumerate() {
         if !matches!(
             command,
-            crate::channel::Command::Add { .. } | crate::channel::Command::Retry { .. }
+            crate::channel::Command::Add { .. }
+                | crate::channel::Command::Retry { .. }
+                | crate::channel::Command::Requeue { .. }
+                | crate::channel::Command::Drop { .. }
+                | crate::channel::Command::Reparent { .. }
         ) {
             continue;
         }
@@ -1005,7 +1063,7 @@ pub(crate) fn judge(
         return unjudgeable("what it was handed: a command in it is not one this build reads")
             .unwrap_or(Judged::Pass);
     };
-    let staged = match prospective(state, &commands) {
+    let staged = match with_graph_edits(state, &commands) {
         Ok(staged) => staged,
         Err(index) => {
             let op = crate::channel::op_of(&commands[index]);
@@ -1590,7 +1648,7 @@ mod tests {
                 } else {
                     Clearance::Private
                 },
-                identity: format!("github.com/owner/{repo}"),
+                identity: Identity::Registered(format!("github.com/owner/{repo}")),
             }
         }
 

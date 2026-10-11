@@ -1008,10 +1008,10 @@ fn snapshot_of(
                 if let Some(name) = &plan.name {
                     metadata.insert("onepipeline.name".into(), json!(name));
                 }
-                // The edges as they stand: an end a retry replaced names its replacement.
-                let edges = crate::boundary::edges_now(&plan.export_edges, &state.superseded);
-                if !edges.is_empty() {
-                    metadata.insert("onepipeline.export_edges".into(), json!(edges));
+                // As launched: each end names its lineage's root, which is the id the
+                // store's own item for that lineage carries whatever retried it.
+                if !plan.export_edges.is_empty() {
+                    metadata.insert("onepipeline.export_edges".into(), json!(plan.export_edges));
                 }
                 metadata
             })

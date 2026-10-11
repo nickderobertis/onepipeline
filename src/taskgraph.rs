@@ -1384,7 +1384,7 @@ mod tests {
                 } else {
                     crate::boundary::Clearance::Private
                 },
-                identity: repo.to_owned(),
+                identity: crate::boundary::Identity::Registered(repo.to_owned()),
             }
         }
 

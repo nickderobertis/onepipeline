@@ -756,6 +756,41 @@ fn the_export_base_holds_through_supersession_retry_and_resume() {
         assert_eq!(event["payload"]["branch"], exported, "{event}");
     }
 
+    // The plan store the run projected onto holds an edge that agrees with its items: the
+    // edge names each lineage by its root, which is the id the store's item for that
+    // lineage carries whatever retried it, and the consumer's item still depends on the
+    // producer's.
+    let stored = world.store_project(&project);
+    assert_eq!(
+        stored["items"][0]["item"]["metadata"]["onepipeline.export_edges"],
+        json!([edge("generalize", "examples")]),
+        "{stored}"
+    );
+    let items = world.store_tasks(&project);
+    let id_of = |task: &Value| task["item"]["metadata"]["onepipeline.id"].clone();
+    let ids: Vec<Value> = items.iter().map(id_of).collect();
+    assert!(
+        ids.contains(&json!("generalize")) && ids.contains(&json!("examples")),
+        "{ids:?}"
+    );
+    let consumer_item = items
+        .iter()
+        .find(|task| id_of(task) == json!("examples"))
+        .expect("the consumer's item");
+    let producer_item = items
+        .iter()
+        .find(|task| id_of(task) == json!("generalize"))
+        .expect("the producer's item");
+    assert!(
+        world
+            .store_deps(consumer_item["id"].as_str().unwrap_or_default())
+            .iter()
+            .any(|dep| dep
+                .to_string()
+                .contains(producer_item["item"]["id"].as_str().unwrap_or("no id"))),
+        "the consumer's item no longer depends on the producer's"
+    );
+
     // What landed carries the replacement producer's example, so the consumer built on
     // the export and never on the default base alone.
     git_out(&world, &library.checkout, &["fetch", "origin"]);
@@ -2485,4 +2520,107 @@ fn the_validator_refuses_to_judge_a_malformed_document_and_reads_commands_as_the
     )
     .exited(exit_for("pass"));
     world.release("generalize.go");
+}
+
+#[cfg(unix)]
+#[test]
+fn an_export_producer_recorded_done_with_no_kept_branch_never_starts_its_consumer() {
+    let (world, _, _) = mixed_world("boundary-unkept");
+    world.script("generalize.work-at", "examples/generic/sample.md");
+    world.script("generalize.work", "a generic example\n");
+    world.script("gate.wait", "hold");
+    let mut plan = exported_plan("unkept");
+    plan["tasks"]
+        .as_array_mut()
+        .expect("nodes")
+        .push(crate::harness::agent("gate", &[]));
+    plan["tasks"][1]["deps"] = json!(["generalize", "gate"]);
+    let project = world.plan("unkept", &plan);
+    world.run(&["start", &project, "--detach"]).exited(0);
+    until_settled(&world, "unkept", "generalize");
+    crate::harness::end_driver(&world, "unkept");
+    // llmlint: ignore-block[tests_mirror_real_usage] a producer settled `done` with no
+    // kept branch is a state no current preservation writes — every one carries its
+    // branch — so it is the older or damaged durable record an adopting driver meets at
+    // the real adoption boundary, as the preserve-stacking journey models it. The
+    // compiled binary must refuse the consumer's dispatch rather than start it from the
+    // default base; no engine, session or repository operation is substituted.
+    let mut events = world.journal("unkept");
+    for event in &mut events {
+        if event["labels"]["node"] == "generalize" && event["kind"] == "node-settled" {
+            if let Some(payload) = event["payload"].as_object_mut() {
+                payload.remove("branch");
+            }
+        }
+    }
+    let contents: String = events.iter().map(|event| format!("{event}\n")).collect();
+    std::fs::write(world.run_file("unkept", "events.jsonl"), contents).expect("the record");
+    let checkpoint = world.run_file("unkept", "checkpoint.json");
+    if checkpoint.exists() {
+        std::fs::remove_file(checkpoint).expect("the checkpoint is dropped");
+    }
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    world.run(&["adopt", "unkept", "--detach"]).exited(0);
+    world.release("gate.go");
+    until_settled(&world, "unkept", "examples");
+    let detail = detail_of(&world, "unkept", "examples");
+    assert!(detail.contains("settled with no kept branch"), "{detail}");
+    assert!(tasks_of(&world, "examples").is_empty());
+    assert!(!world.run_file("unkept", "exports.json").is_file());
+}
+
+#[test]
+fn a_change_request_description_is_written_over_the_run_scope() {
+    let (world, _, _, _) = scoped_world("scope-described");
+    // The public repository opens change requests, which its worker opens as a draft.
+    std::fs::write(
+        world.onevcs_home().join("rules.yml"),
+        "version: 4\nrules:\n  - match: {owner: owner, name: library}\n    publication: \
+         change-open\n    visibility: public\n  - match: {owner: owner}\n    visibility: \
+         private\ndefault:\n  publication: local-direct\n  approvals: none\n",
+    )
+    .expect("the rules file is written");
+    let drafting = world.pr_author_graph();
+    let launch = |name: &str, body: &str| {
+        world.script("pr-author.body", body);
+        let node = format!("described-{name}");
+        world.script(&format!("{node}.work"), "the worker wrote this\n");
+        world.script(&format!("{node}.drafts"), "wip: the worker's title");
+        world.script(
+            &format!("{node}.drafts-body"),
+            "## What\nThe worker's own words.\n",
+        );
+        let mut keeper = lifecycle(&format!("keeper-{name}"), &[]);
+        keeper["parked"] = json!(true);
+        let project = world.plan(
+            name,
+            &mixed_plan(name, vec![keeper, public(&node, &[])], vec![]),
+        );
+        world
+            .run(&[
+                "start",
+                &project,
+                "--attach",
+                "--pr-author-graph",
+                &drafting,
+            ])
+            .settled();
+    };
+    // A description naming only B, which the run does not name, is written.
+    launch("cites-b", "## What\nBuilt like owner/beta does it.\n");
+    assert_eq!(
+        world.events_of("cites-b", "change-described").len(),
+        1,
+        "{}",
+        world.dump()
+    );
+    // One naming A is refused before the host is written, and the worker's stands.
+    launch("cites-a", "## What\nBuilt like owner/service does it.\n");
+    assert!(
+        world.events_of("cites-a", "change-described").is_empty(),
+        "a description naming the run's private repository was written"
+    );
+    let detail = detail_of(&world, "cites-a", "described-cites-a");
+    assert!(detail.contains("was not written onto"), "{detail}");
+    assert!(!detail.contains("owner/service"), "{detail}");
 }
