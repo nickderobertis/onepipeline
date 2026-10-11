@@ -270,6 +270,7 @@ fn the_budgets_file_registers_the_host_view_budget() {
 }
 
 /// The reporter, run from `cwd` with the result going to `result` when one is named.
+#[cfg(unix)]
 fn host_view_report(
     cwd: &std::path::Path,
     result: Option<&std::path::Path>,
@@ -286,6 +287,7 @@ fn host_view_report(
 }
 
 /// A record shaped as `scripts/host-view-measure.mjs` writes one.
+#[cfg(unix)]
 fn host_view_record() -> serde_json::Value {
     let breakdown = |live_fold_ms: f64| {
         serde_json::json!({
