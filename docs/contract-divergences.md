@@ -9649,10 +9649,15 @@ A project key, `{"run": string, "host": string, "session": string | null, "pid":
 integer, "claimed_at": RFC 3339}`, written with a driver's first projection — a
 launch's and an adoption's — wherever what last landed is not that claim. It is
 released at closeout and at `stop` only where the stored claim still names this run
-(its `run` and `host`): the releasing projection reads the project first, writes the
-claim `null` where it does, and where it names another run writes **nothing at all**
-to the project — neither the claim nor the closeout's release of unstarted nodes —
-because that run drives it now. `shutdown` keeps it, so the run stays adoptable.
+(its `run` and `host`): the releasing projection reads the project first and writes
+the claim `null` at once where it does, before any task it carries — so a status the
+store refuses cannot leave it standing — and where it names another run writes
+**nothing at all** to the project, neither the claim nor the closeout's release of
+unstarted nodes, because that run drives it now. A closeout's projection is bounded
+by its window; where the window ends with that projection still in flight against a
+slow store, the driver releases the claim itself — the same read, then the same
+write, each bounded — unless the store has asked to be left alone. `shutdown` keeps
+it, so the run stays adoptable.
 
 **By the manager's ruling**, a release writes `null` rather than removing the key:
 `onetaskgraph` 0.4.0's narrow project write only adds or replaces a key — tasks have
@@ -9705,11 +9710,14 @@ the run's first projection writes its own claim.
 
 ### The supersession check
 
-A live driver reads the claim at launch and adoption (before its first projection),
-once at the start of each pass that would dispatch or publish — at the first dispatch
+A live driver reads the claim at launch — the launch's own read, which refused or
+admitted it, covers its driver's first pass — and at adoption, before its first
+projection; once at the start of each pass that would dispatch or publish — at the first dispatch
 the pass is about to make, or for the publications waiting on it, one read covering
 every dispatch and publication that pass makes — and on its idle loop every 600
-seconds, and never before an individual dispatch or publication. A claim naming a run
+seconds, and never before an individual dispatch or publication. Each read is bounded
+at 20 seconds and skipped while the store has asked to be left alone; a read that
+fails or is skipped answers nothing, and the driver goes on. A claim naming a run
 other than this one (its `run` and `host`) and other than the one this launch took
 over **supersedes** it: it dispatches and publishes nothing more, journals
 `driver-superseded {by: <claim>}`, raises a non-blocking `driver-superseded` surface,
@@ -9782,10 +9790,40 @@ CLI and event paragraphs.
 
 **What this build does.** `tests/e2e/continuation.rs` drives each rule through the
 compiled binary over a real `local-md` store and the real linked `onevcs` over a real
-origin, with GitHub at `onevcs`'s `ONEVCS_GH` seam shared by every host:
-`a_cold_host_continues_a_drafted_stack_from_the_store_and_dispatches_none_of_it`
-continues a three-node stack drafted on a team identity from a host with no runs root
-and a fresh `ONEVCS_HOME`. `src/taskgraph.rs`'s
+origin, with GitHub at `onevcs`'s `ONEVCS_GH` seam shared by every host — a second
+host being `World::on_host`, the same store, origin and GitHub with an empty runs root,
+a fresh `ONEVCS_HOME` and a `HOSTNAME` of its own:
+
+- the launch: `a_cold_host_continues_a_drafted_stack_from_the_store_and_dispatches_none_of_it`
+  (three drafts continued, every stored field, `status` and `results`),
+  `a_node_added_on_a_continued_node_is_drafted_on_its_recorded_branch`, and one pin per
+  source — `a_failed_node_…`, `a_cancelled_node_…` and
+  `a_parked_node_is_continued_pinned_to_its_branch_and_adopts_its_draft`, and
+  `an_in_flight_dispatch_left_on_the_store_is_continued_by_a_host_that_takes_the_project_over`,
+  which also reads `onepipeline.dispatch` and the claim off the board while a run
+  works, and keeps both through a `shutdown`;
+- `--fresh` and the landing keys: `a_landed_project_relaunches_continuing_it_and_runs_afresh_with_fresh`
+  and `fresh_is_refused_while_a_node_holds_a_change_request_nothing_has_landed`;
+- the claim: `the_claim_is_held_while_a_run_drives_and_released_at_closeout_and_at_stop`,
+  `a_claim_of_this_hosts_own_run_refuses_a_launch_naming_adopt_live_or_gone`,
+  `a_launch_whose_store_cannot_be_read_is_refused_rather_than_read_as_unclaimed` and
+  `a_successors_claim_survives_the_closeout_and_the_stop_of_the_run_it_took_over`;
+- supersession: `a_superseded_driver_reads_the_claim_at_the_pass_that_would_dispatch_and_dispatches_nothing`,
+  `a_pass_that_dispatches_three_nodes_reads_the_claim_once` (the store's own count of
+  project reads), `a_superseded_driver_publishes_nothing_after_the_check_but_finishes_a_publication_under_way`,
+  `an_idle_superseded_driver_notices_within_one_idle_check_and_publishes_nothing`, and
+  `two_cold_hosts_launching_one_project_at_once_leave_one_driver_and_every_draft_alone`.
+
+`tests/e2e/store.rs`'s two relaunch journeys now continue what they relaunch, the
+retried one under the root's id. `tests/smoke/continuation.rs` is the live tier's:
+`a_board_project_is_carried_on_by_a_cold_host_that_takes_it_over` drives a project on
+onetaskgraph's live board (`nickderobertis` Projects #1, issues in
+`nickderobertis/onetaskgraph-live-scratch`) and `nickderobertis/onepipeline-smoke`
+through a refusal, a takeover of a live driver, a continuation and two racing launches,
+closing everything it created. `src/taskgraph.rs`'s
 `what_a_run_projected_is_read_past_as_no_plan_field` reads every projected key past,
-and `tests/contract.rs`'s `the_continuation_is_what_the_divergence_record_names`
-holds the block above to the registered documents and the parser.
+`src/writeback.rs`'s `the_driver_claim_differs_only_where_it_would_be_written` holds
+when a projection writes or releases the claim, `src/continuation.rs`'s unit tests hold
+the claim's shape, the refusal and the 600-second interval, and `tests/contract.rs`'s
+`the_continuation_is_what_the_divergence_record_names` holds the block above to the
+registered documents and the parser.
