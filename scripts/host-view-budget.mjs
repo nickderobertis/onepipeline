@@ -106,13 +106,12 @@ export function validateRecord(held) {
 
 const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 
-// Every figure a breakdown, a median or a load carries is a nonnegative number, or
-// null where the read did not measure it.
+// Every figure a breakdown, a median or a load carries is present, and is a
+// nonnegative number or null where the read did not measure it.
 function figure(value, name) {
   if (
-    value !== undefined &&
-    value !== null &&
-    (typeof value !== "number" || !Number.isFinite(value) || value < 0)
+    value === undefined ||
+    (value !== null && (typeof value !== "number" || !Number.isFinite(value) || value < 0))
   ) {
     fail(`${name} must be a nonnegative number or null`);
   }

@@ -398,6 +398,16 @@ fn the_host_view_reporter_reports_the_slowest_steady_read_of_the_record_alone() 
     let figure = breakdown.remove("list_ms").expect("a figure");
     breakdown.insert("listing_ms".to_owned(), figure);
     malformed.push(Some(renamed.to_string()));
+    // A steady read that omits its median or its load, rather than writing null.
+    for key in ["median_ms", "load1"] {
+        let mut missing = host_view_record();
+        missing["steady"]
+            .as_object_mut()
+            .expect("a steady read")
+            .remove(key)
+            .expect("a figure");
+        malformed.push(Some(missing.to_string()));
+    }
     for body in malformed {
         let _ = std::fs::remove_file(&record);
         if let Some(body) = &body {
