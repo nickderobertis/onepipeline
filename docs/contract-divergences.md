@@ -9460,8 +9460,9 @@ absent, so every record written before them reads as it did:
 A lifecycle failure before N's session opened carries neither `base` nor `head`.
 The fold keeps them per node, so a later pass reads a node's stack from the journal
 alone, and the store write-back projects them verbatim inside
-`onepipeline.settlement`. A failed settlement also names the change request its
-session held when it ended, which a publication refused by its checks leaves open.
+`onepipeline.settlement`. A settlement that did not finish the node — failed or
+cancelled — also names the change request a session of the node opened, which a
+publication refused by its checks leaves open.
 
 **Views.** `status` and `results` list every lifecycle node holding a change
 request nothing has landed, in any state, with that change request and what it is
