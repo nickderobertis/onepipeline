@@ -61,7 +61,7 @@
     "gone",
     "skipped"
   ],
-  "description": "`onepipeline host --json`: every live dispatch on this host, as one document.\n\nThe text form is this document rendered \u2014 [`render`] \u2014 so the two cannot\ndisagree. `schemas/host-reading.schema.json` is generated from this type.",
+  "description": "`onepipeline host --json`: every live dispatch on this host, as one document.\n\nThe text form is this document rendered \u2014 by\n[`render_host`](crate::verbs::render_host) \u2014 so the two cannot disagree.\n`schemas/host-reading.schema.json` is generated from this type.",
   "title": "HostReading",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$defs": {
@@ -107,7 +107,7 @@
         "total_bytes",
         "error"
       ],
-      "description": "One `free space:` line, as data: the document `onepipeline host --json`\ncarries, and what [`render`] prints."
+      "description": "One `free space:` line, as data: the document `onepipeline host --json`\ncarries, and what [`render_host`](crate::verbs::render_host)\nprints on its `free space:` lines."
     },
     "FreeSpaceRoot": {
       "type": "object",

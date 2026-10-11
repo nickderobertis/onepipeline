@@ -44,7 +44,8 @@ pub(crate) fn lines(runs_root: &Path) -> String {
 }
 
 /// One `free space:` line, as data: the document `onepipeline host --json`
-/// carries, and what [`render`] prints.
+/// carries, and what [`render_host`](crate::verbs::render_host)
+/// prints on its `free space:` lines.
 // llmlint: ignore-block[invalid_states_unrepresentable] the byte counts and the error, and a
 // root's role, path and ancestor, are separate nullable keys because version 1 of the
 // `host --json` reading the plan fixed states them so, and these types are what its schema is

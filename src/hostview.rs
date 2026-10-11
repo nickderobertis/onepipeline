@@ -67,8 +67,9 @@ pub const MAX_COLD_JOURNAL_BYTES: u64 = 1 << 30;
 
 /// `onepipeline host --json`: every live dispatch on this host, as one document.
 ///
-/// The text form is this document rendered — [`render`] — so the two cannot
-/// disagree. `schemas/host-reading.schema.json` is generated from this type.
+/// The text form is this document rendered — by
+/// [`render_host`](crate::verbs::render_host) — so the two cannot disagree.
+/// `schemas/host-reading.schema.json` is generated from this type.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct HostReading {
     /// Always [`HOST_READING_SCHEMA_VERSION`].
