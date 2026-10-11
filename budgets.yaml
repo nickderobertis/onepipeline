@@ -60,13 +60,14 @@ budgets:
     command: [node, scripts/stop-guard-unpublished-budget.mjs, --scale, '10']
     unit: seconds
     direction: max
-    threshold: 0.5
+    threshold: 1.0
     description: >-
       Warm native Stop verdict at ten times the host-shaped workload: the slowest
       scenario's maximum of ten calls after one priming call. Read from the journey's
-      telemetry. The manager's approved bound at ten times the workload.
-      Its target is reachable because onevcs 0.45.0 reads only the sessions the launcher
-      label selects (onevcs #356), so the decision no longer reads every stream on the host.
+      telemetry. A temporary relaxation from the manager's 0.5 s design bound, by the
+      user's ruling of 2026-10-11 to land now; a later gap-closing run owns the remaining
+      10x warm cost. onevcs 0.45.0 reads only the sessions the launcher label selects
+      (onevcs #356), so the decision no longer reads every stream on the host.
   - id: stop-guard-unpublished-journey-time
     measure: reported
     command: [node, scripts/stop-guard-unpublished-budget.mjs, --journey-time]
