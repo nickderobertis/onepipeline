@@ -9584,11 +9584,14 @@ planner's ruling of 2026-10-09 (c-3c26234902e71ed808cd4ae732f261f4): that paragr
 must name every function `src/verbs.rs` publishes, and `tests/contract.rs` holds the
 four signatures to it. The CLI and the `stop-guard` flags remain this proposal.
 
-**Its latency is budgeted** in `budgets.yaml` — 0.2 s warm, 0.5 s cold and 0.5 s
+**Its latency is budgeted** in `budgets.yaml` — 0.2 s warm, 0.5 s cold and 1.0 s
 warm at ten times the host-shaped workload, plus a 180 s journey time — read from
 the telemetry `tests/stop_verdict/` writes and judged on the merge-path CI runner.
-Those are the design targets, reachable because onevcs 0.45.0 reads only the
-sessions the launcher label selects (onevcs #356).
+Warm and cold are the design targets; the 10x bound is a temporary relaxation from
+its 0.5 s design target, by the user's ruling of 2026-10-11 to land now, and a
+later gap-closing run owns the remaining 10x warm cost. Each is measured against
+onevcs 0.47.0, whose decision read reads only the sessions the launcher label
+selects (onevcs #356, first released in 0.45.0).
 
 ```json
 {

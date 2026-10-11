@@ -1327,7 +1327,11 @@ fn drafted_status(
             Some(onevcs::DraftReason::AwaitingRelease { .. }),
         ) => NodeStatus::CompleteDraft,
         (onevcs::PublishOutcome::ChangeDraft(_), _) => NodeStatus::Done,
-        (onevcs::PublishOutcome::ChangeReviewDraft(_), _) => NodeStatus::Done,
+        (
+            onevcs::PublishOutcome::ChangeReviewDraft(_)
+            | onevcs::PublishOutcome::ChangeReviewDraftUnchecked(_),
+            _,
+        ) => NodeStatus::Done,
         (
             onevcs::PublishOutcome::Merged(_)
             | onevcs::PublishOutcome::ChangeOpen(_)
@@ -1408,7 +1412,11 @@ fn finished_detail(
     };
     let lifted = match (change.draft, answered) {
         (false, _) => "",
-        (true, onevcs::PublishOutcome::ChangeDraft(_)) => " and left it as a draft",
+        (
+            true,
+            onevcs::PublishOutcome::ChangeDraft(_)
+            | onevcs::PublishOutcome::ChangeReviewDraftUnchecked(_),
+        ) => " and left it as a draft",
         (true, onevcs::PublishOutcome::ChangeReviewDraft(_)) => {
             ", and the publication kept it as a draft for its user's review"
         }
@@ -2801,6 +2809,13 @@ mod tests {
         );
         assert_eq!(
             drafted_status(&onevcs::PublishOutcome::ChangeReviewDraft(url()), None),
+            NodeStatus::Done
+        );
+        assert_eq!(
+            drafted_status(
+                &onevcs::PublishOutcome::ChangeReviewDraftUnchecked(url()),
+                None
+            ),
             NodeStatus::Done
         );
         assert_eq!(

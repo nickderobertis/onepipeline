@@ -240,6 +240,8 @@ pub fn publish(
             body: body.map(str::to_owned),
             draft: draft.cloned(),
             term_scope: onevcs::TermScope::Registry,
+            adopt: None,
+            defer_checks: false,
         },
         &NodeCancellation(cancel),
     )
@@ -381,6 +383,11 @@ pub fn outcome_of(outcome: &PublishOutcome) -> &'static str {
         PublishOutcome::ChangeDraft(_) => DRAFTED,
         // Green and done, but not yet lifted: see [`REVIEW_DRAFTED`].
         PublishOutcome::ChangeReviewDraft(_) => REVIEW_DRAFTED,
+        // Pushed into a review draft with its checks unread, which only a
+        // `defer_checks` publication ends in and no request here sets. Read as the
+        // draft it is rather than as `change-review-draft`, which says the checks
+        // came back green.
+        PublishOutcome::ChangeReviewDraftUnchecked(_) => DRAFTED,
         PublishOutcome::Queued(_) => "queued",
         PublishOutcome::NothingToPublish => "no-changes",
         PublishOutcome::Failed { kind, .. } => failure_of(*kind).outcome(),
@@ -645,6 +652,7 @@ pub fn landing_of(outcome: &PublishOutcome) -> Option<crate::graph::Landing> {
         PublishOutcome::ChangeOpen(_)
         | PublishOutcome::ChangeDraft(_)
         | PublishOutcome::ChangeReviewDraft(_)
+        | PublishOutcome::ChangeReviewDraftUnchecked(_)
         | PublishOutcome::Queued(_) => Some(Landing::Unlanded),
         PublishOutcome::NothingToPublish | PublishOutcome::Failed { .. } => None,
     }
@@ -903,6 +911,7 @@ pub fn change_url(outcome: &PublishOutcome) -> Option<String> {
         PublishOutcome::ChangeOpen(url)
         | PublishOutcome::ChangeDraft(url)
         | PublishOutcome::ChangeReviewDraft(url)
+        | PublishOutcome::ChangeReviewDraftUnchecked(url)
         | PublishOutcome::Queued(url) => Some(url.to_string()),
         PublishOutcome::Merged(_)
         | PublishOutcome::NothingToPublish
@@ -2970,6 +2979,11 @@ mod tests {
             "change-review-draft"
         );
         assert_eq!(REVIEW_DRAFTED, "change-review-draft");
+        // Pushed into a review draft with its checks unread says nothing green.
+        assert_eq!(
+            outcome_of(&PublishOutcome::ChangeReviewDraftUnchecked(url.clone())),
+            DRAFTED
+        );
         assert_eq!(outcome_of(&PublishOutcome::Queued(url)), "queued");
         assert_eq!(outcome_of(&PublishOutcome::NothingToPublish), "no-changes");
         // A failed publication settles under the word its **kind** earns, which
@@ -3079,6 +3093,10 @@ mod tests {
             Some(Landing::Unlanded)
         );
         assert_eq!(
+            landing_of(&PublishOutcome::ChangeReviewDraftUnchecked(url.clone())),
+            Some(Landing::Unlanded)
+        );
+        assert_eq!(
             landing_of(&PublishOutcome::Queued(url)),
             Some(Landing::Unlanded)
         );
@@ -3105,6 +3123,10 @@ mod tests {
         );
         assert_eq!(
             change_url(&PublishOutcome::ChangeReviewDraft(url.clone())).as_deref(),
+            Some("https://example.invalid/pull/7")
+        );
+        assert_eq!(
+            change_url(&PublishOutcome::ChangeReviewDraftUnchecked(url.clone())).as_deref(),
             Some("https://example.invalid/pull/7")
         );
         assert_eq!(

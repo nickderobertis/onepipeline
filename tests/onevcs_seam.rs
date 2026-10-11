@@ -132,6 +132,8 @@ fn every_operation_this_crate_performs_is_served_by_the_provider_seam() {
             // below is where a reason is carried.
             draft: None,
             term_scope: onevcs::TermScope::Registry,
+            adopt: None,
+            defer_checks: false,
         },
     )
     .expect("the seam publishes a session it opened");
@@ -232,6 +234,8 @@ fn every_operation_this_crate_performs_is_served_by_the_provider_seam() {
             body: None,
             draft: Some(reason.clone()),
             term_scope: onevcs::TermScope::Registry,
+            adopt: None,
+            defer_checks: false,
         },
     )
     .expect("the seam publishes a draft");
@@ -270,6 +274,8 @@ fn every_operation_this_crate_performs_is_served_by_the_provider_seam() {
             body: None,
             draft: None,
             term_scope: onevcs::TermScope::Registry,
+            adopt: None,
+            defer_checks: false,
         },
     )
     .expect("the seam lifts the draft it held");
@@ -368,6 +374,8 @@ fn published_through_the_lifecycle(
             body: None,
             draft: None,
             term_scope: onevcs::TermScope::Registry,
+            adopt: None,
+            defer_checks: false,
         },
     )
     .expect("the seam publishes through the lifecycle");
