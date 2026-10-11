@@ -2975,6 +2975,17 @@ fn roots_to_stop(paths: &RunPaths, record: &LaunchRecord) -> Result<Aim> {
                 );
                 unproven.push(pid);
             }
+            #[cfg(target_os = "linux")]
+            (Claim::Inexact, _) => {
+                left_alone(
+                    &paths.run,
+                    named_by,
+                    pid,
+                    "its record's start token is in the older `ps` spelling and no longer reads \
+                     the same",
+                );
+                unproven.push(pid);
+            }
         }
     }
     if !on_this_host {

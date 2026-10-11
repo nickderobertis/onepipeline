@@ -1168,25 +1168,96 @@ impl StartToken {
     ///
     /// The empty one is never anybody's, for the reason on the type.
     pub fn matches(&self, recorded: &str) -> bool {
-        !recorded.is_empty()
-            && (self.recorded == recorded || {
-                #[cfg(target_os = "linux")]
-                {
-                    // A procfs token that differs is a different process; only a
-                    // record in the older `ps` spelling is worth a `ps`.
-                    !recorded.starts_with(PROC_STAT_TOKEN)
-                        && self
-                            .legacy_ps
-                            .get_or_init(|| ps_process_start_token(self.pid))
-                            .as_deref()
-                            == Some(recorded)
-                }
-                #[cfg(not(target_os = "linux"))]
-                {
-                    false
-                }
-            })
+        self.reads(recorded) == TokenReading::Same
     }
+
+    /// How a token recorded earlier reads against this process's.
+    pub(crate) fn reads(&self, recorded: &str) -> TokenReading {
+        if recorded.is_empty() {
+            return TokenReading::Different;
+        }
+        if self.recorded == recorded {
+            return TokenReading::Same;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            // A procfs token that differs is a different process; only a record
+            // in the older `ps` spelling is worth a `ps`.
+            if recorded.starts_with(PROC_STAT_TOKEN) {
+                return TokenReading::Different;
+            }
+            let now = self
+                .legacy_ps
+                .get_or_init(|| ps_process_start_token(self.pid));
+            legacy_reading(now.as_deref(), recorded)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            TokenReading::Different
+        }
+    }
+}
+
+/// What comparing a recorded start token with a process's own says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TokenReading {
+    /// The same process, to the resolution the token is spelled at.
+    Same,
+    /// Another process: the host answered, in a spelling that does not drift,
+    /// with a different start.
+    Different,
+    /// Neither can be said. Linux's `ps lstart` is boot time plus the process's
+    /// start ticks, and boot time is recomputed from the wall clock at every
+    /// read, so the same process can read a second apart, or further after the
+    /// clock is stepped. A record in that spelling that no longer reads the same
+    /// is therefore not proof its process ended. Linux's alone: the other
+    /// platforms' tokens are stored starts that do not drift.
+    #[cfg(target_os = "linux")]
+    Inexact,
+}
+
+/// A record that is not procfs's spelling against what `ps` says now. One in
+/// `ps lstart`'s is the same within the one second it is spelled to, and
+/// otherwise [`TokenReading::Inexact`], never [`TokenReading::Different`]; one in
+/// neither spelling is no start this host could have given, so it is different.
+#[cfg(target_os = "linux")]
+fn legacy_reading(now: Option<&str>, recorded: &str) -> TokenReading {
+    match (now.and_then(lstart_seconds), lstart_seconds(recorded)) {
+        _ if now == Some(recorded) => TokenReading::Same,
+        (_, None) => TokenReading::Different,
+        (Some(now), Some(then)) if now.abs_diff(then) <= 1 => TokenReading::Same,
+        _ => TokenReading::Inexact,
+    }
+}
+
+/// Seconds since the epoch of a `ps -o lstart=` answer read in UTC and the C
+/// locale, as `Sun Oct 11 19:23:36 2026`; `None` for anything else.
+#[cfg(target_os = "linux")]
+fn lstart_seconds(lstart: &str) -> Option<i64> {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let fields: Vec<&str> = lstart.split_whitespace().collect();
+    let [_weekday, month, day, time, year] = fields.as_slice() else {
+        return None;
+    };
+    let month = i64::try_from(MONTHS.iter().position(|name| name == month)? + 1).ok()?;
+    let day: i64 = day.parse().ok()?;
+    let year: i64 = year.parse().ok()?;
+    let mut clock = time.split(':').map(str::parse::<i64>);
+    let (Some(Ok(hours)), Some(Ok(minutes)), Some(Ok(seconds)), None) =
+        (clock.next(), clock.next(), clock.next(), clock.next())
+    else {
+        return None;
+    };
+    // Days from 1970-01-01 to the civil date, by Howard Hinnant's algorithm.
+    let shifted = if month <= 2 { year - 1 } else { year };
+    let era = shifted.div_euclid(400);
+    let of_era = shifted - era * 400;
+    let of_year = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+    let of_cycle = of_era * 365 + of_era / 4 - of_era / 100 + of_year;
+    let days = era * 146_097 + of_cycle - 719_468;
+    Some(days * 86_400 + hours * 3_600 + minutes * 60 + seconds)
 }
 
 /// When a process started, as an opaque token this host can compare a later
@@ -1246,6 +1317,10 @@ pub(crate) enum Claim {
     /// A live process this host would not describe, so there was nothing to
     /// compare its record against.
     HostSilent,
+    /// A live process whose record's start token is in a spelling that drifts
+    /// and no longer reads the same: see [`TokenReading::Inexact`].
+    #[cfg(target_os = "linux")]
+    Inexact,
 }
 
 impl Claim {
@@ -1268,12 +1343,14 @@ impl Claim {
 /// build has nothing to compare, which is *cannot say* rather than *nothing is
 /// running there*.
 pub(crate) fn claim_on(pid: u32, started: &str) -> Claim {
-    let reading = process_start_token(pid);
+    let reading = process_start_token(pid).map(|token| token.reads(started));
     match reading {
-        Some(ref token) if token.matches(started) => Claim::Proved,
+        Some(TokenReading::Same) => Claim::Proved,
         _ if !process_may_be_live(pid) => Claim::Gone,
-        Some(_) if !started.is_empty() => Claim::Reissued,
-        Some(_) => Claim::Unstamped,
+        #[cfg(target_os = "linux")]
+        Some(TokenReading::Inexact) => Claim::Inexact,
+        Some(TokenReading::Different) if !started.is_empty() => Claim::Reissued,
+        Some(TokenReading::Different) => Claim::Unstamped,
         None => Claim::HostSilent,
     }
 }
@@ -1996,6 +2073,39 @@ pub(crate) fn reaped_pid() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `ps lstart` is spelled to the second and drifts with the boot time Linux
+    /// recomputes from the wall clock: a second apart is the same process, and
+    /// further apart is something this host cannot say, never a different process.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_legacy_start_token_is_compared_to_its_second_and_never_read_as_another_process() {
+        let recorded = "Sun Oct 11 19:23:36 2026";
+        assert_eq!(lstart_seconds(recorded), Some(1_791_746_616));
+        assert_eq!(lstart_seconds("Thu Jan  1 00:00:00 1970"), Some(0));
+        assert_eq!(
+            lstart_seconds("Thu Feb 29 12:00:00 2024"),
+            Some(1_709_208_000)
+        );
+        for malformed in ["", "Sun Oct 11 19:23 2026", "Sun Okt 11 19:23:36 2026"] {
+            assert_eq!(lstart_seconds(malformed), None, "{malformed:?}");
+        }
+        for (now, reading) in [
+            (Some(recorded), TokenReading::Same),
+            (Some("Sun Oct 11 19:23:37 2026"), TokenReading::Same),
+            (Some("Sun Oct 11 19:23:35 2026"), TokenReading::Same),
+            (Some("Sun Oct 11 19:23:38 2026"), TokenReading::Inexact),
+            (Some("Sun Oct 11 20:23:36 2026"), TokenReading::Inexact),
+            (Some("not a time"), TokenReading::Inexact),
+            (None, TokenReading::Inexact),
+        ] {
+            assert_eq!(legacy_reading(now, recorded), reading, "{now:?}");
+        }
+        assert_eq!(
+            legacy_reading(Some(recorded), "a token in no spelling this host writes"),
+            TokenReading::Different
+        );
+    }
 
     /// The signals entry 88 of the divergence register says an interrupted
     /// landing's cleanup covers are exactly the ones the guard holds — the drift

@@ -1748,7 +1748,11 @@ fn a_phase_record_that_cannot_be_written_costs_the_read_nothing() {
 
 /// A live dispatch whose registry entry an engine before procfs tokens wrote — the
 /// `ps -o lstart=` spelling, read in UTC and the C locale — is still a held row: the
-/// view asks `ps` for that spelling only when an entry carries it.
+/// view asks `ps` for that spelling only when an entry carries it, and compares it
+/// to the second it is spelled at, so the second Linux's recomputed boot time can
+/// move it by between the two asks does not decide the row. A live process whose
+/// legacy entry reads further off — a stepped clock moves it so — is an `UNPROVEN`
+/// row with its reason, never gone: that spelling cannot prove a process ended.
 #[test]
 fn a_live_dispatch_recorded_with_a_legacy_ps_start_token_is_held() {
     let world = World::new("host-view-legacy-token").with_env("HOSTNAME", HOST);
@@ -1769,21 +1773,53 @@ fn a_live_dispatch_recorded_with_a_legacy_ps_start_token_is_held() {
         !legacy.is_empty() && !legacy.starts_with("linux-proc-stat:"),
         "{legacy}"
     );
+    let (shifted_pid, _) = fixture.sleeper();
+    let shifted = Command::new("ps")
+        .args(["-p", &shifted_pid.to_string(), "-o", "lstart="])
+        .env("TZ", "UTC")
+        .env("LC_ALL", "C")
+        .output()
+        .expect("ps answers");
+    let shifted = String::from_utf8(shifted.stdout).expect("UTF-8");
+    // A year earlier: the same spelling, read as no second near this process's start.
+    let (rest, year) = shifted.trim().rsplit_once(' ').expect("a year");
+    let year: u32 = year.parse().expect("a year");
+    let shifted = format!("{rest} {}", year - 1);
     let (driver, driver_token) = fixture.sleeper();
     let started = now_millis() - 600_000;
     // llmlint: ignore[tests_mirror_real_usage] no build of this crate writes the former spelling any more, so the entry an engine before procfs tokens wrote is written here in the shape it took, naming a real live process; the read is the real binary's.
     fixture.run(
         &world,
         &json!({"run": "legacy", "started_ms": started,
+        "nodes": ["build"], "ending": [{"dispatched": "build"}],
         "driver": {"pid": driver, "token": driver_token},
-        "registry": [{"node": "plan", "pid": pid, "token": legacy, "recorded_ms": started}]}),
+        "registry": [
+            {"node": "plan", "pid": pid, "token": legacy, "recorded_ms": started},
+            {"node": "build", "pid": shifted_pid, "token": shifted, "recorded_ms": now_millis()},
+        ]}),
     );
     fixture
         .expected
         .held
         .insert(("legacy".to_owned(), "plan".to_owned()));
+    fixture
+        .expected
+        .unproven
+        .insert(("legacy".to_owned(), "build".to_owned()));
     let (reading, _) = both_forms(&world, "a legacy token");
     holds(&fixture.expected, &reading, "a legacy token");
+    let build = reading["dispatches"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .find(|row| row["node"] == "build")
+        .expect("the shifted entry's row");
+    assert!(
+        build["unproven"].as_str().is_some_and(
+            |why| why.contains("older `ps` spelling") && why.contains(&shifted_pid.to_string())
+        ),
+        "{build}"
+    );
 }
 
 /// The `host-view-time` measurement, run whole over this suite's build, records for

@@ -3674,11 +3674,19 @@ pub(crate) fn proof_of(record: &ledger::DispatchRecord) -> Proof {
             record.pid
         )),
         // llmlint: ignore-end[changed_behavior_has_e2e]
-        Some(token) if token.matches(&record.started) => Proof::Held,
-        Some(_) => Proof::Stale(format!(
-            "pid {} is a different process from the one its dispatch was recorded in",
-            record.pid
-        )),
+        Some(token) => match token.reads(&record.started) {
+            sys::TokenReading::Same => Proof::Held,
+            #[cfg(target_os = "linux")]
+            sys::TokenReading::Inexact => Proof::Unproven(format!(
+                "its entry records pid {}'s start in the older `ps` spelling, which this host's \
+                 clock can shift, and it no longer reads the same",
+                record.pid
+            )),
+            sys::TokenReading::Different => Proof::Stale(format!(
+                "pid {} is a different process from the one its dispatch was recorded in",
+                record.pid
+            )),
+        },
     }
 }
 
