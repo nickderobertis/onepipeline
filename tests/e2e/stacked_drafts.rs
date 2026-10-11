@@ -167,11 +167,15 @@ fn service(world: &World) -> Repository {
 /// is drafted against after the whole run has settled.
 #[test]
 fn landing_dependents_of_unlanded_parents_are_drafted_on_them() {
-    let world = team_world("stack-drafts").with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "1");
+    // `f` is asked twice, so its second session — continued on its branch, which cuts
+    // nothing and so reports no prefix — opens before `h` is placed; `h`'s stack base
+    // is named under the prefix all the same.
+    let world = team_world("stack-drafts").with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "2");
     let repo = service(&world);
-    for id in ["a", "b", "c", "e", "f", "g", "h"] {
+    for id in ["a", "b", "c", "e", "g", "h"] {
         world.script(&format!("{id}.work"), &format!("{id}'s change\n"));
     }
+    world.script("f.work-anew", "f's change");
     // Checked by the worker before it writes: the parent's work is already in the
     // worktree it was dispatched into, so the session was cut from it.
     world.script("b.requires-file", "a.md");
@@ -383,6 +387,15 @@ fn landing_dependents_of_unlanded_parents_are_drafted_on_them() {
     let f = settled(&world, run, "f");
     assert_eq!(f["status"], "failed", "{f}");
     assert_eq!(f["outcome"], "checks-failed", "{f}");
+    assert_eq!(
+        world
+            .events_of(run, "node-dispatched")
+            .iter()
+            .filter(|event| event["labels"]["node"] == "f")
+            .count(),
+        2,
+        "f was not asked again on its branch"
+    );
     assert_eq!(f["base"], a_branch, "{f}");
     let f_url = text(&f["change_url"], "f's change request");
     assert!(f.get("head").is_some_and(Value::is_string), "{f}");

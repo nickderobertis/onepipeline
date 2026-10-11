@@ -3019,6 +3019,30 @@ mod tests {
         assert_eq!(state.branch_prefix.as_deref(), Some(""));
         let state = fold(&[opened(1, "a", "s-1", "a")]);
         assert_eq!(state.branch_prefix, None, "the relay alone says nothing");
+
+        // A session that cut nothing says nothing about the prefix, so a later one
+        // of those leaves the reported prefix standing: continued, resumed, and one
+        // opened on the node's own pinned `branch`.
+        let mut continued = sibling(2, None);
+        continued.payload.insert("continued".into(), json!(true));
+        let mut resumed = sibling(3, None);
+        resumed.payload.insert("reused".into(), json!(true));
+        let state = fold(&[sibling(1, Some("me/")), continued, resumed]);
+        assert_eq!(state.branch_prefix.as_deref(), Some("me/"));
+        let mut pinned = agent("a", &[]);
+        pinned.repo = Some("service".into());
+        pinned.branch = Some("me/a".into());
+        let state = fold(&[
+            pipeline(
+                journal::PipelineKind::RunStarted,
+                0,
+                None,
+                &[("plan", json!(plan_of_nodes(vec![pinned])))],
+            ),
+            sibling(1, Some("me/")),
+            sibling(2, None),
+        ]);
+        assert_eq!(state.branch_prefix.as_deref(), Some("me/"));
     }
 
     /// A branch a pass retired stops being retired the moment a session opens on
