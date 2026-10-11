@@ -1161,7 +1161,6 @@ fn renders(text: &str, reading: &Value, what: &str) {
     }
 }
 
-/// The middle of a set of timed reads.
 fn median(walls: &[f64]) -> f64 {
     let mut sorted = walls.to_vec();
     sorted.sort_by(f64::total_cmp);
