@@ -8514,6 +8514,9 @@ fn the_readmes_interface_claims_match_the_code_they_describe() {
         EXIT_WATCH_ELAPSED,
         EXIT_NODE_SETTLED,
         EXIT_RUN_CHANGED,
+        // `watch --flow`'s own two, which the same passage states.
+        onepipeline::error::EXIT_RUN_JOINED,
+        onepipeline::error::EXIT_FLOW_FAILED,
     ]
     .iter()
     .map(i32::to_string)
