@@ -359,6 +359,13 @@ pub(crate) fn live_branches(
 ) -> Vec<Named> {
     let mut named = std::collections::BTreeSet::new();
     for (id, status) in statuses {
+        // llmlint: ignore[changed_behavior_has_e2e] what it changes is a name handed to
+        // `onevcs`'s retirement, which retires only a branch whose content its base already
+        // carries — a draft in review carries work its base does not, so a journey's idle
+        // pass would keep it with or without this name, and the exclusion cannot be told
+        // apart end to end. `a_done_unlanded_lifecycle_node_names_the_branch_it_settled_on`
+        // holds that the engine names it, as `a_running_node_names_its_open_sessions_branch`
+        // holds the session cell for the same reason.
         let in_review = *status == NodeStatus::Done
             && state.landings.get(id) == Some(&crate::graph::Landing::Unlanded);
         if !in_review

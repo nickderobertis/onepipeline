@@ -627,6 +627,7 @@ pub(crate) fn drafted(reports: &[Value]) -> Drafted {
 ///
 /// The value is handed back as the drafter wrote it; what it has to be is the
 /// caller's question, since only a rework's publication asks it.
+// llmlint: ignore[changed_behavior_has_e2e] the double answers each drafting dispatch with one candidate that ran, so no journey puts two conforming bodies beside two verdicts; `a_title_check_is_read_off_the_result_that_drafted_the_body` holds the pairing over reports of that shape, and every verdict journey in `tests/e2e/rework.rs` reads one through this.
 pub(crate) fn title_check(reports: &[Value]) -> Option<Value> {
     reports
         .iter()
@@ -1159,6 +1160,34 @@ mod tests {
         // And an entry that answered but named no producer is not shown under a
         // blank identity.
         assert!(turns(&json!({"results": [{"text": "done"}]})).is_empty());
+    }
+
+    /// A `title_check` is read off the very result whose body [`drafted`] takes:
+    /// never off a candidate the schema refused, nor one that conformed with no
+    /// body, nor a later one beside the body taken — across reports as within one.
+    #[test]
+    fn a_title_check_is_read_off_the_result_that_drafted_the_body() {
+        let reports = vec![
+            json!({"results": [
+                {"schema_valid": false, "structured": {"body": "half", "title_check": {"verdict": "replaced", "title": "fix: refused"}}},
+                {"schema_valid": true, "structured": {"body": "", "title_check": {"verdict": "replaced", "title": "fix: bodyless"}}},
+            ]}),
+            json!({"results": [
+                {"schema_valid": true, "structured": {"body": "## What\nthe body", "title_check": {"verdict": "keeps"}}},
+                {"schema_valid": true, "structured": {"body": "## What\nlater", "title_check": {"verdict": "replaced", "title": "fix: later"}}},
+            ]}),
+        ];
+        assert_eq!(
+            drafted(&reports),
+            Drafted::Body("## What\nthe body".to_owned())
+        );
+        assert_eq!(title_check(&reports), Some(json!({"verdict": "keeps"})));
+        // A body with no verdict beside it carries none, whatever a later one says.
+        let silent = vec![json!({"results": [
+            {"schema_valid": true, "structured": {"body": "## What\nthe body"}},
+            {"schema_valid": true, "structured": {"body": "## What\nlater", "title_check": {"verdict": "keeps"}}},
+        ]})];
+        assert_eq!(title_check(&silent), None);
     }
 
     /// The drafted body is the validated answer of the result that ran, and

@@ -2535,6 +2535,18 @@ fn compile_rework(
     // What is still being worked on, named before the node's own status: a node
     // whose restack is running is recorded running, and the refusal a reader can
     // act on is the restack's rather than "not done".
+    //
+    // llmlint: ignore-block[changed_behavior_has_e2e] three refusals no journey can put a
+    // run in front of on purpose. The in-flight one needs a `reply` to land inside the
+    // seconds a restack or dispatch of the node, its lineage or a draft above it is running,
+    // which the doubles' holds cannot pin to the reconciler's own judgement of it; a landed
+    // node needs a host that merges a change request the run then reads, which a team
+    // repository — the only one a draft in review is on — never does; and a done lifecycle
+    // node with no branch is a settlement this build never writes. Each is held by its own
+    // test in this module's `tests` (`a_rework_while_its_node_lineage_or_a_draft_above_it_
+    // is_in_flight_is_refused`, `..._of_a_landed_node_...`, `..._with_no_recorded_branch_...`)
+    // over the same `compile`, and every refusal a journey can reach is driven through the
+    // binary by `tests/e2e/rework.rs`'s `a_rework_the_run_cannot_take_is_refused_naming_why`.
     if let Some(busy) = busy_around(graph, frontier, id) {
         return Err(refuse(format!(
             "rework: {busy}; rework node '{id}' once it settles"
@@ -2561,7 +2573,7 @@ fn compile_rework(
             "rework: node '{id}' has no branch on the run's record, so there is nothing to \
              rework it on"
         )));
-    };
+    }; // llmlint: ignore-end[changed_behavior_has_e2e]
     if rework.reason.trim().is_empty() {
         return Err(refuse(format!(
             "rework: node '{id}': the reason cannot be blank"

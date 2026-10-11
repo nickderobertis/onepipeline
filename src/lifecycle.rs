@@ -1009,6 +1009,11 @@ fn restack_open(
             persona: step.persona.as_deref(),
             controls: *controls,
         };
+        // llmlint: ignore[changed_behavior_has_e2e] the stack base advanced here is the very
+        // `assemble` a first placement runs, and every ending of it — advanced, conflicted and
+        // concluded by the worker, conflicted and failed — is driven by `tests/e2e/
+        // stacked_drafts.rs`; the restack's own advance is driven by `tests/e2e/rework.rs`'s
+        // `a_rework_restacks_every_draft_stacked_on_it_by_merges_alone`.
         let (assembled, dispatched) = assemble(
             executor,
             paths,
@@ -1029,6 +1034,12 @@ fn restack_open(
         placed.agent_dispatched |= dispatched;
     }
     let labels = engine::dispatch_labels(&paths.run, &node.id, None, node.persona.as_deref());
+    // llmlint: ignore[changed_behavior_has_e2e] an open `onevcs` refuses for a branch a
+    // node settled on and the run just saw pushed is a pool another run filled in the
+    // instant after this pass admitted it, or a state root that changed under the call —
+    // neither a journey can time. What a restack refused later, by its publication, is the
+    // retry-on-the-same-branch loop every lifecycle node runs, driven by `tests/e2e/
+    // lifecycle.rs`.
     let session = crate::executor::open_session(&request, &labels)
         .map_err(|error| failed(error.to_string()))?;
     let Some(merge) = crate::vcs::merge_in_progress(&session) else {
@@ -1627,7 +1638,7 @@ fn publish(
         None => (false, None),
     };
     if let (Some(titled), Some(change)) = (titled, &held) {
-        report_title(node, titled, change, undescribed.is_none(), tx);
+        report_title(node, titled, change, undescribed.as_deref(), tx);
     }
     // One aside beside a publication's own words, and **not** only an undrafted
     // body: a body that was not drafted, or one that was drafted and could not
@@ -2766,6 +2777,9 @@ impl ReworkDrafting {
                 self.base,
                 patch.trim_end()
             ),
+            // llmlint: ignore[changed_behavior_has_e2e] a worktree git cannot diff is a
+            // session `onevcs` handed over broken; `a_net_diff_is_the_whole_change_against_
+            // its_base_and_leaves_the_index_alone` holds the refusal it is said from.
             Err(why) => format!("The net diff could not be read: {why}"),
         };
         format!(
@@ -2812,32 +2826,52 @@ enum TitleCheck {
     Replaced(String),
 }
 
-/// Read a drafter's `title_check`, or say what is wrong with it.
+/// A drafter's `title_check` as the wire carries it: a verdict, and the subject a
+/// `replaced` names — closed, so a field this build does not read, or a `keeps`
+/// naming a title, is refused rather than passed over.
+#[derive(Debug, serde::Deserialize)]
+#[serde(tag = "verdict", rename_all = "lowercase", deny_unknown_fields)]
+enum TitleCheckWire {
+    /// The current title still describes the net change.
+    Keeps {},
+    /// It does not, and this subject does.
+    Replaced {
+        /// The subject, held to the title rule where it is read.
+        title: String,
+    },
+}
+
+/// Read a drafter's `title_check` through [`TitleCheckWire`], or say what is wrong
+/// with it — a verdict neither of the two named as such, anything else in the
+/// deserializer's own words, and a `replaced` subject the title rule refuses.
 fn title_check_of(check: Option<&serde_json::Value>) -> std::result::Result<TitleCheck, String> {
     let Some(check) = check else {
         return Err("the drafter's answer carried no `title_check`".to_owned());
     };
-    match check.get("verdict").and_then(serde_json::Value::as_str) {
-        Some("keeps") => Ok(TitleCheck::Keeps),
-        Some("replaced") => {
-            let Some(title) = check.get("title").and_then(serde_json::Value::as_str) else {
-                return Err(
-                    "the drafter's `title_check` said `replaced` and named no title".to_owned(),
-                );
-            };
-            crate::graph::validate_subject(title)
-                .map(|()| TitleCheck::Replaced(title.trim().to_owned()))
-                .map_err(|why| {
-                    format!(
-                        "the drafter's `title_check` replaced the title with {title:?}, which \
-                         the title rule refuses: {why}"
-                    )
-                })
+    let read = serde_json::from_value::<TitleCheckWire>(check.clone()).map_err(|error| {
+        match check.get("verdict").and_then(serde_json::Value::as_str) {
+            Some(verdict) if !matches!(verdict, "keeps" | "replaced") => format!(
+                "the drafter's `title_check` verdict {verdict:?} is neither `keeps` nor \
+                 `replaced`"
+            ),
+            // llmlint: ignore[changed_behavior_has_e2e] a `title_check` the wire type refuses
+            // for its shape rather than its verdict — an extra field, a `keeps` naming a
+            // title, a `replaced` naming none — is held by `the_title_check_and_the_net_diff_
+            // cap_are_entry_116s`; the journey drives the verdict and the subject a drafter
+            // answers wrongly, which settle the same way through this function.
+            _ => format!("the drafter's `title_check` is not one this build reads: {error}"),
         }
-        Some(other) => Err(format!(
-            "the drafter's `title_check` verdict {other:?} is neither `keeps` nor `replaced`"
-        )),
-        None => Err("the drafter's `title_check` names no verdict".to_owned()),
+    })?;
+    match read {
+        TitleCheckWire::Keeps {} => Ok(TitleCheck::Keeps),
+        TitleCheckWire::Replaced { title } => crate::graph::validate_subject(&title)
+            .map(|()| TitleCheck::Replaced(title.trim().to_owned()))
+            .map_err(|why| {
+                format!(
+                    "the drafter's `title_check` replaced the title with {title:?}, which the \
+                     title rule refuses: {why}"
+                )
+            }),
     }
 }
 
@@ -2872,16 +2906,25 @@ fn rework_title(node: &Node, rework: &Reworking, drafting: Option<&Drafting>) ->
 }
 
 /// Hand what became of a rework's title to the loop: a retitle where the host
-/// took a new one, and an unverified title where nothing checked the one it kept.
+/// took a new one, and an unverified title where nothing checked the one it kept
+/// — or where the host refused the new one, which leaves the old one standing
+/// with nothing saying it still describes the change. A new title that is the
+/// one the change request already carries changed nothing, and records nothing.
 fn report_title(
     node: &Node,
     titled: Titled,
     held: &onevcs::SessionChange,
-    written: bool,
+    refused: Option<&str>,
     tx: &Sender<Message>,
 ) {
+    let titled = match (titled, refused) {
+        (Titled::Changed { to, .. }, Some(why)) if to != held.title => {
+            Titled::Unverified(format!("the host did not take the title {to:?}: {why}"))
+        }
+        (titled, _) => titled,
+    };
     match titled {
-        Titled::Changed { to, by } if written && to != held.title => {
+        Titled::Changed { to, by } if to != held.title => {
             let _ = tx.send(Message::ChangeRetitled(Box::new(
                 crate::payload::ChangeRetitled {
                     node: node.id.clone(),
@@ -2900,7 +2943,7 @@ fn report_title(
                         title: held.title.clone(),
                         reason: engine::bounded(&crate::views::one_line(&reason)),
                     },
-                    change_url: held.url.to_string(),
+                    change_url: held.url.clone(),
                 },
             )));
         }
@@ -4648,8 +4691,23 @@ mod tests {
             .as_array()
             .expect("the verdicts")
         {
-            let check = serde_json::json!({"verdict": verdict, "title": "fix: x"});
+            let check = match verdict.as_str() {
+                Some("keeps") => serde_json::json!({"verdict": "keeps"}),
+                _ => serde_json::json!({"verdict": verdict, "title": "fix: x"}),
+            };
             assert!(title_check_of(Some(&check)).is_ok(), "{verdict}");
+        }
+        // Closed: a field it does not declare, a `keeps` naming a title, a
+        // `replaced` naming none, and a verdict that is not a word are refused.
+        for refused in [
+            serde_json::json!({"verdict": "keeps", "because": "it does"}),
+            serde_json::json!({"verdict": "keeps", "title": "fix: x"}),
+            serde_json::json!({"verdict": "replaced"}),
+            serde_json::json!({"verdict": 7}),
+            serde_json::json!({"verdict": "replaced", "title": 7}),
+            serde_json::json!("keeps"),
+        ] {
+            assert!(title_check_of(Some(&refused)).is_err(), "{refused}");
         }
         assert!(title_check_of(Some(&serde_json::json!({"verdict": "maybe"}))).is_err());
         assert!(title_check_of(None).is_err());

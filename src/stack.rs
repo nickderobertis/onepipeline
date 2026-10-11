@@ -377,10 +377,15 @@ pub(crate) fn placement(
 /// branches the run has since seen move.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Owed {
+    // llmlint: ignore-block[invalid_states_unrepresentable] the node and the branch are
+    // `RunState`'s own, as `Parent`'s are above: a node id the graph holds and a branch its
+    // settlement recorded, each checked where it was folded by `vcs::usable`, and handed on
+    // as the `String`s the session request and the journal record take them as.
     /// The node.
     pub(crate) node: String,
     /// The branch its settlement recorded, which the restack continues.
     pub(crate) branch: String,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
     /// Where it is restacked: its recorded stack, each parent named by its
     /// lineage's newest node and at the head its branch stands at now.
     pub(crate) stack: Stack,

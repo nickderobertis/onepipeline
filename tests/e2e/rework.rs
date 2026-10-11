@@ -843,11 +843,12 @@ fn a_rework_whose_change_outgrew_its_title_is_retitled_by_the_drafter() {
 
 /// The op's title outranks the drafter's, and a `keeps` leaves the title alone:
 /// `x` is reworked stating a title while its drafter answers `replaced` with another,
-/// and `y` is reworked stating none while its drafter answers `keeps`.
+/// `y` is reworked stating none while its drafter answers `keeps`, and `z`'s drafter
+/// answers `replaced` with the title it already has.
 #[test]
 fn the_op_s_title_outranks_the_drafter_s_and_a_keeps_leaves_the_title_alone() {
     let world = team_world("rework-precedence");
-    for id in ["x", "y"] {
+    for id in ["x", "y", "z"] {
         world.script(&format!("{id}.work"), &format!("{id}'s change\n"));
         world.script(
             &format!("{id}-rework-1.work"),
@@ -864,8 +865,12 @@ fn the_op_s_title_outranks_the_drafter_s_and_a_keeps_leaves_the_title_alone() {
     launched(
         &world,
         run,
-        vec![lifecycle("x", &[]), lifecycle("y", &[])],
-        2,
+        vec![
+            lifecycle("x", &[]),
+            lifecycle("y", &[]),
+            lifecycle("z", &[]),
+        ],
+        3,
         &["--pr-author-graph", &drafter],
     );
     let branch = |id: &str| text(&settled(&world, run, id)["branch"], "a branch").to_owned();
@@ -894,6 +899,18 @@ fn the_op_s_title_outranks_the_drafter_s_and_a_keeps_leaves_the_title_alone() {
     );
     assert_eq!(change_from(&world, &branch("y"))["title"], "feat: ship y");
     assert!(retitled(&world, run, "y-rework-1").is_empty());
+    assert!(world.events_of(run, "title-unverified").is_empty());
+
+    // A `replaced` naming the title the change request already carries changes
+    // nothing, and records nothing.
+    world.script(
+        "pr-author.title-check",
+        r#"{"verdict": "replaced", "title": "feat: ship z"}"#,
+    );
+    reply(&world, run, json!([rework("z", "say it the same way")])).exited(0);
+    adopt(&world, run).exited(0);
+    assert_eq!(change_from(&world, &branch("z"))["title"], "feat: ship z");
+    assert!(retitled(&world, run, "z-rework-1").is_empty());
     assert!(world.events_of(run, "title-unverified").is_empty());
 }
 
@@ -946,7 +963,7 @@ fn left_unverified(world: &World, run: &str, id: &str, title: &str, because: &st
 #[test]
 fn a_title_nothing_verified_is_left_unverified_until_a_retitle_sets_one() {
     let world = team_world("rework-unverified");
-    for id in ["a", "b", "c", "d"] {
+    for id in ["a", "b", "c", "d", "e", "f"] {
         world.script(&format!("{id}.work"), &format!("{id}'s change\n"));
         world.script(
             &format!("{id}-rework-1.work"),
@@ -957,6 +974,9 @@ fn a_title_nothing_verified_is_left_unverified_until_a_retitle_sets_one() {
     world.script("kept.work", "kept's change\n");
     let mut kept = lifecycle("kept", &[]);
     kept["publish"] = json!("preserve");
+    // A node whose plan states its change request's body: no drafter reads it.
+    let mut planned = lifecycle("e", &[]);
+    planned["body"] = json!("## What\nThe plan's own body.");
     let run = "unverified";
     let drafter = world.pr_author_graph();
     launched(
@@ -967,6 +987,8 @@ fn a_title_nothing_verified_is_left_unverified_until_a_retitle_sets_one() {
             lifecycle("b", &[]),
             lifecycle("c", &[]),
             lifecycle("d", &[]),
+            planned,
+            lifecycle("f", &[]),
             kept,
             crate::harness::agent("notes", &[]),
         ],
@@ -974,7 +996,7 @@ fn a_title_nothing_verified_is_left_unverified_until_a_retitle_sets_one() {
         &["--pr-author-graph", &drafter],
     );
     // Published as they always were: the drafter answered a body and no verdict.
-    for id in ["a", "b", "c", "d"] {
+    for id in ["a", "b", "c", "d", "f"] {
         let change = change_from(&world, text(&settled(&world, run, id)["branch"], "branch"));
         assert!(
             text(&change["body"], "a body").starts_with(crate::stacked_drafts::DRAFTED),
@@ -1005,6 +1027,35 @@ fn a_title_nothing_verified_is_left_unverified_until_a_retitle_sets_one() {
         "feat: ship d",
         "which the title rule refuses",
     );
+    world.unscript("pr-author.title-check");
+    left_unverified(&world, run, "e", "feat: ship e", "the plan states the body");
+    // A title the host will not take leaves the one it has, unverified — and a
+    // `retitle` it will not take is refused with nothing appended.
+    world.script("gh.edit-refused", "the change request is locked");
+    let mut stated = rework("f", "rework it");
+    stated["title"] = json!("fix(f): what the op says");
+    reply(&world, run, json!([stated])).exited(0);
+    adopt(&world, run).exited(0);
+    let f = unverified(&world, run, "f-rework-1");
+    assert_eq!(f.len(), 1, "{f:#?}");
+    assert!(
+        text(&f[0]["reason"], "a reason").contains("did not take the title"),
+        "{}",
+        f[0]
+    );
+    let f_branch = text(&settled(&world, run, "f-rework-1")["branch"], "f").to_owned();
+    assert_eq!(change_from(&world, &f_branch)["title"], "feat: ship f");
+    let committed = world.events_of(run, "edit-committed").len();
+    reply(
+        &world,
+        run,
+        json!([{"op": "retitle", "id": "f-rework-1", "title": "fix(f): again", "reason": "why"}]),
+    )
+    .exited(crate::harness::REFUSED)
+    .err_has("would not take the title");
+    assert_eq!(world.events_of(run, "edit-committed").len(), committed);
+    assert!(retitled(&world, run, "f-rework-1").is_empty());
+    world.unscript("gh.edit-refused");
 
     // The remedy: a retitle sets the title through the host and clears it.
     let committed_before = world.events_of(run, "edit-committed").len();
@@ -1263,4 +1314,154 @@ fn only_the_planner_may_rework_or_retitle() {
         change_from(&world, &branch)["title"],
         "fix(a): the planner's"
     );
+}
+
+/// Each `rework` a run can be asked for and refuses, refused through the binary
+/// naming why with nothing appended; a second rework of the same lineage numbered
+/// past the first and refused a replacement id the lineage already used, its item
+/// on the store naming what the newest rework answers.
+#[test]
+fn a_rework_the_run_cannot_take_is_refused_naming_why() {
+    let world = team_world("rework-refused");
+    world.script("a.work", "a's change\n");
+    world.script("broken.fail", "1");
+    world.script("a-rework-1.work", "a's change, reworked\n");
+    world.script("a-rework-1.work-file", "a");
+    world.script("a-rework-2.work", "a's change, reworked again\n");
+    world.script("a-rework-2.work-file", "a");
+    world.script("pr-author.title-check", KEEPS);
+    let run = "refused";
+    let drafter = world.pr_author_graph();
+    let project = launched(
+        &world,
+        run,
+        vec![
+            lifecycle("a", &[]),
+            lifecycle("broken", &[]),
+            crate::harness::agent("notes", &[]),
+        ],
+        3,
+        &["--pr-author-graph", &drafter],
+    );
+    let committed = world.events_of(run, "edit-committed").len();
+    let with = |field: &str, value: Value| {
+        let mut command = rework("a", "change it");
+        command[field] = value;
+        command
+    };
+    for (command, says) in [
+        (rework("nope", "change it"), "no node 'nope'"),
+        (rework("notes", "change it"), "is not a lifecycle node"),
+        (rework("broken", "change it"), "is failed, not done"),
+        (with("reason", json!(" ")), "the reason cannot be blank"),
+        (
+            with("instruction", json!("")),
+            "the instruction cannot be blank",
+        ),
+        (
+            with("title", json!("make it better")),
+            "Conventional Commit",
+        ),
+        (
+            with("replacement", json!("broken")),
+            "replacement id 'broken' must be new",
+        ),
+    ] {
+        reply(&world, run, json!([command]))
+            .exited(crate::harness::REFUSED)
+            .err_has(says);
+    }
+    assert_eq!(world.events_of(run, "edit-committed").len(), committed);
+
+    // `broken` failed, so the run ends unfinished whatever the rework does: the
+    // adopting driver is read by what it settled, not by its exit.
+    reply(&world, run, json!([rework("a", "change it")])).exited(0);
+    adopt(&world, run);
+    // The lineage's own ids are spent: the node it replaced cannot be named again,
+    // and the next rework of it is numbered past the first.
+    reply(
+        &world,
+        run,
+        json!([with("replacement", json!("a")).as_object().map(|command| {
+            let mut command = command.clone();
+            command.insert("id".into(), json!("a-rework-1"));
+            Value::Object(command)
+        })]),
+    )
+    .exited(crate::harness::REFUSED)
+    .err_has("replacement id 'a' must be new");
+    reply(
+        &world,
+        run,
+        json!([rework("a-rework-1", "change it again")]),
+    )
+    .exited(0);
+    adopt(&world, run);
+    let again = settled(&world, run, "a-rework-2");
+    assert_eq!(again["outcome"], "change-review-draft", "{again}");
+    assert_eq!(again["branch"], settled(&world, run, "a")["branch"]);
+
+    // The item the lineage projected onto carries what its latest rework answers.
+    world.until_store("the second rework to reach the store", |world| {
+        world
+            .store_tasks(&project)
+            .iter()
+            .any(|task| task["item"]["metadata"]["onepipeline.rework"]["replaces"] == "a-rework-1")
+    });
+}
+
+/// A restack whose conflict the draft's own worker fails to conclude settles that
+/// draft `failed`, recorded as the restack it was — an agent turn spent, nothing
+/// pushed — and moves nothing above it: its branch never moved, so the draft
+/// stacked on it owes no restack.
+#[test]
+fn a_restack_whose_worker_fails_its_merge_settles_the_draft_failed() {
+    let world = team_world("rework-conflict-failed");
+    world.script("a.work", "a wrote this\n");
+    world.script("a.work-file", "shared");
+    world.script("b.work", "b changed this\n");
+    world.script("b.work-file", "shared");
+    world.script("c.work", "c's change\n");
+    world.script("a-rework-1.work", "a reworked this\n");
+    world.script("a-rework-1.work-file", "shared");
+    world.script("pr-author.title-check", KEEPS);
+    let run = "failed";
+    let drafter = world.pr_author_graph();
+    launched(
+        &world,
+        run,
+        vec![
+            lifecycle("a", &[]),
+            lifecycle("b", &["a"]),
+            lifecycle("c", &["b"]),
+        ],
+        3,
+        &["--pr-author-graph", &drafter],
+    );
+    let b_branch = text(&settled(&world, run, "b")["branch"], "b's branch").to_owned();
+    let b_head = head_of(&world, &b_branch);
+    world.unscript("b.work");
+    world.script("b.fail", "1");
+
+    reply(&world, run, json!([rework("a", "rewrite the shared file")])).exited(0);
+    // The run ends unfinished, with `b` failed: read by what it settled.
+    adopt(&world, run);
+
+    let b = settled(&world, run, "b");
+    assert_eq!(b["status"], "failed", "{b}");
+    let restacked = world
+        .events_of(run, "node-restacked")
+        .into_iter()
+        .find(|event| event["labels"]["node"] == "b")
+        .expect("b's restack is on the record");
+    assert_eq!(restacked["payload"]["agent_dispatched"], true);
+    assert_eq!(head_of(&world, &b_branch), b_head, "b's branch moved");
+    assert!(
+        !world
+            .events_of(run, "node-restack-started")
+            .iter()
+            .any(|event| event["labels"]["node"] == "c"),
+        "c was restacked onto a branch that never moved"
+    );
+    assert_eq!(settled(&world, run, "c")["status"], "done");
 }

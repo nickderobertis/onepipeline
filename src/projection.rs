@@ -1521,6 +1521,12 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
             // that is what it is again: its parents' heads still say it is owed,
             // so the adopting driver restacks it rather than dispatching its work
             // a second time.
+            // llmlint: ignore[changed_behavior_has_e2e] a journey would have to kill the
+            // driver inside the seconds a restack runs and before it settles, which no hold
+            // of the doubles reaches without also holding the restack's publication; the
+            // fold is held over real records by `a_restack_its_driver_died_in_leaves_the_node_
+            // done_for_the_adopter`, and the restack the adopter then owes is `restacks_owed`'s,
+            // driven by every restack journey in `tests/e2e/rework.rs`.
             for node in std::mem::take(&mut state.restacking).into_keys() {
                 state.recorded.insert(node, Recorded::At(NodeStatus::Done));
             }

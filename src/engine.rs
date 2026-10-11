@@ -586,8 +586,9 @@ pub(crate) enum Message {
 pub(crate) struct UnverifiedTitle {
     /// What `title-unverified` records.
     pub unverified: crate::payload::TitleUnverified,
-    /// Where a person reads the change request it is the title of.
-    pub change_url: String,
+    /// Where a person reads the change request it is the title of, as the host
+    /// answered it.
+    pub change_url: onevcs::Url,
 }
 
 /// The non-blocking surface a title nothing verified raises: the node, the
@@ -4030,6 +4031,16 @@ fn retitle_change(validated: &ValidatedRetitle) -> Result<Vec<edits::Operation>>
     else {
         return Ok(validated.compiled.clone());
     };
+    // llmlint: ignore-block[changed_behavior_has_e2e] the three refusals before the write
+    // need a node whose change request is open on the run's record and whose session is not
+    // — a settlement this build never writes — or a host that drops the change request, or
+    // stops answering, between the run's record of it and this read: the fake host's
+    // outage counts calls from the run's start and its records only grow, so neither can be
+    // timed to this one read. The write's own refusal after them is driven end to end by
+    // `tests/e2e/rework.rs`'s `a_title_nothing_verified_is_left_unverified_until_a_retitle_
+    // sets_one`, through a host refusing the edit, with nothing appended; the residue of a
+    // later command refusing the envelope after this wrote is `deliver_envelope`'s, stated
+    // there for a note.
     let Some(token) = &validated.session else {
         return Err(Error::Refused(format!(
             "retitle: node '{node}' has no session on the run's record to address its change \
@@ -4046,7 +4057,7 @@ fn retitle_change(validated: &ValidatedRetitle) -> Result<Vec<edits::Operation>>
         return Err(Error::Refused(format!(
             "retitle: node '{node}' has no open change request on the host to retitle"
         )));
-    };
+    }; // llmlint: ignore-end[changed_behavior_has_e2e]
     crate::vcs::describe_change(token, Some(to), &change.body).map_err(|error| {
         Error::Refused(format!(
             "retitle: node '{node}': {} would not take the title: {error}",

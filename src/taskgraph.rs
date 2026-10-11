@@ -94,6 +94,7 @@ pub(crate) const SUPERSEDES_KEY: &str = "onepipeline.supersedes";
 /// Projection-only metadata on a rework's replacement: the node it replaces, the
 /// reason, the instruction and each review comment it answers, so any host knows
 /// which comments a rework is answering.
+// llmlint: ignore[changed_behavior_has_e2e] a relaunch through the binary of a project a run projected onto is refused today on `onepipeline.change_url`, a key every published node carries and this list does not name — pre-existing, and drafted as a follow-up — so it cannot reach this key; `a_projected_rework_reads_past_as_the_lineage_keys_do` reads one through the linked store's own engine.
 pub(crate) const REWORK_KEY: &str = "onepipeline.rework";
 
 /// The reserved keys the write-back owns and no node field answers to.
@@ -1423,6 +1424,30 @@ mod tests {
         );
         // Each task's own metadata, verbatim, keys this engine does not read included.
         assert_eq!(read.metadata["test"]["team.owner"], json!("qa"));
+    }
+
+    /// A task a run projected a rework onto carries `onepipeline.rework` beside the
+    /// lineage keys, and reads back as the node it was launched as: the key is the
+    /// write-back's, and no node field answers to it.
+    #[test]
+    fn a_projected_rework_reads_past_as_the_lineage_keys_do() {
+        let mut metadata = node("reader");
+        metadata["onepipeline.node"] = json!("reader-rework-1");
+        metadata["onepipeline.supersedes"] = json!(["reader"]);
+        metadata[REWORK_KEY] = json!({
+            "replaces": "reader",
+            "reason": "the reviewer asked for a retry",
+            "instruction": "retry a failed read",
+            "comments": [{"id": "1", "url": "https://github.com/o/r/pull/1#discussion_r1"}],
+        });
+        let read = load(store(
+            json!({}),
+            vec![task("t-reader", metadata, json!({}))],
+            vec![],
+        ))
+        .unwrap_or_else(|_| panic!("the project reads as a plan"));
+        assert_eq!(read.plan.tasks.len(), 1);
+        assert_eq!(read.plan.tasks[0].id, "reader");
     }
 
     /// A body's surrounding whitespace is the store's layout, so a step is handed the body

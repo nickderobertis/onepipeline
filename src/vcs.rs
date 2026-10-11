@@ -2376,6 +2376,7 @@ pub(crate) fn net_diff(
 
 /// `patch`, cut at the last line end at or before `cap` bytes where it is longer,
 /// with a line saying where it was cut and how much is not shown.
+// llmlint: ignore[changed_behavior_has_e2e] reaching the cut end to end needs a rework whose change is over 200 KB, which a journey would write only to read the line back; `a_net_diff_over_its_cap_is_cut_at_a_line_end_saying_where_and_how_much` holds the cut, and the uncut patch reaches the drafter in `tests/e2e/rework.rs`'s `a_rework_whose_change_outgrew_its_title_is_retitled_by_the_drafter`.
 fn capped(patch: String, cap: usize) -> String {
     if patch.len() <= cap {
         return patch;
@@ -2827,6 +2828,59 @@ mod tests {
             },
             &crate::event::Labels::default(),
         )
+    }
+
+    /// The net diff over real git: against the base a change is drafted on, with
+    /// what the worktree has not committed and a file it has not added in it, from
+    /// a base with no remote-tracking ref to read; the worktree's own index — what
+    /// a publication commits from — left exactly as it was; and a read git refuses
+    /// answered as one.
+    #[test]
+    fn a_net_diff_is_the_whole_change_against_its_base_and_leaves_the_index_alone() {
+        let root =
+            std::env::temp_dir().join(format!("onepipeline-net-diff-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a scratch root");
+        git_in(&root, &["init", "-q", "--initial-branch=main", "repo"]);
+        let repo = root.join("repo");
+        std::fs::write(repo.join("reader.md"), "read the plan from disk\n").expect("a file");
+        git_in(&repo, &["add", "-A"]);
+        git_in(&repo, &["commit", "-q", "-m", "feat: the reader"]);
+        git_in(&repo, &["checkout", "-q", "-b", "feature"]);
+        std::fs::write(repo.join("reader.md"), "read the plan, retrying\n").expect("a file");
+        git_in(&repo, &["commit", "-q", "-am", "feat: retry"]);
+        // Uncommitted, and a file nothing has added.
+        std::fs::write(repo.join("reader.md"), "read the plan, retrying twice\n").expect("a file");
+        std::fs::write(repo.join("retry.md"), "the retry policy\n").expect("a file");
+        let index = || std::fs::read(repo.join(".git").join("index")).expect("the index");
+        let before = index();
+
+        let patch = net_diff(&repo, "main").expect("the diff reads");
+        assert!(patch.contains("-read the plan from disk\n"), "{patch}");
+        assert!(
+            patch.contains("+read the plan, retrying twice\n"),
+            "{patch}"
+        );
+        assert!(
+            patch.contains("+++ b/retry.md") && patch.contains("+the retry policy"),
+            "{patch}"
+        );
+        assert!(!patch.contains("retrying\n+"), "{patch}");
+        assert_eq!(index(), before, "the worktree's own index moved");
+        assert!(
+            std::fs::read_dir(std::env::temp_dir())
+                .expect("the temporary directory")
+                .filter_map(std::result::Result::ok)
+                .all(|entry| !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(&format!("onepipeline-net-diff-{}-", std::process::id()))),
+            "the scratch index was left behind"
+        );
+        // A base git cannot name is a read refused, said in git's words.
+        let refused = net_diff(&repo, "nowhere").expect_err("no such base");
+        assert!(refused.contains("merge-base"), "{refused}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
