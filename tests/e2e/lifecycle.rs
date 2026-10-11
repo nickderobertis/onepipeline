@@ -3163,6 +3163,20 @@ fn a_verdict_that_never_says_landed_leaves_the_dependents_held_and_settles() {
         .with_env("ONEPIPELINE_MERGE_PATH_READS", "1")
         .with_env("ONEPIPELINE_MERGE_PATH_BACKOFF_SECONDS", "1");
     world.repository("change-auto", &[]);
+    // The service's visibility is declared, so the publication's write boundary
+    // takes the rule's word and asks the host nothing: the outage below is spent
+    // on the reads it is scripted for, not on a visibility probe.
+    std::fs::write(
+        world.onevcs_home().join("rules.yml"),
+        "version: 4\n\
+         rules:\n\
+         \x20 - match: {host: github.com, owner: owner, name: service}\n\
+         \x20   visibility: private\n\
+         default:\n\
+         \x20 publication: change-auto\n\
+         \x20 approvals: none\n",
+    )
+    .expect("the rules file is written");
     world.script("publish.work", "the worker wrote this\n");
     world.script("announce.work", "and this announces it\n");
     // Out for one call, which is the read behind this node's push. Nothing lands

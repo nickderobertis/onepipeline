@@ -1525,6 +1525,23 @@ fn changed_repository_identities_fail_the_dependent_before_dispatch() {
     let world = World::new("stacked-repo-changed");
     world.repository("local-direct", &[]);
     let other = world.extra_repository("other");
+    // The fixture's visibilities are declared, so H's preserving push takes the
+    // rule's word: the fake host answers no visibility probe, and an unanswered
+    // one screens the push against every registered private repository's
+    // declarations, which the re-registration below leaves one identity without.
+    std::fs::write(
+        world.onevcs_home().join("rules.yml"),
+        "version: 4\n\
+         rules:\n\
+         \x20 - match: {host: github.com, owner: owner, name: service}\n\
+         \x20   visibility: private\n\
+         \x20 - match: {host: github.com, owner: owner, name: other}\n\
+         \x20   visibility: private\n\
+         default:\n\
+         \x20 publication: local-direct\n\
+         \x20 approvals: none\n",
+    )
+    .expect("the rules file is written");
     world.script("H.work", "harness\n");
     world.script("H.wait", "hold");
     let mut a = kept("A", &["H"]);
