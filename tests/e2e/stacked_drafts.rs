@@ -47,8 +47,8 @@ fn team_world(name: &str) -> World {
 }
 
 /// Launch `nodes` attached, one at a time so the host numbers their change requests
-/// in plan order, and wait for the run's result.
-fn settle(world: &World, name: &str, nodes: Vec<Value>, extra: &[&str]) {
+/// in plan order, wait for the run's result, and hand back what the launch printed.
+fn settle(world: &World, name: &str, nodes: Vec<Value>, extra: &[&str]) -> crate::harness::Run {
     let mut plan = plan_of(name, nodes);
     plan["concurrency"] = json!(1);
     let path = world.plan(name, &plan);
@@ -61,6 +61,7 @@ fn settle(world: &World, name: &str, nodes: Vec<Value>, extra: &[&str]) {
         launched.stdout,
         launched.stderr
     );
+    launched
 }
 
 /// The newest settlement of `node`'s, as the journal recorded it.
@@ -454,6 +455,133 @@ fn a_conflicting_stack_base_is_concluded_by_the_node_s_own_worker() {
         ["e.md"]
     );
     assert_eq!(change_from(&world, e_branch)["base"], stack_base.as_str());
+}
+
+/// A stack base whose merge the worker never concludes fails the node once the
+/// worker has been handed one merge per parent and the root, naming the stack base,
+/// with no session of its own opened — so the settlement names its stack and neither
+/// a base nor a head.
+#[test]
+fn an_unconcluded_stack_base_merge_fails_the_node_naming_it() {
+    let world = team_world("stack-unconcluded");
+    let repo = service(&world);
+    world.script("a.work", "a wrote this\n");
+    world.script("c.work", "c wrote this\n");
+    world.script("a.work-file", "shared");
+    world.script("c.work-file", "shared");
+    world.script("e.work", "e's change\n");
+    // Handed the merge, it concludes nothing.
+    world.script("e.merges-only", "");
+    let run = "unconcluded";
+    settle(
+        &world,
+        run,
+        vec![
+            lifecycle("a", &[]),
+            lifecycle("c", &[]),
+            lifecycle("e", &["a", "c"]),
+        ],
+        &[],
+    );
+    let e = settled(&world, run, "e");
+    let stack_base = format!("{PREFIX}stack-base/{run}/e");
+    assert_eq!(e["status"], "failed", "{e}");
+    assert_eq!(e["outcome"], "infrastructure-failure", "{e}");
+    let detail = text(&e["detail"], "e's detail");
+    assert!(
+        detail.contains(&format!(
+            "the stack base {stack_base} could not be assembled"
+        )) && detail.contains("conflicted again after the worker was handed 3 merge(s)"),
+        "{detail}"
+    );
+    // The root's merge and each parent's: three hand-offs, then the refusal.
+    let tasks = tasks_of(&world, run, "e", "engineer");
+    assert_eq!(tasks.len(), 3, "{tasks:#?}");
+    assert!(tasks
+        .iter()
+        .all(|task| task.contains("opened with a merge in progress")));
+    assert!(e.get("base").is_none() && e.get("head").is_none(), "{e}");
+    assert_eq!(e["stack"]["stack_base"], stack_base.as_str(), "{e}");
+    assert!(
+        git(&world, &repo.origin, &["branch", "--list", &stack_base])
+            .trim()
+            .is_empty(),
+        "a stack base nobody concluded was pushed"
+    );
+}
+
+/// The node's worker failing in the stack base's session settles the node on that
+/// failure, with nothing of its own session opened.
+#[test]
+fn a_worker_that_fails_the_stack_base_merge_fails_the_node() {
+    let world = team_world("stack-merge-fails");
+    world.script("a.work", "a wrote this\n");
+    world.script("c.work", "c wrote this\n");
+    world.script("a.work-file", "shared");
+    world.script("c.work-file", "shared");
+    world.script("e.fail", "1");
+    let run = "mergefails";
+    settle(
+        &world,
+        run,
+        vec![
+            lifecycle("a", &[]),
+            lifecycle("c", &[]),
+            lifecycle("e", &["a", "c"]),
+        ],
+        &[],
+    );
+    let e = settled(&world, run, "e");
+    assert_eq!(e["status"], "failed", "{e}");
+    assert_ne!(
+        e["outcome"], "infrastructure-failure",
+        "the worker's own ending: {e}"
+    );
+    let tasks = tasks_of(&world, run, "e", "engineer");
+    assert_eq!(tasks.len(), 1, "{tasks:#?}");
+    assert!(
+        tasks[0].contains("opened with a merge in progress"),
+        "{}",
+        tasks[0]
+    );
+    assert!(e.get("base").is_none() && e.get("branch").is_none(), "{e}");
+    assert_eq!(
+        e["stack"]["stack_base"],
+        format!("{PREFIX}stack-base/{run}/e"),
+        "{e}"
+    );
+}
+
+/// A Stack block the host refuses to write leaves the node settled on its
+/// publication, says so on the driver's output, and leaves the description as the
+/// publication opened it.
+#[test]
+fn a_stack_block_the_host_will_not_take_leaves_the_publication_as_it_settled() {
+    let world = team_world("stack-edit-refused");
+    world.script("a.work", "a's change\n");
+    world.script("b.work", "b's change\n");
+    world.script("gh.edit-refused", "the host refused the edit");
+    let run = "editrefused";
+    let launched = settle(
+        &world,
+        run,
+        vec![lifecycle("a", &[]), lifecycle("b", &["a"])],
+        &[],
+    );
+    let a = settled(&world, run, "a");
+    let b = settled(&world, run, "b");
+    assert_eq!(b["status"], "done", "{b}");
+    assert_eq!(b["outcome"], "change-review-draft", "{b}");
+    assert_eq!(b["base"], a["branch"], "{b}");
+    let change = change_from(&world, text(&b["branch"], "b's branch"));
+    launched.err_has(&format!(
+        "node 'b': the Stack block was not written onto {}",
+        text(&b["change_url"], "b's change request")
+    ));
+    assert!(
+        !text(&change["body"], "b's body").contains(OPEN),
+        "{change}"
+    );
 }
 
 /// A dependent of a parent that landed is placed on the root as it always was, and

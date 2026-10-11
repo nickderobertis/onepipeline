@@ -561,6 +561,23 @@ pub(crate) struct SettledStack {
     // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
+impl SettledStack {
+    /// Whether every name and commit it carries is one a branch or a commit can
+    /// be — what [`crate::vcs::usable`] accepts — and its parents are not empty.
+    pub(crate) fn is_usable(&self) -> bool {
+        !self.parents.is_empty()
+            && self.parents.iter().all(|parent| {
+                !parent.node.is_empty()
+                    && crate::vcs::usable(&parent.branch).is_some()
+                    && crate::vcs::usable(&parent.head).is_some()
+            })
+            && self
+                .stack_base
+                .as_deref()
+                .is_none_or(|stack_base| crate::vcs::usable(stack_base).is_some())
+    }
+}
+
 /// One stack parent of a settled node.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct StackParent {

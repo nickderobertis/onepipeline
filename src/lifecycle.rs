@@ -672,15 +672,27 @@ fn attempt_once(
         // opens, and only by the step that opens it: every later step works in
         // that session's worktree.
         if worktree.is_none() {
-            if let Some(stack) = stack.filter(|stack| stack.stack_base.is_some()) {
+            if let Some(
+                assembling @ crate::stack::Stack::OnStackBase {
+                    root,
+                    branch,
+                    parents,
+                },
+            ) = stack
+            {
                 let merging = Merging {
                     graph: &graph,
                     task: &task,
                     persona: step.persona.as_deref(),
                     controls: *controls,
                 };
+                let base = StackBaseOf {
+                    root,
+                    branch,
+                    parents,
+                };
                 match assemble(
-                    executor, paths, node, stack, &merging, cancel, tx, ended, attempt,
+                    executor, paths, node, &base, &merging, cancel, tx, ended, attempt,
                 ) {
                     Ok(assembled) => {
                         let heads = assembled
@@ -688,7 +700,7 @@ fn attempt_once(
                             .iter()
                             .map(|parent| (parent.branch.clone(), parent.head.0.clone()))
                             .collect();
-                        placed.stack = Some(Box::new(stack.settled(&heads)));
+                        placed.stack = Some(Box::new(assembling.settled(&heads)));
                     }
                     Err(ended) => return *ended,
                 }
@@ -846,6 +858,13 @@ fn with_stack(task: String, stack: Option<&crate::stack::Stack>) -> String {
 /// write leaves the description as it was and says so on the driver's output: the
 /// publication is what the node settles on, and it has already been made.
 fn write_stack_block(node: &Node, token: &onevcs::SessionToken, stack: &crate::stack::Stack) {
+    // llmlint: ignore-block[changed_behavior_has_e2e] neither arm has a journey that reaches
+    // it alone. A node with a stack parent is on a repository whose changes stay open, and
+    // every publication of one that answered opened or adopted a change request, so `None`
+    // is a host that lost it between the two calls. A read refused here needs the host to
+    // fail this one call and answer the publication just before it, and the fake host's
+    // outage counts calls from the run's start. The write's refusal beside it is driven by
+    // `a_stack_block_the_host_will_not_take_leaves_the_publication_as_it_settled`.
     let change = match crate::vcs::session_change(token) {
         Ok(Some(change)) => change,
         Ok(None) => return,
@@ -856,7 +875,7 @@ fn write_stack_block(node: &Node, token: &onevcs::SessionToken, stack: &crate::s
             );
             return;
         }
-    };
+    }; // llmlint: ignore-end[changed_behavior_has_e2e]
     let described = crate::stack::splice(&change.body, &stack.block());
     if described == change.body {
         return;
@@ -879,7 +898,14 @@ struct Merging<'a> {
     controls: crate::controls::NodeControls,
 }
 
-/// Assemble the stack base `stack` names, handing any merge that stops on a
+/// The stack base a node is placed on, as its placement named it.
+struct StackBaseOf<'a> {
+    root: &'a str,
+    branch: &'a str,
+    parents: &'a [crate::stack::Parent],
+}
+
+/// Assemble the stack base `base` names, handing any merge that stops on a
 /// conflict to the node's own worker and assembling again once it concludes.
 ///
 /// Bounded at one conclusion per merge the assembly makes — the root's and each
@@ -891,26 +917,26 @@ struct Merging<'a> {
 /// so none of them carries a base or a head.
 #[allow(
     clippy::too_many_arguments,
-    reason = "one assembly inside one attempt, which needs that attempt's executor, run,               node, stack, dispatch, cancellation, event stream and attempt number"
+    reason = "one assembly inside one attempt, which needs that attempt's executor, run, node, \
+              stack base, dispatch, cancellation, event stream and attempt number"
 )]
 fn assemble(
     executor: &dyn Executor,
     paths: &RunPaths,
     node: &Node,
-    stack: &crate::stack::Stack,
+    base: &StackBaseOf<'_>,
     merging: &Merging<'_>,
     cancel: &crate::executor::CancellationToken,
     tx: &Sender<Message>,
     ended: &engine::EndedDispatches,
     attempt: std::num::NonZeroU32,
 ) -> Result<onevcs::StackBase, Box<Attempt>> {
-    let branch = stack.base().to_owned();
+    let branch = base.branch;
     let failed = |why: String| {
         Box::new(Attempt::settled(Settlement {
             detail: Some(format!(
                 "the stack base {branch} could not be assembled from {}: {why}",
-                stack
-                    .parents
+                base.parents
                     .iter()
                     .map(|parent| parent.branch.as_str())
                     .collect::<Vec<_>>()
@@ -923,16 +949,19 @@ fn assemble(
             )
         }))
     };
-    let (Some(repo), Some(root)) = (node.repo.clone(), stack.root.clone()) else {
+    // llmlint: ignore-block[changed_behavior_has_e2e] a node reaches here only through its
+    // own lifecycle execution, which `execute` enters for a node naming a `repo` and nothing
+    // else; the arm is the type's, not a path any plan can take.
+    let Some(repo) = node.repo.clone() else {
         return Err(failed(
-            "the node names no repository or root to assemble it on".into(),
+            "the node names no repository to assemble it in".into(),
         ));
-    };
+    }; // llmlint: ignore-end[changed_behavior_has_e2e]
     let request = onevcs::StackBaseRequest {
         repo,
-        branch: branch.clone(),
-        root,
-        parents: stack
+        branch: branch.to_owned(),
+        root: base.root.to_owned(),
+        parents: base
             .parents
             .iter()
             .map(|parent| parent.branch.clone())
@@ -959,13 +988,16 @@ fn assemble(
             | onevcs::StackBaseOutcome::Advanced
             | onevcs::StackBaseOutcome::Unchanged => return Ok(assembled),
             onevcs::StackBaseOutcome::Conflicted { session, conflict } => (session, conflict),
+            // llmlint: ignore-block[changed_behavior_has_e2e] `StackBaseOutcome` is
+            // `#[non_exhaustive]`, and the linked release answers the four outcomes above
+            // and no other; this arm is for a later release's, which no journey can produce.
             other => {
                 return Err(failed(format!(
                     "onevcs answered {other:?}, which this build cannot read"
                 )))
-            }
+            } // llmlint: ignore-end[changed_behavior_has_e2e]
         };
-        if concluded > stack.parents.len() {
+        if concluded > base.parents.len() {
             return Err(failed(format!(
                 "its merge conflicted again after the worker was handed {concluded} merge(s) \
                  to conclude, so the conflict is still in session {}",
@@ -973,12 +1005,15 @@ fn assemble(
             )));
         }
         concluded += 1;
+        // llmlint: ignore-block[changed_behavior_has_e2e] the record `onevcs` just wrote for
+        // the session it just answered with: unreadable only where the state root changed
+        // underneath this call, which no journey can arrange between two library calls.
         let Some(mut opened) = crate::vcs::working_session(session) else {
             return Err(failed(format!(
                 "the merge conflicted, and session {} that holds it could not be read",
                 session.0
             )));
-        };
+        }; // llmlint: ignore-end[changed_behavior_has_e2e]
         opened.conflict = Some(conflict.clone());
         let task = match crate::vcs::merge_in_progress(&opened) {
             Some(merge) => crate::plan::with_merge_in_progress(merging.task, &merge),
@@ -995,6 +1030,9 @@ fn assemble(
         };
         let drained = match engine::attempt(executor, node, cancel, tx, &build, ended, attempt) {
             engine::Attempted::Drained(drained) => *drained,
+            // llmlint: ignore[changed_behavior_has_e2e] an exhausted pool is a session open's
+            // refusal, and this dispatch opens none: it runs in the worktree of the session
+            // `onevcs` already opened for the stack base.
             engine::Attempted::Exhausted(refusal) => {
                 return Err(Box::new(Attempt::Exhausted(Box::new(refusal))))
             }

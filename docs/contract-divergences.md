@@ -9424,7 +9424,9 @@ when N starts and asks no host.
   host's branch prefix followed by `stack-base/<plan name>/<node id>`, `root` N's
   root, `parents` the stack parents' branches in N's declared dependency order, and
   the session labels `run` and `node`; N's session and change request are based on
-  that branch. On `Conflicted`, N's own worker is dispatched into the returned
+  that branch. The prefix is the one `onevcs`'s own `session-opened` record reports
+  putting in front of a branch it cut for the run — `onevcs` publishes no resolver
+  of it for a branch it does not cut itself — and none where it reported none. On `Conflicted`, N's own worker is dispatched into the returned
   session with the merge-in-progress task, and once it concludes the merge the
   engine assembles again and proceeds. An assembly that fails, or that conflicts
   again after the worker concluded one merge per parent and the root, settles N
@@ -9432,7 +9434,9 @@ when N starts and asks no host.
 
 An explicit `base_branch` stays the **root** of assembly, while stack parents set
 the checkout and change-request base. Without one, the root is the base the
-lowest stack's root-placed change was drafted against. `publish: preserve`
+lowest stack's root-placed change was drafted against. A stack parent whose
+settlement recorded no commit for its branch, or several with no root on the
+record, fail N as `infrastructure-failure` before it is dispatched, naming them. `publish: preserve`
 stacking and its fan-in refusal (entry 112) are unchanged.
 
 **What the worker and the drafter read.** N's rendered task ends with a `## Stack`
@@ -9514,7 +9518,11 @@ write one file and `e`'s worker conclude the stack base's merge.
 `an_explicit_base_branch_is_the_root_of_the_stack_base` the explicit root and an
 assembly refused before any session opened,
 `a_republished_stack_keeps_one_block_and_the_text_around_it` a second publication
-over a description a reviewer edited, and
+over a description a reviewer edited,
+`a_stack_block_the_host_will_not_take_leaves_the_publication_as_it_settled` a
+refused write of the block, `an_unconcluded_stack_base_merge_fails_the_node_naming_it`
+and `a_worker_that_fails_the_stack_base_merge_fails_the_node` the two ways a
+conflicted stack base ends without one, and
 `a_stacked_settlement_is_projected_onto_the_store` the store write-back.
 `tests/contract.rs`'s `the_stacked_settlement_is_what_the_divergence_record_names`
 checks the block above against the registered `node-settled` document, and

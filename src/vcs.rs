@@ -362,51 +362,6 @@ pub fn assemble_stack_base(request: &onevcs::StackBaseRequest) -> Result<onevcs:
     onevcs::assemble_stack_base(&providers(), request).map_err(refusal)
 }
 
-/// The branch prefix this host puts in front of every branch `onevcs` cuts, which
-/// is what a stack base's name starts with.
-///
-/// `onevcs` resolves it from two layers a caller can reach — its
-/// [`PREFIX_ENV`](onevcs::branches::PREFIX_ENV) in the environment, then the
-/// `prefix:` of the host's [branches file](onevcs::branches::default_path) — over
-/// a shipped default of none, and publishes no resolver for a branch it does not
-/// cut itself. This reads the same two layers in the same order, through the
-/// sibling's own names for both and its own document type.
-///
-/// # Errors
-///
-/// A branches file that exists and cannot be read as one, said in its own words:
-/// naming a stack base under a prefix nobody configured would put it where no
-/// other branch of this host's lives.
-pub fn host_branch_prefix() -> std::result::Result<String, String> {
-    if let Some(prefix) = std::env::var_os(onevcs::branches::PREFIX_ENV) {
-        let prefix = prefix.to_str().ok_or_else(|| {
-            format!(
-                "{} is not text, so no stack base can be named under it",
-                onevcs::branches::PREFIX_ENV
-            )
-        })?;
-        return Ok(prefix.trim().to_owned());
-    }
-    let path = onevcs::branches::default_path().map_err(|error| error.to_string())?;
-    if !path.is_file() {
-        return Ok(String::new());
-    }
-    let raw = std::fs::read_to_string(&path).map_err(|error| {
-        format!(
-            "cannot read the branches file at {}: {error}",
-            path.display()
-        )
-    })?;
-    serde_norway::from_str::<onevcs::branches::BranchesFile>(&raw)
-        .map(|file| file.prefix)
-        .map_err(|error| {
-            format!(
-                "the branches file at {} is malformed: {error}",
-                path.display()
-            )
-        })
-}
-
 /// The word a node whose change request is held open as a **draft** settles on.
 ///
 /// Its own outcome beside `change-open` rather than a shade of it, because the

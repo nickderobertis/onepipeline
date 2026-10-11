@@ -175,6 +175,11 @@ pub struct RunState {
     /// every run whose nodes were never drafted on unlanded work.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) stacks: BTreeMap<String, crate::payload::SettledStack>,
+    /// The branch prefix `onevcs` reported putting in front of the branches it cut
+    /// for this run's sessions — `""` once it cut one and reported none — which is
+    /// what a stack base is named under. `None` until a session cut a branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) branch_prefix: Option<String>,
     /// The branches an idle pass of this run's driver retired as holding no work
     /// beyond their base, folded from its `branches-retired`.
     ///
@@ -1183,10 +1188,19 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
                 .and_then(crate::vcs::usable)
             {
                 state.bases.insert(node.clone(), base);
+                // llmlint: ignore-block[changed_behavior_has_e2e] a newer settlement of the
+                // same node naming no stack is a node placed again after its parents landed,
+                // which this build reaches only once restacking ships; this module's
+                // `a_settlement_s_base_and_stack_are_folded_and_a_later_unstacked_one_drops_the_stack`
+                // folds it. A record that is not a usable stack is one this build's writer
+                // never produces, read as none rather than carried into placement.
                 match payload
                     .get(journal::SETTLED_STACK)
                     .cloned()
-                    .and_then(|stack| serde_json::from_value(stack).ok())
+                    .and_then(|stack| {
+                        serde_json::from_value::<crate::payload::SettledStack>(stack).ok()
+                    })
+                    .filter(crate::payload::SettledStack::is_usable)
                 {
                     Some(stack) => {
                         state.stacks.insert(node.clone(), stack);
@@ -1194,7 +1208,7 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
                     None => {
                         state.stacks.remove(node);
                     }
-                }
+                } // llmlint: ignore-end[changed_behavior_has_e2e]
             }
             // The classification the dispatch died under, and the commit its
             // branch was left at. Both are the settlement's own — nothing else in
@@ -1592,6 +1606,30 @@ fn fold_session(state: &mut RunState, event: &Envelope) {
     };
     // Cut fresh from the base if a pass had retired it, so it exists again.
     state.retired_branches.remove(session.branch().as_str());
+    // The prefix `onevcs` put in front of a branch it cut, read off its own record
+    // of the cut — the one carrying the `placement` it always writes, rather than
+    // the shorter account of the same open this crate relays beside it: reported
+    // where one was applied, and absent on a fresh cut where none was. A continued
+    // or resumed session, and one pinned to the node's own `branch`, cut nothing,
+    // so they say nothing about it.
+    let pinned = state
+        .graph
+        .get(node)
+        .is_some_and(|planned| planned.branch.is_some());
+    let cut = !pinned
+        && event.payload.get("placement").is_some()
+        && event.payload.get("continued").is_none()
+        && event.payload.get("reused").is_none();
+    if let Some(prefix) = event
+        .payload
+        .get("branch_prefix")
+        .and_then(|prefix| prefix.get("prefix"))
+        .and_then(Value::as_str)
+    {
+        state.branch_prefix = Some(prefix.to_owned());
+    } else if cut {
+        state.branch_prefix = Some(String::new());
+    }
     if let Some(base) = base_named_by(event) {
         state.bases.insert(node.to_string(), base);
     }
@@ -2952,6 +2990,33 @@ mod tests {
                 },
             )
         }
+    }
+
+    /// The branch prefix a stack base is named under is the one `onevcs`'s own
+    /// record of a cut reports; that record naming none is a cut under none, and
+    /// the shorter relay of the same open this crate writes says nothing either way.
+    #[test]
+    fn the_branch_prefix_is_read_off_onevcs_s_own_record_of_a_cut() {
+        // `onevcs`'s own record: the relay's fields and the `placement` it always writes.
+        let sibling = |seq: u64, prefix: Option<&str>| {
+            let mut event = opened(seq, "a", "s-1", "me/a");
+            event
+                .payload
+                .insert("placement".into(), json!({"kind": "run-root"}));
+            if let Some(prefix) = prefix {
+                event.payload.insert(
+                    "branch_prefix".into(),
+                    json!({"prefix": prefix, "from": "the environment"}),
+                );
+            }
+            event
+        };
+        let state = fold(&[sibling(1, Some("me/")), opened(2, "a", "s-1", "me/a")]);
+        assert_eq!(state.branch_prefix.as_deref(), Some("me/"));
+        let state = fold(&[sibling(1, None)]);
+        assert_eq!(state.branch_prefix.as_deref(), Some(""));
+        let state = fold(&[opened(1, "a", "s-1", "a")]);
+        assert_eq!(state.branch_prefix, None, "the relay alone says nothing");
     }
 
     /// A branch a pass retired stops being retired the moment a session opens on

@@ -1534,12 +1534,6 @@ fn commit_and_land_on_base(args: &[String], name: &str, base: &str) {
     }
 }
 
-/// Conclude the merge a session opened with, where it opened with one.
-///
-/// Real git in the real worktree, on [`commit_on_a_branch_of_its_own`]'s terms:
-/// `MERGE_HEAD` says whether a merge is in progress, `git diff --diff-filter=U`
-/// names the unmerged paths, and `git commit --no-edit` takes git's own merge
-/// message — so what is committed is the merge, with both parents.
 /// Whether the dispatch's worktree holds a merge in progress.
 fn merging(args: &[String]) -> bool {
     let worktree = session_worktree(args, "asking whether a merge is in progress");
@@ -1551,6 +1545,12 @@ fn merging(args: &[String]) -> bool {
         .is_ok_and(|status| status.success())
 }
 
+/// Conclude the merge a session opened with, where it opened with one.
+///
+/// Real git in the real worktree, on [`commit_on_a_branch_of_its_own`]'s terms:
+/// `MERGE_HEAD` says whether a merge is in progress, `git diff --diff-filter=U`
+/// names the unmerged paths, and `git commit --no-edit` takes git's own merge
+/// message — so what is committed is the merge, with both parents.
 fn resolve_merge(args: &[String], body: &str) {
     let worktree = session_worktree(args, "concluding a session's merge");
     let git = |argv: &[&str]| -> std::process::Output {

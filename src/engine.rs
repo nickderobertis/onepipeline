@@ -5539,28 +5539,25 @@ fn start_ready(
             .as_ref()
             .and_then(|plan| plan.name.clone())
             .unwrap_or_else(|| paths.run.clone());
-        let stack = match crate::stack::placement(
-            state,
-            statuses,
-            &node,
-            &plan_name,
-            &same_identity,
-            &crate::vcs::host_branch_prefix,
-        ) {
-            Ok(stack) => stack,
-            Err(detail) => {
-                settle(
-                    paths,
-                    journal,
-                    &Settlement {
-                        detail: Some(detail),
-                        ..failed(&node.id, INFRASTRUCTURE_FAILURE)
-                    },
-                )?;
-                settled_here = true;
-                continue;
-            }
-        };
+        let stack =
+            match crate::stack::placement(state, statuses, &node, &plan_name, &same_identity) {
+                Ok(stack) => stack,
+                // llmlint: ignore-block[changed_behavior_has_e2e] reached only by the two refusals
+                // `stack::placement` makes, each of a record this build never writes — its own
+                // suppression says which — so a journey would prove a hand-edited journal.
+                Err(detail) => {
+                    settle(
+                        paths,
+                        journal,
+                        &Settlement {
+                            detail: Some(detail),
+                            ..failed(&node.id, INFRASTRUCTURE_FAILURE)
+                        },
+                    )?;
+                    settled_here = true;
+                    continue;
+                } // llmlint: ignore-end[changed_behavior_has_e2e]
+            };
         if let Some(stack) = &stack {
             node.base_branch = Some(stack.base().to_owned());
         }
