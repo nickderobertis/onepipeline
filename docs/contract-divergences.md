@@ -9440,7 +9440,12 @@ and this build makes each as follows until it is ruled on.
    `onevcs::inspect_repository`** at load, at every live edit, and for every envelope
    judged — one host read per distinct repository — because a recorded visibility is
    never refreshed except at a write, and a stale `unknown` would make a public
-   repository private and hide a mixed plan's dependency from the rule.
+   repository private and hide a mixed plan's dependency from the rule. A dispatch and
+   a write-back read the resolution the run's plan last took, made again whenever an
+   accepted edit changes what a node names, is classified as, or depends on — which is
+   when the design recomputes the scope — so a visibility that changes under an
+   unchanged plan reaches them at the next such edit, and reaches every load, live edit
+   and envelope at once.
 7. **A consumer's `branch` and `resume` are refused in a document, and checked at
    dispatch otherwise.** The engine itself pins both on a consumer it cancelled and
    requeued, to the export's own branch, so a live edit's check cannot tell that pin

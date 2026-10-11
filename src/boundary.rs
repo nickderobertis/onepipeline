@@ -326,6 +326,16 @@ const RESOLVED_KEPT: usize = 8;
 /// How the boundary stands for a run's plan, asked of the linked `onevcs` the first time
 /// the plan takes this shape — at launch, and again after every accepted edit that changes
 /// a repository, a classification, a dependency or an edge.
+///
+/// What a dispatch and a write-back read, which recomputes the run's scope on exactly what
+/// the contract recomputes it on: an accepted edit. A repository whose visibility changes
+/// under an unchanged plan is read anew by the next load, live edit or envelope judged,
+/// each of which resolves afresh, and by these two at the next edit after it.
+// llmlint: ignore[changed_behavior_has_e2e] reuse under an unchanged shape is the absence of
+// a host read, which no journey can observe here: every repository this suite registers has
+// a visibility its rules file states, and a declared visibility is never asked of the host.
+// Recomputation on a changed shape is
+// `publication_boundary::a_live_edit_naming_b_puts_b_in_the_run_scope_for_every_check_after_it`.
 pub(crate) fn of_run(plan: &Plan) -> Resolved {
     let key = shape(plan);
     if let Ok(cached) = RESOLVED.lock() {
@@ -1251,11 +1261,30 @@ fn well_formed(document: &serde_json::Value) -> Result<(), String> {
     }
     // And it is one of the records the channel itself writes, read as that record: a
     // misspelled field is not quietly read as an envelope carrying nothing to judge.
+    // The reply envelope refuses an unknown field itself; the three queue records read the
+    // way a durable record must — a newer build's field skipped — so what a validator is
+    // handed of them is held to exactly their fields here.
+    let only = |known: &[&str]| fields.keys().all(|key| known.contains(&key.as_str()));
     let reads_as = |document: &serde_json::Value| {
         serde_json::from_value::<crate::channel::Reply>(document.clone()).is_ok()
-            || serde_json::from_value::<crate::channel::QueuedReply>(document.clone()).is_ok()
-            || serde_json::from_value::<crate::channel::QueuedCommands>(document.clone()).is_ok()
-            || serde_json::from_value::<crate::channel::layout::Surface>(document.clone()).is_ok()
+            || (only(&["id", "reply", "at", "correlation"])
+                && serde_json::from_value::<crate::channel::QueuedReply>(document.clone()).is_ok())
+            || (only(&["id", "author", "commands"])
+                && serde_json::from_value::<crate::channel::QueuedCommands>(document.clone())
+                    .is_ok())
+            || (only(&[
+                "id",
+                "kind",
+                "message",
+                "source",
+                "blocking",
+                "queued_at",
+                "workstream",
+                "abandoned",
+                "asker",
+                "correlation",
+            ]) && serde_json::from_value::<crate::channel::layout::Surface>(document.clone())
+                .is_ok())
     };
     if reads_as(document) {
         Ok(())

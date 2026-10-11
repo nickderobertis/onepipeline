@@ -319,24 +319,66 @@ fn every_malformed_export_edge_and_alternate_private_context_is_refused_at_load(
         assert!(reason.contains(&advice), "{name}: {reason}");
     }
 
-    // And a consumer whose public fields carry a private repository's name is refused
-    // by the term check, over the run's own scope.
-    let mut named = consumer();
-    named["title"] = json!("feat: examples drawn from owner/service");
-    let reason = refused_by_check(
-        &world,
-        "named",
-        &mixed_plan(
-            "named",
-            vec![producer("generalize", &[]), named],
-            vec![edge("generalize", "examples")],
+    // And a consumer whose public fields or directories carry a private repository's
+    // name is refused by the term check, over the run's own scope — each field on its own.
+    let cited = "drawn from owner/service";
+    let with = |field: &str, value: Value| {
+        let mut named = consumer();
+        named[field] = value;
+        (named, edge("generalize", "examples"))
+    };
+    let mut renamed = consumer();
+    renamed["id"] = json!("owner/service-examples");
+    let mut aimed_from = edge("generalize", "examples");
+    aimed_from["source_directory"] = json!("owner/service/generic");
+    let mut aimed_to = edge("generalize", "examples");
+    aimed_to["target_directory"] = json!("owner/service");
+    let mut renamed_edge = edge("generalize", "owner/service-examples");
+    renamed_edge["to"] = json!("owner/service-examples");
+    for (name, (node, edge)) in [
+        (
+            "named-title",
+            with("title", json!(format!("feat: examples {cited}"))),
         ),
-    );
-    assert!(reason.contains("must be neutral"), "{reason}");
-    assert!(
-        !reason.contains("owner/service"),
-        "a refusal repeated the private name it found:\n{reason}"
-    );
+        (
+            "named-task",
+            with(
+                "task",
+                json!(format!(
+                    "## What\nExamples {cited}.\n\n## Acceptance criteria\n- shipped."
+                )),
+            ),
+        ),
+        (
+            "named-body",
+            with("body", json!(format!("Examples {cited}."))),
+        ),
+        (
+            "named-amendment",
+            with("amendment", json!(format!("Examples {cited}."))),
+        ),
+        (
+            "named-context",
+            with("context", json!(format!("Examples {cited}."))),
+        ),
+        ("named-id", (renamed, renamed_edge)),
+        ("named-source", (consumer(), aimed_from)),
+        ("named-target", (consumer(), aimed_to)),
+    ] {
+        let reason = refused_by_check(
+            &world,
+            name,
+            &mixed_plan(name, vec![producer("generalize", &[]), node], vec![edge]),
+        );
+        assert!(reason.contains("must be neutral"), "{name}: {reason}");
+        // A refusal names the node it refuses, which is what the planner wrote; beyond
+        // that it repeats nothing it found.
+        let said = reason.replace("owner/service-examples", "");
+        assert!(
+            !said.contains("owner/service"),
+            "{name}: a refusal repeated the private name it found:\n{reason}"
+        );
+    }
 
     // The well-formed edge loads.
     let project = world.plan(
@@ -2515,6 +2557,10 @@ fn the_validator_refuses_to_judge_a_malformed_document_and_reads_commands_as_the
             "none of a reply envelope",
         ),
         (
+            json!({"id": 0, "commands": [], "commmands": [{"op": "note", "id": "examples"}]}),
+            "none of a reply envelope",
+        ),
+        (
             json!({"commands": [{"op": "summon", "id": "examples"}]}),
             "none of a reply envelope",
         ),
@@ -2779,4 +2825,64 @@ fn an_adopting_driver_resumes_a_consumer_from_the_export_its_predecessor_recorde
         ),
         "a generic example"
     );
+}
+
+#[test]
+fn a_ticket_of_a_private_source_is_never_named_on_a_plan_store_that_is_not_private() {
+    // A second source, declared private, holds the ticket a node delivers; the plans
+    // source is not declared private. Declaring a visibility opts the store into the
+    // boundary, so the engine supplies its policy.
+    let world = World::new("boundary-private-ticket");
+    let root = world.root.join("private-tickets");
+    std::fs::create_dir_all(root.join("projects")).expect("a projects directory");
+    std::fs::create_dir_all(root.join("tasks").join("board")).expect("a tasks directory");
+    std::fs::write(
+        root.join("projects").join("board.md"),
+        "---\ntitle: \"Board\"\n---\n",
+    )
+    .expect("the board");
+    std::fs::write(
+        root.join("tasks").join("board").join("t1.md"),
+        "---\ntitle: \"Ticket t1\"\nproject: board\nstatus: todo\n---\n",
+    )
+    .expect("the ticket");
+    let world = world
+        .with_env("ONETASKGRAPH_SOURCES__TICKETS__PLUGIN", "local-md")
+        .with_env(
+            "ONETASKGRAPH_SOURCES__TICKETS__CONFIG__ROOT",
+            &root.to_string_lossy(),
+        )
+        .with_env("ONETASKGRAPH_SOURCES__TICKETS__VISIBILITY", "private");
+    world.script("keep.wait", "hold");
+    let project = world.plan(
+        "ticketed",
+        &plan_of("ticketed", vec![crate::harness::agent("keep", &[])]),
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the keeper to be in flight", |world| {
+        !world.events_of("ticketed", "node-dispatched").is_empty()
+    });
+    // A node delivering the private ticket joins the plan, and the write-back creates its
+    // item on the plans source: the store withholds the reference to an item of a source
+    // declared private, on a source that is not, so the item is written naming none.
+    let mut ship = crate::harness::agent("ship", &[]);
+    ship["delivers"] = json!(["tickets:board/t1"]);
+    ship["parked"] = json!(true);
+    reply(&world, "ticketed", json!([{"op": "add", "node": ship}]));
+    world.until("the write-back to create the node's item", |world| {
+        world
+            .store_tasks(&project)
+            .iter()
+            .any(|task| task["item"]["metadata"]["onepipeline.id"] == "ship")
+    });
+    let created = world
+        .store_tasks(&project)
+        .into_iter()
+        .find(|task| task["item"]["metadata"]["onepipeline.id"] == "ship")
+        .expect("the node's item");
+    assert!(
+        !created.to_string().contains("tickets:board/t1"),
+        "the plans source names the private ticket: {created}"
+    );
+    world.release("keep.go");
 }

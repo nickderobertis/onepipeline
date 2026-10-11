@@ -648,18 +648,34 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         // The public boundary's refusals, in the store's own words for each: every one of
         // them is decided before the write's first mutation, so none is worth asking again.
         EngineError::NotPrivateDestination { .. } => decided("not-private-destination"),
+        // llmlint: ignore-block[changed_behavior_has_e2e] a source declared private whose
+        // backend answers, at the write, that it is not — or cannot answer — is a hosted
+        // backend's own visibility read (GitHub Projects, Linear); `local-md`, the backend
+        // every offline journey writes through, answers from its declaration alone.
         EngineError::DestinationNotPrivate { .. } => decided("destination-not-private"),
         EngineError::VisibilityUnreadable { error, .. } => {
             ("visibility-unreadable".to_owned(), Some(error))
         }
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         EngineError::BoundaryRefused { .. } => decided("boundary-refused"),
         EngineError::BoundaryUnavailable { .. } => decided("boundary-unavailable"),
+        // llmlint: ignore-block[changed_behavior_has_e2e] unreachable from a write-back, and
+        // named here because the match is exhaustive: the store raises these for a write that
+        // *states* a reference or files an item, and a write-back's copy withholds a private
+        // reference rather than stating it
+        // (`publication_boundary::a_ticket_of_a_private_source_is_never_named_on_a_plan_store_that_is_not_private`),
+        // its targeted updates never restate one, and every item it writes is filed under
+        // the one project the run was launched from, which it read before the run began.
+        // A source declared private whose backend says otherwise, or cannot say, is a hosted
+        // backend's answer (GitHub Projects, Linear), which no offline journey reaches; the
+        // words are the store's own kinds, which `writeback::tests` hold.
         EngineError::PrivateReference { .. } | EngineError::PrivateItemReference { .. } => {
             decided("private-reference")
         }
         EngineError::ReferenceUnclassified { .. } => decided("reference-unclassified"),
         EngineError::ProjectUnclassified { .. } => decided("project-unclassified"),
         EngineError::PrivateMemberOfPublicProject { .. } => decided("private-member"),
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         EngineError::DestinationUnavailable { error, .. }
         | EngineError::SourceRefused { error, .. }
         | EngineError::SourceUnavailable { error, .. }
@@ -5166,6 +5182,56 @@ mod tests {
             },
             EngineError::DependencyCycle {
                 tasks: vec![id(), id()],
+            },
+            // The public boundary's refusals, each under the store's own kind.
+            EngineError::NotPrivateDestination {
+                item: "a".into(),
+                destination: "plans".into(),
+                declared: onetaskgraph_core::config::SourceVisibility::Unknown,
+            },
+            EngineError::DestinationNotPrivate {
+                item: "a".into(),
+                destination: "plans".into(),
+                reality: onetaskgraph_plugin_api::Visibility::Public,
+            },
+            EngineError::VisibilityUnreadable {
+                item: "a".into(),
+                destination: "plans".into(),
+                error: source.clone(),
+            },
+            EngineError::BoundaryRefused {
+                item: "a".into(),
+                destination: "plans".into(),
+                reason: words(),
+            },
+            EngineError::BoundaryUnavailable {
+                item: "a".into(),
+                destination: "plans".into(),
+                reason: words(),
+            },
+            EngineError::PrivateReference {
+                item: "a".into(),
+                destination: "plans".into(),
+                named: "tickets".into(),
+            },
+            EngineError::PrivateItemReference {
+                item: "a".into(),
+                destination: "plans".into(),
+                reference: "tickets:a".into(),
+            },
+            EngineError::ReferenceUnclassified {
+                item: "a".into(),
+                reference: "tickets:a".into(),
+                destination: "plans".into(),
+                why: words(),
+            },
+            EngineError::ProjectUnclassified {
+                project: "plans:a".into(),
+                why: words(),
+            },
+            EngineError::PrivateMemberOfPublicProject {
+                item: "a".into(),
+                project: "plans:a".into(),
             },
             // A copy that could not be undone takes the class and kind of the failure it wraps.
             EngineError::CopyNotUndone {
