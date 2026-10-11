@@ -2513,7 +2513,8 @@ pub(crate) fn status_reporting(view: &RunView, providers: Providers) -> String {
             if let Some(onto) = view.state.restacking.get(id) {
                 out.push_str(&format!(
                     "; restacking onto {}",
-                    onto.iter()
+                    onto.as_slice()
+                        .iter()
                         .map(|onto| format!(
                             "{} at {}",
                             one_line(&onto.branch),
@@ -4404,6 +4405,7 @@ fn restack_phrase(state: &RunState, id: &str) -> Option<String> {
         "restacked onto {}, {} an agent turn",
         record
             .onto
+            .as_slice()
             .iter()
             .map(parent)
             .collect::<Vec<_>>()

@@ -1533,6 +1533,39 @@ pub(crate) struct RestackOnto {
     pub(crate) head: String,
 }
 
+/// The stack parents a restack brings a draft onto: at least one, which is the
+/// only list a restack has — a draft with no stack parent owes none.
+///
+/// Read through [`TryFrom`], so a record naming none is refused where it is read
+/// rather than folded as a restack onto nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "Vec<RestackOnto>", into = "Vec<RestackOnto>")]
+pub(crate) struct Onto(Vec<RestackOnto>);
+
+impl TryFrom<Vec<RestackOnto>> for Onto {
+    type Error = String;
+
+    fn try_from(parents: Vec<RestackOnto>) -> Result<Self, String> {
+        if parents.is_empty() {
+            return Err("a restack names at least one stack parent it brings the node onto".into());
+        }
+        Ok(Self(parents))
+    }
+}
+
+impl From<Onto> for Vec<RestackOnto> {
+    fn from(onto: Onto) -> Self {
+        onto.0
+    }
+}
+
+impl Onto {
+    /// Each stack parent's branch and head, in the node's dependency order.
+    pub(crate) fn as_slice(&self) -> &[RestackOnto] {
+        &self.0
+    }
+}
+
 /// Why a draft is restacked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
@@ -1550,8 +1583,8 @@ pub(crate) struct NodeRestackStarted {
     /// The node.
     pub(crate) node: String,
     /// Each stack parent's branch and the head it is brought onto: at least one.
-    #[schemars(length(min = 1))]
-    pub(crate) onto: Vec<RestackOnto>,
+    #[schemars(with = "Vec<RestackOnto>", length(min = 1))]
+    pub(crate) onto: Onto,
     /// Why.
     pub(crate) cause: RestackCause,
 }

@@ -526,8 +526,6 @@ fn record(dir: &Path, id: &str, state: Change) {
     }
 }
 
-/// The next number, derived from the record rather than kept anywhere: nothing
-/// carries a counter between two invocations of a program that exits.
 /// Run one write of `opened.jsonl` while no other process of this host is writing
 /// it.
 ///
@@ -569,6 +567,8 @@ fn holding_the_records(dir: &Path, write: impl FnOnce() -> ExitCode) -> ExitCode
     wrote
 }
 
+/// The next number, derived from the record rather than kept anywhere: nothing
+/// carries a counter between two invocations of a program that exits.
 fn next_number(dir: &Path) -> NonZeroU64 {
     NonZeroU64::MIN.saturating_add(opened_changes(dir).len() as u64)
 }

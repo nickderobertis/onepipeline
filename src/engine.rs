@@ -2004,7 +2004,7 @@ fn converge(
                     journal.emit(
                         journal::PipelineKind::ChangeRetitled,
                         journal::labels(&paths.run, Some(&retitled.node)),
-                        payload_of(&*retitled),
+                        payload_of(&*retitled)?,
                     )?;
                     state.refresh(paths);
                     derived = None;
@@ -2014,7 +2014,7 @@ fn converge(
                     journal.emit(
                         journal::PipelineKind::TitleUnverified,
                         journal::labels(&paths.run, Some(&title.unverified.node)),
-                        payload_of(&title.unverified),
+                        payload_of(&title.unverified)?,
                     )?;
                     raise(paths, journal, title_unverified_surface(&title))?;
                     state.refresh(paths);
@@ -2040,7 +2040,7 @@ fn converge(
                                     .outcome
                                     .clone()
                                     .unwrap_or_else(|| settlement.status.as_str().to_owned()),
-                            }),
+                            })?,
                         )?;
                     }
                     settle(paths, journal, settlement)?;
@@ -6043,7 +6043,7 @@ fn start_restacks(
                 node: node.id.clone(),
                 onto: owed.onto(),
                 cause: owed.cause,
-            }),
+            })?,
         )?;
         let cancel = CancellationToken::new();
         let references = releases.references(&node);
@@ -8246,7 +8246,7 @@ pub(crate) fn record_operation_facts(
                     from: from.clone(),
                     to: to.clone(),
                     by: crate::payload::RetitledBy::Retitle,
-                }),
+                })?,
             )?,
             // A note no turn took is owed to the node's next dispatch: the commit
             // just journalled says so, and the bus's carry store is what hands it
@@ -8274,13 +8274,21 @@ pub(crate) fn record_operation_facts(
 
 /// A payload this crate declares, as the map a journal record carries.
 ///
-/// Every type passed here is a struct of named fields, which serializes as an
-/// object; anything else would be a record with no payload, and is written as one
-/// rather than dropped.
-pub(crate) fn payload_of<T: Serialize>(declared: &T) -> serde_json::Map<String, Value> {
+/// # Errors
+///
+/// A value that does not serialize, or serializes as something other than an
+/// object, is refused rather than written as a record carrying no payload: the
+/// record's document requires its fields, and an empty payload in their place
+/// would be a record nothing could read back as what it says.
+pub(crate) fn payload_of<T: Serialize>(declared: &T) -> Result<serde_json::Map<String, Value>> {
     match serde_json::to_value(declared) {
-        Ok(Value::Object(payload)) => payload,
-        _ => serde_json::Map::new(),
+        Ok(Value::Object(payload)) => Ok(payload),
+        Ok(other) => Err(Error::Invalid(format!(
+            "a journal payload is an object, and this one serialized as {other}"
+        ))),
+        Err(error) => Err(Error::Invalid(format!(
+            "a journal payload did not serialize: {error}"
+        ))),
     }
 }
 
@@ -11290,6 +11298,27 @@ mod tests {
             .expect("entry 65 names the field");
         let payload = journal::payload(&[(field, json!(operation_kinds(&every)))]);
         assert_eq!(payload[field], json!(edits::every_operation_kind()));
+    }
+
+    /// A journal payload is an object: a value serializing as anything else is
+    /// refused rather than written as a record with no payload.
+    #[test]
+    fn a_payload_that_is_not_an_object_is_refused_rather_than_written_empty() {
+        let written = payload_of(&crate::payload::TitleUnverified {
+            node: "a".into(),
+            title: "feat: a".into(),
+            reason: "nothing checked it".into(),
+        })
+        .expect("a declared payload is an object");
+        assert_eq!(written["node"], "a");
+        let refused = payload_of(&"a string").expect_err("a string is no payload");
+        assert!(refused.to_string().contains("serialized as"), "{refused}");
+        let unserializable = std::collections::BTreeMap::from([(vec![1u8], 1u8)]);
+        let refused = payload_of(&unserializable).expect_err("a map keyed by bytes is no JSON");
+        assert!(
+            refused.to_string().contains("did not serialize"),
+            "{refused}"
+        );
     }
 
     /// The word each command of a refused envelope is answered with — including

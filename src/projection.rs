@@ -197,7 +197,7 @@ pub struct RunState {
     /// The restacks running now, by node, with the heads each brings its node onto.
     /// Omitted when empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub(crate) restacking: BTreeMap<String, Vec<crate::payload::RestackOnto>>,
+    pub(crate) restacking: BTreeMap<String, crate::payload::Onto>,
     /// The last restack each node published. Omitted when empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) restacks: BTreeMap<String, RestackRecord>,
@@ -503,7 +503,7 @@ pub(crate) struct ReworkRecord {
 #[serde(deny_unknown_fields)]
 pub(crate) struct RestackRecord {
     /// Each stack parent's branch and the head it was brought onto.
-    pub(crate) onto: Vec<crate::payload::RestackOnto>,
+    pub(crate) onto: crate::payload::Onto,
     /// What the restack left the node's branch at, and how it published.
     pub(crate) restacked: crate::payload::NodeRestacked,
 }
@@ -1377,10 +1377,14 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
             ) else {
                 return;
             };
-            let onto = state.restacking.remove(&restacked.node).unwrap_or_default();
-            state
-                .restacks
-                .insert(restacked.node.clone(), RestackRecord { onto, restacked });
+            // A restack published is one this run saw start: a `node-restacked` naming
+            // no start before it is not a record this build writes, and says nothing
+            // about what the node was brought onto.
+            if let Some(onto) = state.restacking.remove(&restacked.node) {
+                state
+                    .restacks
+                    .insert(restacked.node.clone(), RestackRecord { onto, restacked });
+            }
         }
         // The title moves with the change request it was written onto, so the
         // write-back projects it, and nothing is unverified about it any more.
@@ -4344,7 +4348,7 @@ mod tests {
         );
         let restacking = fold(&[settled.clone(), started.clone()]);
         assert_eq!(restacking.recorded["b"], Recorded::At(NodeStatus::Running));
-        assert_eq!(restacking.restacking["b"][0].head, "9f8e7d");
+        assert_eq!(restacking.restacking["b"].as_slice()[0].head, "9f8e7d");
         assert_eq!(restacking.branch_heads["me/b"], "1f2e3d");
         let adopted = pipeline(journal::PipelineKind::DriverAdopted, 3, None, &[]);
         let state = fold(&[settled, started, adopted]);

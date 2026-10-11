@@ -395,15 +395,20 @@ pub(crate) struct Owed {
 
 impl Owed {
     /// Each stack parent's branch and the head the restack brings the node onto.
-    pub(crate) fn onto(&self) -> Vec<crate::payload::RestackOnto> {
-        self.stack
+    pub(crate) fn onto(&self) -> crate::payload::Onto {
+        let onto: Vec<crate::payload::RestackOnto> = self
+            .stack
             .parents()
             .iter()
             .map(|parent| crate::payload::RestackOnto {
                 branch: parent.branch.clone(),
                 head: parent.head.clone(),
             })
-            .collect()
+            .collect();
+        // A stack holds at least one parent by construction — `Stack::OnParent` one,
+        // `Several` two or more — so the list is never empty.
+        onto.try_into()
+            .unwrap_or_else(|why: String| unreachable!("a stack's parents: {why}"))
     }
 }
 
