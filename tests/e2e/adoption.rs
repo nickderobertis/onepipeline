@@ -2002,8 +2002,8 @@ fn an_arrival_note_with_no_live_turn_to_reach_is_owed_to_the_next_dispatch() {
 /// ledger**.
 ///
 /// It is out-of-repository whatever repository it lands in: the branch belongs to
-/// another run, so the stacked-branch machinery this crate has cannot reach it
-/// and a git pin is the only thing a worker can hold.
+/// another run, so the stack placement this crate makes from its own run's
+/// settlements cannot reach it and a git pin is the only thing a worker can hold.
 #[test]
 fn a_cross_dag_dependency_is_pinned_against_git_and_named_from_the_upstreams_ledger() {
     let world = watching("adoption-crossdag");

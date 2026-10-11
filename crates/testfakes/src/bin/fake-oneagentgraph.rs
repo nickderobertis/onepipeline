@@ -756,6 +756,17 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         commit_on_a_branch_of_its_own(args, &branch);
     }
 
+    // A worker handed a merge that is all it is there to conclude — a stack base's,
+    // which is not the node's own branch — concludes it with `<key>.resolves-merge`
+    // and writes nothing else there. Scripted `<key>.merges-only`; a dispatch whose
+    // worktree holds no merge in progress is untouched by it and does its work.
+    if dir.join(format!("{key}.merges-only")).exists() && merging(args) {
+        if let Some(body) = fake::node_script(dir, &key, "resolves-merge") {
+            resolve_merge(args, &body);
+        }
+        return ExitCode::SUCCESS;
+    }
+
     if let Some(file) = fake::node_script(dir, &key, "requires-file") {
         let Some(workspace) = fake::flag(args, "--dir") else {
             fake::fail("checking a dependency file requires --dir");
@@ -768,8 +779,14 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         }
     }
 
+    // `<key>.work-file`, where present, names the file the work is written to in
+    // place of `<key>.md` — a stem, `.md` added — so two nodes can write one path
+    // and conflict where their branches meet.
     if let Some(body) = fake::node_script(dir, &key, "work") {
-        write_work(args, &fake::segment(&key), &body);
+        let name = fake::node_script(dir, &key, "work-file")
+            .map(|stem| stem.trim().to_owned())
+            .unwrap_or_else(|| fake::segment(&key));
+        write_work(args, &name, &body);
     }
 
     // A worker that leaves a process of its own working inside its worktree when
@@ -1523,6 +1540,17 @@ fn commit_and_land_on_base(args: &[String], name: &str, base: &str) {
 /// `MERGE_HEAD` says whether a merge is in progress, `git diff --diff-filter=U`
 /// names the unmerged paths, and `git commit --no-edit` takes git's own merge
 /// message — so what is committed is the merge, with both parents.
+/// Whether the dispatch's worktree holds a merge in progress.
+fn merging(args: &[String]) -> bool {
+    let worktree = session_worktree(args, "asking whether a merge is in progress");
+    std::process::Command::new("git")
+        .args(["rev-parse", "-q", "--verify", "MERGE_HEAD"])
+        .current_dir(&worktree)
+        .stdin(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
 fn resolve_merge(args: &[String], body: &str) {
     let worktree = session_worktree(args, "concluding a session's merge");
     let git = |argv: &[&str]| -> std::process::Output {

@@ -2628,6 +2628,14 @@ pub(crate) fn status_reporting(view: &RunView, providers: Providers) -> String {
                 out.push_str(&format!("  {id}: {} — {kept}\n", crate::engine::PRESERVED));
             }
         }
+        // Every node holding a change request nothing has landed, whatever state
+        // it is in: a stack of drafts is read bottom to top, and a reader needs
+        // each one's change request and what it is drafted against to read it.
+        for (id, node_status) in &statuses {
+            if let Some(change) = open_change_phrase(view, &render, id) {
+                out.push_str(&format!("  {id}: {} — {change}\n", node_status.as_str()));
+            }
+        }
         // The settled nodes whose work has not reached anyone. This view
         // otherwise reports only what is in flight, so a planner reading it saw
         // a run go quiet and took that for a run whose work had landed. Named
@@ -2678,6 +2686,58 @@ pub(crate) fn status_reporting(view: &RunView, providers: Providers) -> String {
         }
     }
     out
+}
+
+/// A node's change request that nothing has landed, and what it is drafted
+/// against: its stack parent's branch and change request, the stack base and the
+/// parents merged into it, or the base its session opened on — or `None` for a
+/// node holding no change request, or one whose change is not reported unlanded.
+///
+/// Whether it landed is [`reported_landing`]'s answer, the one the outstanding
+/// count beside it gives, so a change a read taken now finds on its base is on
+/// neither. Named once because `results` and `status` both say it, for the reason
+/// [`preserved_phrase`] is.
+fn open_change_phrase(view: &RunView, render: &Rendering, id: &str) -> Option<String> {
+    let state = &view.state;
+    let url = state.change_urls.get(id)?;
+    if !matches!(reported_landing(view, render, id).stands(), Stands::NotLanded) {
+        return None;
+    }
+    let parent = |parent: &crate::payload::StackParent| {
+        let change = state
+            .change_urls
+            .get(&parent.node)
+            .map(|url| format!(", {url}"))
+            .unwrap_or_default();
+        format!("{} ({}{change})", parent.node, parent.branch)
+    };
+    let against = match state.stacks.get(id) {
+        Some(stack) => match (&stack.stack_base, stack.parents.as_slice()) {
+            (None, [only]) => Some(format!(
+                "{}'s branch {}{}",
+                only.node,
+                only.branch,
+                state
+                    .change_urls
+                    .get(&only.node)
+                    .map(|url| format!(" ({url})"))
+                    .unwrap_or_default()
+            )),
+            (stack_base, parents) => Some(format!(
+                "stack base {} merging {}",
+                stack_base
+                    .as_deref()
+                    .or_else(|| state.bases.get(id).map(String::as_str))
+                    .unwrap_or("(unnamed)"),
+                parents.iter().map(parent).collect::<Vec<_>>().join(" and ")
+            )),
+        },
+        None => state.bases.get(id).map(|base| format!("the root {base}")),
+    };
+    Some(match against {
+        Some(against) => format!("{url} drafted against {against}"),
+        None => url.clone(),
+    })
 }
 
 /// Where a node settled [`PRESERVED`] kept its work: the branch, the commit it
@@ -4126,8 +4186,11 @@ pub fn results(view: &RunView) -> String {
                 session.token().0
             ));
         }
-        // The one piece of evidence a person actually opens.
-        if let Some(url) = view.state.change_urls.get(&node.id) {
+        // The one piece of evidence a person actually opens — and, for a change
+        // nothing has landed, what it is drafted against.
+        if let Some(change) = open_change_phrase(view, &render, &node.id) {
+            out.push_str(&format!(" — {change}"));
+        } else if let Some(url) = view.state.change_urls.get(&node.id) {
             out.push_str(&format!(" — {url}"));
         }
         out.push('\n');

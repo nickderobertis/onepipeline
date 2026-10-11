@@ -530,6 +530,50 @@ pub(crate) struct NodeSettled {
     /// The steps the branch carries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) completed_steps: Option<Vec<String>>,
+    // llmlint: ignore-block[invalid_states_unrepresentable] a wire document, as the stacked
+    // drafts contract spells it: `base` is a branch name on the wire, as `branch` beside it
+    // already is, and this crate writes it from the session `onevcs` opened and reads it
+    // back only to place a dependent and to render it.
+    /// The branch the node's change request is based on: the root, a stack
+    /// parent's branch, or the stack base merging its stack parents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) base: Option<String>,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
+    /// The unlanded same-repository changes the node was drafted on top of,
+    /// present exactly when it had any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) stack: Option<SettledStack>,
+}
+
+/// The stack a lifecycle node was drafted on: the stack parents its branch was
+/// placed on, and the stack base merging them when there were several.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct SettledStack {
+    /// Each stack parent, in the node's declared dependency order.
+    pub(crate) parents: Vec<StackParent>,
+    // llmlint: ignore-block[invalid_states_unrepresentable] a wire document, as the stacked
+    // drafts contract spells it: `stack_base` is the branch `onevcs::StackBase` names as a
+    // `String` itself, and `null` where one stack parent's branch is the base.
+    /// The stack base the node was placed on, `null` where it had one stack
+    /// parent and was placed on that parent's branch.
+    #[serde(default)]
+    pub(crate) stack_base: Option<String>,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
+}
+
+/// One stack parent of a settled node.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct StackParent {
+    // llmlint: ignore-block[invalid_states_unrepresentable] a wire document, as the stacked
+    // drafts contract spells it: a node id, a branch and a commit are strings on the wire,
+    // as `branch` and `head` on the settlement itself already are.
+    /// The parent node.
+    pub(crate) node: String,
+    /// Its branch, which the node was placed on or which the stack base merges.
+    pub(crate) branch: String,
+    /// The commit that branch stood at when the node was placed on it.
+    pub(crate) head: String,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
 /// `edit-committed`: an accepted command that changed something.

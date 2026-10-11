@@ -165,6 +165,16 @@ pub struct RunState {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     // llmlint: ignore[invalid_states_unrepresentable] a node id and a branch are the plain strings every neighbouring map of this struct carries — `branches` holds the same kind of value — and the branch is checked where it enters, by `vcs::usable`, which is the only thing that writes this map.
     pub bases: BTreeMap<String, String>,
+    /// The stack each lifecycle node was drafted on, folded from its
+    /// settlement's `stack`: its stack parents and the stack base merging them.
+    ///
+    /// What a later pass reads a node's stack from — the root a dependent's own
+    /// stack stands on, a restack, a continuation — without asking a host. A
+    /// node's newest settlement that resolved a base and named no stack removes
+    /// its entry, since that placement had none. Omitted when empty, which is
+    /// every run whose nodes were never drafted on unlanded work.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) stacks: BTreeMap<String, crate::payload::SettledStack>,
     /// The branches an idle pass of this run's driver retired as holding no work
     /// beyond their base, folded from its `branches-retired`.
     ///
@@ -1164,6 +1174,27 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
             }
             if let Some(url) = payload.get("change_url").and_then(Value::as_str) {
                 state.change_urls.insert(node.clone(), url.to_string());
+            }
+            // Where the node's change request is based, and the stack it was
+            // drafted on: what a dependent placed later reads its root from.
+            if let Some(base) = payload
+                .get(journal::SETTLED_BASE)
+                .and_then(Value::as_str)
+                .and_then(crate::vcs::usable)
+            {
+                state.bases.insert(node.clone(), base);
+                match payload
+                    .get(journal::SETTLED_STACK)
+                    .cloned()
+                    .and_then(|stack| serde_json::from_value(stack).ok())
+                {
+                    Some(stack) => {
+                        state.stacks.insert(node.clone(), stack);
+                    }
+                    None => {
+                        state.stacks.remove(node);
+                    }
+                }
             }
             // The classification the dispatch died under, and the commit its
             // branch was left at. Both are the settlement's own — nothing else in
@@ -3989,6 +4020,52 @@ mod tests {
             NodeStatus::Done,
             "the derived status still reads the park ahead of the settlement"
         );
+    }
+
+    /// A settlement's `base` and `stack` are folded per node, and the node's newer
+    /// settlement naming a base and no stack drops the stack its older one named.
+    #[test]
+    fn a_settlement_s_base_and_stack_are_folded_and_a_later_unstacked_one_drops_the_stack() {
+        let settled = |seq: u64, fields: &[(&str, Value)]| {
+            pipeline(journal::PipelineKind::NodeSettled, seq, Some("e"), fields)
+        };
+        let stack = json!({
+            "parents": [
+                {"node": "a", "branch": "me/a", "head": "1f2e3d"},
+                {"node": "c", "branch": "me/c", "head": "2a3b4c"},
+            ],
+            "stack_base": "me/stack-base/p/e",
+        });
+        let stacked = settled(
+            1,
+            &[
+                ("status", json!("done")),
+                ("outcome", json!("change-review-draft")),
+                ("head", json!("9f8e7d")),
+                ("base", json!("me/stack-base/p/e")),
+                ("stack", stack.clone()),
+            ],
+        );
+        let state = fold(std::slice::from_ref(&stacked));
+        assert_eq!(state.bases["e"], "me/stack-base/p/e");
+        assert_eq!(state.heads["e"], "9f8e7d");
+        assert_eq!(
+            serde_json::to_value(&state.stacks["e"]).expect("serializes"),
+            stack,
+            "the stack is folded as it was written"
+        );
+        // A retry placed on the root: its settlement names a base and no stack.
+        let unstacked = settled(
+            2,
+            &[
+                ("status", json!("done")),
+                ("outcome", json!("change-review-draft")),
+                ("base", json!("main")),
+            ],
+        );
+        let state = fold(&[stacked, unstacked]);
+        assert_eq!(state.bases["e"], "main");
+        assert!(!state.stacks.contains_key("e"), "{:?}", state.stacks);
     }
 
     /// A stated landing is folded as the node's landing, on its own tier; the
