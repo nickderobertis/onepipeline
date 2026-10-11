@@ -312,8 +312,7 @@ fn thread_hunk(world: &World, base: &str, head: &str, path: &str) -> String {
         .unwrap_or_else(|| panic!("{path} has no hunk in {base}...{head}:\n{diff}"))
 }
 
-/// The position of the first event of `kind` labelled `node` in the run's journal,
-/// and of any event at all where `kind` is `None`.
+/// The position of the first event of `kind` labelled `node` in the run's journal.
 fn position(journal: &[Value], kind: &str, node: &str) -> usize {
     journal
         .iter()
