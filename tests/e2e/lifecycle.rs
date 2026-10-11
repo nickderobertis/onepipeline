@@ -2438,6 +2438,22 @@ fn a_cancelled_run_reads_no_merge_path_once_its_push_has_landed() {
     let go = world.fakes.join("push.go");
     let held = held_merge_path(&world, &go);
     let repo = world.repository("change-auto", &held.argv());
+    // The service's visibility is declared, so the publication's write boundary
+    // takes the rule's word and asks the host nothing: the one read left to
+    // count is the closeout's.
+    std::fs::write(
+        world.onevcs_home().join("rules.yml"),
+        "version: 4\n\
+         rules:\n\
+         \x20 - match: {host: github.com, owner: owner, name: service}\n\
+         \x20   publication: change-auto\n\
+         \x20   approvals: none\n\
+         \x20   visibility: private\n\
+         default:\n\
+         \x20 publication: change-auto\n\
+         \x20 approvals: none\n",
+    )
+    .expect("the rules file is written");
     world.script("service.work", "the worker wrote this\n");
     // The host never comes back, so every read this loop is allowed would fail.
     world.script("gh.outage", "");
