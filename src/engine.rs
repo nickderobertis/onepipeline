@@ -495,6 +495,12 @@ pub struct Settlement {
     pub remote: Option<onevcs::Preservation>,
     /// The declared steps this attempt finished, for a continuation to skip.
     pub completed_steps: Vec<String>,
+    /// The branch a lifecycle node's change request is based on, once its
+    /// session resolved one.
+    pub base: Option<String>,
+    /// The stack a lifecycle node was drafted on, where it had stack parents.
+    /// Boxed, because only a stacked node's settlement carries one.
+    pub(crate) stack: Option<Box<crate::payload::SettledStack>>,
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
@@ -514,6 +520,8 @@ impl Settlement {
             head: None,
             remote: None,
             completed_steps: Vec::new(),
+            base: None,
+            stack: None,
         }
     }
 }
@@ -5324,6 +5332,17 @@ struct PlacementShape {
     base: Option<String>,
 }
 
+/// Whether two `repo` spellings name one repository, as `onevcs` resolves each.
+///
+/// The read [`crate::graph::stacking_bases`] makes of a preserve edge, made of a
+/// landing node's dependency: a spelling `onevcs` cannot resolve names no
+/// repository this run can place anything on, so it is answered `false` and the
+/// dependency only orders the node.
+fn same_identity(mine: &str, other: &str) -> bool {
+    let identity = |repo: &str| onevcs::release_targets(repo).map(|repository| repository.identity);
+    matches!((identity(mine), identity(other)), (Ok(mine), Ok(other)) if mine == other)
+}
+
 struct StackingPlacement {
     shape: BTreeMap<String, PlacementShape>,
     bases: std::result::Result<BTreeMap<String, String>, String>,
@@ -5550,6 +5569,38 @@ fn start_ready(
             }
         };
 
+        // A landing node depending on unlanded work of its own repository is
+        // placed on that work: one parent's branch, or the stack base merging
+        // several. Decided from the landings this run has recorded, so it asks
+        // no host; a node with no stack parents is placed as it always was.
+        let plan_name = state
+            .plan
+            .as_ref()
+            .and_then(|plan| plan.name.clone())
+            .unwrap_or_else(|| paths.run.clone());
+        let stack =
+            match crate::stack::placement(state, statuses, &node, &plan_name, &same_identity) {
+                Ok(stack) => stack,
+                // llmlint: ignore-block[changed_behavior_has_e2e] reached only by the two refusals
+                // `stack::placement` makes, each of a record this build never writes — its own
+                // suppression says which — so a journey would prove a hand-edited journal.
+                Err(detail) => {
+                    settle(
+                        paths,
+                        journal,
+                        &Settlement {
+                            detail: Some(detail),
+                            ..failed(&node.id, INFRASTRUCTURE_FAILURE)
+                        },
+                    )?;
+                    settled_here = true;
+                    continue;
+                } // llmlint: ignore-end[changed_behavior_has_e2e]
+            };
+        if let Some(stack) = &stack {
+            node.base_branch = Some(stack.base().to_owned());
+        }
+
         // A lifecycle node is asked for only where its identity has room for
         // the session it would open. Held, it is **skipped** rather than broken
         // past: a node of another identity behind it still starts this pass.
@@ -5682,6 +5733,7 @@ fn start_ready(
             launch,
             &node,
             &references,
+            stack,
             cancel.clone(),
             tx.clone(),
             resume,
@@ -5820,6 +5872,7 @@ fn spawn(
     launch: &LaunchRecord,
     node: &Node,
     references: &[crate::plan::CrossRepoReference],
+    stack: Option<crate::stack::Stack>,
     cancel: CancellationToken,
     tx: Sender<Message>,
     resume: Option<Box<crate::lifecycle::Continuation>>,
@@ -5877,6 +5930,7 @@ fn spawn(
                     &launched,
                     &node,
                     &references,
+                    stack.as_ref(),
                     &cancel,
                     &tx,
                     &ended,
@@ -7901,6 +7955,12 @@ fn settle(paths: &RunPaths, journal: &mut Journal, settlement: &Settlement) -> R
     }
     if !settlement.completed_steps.is_empty() {
         payload.insert("completed_steps".into(), json!(settlement.completed_steps));
+    }
+    if let Some(base) = &settlement.base {
+        payload.insert(journal::SETTLED_BASE.into(), json!(base));
+    }
+    if let Some(stack) = &settlement.stack {
+        payload.insert(journal::SETTLED_STACK.into(), json!(stack));
     }
     journal.emit(
         journal::PipelineKind::NodeSettled,

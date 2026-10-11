@@ -316,9 +316,10 @@ impl Answer {
 /// One dependency of a node whose work lands **outside** that node's repository,
 /// in a repository that releases something.
 ///
-/// A dependency inside the same repository is not one of these: the lifecycle
-/// already prepares the stacked or merged-stacked branch for it, and nothing
-/// here changes that. Neither is one whose repository declares no release
+/// A dependency inside the same repository is not one of these: its work reaches
+/// the node through that repository's own branches — a landed dependency through
+/// the root, an unlanded one by placing the node on its branch or on the stack
+/// base merging several (`crate::stack`) — and nothing here changes that. Neither is one whose repository declares no release
 /// targets — there is no release to wait for, which is every repository on a host
 /// that has configured none.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1531,9 +1532,9 @@ impl Watch {
     ) -> Resolution {
         let target = node.consumes.get(dep).cloned();
         // A cross-DAG dependency is out-of-repository whatever repository it
-        // lands in: the branch is another run's, so the stacked-branch machinery
-        // this crate has cannot reach it and a git pin is the only thing a
-        // worker can hold.
+        // lands in: the branch is another run's, so the stack placement this
+        // crate makes from its own run's settlements cannot reach it and a git pin
+        // is the only thing a worker can hold.
         if let Some(reference) = crate::crossdag::parse(dep) {
             let Some(upstream) = upstream_of(paths, &reference) else {
                 return Resolution::Unreadable(format!(
@@ -1638,8 +1639,9 @@ fn across_repositories(
         Err(why) => return Err(Ended::Unreadable(unread(&repo, &why))),
     };
     if Some(identity.as_str()) == mine {
-        // The lifecycle already prepares the stacked or merged-stacked
-        // branch for this one, exactly as it does today.
+        // Same repository: the work reaches the node through that repository's
+        // branches — the root once it landed, or the node's stack placement
+        // (`crate::stack`) while it has not — so there is no release to await.
         return Err(Ended::NothingToAwait);
     }
     Ok(repo)

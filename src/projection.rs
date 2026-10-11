@@ -165,6 +165,22 @@ pub struct RunState {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     // llmlint: ignore[invalid_states_unrepresentable] a node id and a branch are the plain strings every neighbouring map of this struct carries — `branches` holds the same kind of value — and the branch is checked where it enters, by `vcs::usable`, which is the only thing that writes this map.
     pub bases: BTreeMap<String, String>,
+    /// The stack each lifecycle node was drafted on, folded from its
+    /// settlement's `stack`: its stack parents and the stack base merging them.
+    ///
+    /// What a later pass reads a node's stack from — the root a dependent's own
+    /// stack stands on, a restack, a continuation — without asking a host. A
+    /// node's newest settlement that resolved a base and named no stack removes
+    /// its entry, since that placement had none. Omitted when empty, which is
+    /// every run whose nodes were never drafted on unlanded work.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) stacks: BTreeMap<String, crate::payload::SettledStack>,
+    /// The branch prefix `onevcs` reported putting in front of the branches it cut
+    /// for this run's sessions — `""` once it cut one and reported none — which is
+    /// what a stack base is named under. `None` until a session cut a branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    // llmlint: ignore[invalid_states_unrepresentable] the prefix is the plain string `onevcs` reports and every branch beside it in this struct is, checked where it enters by `vcs::usable` — the only thing that writes it, apart from the empty string a cut under no prefix is — and `onevcs` itself holds no newtype for it to borrow.
+    pub(crate) branch_prefix: Option<String>,
     /// The branches an idle pass of this run's driver retired as holding no work
     /// beyond their base, folded from its `branches-retired`.
     ///
@@ -1170,6 +1186,36 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
             if let Some(url) = payload.get("change_url").and_then(Value::as_str) {
                 state.change_urls.insert(node.clone(), url.to_string());
             }
+            // Where the node's change request is based, and the stack it was
+            // drafted on: what a dependent placed later reads its root from.
+            if let Some(base) = payload
+                .get(journal::SETTLED_BASE)
+                .and_then(Value::as_str)
+                .and_then(crate::vcs::usable)
+            {
+                state.bases.insert(node.clone(), base);
+                // llmlint: ignore-block[changed_behavior_has_e2e] a newer settlement of the
+                // same node naming no stack is a node placed again after its parents landed,
+                // which this build reaches only once restacking ships; this module's
+                // `a_settlement_s_base_and_stack_are_folded_and_a_later_unstacked_one_drops_the_stack`
+                // folds it. A record that is not a usable stack is one this build's writer
+                // never produces, read as none rather than carried into placement.
+                match payload
+                    .get(journal::SETTLED_STACK)
+                    .cloned()
+                    .and_then(|stack| {
+                        serde_json::from_value::<crate::payload::SettledStack>(stack).ok()
+                    })
+                    .filter(crate::payload::SettledStack::is_usable)
+                {
+                    Some(stack) => {
+                        state.stacks.insert(node.clone(), stack);
+                    }
+                    None => {
+                        state.stacks.remove(node);
+                    }
+                } // llmlint: ignore-end[changed_behavior_has_e2e]
+            }
             // The classification the dispatch died under, and the commit its
             // branch was left at. Both are the settlement's own — nothing else in
             // the journal says either — so a fold that dropped them would leave a
@@ -1566,6 +1612,34 @@ fn fold_session(state: &mut RunState, event: &Envelope) {
     };
     // Cut fresh from the base if a pass had retired it, so it exists again.
     state.retired_branches.remove(session.branch().as_str());
+    // The prefix `onevcs` put in front of a branch it cut, read off its own record
+    // of the cut — the one carrying the `placement` it always writes, rather than
+    // the shorter account of the same open this crate relays beside it: reported
+    // where one was applied, and absent on a fresh cut where none was. A continued
+    // or resumed session, and one pinned to the node's own `branch`, cut nothing,
+    // so they say nothing about it. `tests/e2e/stacked_drafts.rs` opens each after
+    // a cut and names a stack base with the prefix: a continued retry in
+    // `landing_dependents_of_unlanded_parents_are_drafted_on_them`, a pinned node in
+    // `a_pinned_parent_leaves_the_prefix_a_stack_base_is_named_with`.
+    let pinned = state
+        .graph
+        .get(node)
+        .is_some_and(|planned| planned.branch.is_some());
+    let cut = !pinned
+        && event.payload.get("placement").is_some()
+        && event.payload.get("continued").is_none()
+        && event.payload.get("reused").is_none();
+    if let Some(prefix) = event
+        .payload
+        .get("branch_prefix")
+        .and_then(|prefix| prefix.get("prefix"))
+        .and_then(Value::as_str)
+        .and_then(crate::vcs::usable)
+    {
+        state.branch_prefix = Some(prefix);
+    } else if cut {
+        state.branch_prefix = Some(String::new());
+    }
     if let Some(base) = base_named_by(event) {
         state.bases.insert(node.to_string(), base);
     }
@@ -2929,6 +3003,57 @@ mod tests {
         }
     }
 
+    /// The branch prefix a stack base is named under is the one `onevcs`'s own
+    /// record of a cut reports; that record naming none is a cut under none, and
+    /// the shorter relay of the same open this crate writes says nothing either way.
+    #[test]
+    fn the_branch_prefix_is_read_off_onevcs_s_own_record_of_a_cut() {
+        // `onevcs`'s own record: the relay's fields and the `placement` it always writes.
+        let sibling = |seq: u64, prefix: Option<&str>| {
+            let mut event = opened(seq, "a", "s-1", "me/a");
+            event
+                .payload
+                .insert("placement".into(), json!({"kind": "run-root"}));
+            if let Some(prefix) = prefix {
+                event.payload.insert(
+                    "branch_prefix".into(),
+                    json!({"prefix": prefix, "from": "the environment"}),
+                );
+            }
+            event
+        };
+        let state = fold(&[sibling(1, Some("me/")), opened(2, "a", "s-1", "me/a")]);
+        assert_eq!(state.branch_prefix.as_deref(), Some("me/"));
+        let state = fold(&[sibling(1, None)]);
+        assert_eq!(state.branch_prefix.as_deref(), Some(""));
+        let state = fold(&[opened(1, "a", "s-1", "a")]);
+        assert_eq!(state.branch_prefix, None, "the relay alone says nothing");
+
+        // A session that cut nothing says nothing about the prefix, so a later one
+        // of those leaves the reported prefix standing: continued, resumed, and one
+        // opened on the node's own pinned `branch`.
+        let mut continued = sibling(2, None);
+        continued.payload.insert("continued".into(), json!(true));
+        let mut resumed = sibling(3, None);
+        resumed.payload.insert("reused".into(), json!(true));
+        let state = fold(&[sibling(1, Some("me/")), continued, resumed]);
+        assert_eq!(state.branch_prefix.as_deref(), Some("me/"));
+        let mut pinned = agent("a", &[]);
+        pinned.repo = Some("service".into());
+        pinned.branch = Some("me/a".into());
+        let state = fold(&[
+            pipeline(
+                journal::PipelineKind::RunStarted,
+                0,
+                None,
+                &[("plan", json!(plan_of_nodes(vec![pinned])))],
+            ),
+            sibling(1, Some("me/")),
+            sibling(2, None),
+        ]);
+        assert_eq!(state.branch_prefix.as_deref(), Some("me/"));
+    }
+
     /// A branch a pass retired stops being retired the moment a session opens on
     /// it again, because that session cut it fresh from the base — and a
     /// `branches-retired` this build cannot read retires nothing.
@@ -3995,6 +4120,52 @@ mod tests {
             NodeStatus::Done,
             "the derived status still reads the park ahead of the settlement"
         );
+    }
+
+    /// A settlement's `base` and `stack` are folded per node, and the node's newer
+    /// settlement naming a base and no stack drops the stack its older one named.
+    #[test]
+    fn a_settlement_s_base_and_stack_are_folded_and_a_later_unstacked_one_drops_the_stack() {
+        let settled = |seq: u64, fields: &[(&str, Value)]| {
+            pipeline(journal::PipelineKind::NodeSettled, seq, Some("e"), fields)
+        };
+        let stack = json!({
+            "parents": [
+                {"node": "a", "branch": "me/a", "head": "1f2e3d"},
+                {"node": "c", "branch": "me/c", "head": "2a3b4c"},
+            ],
+            "stack_base": "me/stack-base/p/e",
+        });
+        let stacked = settled(
+            1,
+            &[
+                ("status", json!("done")),
+                ("outcome", json!("change-review-draft")),
+                ("head", json!("9f8e7d")),
+                ("base", json!("me/stack-base/p/e")),
+                ("stack", stack.clone()),
+            ],
+        );
+        let state = fold(std::slice::from_ref(&stacked));
+        assert_eq!(state.bases["e"], "me/stack-base/p/e");
+        assert_eq!(state.heads["e"], "9f8e7d");
+        assert_eq!(
+            serde_json::to_value(&state.stacks["e"]).expect("serializes"),
+            stack,
+            "the stack is folded as it was written"
+        );
+        // A retry placed on the root: its settlement names a base and no stack.
+        let unstacked = settled(
+            2,
+            &[
+                ("status", json!("done")),
+                ("outcome", json!("change-review-draft")),
+                ("base", json!("main")),
+            ],
+        );
+        let state = fold(&[stacked, unstacked]);
+        assert_eq!(state.bases["e"], "main");
+        assert!(!state.stacks.contains_key("e"), "{:?}", state.stacks);
     }
 
     /// A stated landing is folded as the node's landing, on its own tier; the

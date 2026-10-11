@@ -101,10 +101,102 @@ pub fn execute(
     launch: &Launch,
     node: &Node,
     references: &[crate::plan::CrossRepoReference],
+    stack: Option<&crate::stack::Stack>,
     cancel: &crate::executor::CancellationToken,
     tx: &Sender<Message>,
     ended: &engine::EndedDispatches,
     resume: Option<Continuation>,
+) -> engine::Ending {
+    let mut placed = Placed {
+        stack: stack.map(|stack| Box::new(stack.settled(&BTreeMap::new()))),
+        ..Placed::default()
+    };
+    match execute_placed(
+        executor,
+        paths,
+        launch,
+        node,
+        references,
+        stack,
+        cancel,
+        tx,
+        ended,
+        resume,
+        &mut placed,
+    ) {
+        engine::Ending::Settled(settlement) => engine::Ending::Settled(placed.stamp(settlement)),
+        ending => ending,
+    }
+}
+
+/// What a lifecycle node's attempts learnt about where it was placed, which every
+/// settlement of the node carries whichever path reached it.
+///
+/// Read as each attempt goes — the base its session opened on, the commit its
+/// branch stood at before the session closed, the change request it holds — and
+/// stamped onto the settlement [`execute`] returns, so a failure settled after a
+/// spent re-dispatch budget names them exactly as a success does.
+// llmlint: ignore-end[invalid_states_unrepresentable]
+// llmlint: ignore-block[invalid_states_unrepresentable] `base`, `head` and `change_url` hold
+// what goes onto `Settlement`'s own `Option<String>` fields of those names and are read
+// nowhere else: a newtype here would be unwrapped at the one place it is read.
+#[derive(Debug, Default)]
+struct Placed {
+    /// The base the node's session opened on, once one did.
+    base: Option<String>,
+    /// The commit the node's branch stood at after its closeout published it,
+    /// read before its session closed. A dispatch that ended before its closeout
+    /// says where its branch stands itself, and nothing here adds to that.
+    head: Option<String>,
+    /// The change request a session of the node opened, which a settlement that
+    /// did not finish the node names.
+    change_url: Option<String>,
+    /// The stack it was drafted on, where it had stack parents.
+    stack: Option<Box<crate::payload::SettledStack>>,
+}
+// llmlint: ignore-end[invalid_states_unrepresentable]
+// llmlint: ignore-block[invalid_states_unrepresentable] the graph references below are the
+// same validated, launch-recorded strings the engine carries — the launch record's own
+// fields, read off it strictly and passed straight back into oneagentgraph's transparent
+// ConfigRef. Another newtype would duplicate that sibling type and widen this
+// path-resolution change across unrelated composition.
+
+impl Placed {
+    /// `settlement`, with what it did not say itself filled in from here.
+    fn stamp(&self, settlement: Settlement) -> Settlement {
+        Settlement {
+            base: settlement.base.clone().or_else(|| self.base.clone()),
+            head: settlement.head.clone().or_else(|| self.head.clone()),
+            // Only where the node did not finish: a failed or cancelled node is the
+            // one whose change request no publication outcome named, and the one a
+            // reader has to be sent to.
+            change_url: settlement.change_url.clone().or_else(|| {
+                (settlement.status != NodeStatus::Done)
+                    .then(|| self.change_url.clone())
+                    .flatten()
+            }),
+            stack: settlement.stack.clone().or_else(|| self.stack.clone()),
+            ..settlement
+        }
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "`execute`'s own context, and where what its attempts learn is kept"
+)]
+fn execute_placed(
+    executor: &dyn Executor,
+    paths: &RunPaths,
+    launch: &Launch,
+    node: &Node,
+    references: &[crate::plan::CrossRepoReference],
+    stack: Option<&crate::stack::Stack>,
+    cancel: &crate::executor::CancellationToken,
+    tx: &Sender<Message>,
+    ended: &engine::EndedDispatches,
+    resume: Option<Continuation>,
+    placed: &mut Placed,
 ) -> engine::Ending {
     let launched = node;
     // Where the loop starts: at the first attempt, with nothing behind it, or
@@ -163,7 +255,8 @@ pub fn execute(
     };
     loop {
         let preserved = match attempt_once(
-            executor, paths, launch, &node, references, &notes, cancel, tx, ended, attempt,
+            executor, paths, launch, &node, references, stack, &notes, cancel, tx, ended, attempt,
+            placed,
         ) {
             Attempt::Settled(settlement) => return engine::Ending::Settled(*settlement),
             Attempt::Preserving(preserved) => preserved,
@@ -424,11 +517,13 @@ fn attempt_once(
     launch: &Launch,
     node: &Node,
     references: &[crate::plan::CrossRepoReference],
+    stack: Option<&crate::stack::Stack>,
     notes: &[crate::note::RecordedNote],
     cancel: &crate::executor::CancellationToken,
     tx: &Sender<Message>,
     ended: &engine::EndedDispatches,
     attempt: std::num::NonZeroU32,
+    placed: &mut Placed,
 ) -> Attempt {
     let run = paths.run.as_str();
     let vcs_filter = launch.vcs_filter.as_ref();
@@ -628,12 +723,53 @@ fn attempt_once(
             step.agent_graph.as_ref().or(node.agent_graph.as_ref()),
             &launch.node_graph,
         );
+        // What the node's worker is told, stack and all: the stack parents it is
+        // drafted on and the base it is drafted against, after its own task.
+        let task = with_stack(step.rendered_task_carrying(node, references, notes), stack);
+        // The stack base is assembled before the session that is cut from it
+        // opens, and only by the step that opens it: every later step works in
+        // that session's worktree.
+        if worktree.is_none() {
+            if let Some(
+                assembling @ crate::stack::Stack::OnStackBase {
+                    root,
+                    branch,
+                    parents,
+                },
+            ) = stack
+            {
+                let merging = Merging {
+                    graph: &graph,
+                    task: &task,
+                    persona: step.persona.as_deref(),
+                    controls: *controls,
+                };
+                match assemble(
+                    executor,
+                    paths,
+                    node,
+                    (root, branch, parents.as_slice()),
+                    &merging,
+                    cancel,
+                    tx,
+                    ended,
+                    attempt,
+                ) {
+                    Ok(assembled) => {
+                        let heads = assembled
+                            .parents
+                            .iter()
+                            .map(|parent| (parent.branch.clone(), parent.head.0.clone()))
+                            .collect();
+                        placed.stack = Some(Box::new(assembling.settled(&heads)));
+                    }
+                    Err(ended) => return *ended,
+                }
+            }
+        }
         let build = |attempt| DispatchRequest {
             graph: graph.clone(),
-            task: crate::boundary::with_section(
-                step.rendered_task_carrying(node, references, notes),
-                launch.boundary.section(),
-            ),
+            task: crate::boundary::with_section(task.clone(), launch.boundary.section()),
             labels: engine::dispatch_labels(
                 run,
                 &node.id,
@@ -663,6 +799,7 @@ fn attempt_once(
                 let opened = crate::vcs::working_session(token);
                 worktree = opened.as_ref().map(|open| open.worktree.clone());
                 base = opened.map(|open| open.base);
+                placed.base = base.clone().or_else(|| placed.base.take());
                 stream = crate::vcs::follow(token, vcs_filter, relay_into(tx, whose.clone()));
             }
         }
@@ -729,6 +866,7 @@ fn attempt_once(
         launch,
         node,
         references,
+        stack,
         worktree.as_deref(),
         base.as_deref(),
         began,
@@ -749,8 +887,216 @@ fn attempt_once(
     if matches!(attempted, Attempt::Settled(_)) {
         check_criteria(node, worktree.as_deref(), tx);
     }
+    // Where the published branch stands and which change request a session of
+    // this node opened, read while the session is still open: a settlement this
+    // attempt did not reach — one after a spent re-dispatch budget among them —
+    // names both. Read off the worktree and the session's own stream, so it asks
+    // the host nothing more.
+    placed.head = worktree
+        .as_deref()
+        .and_then(crate::vcs::worktree_head)
+        .or_else(|| placed.head.take());
+    placed.change_url = crate::vcs::change_opened_in(&token).or_else(|| placed.change_url.take());
     end_session(stream, tx, Some(&token), &whose, vcs_filter);
     attempted
+}
+
+/// `task`, with the Stack section after it where the node has stack parents.
+fn with_stack(task: String, stack: Option<&crate::stack::Stack>) -> String {
+    match stack {
+        Some(stack) => format!("{task}\n\n{}", stack.task_section()),
+        None => task,
+    }
+}
+
+/// Write `stack`'s block onto the change request the session holds: appended
+/// where its description holds none, in place of the one it holds otherwise, and
+/// nothing else in the description touched.
+///
+/// Through `onevcs`'s `describe_change` with no title, so the title stands as the
+/// publication left it. A session holding no change request — a publication that
+/// opened none — has nothing to write onto, and a description already holding
+/// this very block is not written again. A host that refused the read or the
+/// write leaves the description as it was and says so on the driver's output: the
+/// publication is what the node settles on, and it has already been made.
+fn write_stack_block(
+    node: &Node,
+    token: &onevcs::SessionToken,
+    stack: &crate::stack::Stack,
+    term_scope: &onevcs::TermScope,
+) {
+    // llmlint: ignore-block[changed_behavior_has_e2e] neither arm has a journey that reaches
+    // it alone. A node with a stack parent is on a repository whose changes stay open, and
+    // every publication of one that answered opened or adopted a change request, so `None`
+    // is a host that lost it between the two calls. A read refused here needs the host to
+    // fail this one call and answer the publication just before it, and the fake host's
+    // outage counts calls from the run's start. The write's refusal beside it is driven by
+    // `a_stack_block_the_host_will_not_take_leaves_the_publication_as_it_settled`.
+    let change = match crate::vcs::session_change(token) {
+        Ok(Some(change)) => change,
+        Ok(None) => return,
+        Err(error) => {
+            eprintln!(
+                "onepipeline: node '{}': its change request's Stack block was not written: {error}",
+                node.id
+            );
+            return;
+        }
+    }; // llmlint: ignore-end[changed_behavior_has_e2e]
+    let described = crate::stack::splice(&change.body, &stack.block());
+    if described == change.body {
+        return;
+    }
+    if let Err(error) = crate::vcs::describe_change(token, None, &described, term_scope) {
+        eprintln!(
+            "onepipeline: node '{}': the Stack block was not written onto {}: {error}",
+            node.id, change.url
+        );
+    }
+}
+
+/// What the node's worker is dispatched with when it is handed its stack base's
+/// merge: the dispatch its first step would have made, in the stack base's
+/// session instead of its own.
+struct Merging<'a> {
+    graph: &'a oneagentgraph::config::ConfigRef,
+    task: &'a str,
+    persona: Option<&'a str>,
+    controls: crate::controls::NodeControls,
+}
+
+/// Assemble the stack base `branch` on `root` from `parents`, handing any merge
+/// that stops on a conflict to the node's own worker and assembling again once it
+/// concludes.
+///
+/// Bounded at one conclusion per merge the assembly makes — the root's and each
+/// parent's — because a stack base whose every merge was concluded has nothing
+/// left to stop on, so a further conflict is a worker that did not conclude one.
+/// Every ending that is not the assembled base is the node's settlement: the
+/// worker's own where its dispatch did not succeed, and `infrastructure-failure`
+/// naming the stack base otherwise. Nothing of the node's own session exists yet,
+/// so none of them carries a base or a head.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one assembly inside one attempt, which needs that attempt's executor, run, node, \
+              stack base, dispatch, cancellation, event stream and attempt number"
+)]
+fn assemble(
+    executor: &dyn Executor,
+    paths: &RunPaths,
+    node: &Node,
+    (root, branch, parents): (&str, &str, &[crate::stack::Parent]),
+    merging: &Merging<'_>,
+    cancel: &crate::executor::CancellationToken,
+    tx: &Sender<Message>,
+    ended: &engine::EndedDispatches,
+    attempt: std::num::NonZeroU32,
+) -> Result<onevcs::StackBase, Box<Attempt>> {
+    let failed = |why: String| {
+        Box::new(Attempt::settled(Settlement {
+            detail: Some(format!(
+                "the stack base {branch} could not be assembled from {}: {why}",
+                parents
+                    .iter()
+                    .map(|parent| parent.branch.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+            ..Settlement::plain(
+                &node.id,
+                NodeStatus::Failed,
+                Some(engine::INFRASTRUCTURE_FAILURE),
+            )
+        }))
+    };
+    // llmlint: ignore-block[changed_behavior_has_e2e] a node reaches here only through its
+    // own lifecycle execution, which `execute` enters for a node naming a `repo` and nothing
+    // else; the arm is the type's, not a path any plan can take.
+    let Some(repo) = node.repo.clone() else {
+        return Err(failed(
+            "the node names no repository to assemble it in".into(),
+        ));
+    }; // llmlint: ignore-end[changed_behavior_has_e2e]
+    let request = onevcs::StackBaseRequest {
+        repo,
+        branch: branch.to_owned(),
+        root: root.to_owned(),
+        parents: parents.iter().map(|parent| parent.branch.clone()).collect(),
+        labels: BTreeMap::from([
+            (
+                crate::executor::SESSION_RUN_LABEL.to_owned(),
+                paths.run.clone(),
+            ),
+            (
+                crate::executor::SESSION_NODE_LABEL.to_owned(),
+                node.id.clone(),
+            ),
+        ]),
+    };
+    let mut concluded = 0;
+    loop {
+        let assembled = match crate::vcs::assemble_stack_base(&request) {
+            Ok(assembled) => assembled,
+            Err(error) => return Err(failed(error.to_string())),
+        };
+        let (session, conflict) = match &assembled.outcome {
+            onevcs::StackBaseOutcome::Created
+            | onevcs::StackBaseOutcome::Advanced
+            | onevcs::StackBaseOutcome::Unchanged => return Ok(assembled),
+            onevcs::StackBaseOutcome::Conflicted { session, conflict } => (session, conflict),
+            // llmlint: ignore-block[changed_behavior_has_e2e] `StackBaseOutcome` is
+            // `#[non_exhaustive]`, and the linked release answers the four outcomes above
+            // and no other; this arm is for a later release's, which no journey can produce.
+            other => {
+                return Err(failed(format!(
+                    "onevcs answered {other:?}, which this build cannot read"
+                )))
+            } // llmlint: ignore-end[changed_behavior_has_e2e]
+        };
+        if concluded > parents.len() {
+            return Err(failed(format!(
+                "its merge conflicted again after the worker was handed {concluded} merge(s) \
+                 to conclude, so the conflict is still in session {}",
+                session.0
+            )));
+        }
+        concluded += 1;
+        // llmlint: ignore-block[changed_behavior_has_e2e] the record `onevcs` just wrote for
+        // the session it just answered with: unreadable only where the state root changed
+        // underneath this call, which no journey can arrange between two library calls.
+        let Some(mut opened) = crate::vcs::working_session(session) else {
+            return Err(failed(format!(
+                "the merge conflicted, and session {} that holds it could not be read",
+                session.0
+            )));
+        }; // llmlint: ignore-end[changed_behavior_has_e2e]
+        opened.conflict = Some(conflict.clone());
+        let task = match crate::vcs::merge_in_progress(&opened) {
+            Some(merge) => crate::plan::with_merge_in_progress(merging.task, &merge),
+            None => merging.task.to_owned(),
+        };
+        let build = |attempt| DispatchRequest {
+            graph: merging.graph.clone(),
+            task: task.clone(),
+            labels: engine::dispatch_labels(&paths.run, &node.id, None, merging.persona),
+            controls: merging.controls,
+            workspace: WorkspaceSpec::Path(opened.worktree.clone()),
+            cancel: cancel.clone(),
+            attempt,
+        };
+        let drained = match engine::attempt(executor, node, cancel, tx, &build, ended, attempt) {
+            engine::Attempted::Drained(drained) => *drained,
+            // llmlint: ignore[changed_behavior_has_e2e] an exhausted pool is a session open's
+            // refusal, and this dispatch opens none: it runs in the worktree of the session
+            // `onevcs` already opened for the stack base.
+            engine::Attempted::Exhausted(refusal) => {
+                return Err(Box::new(Attempt::Exhausted(Box::new(refusal))))
+            }
+        };
+        if drained.settlement.status != NodeStatus::Done {
+            return Err(Box::new(Attempt::settled(drained.settlement)));
+        }
+    }
 }
 
 /// Hand [`crate::criteria`]'s reading of this node's branch to the loop.
@@ -951,6 +1297,7 @@ fn publish(
     launch: &Launch,
     node: &Node,
     references: &[crate::plan::CrossRepoReference],
+    stack: Option<&crate::stack::Stack>,
     worktree: Option<&std::path::Path>,
     base: Option<&str>,
     began: std::time::SystemTime,
@@ -1010,6 +1357,7 @@ fn publish(
             paths,
             launch,
             node,
+            stack,
             worktree,
             held.as_ref(),
             cancel,
@@ -1122,6 +1470,14 @@ fn publish(
         cancel,
         &launch.boundary.term_scope,
     );
+    // The Stack block, written by the engine itself onto every change request a
+    // publication of a stacked node leaves — failed ones included, since the
+    // change request outlives the attempt and a re-dispatch publishes onto it.
+    if publication.answered.is_ok() {
+        if let Some(stack) = stack {
+            write_stack_block(node, token, stack, &launch.boundary.term_scope);
+        }
+    }
     match publication.answered {
         Ok(published) => {
             // A publication that did not land is an ending of the publication,
@@ -2165,8 +2521,16 @@ const WORKER_TRANSCRIPT_HEADING: &str = "## Worker transcript";
 /// produced, and when, is the worker's to decide and the drafter's to find: a
 /// demonstration change request it opened, a comment a bot posted, a check it
 /// triggered.
-fn drafting_task(node: &Node, run: &str, held: Option<&onevcs::SessionChange>) -> String {
+fn drafting_task(
+    node: &Node,
+    run: &str,
+    held: Option<&onevcs::SessionChange>,
+    stack: Option<&crate::stack::Stack>,
+) -> String {
     let mut task = format!("{DRAFTING_TASK}\n\n{}", node.rendered_task());
+    if let Some(stack) = stack {
+        task.push_str(&format!("\n\n{}", stack.drafting_section()));
+    }
     if let Some(change) = held {
         let description = if change.body.trim().is_empty() {
             NO_DESCRIPTION
@@ -2334,6 +2698,7 @@ fn drafted(
     paths: &RunPaths,
     launch: &Launch,
     node: &Node,
+    stack: Option<&crate::stack::Stack>,
     worktree: Option<&std::path::Path>,
     held: Option<&onevcs::SessionChange>,
     cancel: &crate::executor::CancellationToken,
@@ -2364,11 +2729,16 @@ fn drafted(
             // did, since what it drafts is public.
             task: if launch.boundary.is_public() {
                 crate::boundary::with_section(
-                    drafting_task(node, &format!("${}", crate::agentgraph::RUN_ID_ENV), held),
+                    drafting_task(
+                        node,
+                        &format!("${}", crate::agentgraph::RUN_ID_ENV),
+                        held,
+                        stack,
+                    ),
                     launch.boundary.section(),
                 )
             } else {
-                drafting_task(node, &paths.run, held)
+                drafting_task(node, &paths.run, held, stack)
             },
             labels: engine::dispatch_labels(&paths.run, &node.id, None, Some(PR_AUTHOR_PERSONA)),
             // None of the node's own: the drafting dispatch is not the node's work,
@@ -3345,8 +3715,8 @@ mod tests {
             title: "wip: the worker's".to_owned(),
             body: String::new(),
         };
-        let with = drafting_task(&node, "run-1", Some(&held));
-        let without = drafting_task(&node, "run-1", None);
+        let with = drafting_task(&node, "run-1", Some(&held), None);
+        let without = drafting_task(&node, "run-1", None, None);
         assert!(with.starts_with(DRAFTING_TASK) && without.starts_with(DRAFTING_TASK));
         let positions: Vec<usize> = [
             DRAFTING_TASK,
@@ -3386,6 +3756,7 @@ mod tests {
                 draft: false,
                 ..held
             }),
+            None,
         );
         assert!(described.contains(&format!("{DESCRIPTION_HEADING}\n## What\nHalf written.")));
         assert!(described.contains(&format!("{HELD_AS_DRAFT_LINE} no")));
@@ -3526,6 +3897,7 @@ mod tests {
             },
             &node,
             &[],
+            None,
             &crate::executor::CancellationToken::new(),
             &tx,
             &engine::EndedDispatches::none(),

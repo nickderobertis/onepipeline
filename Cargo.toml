@@ -652,6 +652,14 @@ resolver = "2"
 # admits no 0.43.x; `onevcs-testing` 0.13.4 requires exactly `=0.43.1`, so the pair
 # moves as one.
 #
+# `onevcs` 0.45.0 is the floor because it carries `assemble_stack_base` — a stack
+# base branch cut from a root with each unlanded parent merged into it, pushed
+# forward-only, and a merge conflict left in progress in a session — which is what
+# a landing node depending on several unlanded same-identity parents is placed on.
+# `tests/e2e/stacked_drafts.rs` drives it. A **requirement**, because `^0.43`
+# admits no 0.45.x; `onevcs-testing` 0.13.7 requires exactly `=0.45.0`, so the
+# pair moves as one.
+#
 # `onevcs` 0.46.0 is the floor because it is the release the boundary work this crate
 # composes was pinned against (`src/boundary.rs`: the term matcher, `TermScope`,
 # `PublicWriteInput` and `export`), and `tests/e2e/publication_boundary.rs` drives
