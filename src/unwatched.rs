@@ -364,7 +364,25 @@ pub(crate) fn asked(root: &Path, session: &str, budget: Option<WakeBudget>) -> R
     let mut unresolved: Vec<String> = owned.unresolved;
     let mut unknown: Vec<String> = Vec::new();
     let now = i128::from(sys::now_millis());
-    for paths in owned.runs {
+    let flows = crate::flow::of_session(root, session)?;
+    // The session's live flows a qualifying watch is on: a run launched in one
+    // counts as watched by that watch while the flow lives.
+    let mut watched_flows: std::collections::BTreeSet<crate::flow::FlowId> =
+        std::collections::BTreeSet::new();
+    for flow in &flows {
+        match owed_by_flow(flow, session, budget) {
+            FlowOwes::Nothing => {}
+            FlowOwes::Watched => {
+                watched_flows.insert(flow.flow_id());
+            }
+            FlowOwes::Line(line) => reported.push(line),
+            FlowOwes::Unknown(why) => unknown.push(format!("flow {}: {why}\n", flow.id())),
+        }
+    }
+    for (paths, flow) in owned.runs {
+        if flow.is_some_and(|flow| watched_flows.contains(&flow)) {
+            continue;
+        }
         let summary = match decide(&paths, session) {
             Decided::Closed => continue,
             Decided::Undecidable(reason) => {
@@ -449,6 +467,153 @@ pub(crate) fn asked(root: &Path, session: &str, budget: Option<WakeBudget>) -> R
         },
         unknown,
     })
+}
+
+/// What a session owes one of its flows.
+enum FlowOwes {
+    /// Nothing: it ended `0`, or a closure it was owed has been acknowledged.
+    Nothing,
+    /// It is live and a qualifying watch is on it — which watches every run
+    /// launched in it too.
+    Watched,
+    /// A line to report: a live flow nothing qualifying watches, or one owed
+    /// closure.
+    Line(UnwatchedRun),
+    /// Whether it ended, was closed, or is watched in time cannot be said — an
+    /// unknown, which a guard warns on rather than passing in silence.
+    Unknown(String),
+}
+
+/// How a flow owed closure ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Closure {
+    /// Its program ended with this non-zero status.
+    Ended(std::num::NonZeroI32),
+    /// Its holder is gone with no ending recorded.
+    Died,
+}
+
+impl Closure {
+    /// The standing word its line carries.
+    const fn word(self) -> &'static str {
+        match self {
+            Self::Ended(_) => "ENDED",
+            Self::Died => "DIED",
+        }
+    }
+
+    /// Why it is owed closure, as its line says it.
+    fn why(self) -> String {
+        match self {
+            Self::Ended(status) => format!("it ended with status {status}"),
+            Self::Died => "it died: its holder is gone with no ending recorded".to_owned(),
+        }
+    }
+}
+
+/// What `session` owes `flow` under `budget`, on the rule the Flows section of
+/// `docs/stop-guard.md` states.
+fn owed_by_flow(flow: &crate::flow::Flow, session: &str, budget: Option<WakeBudget>) -> FlowOwes {
+    let id = flow.id();
+    let closure = |ended: Closure| match flow.acknowledged_by(session) {
+        Ok(true) => FlowOwes::Nothing,
+        Ok(false) => FlowOwes::Line(UnwatchedRun {
+            run: format!("flow {id}"),
+            standing: ended.word(),
+            why_not_watched: ended.why(),
+            remedy: format!(
+                "close it with: onepipeline unwatched --acknowledge-flow {id} --reason <TEXT>"
+            ),
+        }),
+        Err(why) => FlowOwes::Unknown(why),
+    };
+    match flow.standing() {
+        Err(why) => FlowOwes::Unknown(why),
+        Ok(crate::flow::Standing::Ended(status)) => match std::num::NonZeroI32::new(status) {
+            None => FlowOwes::Nothing,
+            Some(status) => closure(Closure::Ended(status)),
+        },
+        Ok(crate::flow::Standing::Died) => closure(Closure::Died),
+        Ok(crate::flow::Standing::Live) => {
+            let leases = Leases::of(&flow.paths);
+            let watchers = &leases.watchers;
+            let why_not_watched = match budget {
+                None if watchers.any_live() => return FlowOwes::Watched,
+                None => watchers.why_not_watched(),
+                Some(budget) => {
+                    let reserve = crate::cli::WAKE_RESERVE_SECONDS;
+                    let span = i128::from(budget.seconds().saturating_sub(reserve)) * 1_000;
+                    let wakes = leases.flow_wakes(session, span, reserve);
+                    if wakes.contains(&Wake::Within) {
+                        return FlowOwes::Watched;
+                    }
+                    let unknowns: Vec<String> = wakes
+                        .iter()
+                        .filter_map(|wake| match wake {
+                            Wake::Unknown(why) => Some(why.clone()),
+                            _ => None,
+                        })
+                        .collect();
+                    if !unknowns.is_empty() {
+                        return FlowOwes::Unknown(format!(
+                            "whether a live watch wakes this session within its wake budget of \
+                             {}s cannot be said, so it is not reported: {}",
+                            budget.seconds(),
+                            unknowns.join("; ")
+                        ));
+                    }
+                    let fails: Vec<String> = wakes
+                        .iter()
+                        .filter_map(|wake| match wake {
+                            Wake::Fails(why) => Some(why.clone()),
+                            _ => None,
+                        })
+                        .collect();
+                    if fails.is_empty() {
+                        watchers.why_not_watched()
+                    } else {
+                        format!(
+                            "no live watch wakes this session within its wake budget of {}s \
+                             less its {reserve}s wake reserve: {}",
+                            budget.seconds(),
+                            fails.join("; ")
+                        )
+                    }
+                }
+            };
+            let remedy = match budget {
+                Some(budget) if budget.said == Said::Flag => format!(
+                    "{ARM_A_WATCH} --flow {id} --timeout {}",
+                    budget
+                        .seconds()
+                        .saturating_sub(crate::cli::WAKE_RESERVE_SECONDS)
+                ),
+                _ => format!("{ARM_A_WATCH} --flow {id}"),
+            };
+            FlowOwes::Line(UnwatchedRun {
+                run: format!("flow {id}"),
+                standing: "LIVE",
+                why_not_watched,
+                remedy,
+            })
+        }
+    }
+}
+
+/// `onepipeline unwatched --acknowledge-flow ID --reason TEXT`: record that
+/// `session` owes the flow `id` under `root` nothing further.
+///
+/// # Errors
+///
+/// A flow that is not there or cannot be read, and every refusal
+/// [`crate::flow::Flow::acknowledge`] makes.
+pub(crate) fn acknowledge_flow(
+    root: &Path,
+    id: &str,
+    session: &str,
+    reason: &str,
+) -> Result<crate::flow::FlowAcknowledgement> {
+    crate::flow::Flow::open(root, id)?.acknowledge(session, reason)
 }
 
 /// The command that would satisfy the question for one reported run.
@@ -581,7 +746,9 @@ fn discover_owned_runs(root: &Path, session: &str) -> Result<Discovered> {
             continue;
         };
         if launch.owned_by(session) {
-            owned.runs.push(paths);
+            owned
+                .runs
+                .push((paths, crate::flow::FlowId::parse(&launch.flow)));
         }
     }
     Ok(owned)
@@ -597,8 +764,9 @@ fn discover_owned_runs(root: &Path, session: &str) -> Result<Discovered> {
 /// incomplete look is exactly how a run nobody is watching goes unmentioned.
 #[derive(Default)]
 struct Discovered {
-    /// The run roots whose launch record names the resolved session.
-    runs: Vec<RunPaths>,
+    /// The run roots whose launch record names the resolved session, each with
+    /// the flow its launch record names, where it names one that is a flow id.
+    runs: Vec<(RunPaths, Option<crate::flow::FlowId>)>,
     /// What could not be resolved, each already worded for standard error.
     unresolved: Vec<String>,
 }

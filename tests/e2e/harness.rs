@@ -967,6 +967,9 @@ impl World {
             // `watch`, `unwatched` or `stop-guard` without one means a host that sets
             // none, and one about the budget sets it with `.env` of its own.
             .env_remove(onepipeline::cli::WAKE_BUDGET_ENV)
+            // And the flow this suite may itself be running in: a journey about
+            // flows starts its own, and every other one means a launch in none.
+            .env_remove(onepipeline::cli::FLOW_ENV)
             // And the branch-name template a host may export: a journey about the
             // shipped default means a launch that names none, and one about the
             // variable sets it with `.env` of its own.

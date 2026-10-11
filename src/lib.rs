@@ -84,6 +84,8 @@ mod driver;
 mod edits;
 mod engine;
 mod findings;
+mod flow;
+mod flowwatch;
 mod freespace;
 mod graph;
 mod hooks;
@@ -138,5 +140,10 @@ pub fn run(cli: cli::Cli) -> Result<i32> {
     if let Ok(exe) = std::env::current_exe() {
         agentgraph::speaks_this_cli(exe);
     }
+    // The flow this process was started in, read once and taken out of the
+    // environment before anything could spawn: whatever this process starts
+    // inherits none of it — a node dispatch above all — and the one child that
+    // must carry it, a flow's program, is handed it explicitly.
+    flow::take_inherited();
     driver::dispatch(cli)
 }

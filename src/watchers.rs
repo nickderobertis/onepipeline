@@ -498,7 +498,7 @@ impl WatchStanding {
     /// [`Unproven`](Self::Unproven) is the case this distinction exists for — a
     /// live watcher whose start this host would not report, whose record a sweep
     /// would otherwise erase for ever.
-    fn proved_gone(self) -> bool {
+    pub(crate) fn proved_gone(self) -> bool {
         matches!(
             self,
             Self::ProcessGone | Self::AwaitingItsParent | Self::NotThatProcess
@@ -626,14 +626,42 @@ impl Leases {
     /// What `budget_ms` makes of each **live** lease, in file-name order, for a
     /// session asking at `now_ms`.
     pub(crate) fn wakes(&self, session: &str, budget_ms: i128, now_ms: i128) -> Vec<Wake> {
+        self.judged(session, &Latest::By(now_ms + budget_ms))
+    }
+
+    /// What a flow's wake budget makes of each **live** lease on it: a lease
+    /// wakes the session in time only where its terms give up within `span_ms`
+    /// of the instant it armed — the budget less the wake reserve — so a watch
+    /// armed with a timeout equal to the budget never counts, however long it
+    /// has been waiting.
+    pub(crate) fn flow_wakes(&self, session: &str, span_ms: i128, reserve: u64) -> Vec<Wake> {
+        self.judged(
+            session,
+            &Latest::AfterArming {
+                span_ms,
+                reserve_seconds: reserve,
+            },
+        )
+    }
+
+    fn judged(&self, session: &str, latest: &Latest) -> Vec<Wake> {
         self.watchers
             .watches
             .iter()
             .zip(&self.terms)
             .filter(|(watch, _)| watch.standing.is_live())
-            .map(|(watch, terms)| wake(&watch.record, terms, session, now_ms + budget_ms))
+            .map(|(watch, terms)| wake(&watch.record, terms, session, latest))
             .collect()
     }
+}
+
+/// The latest a live lease may give up and still wake its session in time.
+enum Latest {
+    /// By this instant, in epoch milliseconds: a run's rule.
+    By(i128),
+    /// Within this span of the instant the lease armed: a flow's rule, which
+    /// holds back the reserve named beside it.
+    AfterArming { span_ms: i128, reserve_seconds: u64 },
 }
 
 /// What one live lease's terms say about waking `session` by `latest_ms`.
@@ -642,7 +670,7 @@ impl Leases {
 /// the others say — so a terms record naming no session but recording no
 /// deadline fails on the deadline, and only one whose every other conjunct holds
 /// is left unknown by the session it does not name.
-fn wake(record: &WatcherRecord, terms: &TermsRead, session: &str, latest_ms: i128) -> Wake {
+fn wake(record: &WatcherRecord, terms: &TermsRead, session: &str, latest: &Latest) -> Wake {
     let pid = record.pid;
     let terms = match terms {
         TermsRead::Absent => {
@@ -669,11 +697,29 @@ fn wake(record: &WatcherRecord, terms: &TermsRead, session: &str, latest_ms: i12
         ));
     }
     let mut fails: Vec<String> = Vec::new();
-    match &terms.deadline {
-        None => fails.push("it has no deadline (`--timeout none`)".to_owned()),
-        Some(deadline) => {
-            if instant_millis(deadline).is_none_or(|at| at > latest_ms) {
+    match (&terms.deadline, latest) {
+        (None, _) => fails.push("it has no deadline (`--timeout none`)".to_owned()),
+        (Some(deadline), Latest::By(latest_ms)) => {
+            if instant_millis(deadline).is_none_or(|at| at > *latest_ms) {
                 fails.push(format!("its deadline {deadline} is past the wake budget"));
+            }
+        }
+        (
+            Some(deadline),
+            Latest::AfterArming {
+                span_ms,
+                reserve_seconds,
+            },
+        ) => {
+            let latest_ms = instant_millis(&record.began_at).map(|armed| armed + span_ms);
+            if instant_millis(deadline)
+                .zip(latest_ms)
+                .is_none_or(|(at, latest_ms)| at > latest_ms)
+            {
+                fails.push(format!(
+                    "its deadline {deadline} is past the wake budget less its {reserve_seconds}s \
+                     wake reserve"
+                ));
             }
         }
     }
@@ -797,17 +843,27 @@ fn standing_of(record: &WatcherRecord, run: &str) -> WatchStanding {
     if record.run_id != run {
         return WatchStanding::AnotherRun;
     }
-    if record.host != sys::hostname() {
+    holder_standing(&record.host, record.pid, &record.started)
+}
+
+/// Whether the process a record names — on `host`, by `pid` and the start token
+/// it recorded — is the one that wrote it and is alive now: the last five of
+/// [`standing_of`]'s conditions, in its order.
+///
+/// Shared with the flow record, whose holder is live on exactly the rule a
+/// watch lease is.
+pub(crate) fn holder_standing(host: &str, pid: NonZeroU32, started: &str) -> WatchStanding {
+    if host != sys::hostname() {
         return WatchStanding::AnotherHost;
     }
-    let pid = record.pid.get();
+    let pid = pid.get();
     if !sys::process_may_be_live(pid) {
         return WatchStanding::ProcessGone;
     }
     if sys::process_terminated_awaiting_parent(pid) {
         return WatchStanding::AwaitingItsParent;
     }
-    token_standing(sys::process_start_token(pid).as_ref(), &record.started)
+    token_standing(sys::process_start_token(pid).as_ref(), started)
 }
 
 /// The last of the six conditions, taken apart from the host that answers it: what
@@ -868,9 +924,17 @@ impl Armed {
     /// cannot be judged — an unknown, which makes the guard warn under a budget
     /// and counts as watching without one — rather than as no watch at all; `wake_budget::a_watch_whose_terms_cannot_be_written_is_an_unknown`
     /// drives that through the binary.
-    pub(crate) fn arm(paths: &RunPaths, request: &crate::watch::Request) -> Self {
+    pub(crate) fn arm(
+        paths: &RunPaths,
+        timeout: crate::cli::WatchTimeout,
+        until: &[crate::cli::WatchUntil],
+    ) -> Self {
         Self::sweep(paths);
         let pid = sys::pid();
+        // One instant for the lease's `began_at` and the terms' deadline, so the
+        // span between the two is exactly the timeout the watch was given — which
+        // is what a flow's wake budget is decided from.
+        let now = sys::now_millis();
         let record = WatcherRecord {
             schema_version: WATCHER_SCHEMA_VERSION,
             run_id: paths.run.clone(),
@@ -883,18 +947,14 @@ impl Armed {
             started: sys::process_start_token(pid)
                 .map(|token| token.recorded().to_string())
                 .unwrap_or_default(),
-            began_at: sys::now_rfc3339(),
+            began_at: sys::rfc3339_from_millis(now),
         };
         let path = paths.watcher(pid, &nonce());
         let terms = path
             .file_name()
             .map(|name| paths.watch_terms().join(name))
             .filter(|terms_path| {
-                ledger::write_json(
-                    terms_path,
-                    &terms_of(&record, request.timeout, &request.until),
-                )
-                .is_ok()
+                ledger::write_json(terms_path, &terms_of(&record, now, timeout, until)).is_ok()
             });
         let path = ledger::write_json(&path, &record).ok().map(|()| path);
         let mut armed = Self { path, terms };
@@ -941,6 +1001,7 @@ impl Drop for Armed {
 /// the wait and conditions its request resolved.
 fn terms_of(
     record: &WatcherRecord,
+    now: u64,
     timeout: crate::cli::WatchTimeout,
     conditions: &[crate::cli::WatchUntil],
 ) -> WatchTerms {
@@ -968,8 +1029,7 @@ fn terms_of(
         started: record.started.clone(),
         deadline: match timeout {
             crate::cli::WatchTimeout::Bounded(seconds) => Some(sys::rfc3339_from_millis(
-                sys::now_millis()
-                    .saturating_add(seconds.saturating_mul(1_000))
+                now.saturating_add(seconds.saturating_mul(1_000))
                     // The latest instant RFC 3339's four-digit year can spell, so a
                     // wait no clock reaches is still a deadline a reader can read.
                     .min(LATEST_INSTANT_MS),
@@ -1284,8 +1344,18 @@ mod tests {
                 .expect("a bounded watch records a deadline")
         };
         let before = i128::from(sys::now_millis());
-        let now = terms_of(&record, WatchTimeout::Bounded(0), &[WatchUntil::Surface]);
-        let later = terms_of(&record, WatchTimeout::Bounded(90), &[WatchUntil::Settled]);
+        let now = terms_of(
+            &record,
+            sys::now_millis(),
+            WatchTimeout::Bounded(0),
+            &[WatchUntil::Surface],
+        );
+        let later = terms_of(
+            &record,
+            sys::now_millis(),
+            WatchTimeout::Bounded(90),
+            &[WatchUntil::Settled],
+        );
         let after = i128::from(sys::now_millis());
         assert!((before..=after).contains(&at(&now)), "{now:?}");
         assert!(
@@ -1293,7 +1363,7 @@ mod tests {
             "{later:?}"
         );
         assert_eq!(now.until, ["surface", "settled", "nothing-driving"]);
-        let defaulted = terms_of(&record, WatchTimeout::Bounded(0), &[]);
+        let defaulted = terms_of(&record, sys::now_millis(), WatchTimeout::Bounded(0), &[]);
         assert_eq!(
             defaulted.until,
             ["surface", "node-settled", "settled", "nothing-driving"]
@@ -1301,6 +1371,7 @@ mod tests {
         assert_eq!(later.until, ["settled", "nothing-driving"]);
         let unbounded = terms_of(
             &record,
+            sys::now_millis(),
             WatchTimeout::Unbounded,
             &[WatchUntil::Node("build".into()), WatchUntil::NothingDriving],
         );

@@ -185,7 +185,7 @@ pub enum Command {
     #[command(subcommand)]
     Channel(ChannelCommand),
     /// Read the next planner surface.
-    Next(ReadArgs),
+    Next(TargetArgs),
     /// Reply to a surface, with a verdict, graph edits, or both.
     Reply(ReplyArgs),
     /// Raise a surface to the planner.
@@ -220,6 +220,9 @@ pub enum Command {
     /// Ask the manager a blocking question over the run's planner channel, and
     /// answer with theirs.
     Ask(AskArgs),
+    /// Supervised processes that are not themselves runs.
+    #[command(subcommand)]
+    Flow(FlowCommand),
     /// Land a completed branch through the linked onevcs `publish-branch`,
     /// drafting its change request's body first.
     #[command(override_usage = LAND_USAGE_PUBLISH_BRANCH)]
@@ -373,7 +376,7 @@ pub enum ChannelCommand {
     NoEngineVerb,
     /// Read a run's channel: every surface and where it is, the replies, and the
     /// command queue with the reconciler's answers. Consumes nothing.
-    Queue(RunArgs),
+    Queue(ChannelQueueArgs),
 }
 
 /// `onepipeline plan check`.
@@ -721,6 +724,28 @@ pub struct ReadArgs {
     pub all: bool,
 }
 
+/// What `next` and `watch` read: one run, shaped through a profile as
+/// [`ReadArgs`] takes it, or one flow with `--flow` in its place.
+///
+/// The two are mutually exclusive, and a flow has no event view to shape, so
+/// `--filter` and `--all` are a run's alone.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+#[command(group = clap::ArgGroup::new("target").required(true).args(["run", "flow"]))]
+pub struct TargetArgs {
+    /// The run id.
+    pub run: Option<String>,
+    /// The flow to read instead of a run, by the id `flow run` printed.
+    #[arg(long, value_name = "ID", conflicts_with_all = ["filter", "all"])]
+    pub flow: Option<String>,
+    /// The profile to read through: a name this run has, or a filter spec as a
+    /// file path or inline JSON.
+    #[arg(long, value_name = "NAME|SPEC", conflicts_with = "all")]
+    pub filter: Option<String>,
+    /// Read every event in the store, through no profile at all.
+    #[arg(long)]
+    pub all: bool,
+}
+
 /// `onepipeline monitor`: the run and profile selection every read verb takes,
 /// and the cursor `watch` prints and reads back.
 ///
@@ -779,7 +804,13 @@ pub fn wake_budget_from_environment() -> std::result::Result<Option<std::num::No
 }
 
 /// `watch`'s `--timeout` when none is given: the wake budget the environment
-/// names, and [`DEFAULT_WATCH_TIMEOUT_SECONDS`] where it names none.
+/// names less [`WAKE_RESERVE_SECONDS`], and [`DEFAULT_WATCH_TIMEOUT_SECONDS`]
+/// where it names none.
+///
+/// Less the reserve because a watch under a wake budget has to *return* within
+/// it, not only be configured to: the reserve is what its ending line, its
+/// lease's removal and the process's own exit are given. A budget no longer than
+/// the reserve leaves `0`, which reads once and returns.
 ///
 /// A variable that names no budget is refused by the verb before anything is
 /// waited, so the value this falls back to for it is never waited on.
@@ -788,9 +819,37 @@ pub fn default_watch_timeout() -> WatchTimeout {
         wake_budget_from_environment()
             .ok()
             .flatten()
-            .map_or(DEFAULT_WATCH_TIMEOUT_SECONDS, std::num::NonZeroU64::get),
+            .map_or(DEFAULT_WATCH_TIMEOUT_SECONDS, |budget| {
+                budget.get().saturating_sub(WAKE_RESERVE_SECONDS)
+            }),
     )
 }
+
+/// The **wake reserve**: how much of a wake budget a watch leaves for returning,
+/// in seconds.
+///
+/// A `watch` given no `--timeout` under a wake budget gives up this long before
+/// the budget, and a `watch --flow` counts as waking its session in time only
+/// where its recorded terms give up at least this long before the budget. Stated
+/// in `docs/stop-guard.md`, which `flowwatch`'s own tests hold to this value.
+pub const WAKE_RESERVE_SECONDS: u64 = 2;
+
+/// How often a `watch` with a deadline checks it while it waits, in
+/// milliseconds, whatever `--tick-interval` says.
+///
+/// So a watch's exit after its deadline is late by at most this, rather than by
+/// however long the wait it was in happened to be. Stated in
+/// `docs/stop-guard.md` beside [`WAKE_RESERVE_SECONDS`].
+pub const DEADLINE_CHECK_MILLIS: u64 = 500;
+
+/// The environment variable naming the flow a process runs in.
+///
+/// Set by `onepipeline flow run` on the program it starts, and read by `start`
+/// (which records it on the run's launch record), by `ask` (which asks on the
+/// flow's own channel where it names no run) and by a nested `flow run` (which
+/// joins the flow rather than registering another). Divergence entry 114 states
+/// it; a node dispatch never carries it.
+pub const FLOW_ENV: &str = "ONEPIPELINE_FLOW";
 
 /// How often a `watch` says it is still there while nothing is happening, when
 /// it is given none.
@@ -861,11 +920,12 @@ impl std::str::FromStr for WatchTimeout {
 /// a match. The README and the divergence record are reconciled against the
 /// spellings here too, so what a supervisor is told to type is what the parser
 /// reads.
-const CONDITIONS: [(&str, WatchUntil); 5] = [
+const CONDITIONS: [(&str, WatchUntil); 6] = [
     ("settled", WatchUntil::Settled),
     ("surface", WatchUntil::Surface),
     ("nothing-driving", WatchUntil::NothingDriving),
     ("node-settled", WatchUntil::NodeSettled),
+    ("run-joined", WatchUntil::RunJoined),
     // The one entry that is a **shape** rather than a word: what follows the
     // prefix is a node id the caller supplies, so the parser reads this row by
     // its prefix and builds the condition from the text after it. The value
@@ -883,7 +943,7 @@ const NODE_ID_PLACEHOLDER: &str = "<ID>";
 ///
 /// Derived from the one table above rather than restated, so a spelling this
 /// build reads is a spelling it names.
-pub fn watch_conditions() -> [&'static str; 5] {
+pub fn watch_conditions() -> [&'static str; 6] {
     CONDITIONS.map(|(spelling, _)| spelling)
 }
 
@@ -936,6 +996,10 @@ pub enum WatchUntil {
     /// [`NodeSettled`](Self::NodeSettled). Validated against the run's own graph
     /// when the command is invoked.
     Node(String),
+    /// Return when a run joins the watched flow: one launched after the watch
+    /// armed, or past its cursor. A flow watch's alone — `watch --flow` — and
+    /// refused on a run's.
+    RunJoined,
 }
 
 impl std::fmt::Display for WatchUntil {
@@ -945,6 +1009,7 @@ impl std::fmt::Display for WatchUntil {
             Self::Settled => out.write_str("settled"),
             Self::NothingDriving => out.write_str("nothing-driving"),
             Self::NodeSettled => out.write_str("node-settled"),
+            Self::RunJoined => out.write_str("run-joined"),
             Self::Node(node) => write!(
                 out,
                 "{}{node}",
@@ -996,12 +1061,14 @@ impl std::str::FromStr for WatchUntil {
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 pub struct WatchArgs {
     /// The run, and the profile its event view is shaped through — exactly as
-    /// `monitor` takes them.
+    /// `monitor` takes them — or, with `--flow`, one flow and every run it
+    /// launched.
     #[command(flatten)]
-    pub read: ReadArgs,
+    pub read: TargetArgs,
     /// How long to wait before giving up, in seconds. `0` reads once and
     /// returns; `none` does not bound the wait at all. Omitted, the wake budget
-    /// `ONEPIPELINE_WAKE_BUDGET` names, else 300.
+    /// `ONEPIPELINE_WAKE_BUDGET` names less the wake reserve `docs/stop-guard.md`
+    /// states, else 300.
     #[arg(long, value_name = "SECONDS|none", default_value_t = default_watch_timeout())]
     pub timeout: WatchTimeout,
     /// How long a silence may last before this stream says it is still there,
@@ -1044,6 +1111,7 @@ pub struct WatchArgs {
 /// it runs in carries somebody else's — so a verb that could only read the
 /// environment would answer confidently about the wrong session.
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
+#[command(group = clap::ArgGroup::new("closing").args(["acknowledge", "acknowledge_flow"]))]
 pub struct UnwatchedArgs {
     /// The launching session whose runs to ask about. Omitted, the session
     /// `ONEPIPELINE_LAUNCHER_SESSION` names.
@@ -1057,15 +1125,21 @@ pub struct UnwatchedArgs {
         long,
         value_name = "SECONDS",
         value_parser = clap::value_parser!(u64).range(1..),
-        conflicts_with = "acknowledge"
+        conflicts_with = "closing"
     )]
     pub wake_budget: Option<u64>,
     /// Close this run for the session instead of asking about its runs: it is
     /// owed nothing further until a later adoption or edit re-opens it.
     #[arg(long, value_name = "RUN", requires = "reason")]
     pub acknowledge: Option<String>,
-    /// Why the run needs nothing further, recorded with the acknowledgement.
-    #[arg(long, value_name = "TEXT", requires = "acknowledge")]
+    /// Close this flow for the session instead of asking about its runs: one
+    /// that ended with a non-zero status, or whose holder died, is owed nothing
+    /// further. Recorded beside the flow, never in a run's journal.
+    #[arg(long, value_name = "ID", requires = "reason")]
+    pub acknowledge_flow: Option<String>,
+    /// Why the run or flow needs nothing further, recorded with the
+    /// acknowledgement.
+    #[arg(long, value_name = "TEXT", requires = "closing")]
     pub reason: Option<String>,
 }
 
@@ -1246,6 +1320,60 @@ pub struct DriveArgs {
     pub await_ending: bool,
 }
 
+/// `onepipeline channel queue`: one run's channel, or one flow's.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+#[command(group = clap::ArgGroup::new("target").required(true).args(["run", "flow"]))]
+pub struct ChannelQueueArgs {
+    /// The run id.
+    pub run: Option<String>,
+    /// Read this flow's own channel instead of a run's.
+    #[arg(long, value_name = "ID")]
+    pub flow: Option<String>,
+}
+
+/// What a flow may be asked to do.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+#[command(rename_all = "kebab-case")]
+pub enum FlowCommand {
+    /// Run a program as a flow the launching session owns: a process a manager
+    /// must supervise that is not itself a run.
+    ///
+    /// Prints `flow <ID>: watch it with: onepipeline watch --flow <ID>` on
+    /// standard error before the program starts, runs it with `ONEPIPELINE_FLOW=<ID>`
+    /// added to this environment, forwards SIGINT, SIGTERM and SIGHUP to it, and
+    /// exits with its status (128 + the signal for one a signal ended). Under a
+    /// live flow of the same session already, the program runs in that flow and
+    /// nothing is registered.
+    Run(FlowRunArgs),
+}
+
+/// `onepipeline flow run`.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct FlowRunArgs {
+    /// What the flow's id is minted from: the first free of `<NAME>`,
+    /// `<NAME>-2`, ... Letters, digits, `.`, `_` and `-`. Omitted, the program's
+    /// file name.
+    #[arg(long, value_name = "NAME")]
+    pub name: Option<String>,
+    /// The session that owns the flow. Omitted, `ONEPIPELINE_LAUNCHER_SESSION`;
+    /// with neither, the program runs registered as no flow.
+    #[arg(long, value_name = "ID")]
+    pub session: Option<String>,
+    /// The onemessagebus configuration the flow's own channel is kept under,
+    /// checked as `start` checks its own.
+    #[arg(long, value_name = "PATH")]
+    pub bus_config: Option<PathBuf>,
+    /// The program and its arguments, after `--`.
+    #[arg(
+        value_name = "PROGRAM",
+        last = true,
+        required = true,
+        num_args = 1..,
+        value_parser = clap::value_parser!(std::ffi::OsString)
+    )]
+    pub program: Vec<std::ffi::OsString>,
+}
+
 /// A command that names one run and nothing else.
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 pub struct RunArgs {
@@ -1301,11 +1429,16 @@ pub struct StatusArgs {
 
 /// `onepipeline reply`.
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
+#[command(group = clap::ArgGroup::new("target").required(true).multiple(true).args(["run", "flow"]))]
 pub struct ReplyArgs {
-    /// The run id.
-    pub run: String,
+    /// The run id. With `--flow`, the one positional is the envelope file.
+    pub run: Option<String>,
     /// The reply envelope. Omitted, it is read from stdin.
     pub file: Option<PathBuf>,
+    /// Reply on this flow's own channel instead of a run's: a verdict alone,
+    /// since a flow has no graph to edit.
+    #[arg(long, value_name = "ID")]
+    pub flow: Option<String>,
     /// The question a verdict answers, by the correlation its asker was told.
     /// Omitted, the verdict is bound to the question it can be bound to — see
     /// `docs/contract.md`'s channel paragraph.
@@ -1320,13 +1453,18 @@ pub struct ReplyArgs {
 /// through a shell. Divergence 38 records why. `--message` still works, and is
 /// refused beside a file.
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
+#[command(group = clap::ArgGroup::new("target").required(true).multiple(true).args(["run", "flow"]))]
 pub struct SurfaceArgs {
-    /// The run id.
-    pub run: String,
+    /// The run id. With `--flow`, the one positional is the file the text is
+    /// read from.
+    pub run: Option<String>,
     /// The file the surface's text is read from. Omitted, it is read from
     /// stdin — unless `--message` carried it.
     #[arg(conflicts_with = "message")]
     pub file: Option<PathBuf>,
+    /// Raise the surface on this flow's own channel instead of a run's.
+    #[arg(long, value_name = "ID")]
+    pub flow: Option<String>,
     /// What the surface is asking about.
     #[arg(long, value_name = "KIND")]
     pub kind: SurfaceKind,

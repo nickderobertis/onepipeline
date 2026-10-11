@@ -866,6 +866,7 @@ mod tests {
             template_root: String::new(),
             require_rendered: false,
             oneharness_sessions: None,
+            flow: String::new(),
             envelope_reviewer_bar: Default::default(),
         };
         crate::ledger::write_json(&paths.launch(), &record).expect("a launch record");

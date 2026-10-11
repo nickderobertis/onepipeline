@@ -55,6 +55,10 @@ const MEANINGFUL: [PipelineKind; 9] = [
     PipelineKind::RunStopped,
 ];
 
+/// The longest a watch with a deadline goes without checking it.
+pub(crate) const DEADLINE_CHECK: Duration =
+    Duration::from_millis(crate::cli::DEADLINE_CHECK_MILLIS);
+
 /// Why a watch returned: a closed set with a code each, so a caller branches on
 /// the status and never on the words beside it.
 ///
@@ -286,7 +290,7 @@ pub(crate) fn watch(
     // exists and costs the watch itself nothing, so it changes neither this verb's
     // output nor any of its statuses. See `src/watchers.rs` for why its absence
     // may never be relied upon.
-    let _armed = crate::watchers::Armed::arm(paths, request);
+    let _armed = crate::watchers::Armed::arm(paths, request.timeout, &request.until);
     let mut wait = Wait::armed(paths, &view, files, began);
 
     let ended = |view: &RunView,
@@ -604,9 +608,18 @@ fn read_run(paths: &RunPaths, cursor: &mut Cursor) -> Result<(RunView, Vec<Envel
 /// do: reach its deadline, or write the heartbeat a quiet interval owes.
 ///
 /// Unbounded where it has neither, because a change is what ends that wait.
-fn wake_within(deadline: Option<Instant>, tick: Duration, quiet_since: Instant) -> Duration {
+/// A wait with a deadline blocks no longer than [`DEADLINE_CHECK`] at a time,
+/// whatever its heartbeat says, so its exit after the deadline is late by at
+/// most that.
+pub(crate) fn wake_within(
+    deadline: Option<Instant>,
+    tick: Duration,
+    quiet_since: Instant,
+) -> Duration {
     let until_deadline = deadline.map_or(Duration::MAX, |deadline| {
-        deadline.saturating_duration_since(Instant::now())
+        deadline
+            .saturating_duration_since(Instant::now())
+            .min(DEADLINE_CHECK)
     });
     let until_heartbeat = match tick.is_zero() {
         true => Duration::MAX,
@@ -907,7 +920,7 @@ impl Transport for RunChanges {
 /// never reaches that arithmetic at all — it is the absence of a deadline rather
 /// than one far away, which is what keeps `0`'s published meaning, read once and
 /// return, the value it always was.
-fn deadline(timeout: WatchTimeout) -> Result<Option<Instant>> {
+pub(crate) fn deadline(timeout: WatchTimeout) -> Result<Option<Instant>> {
     let WatchTimeout::Bounded(seconds) = timeout else {
         return Ok(None);
     };
@@ -980,7 +993,7 @@ impl Monitored {
     }
 }
 
-fn tail(paths: &RunPaths, cursor: &mut Cursor) -> Vec<Envelope> {
+pub(crate) fn tail(paths: &RunPaths, cursor: &mut Cursor) -> Vec<Envelope> {
     let (mut fresh, at) = journal::finished_after(&paths.journal(), cursor.at);
     cursor.at = at;
     journal::merge_order(&mut fresh);
@@ -1071,6 +1084,14 @@ impl Selectors {
         for condition in until {
             match condition {
                 WatchUntil::Settled | WatchUntil::NothingDriving => {}
+                WatchUntil::RunJoined => {
+                    return Err(Error::Invalid(format!(
+                        "`--until {condition}` is a flow watch's condition: a run is joined by \
+                         nothing, so watch the flow that launched run '{}' with `onepipeline \
+                         watch --flow <ID>`",
+                        view.paths.run
+                    )))
+                }
                 WatchUntil::Surface => chosen.surface = true,
                 WatchUntil::NodeSettled => {
                     let ids: Vec<&String> = statuses.keys().collect();
@@ -1160,7 +1181,7 @@ fn named<'a>(ids: impl Iterator<Item = &'a String>) -> String {
 /// Asked of the source and the kind together, for the reason [`meaningful`]
 /// gives: a sibling that one day spells `node-settled` the way this one does
 /// would otherwise end a wait over a node that settled nothing.
-fn settlement_of(event: &Envelope) -> Option<&str> {
+pub(crate) fn settlement_of(event: &Envelope) -> Option<&str> {
     (meaningful(event) && PipelineKind::from_wire(&event.kind) == Some(PipelineKind::NodeSettled))
         .then_some(event.labels.node.as_deref())
         .flatten()
@@ -1259,7 +1280,7 @@ fn concluded(
 ///
 /// The watch consumes nothing: every surface it reports is still there for
 /// `next`.
-fn surface_waiting(paths: &RunPaths) -> Option<bool> {
+pub(crate) fn surface_waiting(paths: &RunPaths) -> Option<bool> {
     let queue = crate::channel::ChannelState::new(paths).queue();
     let unanswered = || views::blocking_surface(paths);
     match queue.waiting.is_empty() {
@@ -1275,13 +1296,13 @@ fn surface_waiting(paths: &RunPaths) -> Option<bool> {
 /// is a place in every journal there is, so without the run a cursor pasted
 /// against the wrong one resumes rather than being refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Cursor {
+pub(crate) struct Cursor {
     run: String,
-    at: u64,
+    pub(crate) at: u64,
 }
 
 impl Cursor {
-    fn start(run: &str) -> Self {
+    pub(crate) fn start(run: &str) -> Self {
         Self {
             run: run.to_string(),
             at: 0,
@@ -1311,7 +1332,7 @@ impl serde::Serialize for Cursor {
 /// The last is a boundary check and not a second length check — every record here
 /// ends in a newline, so a byte in range but mid-record would resume by handing
 /// the caller a fragment as though it were an event.
-fn resolve_cursor(paths: &RunPaths, token: &str) -> Result<Cursor> {
+pub(crate) fn resolve_cursor(paths: &RunPaths, token: &str) -> Result<Cursor> {
     let Cursor { run, at } = parse_cursor(token)?;
     if run != paths.run {
         return Err(Error::Invalid(format!(
@@ -1611,7 +1632,7 @@ pub(crate) fn open_log(path: &Path) -> Result<std::fs::File> {
 ///
 /// A zero is said out loud rather than left out: "nothing is waiting" and "this
 /// line does not mention what is waiting" are otherwise the same line.
-fn unread_phrase(unread: &Unread) -> String {
+pub(crate) fn unread_phrase(unread: &Unread) -> String {
     match unread.count {
         0 => "0 unread planner surfaces".to_string(),
         count => format!("{count} unread planner surface(s): {}", unread.phrase()),
