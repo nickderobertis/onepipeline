@@ -829,6 +829,7 @@ fn opened_no_ended_journal(ended: &[String], traced: &Traced, label: &str) -> BT
 /// journey sees that the sparse journal's verdict came without the read even
 /// trying to open it.
 fn cold_read(world: &World, program: &Path, fixture: &Fixture) -> Traced {
+    // llmlint: ignore[tests_mirror_real_usage] the cold state is the one the task states as every ended run's `summary.json` and `checkpoint.json` deleted, which is how a root an older engine left, or never derived, looks to this reader; no interface of this crate removes derived documents, and the read that follows is the real binary's.
     fixture.cold(world);
     let phases = world.root.join("cold.phases.jsonl");
     let cold = traced(
@@ -879,6 +880,7 @@ fn cold_read(world: &World, program: &Path, fixture: &Fixture) -> Traced {
 fn the_host_view_answers_a_host_sized_root_steady_cold_and_steady_again() {
     let world = World::new("host-view").with_env("HOSTNAME", HOST);
     let program = crate::harness::binary();
+    // llmlint: ignore[tests_mirror_real_usage] the task requires a generated 100-run root shaped like this host's — its live, stale and registry-less runs and a 3.6 GiB sparse journal — which no sequence of real launches reproduces at that size or cost; `host_view_fixture.mjs`'s head says how it is built from the recorded run, and every read of it is the real binary's.
     let mut fixture = Fixture::generate(&world);
 
     let cold = cold_read(&world, &program, &fixture);
@@ -909,6 +911,7 @@ fn the_host_view_answers_a_host_sized_root_steady_cold_and_steady_again() {
     let mut sizes = Vec::new();
     for total in [100, 400, 800] {
         if total > 100 {
+            // llmlint: ignore[tests_mirror_real_usage] the task's scaling fixtures add ended, settled runs drawn from the 100-root fixture's own, each a hardlinked journal with its summary and checkpoint rewritten to its run id, to keep 800 roots' disk small; the reads over them are the real binary's.
             fixture.grow(&world, total);
         }
         assert_eq!(fixture.roots(), total);
