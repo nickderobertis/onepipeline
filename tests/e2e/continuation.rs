@@ -150,13 +150,16 @@ fn dispatched(world: &World, run: &str) -> Vec<String> {
         .collect()
 }
 
-/// The sessions `run`'s dispatches opened, by the branch each worked on.
+/// The branches `run`'s dispatches opened sessions on, each once: the sibling's own
+/// `session-opened` and the copy the engine relays beside it describe one session.
 fn sessions_opened(world: &World, run: &str) -> Vec<String> {
     world
         .journal(run)
         .iter()
         .filter(|event| event["source"] == "vcs" && event["kind"] == "session-opened")
         .filter_map(|event| event["payload"]["branch"].as_str().map(str::to_owned))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
         .collect()
 }
 
@@ -272,4 +275,183 @@ fn a_cold_host_continues_a_drafted_stack_from_the_store_and_dispatches_none_of_i
         assert!(held_as_draft(&world, &change["number"]), "{change}");
     }
     drop(cold);
+}
+
+/// A drafted three-node stack the cold host continues, with a fourth node a planner added
+/// on the board depending on its top: only the new node is dispatched, its session is cut
+/// from the top node's recorded branch, and its change request is drafted against it.
+#[test]
+fn a_node_added_on_a_continued_node_is_drafted_on_its_recorded_branch() {
+    let world = team_world("continue-added");
+    for id in ["a", "b", "c", "d"] {
+        world.script(&format!("{id}.work"), &format!("{id}'s change\n"));
+    }
+    world.script("d.requires-file", "c.md");
+    let run = "added";
+    let project = author(
+        &world,
+        run,
+        vec![
+            lifecycle("a", &[]),
+            lifecycle("b", &["a"]),
+            lifecycle("c", &["b"]),
+        ],
+    );
+    launch(&world, run, &project, &[]);
+    let stored = stored_settlements(&world, &project);
+    let created = created_from(&world);
+    world.add_task(run, "003-d", &lifecycle("d", &["c"]), &[("c", "002-c")]);
+
+    std::fs::remove_dir_all(&world.runs).expect("the runs root is removed");
+    let cold = world.on_host("host-b");
+    launch(&cold, run, &project, &[]).exited(0);
+
+    assert_eq!(dispatched(&cold, run), vec!["d".to_owned()]);
+    let d = settled(&cold, run, "d");
+    assert_eq!(d["outcome"], "change-review-draft", "{d}");
+    assert_eq!(
+        d["base"], stored["c"]["branch"],
+        "d was not placed on c's branch: {d}"
+    );
+    assert_eq!(
+        d["stack"]["parents"][0]["branch"], stored["c"]["branch"],
+        "{d}"
+    );
+    let d_branch = d["branch"].as_str().expect("d's branch");
+    let mut now = created.clone();
+    now.push(d_branch.to_owned());
+    assert_eq!(
+        created_from(&world),
+        now,
+        "a change request other than d's was opened"
+    );
+    let opened = changes_from(&world, d_branch);
+    assert_eq!(opened.len(), 1, "{opened:?}");
+    assert_eq!(opened[0]["base"], stored["c"]["branch"], "{opened:?}");
+    for id in ["a", "b", "c"] {
+        assert_eq!(as_stored(&settled(&cold, run, id)), stored[id], "{id}");
+    }
+    drop(cold);
+}
+
+/// `a → b` drafted on a team identity whose host reports `b`'s checks red, publishing once:
+/// `a` settles `change-review-draft` and `b` `failed`, holding its branch and its draft.
+/// Answers the world, the project and the settlements the store holds.
+fn a_failed_draft(name: &str, run: &str) -> (World, String, BTreeMap<String, Value>) {
+    let world = team_world(name).with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "1");
+    world.script("a.work", "a's change\n");
+    world.script("b.work-anew", "b's change");
+    // `b`'s change request is the second the host opens; its checks fail.
+    world.script("gh.checks.2", RED);
+    let project = author(
+        &world,
+        run,
+        vec![lifecycle("a", &[]), lifecycle("b", &["a"])],
+    );
+    launch(&world, run, &project, &[]);
+    let stored = stored_settlements(&world, &project);
+    assert_eq!(stored["b"]["status"], "failed", "{stored:#?}");
+    for field in ["branch", "change_url"] {
+        assert!(
+            stored["b"][field].is_string(),
+            "b stored no {field}: {stored:#?}"
+        );
+    }
+    (world, project, stored)
+}
+
+/// Write `value` under `key` on the task carrying node `node`, as a driver on another host
+/// would have written it.
+fn restate(world: &World, project: &str, node: &str, key: &str, value: Value) {
+    let task = world
+        .store_tasks(project)
+        .into_iter()
+        .find(|task| task["item"]["metadata"]["onepipeline.id"] == node)
+        .unwrap_or_else(|| panic!("the board holds no item for {node}"));
+    let id: onetaskgraph_core::GlobalId = task["id"]
+        .as_str()
+        .expect("an item id")
+        .parse()
+        .expect("a qualified id");
+    let key = onetaskgraph_plugin_api::MetadataKey::new(key.to_owned()).expect("a key");
+    world
+        .store_call(|engine| async move { engine.set_task_metadata(&id, &key, &value).await })
+        .unwrap_or_else(|why| panic!("the store refused the write: {why}"));
+}
+
+/// A cold host continues `a` and dispatches `b` pinned to the branch its stored
+/// settlement left — no new branch — and `b`'s publication, through the engine's ordinary
+/// path, adopts the change request already open from it: the host is asked to open none,
+/// and that change request is still the one draft on the branch.
+fn the_pinned_node_continues_its_branch_and_its_draft(
+    world: &World,
+    project: &str,
+    run: &str,
+    stored: &BTreeMap<String, Value>,
+) {
+    let branch = stored["b"]["branch"]
+        .as_str()
+        .expect("b's branch")
+        .to_owned();
+    let created = created_from(world);
+    // The red checks were the reason it failed; a reviewer's fix has turned them green.
+    world.script("gh.checks.2", GREEN);
+    std::fs::remove_dir_all(&world.runs).expect("the runs root is removed");
+    let cold = world.on_host("host-b");
+    launch(&cold, run, project, &[]).exited(0);
+    assert_eq!(dispatched(&cold, run), vec!["b".to_owned()]);
+    assert_eq!(
+        sessions_opened(&cold, run),
+        vec![branch.clone()],
+        "b was not dispatched on the branch it left"
+    );
+    assert_eq!(created_from(world), created, "a change request was opened");
+    let b = settled(&cold, run, "b");
+    assert_eq!(b["status"], "done", "{b}");
+    assert_eq!(b["outcome"], "change-review-draft", "{b}");
+    assert_eq!(b["branch"], json!(branch), "{b}");
+    assert_eq!(b["change_url"], stored["b"]["change_url"], "{b}");
+    let held = changes_from(world, &branch);
+    assert_eq!(held.len(), 1, "{held:?}");
+    assert!(held_as_draft(world, &held[0]["number"]), "{held:?}");
+    assert_eq!(
+        settled(&cold, run, "a")["continued"]["source"],
+        "store",
+        "a was not continued"
+    );
+    drop(cold);
+}
+
+/// A node its last driver settled `failed` with a branch and a draft is continued on that
+/// branch, and its draft adopted.
+#[test]
+fn a_failed_node_is_continued_pinned_to_its_branch_and_adopts_its_draft() {
+    let run = "failed";
+    let (world, project, stored) = a_failed_draft("continue-failed", run);
+    the_pinned_node_continues_its_branch_and_its_draft(&world, &project, run, &stored);
+}
+
+/// A node its last driver settled `cancelled` with a branch and a draft — a dispatch a
+/// manager cancelled while its publication was being retried — is continued the same way.
+#[test]
+fn a_cancelled_node_is_continued_pinned_to_its_branch_and_adopts_its_draft() {
+    let run = "cancelled";
+    let (world, project, mut stored) = a_failed_draft("continue-cancelled", run);
+    let b = stored.get_mut("b").expect("b's settlement");
+    b["status"] = json!("cancelled");
+    b.as_object_mut().expect("a settlement").remove("outcome");
+    restate(&world, &project, "b", "onepipeline.settlement", b.clone());
+    the_pinned_node_continues_its_branch_and_its_draft(&world, &project, run, &stored);
+}
+
+/// A node its last driver left `parked` with a branch and a draft is continued the same way.
+#[test]
+fn a_parked_node_is_continued_pinned_to_its_branch_and_adopts_its_draft() {
+    let run = "parked";
+    let (world, project, mut stored) = a_failed_draft("continue-parked", run);
+    let b = stored.get_mut("b").expect("b's settlement");
+    b["status"] = json!("parked");
+    b.as_object_mut().expect("a settlement").remove("outcome");
+    restate(&world, &project, "b", "onepipeline.settlement", b.clone());
+    the_pinned_node_continues_its_branch_and_its_draft(&world, &project, run, &stored);
 }

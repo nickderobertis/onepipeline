@@ -2550,6 +2550,15 @@ impl World {
         format!("{STORE_SOURCE}:{identifier}")
     }
 
+    /// One more node of the project `name` this world authored, written as the task a
+    /// planner adds on the board after a run: `file` is its name in the store, and each
+    /// dependency names a node already there by its id, through `named` — that node's own
+    /// file name.
+    pub fn add_task(&self, name: &str, file: &str, node: &Value, named: &[(&str, &str)]) {
+        let named: BTreeMap<&str, &str> = named.iter().copied().collect();
+        self.task(&self.store(), &project_id(name), node, file, &named);
+    }
+
     /// The project a run must never touch, and the reason every store fixture
     /// here holds one.
     ///
