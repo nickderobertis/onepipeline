@@ -1,5 +1,4 @@
-//! `onepipeline host` over a runs root shaped like a real host's, and what it
-//! costs to read one.
+//! `onepipeline host` over a runs root shaped like a real host's.
 //!
 //! The view answers *what is running on this host right now*, and it is asked by
 //! people and by scripts alike, so these journeys hold two things at once: that
@@ -9,13 +8,11 @@
 //! inferred: every ended run's journal is made unreadable to the view's process,
 //! and the kernel is asked (through `strace`) which journals the process opened.
 //!
-//! The fixture is generated here. Its journals are the recorded run
-//! `tests/recorded/run-root/onemessagebus-repair-2`, renamed per run and padded
-//! to a drawn size with that store's own records in the kind mix a real host's
-//! journals carry by bytes, so a journal of a given size costs the view what a
-//! real one does. The budget `host-view-time` reads what
-//! [`the_host_view_answers_a_host_sized_root_steady_cold_and_steady_again`]
-//! records; see `budgets.yaml` and `scripts/host-view-budget.mjs`.
+//! The roots are written by `tests/e2e/host_view_fixture.mjs`, the one generator
+//! these journeys and the `host-view-time` budget share: the budget's
+//! `scripts/host-view-measure.mjs` times the release binary CI's `install` job
+//! builds over the same root, and these journeys read it with this suite's own
+//! build, under `strace`.
 //!
 //! Linux only: the live dispatches are real processes whose registry entries
 //! carry their procfs start tokens, and the observation is `strace`'s.
@@ -26,13 +23,13 @@
 // writes — the journals are a recorded run's own records — and the view under test is the
 // real compiled binary, read the way an operator reads it.
 
-// llmlint: ignore-file[expensive_tests_stay_behind_their_own_edge] measured: the module's
-// seven journeys run in 35-60 seconds on a loaded host, two of them generating a 100-run root of
-// ~260 MB of journals, and the release build they time is made by the recipe ahead of the suite.
-// They exercise `hostview`, `checkpoint`, `summary`, `views`, `sys` and `freespace` through the
-// compiled binary, and read the recorded run under `tests/recorded/` and the budget reporter, so
-// any change under `src/` can move what they hold; the narrowest edge they can honestly sit
-// behind is the crate's, which is this target's. The declaration in `main.rs` says the same.
+// llmlint: ignore-file[expensive_tests_stay_behind_their_own_edge] measured: the module's six
+// journeys take two to three minutes on a loaded host, nearly all of it one cold read of the
+// generated 100-run root's ~260 MB of journals by this suite's debug build. They exercise
+// `hostview`, `checkpoint`, `summary`, `views`, `sys` and `freespace` through the compiled
+// binary, and read the recorded run under `tests/recorded/` through the generator, so any
+// change under `src/` can move what they hold; the narrowest edge they can honestly sit behind
+// is the crate's, which is this target's. The declaration in `main.rs` says the same.
 
 #![cfg(target_os = "linux")]
 
@@ -44,38 +41,21 @@ use std::time::Instant;
 
 use serde_json::{json, Value};
 
-use crate::harness::{now_millis, reaped_pid, World};
+use crate::harness::{now_millis, World};
 
-/// The recorded run every generated journal is made from.
-const SEED_RUN: &str = "onemessagebus-repair-2";
-const MIB: u64 = 1 << 20;
-/// The size of the largest journal on the host the budget was measured on, a
-/// long-ended run's: generated sparse, so it costs no disk.
-const SPARSE_BYTES: u64 = 3_838_692_260;
-/// What one byte of a real host's journals is, by record kind: the share each
-/// kind held of that host's 5.2 GiB of journals, measured 2026-10-10.
-const KIND_MIX: [(&str, f64); 8] = [
-    ("turn-activity", 47.20),
-    ("member-heartbeat", 17.05),
-    ("planner-surface-queued", 5.85),
-    ("planner-surfaced", 4.52),
-    ("turn-started", 3.89),
-    ("turn-message", 2.36),
-    ("turn-completed", 1.32),
-    ("oneharness-session", 0.61),
-];
-/// The host name every generated record and every read carries, so a launch
-/// record's driver and a registry entry's pid are this host's to prove.
+/// The generator every journey here and `scripts/host-view-measure.mjs` share.
+const GENERATOR: &str = "tests/e2e/host_view_fixture.mjs";
+/// The host name every generated record and every read carries, as the generator
+/// writes it (its `HOST`), so a launch record's driver and a registry entry's pid
+/// are this host's to prove.
 const HOST: &str = "host-view-fixture";
-/// How long after a run records a dispatch its registry entry is stamped: the
-/// executor writes it once the dispatch has launched.
-const ENTRY_AFTER_MS: u64 = 1_000;
+const MIB: u64 = 1 << 20;
 /// The variable asking `onepipeline host` to append its phase breakdown to a file.
 const PHASES_ENV: &str = "ONEPIPELINE_HOST_PHASES";
 /// The phases a steady read over a fixture records, by the names `src/hostview.rs`,
 /// `src/lib.rs` and `src/driver.rs` give them, and the quantity it counts: held
 /// here so a phase renamed there fails these journeys rather than dropping out of
-/// the budget's detail.
+/// the readings.
 const STEADY_PHASES: [&str; 9] = [
     "event-registry",
     "list",
@@ -87,297 +67,10 @@ const STEADY_PHASES: [&str; 9] = [
     "free-space",
     "render",
 ];
-/// Where the journeys leave what `scripts/host-view-budget.mjs` reports.
-const RECORD: &str = "target/budget-records/host-view.json";
-
-/// A small deterministic generator, so a fixture is the same fixture every time
-/// it is generated.
-struct Draw(u64);
-
-impl Draw {
-    fn next(&mut self) -> u64 {
-        // SplitMix64.
-        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
-    }
-
-    fn unit(&mut self) -> f64 {
-        (self.next() >> 11) as f64 / (1u64 << 53) as f64
-    }
-
-    fn between(&mut self, low: f64, high: f64) -> f64 {
-        low + (high - low) * self.unit()
-    }
-
-    fn below(&mut self, n: usize) -> usize {
-        usize::try_from(self.next() % n as u64).expect("an index")
-    }
-}
-
-/// A journal stamp, `YYYY-MM-DDThh:mm:ss.sssZ`, for epoch milliseconds.
-fn stamp(ms: u64) -> String {
-    let days = i64::try_from(ms / 86_400_000).expect("days fit");
-    let of_day = ms % 86_400_000;
-    // Civil date from days, by the standard era arithmetic.
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let of_era = z - era * 146_097;
-    let year_of_era = (of_era - of_era / 1_460 + of_era / 36_524 - of_era / 146_096) / 365;
-    let of_year = of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_index = (5 * of_year + 2) / 153;
-    let day = of_year - (153 * month_index + 2) / 5 + 1;
-    let month = if month_index < 10 {
-        month_index + 3
-    } else {
-        month_index - 9
-    };
-    let year = year_of_era + era * 400 + i64::from(month <= 2);
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{:03}Z",
-        of_day / 3_600_000,
-        of_day / 60_000 % 60,
-        of_day / 1_000 % 60,
-        of_day % 1_000
-    )
-}
-
-// llmlint: ignore-block[tests_mirror_real_usage] the subject is `onepipeline host` over a runs
-// root as a host accumulates one over weeks — hundreds of ended runs, long-dead drivers, a
-// 3.6 GiB journal, engines older than the dispatch registry — which no journey can produce
-// through the engine in a test's lifetime. So the root is generated: every journal is the
-// recorded run's own records renamed, the launch records and registry entries are in the
-// shapes the engine writes, a summary stamp moved stands in for the writer that keeps it
-// current, and every read of it is the real binary's. The task that added this view's budget
-// states this fixture; the adoption that races the view is driven through the real engine.
-/// The recorded store, split into what a run starts with, the records its body is
-/// padded with, and how it settles.
-struct Seed {
-    head: Vec<Value>,
-    settle: Vec<Value>,
-    /// Each padding kind's records, pre-rendered with their stamp, sequence and
-    /// (for a pipeline record) stream left as placeholders.
-    body: BTreeMap<&'static str, Vec<String>>,
-    launch: Value,
-    t0: u64,
-}
-
-impl Seed {
-    fn read() -> Self {
-        let dir = crate::harness::repo_file(&format!("tests/recorded/run-root/{SEED_RUN}"));
-        let records: Vec<Value> = std::fs::read_to_string(dir.join("events.jsonl"))
-            .expect("the recorded journal")
-            .lines()
-            .map(|line| serde_json::from_str(line).expect("a recorded record"))
-            .collect();
-        let at = |kind: &str| {
-            records
-                .iter()
-                .position(|record| record["kind"] == kind)
-                .unwrap_or_else(|| panic!("the recorded run holds a {kind}"))
-        };
-        let head = records[..=at("turn-started")].to_vec();
-        let settled_at = at("member-settled");
-        let settle = records[settled_at..=at("node-settled")].to_vec();
-        let mut body: BTreeMap<&'static str, Vec<String>> = BTreeMap::new();
-        for (kind, _) in KIND_MIX {
-            let rendered: Vec<String> = records[head.len()..settled_at]
-                .iter()
-                .filter(|record| record["kind"] == kind)
-                .map(|record| {
-                    let mut record = record.clone();
-                    record["ts"] = json!("@@TS@@");
-                    record["seq"] = json!("@@SEQ@@");
-                    if record["source"] == "pipeline" {
-                        record["stream"] = json!("@@STREAM@@");
-                    }
-                    record.to_string()
-                })
-                .collect();
-            assert!(!rendered.is_empty(), "the recorded run holds no {kind}");
-            body.insert(kind, rendered);
-        }
-        let t0 = crate::harness::epoch_millis(records[0]["ts"].as_str().expect("a stamp"));
-        Self {
-            head,
-            settle,
-            body,
-            launch: serde_json::from_str(
-                &std::fs::read_to_string(dir.join("launch.json")).expect("the recorded launch"),
-            )
-            .expect("a launch record"),
-            t0,
-        }
-    }
-
-    /// The recorded plan, with a task per extra node beside its one `plan` task.
-    fn plan_with(&self, nodes: &[&str]) -> Value {
-        let mut plan = self.head[0]["payload"]["plan"].clone();
-        let first = plan["tasks"][0].clone();
-        for node in nodes {
-            let mut task = first.clone();
-            task["id"] = json!(node);
-            task["title"] = json!(node);
-            plan["tasks"].as_array_mut().expect("tasks").push(task);
-        }
-        plan
-    }
-
-    /// One run's store: the recorded head, a body padded to `size` bytes, and the
-    /// ending — the recorded settlement where `settled`, then `tail`.
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "each is one fact the generated journal varies by: who, how big, when it began, whether it settled, what it ends in, which extra nodes its plan names, and the draw"
-    )]
-    fn journal(
-        &self,
-        draw: &mut Draw,
-        run: &str,
-        size: u64,
-        start_ms: u64,
-        settled: bool,
-        tail: &[Value],
-        nodes: &[&str],
-    ) -> Vec<u8> {
-        let shift = start_ms.saturating_sub(self.t0);
-        let mut store = Store {
-            run,
-            out: String::new(),
-            seqs: BTreeMap::new(),
-            clock: start_ms,
-        };
-        for record in &self.head {
-            let mut record = record.clone();
-            if record["kind"] == "run-started" && !nodes.is_empty() {
-                record["payload"]["plan"] = self.plan_with(nodes);
-            }
-            let recorded = crate::harness::epoch_millis(record["ts"].as_str().expect("a stamp"));
-            store.emit(&record, recorded + shift);
-        }
-        let ending: Vec<Value> = if settled {
-            self.settle.iter().chain(tail).cloned().collect()
-        } else {
-            tail.to_vec()
-        };
-        let ending_bytes: usize = ending
-            .iter()
-            .map(|record| record.to_string().len() + 1)
-            .sum::<usize>()
-            + 512;
-        let target = usize::try_from(size)
-            .expect("a size")
-            .saturating_sub(ending_bytes);
-        let total: f64 = KIND_MIX.iter().map(|(_, share)| share).sum();
-        let mut surfaces = 0u64;
-        while store.out.len() < target {
-            let mut pick = draw.unit() * total;
-            let kind = KIND_MIX
-                .iter()
-                .find(|(_, share)| {
-                    pick -= share;
-                    pick < 0.0
-                })
-                .map_or(KIND_MIX[0].0, |(kind, _)| kind);
-            let choices = &self.body[kind];
-            let template = &choices[draw.below(choices.len())];
-            store.clock += 5 + draw.next() % 896;
-            // Each surface on a stream of its own, as the channel's producers write them.
-            let stream = if template.contains("@@STREAM@@") {
-                surfaces += 1;
-                format!("{HOST}-surface-{surfaces}")
-            } else {
-                template
-                    .split("\"stream\":\"")
-                    .nth(1)
-                    .and_then(|rest| rest.split('"').next())
-                    .unwrap_or_default()
-                    .to_owned()
-            };
-            let seq = store.next_seq(&stream);
-            let line = template
-                .replace(SEED_RUN, run)
-                .replacen("\"@@TS@@\"", &format!("\"{}\"", stamp(store.clock)), 1)
-                .replacen("\"@@SEQ@@\"", &seq.to_string(), 1)
-                .replacen("@@STREAM@@", &stream, 1);
-            store.out.push_str(&line);
-            store.out.push('\n');
-        }
-        for record in &ending {
-            let at = store.clock + 1_000;
-            store.emit(record, at);
-        }
-        store.out.into_bytes()
-    }
-}
-
-/// One journal as it is written: its records, each stream's next sequence
-/// number, and the clock its stamps advance on.
-struct Store<'a> {
-    run: &'a str,
-    out: String,
-    seqs: BTreeMap<String, u64>,
-    clock: u64,
-}
-
-impl Store<'_> {
-    fn next_seq(&mut self, stream: &str) -> u64 {
-        let seq = self.seqs.entry(stream.to_owned()).or_insert(0);
-        *seq += 1;
-        *seq - 1
-    }
-
-    /// Append one record, renamed to this run and stamped no earlier than `at`.
-    fn emit(&mut self, record: &Value, at: u64) {
-        let mut record: Value =
-            serde_json::from_str(&record.to_string().replace(SEED_RUN, self.run)).expect("JSON");
-        self.clock = self.clock.max(at);
-        record["ts"] = json!(stamp(self.clock));
-        let stream = record["stream"].as_str().unwrap_or_default().to_owned();
-        record["seq"] = json!(self.next_seq(&stream));
-        self.out.push_str(&record.to_string());
-        self.out.push('\n');
-    }
-}
-
-/// A `pipeline` record of this host's.
-fn pipeline(run: &str, kind: &str, node: Option<&str>, at: u64, payload: Value) -> Value {
-    let mut labels = json!({"run_id": run});
-    if let Some(node) = node {
-        labels["node"] = json!(node);
-    }
-    json!({
-        "v": 2,
-        "ts": stamp(at),
-        "stream": format!("{HOST}-4000002"),
-        "seq": 0,
-        "source": "pipeline",
-        "kind": kind,
-        "labels": labels,
-        "payload": payload,
-        "artifacts": [],
-    })
-}
-
-/// A run's stop, as an engine records it, on a stream of the stopping process's own.
-fn stopped(run: &str, teardown: Option<&str>, at: u64) -> Value {
-    let mut payload = json!({"owner": "[mine]", "forced": false});
-    if let Some(teardown) = teardown {
-        payload["teardown"] = json!(teardown);
-    }
-    let mut record = pipeline(run, "run-stopped", None, at, payload);
-    record["stream"] = json!(format!("{HOST}-4000001"));
-    record
-}
-
-/// The two records a driver writes as it dispatches a node.
-fn dispatched(run: &str, node: &str, at: u64) -> Vec<Value> {
-    ["node-ready", "node-dispatched"]
-        .into_iter()
-        .map(|kind| pipeline(run, kind, Some(node), at, json!({})))
-        .collect()
-}
+/// Where the journey over the 100-run fixture leaves this build's readings: the
+/// gate's evidence beside the budget, which `scripts/host-view-measure.mjs` takes
+/// of the release binary in CI's `install` job.
+const DEBUG_RECORD: &str = "target/budget-records/host-view-debug.json";
 
 /// A process's start token as this host's procfs spells it, the way the engine
 /// records one — asked of `/proc` here rather than of the crate under test.
@@ -407,7 +100,8 @@ struct Expected {
     skipped: BTreeSet<String>,
 }
 
-/// One generated runs root, and the processes its live dispatches are.
+/// One generated runs root, the manifest the generator answered for it, and the
+/// processes its live dispatches are.
 struct Fixture {
     runs: PathBuf,
     expected: Expected,
@@ -415,11 +109,9 @@ struct Fixture {
     live_runs: BTreeSet<String>,
     /// Every run whose journal a steady read may not open.
     ended: Vec<String>,
-    /// The ended, settled runs a grown fixture's history is drawn from.
-    settled: Vec<String>,
     sparse_run: String,
-    /// The bytes of records the sparse journal holds ahead of its hole.
-    sparse_records: u64,
+    /// The generator's manifest, as a file its next verb reads.
+    manifest: PathBuf,
     children: Vec<Child>,
 }
 
@@ -436,214 +128,146 @@ impl Drop for Fixture {
     }
 }
 
-/// Sizes for `n` journals in a real host's proportions: of every 90, 45 at or
-/// below 0.2 MiB, 36 up to 2.6 MiB, 8 up to 28.7 MiB and one of 29 MiB.
-fn sizes(draw: &mut Draw) -> (Vec<u64>, Vec<u64>) {
-    let mib = |value: f64| (value * MIB as f64) as u64;
-    let small: Vec<u64> = (0..45).map(|_| mib(draw.between(0.02, 0.2))).collect();
-    let mut rest: Vec<u64> = (0..36).map(|_| mib(draw.between(0.2, 2.6))).collect();
-    rest.extend((0..8).map(|_| mib(draw.between(2.6, 28.7))));
-    rest.push(29 * MIB);
-    (small, rest)
+/// One verb of the generator, run in `world`'s environment — which names its
+/// runs root and this host's name — answering what it printed.
+fn generator(world: &World, args: &[&str]) -> String {
+    let script = crate::harness::repo_file(GENERATOR);
+    let mut argv = vec![script.to_str().expect("a UTF-8 path")];
+    argv.extend_from_slice(args);
+    let output = world
+        .cmd_on(Path::new("node"), &argv)
+        .output()
+        .expect("node runs the fixture generator");
+    assert!(
+        output.status.success(),
+        "`{GENERATOR} {}` failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("UTF-8")
+}
+
+fn pairs(value: &Value) -> BTreeSet<(String, String)> {
+    value
+        .as_array()
+        .expect("pairs")
+        .iter()
+        .map(|pair| {
+            (
+                pair[0].as_str().expect("a run").to_owned(),
+                pair[1].as_str().expect("a node").to_owned(),
+            )
+        })
+        .collect()
+}
+
+fn names(value: &Value) -> Vec<String> {
+    value
+        .as_array()
+        .expect("names")
+        .iter()
+        .map(|name| name.as_str().expect("a name").to_owned())
+        .collect()
 }
 
 impl Fixture {
-    /// The 100-run fixture: 9 roots with no launch record, 64 with a dispatch
-    /// registry, 91 journals (one of them the sparse 3.6 GiB one), 3 runs holding
-    /// 5 live dispatches in real processes — one of them a run whose driver has
-    /// died — 4 stale registry entries, and 2 registry-less ended runs recording a
-    /// node running, stopped `signalled` and `partly-signalled`, written as an
-    /// engine before the registry wrote them: `round-NN` directories and no
-    /// `dispatches/`.
-    fn generate(runs: &Path) -> Self {
-        let mut draw = Draw(100);
-        let seed = Seed::read();
-        let runs = runs.to_path_buf();
-        std::fs::create_dir_all(&runs).expect("a runs root");
-        let mut fixture = Self {
-            runs,
+    /// An empty root, built run by run with [`Fixture::run`].
+    fn empty(world: &World) -> Self {
+        std::fs::create_dir_all(&world.runs).expect("a runs root");
+        Self {
+            runs: world.runs.clone(),
             expected: Expected::default(),
             live_runs: BTreeSet::new(),
             ended: Vec::new(),
-            settled: Vec::new(),
-            sparse_run: "huge-ended".to_owned(),
-            sparse_records: 0,
+            sparse_run: String::new(),
+            manifest: world.root.join("manifest.json"),
             children: Vec::new(),
+        }
+    }
+
+    /// The generator's 100-run fixture, its live dispatches this test's own
+    /// processes: two live drivers, and five dispatches across three runs, the
+    /// third of which the generator gives a driver that has died.
+    fn generate(world: &World) -> Self {
+        let mut fixture = Self::empty(world);
+        let mut process = || {
+            let (pid, token) = fixture.sleeper();
+            json!({"pid": pid, "token": token})
         };
-        let now = now_millis();
-        let hours_ago = now - 3 * 3_600_000;
-        let (mut small, mut rest) = sizes(&mut draw);
-
-        for i in 0..9 {
-            let name = format!("no-launch-{i:02}");
-            std::fs::create_dir_all(fixture.runs.join(&name).join("channel")).expect("a root");
-            fixture.expected.skipped.insert(name);
-        }
-
-        // 3 live runs holding 5 live dispatches; the third's driver has died, and
-        // its dispatch outlived it.
-        for (i, nodes) in [vec!["plan", "build"], vec!["plan", "review"], vec!["plan"]]
-            .into_iter()
-            .enumerate()
-        {
-            let run = format!("live-{i}");
-            let (driver, driver_token) = if i == 2 {
-                (reaped_pid(), "linux-proc-stat:1".to_owned())
-            } else {
-                fixture.sleeper()
-            };
-            let mut tail = Vec::new();
-            let mut entries = Vec::new();
-            let started = now - 600_000;
-            for (k, node) in nodes.iter().enumerate() {
-                let (pid, token) = fixture.sleeper();
-                // An entry is stamped just after the run records the dispatch.
-                let recorded = if *node == "plan" {
-                    started
-                } else {
-                    let at = now - 60_000 * (k as u64 + 1);
-                    tail.extend(dispatched(&run, node, at));
-                    at
-                };
-                entries.push(json!({
-                    "node": node, "pid": pid, "host": HOST,
-                    "dispatched_at": stamp(recorded + ENTRY_AFTER_MS), "started": token,
-                }));
-                fixture
-                    .expected
-                    .held
-                    .insert((run.clone(), (*node).to_owned()));
-            }
-            let extra: Vec<&str> = nodes.iter().copied().filter(|n| *n != "plan").collect();
-            let size = small.pop().expect("a size");
-            let journal = seed.journal(&mut draw, &run, size, started, false, &tail, &extra);
-            fixture.write_run(
-                &seed,
-                &run,
-                &journal,
-                Some(&entries),
-                driver,
-                &driver_token,
-                &extra,
-            );
-            fixture.live_runs.insert(run);
-        }
-
-        // 4 stale registry entries: a node the run records running, whose process is gone.
-        for i in 0..4u64 {
-            let run = format!("stale-{i}");
-            let started = hours_ago - i * 86_400_000;
-            let entry = json!({
-                "node": "plan", "pid": reaped_pid(), "host": HOST,
-                "dispatched_at": stamp(started + ENTRY_AFTER_MS), "started": "linux-proc-stat:1",
-            });
-            let size = rest.remove(0);
-            let journal = seed.journal(&mut draw, &run, size, started, false, &[], &[]);
-            fixture.write_run(
-                &seed,
-                &run,
-                &journal,
-                Some(&[entry]),
-                reaped_pid(),
-                "linux-proc-stat:1",
-                &[],
-            );
-            fixture
-                .expected
-                .stale
-                .insert((run.clone(), "plan".to_owned()));
-            fixture.ended.push(run);
-        }
-
-        // 2 registry-less ended runs recording `plan` running, stopped long ago.
-        for (run, teardown) in [
-            ("registryless-stopped", "signalled"),
-            ("registryless-undecided", "partly-signalled"),
-        ] {
-            let started = hours_ago - 50 * 86_400_000;
-            let size = small.pop().expect("a size");
-            let mut journal = seed.journal(&mut draw, run, size, started, false, &[], &[]);
-            let last = last_stamp(&journal);
-            journal.extend(format!("{}\n", stopped(run, Some(teardown), last + 60_000)).bytes());
-            fixture.write_run(
-                &seed,
-                run,
-                &journal,
-                None,
-                reaped_pid(),
-                "linux-proc-stat:1",
-                &[],
-            );
-            std::fs::create_dir(fixture.runs.join(run).join("round-01")).expect("a round");
-            fixture.ended.push(run.to_owned());
-        }
+        let processes = json!({
+            "drivers": [process(), process()],
+            "entries": [[process(), process()], [process(), process()], [process()]],
+        });
+        let file = world.root.join("processes.json");
+        write(&file, &processes);
+        let manifest = generator(world, &["generate", path(&fixture.runs), path(&file)]);
+        fixture.adopt(&manifest);
         fixture
-            .expected
-            .stopped
-            .insert(("registryless-stopped".to_owned(), "plan".to_owned()));
-        fixture
-            .expected
-            .unproven
-            .insert(("registryless-undecided".to_owned(), "plan".to_owned()));
+    }
 
-        // The 3.6 GiB journal's run: ended and settled, its registry emptied as its
-        // dispatches ended. Its records are generated small and the file grown
-        // sparse past them, so its 3.6 GiB cost no disk.
-        let sparse = fixture.sparse_run.clone();
-        let journal = seed.journal(
-            &mut draw,
-            &sparse,
-            MIB / 5,
-            hours_ago - 40 * 86_400_000,
-            true,
-            &[],
-            &[],
+    /// Take the generator's manifest as this fixture's.
+    fn adopt(&mut self, manifest: &str) {
+        std::fs::write(&self.manifest, manifest).expect("the manifest");
+        let manifest: Value = serde_json::from_str(manifest).expect("a manifest");
+        let expected = &manifest["expected"];
+        self.expected = Expected {
+            held: pairs(&expected["held"]),
+            unproven: pairs(&expected["unproven"]),
+            stale: pairs(&expected["stale"]),
+            stopped: pairs(&expected["stopped"]),
+            skipped: names(&expected["skipped"]).into_iter().collect(),
+        };
+        self.live_runs = names(&manifest["live_runs"]).into_iter().collect();
+        self.ended = names(&manifest["ended"]);
+        self.sparse_run = manifest["sparse_run"].as_str().expect("a run").to_owned();
+    }
+
+    /// Grow the root with ended history to `total` run roots.
+    fn grow(&mut self, world: &World, total: usize) {
+        let manifest = generator(
+            world,
+            &[
+                "grow",
+                path(&self.runs),
+                path(&self.manifest),
+                &total.to_string(),
+            ],
         );
-        fixture.write_run(
-            &seed,
-            &sparse,
-            &journal,
-            Some(&[]),
-            reaped_pid(),
-            "linux-proc-stat:1",
-            &[],
-        );
-        fixture.sparse_records = journal.len() as u64;
-        fixture.sparse_to(SPARSE_BYTES);
-        fixture.ended.push(sparse);
+        self.adopt(&manifest);
+    }
 
-        // The rest: ended, settled runs, to 91 journals and 64 registries.
-        let mut sizes: Vec<u64> = small.into_iter().chain(rest).collect();
-        let with_registry = 64 - 3 - 4 - 1;
-        let mut i = 0;
-        while !sizes.is_empty() {
-            let size = sizes.remove(draw.below(sizes.len()));
-            let run = format!("ended-{i:03}");
-            let journal = seed.journal(
-                &mut draw,
-                &run,
-                size,
-                hours_ago - (i as u64 + 1) * 3_600_000,
-                true,
-                &[],
-                &[],
-            );
-            let registry: Option<&[Value]> = if i < with_registry { Some(&[]) } else { None };
-            fixture.write_run(
-                &seed,
-                &run,
-                &journal,
-                registry,
-                reaped_pid(),
-                "linux-proc-stat:1",
-                &[],
-            );
-            fixture.ended.push(run.clone());
-            fixture.settled.push(run);
-            i += 1;
-        }
-        assert_eq!(fixture.roots(), 100, "the fixture is not 100 run roots");
-        fixture
+    /// The cold state: no ended run's derived document, every ended journal
+    /// readable but the sparse one, which no state makes readable.
+    fn cold(&self, world: &World) {
+        generator(world, &["cold", path(&self.runs), path(&self.manifest)]);
+    }
+
+    /// The sparse run's summary as its writer keeps it, written by a read of
+    /// `program`.
+    fn stamp_sparse(&self, world: &World, program: &Path) {
+        generator(
+            world,
+            &[
+                "stamp-sparse",
+                path(&self.runs),
+                path(&self.manifest),
+                path(program),
+            ],
+        );
+    }
+
+    /// One run, shaped as `spec` says — see the generator's `run` verb.
+    fn run(&self, world: &World, spec: &Value) {
+        let file = world.root.join("run.json");
+        write(&file, spec);
+        generator(world, &["run", path(&self.runs), path(&file)]);
+    }
+
+    /// Append `ending` to `run`'s journal — see the generator's `append` verb.
+    fn append(&self, world: &World, run: &str, ending: &Value) {
+        let file = world.root.join("append.json");
+        write(&file, &json!({"run": run, "ending": ending}));
+        generator(world, &["append", path(&self.runs), path(&file)]);
     }
 
     /// A real process standing in for a dispatch or a driver, and its start token.
@@ -656,43 +280,6 @@ impl Fixture {
         let pid = child.id();
         self.children.push(child);
         (pid, start_token(pid))
-    }
-
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "each is one document of the run root it writes: its journal, its registry, the launch record's driver and start token, and its plan's extra nodes"
-    )]
-    fn write_run(
-        &self,
-        seed: &Seed,
-        run: &str,
-        journal: &[u8],
-        registry: Option<&[Value]>,
-        driver: u32,
-        driver_token: &str,
-        nodes: &[&str],
-    ) {
-        let dir = self.runs.join(run);
-        std::fs::create_dir_all(&dir).expect("a run root");
-        let mut launch = seed.launch.clone();
-        launch["run_id"] = json!(run);
-        launch["project"] = json!(format!("authoring:{run}"));
-        launch["host"] = json!(HOST);
-        launch["pid"] = json!(driver);
-        launch["started"] = json!(driver_token);
-        write(&dir.join("launch.json"), &launch);
-        write(&dir.join("plan.json"), &seed.plan_with(nodes));
-        std::fs::write(dir.join("events.jsonl"), journal).expect("a journal");
-        if let Some(entries) = registry {
-            std::fs::create_dir(dir.join("dispatches")).expect("a registry");
-            for (n, entry) in entries.iter().enumerate() {
-                write(
-                    &dir.join("dispatches")
-                        .join(format!("{}-{n}.json", entry["pid"])),
-                    entry,
-                );
-            }
-        }
     }
 
     fn roots(&self) -> usize {
@@ -711,115 +298,12 @@ impl Fixture {
                 std::fs::set_permissions(self.journal(run), std::fs::Permissions::from_mode(mode));
         }
     }
-
-    /// Every ended run but the sparse one, whose journal is unreadable in every state.
-    fn ended_but_sparse(&self) -> Vec<String> {
-        self.ended
-            .iter()
-            .filter(|run| **run != self.sparse_run)
-            .cloned()
-            .collect()
-    }
-
-    /// Set the sparse journal's length: its records alone, or grown past them.
-    fn sparse_to(&self, len: u64) {
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open(self.journal(&self.sparse_run))
-            .and_then(|file| file.set_len(len))
-            .expect("the sparse journal's length");
-    }
-
-    /// The writer-maintained summary of the sparse run, standing in for the journal
-    /// writer that keeps it current as it appends: written by a read of the binary
-    /// under test over the journal's records alone — every other ended journal
-    /// unreadable, so nothing else is read — then stamped to the 3.6 GiB file.
-    fn stamp_sparse(&self, world: &World, program: &Path) {
-        self.readable(&self.ended, false);
-        self.readable(std::slice::from_ref(&self.sparse_run), true);
-        self.sparse_to(self.sparse_records);
-        let read = world
-            .cmd_on(program, &["host"])
-            .output()
-            .expect("the binary runs");
-        assert!(
-            read.status.success(),
-            "{}",
-            String::from_utf8_lossy(&read.stderr)
-        );
-        self.sparse_to(SPARSE_BYTES);
-        self.readable(std::slice::from_ref(&self.sparse_run), false);
-        let journal = self.journal(&self.sparse_run);
-        let summary_path = self.runs.join(&self.sparse_run).join("summary.json");
-        let mut summary = read_json(&summary_path);
-        let about = std::fs::metadata(&journal).expect("the journal");
-        summary["journal_len"] = json!(about.len());
-        summary["journal_mtime_ms"] = json!(about
-            .modified()
-            .expect("a modification time")
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("after the epoch")
-            .as_millis() as u64);
-        write(&summary_path, &summary);
-    }
-
-    /// Make the root cold: no derived document beside any ended journal, every
-    /// ended journal readable but the sparse one, which no state makes readable.
-    fn cold(&self) {
-        self.forget_derived();
-        self.readable(&self.ended_but_sparse(), true);
-        self.readable(std::slice::from_ref(&self.sparse_run), false);
-    }
-
-    /// Forget every ended run's derived documents: the cold state.
-    fn forget_derived(&self) {
-        for run in &self.ended {
-            for document in ["summary.json", "checkpoint.json"] {
-                let _ = std::fs::remove_file(self.runs.join(run).join(document));
-            }
-        }
-    }
-
-    /// Grow the root with ended, settled runs — and launch-less roots, at 9% — to
-    /// `total` run roots. Each added run is one of the 100-run fixture's own
-    /// settled runs with its journal **hardlinked**, and its summary and checkpoint
-    /// rewritten to its own id, so the disk it costs is a few KiB.
-    fn grow(&mut self, total: usize) {
-        let mut draw = Draw(total as u64);
-        let mut launchless = self.expected.skipped.len();
-        while launchless < total * 9 / 100 {
-            let name = format!("no-launch-{launchless:03}");
-            std::fs::create_dir_all(self.runs.join(&name).join("channel")).expect("a root");
-            self.expected.skipped.insert(name);
-            launchless += 1;
-        }
-        let mut i = 0;
-        while self.roots() < total {
-            let source = self.settled[draw.below(self.settled.len())].clone();
-            let run = format!("clone-{total}-{i:04}");
-            i += 1;
-            let (from, to) = (self.runs.join(&source), self.runs.join(&run));
-            std::fs::create_dir(&to).expect("a run root");
-            std::fs::hard_link(from.join("events.jsonl"), to.join("events.jsonl")).expect("a link");
-            std::fs::hard_link(from.join("plan.json"), to.join("plan.json")).expect("a link");
-            let mut launch = read_json(&from.join("launch.json"));
-            launch["run_id"] = json!(run);
-            launch["project"] = json!(format!("authoring:{run}"));
-            write(&to.join("launch.json"), &launch);
-            if from.join("dispatches").is_dir() {
-                std::fs::create_dir(to.join("dispatches")).expect("a registry");
-            }
-            for document in ["summary.json", "checkpoint.json"] {
-                let mut body = read_json(&from.join(document));
-                body["run_id"] = json!(run);
-                write(&to.join(document), &body);
-            }
-            self.ended.push(run);
-        }
-    }
 }
 
-// llmlint: ignore-end[tests_mirror_real_usage]
+fn path(path: &Path) -> &str {
+    path.to_str().expect("a UTF-8 path")
+}
+
 fn write(path: &Path, value: &Value) {
     std::fs::write(path, serde_json::to_string_pretty(value).expect("JSON")).expect("a write");
 }
@@ -829,13 +313,6 @@ fn read_json(path: &Path) -> Value {
         &std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display())),
     )
     .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
-}
-
-/// The stamp of a journal's last record, in epoch milliseconds.
-fn last_stamp(journal: &[u8]) -> u64 {
-    let text = std::str::from_utf8(journal).expect("UTF-8");
-    let last: Value = serde_json::from_str(text.lines().last().expect("a record")).expect("JSON");
-    crate::harness::epoch_millis(last["ts"].as_str().expect("a stamp"))
 }
 
 /// One real invocation of the binary, kept whole.
@@ -1344,114 +821,12 @@ fn opened_no_ended_journal(ended: &[String], traced: &Traced, label: &str) -> BT
     traced.opened.keys().cloned().collect()
 }
 
-/// Merge `entries` into the budget record, under a lock, so the two journeys that
-/// write it can run at once.
-fn record(entries: Value) {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(RECORD);
-    std::fs::create_dir_all(path.parent().expect("a directory")).expect("the record's directory");
-    let lock = std::fs::File::create(path.with_extension("lock")).expect("a lock file");
-    lock.lock().expect("the record's lock");
-    let mut held: Value = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .filter(Value::is_object)
-        .unwrap_or_else(|| json!({}));
-    for (key, value) in entries.as_object().expect("an object") {
-        held[key] = value.clone();
-    }
-    held["schema_version"] = json!(1);
-    std::fs::write(&path, serde_json::to_string_pretty(&held).expect("JSON")).expect("the record");
-    let _ = lock.unlock();
-}
-
-/// What a read's phases say, as the budget's record carries it.
-fn breakdown(phases: &Option<Value>) -> Value {
-    let field = |path: &[&str]| {
-        phases.as_ref().map_or(Value::Null, |line| {
-            path.iter().fold(line, |value, key| &value[*key]).clone()
-        })
-    };
-    let ms = |name: &str| field(&["phases", name, "wall_ms"]);
-    json!({
-        "process_start_ms": field(&["process_start_ms"]),
-        "event_registry_ms": ms("event-registry"),
-        "list_ms": ms("list"),
-        "launch_and_summary_ms": ms("launch-and-summary"),
-        "registry_ms": ms("registry"),
-        "pid_proofs_ms": ms("pid-proofs"),
-        "decide_ended_ms": ms("decide-ended"),
-        "live_fold_ms": ms("live-fold"),
-        "live_runs_folded": field(&["phases", "live-fold", "count"]),
-        "live_journal_bytes": field(&["quantities", "live-journal-bytes"]),
-        "cold_fold_ms": ms("cold-fold"),
-        "cold_journal_bytes": field(&["quantities", "cold-journal-bytes"]),
-        "free_space_ms": ms("free-space"),
-        "render_ms": ms("render"),
-        "exit_ms": field(&["exit_ms"]),
-        "read_bytes": field(&["read_bytes"]),
-    })
-}
-
-/// The binary users run: an optimized release build of this tree, which is what
-/// `host-view-time` times — a debug build's figure measures its build flavour.
-///
-/// Asked of cargo exactly as `_host-view-release` in the justfile asks, which says
-/// why. The copy handed back is this test's own, so a later rebuild's uplift cannot
-/// take the file away under a spawn.
-fn release_binary(world: &World) -> PathBuf {
-    static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    let built = BUILT.get_or_init(|| {
-        let repo = crate::harness::repo_file(".");
-        let mut cargo = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
-        cargo
-            .args([
-                "build",
-                "--release",
-                "--locked",
-                "--offline",
-                "--bin",
-                "onepipeline",
-            ])
-            .arg("--target-dir")
-            .arg(repo.join("target"))
-            .current_dir(&repo);
-        for (name, _) in std::env::vars_os() {
-            let name = name.to_string_lossy();
-            // What cargo sets for a running test, and what the coverage tier sets for
-            // its own build, are neither of them the release build's.
-            if (name.starts_with("CARGO_") && name != "CARGO_HOME")
-                || name.starts_with("LLVM_")
-                || [
-                    "RUSTFLAGS",
-                    "RUSTDOCFLAGS",
-                    "RUSTC_WORKSPACE_WRAPPER",
-                    "OUT_DIR",
-                ]
-                .contains(&name.as_ref())
-            {
-                cargo.env_remove(name.as_ref());
-            }
-        }
-        cargo.env("RUSTFLAGS", "-D warnings");
-        let output = cargo.output().expect("cargo runs");
-        assert!(
-            output.status.success(),
-            "the release build `host-view-time` times did not build: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        repo.join("target/release/onepipeline")
-    });
-    let own = world.root.join("onepipeline-release");
-    std::fs::copy(built, &own).expect("this test's own copy of the release build");
-    own
-}
-
 /// The cold read: no ended run's derived document, every ended journal readable
-/// but the 3.6 GiB one, which stays unreadable. Traced for its opens alone, so it
-/// runs close to its untraced speed and the journey sees that the sparse journal's
-/// verdict came without the read even trying to open it.
+/// but the 3.6 GiB one, which stays unreadable. Traced for its opens alone, so the
+/// journey sees that the sparse journal's verdict came without the read even
+/// trying to open it.
 fn cold_read(world: &World, program: &Path, fixture: &Fixture) -> Traced {
-    fixture.cold();
+    fixture.cold(world);
     let phases = world.root.join("cold.phases.jsonl");
     let cold = traced(
         world,
@@ -1475,7 +850,8 @@ fn cold_read(world: &World, program: &Path, fixture: &Fixture) -> Traced {
     cold
 }
 
-/// The budget's journey, over the 100-run fixture.
+/// `onepipeline host` over the generator's 100-run fixture, through this suite's
+/// own build, with the kernel asked what every read opened.
 ///
 /// The root is generated as a host's root is before any reader has been through
 /// it: cold, with no derived document beside any journal. One read answers it —
@@ -1484,26 +860,31 @@ fn cold_read(world: &World, program: &Path, fixture: &Fixture) -> Traced {
 /// every ended journal made unreadable, answers identically and opens none of
 /// them. Then the sparse run's summary is stamped to its 3.6 GiB file, standing in
 /// for the journal writer that keeps it current, and five single reads at that
-/// steady state are timed, each held to the answer, with the text form rendering
-/// the same reading.
+/// steady state are each held to the answer, with the text form rendering the same
+/// reading.
 ///
-/// What is timed is the release build, which is what a user runs; the same five
-/// reads by this suite's own build are recorded beside them as detail, never as
-/// the verdict.
+/// What a read costs does not grow with ended history: the root then grows to 400
+/// and 800 run roots holding the same live set, and at each size the reads open no
+/// ended journal, open the same runs — the live ones — and give the same rows and
+/// proved-gone dispatches.
+///
+/// The `host-view-time` budget times the release binary CI's `install` job builds
+/// (`scripts/host-view-measure.mjs`, over this same generator). What this build's
+/// reads take is recorded here as the gate's evidence beside it, never as the
+/// verdict.
 #[test]
 fn the_host_view_answers_a_host_sized_root_steady_cold_and_steady_again() {
     let world = World::new("host-view").with_env("HOSTNAME", HOST);
-    let release = release_binary(&world);
-    let fixture = Fixture::generate(&world.runs);
+    let program = crate::harness::binary();
+    let mut fixture = Fixture::generate(&world);
 
-    let cold = cold_read(&world, &release, &fixture);
+    let cold = cold_read(&world, &program, &fixture);
     let cold_verdicts = verdicts(&cold.reading);
 
-    // The read after the cold one is steady: no ended journal is opened.
     fixture.readable(&fixture.ended, false);
     let after_cold = traced(
         &world,
-        &release,
+        &program,
         &world.root.join("after-cold.strace"),
         true,
         None,
@@ -1520,200 +901,47 @@ fn the_host_view_answers_a_host_sized_root_steady_cold_and_steady_again() {
     );
     opened_no_ended_journal(&fixture.ended, &after_cold, "the read after the cold one");
 
-    fixture.stamp_sparse(&world, &release);
-    let steady = read_state(&world, &release, &fixture, "steady", 5);
-    let opened = opened_no_ended_journal(&fixture.ended, &steady.traced, "steady");
-    assert_eq!(
-        opened, fixture.live_runs,
-        "a steady read folds exactly the runs holding live work"
-    );
-    assert_eq!(
-        steady.verdicts, cold_verdicts,
-        "the steady and cold reads disagree"
-    );
-    let debug = read_state(
-        &world,
-        &crate::harness::binary(),
-        &fixture,
-        "steady-debug",
-        5,
-    );
-    opened_no_ended_journal(&fixture.ended, &debug.traced, "steady, this suite's build");
-    assert_eq!(debug.verdicts, cold_verdicts, "the two builds disagree");
-
-    record(json!({
-        "runs_root": {
-            "run_roots": fixture.roots(),
-            "live_dispatches": fixture.expected.held.len(),
-            "stale_entries": fixture.expected.stale.len(),
-        },
-        "steady": {
-            "build": "release",
-            "reads_ms": steady.walls_ms,
-            "median_ms": median(&steady.walls_ms),
-            "load1": steady.load1,
-            "breakdown": breakdown(&steady.phases),
-            "ended_journal_bytes_opened": 0,
-            "runs_opened": opened,
-        },
-        "steady_debug": {
-            "build": "the e2e tier's own (debug, and coverage-instrumented under `just check`)",
-            "reads_ms": debug.walls_ms,
-            "median_ms": median(&debug.walls_ms),
-            "load1": debug.load1,
-            "breakdown": breakdown(&debug.phases),
-        },
-        "cold": {
-            "build": "release",
-            "read_ms": cold.wall_ms,
-            "breakdown": breakdown(&cold.phases),
-        },
-        "after_cold": {
-            "ended_journal_bytes_opened": 0,
-        },
-    }));
-
-    // The reporter reads this record as written: every figure it prints is one the
-    // record holds, so a field renamed on either side fails here rather than
-    // reporting as missing.
-    let result = world.root.join("budget-result.json");
-    let reported = Command::new("node")
-        .arg(crate::harness::repo_file("scripts/host-view-budget.mjs"))
-        .current_dir(crate::harness::repo_file("."))
-        .env("ONEBUDGETSPEC_RESULT", &result)
-        .output()
-        .expect("node runs the committed reporter");
-    assert!(
-        reported.status.success(),
-        "{}",
-        String::from_utf8_lossy(&reported.stderr)
-    );
-    let detail = read_json(&result)["detail"]
-        .as_str()
-        .expect("a detail")
-        .to_owned();
-    assert!(
-        !detail.contains("n/a") && !detail.contains('?'),
-        "the reporter printed a figure the record does not hold: {detail}"
-    );
-}
-
-/// What a read costs does not grow with ended history. Three roots hold the same
-/// live set — 3 runs holding 5 live dispatches, 4 stale registry entries and the
-/// 2 registry-less ended runs — and differ only in how many ended runs they keep:
-/// 100, 400 and 800 run roots. At steady state, every ended journal unreadable,
-/// each opens no ended run's journal, opens the same runs (the live ones), and
-/// prints the same rows and proved-gone dispatches. Each size's single reads by
-/// the release build, and the per-ended-run increment between their medians, go
-/// to the budget's record as evidence: no threshold applies to them beyond the
-/// budget's own at 100.
-#[test]
-fn the_host_view_over_a_host_sized_root_opens_only_live_runs_whatever_its_ended_history() {
-    let world = World::new("host-view-scaling").with_env("HOSTNAME", HOST);
-    let release = release_binary(&world);
-    let mut fixture = Fixture::generate(&world.runs);
-    cold_read(&world, &release, &fixture);
-    fixture.stamp_sparse(&world, &release);
+    fixture.stamp_sparse(&world, &program);
     let mut sizes = Vec::new();
-    let mut first: Option<(Verdicts, BTreeSet<String>)> = None;
     for total in [100, 400, 800] {
-        fixture.grow(total);
+        if total > 100 {
+            fixture.grow(&world, total);
+        }
         assert_eq!(fixture.roots(), total);
         fixture.readable(&fixture.ended, false);
-        let label = format!("scaling-{total}");
-        let read = read_state(&world, &release, &fixture, &label, 5);
+        let label = format!("steady-{total}");
+        let read = read_state(&world, &program, &fixture, &label, 5);
         let opened = opened_no_ended_journal(&fixture.ended, &read.traced, &label);
-        assert_eq!(opened, fixture.live_runs, "{label}: the runs opened");
-        match &first {
-            None => first = Some((read.verdicts, opened.clone())),
-            Some((at_100, opened_at_100)) => {
-                assert_eq!(read.verdicts.rows, at_100.rows, "{label}: rows");
-                assert_eq!(read.verdicts.gone, at_100.gone, "{label}: gone");
-                assert_eq!(&opened, opened_at_100, "{label}: the runs opened");
-            }
-        }
+        assert_eq!(
+            opened, fixture.live_runs,
+            "{label}: a steady read folds exactly the runs holding live work"
+        );
+        assert_eq!(read.verdicts.rows, cold_verdicts.rows, "{label}: rows");
+        assert_eq!(read.verdicts.gone, cold_verdicts.gone, "{label}: gone");
         sizes.push(json!({
             "run_roots": total,
-            "ended_runs": fixture.ended.len(),
             "reads_ms": read.walls_ms,
             "median_ms": median(&read.walls_ms),
             "load1": read.load1,
-            "ended_journal_bytes_opened": 0,
-            "runs_opened": opened,
+            "phases": read.phases,
         }));
     }
-    let increments: Vec<Value> = sizes
-        .windows(2)
-        .map(|pair| {
-            let ms = |size: &Value| size["median_ms"].as_f64().expect("a median");
-            let ended = |size: &Value| size["ended_runs"].as_f64().expect("a count");
-            json!({
-                "from": pair[0]["run_roots"],
-                "to": pair[1]["run_roots"],
-                "ms_per_ended_run":
-                    (ms(&pair[1]) - ms(&pair[0])) / (ended(&pair[1]) - ended(&pair[0])),
-            })
-        })
-        .collect();
-    record(json!({"scaling": {"build": "release", "sizes": sizes, "increments": increments}}));
-}
 
-// llmlint: ignore-block[tests_mirror_real_usage] the same generated root, run by run: see the
-// reason on the generator above.
-/// A small root, built run by run, for the journeys about one verdict each.
-impl Fixture {
-    fn empty(runs: &Path) -> Self {
-        std::fs::create_dir_all(runs).expect("a runs root");
-        Self {
-            runs: runs.to_path_buf(),
-            expected: Expected::default(),
-            live_runs: BTreeSet::new(),
-            ended: Vec::new(),
-            settled: Vec::new(),
-            sparse_run: String::new(),
-            sparse_records: 0,
-            children: Vec::new(),
-        }
-    }
-
-    /// A run recording `plan` running, written as an engine before the dispatch
-    /// registry wrote one — a `round-01` directory and no `dispatches/` — ending in
-    /// `ending`, appended in order after its last record a minute apart.
-    fn registry_less(&mut self, seed: &Seed, run: &str, ending: &[&dyn Fn(u64) -> Value]) {
-        let mut draw = Draw(run.len() as u64);
-        let started = now_millis() - 30 * 86_400_000;
-        let mut journal = seed.journal(&mut draw, run, 40 * 1024, started, false, &[], &[]);
-        let mut at = last_stamp(&journal);
-        for record in ending {
-            at += 60_000;
-            journal.extend(format!("{}\n", record(at)).bytes());
-        }
-        self.write_run(
-            seed,
-            run,
-            &journal,
-            None,
-            reaped_pid(),
-            "linux-proc-stat:1",
-            &[],
-        );
-        std::fs::create_dir(self.runs.join(run).join("round-01")).expect("a round");
-        self.ended.push(run.to_owned());
-    }
-}
-
-/// A `driver-adopted` record, naming a driver that is gone.
-fn adopted(run: &str, at: u64) -> Value {
-    pipeline(
-        run,
-        "driver-adopted",
-        None,
-        at,
-        json!({"adoption": 1, "pid": reaped_pid()}),
+    let readings = json!({
+        "build": "the e2e tier's own (debug, and coverage-instrumented under `just check`)",
+        "cold_read_ms": cold.wall_ms,
+        "sizes": sizes,
+    });
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(DEBUG_RECORD);
+    std::fs::create_dir_all(path.parent().expect("a directory")).expect("the record's directory");
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&readings).expect("JSON"),
     )
+    .expect("the record");
+    eprintln!("host_view: this build's steady reads, by root size: {sizes:?}");
 }
 
-// llmlint: ignore-end[tests_mirror_real_usage]
 /// The keys version 1 of the reading states, at each level, every one present.
 fn has_the_version_1_keys(reading: &Value) {
     let keys = |value: &Value| -> BTreeSet<String> {
@@ -1802,58 +1030,37 @@ fn both_forms(world: &World, label: &str) -> (Value, String) {
 #[test]
 fn a_registry_less_runs_last_stop_decides_whether_its_dispatch_is_gone() {
     let world = World::new("host-view-stops").with_env("HOSTNAME", HOST);
-    let seed = Seed::read();
     // llmlint: ignore-block[tests_mirror_real_usage] runs as engines before the dispatch registry
-    // left them, and the adoption appended to one, are the generated root's: see the reason on
-    // the generator. `an_adoption_racing_the_view…` drives a real adoption through the engine.
-    let mut fixture = Fixture::empty(&world.runs);
+    // left them, and the adoption appended to one, are the generator's: see the reason at its
+    // head. `an_adoption_racing_the_view…` drives a real adoption through the engine.
+    let mut fixture = Fixture::empty(&world);
     let plan = |run: &str| (run.to_owned(), "plan".to_owned());
-
-    let signalled = |run: &'static str| move |at: u64| stopped(run, Some("signalled"), at);
-    fixture.registry_less(
-        &seed,
-        "stopped-signalled",
-        &[&signalled("stopped-signalled")],
-    );
-    fixture.registry_less(
-        &seed,
-        "stopped-unrecorded",
-        &[&|at| stopped("stopped-unrecorded", None, at)],
-    );
-    fixture.registry_less(
-        &seed,
-        "stopped-partly",
-        &[&|at| stopped("stopped-partly", Some("partly-signalled"), at)],
-    );
-    fixture.registry_less(
-        &seed,
+    let long_ago = now_millis() - 30 * 86_400_000;
+    let registry_less = |run: &str, ending: Value| {
+        fixture.run(
+            &world,
+            &json!({"run": run, "started_ms": long_ago, "rounds": true, "ending": ending}),
+        );
+    };
+    registry_less("stopped-signalled", json!([{"stopped": "signalled"}]));
+    registry_less("stopped-unrecorded", json!([{"stopped": null}]));
+    registry_less("stopped-partly", json!([{"stopped": "partly-signalled"}]));
+    // An adoption abandons the dispatch in flight, so the node is running again only
+    // once the adopting driver dispatches it again.
+    registry_less(
         "stopped-then-adopted",
-        // An adoption abandons the dispatch in flight, so the node is running again
-        // only once the adopting driver dispatches it again.
-        &[
-            &signalled("stopped-then-adopted"),
-            &|at| adopted("stopped-then-adopted", at),
-            &|at| {
-                pipeline(
-                    "stopped-then-adopted",
-                    "node-ready",
-                    Some("plan"),
-                    at,
-                    json!({}),
-                )
-            },
-            &|at| {
-                pipeline(
-                    "stopped-then-adopted",
-                    "node-dispatched",
-                    Some("plan"),
-                    at,
-                    json!({}),
-                )
-            },
-        ],
+        json!([{"stopped": "signalled"}, {"adopted": true}, {"dispatched": "plan"}]),
     );
-    fixture.registry_less(&seed, "never-stopped", &[]);
+    registry_less("never-stopped", json!([]));
+    for run in [
+        "stopped-signalled",
+        "stopped-unrecorded",
+        "stopped-partly",
+        "stopped-then-adopted",
+        "never-stopped",
+    ] {
+        fixture.ended.push(run.to_owned());
+    }
     fixture.expected.stopped.insert(plan("stopped-signalled"));
     fixture.expected.stopped.insert(plan("stopped-unrecorded"));
     for run in ["stopped-partly", "stopped-then-adopted", "never-stopped"] {
@@ -1861,62 +1068,29 @@ fn a_registry_less_runs_last_stop_decides_whether_its_dispatch_is_gone() {
     }
 
     // A live dispatch whose run's driver has died, and a stale registry entry.
-    let mut draw = Draw(3);
     let started = now_millis() - 600_000;
     let (pid, token) = fixture.sleeper();
-    let journal = seed.journal(&mut draw, "orphaned", 40 * 1024, started, false, &[], &[]);
-    let entry = json!({"node": "plan", "pid": pid, "host": HOST,
-        "dispatched_at": stamp(started + ENTRY_AFTER_MS), "started": token});
-    fixture.write_run(
-        &seed,
-        "orphaned",
-        &journal,
-        Some(&[entry]),
-        reaped_pid(),
-        "linux-proc-stat:1",
-        &[],
+    fixture.run(
+        &world,
+        &json!({"run": "orphaned", "started_ms": started,
+            "registry": [{"node": "plan", "pid": pid, "token": token, "recorded_ms": started}]}),
     );
     fixture.expected.held.insert(plan("orphaned"));
-    let journal = seed.journal(&mut draw, "stale", 40 * 1024, started, false, &[], &[]);
-    let entry = json!({"node": "plan", "pid": reaped_pid(), "host": HOST,
-        "dispatched_at": stamp(started + ENTRY_AFTER_MS), "started": "linux-proc-stat:1"});
-    fixture.write_run(
-        &seed,
-        "stale",
-        &journal,
-        Some(&[entry]),
-        reaped_pid(),
-        "linux-proc-stat:1",
-        &[],
+    fixture.run(
+        &world,
+        &json!({"run": "stale", "started_ms": started,
+            "registry": [{"node": "plan", "recorded_ms": started}]}),
     );
     fixture.expected.stale.insert(plan("stale"));
     fixture.ended.push("stale".to_owned());
     // And a run that dispatched its node again after the only entry its registry
     // holds for it was written: that stale entry is an earlier attempt's, and says
     // nothing of the dispatch the run records now.
-    let mut journal = seed.journal(
-        &mut draw,
-        "redispatched",
-        40 * 1024,
-        started,
-        false,
-        &[],
-        &[],
-    );
-    let again = last_stamp(&journal) + 60_000;
-    for record in dispatched("redispatched", "plan", again) {
-        journal.extend(format!("{record}\n").bytes());
-    }
-    let entry = json!({"node": "plan", "pid": reaped_pid(), "host": HOST,
-        "dispatched_at": stamp(started + ENTRY_AFTER_MS), "started": "linux-proc-stat:1"});
-    fixture.write_run(
-        &seed,
-        "redispatched",
-        &journal,
-        Some(&[entry]),
-        reaped_pid(),
-        "linux-proc-stat:1",
-        &[],
+    fixture.run(
+        &world,
+        &json!({"run": "redispatched", "started_ms": started,
+            "registry": [{"node": "plan", "recorded_ms": started}],
+            "ending": [{"dispatched": "plan"}]}),
     );
     fixture.expected.unproven.insert(plan("redispatched"));
     fixture.ended.push("redispatched".to_owned());
@@ -2010,20 +1184,11 @@ fn a_registry_less_runs_last_stop_decides_whether_its_dispatch_is_gone() {
 
     // An adoption past the stop, and the adopting driver's re-dispatch of the node:
     // the run is driven again, and its dispatch is no longer proven gone.
-    let at = last_stamp(&std::fs::read(&journal).expect("a journal")) + 60_000;
-    let mut appended = String::new();
-    for record in std::iter::once(adopted("stopped-signalled", at)).chain(dispatched(
+    fixture.append(
+        &world,
         "stopped-signalled",
-        "plan",
-        at + 1_000,
-    )) {
-        appended.push_str(&format!("{record}\n"));
-    }
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .open(&journal)
-        .expect("the journal");
-    std::io::Write::write_all(&mut file, appended.as_bytes()).expect("appended");
+        &json!([{"adopted": true}, {"dispatched": "plan"}]),
+    );
     fixture.expected.stopped.remove(&plan("stopped-signalled"));
     fixture.expected.unproven.insert(plan("stopped-signalled"));
     // llmlint: ignore-end[tests_mirror_real_usage]
@@ -2047,108 +1212,41 @@ fn a_registry_less_runs_last_stop_decides_whether_its_dispatch_is_gone() {
 #[test]
 fn a_journal_past_the_bound_is_never_opened_and_a_run_it_leaves_undecided_is_refused() {
     let world = World::new("host-view-bound").with_env("HOSTNAME", HOST);
-    let seed = Seed::read();
-    // llmlint: ignore-block[tests_mirror_real_usage] journals past the bound are the generated
-    // root's, grown sparse: see the reason on the generator.
-    let mut fixture = Fixture::empty(&world.runs);
-    let mut draw = Draw(11);
+    // llmlint: ignore-block[tests_mirror_real_usage] journals past the bound are the
+    // generator's, grown sparse: see the reason at its head.
+    let mut fixture = Fixture::empty(&world);
     let started = now_millis() - 86_400_000;
     let past = (1u64 << 30) + MIB;
-    let grown = |fixture: &Fixture, run: &str| {
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open(fixture.journal(run))
-            .and_then(|file| file.set_len(past))
-            .expect("a journal past the bound");
-    };
+    let stale = json!([{"node": "plan", "recorded_ms": started}]);
 
-    let journal = seed.journal(
-        &mut draw,
-        "huge-registry-less",
-        40 * 1024,
-        started,
-        false,
-        &[],
-        &[],
+    fixture.run(
+        &world,
+        &json!({"run": "huge-registry-less", "started_ms": started, "grow_to": past}),
     );
-    fixture.write_run(
-        &seed,
-        "huge-registry-less",
-        &journal,
-        None,
-        reaped_pid(),
-        "linux-proc-stat:1",
-        &[],
+    fixture.run(
+        &world,
+        &json!({"run": "huge-stale", "started_ms": started, "registry": stale, "grow_to": past}),
     );
-    grown(&fixture, "huge-registry-less");
-
-    let journal = seed.journal(&mut draw, "huge-stale", 40 * 1024, started, false, &[], &[]);
-    let entry = json!({"node": "plan", "pid": reaped_pid(), "host": HOST,
-        "dispatched_at": stamp(started + ENTRY_AFTER_MS), "started": "linux-proc-stat:1"});
-    fixture.write_run(
-        &seed,
-        "huge-stale",
-        &journal,
-        Some(&[entry]),
-        reaped_pid(),
-        "linux-proc-stat:1",
-        &[],
-    );
-    grown(&fixture, "huge-stale");
-
     let (driver, driver_token) = fixture.sleeper();
     let (pid, token) = fixture.sleeper();
-    let journal = seed.journal(&mut draw, "huge-live", 40 * 1024, started, false, &[], &[]);
-    let entry = json!({"node": "plan", "pid": pid, "host": HOST,
-        "dispatched_at": stamp(started + ENTRY_AFTER_MS), "started": token});
-    fixture.write_run(
-        &seed,
-        "huge-live",
-        &journal,
-        Some(&[entry]),
-        driver,
-        &driver_token,
-        &[],
+    fixture.run(
+        &world,
+        &json!({"run": "huge-live", "started_ms": started, "grow_to": past,
+            "driver": {"pid": driver, "token": driver_token},
+            "registry": [{"node": "plan", "pid": pid, "token": token, "recorded_ms": started}]}),
     );
-    grown(&fixture, "huge-live");
-
     // A driver that may still be running and no entry live: what it has running
     // is not in its registry, and only the journal could say.
     let (driver, driver_token) = fixture.sleeper();
-    let journal = seed.journal(
-        &mut draw,
-        "huge-driven",
-        40 * 1024,
-        started,
-        false,
-        &[],
-        &[],
+    fixture.run(
+        &world,
+        &json!({"run": "huge-driven", "started_ms": started, "grow_to": past,
+            "driver": {"pid": driver, "token": driver_token}, "registry": stale}),
     );
-    let entry = json!({"node": "plan", "pid": reaped_pid(), "host": HOST,
-        "dispatched_at": stamp(started + ENTRY_AFTER_MS), "started": "linux-proc-stat:1"});
-    fixture.write_run(
-        &seed,
-        "huge-driven",
-        &journal,
-        Some(&[entry]),
-        driver,
-        &driver_token,
-        &[],
-    );
-    grown(&fixture, "huge-driven");
 
     // And a run under the bound whose journal the read would have to fold, cold, and
     // cannot open: a fold of nothing would leave its dispatch out.
-    let journal = seed.journal(&mut draw, "unreadable", 40 * 1024, started, false, &[], &[]);
-    fixture.write_run(
-        &seed,
-        "unreadable",
-        &journal,
-        None,
-        reaped_pid(),
-        "linux-proc-stat:1",
-        &[],
-    );
+    fixture.run(&world, &json!({"run": "unreadable", "started_ms": started}));
     fixture.readable(&["unreadable".to_owned()], false);
 
     // Three runs whose writer-maintained summary is current for a journal past the
@@ -2159,28 +1257,18 @@ fn a_journal_past_the_bound_is_never_opened_and_a_run_it_leaves_undecided_is_ref
     // grown journal, as a reader that proved it ended leaves it, and the other's is not.
     let (driver, driver_token) = fixture.sleeper();
     let (pid, token) = fixture.sleeper();
-    let journal = seed.journal(
-        &mut draw,
-        "huge-live-current",
-        40 * 1024,
-        started,
-        false,
-        &[],
-        &[],
-    );
-    let entry = json!({"node": "plan", "pid": pid, "host": HOST,
-        "dispatched_at": stamp(started + ENTRY_AFTER_MS), "started": token});
-    fixture.write_run(
-        &seed,
-        "huge-live-current",
-        &journal,
-        Some(&[entry]),
-        driver,
-        &driver_token,
-        &[],
+    fixture.run(
+        &world,
+        &json!({"run": "huge-live-current", "started_ms": started,
+            "driver": {"pid": driver, "token": driver_token},
+            "registry": [{"node": "plan", "pid": pid, "token": token, "recorded_ms": started}]}),
     );
     for run in ["huge-ended-covered", "huge-ended-uncovered"] {
-        fixture.registry_less(&seed, run, &[&|at| stopped(run, Some("signalled"), at)]);
+        fixture.run(
+            &world,
+            &json!({"run": run, "started_ms": started, "rounds": true,
+                "ending": [{"stopped": "signalled"}]}),
+        );
     }
     let primed = invoke(world.cmd(&["host"]));
     assert_eq!(primed.code, Some(0), "{}", primed.stderr);
@@ -2189,8 +1277,13 @@ fn a_journal_past_the_bound_is_never_opened_and_a_run_it_leaves_undecided_is_ref
         "huge-ended-covered",
         "huge-ended-uncovered",
     ] {
-        grown(&fixture, run);
-        let journal = std::fs::metadata(fixture.journal(run)).expect("a journal");
+        let journal = fixture.journal(run);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&journal)
+            .and_then(|file| file.set_len(past))
+            .expect("a journal past the bound");
+        let journal = std::fs::metadata(journal).expect("a journal");
         let summary = world.runs.join(run).join("summary.json");
         let mut stamped = read_json(&summary);
         assert!(

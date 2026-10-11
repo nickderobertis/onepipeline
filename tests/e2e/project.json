@@ -48,7 +48,7 @@
       "outputs": [
         "{workspaceRoot}/target/llvm-cov-target/onepipeline-e2e-*.profraw",
         "{workspaceRoot}/target/budget-records/stacked-spikes-stage.json",
-        "{workspaceRoot}/target/budget-records/host-view.json"
+        "{workspaceRoot}/target/budget-records/host-view-debug.json"
       ],
       "parallelism": false
     },

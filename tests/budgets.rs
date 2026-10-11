@@ -258,6 +258,14 @@ fn the_budgets_file_registers_the_host_view_budget() {
         ["node", "scripts/host-view-budget.mjs"],
         "the budget's command is not the committed reporter"
     );
+    // It times the release binary CI's `install` job builds, so the gate's `just budgets`,
+    // which builds none, leaves it to `just host-view-budget` there.
+    assert_eq!(budget.labels, ["release-binary"]);
+    let justfile = std::fs::read_to_string(root().join("justfile")).expect("the justfile reads");
+    assert!(justfile.contains("check budgets.yaml --exclude-label release-binary"));
+    assert!(justfile.contains("onebudgetspec check budgets.yaml --id host-view-time"));
+    let ci = std::fs::read_to_string(root().join(".github/workflows/ci.yml")).expect("ci.yml");
+    assert!(ci.contains("just host-view-budget \"$(command -v onepipeline)\""));
 }
 
 /// The reporter, run from `cwd` with the result going to `result` when one is named.
@@ -276,36 +284,44 @@ fn host_view_report(
     command.output().expect("node runs the committed reporter")
 }
 
-/// A record shaped as `tests/e2e/host_view.rs` writes one.
+/// A record shaped as `scripts/host-view-measure.mjs` writes one.
 fn host_view_record() -> serde_json::Value {
+    let breakdown = |live_fold_ms: f64| {
+        serde_json::json!({
+            "event_registry_ms": 2.0, "list_ms": 0.4, "launch_and_summary_ms": 1.8,
+            "registry_ms": 0.2, "pid_proofs_ms": 0.3, "decide_ended_ms": 0.2,
+            "live_fold_ms": live_fold_ms, "cold_fold_ms": null, "free_space_ms": 0.1,
+            "render_ms": 0.1, "process_start_ms": 1.0, "exit_ms": 1.0, "live_runs_folded": 3,
+            "live_journal_bytes": 568_855, "cold_journal_bytes": 1000, "read_bytes": 3000,
+        })
+    };
     serde_json::json!({
         "schema_version": 1,
+        "binary": "/usr/local/bin/onepipeline",
         "runs_root": {"run_roots": 100, "live_dispatches": 5, "stale_entries": 4},
         "steady": {
             "build": "release",
             "reads_ms": [12.5, 31.0, 9.5, 14.0, 13.0],
             "median_ms": 13.0,
             "load1": 2.5,
-            "breakdown": {"event_registry_ms": 2.0, "live_runs_folded": 3, "live_fold_ms": 4.0},
-            "ended_journal_bytes_opened": 0,
-            "runs_opened": ["live-0", "live-1", "live-2"],
+            "breakdown": breakdown(4.0),
+            "ended_journals_unreadable": true,
         },
-        "steady_debug": {"reads_ms": [70.0], "median_ms": 70.0, "breakdown": {"event_registry_ms": 47.0}},
-        "cold": {"read_ms": 3600.0, "breakdown": {"cold_journal_bytes": 1000, "read_bytes": 3000}},
+        "cold": {"read_ms": 3600.0, "breakdown": breakdown(9.0), "generation_ms": 4000.0},
         "scaling": {
             "sizes": [
-                {"run_roots": 100, "median_ms": 10.0, "ended_journal_bytes_opened": 0, "runs_opened": ["live-0"]},
-                {"run_roots": 400, "median_ms": 18.0, "ended_journal_bytes_opened": 0, "runs_opened": ["live-0"]},
+                {"run_roots": 100, "ended_runs": 88, "reads_ms": [10.0], "median_ms": 10.0, "load1": 2.5},
+                {"run_roots": 400, "ended_runs": 361, "reads_ms": [18.0], "median_ms": 18.0, "load1": 2.5},
             ],
             "increments": [{"from": 100, "to": 400, "ms_per_ended_run": 0.03}],
         },
     })
 }
 
-/// The reporter reports only what the journeys recorded: the slowest steady single read as
-/// the value, since each is judged, and the rest as detail. A record that is missing, that a
-/// journey did not write, or that times anything but the release build is refused, and so is a
-/// run outside the checker — never a value nobody measured.
+/// The reporter reports only what the measurement recorded: the slowest steady single read
+/// as the value, since each is judged, and the rest as detail. A record that is missing, that
+/// the measurement did not write, or that times anything but the release build is refused,
+/// and so is a run outside the checker — never a value nobody measured.
 #[cfg(unix)]
 #[test]
 fn the_host_view_reporter_reports_the_slowest_steady_read_of_the_record_alone() {
@@ -323,19 +339,18 @@ fn the_host_view_reporter_reports_the_slowest_steady_read_of_the_record_alone() 
         ("/steady/reads_ms", serde_json::json!([12.0, -1.0])),
         ("/steady/reads_ms", serde_json::json!(["12"])),
         (
-            "/steady/ended_journal_bytes_opened",
-            serde_json::json!(4096),
-        ),
-        (
             "/steady/reads_ms",
             serde_json::json!([12.0, 13.0, 14.0, 15.0]),
+        ),
+        (
+            "/steady/ended_journals_unreadable",
+            serde_json::json!(false),
         ),
         ("/runs_root/run_roots", serde_json::json!(50)),
         ("/runs_root/live_dispatches", serde_json::json!(0)),
         ("/runs_root/stale_entries", serde_json::json!(null)),
-        ("/steady/runs_opened", serde_json::json!("live-0")),
-        ("/steady_debug/reads_ms", serde_json::json!([-1.0])),
         ("/cold/read_ms", serde_json::json!("slow")),
+        ("/cold", serde_json::json!(null)),
         ("/steady/breakdown/live_fold_ms", serde_json::json!(-4.0)),
         (
             "/steady/breakdown/live_runs_folded",
@@ -344,7 +359,7 @@ fn the_host_view_reporter_reports_the_slowest_steady_read_of_the_record_alone() 
         ("/steady/median_ms", serde_json::json!("13")),
         ("/steady/load1", serde_json::json!(-1.0)),
         ("/scaling/sizes", serde_json::json!("all of them")),
-        ("/scaling/sizes/0/runs_opened", serde_json::json!([1])),
+        ("/scaling/sizes/0/median_ms", serde_json::json!(null)),
         (
             "/scaling/increments/0/ms_per_ended_run",
             serde_json::json!(null),
@@ -354,6 +369,14 @@ fn the_host_view_reporter_reports_the_slowest_steady_read_of_the_record_alone() 
         *held.pointer_mut(path).expect("a field") = value;
         malformed.push(Some(held.to_string()));
     }
+    // A breakdown that lacks a figure — one written or read under another name — too.
+    let mut renamed = host_view_record();
+    let breakdown = renamed["steady"]["breakdown"]
+        .as_object_mut()
+        .expect("a breakdown");
+    let figure = breakdown.remove("list_ms").expect("a figure");
+    breakdown.insert("listing_ms".to_owned(), figure);
+    malformed.push(Some(renamed.to_string()));
     for body in malformed {
         let _ = std::fs::remove_file(&record);
         if let Some(body) = &body {
@@ -365,7 +388,7 @@ fn the_host_view_reporter_reports_the_slowest_steady_read_of_the_record_alone() 
         assert!(!result.exists(), "a refused record reported a value");
         assert!(
             stderr.contains("target/budget-records/host-view.json")
-                && stderr.contains("just test-e2e 'test(/^host_view::the_host_view/)'"),
+                && stderr.contains("just host-view-budget BINARY"),
             "{stderr}"
         );
     }
@@ -406,9 +429,8 @@ fn the_host_view_reporter_reports_the_slowest_steady_read_of_the_record_alone() 
         "12.5, 31.0, 9.5, 14.0, 13.0 ms; median 13.0 ms (reported, not the budget)",
         "event registry 2.0 ms",
         "folding 3 live run(s)",
-        "ended-run journal bytes opened: 0",
-        "cold read (release, every ended run's derived documents absent): 3600.0 ms",
-        "of which the event registry 47.0 ms",
+        "every ended run's journal unreadable to the reads",
+        "cold read (every ended run's derived documents absent): 3600.0 ms",
         "400 roots median 18.0 ms",
         "30.0 µs per ended run 100→400",
     ] {
@@ -420,25 +442,29 @@ fn the_host_view_reporter_reports_the_slowest_steady_read_of_the_record_alone() 
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The reporter names the journeys that write its record, and the e2e binary holds them.
+/// The budget's measurement and the journeys that hold the view correct read one root, from
+/// one generator: what the release binary is timed over is what this suite's build is proved
+/// over. And the measurement refuses to run without the binary it times.
 #[test]
-fn the_host_view_reporter_names_journeys_the_e2e_binary_holds() {
+fn the_host_view_measurement_and_journeys_share_one_generator() {
+    let generator = "tests/e2e/host_view_fixture.mjs";
+    assert!(root().join(generator).is_file());
+    let measure = std::fs::read_to_string(root().join("scripts/host-view-measure.mjs"))
+        .expect("the measurement reads");
+    assert!(measure.contains(&format!("from \"../{generator}\"")));
     let journeys =
         std::fs::read_to_string(root().join("tests/e2e/host_view.rs")).expect("the journeys read");
-    for name in [
-        "the_host_view_answers_a_host_sized_root_steady_cold_and_steady_again",
-        "the_host_view_over_a_host_sized_root_opens_only_live_runs_whatever_its_ended_history",
-    ] {
-        assert!(
-            journeys.contains(&format!("#[test]\nfn {name}()")),
-            "tests/e2e/host_view.rs holds no journey {name}"
-        );
-        assert!(
-            name.starts_with("the_host_view"),
-            "the reporter's filter misses {name}"
-        );
-    }
-    let script = std::fs::read_to_string(root().join("scripts/host-view-budget.mjs"))
-        .expect("the reporter reads");
-    assert!(script.contains("just test-e2e 'test(/^host_view::the_host_view/)'"));
+    assert!(journeys.contains(&format!("const GENERATOR: &str = \"{generator}\";")));
+
+    let unasked = std::process::Command::new("node")
+        .arg(root().join("scripts/host-view-measure.mjs"))
+        .output()
+        .expect("node runs the measurement");
+    assert_eq!(unasked.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&unasked.stderr)
+            .contains("usage: node scripts/host-view-measure.mjs BINARY"),
+        "{}",
+        String::from_utf8_lossy(&unasked.stderr)
+    );
 }

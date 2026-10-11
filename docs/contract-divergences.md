@@ -9456,5 +9456,6 @@ dispatches. And a script could read the answer only by parsing text.
   and `results` over such a document: each exits 0 and leaves it byte for byte.
 
 `tests/e2e/host_view.rs` drives the compiled binary over generated runs roots for
-every claim above, and records what the `host-view-time` budget in `budgets.yaml`
-reports.
+every claim above. The `host-view-time` budget in `budgets.yaml` times the release
+binary CI's `install` job builds, over the same generated root
+(`scripts/host-view-measure.mjs`).

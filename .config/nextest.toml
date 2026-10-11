@@ -83,10 +83,11 @@ status-level = "pass"
 #
 # Each assembles four hundred run roots and grows their journals to ten gibibytes,
 # so its true cost is the disk rather than a process tree — which is why the cap
-# above, about process trees, does not already cover it. The two `host_view`
-# journeys the name also matches take it for a second reason: they time single
-# `onepipeline host` reads for the `host-view-time` budget, and a read sharing the
-# machine with other tests would time the sharing. Sharing a run with them
+# above, about process trees, does not already cover it. The `host_view`
+# journey the name also matches takes it for a second reason: it times single
+# `onepipeline host` reads by this suite's build, recorded beside the
+# `host-view-time` budget, and a read sharing the machine with other tests would
+# time the sharing. Sharing a run with them
 # broke two things that measure time: `listing`'s own growth ratio, and
 # `views::status_keeps_the_last_placeable_beat_when_the_clock_stops_being_readable`,
 # which read a heartbeat three seconds stale because a saturated disk delayed the

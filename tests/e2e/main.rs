@@ -113,13 +113,13 @@ mod driver_exit;
 mod envelope_reviewer;
 mod filter;
 mod holds;
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] seven journeys, about a
-// minute together on a loaded host, two of which generate a 100-run root of ~260 MB of
-// journals and time single reads of it for the `host-view-time` budget. What they exercise
-// is `hostview`, `checkpoint`, `summary`, `views` and `sys` together through the compiled
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] six journeys, one to
+// three minutes together on a loaded host, nearly all of it one cold read of a generated
+// 100-run root's ~260 MB of journals by this suite's debug build. What they exercise is
+// `hostview`, `checkpoint`, `summary`, `views` and `sys` together through the compiled
 // binary, so the narrowest edge they can honestly sit behind is the crate itself, which is
 // this target's; a project edged narrower would drop them out of `nx affected` for the very
-// changes the budget exists to catch.
+// changes they exist to catch.
 mod host_view;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod journal;

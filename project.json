@@ -129,7 +129,6 @@
         "e2eSource",
         "{workspaceRoot}/budgets.yaml",
         "{workspaceRoot}/scripts/stacked-spikes-budget.mjs",
-        "{workspaceRoot}/scripts/host-view-budget.mjs",
         "{workspaceRoot}/package-lock.json",
         "{workspaceRoot}/scripts/linear-writeback-budget.sh"
       ]
