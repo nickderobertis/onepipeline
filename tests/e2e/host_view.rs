@@ -2488,12 +2488,17 @@ fn an_adoption_racing_the_view_loses_no_record_and_its_dispatch_is_never_gone() 
     );
 
     // A fold from that checkpoint is a fold of the whole journal.
+    // llmlint: ignore-block[tests_mirror_real_usage] the claim compares a fold resumed from
+    // the checkpoint with a fold of the whole journal, and no verb folds a run while ignoring
+    // its checkpoint. So the run's own journal, launch record and plan are copied byte for byte
+    // into a root holding no derived document, and both folds are the real binary's `results`.
     let whole = World::new("host-view-adopted-whole");
     let copied = whole.runs.join(run);
     std::fs::create_dir_all(&copied).expect("a copy");
     for file in ["events.jsonl", "launch.json", "plan.json"] {
         std::fs::copy(world.run_file(run, file), copied.join(file)).expect("a copy");
     }
+    // llmlint: ignore-end[tests_mirror_real_usage]
     let from_checkpoint = world.run(&["results", run]);
     from_checkpoint.exited(0);
     let from_nothing = whole.run(&["results", run]);
