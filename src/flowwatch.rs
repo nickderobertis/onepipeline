@@ -70,7 +70,7 @@ enum Ending {
     /// The flow's program ended `0`.
     Ended,
     /// The flow's program ended with this non-zero status.
-    Failed(i32),
+    Failed(std::num::NonZeroI32),
     /// The flow's holder died with no ending recorded.
     Died,
     /// The wait's own bound ran out.
@@ -416,8 +416,9 @@ fn pass(
         }
     }
     let ending = match flow.standing() {
-        Ok(Standing::Ended(0)) => Some(Ending::Ended),
-        Ok(Standing::Ended(status)) => Some(Ending::Failed(status)),
+        Ok(Standing::Ended(status)) => {
+            Some(std::num::NonZeroI32::new(status).map_or(Ending::Ended, Ending::Failed))
+        }
         Ok(Standing::Died) => Some(Ending::Died),
         // An ending that cannot be read says neither that the flow ended nor that
         // it did not, and `unwatched` names it: the wait goes on.
@@ -522,7 +523,11 @@ mod tests {
             ),
             (Ending::RunJoined("r".into()), 8, "run-joined"),
             (Ending::Ended, 0, "ended"),
-            (Ending::Failed(3), 9, "flow-failed"),
+            (
+                Ending::Failed(std::num::NonZeroI32::new(3).expect("non-zero")),
+                9,
+                "flow-failed",
+            ),
             (Ending::Died, 9, "flow-failed"),
             (Ending::Elapsed, 5, "elapsed"),
         ] {
@@ -538,7 +543,13 @@ mod tests {
                 lines.human
             );
         }
-        let failed = ending_lines("plan", &Ending::Failed(3), "c", 0).expect("lines");
+        let failed = ending_lines(
+            "plan",
+            &Ending::Failed(std::num::NonZeroI32::new(3).expect("non-zero")),
+            "c",
+            0,
+        )
+        .expect("lines");
         assert!(
             failed.human.contains("ended with status 3")
                 && failed
@@ -617,7 +628,7 @@ mod tests {
             },
             Ending::RunJoined("r".into()),
             Ending::Ended,
-            Ending::Failed(3),
+            Ending::Failed(std::num::NonZeroI32::new(3).expect("non-zero")),
             Ending::Elapsed,
         ];
         let stated: BTreeSet<(String, String)> = section

@@ -488,7 +488,7 @@ enum FlowOwes {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Closure {
     /// Its program ended with this non-zero status.
-    Ended(i32),
+    Ended(std::num::NonZeroI32),
     /// Its holder is gone with no ending recorded.
     Died,
 }
@@ -529,8 +529,10 @@ fn owed_by_flow(flow: &crate::flow::Flow, session: &str, budget: Option<WakeBudg
     };
     match flow.standing() {
         Err(why) => FlowOwes::Unknown(why),
-        Ok(crate::flow::Standing::Ended(0)) => FlowOwes::Nothing,
-        Ok(crate::flow::Standing::Ended(status)) => closure(Closure::Ended(status)),
+        Ok(crate::flow::Standing::Ended(status)) => match std::num::NonZeroI32::new(status) {
+            None => FlowOwes::Nothing,
+            Some(status) => closure(Closure::Ended(status)),
+        },
         Ok(crate::flow::Standing::Died) => closure(Closure::Died),
         Ok(crate::flow::Standing::Live) => {
             let leases = Leases::of(&flow.paths);
