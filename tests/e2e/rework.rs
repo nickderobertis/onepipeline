@@ -938,7 +938,12 @@ fn the_op_s_title_outranks_the_drafter_s_and_a_keeps_leaves_the_title_alone() {
     reply(&world, run, json!([rework("z", "say it the same way")])).exited(0);
     adopt(&world, run).exited(0);
     assert_eq!(change_from(&world, &branch("z"))["title"], "feat: ship z");
-    assert!(retitled(&world, run, "z-rework-1").is_empty());
+    assert!(
+        retitled(&world, run, "z-rework-1").is_empty(),
+        "{:#?}\n{:#?}",
+        retitled(&world, run, "z-rework-1"),
+        world.changes_opened()
+    );
     assert!(world.events_of(run, "title-unverified").is_empty());
 }
 

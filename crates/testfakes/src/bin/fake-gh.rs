@@ -119,13 +119,13 @@ fn main() -> ExitCode {
             repository(&args, &dir, path)
         }
         (Some("api"), Some(path)) if path.starts_with("repos/") => protection(&args, &dir, path),
-        (Some("pr"), Some("create")) => create(&args, &dir),
+        (Some("pr"), Some("create")) => holding_the_records(&dir, || create(&args, &dir)),
         (Some("pr"), Some("list")) => list(&args, &dir),
         (Some("pr"), Some("view")) => view(&args, &dir),
         (Some("pr"), Some("checks")) => checks(&args, &dir),
         (Some("pr"), Some("merge")) => merge(&args, &dir),
         (Some("pr"), Some("ready")) => ready(&args, &dir),
-        (Some("pr"), Some("edit")) => edit(&args, &dir),
+        (Some("pr"), Some("edit")) => holding_the_records(&dir, || edit(&args, &dir)),
         (Some("run"), Some("view")) => log(&args),
         (Some(one), Some(two)) => fake::refuse(&format!("unknown gh command '{one} {two}'")),
         (Some(one), None) => fake::refuse(&format!("unknown gh command '{one}'")),
@@ -528,6 +528,47 @@ fn record(dir: &Path, id: &str, state: Change) {
 
 /// The next number, derived from the record rather than kept anywhere: nothing
 /// carries a counter between two invocations of a program that exits.
+/// Run one write of `opened.jsonl` while no other process of this host is writing
+/// it.
+///
+/// Two writes race without it, as concurrent publications make them: a `pr create`
+/// numbers its change request by counting the records already written and then
+/// appends its own, so two at once take one number, and a `pr edit` rewrites the
+/// whole file from what it read, so an append between its read and its write is
+/// lost. The real host numbers and stores each change request once; held to one
+/// writer at a time, so does this one. The lock is a file only one process can
+/// create, waited for — bounded, so a writer that died holding it fails the call
+/// that met it rather than hanging the journey.
+fn holding_the_records(dir: &Path, write: impl FnOnce() -> ExitCode) -> ExitCode {
+    let lock = dir.join("gh").join("opened.lock");
+    if let Some(parent) = lock.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock)
+        {
+            Ok(_) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if std::time::Instant::now() >= deadline {
+                    fake::fail(&format!(
+                        "{} was held for a minute by a writer that never let it go",
+                        lock.display()
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(error) => fake::fail(&format!("cannot take {}: {error}", lock.display())),
+        }
+    }
+    let wrote = write();
+    let _ = std::fs::remove_file(&lock);
+    wrote
+}
+
 fn next_number(dir: &Path) -> NonZeroU64 {
     NonZeroU64::MIN.saturating_add(opened_changes(dir).len() as u64)
 }
