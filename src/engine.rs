@@ -3855,6 +3855,78 @@ pub(crate) enum Staged {
     /// A manager note with a conversation to be offered to, composed and offered
     /// to nothing yet.
     Note(Box<ValidatedNote>),
+    /// A `retitle` whose title is written onto the node's change request by the
+    /// delivery phase — the other command whose record a write outside the run
+    /// decides, since what it replaced is what the host held.
+    Retitle(Box<ValidatedRetitle>),
+}
+
+/// A `retitle`, judged and not yet written: what it compiled to, and the session
+/// the node's change request is addressed through.
+pub(crate) struct ValidatedRetitle {
+    /// What the compile staged — the title moving on the graph.
+    compiled: Vec<edits::Operation>,
+    /// The node's last session, where the run's record names one.
+    session: Option<onevcs::SessionToken>,
+}
+
+/// Stage a compiled `retitle` for the delivery phase, addressed through the
+/// session the node's last dispatch opened.
+pub(crate) fn staged_retitle(
+    compiled: Vec<edits::Operation>,
+    session: Option<&crate::vcs::DispatchSession>,
+) -> Staged {
+    Staged::Retitle(Box::new(ValidatedRetitle {
+        compiled,
+        session: session.map(|session| session.token().clone()),
+    }))
+}
+
+/// Write a `retitle`'s title onto the node's change request, through
+/// `onevcs`'s `describe_change` with the body the host holds, and answer the
+/// operation naming the title it replaced.
+///
+/// # Errors
+///
+/// The refusal naming why nothing was written: the run's record names no session
+/// for the node, the host holds no open change request from its branch, or the
+/// host would not take the title.
+fn retitle_change(validated: &ValidatedRetitle) -> Result<Vec<edits::Operation>> {
+    let Some(edits::Operation::Retitled {
+        node, to, reason, ..
+    }) = validated.compiled.first()
+    else {
+        return Ok(validated.compiled.clone());
+    };
+    let Some(token) = &validated.session else {
+        return Err(Error::Refused(format!(
+            "retitle: node '{node}' has no session on the run's record to address its change \
+             request through"
+        )));
+    };
+    let held = crate::vcs::session_change(token).map_err(|error| {
+        Error::Refused(format!(
+            "retitle: node '{node}': the host could not say which change request its branch \
+             holds: {error}"
+        ))
+    })?;
+    let Some(change) = held else {
+        return Err(Error::Refused(format!(
+            "retitle: node '{node}' has no open change request on the host to retitle"
+        )));
+    };
+    crate::vcs::describe_change(token, Some(to), &change.body).map_err(|error| {
+        Error::Refused(format!(
+            "retitle: node '{node}': {} would not take the title: {error}",
+            change.url
+        ))
+    })?;
+    Ok(vec![edits::Operation::Retitled {
+        node: node.clone(),
+        from: Some(change.title),
+        to: to.clone(),
+        reason: reason.clone(),
+    }])
 }
 
 impl Staged {
@@ -3870,6 +3942,7 @@ impl Staged {
         match self {
             Self::Compiled(operations) => operations,
             Self::Note(_) => &[],
+            Self::Retitle(retitle) => &retitle.compiled,
         }
     }
 }
@@ -3892,6 +3965,7 @@ pub(crate) fn commits_of(step: Staged) -> Result<Vec<edits::Operation>> {
     match step {
         Staged::Compiled(operations) => Ok(operations),
         Staged::Note(note) => deliver_manager_note(&note),
+        Staged::Retitle(retitle) => retitle_change(&retitle),
     }
 }
 
@@ -4298,7 +4372,7 @@ impl NoteDeliveries {
             .iter()
             .filter_map(|step| match step {
                 Staged::Note(note) => Some(note.node.clone()),
-                Staged::Compiled(_) => None,
+                Staged::Compiled(_) | Staged::Retitle(_) => None,
             })
             .collect();
         if nodes.is_empty() {
@@ -4545,6 +4619,9 @@ fn validate_command(
     };
     let mut candidate = state.graph.clone();
     let operations = edits::compile(&mut candidate, &frontier, author, command)?;
+    if let Command::Retitle { id, .. } = command {
+        return Ok(staged_retitle(operations, state.sessions.get(id)));
+    }
     let Command::Note {
         id,
         addressee,
@@ -7857,6 +7934,23 @@ pub(crate) fn record_operation_facts(
                     Some(evidence),
                 ),
             )?,
+            // The title a `retitle` wrote, under the one kind every retitle is
+            // recorded as, whoever decided it.
+            edits::Operation::Retitled {
+                node,
+                from: Some(from),
+                to,
+                ..
+            } => journal.emit(
+                journal::PipelineKind::ChangeRetitled,
+                journal::labels(&paths.run, Some(node)),
+                payload_of(&crate::payload::ChangeRetitled {
+                    node: node.clone(),
+                    from: from.clone(),
+                    to: to.clone(),
+                    by: crate::payload::RetitledBy::Retitle,
+                }),
+            )?,
             // A note no turn took is owed to the node's next dispatch: the commit
             // just journalled says so, and the bus's carry store is what hands it
             // over when that dispatch is composed.
@@ -7879,6 +7973,18 @@ pub(crate) fn record_operation_facts(
     // left for it to decide, so it stops holding the run on it.
     crate::discharge::answer_removed(paths, operations)?;
     Ok(())
+}
+
+/// A payload this crate declares, as the map a journal record carries.
+///
+/// Every type passed here is a struct of named fields, which serializes as an
+/// object; anything else would be a record with no payload, and is written as one
+/// rather than dropped.
+pub(crate) fn payload_of<T: Serialize>(declared: &T) -> serde_json::Map<String, Value> {
+    match serde_json::to_value(declared) {
+        Ok(Value::Object(payload)) => payload,
+        _ => serde_json::Map::new(),
+    }
 }
 
 /// Record one node's settlement.
@@ -10827,6 +10933,20 @@ mod tests {
                 shown_to: Vec::new(),
                 routed_to: Vec::new(),
                 envelope: None,
+            },
+            edits::Operation::ReworkRequested {
+                node: node(),
+                replacement: "later-rework-1".into(),
+                reason: "review asked for it".into(),
+                instruction: "retry instead".into(),
+                comments: vec![],
+                title: None,
+            },
+            edits::Operation::Retitled {
+                node: node(),
+                from: Some("feat: before".into()),
+                to: "fix: after".into(),
+                reason: "the title was unverified".into(),
             },
         ];
         assert_eq!(

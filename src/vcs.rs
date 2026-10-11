@@ -2298,6 +2298,12 @@ pub fn is_session_opened(kind: &crate::event::EventKind) -> bool {
     *kind == session_opened_kind()
 }
 
+/// Whether an envelope is a push `onevcs` recorded, in its own vocabulary — the
+/// read [`is_session_opened`] makes, for the same reason.
+pub(crate) fn is_push(kind: &crate::event::EventKind) -> bool {
+    *kind == kind_of(onevcs::EventKind::Push)
+}
+
 /// How `onevcs` spells a session opening, for a caller that has to *write* one
 /// rather than recognise it. One derivation with [`is_session_opened`], so a
 /// test that builds the record and the fold that reads it cannot disagree.

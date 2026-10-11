@@ -517,11 +517,15 @@ pub enum Op {
     Note,
     /// Settle a node from evidence.
     Settle,
+    /// Rework a node settled as a review draft, on its own branch.
+    Rework,
+    /// Retitle a node's open change request.
+    Retitle,
 }
 
 impl Op {
     /// Every op, in the order the contract lists them.
-    pub const ALL: [Op; 14] = [
+    pub const ALL: [Op; 16] = [
         Op::SetNodeSets,
         Op::SetRunNodeSets,
         Op::Add,
@@ -536,6 +540,8 @@ impl Op {
         Op::Amend,
         Op::Note,
         Op::Settle,
+        Op::Rework,
+        Op::Retitle,
     ];
 
     /// The op's wire word.
@@ -556,6 +562,8 @@ impl Op {
             Op::Amend => "amend",
             Op::Note => "note",
             Op::Settle => "settle",
+            Op::Rework => "rework",
+            Op::Retitle => "retitle",
         }
     }
 

@@ -229,6 +229,8 @@ pub fn op_of(command: &Command) -> &'static str {
         Command::Note { .. } => "note",
         Command::Finding { .. } => "finding",
         Command::Settle { .. } => "settle",
+        Command::Rework { .. } => "rework",
+        Command::Retitle { .. } => "retitle",
     }
 }
 
@@ -245,7 +247,9 @@ pub fn target_of(command: &Command) -> Option<String> {
         | Command::Requeue { id, .. }
         | Command::Note { id, .. }
         | Command::Settle { id, .. }
-        | Command::Amend { id, .. } => Some(id.clone()),
+        | Command::Amend { id, .. }
+        | Command::Rework { id, .. }
+        | Command::Retitle { id, .. } => Some(id.clone()),
         Command::Attest { reference } => Some(reference.clone()),
         Command::Finding { id, .. } => id.clone(),
         Command::Complete { .. } => None,
@@ -685,6 +689,59 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         release: Option<StatedRelease>,
     },
+    /// Rework a node that settled `done` as a review draft, on its own branch and
+    /// change request, answering review feedback.
+    ///
+    /// The node is superseded by a replacement in its lineage, exactly as a
+    /// [`Retry`](Self::Retry) builds one, whose definition is the node's own with
+    /// its branch pinned to the one the node's settlement recorded and its task
+    /// followed by a `## Rework` section. Its direct dependents are rewired onto
+    /// the replacement and stay `done`; every draft stacked on it is brought onto
+    /// the replacement's new head once it republishes. The replacement's
+    /// publication adopts the change request already open from that branch, so
+    /// reviewers see the same draft move rather than a second one appear. See
+    /// `docs/contract-divergences.md` entry 116.
+    Rework {
+        /// The node to rework: a lifecycle node settled `done` whose change is
+        /// unlanded and whose branch is on the record.
+        id: String,
+        /// Why it is reworked. Blank is refused rather than recorded.
+        reason: String,
+        /// What to change. Blank is refused rather than recorded.
+        instruction: String,
+        /// The review comments the rework answers.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        comments: Vec<ReworkComment>,
+        /// A Conventional Commit subject the change request is retitled to,
+        /// which takes precedence over anything the body drafter answers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        /// The replacement's id. Omitted, `<lineage root>-rework-<n>` for the
+        /// first `n` no node of the run has used.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replacement: Option<String>,
+    },
+    /// Change the title of a node's open change request without reworking it —
+    /// the remedy for a rework whose title could not be verified.
+    Retitle {
+        /// The node whose change request is retitled.
+        id: String,
+        /// The new Conventional Commit subject.
+        title: String,
+        /// Why. Blank is refused rather than recorded.
+        reason: String,
+    },
+}
+
+/// One review comment a [`Command::Rework`] answers: its id on the host, and
+/// where a person reads it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReworkComment {
+    /// The comment's id on the host.
+    pub id: String,
+    /// Where a person reads it.
+    pub url: String,
 }
 
 /// The release a `settle` states carries the landing it names.

@@ -307,6 +307,26 @@ pub enum PipelineKind {
     /// branch where the failure was one branch's, and the `error`. A failed pass
     /// never fails the run.
     BranchesRetired,
+    /// A lifecycle node's change request was retitled: `node`, the title it
+    /// carried `from`, the title it carries `to`, and `by` — `op` for a rework
+    /// stating one, `drafter` for the body drafter's `replaced` verdict on a
+    /// rework, `retitle` for the op of that name. The node's title in the graph
+    /// moves with it.
+    ChangeRetitled,
+    /// A rework's publication could not verify that its change request's title
+    /// still says what the change does, and left it unchanged: `node`, the
+    /// `title` it kept, and the `reason` — the drafting dispatch failed, no body
+    /// drafter is configured, or its answer carried no valid `title_check`. A
+    /// later `retitle` or `change-retitled` clears it.
+    TitleUnverified,
+    /// A draft stacked on a change that republished with new commits started
+    /// being brought onto it: `node`, each stack parent's branch and the head it
+    /// is brought `onto`, and the `cause`.
+    NodeRestackStarted,
+    /// That restack published: `node`, the `head` its branch stands at, whether
+    /// an agent was dispatched to conclude a conflict, and the publication's
+    /// `outcome`. The node's ordinary `node-settled` follows.
+    NodeRestacked,
 }
 
 impl PipelineKind {
@@ -352,6 +372,10 @@ impl PipelineKind {
             Self::HostShutdown => "host-shutdown",
             Self::BranchesSuperseded => "branches-superseded",
             Self::BranchesRetired => "branches-retired",
+            Self::ChangeRetitled => "change-retitled",
+            Self::TitleUnverified => "title-unverified",
+            Self::NodeRestackStarted => "node-restack-started",
+            Self::NodeRestacked => "node-restacked",
         }
     }
 
@@ -420,6 +444,10 @@ pub const PIPELINE_KINDS: &[PipelineKind] = &[
     PipelineKind::HostShutdown,
     PipelineKind::BranchesSuperseded,
     PipelineKind::BranchesRetired,
+    PipelineKind::ChangeRetitled,
+    PipelineKind::TitleUnverified,
+    PipelineKind::NodeRestackStarted,
+    PipelineKind::NodeRestacked,
 ];
 
 /// The id of a stored artifact.

@@ -175,6 +175,37 @@ pub struct RunState {
     /// every run whose nodes were never drafted on unlanded work.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) stacks: BTreeMap<String, crate::payload::SettledStack>,
+    /// What each `rework` asked of the node it superseded, keyed by that node:
+    /// its replacement, reason, instruction and the review comments it answers.
+    ///
+    /// Beside [`superseded`](Self::superseded), which a rework writes as a retry
+    /// does, because that map cannot say a node was reworked rather than retried
+    /// — and the two read opposite ways: a retried node failed, a reworked one
+    /// finished and is being changed in review. Omitted when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) reworks: BTreeMap<String, ReworkRecord>,
+    /// The commit each branch a node of this run published last stands at, as the
+    /// run saw it: off a relayed `push` of the branch while its publication runs,
+    /// and off the settlement that names it.
+    ///
+    /// What tells a draft stacked on a branch that the branch moved — before the
+    /// publication that moved it has settled, so a restack waits for its parent's
+    /// push and never for its checks. Omitted when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    // llmlint: ignore[invalid_states_unrepresentable] a branch and a commit are the plain strings `branches` and `heads` beside this carry them as, each checked by `vcs::usable` where it enters, which is the only thing that writes this map.
+    pub(crate) branch_heads: BTreeMap<String, String>,
+    /// The restacks running now, by node, with the heads each brings its node onto.
+    /// Omitted when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) restacking: BTreeMap<String, Vec<crate::payload::RestackOnto>>,
+    /// The last restack each node published. Omitted when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) restacks: BTreeMap<String, RestackRecord>,
+    /// Each node whose rework left its change request's title unverified, and
+    /// why — until a `retitle` or another publication retitles it. Omitted when
+    /// empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) titles_unverified: BTreeMap<String, crate::payload::TitleUnverified>,
     /// The branch prefix `onevcs` reported putting in front of the branches it cut
     /// for this run's sessions — `""` once it cut one and reported none — which is
     /// what a stack base is named under. `None` until a session cut a branch.
@@ -441,6 +472,40 @@ impl Recorded {
             Self::Cancelling { since } => Some(since),
         }
     }
+}
+
+/// What one `rework` asked of the node it superseded, as the fold keeps it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+// llmlint: ignore-block[invalid_states_unrepresentable] the fields of the
+// `rework-requested` operation this is folded from, which `compile_rework` judged —
+// a node id, and prose refused blank there — held as the `String`s that operation
+// carries them as.
+pub(crate) struct ReworkRecord {
+    /// The replacement it was reworked under.
+    pub(crate) replacement: String,
+    /// Why.
+    pub(crate) reason: String,
+    /// What it changes.
+    pub(crate) instruction: String,
+    /// The review comments it answers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) comments: Vec<crate::channel::ReworkComment>,
+    /// The title the op stated, where it stated one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) title: Option<String>,
+}
+// llmlint: ignore-end[invalid_states_unrepresentable]
+
+/// One restack a node published, as its `node-restacked` and the
+/// `node-restack-started` before it recorded it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RestackRecord {
+    /// Each stack parent's branch and the head it was brought onto.
+    pub(crate) onto: Vec<crate::payload::RestackOnto>,
+    /// What the restack left the node's branch at, and how it published.
+    pub(crate) restacked: crate::payload::NodeRestacked,
 }
 
 /// A decision point a driver reported as holding dependents back and has not
@@ -831,6 +896,11 @@ impl RunState {
             run_node_sets: self.run_node_sets.clone(),
             graph_validation: None,
             stated_landings: self.stated_landings.clone(),
+            landings: self.landings.clone(),
+            branches: self.branches.clone(),
+            change_urls: self.change_urls.clone(),
+            superseded: self.superseded.clone(),
+            restacking: self.restacking.keys().cloned().collect(),
         }
     }
 
@@ -1052,6 +1122,7 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
         fold_invocation(state, event);
         fold_session(state, event);
         fold_landing_commit(state, event);
+        fold_push(state, event);
         return;
     }
     // This library's own record, at an envelope schema this build does not know.
@@ -1243,6 +1314,13 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
             {
                 state.heads.insert(node.clone(), head);
             }
+            // Where the node's branch stands, as the settlement observed it: the same
+            // fact a relayed push records while the publication runs.
+            if let (Some(branch), Some(head)) = (state.branches.get(node), state.heads.get(node)) {
+                if payload.get(journal::SETTLED_HEAD).is_some() {
+                    state.branch_heads.insert(branch.clone(), head.clone());
+                }
+            }
             if let Some(remote) = payload
                 .get(journal::SETTLED_REMOTE)
                 .and_then(Value::as_str)
@@ -1270,6 +1348,62 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
             if let Some(status) = status {
                 pin_preserved_branch(state, node, status);
             }
+            // A settlement ends any restack the node was in, whichever path
+            // reached it.
+            state.restacking.remove(node);
+        }
+        // A restack is the node's own branch being brought onto its parents: the
+        // node is running again until its settlement, exactly as a dispatch
+        // makes it, and the session an earlier attempt finished with is not the
+        // one it is working in.
+        Some(journal::PipelineKind::NodeRestackStarted) => {
+            let Ok(started) = serde_json::from_value::<crate::payload::NodeRestackStarted>(
+                Value::Object(payload.clone()),
+            ) else {
+                return;
+            };
+            state
+                .recorded
+                .insert(started.node.clone(), Recorded::At(NodeStatus::Running));
+            if let Some(ts) = millis_of(&event.ts) {
+                state.dispatched_at.insert(started.node.clone(), ts);
+            }
+            state.sessions.remove(&started.node);
+            state.restacking.insert(started.node, started.onto);
+        }
+        Some(journal::PipelineKind::NodeRestacked) => {
+            let Ok(restacked) = serde_json::from_value::<crate::payload::NodeRestacked>(
+                Value::Object(payload.clone()),
+            ) else {
+                return;
+            };
+            let onto = state.restacking.remove(&restacked.node).unwrap_or_default();
+            state
+                .restacks
+                .insert(restacked.node.clone(), RestackRecord { onto, restacked });
+        }
+        // The title moves with the change request it was written onto, so the
+        // write-back projects it, and nothing is unverified about it any more.
+        Some(journal::PipelineKind::ChangeRetitled) => {
+            let Ok(retitled) = serde_json::from_value::<crate::payload::ChangeRetitled>(
+                Value::Object(payload.clone()),
+            ) else {
+                return;
+            };
+            if let Some(node) = state.graph.get_mut(&retitled.node) {
+                node.title = Some(retitled.to.clone());
+            }
+            state.titles_unverified.remove(&retitled.node);
+        }
+        Some(journal::PipelineKind::TitleUnverified) => {
+            let Ok(unverified) = serde_json::from_value::<crate::payload::TitleUnverified>(
+                Value::Object(payload.clone()),
+            ) else {
+                return;
+            };
+            state
+                .titles_unverified
+                .insert(unverified.node.clone(), unverified);
         }
         // Both kinds fold the same way, and deliberately: which of them a
         // command is journalled under is decided by the **emitter**, from
@@ -1383,6 +1517,13 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
             // it. See `RunState::stop`.
             state.stop = StopState::NotStopped;
             abandon_the_dispatch_in_flight(state);
+            // A restack its driver died in started from a node settled `done`, and
+            // that is what it is again: its parents' heads still say it is owed,
+            // so the adopting driver restacks it rather than dispatching its work
+            // a second time.
+            for node in std::mem::take(&mut state.restacking).into_keys() {
+                state.recorded.insert(node, Recorded::At(NodeStatus::Done));
+            }
             state
                 .recorded
                 .retain(|_, recorded| recorded.status() != NodeStatus::Running);
@@ -1595,6 +1736,33 @@ fn base_named_by(event: &Envelope) -> Option<String> {
     crate::vcs::usable(event.payload.get("base")?.as_str()?)
 }
 
+/// Record where a branch a node of this run published stands, off the relayed
+/// `push` that moved it.
+///
+/// Only a push the origin **accepted** of the publication's own branch: that is
+/// the one `onevcs` records a `head` on — a push of the base under it lands a
+/// commit no change request is opened from — and a refused push moved nothing.
+fn fold_push(state: &mut RunState, event: &Envelope) {
+    if event.source != Source::Vcs || !crate::vcs::is_push(&event.kind) {
+        return;
+    }
+    if event.labels.node.is_none()
+        || event.payload.get("accepted").and_then(Value::as_bool) != Some(true)
+    {
+        return;
+    }
+    let read = |key: &str| {
+        event
+            .payload
+            .get(key)
+            .and_then(Value::as_str)
+            .and_then(crate::vcs::usable)
+    };
+    if let (Some(branch), Some(head)) = (read("branch"), read("head")) {
+        state.branch_heads.insert(branch, head);
+    }
+}
+
 fn fold_session(state: &mut RunState, event: &Envelope) {
     if event.source != Source::Vcs || !crate::vcs::is_session_opened(&event.kind) {
         return;
@@ -1801,6 +1969,32 @@ pub(crate) fn fold_operations(state: &mut RunState, operations: &[Operation], at
                 // no status word can say: `cancelled` is also what a
                 // `drop` leaves, and the two take opposite actions.
                 state.superseded.insert(node.clone(), replacement.clone());
+            }
+            // Superseded exactly as a retry supersedes — the lineage, the board
+            // item and the notes follow it — but the node it replaced finished:
+            // its record stays `done`, and what the rework asked is kept beside it.
+            Operation::ReworkRequested {
+                node,
+                replacement,
+                reason,
+                instruction,
+                comments,
+                title,
+            } => {
+                state.superseded.insert(node.clone(), replacement.clone());
+                state.reworks.insert(
+                    node.clone(),
+                    ReworkRecord {
+                        replacement: replacement.clone(),
+                        reason: reason.clone(),
+                        instruction: instruction.clone(),
+                        comments: comments.clone(),
+                        title: title.clone(),
+                    },
+                );
+            }
+            Operation::Retitled { node, .. } => {
+                state.titles_unverified.remove(node);
             }
             Operation::NodeParked { node, by, reason } => {
                 // Who decided, and why. The park is what a later

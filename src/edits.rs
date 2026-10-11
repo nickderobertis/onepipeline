@@ -304,6 +304,45 @@ pub enum Operation {
         envelope: Option<u64>,
     },
     // llmlint: ignore-end[invalid_states_unrepresentable]
+    // llmlint: ignore-block[invalid_states_unrepresentable] a durable record field, as
+    // `NodeParked`'s `reason` is: the reason, the instruction and the title are the prose
+    // the `rework` op carried, each refused blank or invalid where `compile_rework` judged
+    // it, and a newtype here would have to deserialize a record an older build wrote. The
+    // node ids are the plain `String` every operation of this enum carries them as.
+    /// A node settled `done` as a review draft was superseded by a rework of it,
+    /// on its own branch: a replacement joins its lineage in the same edit, and
+    /// its dependents are rewired onto the replacement without being reset.
+    ReworkRequested {
+        /// The reworked node.
+        node: String,
+        /// The replacement's id.
+        replacement: String,
+        /// Why it was reworked.
+        reason: String,
+        /// What the rework changes.
+        instruction: String,
+        /// The review comments it answers.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        comments: Vec<crate::channel::ReworkComment>,
+        /// The title the op stated, which takes precedence over the drafter's.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+    },
+    /// A node's open change request was retitled by a `retitle`, through
+    /// `onevcs`'s `describe_change`, and the node's title moved with it.
+    Retitled {
+        /// The node.
+        node: String,
+        /// The change request's title before, as the host held it — absent from
+        /// the compile that judged the op, and filled in by the write.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<String>,
+        /// The title it carries now.
+        to: String,
+        /// Why.
+        reason: String,
+    },
+    // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
 impl Operation {
@@ -359,6 +398,8 @@ impl Operation {
             | Self::SettledFromEvidence { .. }
             | Self::LandingFromEvidence { .. }
             | Self::TaskAmended { .. }
+            | Self::ReworkRequested { .. }
+            | Self::Retitled { .. }
             // llmlint: ignore-block[names_match_behavior] both are `true` for
             // every disposition on purpose, though only `ContextAdded`'s
             // `Deferred` and `NoteDelivered`'s `Carried` move anything a fold
@@ -409,6 +450,8 @@ pub(crate) fn every_operation_kind() -> Vec<String> {
         "task-amended",
         "context-added",
         "note-delivered",
+        "rework-requested",
+        "retitled",
     ]
     .into_iter()
     .map(str::to_owned)
@@ -490,6 +533,25 @@ pub struct Frontier {
     /// duplicate only if it also states nothing new about where the work landed.
     // llmlint: ignore[invalid_states_unrepresentable] a node id is the plain `String` every neighbouring map of this struct keys by — `landings`, `branches`, `change_urls` — and it was validated where the graph took the node; a node-id newtype on this one field would disagree with each of them and convert at every read, which `src/AGENTS.md` names as drift. The value is the typed half: `StatedLanding` holds only a spelling its own parser accepted.
     pub stated_landings: BTreeMap<String, StatedLanding>,
+    // llmlint: ignore-block[invalid_states_unrepresentable] the node ids, branches and change
+    // request URLs are the plain `String`s `RunState`'s own maps carry them as, copied from
+    // there by `RunState::frontier`; each was checked where the fold took it in.
+    /// Whether each published node's change reached its base, as the run recorded it:
+    /// what a `rework` of a landed node is refused on.
+    pub landings: BTreeMap<String, crate::graph::Landing>,
+    /// The branch each settled node left behind: what a `rework` pins its
+    /// replacement to.
+    pub branches: BTreeMap<String, String>,
+    /// The change request each published node opened: what a `retitle` needs open.
+    pub change_urls: BTreeMap<String, String>,
+    /// The replacement each superseded node was retried or reworked under: the
+    /// lineages a `rework` reads its root and its in-flight refusal off.
+    pub superseded: BTreeMap<String, String>,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
+    /// The nodes a restack is bringing onto their stack parents' new heads now, as
+    /// the run's record says: what a `rework` is refused over beside
+    /// [`in_flight`](Self::in_flight), which only the loop knows.
+    pub restacking: BTreeSet<String>,
 }
 
 /// What an edit's overrides are checked against, read off the launch record
@@ -1441,6 +1503,28 @@ fn compile_into(
             blocking,
             id,
         } => compile_finding(graph, id.as_deref(), message, *blocking),
+        Command::Rework {
+            id,
+            reason,
+            instruction,
+            comments,
+            title,
+            replacement,
+        } => compile_rework(
+            graph,
+            frontier,
+            &Rework {
+                id,
+                reason,
+                instruction,
+                comments,
+                title: title.as_deref(),
+                replacement: replacement.as_deref(),
+            },
+        ),
+        Command::Retitle { id, title, reason } => {
+            compile_retitle(graph, frontier, id, title, reason)
+        }
     }
 }
 
@@ -2414,6 +2498,322 @@ fn compile_amend(
     }])
 }
 
+/// One `rework` as the compiler reads it: the op's own fields, borrowed.
+struct Rework<'a> {
+    id: &'a str,
+    reason: &'a str,
+    instruction: &'a str,
+    comments: &'a [crate::channel::ReworkComment],
+    title: Option<&'a str>,
+    replacement: Option<&'a str>,
+}
+
+/// The heading the section a rework appends to its replacement's task opens with.
+pub(crate) const REWORK_HEADING: &str = "## Rework";
+
+/// Validate one `rework` and compile the supersession it is.
+///
+/// Every refusal names why, in the order a reader would check them: the node is
+/// unknown, has nothing a rework could publish onto, is still being worked on, or
+/// is not finished; its change landed; its branch is not on the record; or what
+/// the op carries is blank or not a subject `onevcs` would publish.
+fn compile_rework(
+    graph: &mut Graph,
+    frontier: &Frontier,
+    rework: &Rework<'_>,
+) -> Result<Vec<Operation>> {
+    let id = rework.id;
+    let Some(target) = graph.get(id).cloned() else {
+        return Err(refuse(format!("rework: no node '{id}'")));
+    };
+    if target.repo.is_none() {
+        return Err(refuse(format!(
+            "rework: node '{id}' is not a lifecycle node: it names no repo, so it has no branch \
+             or change request to rework"
+        )));
+    }
+    // What is still being worked on, named before the node's own status: a node
+    // whose restack is running is recorded running, and the refusal a reader can
+    // act on is the restack's rather than "not done".
+    if let Some(busy) = busy_around(graph, frontier, id) {
+        return Err(refuse(format!(
+            "rework: {busy}; rework node '{id}' once it settles"
+        )));
+    }
+    match frontier.recorded.get(id) {
+        Some(NodeStatus::Done) => {}
+        other => {
+            return Err(refuse(format!(
+                "rework: node '{id}' is {}, not done; a rework takes a node settled as a review \
+                 draft, and `retry` is the op for one that is running, failed or cancelled",
+                other.map_or("not started", |status| status.as_str())
+            )))
+        }
+    }
+    if frontier.landings.get(id) == Some(&crate::graph::Landing::Landed) {
+        return Err(refuse(format!(
+            "rework: node '{id}''s change landed, so there is no open change request to rework; \
+             build on the landed work with `add`"
+        )));
+    }
+    let Some(branch) = frontier.branches.get(id).cloned() else {
+        return Err(refuse(format!(
+            "rework: node '{id}' has no branch on the run's record, so there is nothing to \
+             rework it on"
+        )));
+    };
+    if rework.reason.trim().is_empty() {
+        return Err(refuse(format!(
+            "rework: node '{id}': the reason cannot be blank"
+        )));
+    }
+    if rework.instruction.trim().is_empty() {
+        return Err(refuse(format!(
+            "rework: node '{id}': the instruction cannot be blank"
+        )));
+    }
+    if let Some(title) = rework.title {
+        graph::validate_subject(title)
+            .map_err(|why| refuse(format!("rework: node '{id}': the title {title:?}: {why}")))?;
+    }
+    let replacement_id = match rework.replacement {
+        Some(named) => {
+            if named.trim().is_empty() {
+                return Err(refuse("rework: the replacement needs a non-empty id"));
+            }
+            if used(graph, frontier, named) {
+                return Err(refuse(format!(
+                    "rework: replacement id '{named}' must be new"
+                )));
+            }
+            named.to_owned()
+        }
+        None => {
+            let root = lineage_root(frontier, id);
+            (1u32..)
+                .map(|n| format!("{root}-rework-{n}"))
+                .find(|candidate| !used(graph, frontier, candidate))
+                .unwrap_or_else(|| unreachable!("an unbounded range always finds a free id"))
+        }
+    };
+
+    let mut replacement = target.clone();
+    replacement.id = replacement_id.clone();
+    replacement.branch = Some(branch);
+    // The work lives on the branch, so there is nothing to resume beside it.
+    replacement.resume = None;
+    replacement.parked = false;
+    if let Some(title) = rework.title {
+        replacement.title = Some(title.trim().to_owned());
+    }
+    // The node's rendered task — its amendment and any carried note already in it —
+    // followed by what the rework asks, so neither is rendered a second time.
+    replacement.task = Some(format!(
+        "{}\n\n{}",
+        target.rendered_task().trim_end(),
+        rework_section(rework)
+    ));
+    replacement.amendment = None;
+    replacement.context = None;
+    graph::validate_node(&replacement).map_err(|e| refuse(e.to_string()))?;
+
+    let direct = graph.dependents_of(id);
+    let mut operations = vec![
+        Operation::ReworkRequested {
+            node: id.to_owned(),
+            replacement: replacement_id.clone(),
+            reason: rework.reason.trim().to_owned(),
+            instruction: rework.instruction.trim().to_owned(),
+            comments: rework.comments.to_vec(),
+            title: rework.title.map(|title| title.trim().to_owned()),
+        },
+        Operation::NodeAdded {
+            node: Box::new(replacement.clone()),
+            retry_of: Some(id.to_owned()),
+        },
+    ];
+    for dep in &replacement.deps {
+        operations.push(Operation::EdgeAdded {
+            from: dep.clone(),
+            to: replacement_id.clone(),
+            target: replacement.consumes.get(dep).cloned(),
+        });
+    }
+    graph.insert(replacement);
+    // Rewired exactly as a `retry` rewires them, and **not** reset: each dependent
+    // settled on the node's work, which the replacement continues on the same
+    // branch, so it stays `done` and is restacked rather than redone.
+    for dependent in &direct {
+        let mut carried = None;
+        if let Some(node) = graph.get_mut(dependent) {
+            for dep in &mut node.deps {
+                if dep == id {
+                    dep.clone_from(&replacement_id);
+                }
+            }
+            carried = node.consumes.remove(id);
+            if let Some(carried) = carried.clone() {
+                node.consumes.insert(replacement_id.clone(), carried);
+            }
+        }
+        operations.push(Operation::EdgeRemoved {
+            from: id.to_owned(),
+            to: dependent.clone(),
+        });
+        operations.push(Operation::EdgeAdded {
+            from: replacement_id.clone(),
+            to: dependent.clone(),
+            target: carried,
+        });
+    }
+    graph.remove(id);
+    operations.push(Operation::NodeDropped {
+        node: id.to_owned(),
+        dependents: Dependents::Detach,
+    });
+    Ok(operations)
+}
+
+/// The section a rework's replacement task ends with: the reason, the
+/// instruction, and each review comment it answers.
+fn rework_section(rework: &Rework<'_>) -> String {
+    let mut section = format!(
+        "{REWORK_HEADING}\n\nThis node's change request is in review, and this dispatch reworks \
+         it in place: its branch already carries the work below, so build on those commits \
+         rather than redoing them.\n\nReason: {}\n\nInstruction: {}\n",
+        rework.reason.trim(),
+        rework.instruction.trim()
+    );
+    if !rework.comments.is_empty() {
+        section.push_str("\nThe review comments it answers:\n");
+        for comment in rework.comments {
+            section.push_str(&format!("- {}\n", comment.url));
+        }
+    }
+    section
+}
+
+/// Whether `id` names a node the run has used: one the graph holds, one the
+/// record settled, or one a lineage carries.
+fn used(graph: &Graph, frontier: &Frontier, id: &str) -> bool {
+    graph.contains(id)
+        || frontier.recorded.contains_key(id)
+        || frontier.superseded.contains_key(id)
+        || frontier.superseded.values().any(|by| by == id)
+}
+
+/// The first node of `id`'s lineage: what nothing superseded into it.
+fn lineage_root<'a>(frontier: &'a Frontier, id: &'a str) -> &'a str {
+    let mut at = id;
+    let mut seen = BTreeSet::new();
+    while let Some((before, _)) = frontier
+        .superseded
+        .iter()
+        .find(|(_, replacement)| replacement.as_str() == at)
+    {
+        if !seen.insert(before.as_str()) {
+            break;
+        }
+        at = before.as_str();
+    }
+    at
+}
+
+/// The dispatch or restack still working on `id`, its lineage, or a draft stacked
+/// above it, as a refusal names it — or `None` where nothing is.
+fn busy_around(graph: &Graph, frontier: &Frontier, id: &str) -> Option<String> {
+    let mut lineage = vec![lineage_root(frontier, id).to_owned()];
+    while let Some(next) = lineage
+        .last()
+        .and_then(|at| frontier.superseded.get(at))
+        .filter(|next| !lineage.contains(next))
+    {
+        lineage.push(next.clone());
+    }
+    let mut above = Vec::new();
+    let mut pending = graph.dependents_of(id);
+    while let Some(next) = pending.pop() {
+        if !above.contains(&next) {
+            pending.extend(graph.dependents_of(&next));
+            above.push(next);
+        }
+    }
+    let named = |node: &str, whose: &str| {
+        if frontier.restacking.contains(node) {
+            Some(format!("{whose} '{node}' is being restacked"))
+        } else {
+            frontier.in_flight.get(node).map(|dispatch| {
+                format!(
+                    "{whose} '{node}' has a dispatch in flight — {}",
+                    dispatch.named()
+                )
+            })
+        }
+    };
+    lineage
+        .iter()
+        .find_map(|node| {
+            named(
+                node,
+                if node == id {
+                    "node"
+                } else {
+                    "its lineage's node"
+                },
+            )
+        })
+        .or_else(|| {
+            above
+                .iter()
+                .find_map(|node| named(node, "the draft stacked above it"))
+        })
+}
+
+/// Validate one `retitle`: a lifecycle node whose change request is open, a title
+/// `onevcs` would publish, and a reason. The write itself is the delivery's,
+/// which fills in the title it replaced.
+fn compile_retitle(
+    graph: &mut Graph,
+    frontier: &Frontier,
+    id: &str,
+    title: &str,
+    reason: &str,
+) -> Result<Vec<Operation>> {
+    let Some(node) = graph.get(id) else {
+        return Err(refuse(format!("retitle: no node '{id}'")));
+    };
+    if node.repo.is_none() {
+        return Err(refuse(format!(
+            "retitle: node '{id}' is not a lifecycle node: it names no repo, so it has no \
+             change request to retitle"
+        )));
+    }
+    if !frontier.change_urls.contains_key(id)
+        || frontier.landings.get(id) == Some(&crate::graph::Landing::Landed)
+    {
+        return Err(refuse(format!(
+            "retitle: node '{id}' has no open change request on the run's record to retitle"
+        )));
+    }
+    graph::validate_subject(title)
+        .map_err(|why| refuse(format!("retitle: node '{id}': the title {title:?}: {why}")))?;
+    if reason.trim().is_empty() {
+        return Err(refuse(format!(
+            "retitle: node '{id}': the reason cannot be blank"
+        )));
+    }
+    let to = title.trim().to_owned();
+    if let Some(node) = graph.get_mut(id) {
+        node.title = Some(to.clone());
+    }
+    Ok(vec![Operation::Retitled {
+        node: id.to_owned(),
+        from: None,
+        to,
+        reason: reason.trim().to_owned(),
+    }])
+}
+
 /// Fold one recorded operation back onto a graph.
 ///
 /// This is replay's half of [`compile`]: the reconciler validated and mutated,
@@ -2552,11 +2952,19 @@ pub fn apply(graph: &mut Graph, operation: &Operation) {
         // request is journalled for audit, a finding went to the planner's
         // queue, and a note a turn took went into a conversation — all folded
         // elsewhere, or nowhere.
+        // The title moves with the change request it was written onto, so the
+        // write-back projects it.
+        Operation::Retitled { node, to, .. } => {
+            if let Some(node) = graph.get_mut(node) {
+                node.title = Some(to.clone());
+            }
+        }
         Operation::NoteDelivered { .. }
         | Operation::HumanAttested { .. }
         | Operation::CompletionRequested { .. }
         | Operation::FindingRaised { .. }
-        | Operation::RetryRequested { .. } => {}
+        | Operation::RetryRequested { .. }
+        | Operation::ReworkRequested { .. } => {}
     }
 }
 
@@ -5621,5 +6029,320 @@ mod tests {
             },
         );
         assert_eq!(graph.get("b").expect("b").deps, vec!["a".to_string()]);
+    }
+
+    /// A lifecycle node of the rework journeys: a repository, and a title.
+    fn drafted(id: &str, deps: &[&str]) -> Node {
+        Node {
+            repo: Some("service".into()),
+            title: Some(format!("feat({id}): add {id}")),
+            ..agent(id, deps)
+        }
+    }
+
+    /// A run of `a ← b ← c` with `a` and `b` settled `done` and unlanded on their own
+    /// branches, as a rework finds one.
+    fn reworkable() -> (Graph, Frontier) {
+        let graph = graph_of(vec![
+            drafted("a", &[]),
+            drafted("b", &["a"]),
+            drafted("c", &["b"]),
+        ]);
+        let mut frontier = frontier(&[
+            ("a", NodeStatus::Done),
+            ("b", NodeStatus::Done),
+            ("c", NodeStatus::Done),
+        ]);
+        for id in ["a", "b", "c"] {
+            frontier
+                .landings
+                .insert(id.into(), crate::graph::Landing::Unlanded);
+            frontier.branches.insert(id.into(), format!("me/{id}"));
+            frontier
+                .change_urls
+                .insert(id.into(), format!("https://github.com/o/r/pull/{id}"));
+        }
+        (graph, frontier)
+    }
+
+    const REASON: &str = "the reviewer asked for a retry";
+    const INSTRUCTION: &str = "replace the cache with a retry";
+
+    fn rework_of(id: &str) -> Command {
+        rework_stating(id, REASON, INSTRUCTION, None, None)
+    }
+
+    fn rework_stating(
+        id: &str,
+        reason: &str,
+        instruction: &str,
+        title: Option<&str>,
+        replacement: Option<&str>,
+    ) -> Command {
+        Command::Rework {
+            id: id.into(),
+            reason: reason.into(),
+            instruction: instruction.into(),
+            comments: vec![crate::channel::ReworkComment {
+                id: "c1".into(),
+                url: "https://github.com/o/r/pull/1#discussion_r1".into(),
+            }],
+            title: title.map(str::to_owned),
+            replacement: replacement.map(str::to_owned),
+        }
+    }
+
+    /// The refusal `command` is answered with over the reworkable run, and that
+    /// nothing of the graph moved.
+    fn refused_over(graph: &Graph, frontier: &Frontier, command: &Command) -> String {
+        let mut candidate = graph.clone();
+        match compile(&mut candidate, frontier, command) {
+            Err(Error::Refused(why)) => {
+                assert_eq!(
+                    candidate.ids().collect::<Vec<_>>(),
+                    graph.ids().collect::<Vec<_>>(),
+                    "a refused edit moved the graph"
+                );
+                why
+            }
+            other => panic!("{command:?} was not refused: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_rework_supersedes_the_node_on_its_branch_and_keeps_its_dependents_done() {
+        let (mut graph, frontier) = reworkable();
+        let operations = compile(&mut graph, &frontier, &rework_of("a")).expect("accepted");
+        assert_eq!(
+            operations[0],
+            Operation::ReworkRequested {
+                node: "a".into(),
+                replacement: "a-rework-1".into(),
+                reason: "the reviewer asked for a retry".into(),
+                instruction: "replace the cache with a retry".into(),
+                comments: vec![crate::channel::ReworkComment {
+                    id: "c1".into(),
+                    url: "https://github.com/o/r/pull/1#discussion_r1".into(),
+                }],
+                title: None,
+            }
+        );
+        assert!(!graph.contains("a"), "the reworked node left the graph");
+        let replacement = graph.get("a-rework-1").expect("the replacement");
+        assert_eq!(replacement.branch.as_deref(), Some("me/a"));
+        assert_eq!(replacement.title.as_deref(), Some("feat(a): add a"));
+        let task = replacement.task.as_deref().expect("a task");
+        assert!(task.starts_with("## What\ndo it"), "{task}");
+        assert!(task.contains("\n## Rework\n"), "{task}");
+        assert!(
+            task.contains("Instruction: replace the cache with a retry"),
+            "{task}"
+        );
+        assert!(
+            task.contains("- https://github.com/o/r/pull/1#discussion_r1"),
+            "{task}"
+        );
+        assert_eq!(graph.get("b").expect("b").deps, ["a-rework-1"]);
+        // Nothing resets the dependents: no operation names them but their edges.
+        assert!(!operations
+            .iter()
+            .any(|operation| matches!(operation, Operation::RetryRequested { .. })));
+
+        // The next rework of the same lineage is numbered past the first, and a
+        // stated title and replacement id are taken as stated.
+        let mut frontier = frontier.clone();
+        frontier.superseded.insert("a".into(), "a-rework-1".into());
+        frontier
+            .recorded
+            .insert("a-rework-1".into(), NodeStatus::Done);
+        frontier.branches.insert("a-rework-1".into(), "me/a".into());
+        let again = compile(&mut graph, &frontier, &rework_of("a-rework-1")).expect("accepted");
+        assert!(matches!(
+            &again[0],
+            Operation::ReworkRequested { replacement, .. } if replacement == "a-rework-2"
+        ));
+        let stated = rework_stating(
+            "b",
+            REASON,
+            INSTRUCTION,
+            Some("fix(a): retry instead of caching"),
+            Some("a-again"),
+        );
+        compile(&mut graph, &frontier, &stated).expect("accepted");
+        let again = graph.get("a-again").expect("the stated id");
+        assert_eq!(
+            again.title.as_deref(),
+            Some("fix(a): retry instead of caching")
+        );
+    }
+
+    #[test]
+    fn a_rework_of_an_unknown_node_is_refused() {
+        let (graph, frontier) = reworkable();
+        let why = refused_over(&graph, &frontier, &rework_of("nope"));
+        assert!(why.contains("no node 'nope'"), "{why}");
+    }
+
+    #[test]
+    fn a_rework_of_a_node_that_is_not_done_is_refused() {
+        let (graph, mut frontier) = reworkable();
+        frontier.recorded.insert("a".into(), NodeStatus::Failed);
+        let why = refused_over(&graph, &frontier, &rework_of("a"));
+        assert!(why.contains("is failed, not done"), "{why}");
+        frontier.recorded.remove("a");
+        let why = refused_over(&graph, &frontier, &rework_of("a"));
+        assert!(why.contains("is not started, not done"), "{why}");
+    }
+
+    #[test]
+    fn a_rework_of_a_node_that_is_not_a_lifecycle_node_is_refused() {
+        let graph = graph_of(vec![agent("plain", &[])]);
+        let frontier = frontier(&[("plain", NodeStatus::Done)]);
+        let why = refused_over(&graph, &frontier, &rework_of("plain"));
+        assert!(why.contains("is not a lifecycle node"), "{why}");
+    }
+
+    #[test]
+    fn a_rework_of_a_landed_node_is_refused_naming_add() {
+        let (graph, mut frontier) = reworkable();
+        frontier
+            .landings
+            .insert("a".into(), crate::graph::Landing::Landed);
+        let why = refused_over(&graph, &frontier, &rework_of("a"));
+        assert!(why.contains("landed") && why.contains("`add`"), "{why}");
+    }
+
+    #[test]
+    fn a_rework_of_a_node_with_no_recorded_branch_is_refused() {
+        let (graph, mut frontier) = reworkable();
+        frontier.branches.remove("a");
+        let why = refused_over(&graph, &frontier, &rework_of("a"));
+        assert!(why.contains("has no branch on the run's record"), "{why}");
+    }
+
+    #[test]
+    fn a_rework_while_its_node_lineage_or_a_draft_above_it_is_in_flight_is_refused() {
+        let (graph, frontier) = reworkable();
+        let mut dispatched = frontier.clone();
+        dispatched
+            .in_flight
+            .insert("a".into(), LiveDispatch::default());
+        let why = refused_over(&graph, &dispatched, &rework_of("a"));
+        assert!(why.contains("node 'a' has a dispatch in flight"), "{why}");
+
+        let mut above = frontier.clone();
+        above.restacking.insert("c".into());
+        let why = refused_over(&graph, &above, &rework_of("a"));
+        assert!(
+            why.contains("the draft stacked above it 'c' is being restacked"),
+            "{why}"
+        );
+
+        let mut lineage = frontier.clone();
+        lineage.superseded.insert("a-old".into(), "a".into());
+        lineage
+            .in_flight
+            .insert("a-old".into(), LiveDispatch::default());
+        let why = refused_over(&graph, &lineage, &rework_of("a"));
+        assert!(why.contains("its lineage's node 'a-old'"), "{why}");
+    }
+
+    #[test]
+    fn a_rework_with_a_blank_reason_or_instruction_is_refused() {
+        let (graph, frontier) = reworkable();
+        let blank_reason = rework_stating("a", "  ", INSTRUCTION, None, None);
+        let why = refused_over(&graph, &frontier, &blank_reason);
+        assert!(why.contains("the reason cannot be blank"), "{why}");
+        let blank_instruction = rework_stating("a", REASON, "\n", None, None);
+        let why = refused_over(&graph, &frontier, &blank_instruction);
+        assert!(why.contains("the instruction cannot be blank"), "{why}");
+    }
+
+    #[test]
+    fn a_rework_stating_a_title_the_title_rule_refuses_is_refused() {
+        let (graph, frontier) = reworkable();
+        for title in [
+            "make the reader retry".to_owned(),
+            format!("feat: {}", "x".repeat(130)),
+            "Feat(cache): shout".to_owned(),
+            "feat(): empty scope".to_owned(),
+            "feat(cache): ".to_owned(),
+        ] {
+            let command = rework_stating("a", REASON, INSTRUCTION, Some(&title), None);
+            let why = refused_over(&graph, &frontier, &command);
+            assert!(why.contains("the title"), "{title}: {why}");
+        }
+    }
+
+    #[test]
+    fn a_rework_naming_an_existing_replacement_id_is_refused() {
+        let (graph, frontier) = reworkable();
+        for taken in ["b", "a"] {
+            let command = rework_stating("a", REASON, INSTRUCTION, None, Some(taken));
+            let why = refused_over(&graph, &frontier, &command);
+            assert!(
+                why.contains(&format!("replacement id '{taken}' must be new")),
+                "{why}"
+            );
+        }
+    }
+
+    fn retitle_of(id: &str, title: &str, reason: &str) -> Command {
+        Command::Retitle {
+            id: id.into(),
+            title: title.into(),
+            reason: reason.into(),
+        }
+    }
+
+    #[test]
+    fn a_retitle_moves_the_node_s_title_and_leaves_what_it_replaced_to_the_write() {
+        let (mut graph, frontier) = reworkable();
+        let operations = compile(
+            &mut graph,
+            &frontier,
+            &retitle_of("b", "fix(b): say what b does", "the drafter could not"),
+        )
+        .expect("accepted");
+        assert_eq!(
+            operations,
+            [Operation::Retitled {
+                node: "b".into(),
+                from: None,
+                to: "fix(b): say what b does".into(),
+                reason: "the drafter could not".into(),
+            }]
+        );
+        assert_eq!(
+            graph.get("b").and_then(|b| b.title.as_deref()),
+            Some("fix(b): say what b does")
+        );
+    }
+
+    #[test]
+    fn a_retitle_is_refused_for_each_case_it_names() {
+        let (graph, frontier) = reworkable();
+        let why = refused_over(&graph, &frontier, &retitle_of("nope", "fix: x", "why"));
+        assert!(why.contains("no node 'nope'"), "{why}");
+
+        let plain = graph_of(vec![agent("plain", &[])]);
+        let why = refused_over(&plain, &frontier, &retitle_of("plain", "fix: x", "why"));
+        assert!(why.contains("is not a lifecycle node"), "{why}");
+
+        let mut closed = frontier.clone();
+        closed.change_urls.remove("a");
+        let why = refused_over(&graph, &closed, &retitle_of("a", "fix: x", "why"));
+        assert!(why.contains("has no open change request"), "{why}");
+        let mut landed = frontier.clone();
+        landed
+            .landings
+            .insert("a".into(), crate::graph::Landing::Landed);
+        let why = refused_over(&graph, &landed, &retitle_of("a", "fix: x", "why"));
+        assert!(why.contains("has no open change request"), "{why}");
+
+        let why = refused_over(&graph, &frontier, &retitle_of("a", "no type here", "why"));
+        assert!(why.contains("Conventional Commit"), "{why}");
+        let why = refused_over(&graph, &frontier, &retitle_of("a", "fix: x", " "));
+        assert!(why.contains("the reason cannot be blank"), "{why}");
     }
 }

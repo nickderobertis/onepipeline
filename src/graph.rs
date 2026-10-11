@@ -1182,6 +1182,52 @@ fn validate_title(title: &str) -> std::result::Result<(), String> {
     Ok(())
 }
 
+/// The rule a title a rework or a retitle states, or one a body drafter proposes,
+/// is held to: [`validate_title`]'s, and a Conventional Commit subject —
+/// `type(scope)!: description`, the scope and the `!` optional.
+///
+/// Stricter than a plan's own title, which the loader holds to the length alone
+/// and leaves its form to the destination's `commit-msg` hook: a title written
+/// onto a change request already in review is the squash subject it lands under,
+/// and nothing between this op and the host would refuse a prose one.
+// llmlint: ignore[invalid_states_unrepresentable] the validated title is `onevcs::Subject`, which the sibling owns and builds at the description request; this reads the plain `String` an op or a drafter's answer carried, which serde parses before any type could constrain it.
+pub(crate) fn validate_subject(title: &str) -> std::result::Result<(), String> {
+    validate_title(title)?;
+    let title = title.trim();
+    let Some((head, description)) = title.split_once(": ") else {
+        return Err(
+            "it is not a Conventional Commit subject: it has no `type: description` separator"
+                .to_owned(),
+        );
+    };
+    let head = head.strip_suffix('!').unwrap_or(head);
+    let (kind, scope) = match head.split_once('(') {
+        Some((kind, rest)) => match rest.strip_suffix(')') {
+            Some(scope) => (kind, Some(scope)),
+            None => return Err("its scope is not closed by `)`".to_owned()),
+        },
+        None => (head, None),
+    };
+    let word = |text: &str| {
+        !text.is_empty()
+            && text
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    };
+    if !word(kind) {
+        return Err(format!(
+            "it is not a Conventional Commit subject: its type {kind:?} is not a lowercase word"
+        ));
+    }
+    if scope.is_some_and(|scope| scope.trim().is_empty() || scope.contains(['(', ')'])) {
+        return Err("it is not a Conventional Commit subject: its scope is empty".to_owned());
+    }
+    if description.trim().is_empty() {
+        return Err("it is not a Conventional Commit subject: its description is empty".to_owned());
+    }
+    Ok(())
+}
+
 fn check_steps(node: &Node, steps: &[Step]) -> std::result::Result<(), Refusal> {
     let named = |what: String| Refusal::node(&node.id, what).field("steps");
     if steps.is_empty() {

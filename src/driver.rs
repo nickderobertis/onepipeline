@@ -3506,6 +3506,7 @@ pub(crate) fn submit_envelope(
                         paths,
                         &mut graph,
                         &frontier,
+                        &view.state.sessions,
                         envelope.author.clone(),
                         command,
                     ) {
@@ -3851,10 +3852,14 @@ fn validate_here(
     paths: &RunPaths,
     graph: &mut crate::graph::Graph,
     frontier: &Frontier,
+    sessions: &std::collections::BTreeMap<String, crate::vcs::DispatchSession>,
     author: Author,
     command: &Command,
 ) -> Result<engine::Staged> {
     let operations = edits::compile(graph, frontier, author, command)?;
+    if let Command::Retitle { id, .. } = command {
+        return Ok(engine::staged_retitle(operations, sessions.get(id)));
+    }
     let Command::Note {
         id,
         addressee,
