@@ -2010,7 +2010,10 @@ fn a_registry_less_runs_last_stop_decides_whether_its_dispatch_is_gone() {
 /// run past it with no current summary is listed in `skipped` with its reason,
 /// in both forms, and so is one whose driver may still be running with no entry
 /// live. A run past it with a registry is decided from its entries otherwise: a
-/// held one is a row, and a stale one is gone.
+/// held one is a row, and a stale one is gone. One whose writer-maintained summary
+/// is current is decided as that summary allows: live from its entries, and ended
+/// off a checkpoint covering the whole journal — or, with none, from its registry,
+/// or refused.
 ///
 /// And a run under the bound whose journal the read has to fold, and cannot open,
 /// is refused the same way, rather than folded to nothing and left out.
@@ -2121,6 +2124,66 @@ fn a_journal_past_the_bound_is_never_opened_and_a_run_it_leaves_undecided_is_ref
     );
     fixture.readable(&["unreadable".to_owned()], false);
 
+    // Three runs whose writer-maintained summary is current for a journal past the
+    // bound — the shape of a long run's 3.6 GiB journal on a real host. Each is read
+    // once while small, as its writer and readers left it, then grown past the
+    // bound with its summary stamped to the grown file, standing in for the writer
+    // that keeps it current; one ended run's checkpoint is stamped to cover the whole
+    // grown journal, as a reader that proved it ended leaves it, and the other's is not.
+    let (driver, driver_token) = fixture.sleeper();
+    let (pid, token) = fixture.sleeper();
+    let journal = seed.journal(
+        &mut draw,
+        "huge-live-current",
+        40 * 1024,
+        started,
+        false,
+        &[],
+        &[],
+    );
+    let entry = json!({"node": "plan", "pid": pid, "host": HOST,
+        "dispatched_at": stamp(started + ENTRY_AFTER_MS), "started": token});
+    fixture.write_run(
+        &seed,
+        "huge-live-current",
+        &journal,
+        Some(&[entry]),
+        driver,
+        &driver_token,
+        &[],
+    );
+    for run in ["huge-ended-covered", "huge-ended-uncovered"] {
+        fixture.registry_less(&seed, run, &[&|at| stopped(run, Some("signalled"), at)]);
+    }
+    let primed = invoke(world.cmd(&["host"]));
+    assert_eq!(primed.code, Some(0), "{}", primed.stderr);
+    for run in [
+        "huge-live-current",
+        "huge-ended-covered",
+        "huge-ended-uncovered",
+    ] {
+        grown(&fixture, run);
+        let journal = std::fs::metadata(fixture.journal(run)).expect("a journal");
+        let summary = world.runs.join(run).join("summary.json");
+        let mut stamped = read_json(&summary);
+        assert!(
+            stamped["node_counts"]["running"].as_u64() >= Some(1),
+            "{run}: {stamped}"
+        );
+        stamped["journal_len"] = json!(journal.len());
+        stamped["journal_mtime_ms"] = json!(journal
+            .modified()
+            .expect("a modification time")
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("after the epoch")
+            .as_millis() as u64);
+        write(&summary, &stamped);
+    }
+    let checkpoint = world.runs.join("huge-ended-covered/checkpoint.json");
+    let mut covering = read_json(&checkpoint);
+    covering["coverage"]["bytes"] = json!(past);
+    write(&checkpoint, &covering);
+
     // llmlint: ignore-end[tests_mirror_real_usage]
     let read = traced(
         &world,
@@ -2130,6 +2193,9 @@ fn a_journal_past_the_bound_is_never_opened_and_a_run_it_leaves_undecided_is_ref
         None,
     );
     let huge = [
+        "huge-live-current",
+        "huge-ended-covered",
+        "huge-ended-uncovered",
         "huge-registry-less",
         "huge-stale",
         "huge-live",
@@ -2163,8 +2229,18 @@ fn a_journal_past_the_bound_is_never_opened_and_a_run_it_leaves_undecided_is_ref
         .collect();
     assert_eq!(
         skipped.keys().collect::<Vec<_>>(),
-        ["huge-driven", "huge-registry-less", "unreadable"],
+        [
+            "huge-driven",
+            "huge-ended-uncovered",
+            "huge-registry-less",
+            "unreadable"
+        ],
         "{reading}"
+    );
+    assert!(
+        skipped["huge-ended-uncovered"].contains("its dispatch registry cannot be read"),
+        "{}",
+        skipped["huge-ended-uncovered"]
     );
     assert!(
         skipped["huge-driven"].contains("past the 1073741824 a host read opens")
@@ -2184,20 +2260,35 @@ fn a_journal_past_the_bound_is_never_opened_and_a_run_it_leaves_undecided_is_ref
         skipped["unreadable"]
     );
     assert!(
-        text.contains("3 run root(s) skipped:")
+        text.contains("4 run root(s) skipped:")
             && text.contains("huge-registry-less: its journal is")
-            && text.contains("unreadable: its journal cannot be read"),
+            && text.contains(", and 1 more"),
         "{text}"
     );
-    let rows = verdicts(&reading).rows;
+    let held = |run: &str| (run.to_owned(), "plan".to_owned(), "held".to_owned());
     assert_eq!(
-        rows,
-        vec![("huge-live".to_owned(), "plan".to_owned(), "held".to_owned())],
+        verdicts(&reading).rows,
+        vec![held("huge-live"), held("huge-live-current")],
         "{reading}"
     );
     assert_eq!(
         verdicts(&reading).gone,
-        BTreeSet::from([("huge-stale".to_owned(), "plan".to_owned())])
+        BTreeSet::from([
+            ("huge-ended-covered".to_owned(), "plan".to_owned()),
+            ("huge-stale".to_owned(), "plan".to_owned())
+        ])
+    );
+    let stopped = reading["gone"]
+        .as_array()
+        .expect("gone")
+        .iter()
+        .find(|gone| gone["run"] == "huge-ended-covered")
+        .expect("the covered run's dispatch is gone");
+    assert!(
+        stopped["reason"]
+            .as_str()
+            .is_some_and(|why| why.starts_with("its run was stopped")),
+        "the covered run was not decided off its checkpoint: {stopped}"
     );
 }
 
