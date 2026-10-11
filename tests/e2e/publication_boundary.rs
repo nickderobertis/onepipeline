@@ -1456,6 +1456,7 @@ fn a_direct_reply_and_note_meet_the_same_check_without_any_bus() {
 }
 
 /// What the reconciler answered each queued envelope with, by envelope id.
+#[cfg(unix)]
 fn outcome_of(world: &World, run: &str, id: u64) -> Option<Value> {
     world
         .command_outcomes(run)
