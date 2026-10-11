@@ -1167,8 +1167,17 @@ fn a_rework_with_no_body_drafter_configured_leaves_its_title_unverified() {
     world.script("a.work", "a's change\n");
     world.script("a-rework-1.work", "a's change, reworked\n");
     world.script("a-rework-1.work-file", "a");
+    world.script("b.work", "b's change\n");
+    world.script("b-rework-1.work", "b's change, reworked\n");
+    world.script("b-rework-1.work-file", "b");
     let run = "undrafted";
-    launched(&world, run, vec![lifecycle("a", &[])], 1, &[]);
+    launched(
+        &world,
+        run,
+        vec![lifecycle("a", &[]), lifecycle("b", &[])],
+        2,
+        &[],
+    );
     left_unverified(
         &world,
         run,
@@ -1176,6 +1185,25 @@ fn a_rework_with_no_body_drafter_configured_leaves_its_title_unverified() {
         "feat: ship a",
         "no body drafter is configured",
     );
+
+    // A rework stating its title needs no drafter for it: the title is written
+    // onto the change request over the description the host holds, untouched.
+    let b_branch = text(&settled(&world, run, "b")["branch"], "b's branch").to_owned();
+    let body = change_from(&world, &b_branch)["body"].clone();
+    let mut stated = rework("b", "rework it");
+    stated["title"] = json!("fix(b): what the op says");
+    reply(&world, run, json!([stated])).exited(0);
+    adopt(&world, run).exited(0);
+    let change = change_from(&world, &b_branch);
+    assert_eq!(change["title"], "fix(b): what the op says");
+    assert_eq!(change["body"], body, "the description moved: {change}");
+    assert_eq!(
+        retitled(&world, run, "b-rework-1"),
+        [
+            json!({"node": "b-rework-1", "from": "feat: ship b", "to": "fix(b): what the op says", "by": "op"})
+        ]
+    );
+    assert!(unverified(&world, run, "b-rework-1").is_empty());
 }
 
 /// A rework of a run that had settled brings it back to life as any accepted edit
@@ -1500,4 +1528,84 @@ fn a_restack_whose_worker_fails_its_merge_settles_the_draft_failed() {
         "c was restacked onto a branch that never moved"
     );
     assert_eq!(settled(&world, run, "c")["status"], "done");
+}
+
+/// A restack whose publication the host's checks refuse goes back to the draft's
+/// own worker on the same branch, as any publication refusal does — drafted again,
+/// since that worker may change the content — and settles as a review draft once
+/// a later publication of it is green.
+#[test]
+fn a_restack_its_checks_refuse_is_asked_of_the_draft_s_worker_again() {
+    let world = team_world("rework-restack-retry");
+    world.script("a.work", "a's change\n");
+    world.script("b.work-anew", "b's change");
+    world.script("a-rework-1.work", "a's change, as the review asked\n");
+    world.script("a-rework-1.work-file", "a");
+    world.script("pr-author.title-check", KEEPS);
+    let run = "retry";
+    let drafter = world.pr_author_graph();
+    launched(
+        &world,
+        run,
+        vec![lifecycle("a", &[]), lifecycle("b", &["a"])],
+        2,
+        &["--pr-author-graph", &drafter],
+    );
+    let b_branch = text(&settled(&world, run, "b")["branch"], "b's branch").to_owned();
+    let b_number = change_from(&world, &b_branch)["number"].clone();
+    // `b`'s checks fail from here, until its worker has been asked again.
+    world.script(
+        &format!("gh.checks.{b_number}"),
+        "lint completed failure required",
+    );
+
+    reply(
+        &world,
+        run,
+        json!([rework("a", "say what the review asked in a.md")]),
+    )
+    .exited(0);
+    let mut driving = world.cmd(&["adopt", run]);
+    driving
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let driver = driving.spawn().expect("the adopting driver starts");
+    world.until("b's worker to be asked again", |world| {
+        world
+            .events_of(run, "node-dispatched")
+            .iter()
+            .filter(|event| event["labels"]["node"] == "b")
+            .count()
+            == 2
+    });
+    world.script(
+        &format!("gh.checks.{b_number}"),
+        crate::draft_lifecycle::GREEN,
+    );
+    let ended = driver.wait_with_output().expect("the driver ends");
+    assert!(ended.status.success(), "{ended:?}");
+
+    let b = settled(&world, run, "b");
+    assert_eq!(b["status"], "done", "{b}");
+    assert_eq!(b["outcome"], "change-review-draft", "{b}");
+    let restacked = world
+        .events_of(run, "node-restacked")
+        .into_iter()
+        .find(|event| event["labels"]["node"] == "b")
+        .expect("b's restack is on the record");
+    assert_eq!(restacked["payload"]["agent_dispatched"], true);
+    let redispatched = world
+        .events_of(run, "node-dispatched")
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == "b")
+        .nth(1)
+        .expect("b was asked again");
+    assert!(
+        text(&redispatched["payload"]["reason"], "a reason").starts_with("checks-failed"),
+        "{redispatched}"
+    );
+    // Drafted again on its retry, onto the one change request it has.
+    assert_eq!(tasks_of(&world, run, "b", "pr-author").len(), 2);
+    assert_eq!(opened_from(&world, &b_branch), 1);
+    assert!(held_as_draft(&world, &b_number));
 }

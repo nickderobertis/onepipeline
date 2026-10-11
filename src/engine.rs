@@ -4101,13 +4101,22 @@ impl Staged {
 ///
 /// # Errors
 ///
-/// The conversation's own refusal, for a note that reached nobody. It is the only
-/// error this phase can produce, which is the property the envelope's atomicity
-/// rests on — see [`deliver_envelope`].
+/// The conversation's own refusal, for a note that reached nobody, and the host's,
+/// for a `retitle` it would not write. They are the only errors this phase can
+/// produce, and each is a write outside the run that cannot be taken back once a
+/// later command of the envelope refuses — see [`deliver_envelope`] for that
+/// residue, which a retitle shares with a note.
 pub(crate) fn commits_of(step: Staged) -> Result<Vec<edits::Operation>> {
     match step {
         Staged::Compiled(operations) => Ok(operations),
         Staged::Note(note) => deliver_manager_note(&note),
+        // llmlint: ignore[changed_behavior_has_e2e] the residue — this write taken by the
+        // host and a later command of the same envelope then refused at delivery — needs that
+        // later refusal to come from a conversation or a host answering one call and not the
+        // next within one reply, which neither double can be scripted to do; the write itself
+        // and its own refusal are driven by `tests/e2e/rework.rs`'s `a_title_nothing_verified_
+        // is_left_unverified_until_a_retitle_sets_one`, and the all-or-nothing journalling by
+        // `record_delivered`'s note journeys, the same path.
         Staged::Retitle(retitle) => retitle_change(&retitle),
     }
 }

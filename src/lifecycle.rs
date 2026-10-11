@@ -2754,13 +2754,10 @@ struct ReworkDrafting {
     net_diff: std::result::Result<String, String>,
 }
 
-/// The heading the rework's current title is shown under.
+// Named once, because a drafter is told to answer under the last of them and a
+// journey reads each section back by its heading.
 const CURRENT_TITLE_HEADING: &str = "## Current title";
-
-/// The heading the rework's net diff is shown under.
 const NET_DIFF_HEADING: &str = "## Net diff";
-
-/// The heading the rework's title check is asked for under.
 const TITLE_CHECK_HEADING: &str = "## Title check";
 
 impl ReworkDrafting {
