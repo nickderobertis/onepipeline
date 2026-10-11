@@ -230,15 +230,18 @@ fn url_or_none(url: Option<&str>) -> &str {
 
 /// `description` with `block` in it exactly once: appended where it holds no
 /// Stack block, and in place of the text between the markers where it holds one.
-/// Nothing outside the markers moves, so a person's edits elsewhere survive.
+/// Nothing outside the markers moves, so a person's edits elsewhere survive: an
+/// appended block follows every byte of the description, trailing whitespace
+/// included, after only the newlines needed for a blank line before it.
 ///
 /// A description holding an opening marker with no closing one after it is read
 /// as holding no block, and the block is appended: replacing to the end of the
 /// description would delete whatever a person wrote after a stray marker.
 pub(crate) fn splice(description: &str, block: &str) -> String {
     // llmlint: ignore-block[changed_behavior_has_e2e] `tests/e2e/stacked_drafts.rs` drives the
-    // three descriptions a publication meets — empty, a drafted body, and one already holding
-    // the block a reviewer wrote around — through the binary and the host. The one case it
+    // descriptions a publication meets — empty, a drafted body, one already holding the block
+    // a reviewer wrote around, and one a reviewer rewrote without it, ending in whitespace —
+    // through the binary and the host. The one case it
     // does not is an opening marker with no closing one, which only a person typing half a
     // marker into the description produces; `a_stray_opening_marker_is_not_read_as_a_block`
     // below holds that it is appended past rather than replaced to the end.
@@ -248,12 +251,16 @@ pub(crate) fn splice(description: &str, block: &str) -> String {
             return format!("{}{block}{}", &description[..open], &description[end..]);
         }
     } // llmlint: ignore-end[changed_behavior_has_e2e]
-    let trimmed = description.trim_end();
-    if trimmed.is_empty() {
-        block.to_owned()
+      // Appended after every byte of the description, trailing whitespace included,
+      // with only the newlines it lacks to put a blank line before the block.
+    let separator = if description.is_empty() || description.ends_with("\n\n") {
+        ""
+    } else if description.ends_with('\n') {
+        "\n"
     } else {
-        format!("{trimmed}\n\n{block}")
-    }
+        "\n\n"
+    };
+    format!("{description}{separator}{block}")
 }
 
 /// The stack base a node with several stack parents is placed on.
@@ -434,6 +441,12 @@ mod tests {
         let spliced = splice("## What\nb\n\n", &block);
         assert_eq!(spliced, format!("## What\nb\n\n{block}"));
         assert_eq!(splice("", &block), block);
+        assert_eq!(splice("text", &block), format!("text\n\n{block}"));
+        assert_eq!(splice("text\n", &block), format!("text\n\n{block}"));
+        // Trailing whitespace is the description's own, and stays.
+        let trailing = "text  \n\n \t\n";
+        assert_eq!(splice(trailing, &block), format!("{trailing}\n{block}"));
+        assert_eq!(splice(" ", &block), format!(" \n\n{block}"));
     }
 
     #[test]

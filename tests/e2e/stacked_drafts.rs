@@ -818,14 +818,16 @@ fn an_explicit_base_branch_is_the_root_of_the_stack_base() {
 
 /// A second publication of a stacked node — a re-dispatch onto its branch after its
 /// checks failed — assembles its stack base again, still leaves exactly one Stack
-/// block, and keeps text written outside it between the two publications.
+/// block, and keeps text written outside it between the two publications. A third,
+/// over a description a reviewer rewrote without the block, appends one after every
+/// byte of that description, its trailing whitespace included.
 ///
 /// The root moves between the two attempts, so the second assembly advances the
 /// stack base over it rather than finding it as it was, and the continued branch
 /// carries it while its change request still shows only its own change.
 #[test]
 fn a_republished_stack_keeps_one_block_and_the_text_around_it() {
-    let world = team_world("stack-republish").with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "2");
+    let world = team_world("stack-republish").with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "3");
     let repo = service(&world);
     world.script("a.work", "a's change\n");
     world.script("c.work", "c's change\n");
@@ -858,29 +860,28 @@ fn a_republished_stack_keeps_one_block_and_the_text_around_it() {
     first.release();
 
     let second = meeting.arrived();
-    // The first publication opened the change request and wrote its block.
-    let opened = world.fakes.join("gh").join("opened.jsonl");
-    let changes: Vec<Value> = std::fs::read_to_string(&opened)
-        .expect("the host opened change requests")
-        .lines()
-        .map(|line| serde_json::from_str(line).expect("a change request"))
-        .collect();
-    let edited: Vec<String> = changes
-        .into_iter()
-        .map(|mut change| {
-            if change["number"] == 3 {
-                let body = text(&change["body"], "f's body").to_owned();
-                assert!(
-                    body.contains(OPEN),
-                    "the first publication wrote no block:\n{body}"
-                );
-                change["body"] = json!(format!("A reviewer wrote this.\n\n{body}\n\nAnd this."));
-            }
-            change.to_string()
-        })
-        .collect();
-    std::fs::write(&opened, format!("{}\n", edited.join("\n"))).expect("the edit is written");
+    // The first publication opened the change request and wrote its block; a
+    // reviewer writes around it.
+    rewrite_description(&world, 3, |body| {
+        assert!(
+            body.contains(OPEN),
+            "the first publication wrote no block:\n{body}"
+        );
+        format!("A reviewer wrote this.\n\n{body}\n\nAnd this.")
+    });
     second.release();
+
+    let third = meeting.arrived();
+    // The second publication replaced the block in place and kept the text around it.
+    let rewritten = rewrite_description(&world, 3, |body| {
+        one_block(body, "A reviewer wrote this.");
+        assert!(body.ends_with("\n\nAnd this."), "{body}");
+        // Then the reviewer rewrites the whole description, block and all, leaving
+        // it ending in blank lines and trailing spaces.
+        REWRITTEN.to_owned()
+    });
+    assert!(!rewritten.contains(OPEN));
+    third.release();
     world.until("the run to settle", |world| {
         world.run_file(run, "result.json").is_file()
     });
@@ -894,8 +895,8 @@ fn a_republished_stack_keeps_one_block_and_the_text_around_it() {
             .iter()
             .filter(|event| event["labels"]["node"] == "f")
             .count(),
-        2,
-        "f was published twice"
+        3,
+        "f was published three times"
     );
     // Assembled again over the moved root: advanced, forward-only, and carried.
     let assembled_second = git(&world, &repo.origin, &["rev-parse", &stack_base]);
@@ -926,15 +927,54 @@ fn a_republished_stack_keeps_one_block_and_the_text_around_it() {
         .as_str()
         .expect("a body")
         .to_owned();
-    let block = one_block(&description, "A reviewer wrote this.");
+    // The third publication appended a block, and every byte of the description it
+    // found — trailing blank lines and spaces included — is still there, first.
     assert!(
-        description.trim_end().ends_with("And this."),
-        "{description}"
+        description.starts_with(REWRITTEN),
+        "the description the reviewer left is not an exact prefix:\n{description:?}"
     );
+    let appended = &description[REWRITTEN.len()..];
+    assert_eq!(appended.matches(OPEN).count(), 1, "{description:?}");
+    assert_eq!(appended.matches(CLOSE).count(), 1, "{description:?}");
+    let open = appended.find(OPEN).expect("counted above");
+    assert!(
+        appended[..open].chars().all(|c| c == '\n'),
+        "more than a separator between the description and its block: {appended:?}"
+    );
+    assert!(appended.ends_with(CLOSE), "{description:?}");
+    let block = &appended[open..];
     assert!(block.contains(&stack_base), "{block}");
     for parent in ["a", "c"] {
         assert!(block.contains(text(&settled(&world, run, parent)["change_url"], "url")));
     }
+}
+
+/// A description a reviewer rewrote with no Stack block, ending in blank lines and
+/// trailing spaces.
+const REWRITTEN: &str = "A reviewer rewrote all of it.\n\nTrailing space follows.  \n\n \t\n";
+
+/// Rewrite change request `number`'s description on the host as `edit` returns it
+/// from the one there, and answer with the rewrite.
+fn rewrite_description(world: &World, number: u64, edit: impl FnOnce(&str) -> String) -> String {
+    let opened = world.fakes.join("gh").join("opened.jsonl");
+    let mut edit = Some(edit);
+    let mut written = None;
+    let changes: Vec<String> = std::fs::read_to_string(&opened)
+        .expect("the host opened change requests")
+        .lines()
+        .map(|line| {
+            let mut change: Value = serde_json::from_str(line).expect("a change request");
+            if change["number"] == number {
+                let edit = edit.take().expect("one change request has the number");
+                let body = edit(text(&change["body"], "the body"));
+                change["body"] = json!(body);
+                written = Some(body);
+            }
+            change.to_string()
+        })
+        .collect();
+    std::fs::write(&opened, format!("{}\n", changes.join("\n"))).expect("the edit is written");
+    written.unwrap_or_else(|| panic!("the host holds no change request {number}"))
 }
 
 /// The settlement's `base`, `head` and `stack` reach the store the plan was read
