@@ -924,6 +924,12 @@ fn the_host_view_answers_a_host_sized_root_steady_cold_and_steady_again() {
             "reads_ms": read.walls_ms,
             "median_ms": median(&read.walls_ms),
             "load1": read.load1,
+            "ended_journal_bytes_opened": fixture
+                .ended
+                .iter()
+                .filter_map(|run| read.traced.opened.get(run))
+                .sum::<u64>(),
+            "runs_opened": opened,
             "phases": read.phases,
         }));
     }

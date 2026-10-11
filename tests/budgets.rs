@@ -311,9 +311,12 @@ fn host_view_record() -> serde_json::Value {
         "cold": {"read_ms": 3600.0, "breakdown": breakdown(9.0), "generation_ms": 4000.0},
         "scaling": {
             "sizes": [
-                {"run_roots": 100, "ended_runs": 88, "reads_ms": [10.0], "median_ms": 10.0, "load1": 2.5},
-                {"run_roots": 400, "ended_runs": 361, "reads_ms": [18.0], "median_ms": 18.0, "load1": 2.5},
-                {"run_roots": 800, "ended_runs": 725, "reads_ms": [30.0], "median_ms": 30.0, "load1": 2.5},
+                {"run_roots": 100, "ended_runs": 88, "reads_ms": [10.0], "median_ms": 10.0, "load1": 2.5,
+                 "ended_journal_bytes_opened": 0, "runs_opened": ["live-0", "live-1", "live-2"]},
+                {"run_roots": 400, "ended_runs": 361, "reads_ms": [18.0], "median_ms": 18.0, "load1": 2.5,
+                 "ended_journal_bytes_opened": 0, "runs_opened": ["live-0", "live-1", "live-2"]},
+                {"run_roots": 800, "ended_runs": 725, "reads_ms": [30.0], "median_ms": 30.0, "load1": 2.5,
+                 "ended_journal_bytes_opened": 0, "runs_opened": ["live-0", "live-1", "live-2"]},
             ],
             "increments": [
                 {"from": 100, "to": 400, "ms_per_ended_run": 0.03},
@@ -366,6 +369,17 @@ fn the_host_view_reporter_reports_the_slowest_steady_read_of_the_record_alone() 
         ("/scaling/sizes", serde_json::json!("all of them")),
         ("/scaling/sizes/0/median_ms", serde_json::json!(null)),
         ("/scaling/sizes/2/run_roots", serde_json::json!(1600)),
+        ("/scaling/sizes/1/reads_ms", serde_json::json!([])),
+        (
+            "/scaling/sizes/1/ended_journal_bytes_opened",
+            serde_json::json!(null),
+        ),
+        (
+            "/scaling/sizes/2/ended_journal_bytes_opened",
+            serde_json::json!(-1),
+        ),
+        ("/scaling/sizes/0/runs_opened", serde_json::json!("live-0")),
+        ("/scaling/sizes/2/runs_opened", serde_json::json!([""])),
         ("/scaling/increments/1/to", serde_json::json!(1600)),
         (
             "/scaling/increments/0/ms_per_ended_run",
@@ -438,7 +452,9 @@ fn the_host_view_reporter_reports_the_slowest_steady_read_of_the_record_alone() 
         "folding 3 live run(s)",
         "every ended run's journal unreadable to the reads",
         "cold read (every ended run's derived documents absent): 3600.0 ms",
-        "400 roots median 18.0 ms",
+        "400 roots median 18.0 ms (18.0 ms), 0 ended-journal bytes opened, \
+         journals of 3 run(s) opened: live-0, live-1, live-2",
+        "800 roots median 30.0 ms",
         "30.0 µs per ended run 100→400",
     ] {
         assert!(

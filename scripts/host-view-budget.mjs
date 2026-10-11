@@ -147,6 +147,16 @@ function validateDetail(held) {
   held.scaling.sizes.forEach((size, n) => {
     if (!isObject(size)) fail(`scaling.sizes[${n}] must be an object`);
     milliseconds(size.median_ms, `scaling.sizes[${n}].median_ms`);
+    reads(size.reads_ms, `scaling.sizes[${n}].reads_ms`);
+    if (!Number.isSafeInteger(size.ended_journal_bytes_opened) || size.ended_journal_bytes_opened < 0) {
+      fail(`scaling.sizes[${n}].ended_journal_bytes_opened must be a nonnegative count of bytes`);
+    }
+    if (
+      !Array.isArray(size.runs_opened) ||
+      size.runs_opened.some((run) => typeof run !== "string" || run === "")
+    ) {
+      fail(`scaling.sizes[${n}].runs_opened must name the runs whose journals the read opened`);
+    }
   });
   if (
     !Array.isArray(held.scaling.increments) ||
@@ -203,7 +213,13 @@ function detail(held) {
   parts.push(
     "scaling (same live set, more ended history): " +
       held.scaling.sizes
-        .map((size) => `${size.run_roots} roots median ${fixed(size.median_ms)} ms`)
+        .map(
+          (size) =>
+            `${size.run_roots} roots median ${fixed(size.median_ms)} ms ` +
+            `(${size.reads_ms.map(fixed).join(", ")} ms), ` +
+            `${size.ended_journal_bytes_opened} ended-journal bytes opened, ` +
+            `journals of ${size.runs_opened.length} run(s) opened: ${size.runs_opened.join(", ") || "none"}`,
+        )
         .join("; ") +
       (increments ? `; ${increments}` : ""),
   );

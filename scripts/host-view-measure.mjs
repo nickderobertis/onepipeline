@@ -15,13 +15,16 @@
 // not grow with it. Everything goes to `target/budget-records/host-view.json`,
 // which `scripts/host-view-budget.mjs` reports.
 //
-// That no read opens an ended journal is held by `tests/e2e/host_view.rs`, under
-// `strace`; here the reads simply cannot, and are held to answering correctly.
+// The timed reads cannot open an ended journal, and are held to answering
+// correctly. Beside them, one further read at each size runs under `strace`, untimed,
+// so the record says from the kernel which runs' journals that size's read opened
+// and how many ended-journal bytes it read: none, and the live runs alone, or the
+// measurement fails. `tests/e2e/host_view.rs` holds the same under this tree's build.
 
 import { spawn, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   cold,
@@ -162,6 +165,81 @@ function holds(manifest, reading, label) {
   if (problems.length > 0) throw new Error(`${label}: ${problems.join("; ")}`);
 }
 
+/** The run a path names, where it is a run's journal. */
+const runOf = (path) => (path.endsWith("/events.jsonl") ? basename(dirname(path)) : null);
+
+/**
+ * One untimed `host --json` read under `strace`: the runs whose journals it opened,
+ * with the bytes it read from each, and those it tried and failed to open. Throws
+ * where the tracer would not run, since an observation nobody made is not one of
+ * nothing.
+ */
+function traced(manifest, label) {
+  const into = join(work, `${label}.strace`);
+  const done = spawnSync(
+    "strace",
+    [
+      "-f",
+      "--seccomp-bpf",
+      "-qq",
+      "-y",
+      "-e",
+      "trace=openat,open,read,pread64",
+      "-e",
+      "signal=none",
+      "-o",
+      into,
+      binary,
+      "host",
+      "--json",
+    ],
+    { encoding: "utf8" },
+  );
+  if (done.error || done.status !== 0)
+    throw new Error(`${label}: \`strace ... host --json\` ${failure(done)}`);
+  holds(manifest, JSON.parse(done.stdout), `${label} traced read`);
+  let trace;
+  try {
+    trace = readFileSync(into, "utf8");
+  } catch (error) {
+    throw new Error(`${label}: the tracer left no trace (${error.message})`);
+  }
+  if (!trace.includes("openat(")) throw new Error(`${label}: the tracer recorded no open`);
+  const opened = new Map();
+  const refused = new Set();
+  for (const line of trace.split("\n")) {
+    const body = line.slice(line.indexOf(" ") + 1);
+    const result = body.slice(body.lastIndexOf("= ") + 2).trim();
+    if (body.startsWith("openat(") || body.startsWith("open(")) {
+      const run = runOf(body.split('"')[1] ?? "");
+      if (run === null) continue;
+      if (result.startsWith("-")) refused.add(run);
+      else if (!opened.has(run)) opened.set(run, 0);
+    } else if (body.startsWith("read(") || body.startsWith("pread64(")) {
+      const path = body.match(/<([^>]*)>/)?.[1];
+      const run = path === undefined ? null : runOf(path);
+      if (run === null) continue;
+      opened.set(run, (opened.get(run) ?? 0) + (Number.parseInt(result, 10) || 0));
+    }
+  }
+  const ended = new Set(manifest.ended);
+  const reached = [...new Set([...opened.keys(), ...refused])].filter((run) => ended.has(run));
+  if (reached.length > 0)
+    throw new Error(`${label}: the read opened or tried to open ended runs' journals: ${reached.join(", ")}`);
+  const runsOpened = [...opened.keys()].sort();
+  const live = [...manifest.live_runs].sort();
+  if (runsOpened.join() !== live.join())
+    throw new Error(
+      `${label}: the read opened the journals of ${runsOpened.join(", ") || "no run"}, not the live runs ${live.join(", ")}`,
+    );
+  return {
+    ended_journal_bytes_opened: [...opened]
+      .filter(([run]) => ended.has(run))
+      .reduce((sum, [, bytes]) => sum + bytes, 0),
+    runs_opened: runsOpened,
+  };
+}
+
 const median = (walls) => [...walls].sort((a, b) => a - b)[Math.floor(walls.length / 2)];
 
 function steady(manifest, label) {
@@ -174,7 +252,7 @@ function steady(manifest, label) {
     holds(manifest, JSON.parse(last.stdout), `${label} read ${n}`);
     walls.push(last.wallMs);
   }
-  return { walls, breakdown: last.breakdown, load };
+  return { walls, breakdown: last.breakdown, load, opens: traced(manifest, `${label}-traced`) };
 }
 
 try {
@@ -212,6 +290,7 @@ try {
       reads_ms: measured.walls,
       median_ms: median(measured.walls),
       load1: measured.load,
+      ...measured.opens,
     },
   ];
   for (const total of SCALING.slice(1)) {
@@ -223,6 +302,7 @@ try {
       reads_ms: grown.walls,
       median_ms: median(grown.walls),
       load1: grown.load,
+      ...grown.opens,
     });
   }
   const increments = sizes.slice(1).map((size, n) => ({

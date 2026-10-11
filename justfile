@@ -553,9 +553,11 @@ budgets:
 # which is the binary users run, so the budget adds measuring time and no build: the
 # fixture, one cold read and the timed reads (`scripts/host-view-measure.mjs`), then the
 # check, through the prebuilt checker `npm ci` installs with the SDK. Linux only, where the
-# fixture's live dispatches prove their start tokens.
+# fixture's live dispatches prove their start tokens. One further, untimed read per
+# scaling size runs under `strace`, so the record says which journals each size opened.
 # Measure `host-view-time` against an installed release binary, and check it.
 host-view-budget binary:
+    @just _ensure-strace
     @node scripts/host-view-measure.mjs "$1"
     @node_modules/.bin/onebudgetspec check budgets.yaml --id host-view-time
 
