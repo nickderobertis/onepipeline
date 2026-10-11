@@ -1194,6 +1194,12 @@ fn validate_title(title: &str) -> std::result::Result<(), String> {
 pub(crate) fn validate_subject(title: &str) -> std::result::Result<(), String> {
     validate_title(title)?;
     let title = title.trim();
+    if title.chars().any(char::is_control) {
+        return Err(
+            "it is not one subject line: it carries a line break or another control character"
+                .to_owned(),
+        );
+    }
     let Some((head, description)) = title.split_once(": ") else {
         return Err(
             "it is not a Conventional Commit subject: it has no `type: description` separator"

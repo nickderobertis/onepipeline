@@ -639,12 +639,19 @@ fn a_restack_starts_before_its_reworked_parent_s_checks_have_settled() {
     );
     let a_branch = text(&settled(&world, run, "a")["branch"], "a's branch").to_owned();
     let a_number = change_from(&world, &a_branch)["number"].clone();
-    // The rework's change request reports its required check running, until the
-    // journey says otherwise.
-    world.script(
-        &format!("gh.checks.{a_number}"),
-        "lint in_progress - required",
-    );
+    // The rework's change request and the draft's above it report their required
+    // check running, until the journey says otherwise.
+    let b_number = change_from(
+        &world,
+        text(&settled(&world, run, "b")["branch"], "b's branch"),
+    )["number"]
+        .clone();
+    for number in [&a_number, &b_number] {
+        world.script(
+            &format!("gh.checks.{number}"),
+            "lint in_progress - required",
+        );
+    }
 
     reply(
         &world,
@@ -672,10 +679,25 @@ fn a_restack_starts_before_its_reworked_parent_s_checks_have_settled() {
         .events_of(run, "push")
         .iter()
         .any(|event| event["labels"]["node"] == "a-rework-1"));
-    world.script(
-        &format!("gh.checks.{a_number}"),
-        crate::draft_lifecycle::GREEN,
-    );
+    // `status` reads the draft as restacking onto the rework's pushed head while
+    // its own publication waits on its checks.
+    let a_pushed = world
+        .events_of(run, "node-restack-started")
+        .first()
+        .map(|event| event["payload"]["onto"][0]["head"].clone())
+        .expect("the restack names the head");
+    world.until("b's restack to read as running", |world| {
+        world.run(&["status", run]).stdout.contains(&format!(
+            "; restacking onto {a_branch} at {}",
+            text(&a_pushed, "the head")
+        ))
+    });
+    for number in [&a_number, &b_number] {
+        world.script(
+            &format!("gh.checks.{number}"),
+            crate::draft_lifecycle::GREEN,
+        );
+    }
     let ended = driver.wait_with_output().expect("the driver ends");
     assert!(ended.status.success(), "{ended:?}");
     let journal = world.journal(run);
@@ -860,6 +882,9 @@ fn the_op_s_title_outranks_the_drafter_s_and_a_keeps_leaves_the_title_alone() {
         "pr-author.title-check",
         r#"{"verdict": "replaced", "title": "feat(x): what the drafter would say"}"#,
     );
+    // `x`'s rework names its replacement.
+    world.script("x-again.work", "x's change, reworked\n");
+    world.script("x-again.work-file", "x");
     let run = "precedence";
     let drafter = world.pr_author_graph();
     launched(
@@ -877,16 +902,20 @@ fn the_op_s_title_outranks_the_drafter_s_and_a_keeps_leaves_the_title_alone() {
 
     let mut stated = rework("x", "say it the op's way");
     stated["title"] = json!("fix(x): what the op says");
+    stated["replacement"] = json!("x-again");
     reply(&world, run, json!([stated])).exited(0);
     adopt(&world, run).exited(0);
+    let again = settled(&world, run, "x-again");
+    assert_eq!(again["outcome"], "change-review-draft", "{again}");
+    assert_eq!(again["branch"], branch("x").as_str(), "{again}");
     assert_eq!(
         change_from(&world, &branch("x"))["title"],
         "fix(x): what the op says"
     );
     assert_eq!(
-        retitled(&world, run, "x-rework-1"),
+        retitled(&world, run, "x-again"),
         [
-            json!({"node": "x-rework-1", "from": "feat: ship x", "to": "fix(x): what the op says", "by": "op"})
+            json!({"node": "x-again", "from": "feat: ship x", "to": "fix(x): what the op says", "by": "op"})
         ]
     );
 
@@ -938,6 +967,9 @@ fn left_unverified(world: &World, run: &str, id: &str, title: &str, because: &st
     world
         .run(&["status", run])
         .out_has(&format!("{replacement}: title unverified — {title:?} on "));
+    world
+        .run(&["results", run])
+        .out_has(&format!("      title unverified — {title:?} on "));
     let surfaced = world
         .events_of(run, "planner-surface-queued")
         .into_iter()
@@ -1365,6 +1397,10 @@ fn a_rework_the_run_cannot_take_is_refused_naming_why() {
         (
             with("replacement", json!("broken")),
             "replacement id 'broken' must be new",
+        ),
+        (
+            with("replacement", json!(" ")),
+            "the replacement needs a non-empty id",
         ),
     ] {
         reply(&world, run, json!([command]))

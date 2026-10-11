@@ -2139,15 +2139,9 @@ impl World {
     pub fn pr_author_graph(&self) -> String {
         let dir = self.graphs();
         std::fs::create_dir_all(&dir).expect("a directory for the graph configs");
-        // The body, and beside it the optional `title_check` a rework's publication
-        // asks for — the shape the host's own `config/pr-author-body.schema.json`
-        // declares, and which every result without it still conforms to.
         std::fs::write(
             dir.join("body.schema.json"),
-            r#"{"type":"object","properties":{"body":{"type":"string"},
-               "title_check":{"type":"object","properties":{
-                 "verdict":{"enum":["keeps","replaced"]},"title":{"type":"string"}},
-                 "required":["verdict"],"additionalProperties":false}},
+            r#"{"type":"object","properties":{"body":{"type":"string"}},
                "required":["body"],"additionalProperties":false}"#,
         )
         .expect("the drafted body's schema is written");

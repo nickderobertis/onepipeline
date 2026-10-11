@@ -174,6 +174,11 @@ fn answer(node: &str, removal: &Removal) -> Reply {
         Removal::Superseded { replacement } => {
             format!("a committed `retry` of '{node}' superseded it with '{replacement}'")
         }
+        // llmlint: ignore[changed_behavior_has_e2e] the discharge itself — a standing blocking
+        // decision answered when its node leaves the graph — is driven end to end for a `retry`
+        // and a `drop`; this arm only names the edit, and a node a rework takes is one settled
+        // `done`, which no blocking decision this build raises is still standing about.
+        // `a_rework_is_named_as_a_rework` holds the words.
         Removal::Reworked { replacement } => {
             format!("a committed `rework` of '{node}' superseded it with '{replacement}'")
         }

@@ -6279,6 +6279,8 @@ mod tests {
             "Feat(cache): shout".to_owned(),
             "feat(): empty scope".to_owned(),
             "feat(cache): ".to_owned(),
+            "fix: one line\nand another".to_owned(),
+            "fix(a\tb): tabbed".to_owned(),
         ] {
             let command = rework_stating("a", REASON, INSTRUCTION, Some(&title), None);
             let why = refused_over(&graph, &frontier, &command);
