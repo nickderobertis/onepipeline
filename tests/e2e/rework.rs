@@ -689,3 +689,572 @@ fn a_restack_starts_before_its_reworked_parent_s_checks_have_settled() {
     );
     assert_eq!(settled(&world, run, "b")["outcome"], "change-review-draft");
 }
+
+/// The title a node of the cache journey opened under.
+const CACHE_TITLE: &str = "feat(cache): add a read-through cache to the plan reader";
+
+/// The subject the drafter answers that change outgrew it with.
+const RETRY_TITLE: &str = "feat(reader): retry a failed plan read";
+
+/// Commit `file` holding `body` onto the origin's `main`, as the base every node of
+/// a journey is cut from.
+fn on_the_base(world: &World, file: &str, body: &str) {
+    let checkout = service(world).checkout;
+    std::fs::write(checkout.join(file), body).expect("the base file is written");
+    git(world, &checkout, &["add", "-A"]);
+    git(world, &checkout, &["commit", "-m", "feat: the plan reader"]);
+    git(world, &checkout, &["push", "origin", "main"]);
+}
+
+/// The `change-retitled` records the run journalled about `node`.
+fn retitled(world: &World, run: &str, node: &str) -> Vec<Value> {
+    world
+        .events_of(run, "change-retitled")
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == node)
+        .map(|event| event["payload"].clone())
+        .collect()
+}
+
+/// The `title-unverified` records the run journalled about `node`.
+fn unverified(world: &World, run: &str, node: &str) -> Vec<Value> {
+    world
+        .events_of(run, "title-unverified")
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == node)
+        .map(|event| event["payload"].clone())
+        .collect()
+}
+
+/// The section of a drafting task between two of its headings.
+fn section<'a>(task: &'a str, heading: &str, next: &str) -> &'a str {
+    let after = task
+        .split_once(&format!("\n{heading}\n"))
+        .unwrap_or_else(|| panic!("the task has no {heading}:\n{task}"))
+        .1;
+    after
+        .split_once(&format!("\n{next}\n"))
+        .map_or(after, |(within, _)| within)
+}
+
+/// A rework whose net change no longer matches its title: the drafter is shown the
+/// change's real patch against its base beside the title, answers `replaced`, and
+/// the new subject is written onto the change request, journalled as the drafter's,
+/// moved onto the node's title in the graph and projected onto the store — and a
+/// later restack republishing that node keeps it.
+#[test]
+fn a_rework_whose_change_outgrew_its_title_is_retitled_by_the_drafter() {
+    let world = team_world("rework-title");
+    on_the_base(&world, "reader.md", "read the plan from disk\n");
+    world.script("p.work", "p's change\n");
+    world.script("a.work-file", "reader");
+    world.script("a.work", "read the plan through a read-through cache\n");
+    world.script("a-rework-1.work-file", "reader");
+    world.script(
+        "a-rework-1.work",
+        "read the plan from disk, retrying a read that fails\n",
+    );
+    world.script(
+        "pr-author.title-check",
+        &json!({"verdict": "replaced", "title": RETRY_TITLE}).to_string(),
+    );
+    let mut a = lifecycle("a", &["p"]);
+    a["title"] = json!(CACHE_TITLE);
+    let run = "title";
+    let drafter = world.pr_author_graph();
+    let project = launched(
+        &world,
+        run,
+        vec![lifecycle("p", &[]), a],
+        2,
+        &["--pr-author-graph", &drafter],
+    );
+    let a_branch = text(&settled(&world, run, "a")["branch"], "a's branch").to_owned();
+    assert_eq!(change_from(&world, &a_branch)["title"], CACHE_TITLE);
+    // An ordinary publication reads no verdict, whatever its drafter answered.
+    assert!(world.events_of(run, "change-retitled").is_empty());
+
+    reply(
+        &world,
+        run,
+        json!([rework(
+            "a",
+            "remove the cache and retry a failed read instead"
+        )]),
+    )
+    .exited(0);
+    adopt(&world, run).exited(0);
+
+    // The drafter was shown the title beside the change's actual patch.
+    let drafting = tasks_of(&world, run, "a-rework-1", "pr-author");
+    assert_eq!(drafting.len(), 1, "{drafting:#?}");
+    let task = &drafting[0];
+    assert!(task.contains("\n## Rework\n"), "{task}");
+    assert_eq!(
+        section(task, "## Current title", "## Net diff").trim(),
+        CACHE_TITLE
+    );
+    let net = section(task, "## Net diff", "## Title check");
+    assert!(net.contains("```diff"), "{net}");
+    assert!(
+        net.contains("--- a/reader.md") && net.contains("+++ b/reader.md"),
+        "{net}"
+    );
+    assert!(net.contains("@@ "), "no hunk header: {net}");
+    assert!(net.contains("\n-read the plan from disk\n"), "{net}");
+    assert!(
+        net.contains("\n+read the plan from disk, retrying a read that fails\n"),
+        "{net}"
+    );
+    assert!(!net.contains("cache"), "the net diff names a cache: {net}");
+    assert!(task.contains("`title_check`"), "{task}");
+
+    // The drafter's subject is on the change request, on the record, and in the graph.
+    assert_eq!(change_from(&world, &a_branch)["title"], RETRY_TITLE);
+    assert_eq!(
+        retitled(&world, run, "a-rework-1"),
+        [json!({"node": "a-rework-1", "from": CACHE_TITLE, "to": RETRY_TITLE, "by": "drafter"})]
+    );
+    assert!(unverified(&world, run, "a-rework-1").is_empty());
+    world.until_store("the new title to reach the store", |world| {
+        world.store_tasks(&project).iter().any(|task| {
+            task["item"]["metadata"]["onepipeline.id"] == "a"
+                && task["item"]["title"] == RETRY_TITLE
+        })
+    });
+
+    // A restack republishing it later keeps the subject: `p` is reworked, and `a`'s
+    // replacement is brought onto it without an agent and keeps its title.
+    world.script("pr-author.title-check", KEEPS);
+    world.script("p-rework-1.work", "p's change, reworked\n");
+    world.script("p-rework-1.work-file", "p");
+    reply(&world, run, json!([rework("p", "tighten p")])).exited(0);
+    adopt(&world, run).exited(0);
+    let restacked = world
+        .events_of(run, "node-restacked")
+        .into_iter()
+        .find(|event| event["labels"]["node"] == "a-rework-1")
+        .expect("a's replacement was restacked");
+    assert_eq!(restacked["payload"]["agent_dispatched"], false);
+    assert_eq!(change_from(&world, &a_branch)["title"], RETRY_TITLE);
+    assert_eq!(retitled(&world, run, "a-rework-1").len(), 1);
+    assert!(world.events_of(run, "title-unverified").is_empty());
+}
+
+/// The op's title outranks the drafter's, and a `keeps` leaves the title alone:
+/// `x` is reworked stating a title while its drafter answers `replaced` with another,
+/// and `y` is reworked stating none while its drafter answers `keeps`.
+#[test]
+fn the_op_s_title_outranks_the_drafter_s_and_a_keeps_leaves_the_title_alone() {
+    let world = team_world("rework-precedence");
+    for id in ["x", "y"] {
+        world.script(&format!("{id}.work"), &format!("{id}'s change\n"));
+        world.script(
+            &format!("{id}-rework-1.work"),
+            &format!("{id}'s change, reworked\n"),
+        );
+        world.script(&format!("{id}-rework-1.work-file"), id);
+    }
+    world.script(
+        "pr-author.title-check",
+        r#"{"verdict": "replaced", "title": "feat(x): what the drafter would say"}"#,
+    );
+    let run = "precedence";
+    let drafter = world.pr_author_graph();
+    launched(
+        &world,
+        run,
+        vec![lifecycle("x", &[]), lifecycle("y", &[])],
+        2,
+        &["--pr-author-graph", &drafter],
+    );
+    let branch = |id: &str| text(&settled(&world, run, id)["branch"], "a branch").to_owned();
+
+    let mut stated = rework("x", "say it the op's way");
+    stated["title"] = json!("fix(x): what the op says");
+    reply(&world, run, json!([stated])).exited(0);
+    adopt(&world, run).exited(0);
+    assert_eq!(
+        change_from(&world, &branch("x"))["title"],
+        "fix(x): what the op says"
+    );
+    assert_eq!(
+        retitled(&world, run, "x-rework-1"),
+        [
+            json!({"node": "x-rework-1", "from": "feat: ship x", "to": "fix(x): what the op says", "by": "op"})
+        ]
+    );
+
+    world.script("pr-author.title-check", KEEPS);
+    reply(&world, run, json!([rework("y", "say it again")])).exited(0);
+    adopt(&world, run).exited(0);
+    assert_eq!(
+        settled(&world, run, "y-rework-1")["outcome"],
+        "change-review-draft"
+    );
+    assert_eq!(change_from(&world, &branch("y"))["title"], "feat: ship y");
+    assert!(retitled(&world, run, "y-rework-1").is_empty());
+    assert!(world.events_of(run, "title-unverified").is_empty());
+}
+
+/// Rework `id` in `run`, and hold that it settled a review draft still under
+/// `title`, with that title recorded unverified for a reason containing `because`,
+/// shown by `status`, and surfaced to the planner naming the node and the remedy.
+fn left_unverified(world: &World, run: &str, id: &str, title: &str, because: &str) {
+    reply(world, run, json!([rework(id, "rework it")])).exited(0);
+    adopt(world, run).exited(0);
+    let replacement = format!("{id}-rework-1");
+    let settlement = settled(world, run, &replacement);
+    assert_eq!(settlement["status"], "done", "{settlement}");
+    assert_eq!(settlement["outcome"], "change-review-draft", "{settlement}");
+    let branch = text(&settlement["branch"], "a branch");
+    assert_eq!(change_from(world, branch)["title"], title);
+    let records = unverified(world, run, &replacement);
+    assert_eq!(records.len(), 1, "{records:#?}");
+    assert_eq!(records[0]["title"], title);
+    assert!(
+        text(&records[0]["reason"], "a reason").contains(because),
+        "{}",
+        records[0]
+    );
+    assert!(retitled(world, run, &replacement).is_empty());
+    world
+        .run(&["status", run])
+        .out_has(&format!("{replacement}: title unverified — {title:?} on "));
+    let surfaced = world
+        .events_of(run, "planner-surface-queued")
+        .into_iter()
+        .find(|event| {
+            event["payload"]["kind"] == "title-unverified"
+                && event["labels"]["node"] == replacement.as_str()
+        })
+        .unwrap_or_else(|| panic!("no title-unverified surface for {replacement}"));
+    assert_eq!(surfaced["payload"]["blocking"], false, "{surfaced}");
+    let message = text(&surfaced["payload"]["message"], "the surface's message");
+    assert!(
+        message.contains(title) && message.contains("`retitle`") && message.contains("/pull/"),
+        "{message}"
+    );
+}
+
+/// A title nothing could verify is left as it is and said to be unverified — for a
+/// drafting dispatch that failed, an answer with no `title_check`, an unknown
+/// verdict, and a `replaced` subject the title rule refuses — while the node still
+/// settles as a review draft; a `retitle` then sets one through the host and clears
+/// it, and each case a `retitle` is refused for appends nothing. An ordinary
+/// publication whose drafter answered no `title_check` publishes its body as always.
+#[test]
+fn a_title_nothing_verified_is_left_unverified_until_a_retitle_sets_one() {
+    let world = team_world("rework-unverified");
+    for id in ["a", "b", "c", "d"] {
+        world.script(&format!("{id}.work"), &format!("{id}'s change\n"));
+        world.script(
+            &format!("{id}-rework-1.work"),
+            &format!("{id}'s change, reworked\n"),
+        );
+        world.script(&format!("{id}-rework-1.work-file"), id);
+    }
+    world.script("kept.work", "kept's change\n");
+    let mut kept = lifecycle("kept", &[]);
+    kept["publish"] = json!("preserve");
+    let run = "unverified";
+    let drafter = world.pr_author_graph();
+    launched(
+        &world,
+        run,
+        vec![
+            lifecycle("a", &[]),
+            lifecycle("b", &[]),
+            lifecycle("c", &[]),
+            lifecycle("d", &[]),
+            kept,
+            crate::harness::agent("notes", &[]),
+        ],
+        4,
+        &["--pr-author-graph", &drafter],
+    );
+    // Published as they always were: the drafter answered a body and no verdict.
+    for id in ["a", "b", "c", "d"] {
+        let change = change_from(&world, text(&settled(&world, run, id)["branch"], "branch"));
+        assert!(
+            text(&change["body"], "a body").starts_with(crate::stacked_drafts::DRAFTED),
+            "{change}"
+        );
+    }
+    assert!(world.events_of(run, "title-unverified").is_empty());
+
+    world.script("a-rework-1.pr-author.fail", "1");
+    left_unverified(&world, run, "a", "feat: ship a", "the drafting dispatch");
+    left_unverified(&world, run, "b", "feat: ship b", "carried no `title_check`");
+    world.script("pr-author.title-check", r#"{"verdict": "maybe"}"#);
+    left_unverified(
+        &world,
+        run,
+        "c",
+        "feat: ship c",
+        "neither `keeps` nor `replaced`",
+    );
+    world.script(
+        "pr-author.title-check",
+        r#"{"verdict": "replaced", "title": "make the reader retry"}"#,
+    );
+    left_unverified(
+        &world,
+        run,
+        "d",
+        "feat: ship d",
+        "which the title rule refuses",
+    );
+
+    // The remedy: a retitle sets the title through the host and clears it.
+    let committed_before = world.events_of(run, "edit-committed").len();
+    reply(
+        &world,
+        run,
+        json!([{"op": "retitle", "id": "a-rework-1", "title": "fix(a): say what a does now",
+                "reason": "nothing verified the title the rework kept"}]),
+    )
+    .exited(0);
+    let a_branch = text(&settled(&world, run, "a-rework-1")["branch"], "a's branch").to_owned();
+    assert_eq!(
+        change_from(&world, &a_branch)["title"],
+        "fix(a): say what a does now"
+    );
+    assert_eq!(
+        retitled(&world, run, "a-rework-1"),
+        [
+            json!({"node": "a-rework-1", "from": "feat: ship a", "to": "fix(a): say what a does now", "by": "retitle"})
+        ]
+    );
+    assert_eq!(
+        world.events_of(run, "edit-committed").len(),
+        committed_before + 1
+    );
+    let status = world.run(&["status", run]);
+    assert!(
+        !status.stdout.contains("a-rework-1: title unverified"),
+        "{}",
+        status.stdout
+    );
+    status.out_has("b-rework-1: title unverified");
+
+    // Each case a retitle is refused for, refused naming it, with nothing appended.
+    let committed = world.events_of(run, "edit-committed").len();
+    for (command, says) in [
+        (
+            json!({"op": "retitle", "id": "nope", "title": "fix: x", "reason": "why"}),
+            "no node 'nope'",
+        ),
+        (
+            json!({"op": "retitle", "id": "notes", "title": "fix: x", "reason": "why"}),
+            "is not a lifecycle node",
+        ),
+        (
+            json!({"op": "retitle", "id": "kept", "title": "fix: x", "reason": "why"}),
+            "has no open change request",
+        ),
+        (
+            json!({"op": "retitle", "id": "b-rework-1", "title": "make it retry", "reason": "why"}),
+            "Conventional Commit",
+        ),
+        (
+            json!({"op": "retitle", "id": "b-rework-1", "title": "fix: x", "reason": " "}),
+            "the reason cannot be blank",
+        ),
+    ] {
+        reply(&world, run, json!([command]))
+            .exited(crate::harness::REFUSED)
+            .err_has(says);
+    }
+    assert_eq!(world.events_of(run, "edit-committed").len(), committed);
+    assert_eq!(
+        change_from(
+            &world,
+            text(&settled(&world, run, "b-rework-1")["branch"], "b")
+        )["title"],
+        "feat: ship b"
+    );
+}
+
+/// With no body drafter configured, a rework's title is left unverified — the
+/// publication itself is exactly what it would be, and nothing holds the node.
+#[test]
+fn a_rework_with_no_body_drafter_configured_leaves_its_title_unverified() {
+    let world = team_world("rework-undrafted");
+    world.script("a.work", "a's change\n");
+    world.script("a-rework-1.work", "a's change, reworked\n");
+    world.script("a-rework-1.work-file", "a");
+    let run = "undrafted";
+    launched(&world, run, vec![lifecycle("a", &[])], 1, &[]);
+    left_unverified(
+        &world,
+        run,
+        "a",
+        "feat: ship a",
+        "no body drafter is configured",
+    );
+}
+
+/// A rework of a run that had settled brings it back to life as any accepted edit
+/// does: the run reads as live once the edit is committed, the run-end hook fires
+/// again at its new ending, and `status` reads the reworked and restacked nodes as
+/// such.
+#[cfg(unix)]
+#[test]
+fn a_rework_of_a_settled_run_makes_it_live_and_its_hook_fires_again_at_the_new_ending() {
+    use crate::run_end_hooks::{hook, invocations, records, HOOK_TIMEOUT, RECORD_ENV};
+    let world = team_world("rework-revive");
+    std::fs::create_dir_all(records(&world)).expect("a record directory");
+    let record = records(&world).to_string_lossy().into_owned();
+    let world = world.with_env(RECORD_ENV, &record);
+    let hook = hook(&world);
+    world.script("a.work", "a's change\n");
+    world.script("b.work", "b's change\n");
+    world.script("a-rework-1.work", "a's change, as the review asked\n");
+    world.script("a-rework-1.work-file", "a");
+    world.script("pr-author.title-check", KEEPS);
+    let run = "revive";
+    let drafter = world.pr_author_graph();
+    launched(
+        &world,
+        run,
+        vec![lifecycle("a", &[]), lifecycle("b", &["a"])],
+        2,
+        &[
+            "--pr-author-graph",
+            &drafter,
+            "--success-hook",
+            &hook,
+            "--failure-hook",
+            &hook,
+            "--hook-timeout",
+            HOOK_TIMEOUT,
+        ],
+    );
+    assert_eq!(invocations(&world, run), ["success"]);
+    world.run(&["status", run]).out_has("SETTLED");
+
+    reply(
+        &world,
+        run,
+        json!([rework("a", "say what the review asked in a.md")]),
+    )
+    .exited(0);
+    // Live again: the edit added work the run has not done.
+    let live = world.run(&["status", run]);
+    assert!(!live.stdout.contains("SETTLED"), "{}", live.stdout);
+
+    adopt(&world, run).exited(0);
+    assert_eq!(
+        invocations(&world, run),
+        ["success", "success"],
+        "{}",
+        world.dump()
+    );
+    assert_eq!(world.events_of(run, "run-hook-fired").len(), 2);
+    let a_branch = text(&settled(&world, run, "a-rework-1")["branch"], "a's branch").to_owned();
+    let status = world.run(&["status", run]);
+    status.exited(0);
+    status.out_has("SETTLED");
+    status.out_has(&format!(
+        "a: reworked — as a-rework-1: a reviewer asked for it on the draft; answering {COMMENT_URL}"
+    ));
+    status.out_has(&format!(
+        "b: restacked onto a-rework-1's branch {a_branch} at "
+    ));
+    status.out_has(", without an agent turn");
+}
+
+/// The planner is the only author `rework` and `retitle` are granted to: a bus
+/// configuration granting a second author every other op still leaves those two
+/// refused for it, naming the op and the author, with nothing appended — while the
+/// planner's are applied.
+#[test]
+fn only_the_planner_may_rework_or_retitle() {
+    let world = team_world("rework-grants");
+    world.script("a.work", "a's change\n");
+    world.script("a-rework-1.work", "a's change, as the review asked\n");
+    world.script("a-rework-1.work-file", "a");
+    world.script("pr-author.title-check", KEEPS);
+    let others: Vec<&str> = onepipeline::channel::layout::Op::ALL
+        .into_iter()
+        .filter(|op| {
+            !matches!(
+                op,
+                onepipeline::channel::layout::Op::Rework
+                    | onepipeline::channel::layout::Op::Retitle
+            )
+        })
+        .map(onepipeline::channel::layout::Op::word)
+        .collect();
+    let config = world.root.join("onemessagebus.yaml");
+    std::fs::write(
+        &config,
+        format!(
+            "version: 1\ntransport: {{kind: local}}\nauthors:\n  sentinel:\n    capabilities: [{}]\n",
+            others.join(", ")
+        ),
+    )
+    .expect("the bus configuration is written");
+    let config = config.to_string_lossy().into_owned();
+    let run = "grants";
+    let drafter = world.pr_author_graph();
+    launched(
+        &world,
+        run,
+        vec![lifecycle("a", &[])],
+        1,
+        &["--pr-author-graph", &drafter, "--bus-config", &config],
+    );
+    let commands = world.run_file(run, "channel/commands.jsonl");
+    let appended = || std::fs::read_to_string(&commands).unwrap_or_default();
+    let before = appended();
+    let committed = world.events_of(run, "edit-committed").len();
+    let as_sentinel = |command: Value| {
+        world.run_with_stdin(
+            &["reply", run],
+            &json!({"version": onepipeline::channel::REPLY_ENVELOPE_VERSION,
+                    "author": "sentinel", "commands": [command]})
+            .to_string(),
+        )
+    };
+    for (command, op) in [
+        (rework("a", "the sentinel's idea"), "rework"),
+        (
+            json!({"op": "retitle", "id": "a", "title": "fix: the sentinel's", "reason": "why"}),
+            "retitle",
+        ),
+    ] {
+        as_sentinel(command)
+            .exited(crate::harness::REFUSED)
+            .err_has(&format!("'{op}' is not an op the sentinel may issue"));
+    }
+    assert_eq!(appended(), before, "a refused envelope was appended");
+    assert_eq!(world.events_of(run, "edit-committed").len(), committed);
+    // A granted op of the sentinel's own is still applied: the refusal is the two ops'.
+    as_sentinel(json!({"op": "finding", "id": "a", "message": "the sentinel noticed"})).exited(0);
+
+    reply(
+        &world,
+        run,
+        json!([rework("a", "say what the review asked in a.md")]),
+    )
+    .exited(0);
+    adopt(&world, run).exited(0);
+    assert_eq!(
+        settled(&world, run, "a-rework-1")["outcome"],
+        "change-review-draft"
+    );
+    reply(
+        &world,
+        run,
+        json!([{"op": "retitle", "id": "a-rework-1", "title": "fix(a): the planner's",
+                "reason": "the planner decides it"}]),
+    )
+    .exited(0);
+    let branch = text(&settled(&world, run, "a-rework-1")["branch"], "a's branch").to_owned();
+    assert_eq!(
+        change_from(&world, &branch)["title"],
+        "fix(a): the planner's"
+    );
+}
