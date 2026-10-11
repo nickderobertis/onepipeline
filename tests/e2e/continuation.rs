@@ -774,3 +774,61 @@ fn a_successors_claim_survives_the_closeout_and_the_stop_of_the_run_it_took_over
     drop(third);
     drop(successor);
 }
+
+/// A project whose published node landed carries the landing keys the write-back projects
+/// — `onepipeline.landing`, `onepipeline.landing_commit` — and a relaunch reads past them
+/// rather than refusing them as node fields, continuing the landed node; `--fresh` runs it
+/// again, since nothing it holds is a change request a second run would duplicate.
+#[test]
+fn a_landed_project_relaunches_continuing_it_and_runs_afresh_with_fresh() {
+    let world = World::new("continue-landed");
+    world.repository("local-direct", &[]);
+    world.script("work.work-anew", "the work");
+    let run = "landed";
+    let project = author(&world, run, vec![lifecycle("work", &[])]);
+    launch(&world, run, &project, &[]);
+    let item = item_metadata(&world, &project, "work");
+    assert_eq!(item["onepipeline.landing"], "landed", "{item}");
+    assert!(item["onepipeline.landing_commit"].is_string(), "{item}");
+
+    let again = format!("{run}-2");
+    launch(&world, &again, &project, &[]).exited(0);
+    assert_eq!(dispatched(&world, &again), Vec::<String>::new());
+    assert_eq!(
+        settled(&world, &again, "work")["continued"]["source"],
+        "store"
+    );
+
+    let fresh = format!("{run}-3");
+    launch(&world, &fresh, &project, &["--fresh"]).exited(0);
+    assert_eq!(dispatched(&world, &fresh), vec!["work".to_owned()]);
+    assert!(settled(&world, &fresh, "work").get("continued").is_none());
+    assert_eq!(world.run_json(&fresh, "result.json")["state"], "complete");
+}
+
+/// `--fresh` over a project holding a draft nothing has landed is refused, naming the node
+/// and its change request, before anything is minted: running it again would open a second.
+#[test]
+fn fresh_is_refused_while_a_node_holds_a_change_request_nothing_has_landed() {
+    let world = team_world("continue-fresh-refused");
+    world.script("a.work", "a's change\n");
+    let run = "unlanded";
+    let project = author(&world, run, vec![lifecycle("a", &[])]);
+    launch(&world, run, &project, &[]);
+    let url = stored_settlements(&world, &project)["a"]["change_url"]
+        .as_str()
+        .expect("a's change request")
+        .to_owned();
+    let refused = world.run_from(&world.project, &["start", &project, "--attach", "--fresh"]);
+    refused.exited(2);
+    assert!(
+        refused.stderr.contains("--fresh refused:")
+            && refused.stderr.contains(&format!("'a' ({url})")),
+        "{}",
+        refused.stderr
+    );
+    assert!(
+        !world.run_file("unlanded-2", "launch.json").exists(),
+        "the refusal minted a run"
+    );
+}

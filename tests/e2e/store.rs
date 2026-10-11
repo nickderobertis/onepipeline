@@ -2976,8 +2976,12 @@ fn a_terminal_writeback_outage_expires_without_holding_run_settlement() {
     );
 }
 
+/// A project a run settled launches again from another runs root over the same store,
+/// reading past every key the run projected — and, since entry 116, **continues** what it
+/// settled rather than running it again: the node is journalled `continued` from the store
+/// and nothing is dispatched.
 #[test]
-fn a_settled_project_launches_again_from_its_projected_metadata() {
+fn a_settled_project_launches_again_continuing_what_it_projected() {
     let first = World::new("store-writeback-relaunch-first");
     let project = first.plan(
         "writeback-relaunch",
@@ -3003,10 +3007,24 @@ fn a_settled_project_launches_again_from_its_projected_metadata() {
         second.run_json("writeback-relaunch", "result.json")["state"],
         "complete"
     );
+    assert!(
+        second
+            .events_of("writeback-relaunch", "node-dispatched")
+            .is_empty(),
+        "a settled node was dispatched again"
+    );
+    let continued = second.events_of("writeback-relaunch", "node-settled");
+    assert_eq!(continued.len(), 1, "{continued:?}");
+    assert_eq!(
+        continued[0]["payload"]["continued"],
+        json!({"source": "store", "run": null}),
+        "{continued:?}"
+    );
 }
 
 /// A project a run retried a node of launches again, reading the lineage head's
-/// definition under the root's id — its dependents' edges included.
+/// definition under the root's id — its dependents' edges included — and continuing the
+/// head's settlement under that same id, by the ruling entry 116 records.
 ///
 /// The one item a lineage has carries `onepipeline.node` and `onepipeline.supersedes`
 /// beside its settlement — and where the plan's own store is the destination, so does the
@@ -3127,6 +3145,35 @@ fn a_retried_project_launches_again_reading_the_lineage_head_under_the_roots_id(
     );
     second.run(&["start", &project, "--attach"]).settled();
     assert_eq!(second.run_json(run, "result.json")["state"], "complete");
+    // Both lineages settled `done`, so both are continued and neither is dispatched: the
+    // retried one under the root's id, carrying the head's own settlement.
+    assert!(
+        second.events_of(run, "node-dispatched").is_empty(),
+        "a settled lineage was dispatched again"
+    );
+    let head = first
+        .events_of(run, "node-settled")
+        .into_iter()
+        .rfind(|event| event["labels"]["node"] == "work-2")
+        .expect("the head settled");
+    let continued = second
+        .events_of(run, "node-settled")
+        .into_iter()
+        .find(|event| event["labels"]["node"] == "work")
+        .expect("the lineage was continued under the root's id");
+    assert_eq!(
+        continued["payload"]["continued"]["source"], "store",
+        "{continued}"
+    );
+    let mut carried = continued["payload"].clone();
+    carried
+        .as_object_mut()
+        .expect("a payload")
+        .remove("continued");
+    assert_eq!(
+        carried, head["payload"],
+        "the continued settlement is not the head's"
+    );
     // What it launched is the head's definition under the root's id: the retried node,
     // named as the plan authored it and titled by that name, carrying the task the retry
     // stated, and its dependent still depending on it by that name.
