@@ -13,7 +13,7 @@ const record = "target/budget-records/host-view.json";
 const READS = 5;
 const FIXTURE = { run_roots: 100, live_dispatches: 5, stale_entries: 4 };
 const journeys = "just test-e2e 'test(/^host_view::the_host_view/)'";
-let next = `run ${journeys} to regenerate the record, then run 'onebudgetspec check budgets.yaml'`;
+let next = `run ${journeys} to regenerate the record, then run 'just budgets'`;
 
 function fail(message) {
   throw new Error(`unreadable: ${message}`);
@@ -199,10 +199,10 @@ function detail(held) {
 
 try {
   const held = readRecord();
-  next = "ensure ONEBUDGETSPEC_RESULT names a writable file, then rerun 'onebudgetspec check budgets.yaml'";
+  next = "ensure ONEBUDGETSPEC_RESULT names a writable file, then rerun 'just budgets'";
   const reported = report(Math.max(...held.steady.reads_ms), detail(held));
   if (!reported) {
-    next = "invoke this command through 'onebudgetspec check budgets.yaml'";
+    next = "invoke this command through 'just budgets'";
     throw new Error("ONEBUDGETSPEC_RESULT is missing; invoke through onebudgetspec");
   }
 } catch (error) {

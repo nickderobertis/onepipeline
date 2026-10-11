@@ -1387,13 +1387,9 @@ fn breakdown(phases: &Option<Value>) -> Value {
 /// The binary users run: an optimized release build of this tree, which is what
 /// `host-view-time` times — a debug build's figure measures its build flavour.
 ///
-/// The e2e recipes build it ahead of the suite (`_host-view-release` in the
-/// justfile), because a build from cold outlasts a test's own bound; here cargo is
-/// asked again, which costs a fingerprint check when that build is current and
-/// rebuilds it when it is not, so the binary timed is always this tree's. Asked
-/// with the coverage tier's flags replaced by `-D warnings`, exactly as the recipe
-/// asks, so the two builds are one build. The copy handed back is this test's own, so a later
-/// rebuild's uplift cannot take the file away under a spawn.
+/// Asked of cargo exactly as `_host-view-release` in the justfile asks, which says
+/// why. The copy handed back is this test's own, so a later rebuild's uplift cannot
+/// take the file away under a spawn.
 fn release_binary(world: &World) -> PathBuf {
     static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     let built = BUILT.get_or_init(|| {
@@ -1568,6 +1564,30 @@ fn the_host_view_answers_a_host_sized_root_steady_cold_and_steady_again() {
             "ended_journal_bytes_opened": 0,
         },
     }));
+
+    // The reporter reads this record as written: every figure it prints is one the
+    // record holds, so a field renamed on either side fails here rather than
+    // reporting as missing.
+    let result = world.root.join("budget-result.json");
+    let reported = Command::new("node")
+        .arg(crate::harness::repo_file("scripts/host-view-budget.mjs"))
+        .current_dir(crate::harness::repo_file("."))
+        .env("ONEBUDGETSPEC_RESULT", &result)
+        .output()
+        .expect("node runs the committed reporter");
+    assert!(
+        reported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reported.stderr)
+    );
+    let detail = read_json(&result)["detail"]
+        .as_str()
+        .expect("a detail")
+        .to_owned();
+    assert!(
+        !detail.contains("n/a") && !detail.contains('?'),
+        "the reporter printed a figure the record does not hold: {detail}"
+    );
 }
 
 /// What a read costs does not grow with ended history. Three roots hold the same
