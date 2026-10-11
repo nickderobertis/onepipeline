@@ -9523,8 +9523,9 @@ assembly refused before any session opened,
 over a description a reviewer edited, its stack base assembled again over a root
 that moved,
 `a_stack_block_the_host_will_not_take_leaves_the_publication_as_it_settled` a
-refused write of the block, `an_unconcluded_stack_base_merge_fails_the_node_naming_it`
-and `a_worker_that_fails_the_stack_base_merge_fails_the_node` the two ways a
+refused write of the block, `an_unconcluded_stack_base_merge_fails_the_node_naming_it`,
+`a_worker_that_fails_the_stack_base_merge_fails_the_node` and
+`a_node_cancelled_while_concluding_its_stack_base_settles_cancelled` the three ways a
 conflicted stack base ends without one, and
 `a_stacked_settlement_is_projected_onto_the_store` the store write-back.
 `tests/contract.rs`'s `the_stacked_settlement_is_what_the_divergence_record_names`

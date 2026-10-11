@@ -600,6 +600,72 @@ fn a_worker_that_fails_the_stack_base_merge_fails_the_node() {
     );
 }
 
+/// A node cancelled while its worker is concluding its stack base's merge settles
+/// cancelled with nothing of its own session opened, and the stack base it never
+/// finished is not pushed.
+#[test]
+fn a_node_cancelled_while_concluding_its_stack_base_settles_cancelled() {
+    let world = team_world("stack-merge-cancelled");
+    let repo = service(&world);
+    world.script("a.work", "a wrote this\n");
+    world.script("c.work", "c wrote this\n");
+    world.script("a.work-file", "shared");
+    world.script("c.work-file", "shared");
+    world.script("e.resolves-merge", "a and c, reconciled\n");
+    world.script("e.merges-only", "");
+    let meeting = world.rendezvous("e");
+    let run = "mergecancelled";
+    let mut plan = plan_of(
+        run,
+        vec![
+            lifecycle("a", &[]),
+            lifecycle("c", &[]),
+            lifecycle("e", &["a", "c"]),
+        ],
+    );
+    plan["concurrency"] = json!(1);
+    let path = world.plan(run, &plan);
+    world.run(&["start", &path, "--detach"]).exited(0);
+
+    // Held inside the dispatch that was handed the stack base's merge.
+    let held = meeting.arrived();
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [{"op": "cancel", "id": "e"}]}).to_string(),
+        )
+        .exited(0);
+    world.until("the cancel to be committed", |world| {
+        !world.events_of(run, "edit-committed").is_empty()
+    });
+    held.release();
+    world.until("the run to settle", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+
+    let e = settled(&world, run, "e");
+    let stack_base = format!("{PREFIX}stack-base/{run}/e");
+    assert_eq!(e["status"], "cancelled", "{e}");
+    let tasks = tasks_of(&world, run, "e", "engineer");
+    assert_eq!(tasks.len(), 1, "{tasks:#?}");
+    assert!(
+        tasks[0].contains("opened with a merge in progress"),
+        "{}",
+        tasks[0]
+    );
+    assert!(
+        e.get("base").is_none() && e.get("branch").is_none(),
+        "no session of its own opened: {e}"
+    );
+    assert_eq!(e["stack"]["stack_base"], stack_base.as_str(), "{e}");
+    assert!(
+        git(&world, &repo.origin, &["branch", "--list", &stack_base])
+            .trim()
+            .is_empty(),
+        "a stack base the cancelled worker never finished was pushed"
+    );
+}
+
 /// A Stack block the host refuses to write leaves the node settled on its
 /// publication, says so on the driver's output, and leaves the description as the
 /// publication opened it.
