@@ -25,7 +25,7 @@ use std::time::Instant;
 /// names the file the line is appended to.
 pub(crate) const HOST_PHASES_ENV: &str = "ONEPIPELINE_HOST_PHASES";
 
-/// Where the line goes, read once.
+/// Where the line goes; unset or empty records nothing.
 fn target() -> Option<&'static PathBuf> {
     static TARGET: OnceLock<Option<PathBuf>> = OnceLock::new();
     TARGET

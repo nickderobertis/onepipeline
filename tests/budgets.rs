@@ -874,6 +874,27 @@ fn the_host_view_strip_guard_reads_the_binary() {
     std::fs::write(&script, "#!/bin/sh\n").expect("a script");
     assert_eq!(guard(&script), "not an ELF executable");
 
+    // A section table that does not hold together is refused, never read past.
+    let elf = std::fs::read(&stripped).expect("the stripped binary reads");
+    let le64 = |at: usize| u64::from_le_bytes(elf[at..at + 8].try_into().expect("8 bytes"));
+    let table = usize::try_from(le64(0x28)).expect("an offset");
+    let strings = table + 64 * usize::from(u16::from_le_bytes([elf[0x3e], elf[0x3f]]));
+    let past_end = (elf.len() as u64 + 1).to_le_bytes();
+    let malformed: [(&str, usize, &[u8]); 5] = [
+        ("section header size", 0x3a, &[32, 0]),
+        ("string-table index", 0x3e, &[0xff, 0xff]),
+        ("section table offset", 0x28, &past_end),
+        ("string-table extent", strings + 0x20, &past_end),
+        ("section name", table + 64, &[0xff, 0xff, 0xff, 0x7f]),
+    ];
+    for (what, at, bytes) in malformed {
+        let mut broken = elf.clone();
+        broken[at..at + bytes.len()].copy_from_slice(bytes);
+        let path = dir.join("malformed");
+        std::fs::write(&path, &broken).expect("a malformed copy");
+        assert_eq!(guard(&path), "not an ELF executable", "a malformed {what}");
+    }
+
     // And a record of the unstripped build is one the reporter refuses.
     let record = dir.join("target/budget-records/host-view.json");
     std::fs::create_dir_all(record.parent().expect("a parent")).expect("the record's directory");

@@ -158,7 +158,8 @@ pub struct SkippedRoot {
     pub reason: String,
 }
 
-/// Read every run under `root`.
+/// The host's one reading, which the text and `--json` forms both render, so they
+/// cannot disagree.
 pub(crate) fn read(root: &Path) -> HostReading {
     let index = {
         let _list = phase("list");
@@ -313,7 +314,8 @@ fn current_summary(paths: &RunPaths) -> (Option<RunSummary>, (u64, u64)) {
     (summary, stamp)
 }
 
-/// Whether the launch record's driver is proved over on this host.
+/// Only a driver launched on this host can be proved over: another host's pid
+/// says nothing here, so its run is never taken as ended on that evidence.
 fn driver_proved_gone(launch: &LaunchRecord) -> bool {
     launch.host == sys::hostname() && sys::claim_on(launch.pid, &launch.started).is_over()
 }
