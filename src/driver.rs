@@ -1127,7 +1127,7 @@ fn start(args: &StartArgs) -> Result<i32> {
     // already open from it rather than opening a second.
     for (id, branch) in &continuation.pinned {
         if let Some(node) = plan.tasks.iter_mut().find(|node| &node.id == id) {
-            node.branch = Some(branch.clone());
+            node.branch = Some(branch.as_str().to_owned());
         }
     }
 
@@ -1479,7 +1479,7 @@ fn start(args: &StartArgs) -> Result<i32> {
                     continuation
                         .pinned
                         .iter()
-                        .map(|(node, branch)| format!("'{node}' on {branch}"))
+                        .map(|(node, branch)| format!("'{node}' on {}", branch.as_str()))
                         .collect::<Vec<_>>()
                         .join(", ")
                 )

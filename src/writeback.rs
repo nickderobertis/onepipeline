@@ -2174,15 +2174,14 @@ fn carry_the_difference(
     // what last landed — and only then.
     if let DriverWrite::Release { run, host } = &snapshot.driver {
         if baseline.holds_claim_of(run, host) {
-            let stored = destination_project(attempt, snapshot)?
-                .metadata
-                .get(DRIVER_KEY)
-                .cloned()
-                .unwrap_or(Value::Null);
-            let ours = serde_json::from_value::<crate::payload::DriverClaim>(stored.clone())
-                .is_ok_and(|claim| claim.names(run, host));
+            let metadata = destination_project(attempt, snapshot)?.metadata;
+            let stored = metadata.get(DRIVER_KEY).cloned().unwrap_or(Value::Null);
+            // Read as the launch reads it: a claim that is not one is nobody's this run may
+            // release, so it is left as it stands.
+            let read = crate::continuation::claim_of(snapshot.project.as_str(), &metadata);
+            let ours = matches!(&read, Ok(Some(claim)) if claim.names(run, host));
             if !ours {
-                let successor = !stored.is_null();
+                let successor = !matches!(read, Ok(None));
                 baseline
                     .landed
                     .project_metadata

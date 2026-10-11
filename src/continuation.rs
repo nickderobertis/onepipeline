@@ -232,7 +232,7 @@ struct Stored {
 impl Stored {
     /// The branch a node that ran and did not finish left its work on: a failed, cancelled
     /// or parked one's, and no other's.
-    fn left_on(&self) -> Option<String> {
+    fn left_on(&self) -> Option<crate::vcs::BranchName> {
         use crate::payload::Status;
         matches!(
             self.status,
@@ -240,7 +240,7 @@ impl Stored {
         )
         .then(|| self.fields.get("branch")?.as_str())
         .flatten()
-        .and_then(crate::vcs::usable)
+        .and_then(crate::vcs::BranchName::checked)
     }
 }
 
@@ -299,7 +299,7 @@ pub(crate) struct Continuation {
     /// Each node continued `done`, in plan order, with the settlement it journals.
     pub(crate) settled: Vec<(String, Continued)>,
     /// Each node pinned to the branch it left, in plan order.
-    pub(crate) pinned: Vec<(String, String)>,
+    pub(crate) pinned: Vec<(String, crate::vcs::BranchName)>,
 }
 
 /// A `node-settled` a launch journals for a node its store held `done`: the stored settlement
@@ -353,7 +353,9 @@ pub(crate) fn continuation_of(read: &Read, claim: Option<&DriverClaim>) -> Resul
         // A dispatch the store still holds opened after the settlement beside it, since a
         // settlement removes the key: its branch is the one the work was last on.
         let left = settlement.as_ref().and_then(Stored::left_on);
-        if let Some(branch) = dispatch.map(|dispatch| dispatch.branch).or(left) {
+        let dispatched =
+            dispatch.and_then(|dispatch| crate::vcs::BranchName::checked(&dispatch.branch));
+        if let Some(branch) = dispatched.or(left) {
             continued.pinned.push((node.id.clone(), branch));
         }
     }
@@ -513,21 +515,24 @@ pub(crate) fn release_left_standing(
         return;
     };
     let host = crate::sys::hostname();
-    let ours = |claim: Option<&Value>| {
-        claim
-            .and_then(|claim| serde_json::from_value::<DriverClaim>(claim.clone()).ok())
-            .is_some_and(|claim| claim.names(&paths.run, &host))
+    // Both read as the launch reads a claim: one that is not one is nobody's to release.
+    let ours = |metadata: &BTreeMap<String, Value>| {
+        matches!(
+            claim_of(project.as_str(), metadata),
+            Ok(Some(claim)) if claim.names(&paths.run, &host)
+        )
     };
-    if !ours(crate::writeback::landed_claim(&paths.dir).as_ref())
-        || crate::writeback::store_asked_to_wait(&paths.dir)
-    {
+    let landed: BTreeMap<String, Value> = crate::writeback::landed_claim(&paths.dir)
+        .map(|claim| BTreeMap::from([(DRIVER_KEY.to_owned(), claim)]))
+        .unwrap_or_default();
+    if !ours(&landed) || crate::writeback::store_asked_to_wait(&paths.dir) {
         return;
     }
     let store = Store::at(&launch.dir);
     let released = store
         .project_metadata_within(&project, CLAIM_READ_DEADLINE)
         .and_then(|metadata| {
-            if !ours(metadata.get(DRIVER_KEY)) {
+            if !ours(&metadata) {
                 return Ok(());
             }
             store.set_project_metadata_within(
