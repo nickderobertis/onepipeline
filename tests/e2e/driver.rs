@@ -3736,6 +3736,66 @@ fn a_linux_stop_accepts_an_active_runs_legacy_ps_identity() {
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 
+/// A live driver whose launch record carries the former `ps lstart` spelling is
+/// never read as dead when that spelling no longer reads the same: Linux computes
+/// it from a boot time it recomputes off the wall clock, so a stepped clock moves
+/// it for a process that never ended. `status` reads such a run as active, and a
+/// `stop` leaves that driver alone and says why, refusing rather than reporting a
+/// stop it did not make, as for any pid nothing proves is still this run's.
+// llmlint: ignore-block[tests_mirror_real_usage] a stepped wall clock is a host transition
+// no test may make; replacing only the serialized token with the spelling the former engine
+// wrote, twelve hours off, is the persisted input a drifted host leaves, and the real
+// `status` and `stop` then read the real run root and ask the host about the real driver.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_live_driver_whose_legacy_ps_identity_drifted_is_never_read_as_dead() {
+    let world = World::new("driver-legacy-start-token-drifted");
+    world.script("build.wait", "hold");
+    let (run, driver) = start_detached_announcing(&world, "drifted", vec![agent("build", &[])]);
+    world.until("a node to be in flight", |world| {
+        !world.events_of(&run, "node-dispatched").is_empty()
+    });
+
+    let legacy = started_at_of(driver);
+    let fields: Vec<&str> = legacy.split_whitespace().collect();
+    let [weekday, month, day, time, year] = fields.as_slice() else {
+        panic!("an lstart answer: {legacy}");
+    };
+    let (hours, rest) = time.split_once(':').expect("a clock");
+    let hours: u32 = hours.parse().expect("hours");
+    let drifted = format!(
+        "{weekday} {month} {day} {:02}:{rest} {year}",
+        (hours + 12) % 24
+    );
+    let record = world.run_file(&run, "launch.json");
+    let mut launch = world.run_json(&run, "launch.json");
+    launch["started"] = json!(drifted);
+    std::fs::write(record, launch.to_string()).expect("the drifted launch record is installed");
+
+    let status = world.run(&["status", &run]);
+    status.exited(0).out_has("ACTIVE");
+    assert!(
+        !status.stdout.contains("DRIVER DEAD"),
+        "a live driver read as dead:\n{}",
+        status.stdout
+    );
+    world
+        .run(&["stop", &run])
+        .exited(REFUSED)
+        .err_has(&format!("the launch record names pid {driver}"))
+        .err_has("older `ps` spelling and no longer reads the same")
+        .err_has("was only partly stopped");
+    assert!(
+        still_listed(driver),
+        "the stop signalled a driver it could not prove"
+    );
+    world.release("build.go");
+    world.until("the driver to finish once its dispatch is released", |_| {
+        !still_listed(driver)
+    });
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
 /// Finding live pids but declining every recorded identity is a refusal, not an
 /// idle run. The stranger is a real process owned by this test and survives.
 // llmlint: ignore-block[tests_mirror_real_usage] PID reuse is a host transition, not a

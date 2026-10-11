@@ -1231,25 +1231,48 @@ fn legacy_reading(now: Option<&str>, recorded: &str) -> TokenReading {
 }
 
 /// Seconds since the epoch of a `ps -o lstart=` answer read in UTC and the C
-/// locale, as `Sun Oct 11 19:23:36 2026`; `None` for anything else.
+/// locale, as `Sun Oct 11 19:23:36 2026`; `None` for anything else, a date that
+/// does not exist or names the wrong weekday included, so a malformed record is
+/// refused rather than normalized into some other second.
 #[cfg(target_os = "linux")]
 fn lstart_seconds(lstart: &str) -> Option<i64> {
     const MONTHS: [&str; 12] = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ];
+    // 1970-01-01 was a Thursday.
+    const WEEKDAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
     let fields: Vec<&str> = lstart.split_whitespace().collect();
-    let [_weekday, month, day, time, year] = fields.as_slice() else {
+    let [weekday, month, day, time, year] = fields.as_slice() else {
         return None;
     };
     let month = i64::try_from(MONTHS.iter().position(|name| name == month)? + 1).ok()?;
     let day: i64 = day.parse().ok()?;
-    let year: i64 = year.parse().ok()?;
+    // No process on a Linux host started before the epoch, and four digits is
+    // all `lstart` spells a year with.
+    let year: i64 = year
+        .parse()
+        .ok()
+        .filter(|year| (1970..=9999).contains(year))?;
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days_in_month = match month {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
     let mut clock = time.split(':').map(str::parse::<i64>);
     let (Some(Ok(hours)), Some(Ok(minutes)), Some(Ok(seconds)), None) =
         (clock.next(), clock.next(), clock.next(), clock.next())
     else {
         return None;
     };
+    if !(1..=days_in_month).contains(&day)
+        || !(0..24).contains(&hours)
+        || !(0..60).contains(&minutes)
+        || !(0..60).contains(&seconds)
+    {
+        return None;
+    }
     // Days from 1970-01-01 to the civil date, by Howard Hinnant's algorithm.
     let shifted = if month <= 2 { year - 1 } else { year };
     let era = shifted.div_euclid(400);
@@ -1257,7 +1280,8 @@ fn lstart_seconds(lstart: &str) -> Option<i64> {
     let of_year = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
     let of_cycle = of_era * 365 + of_era / 4 - of_era / 100 + of_year;
     let days = era * 146_097 + of_cycle - 719_468;
-    Some(days * 86_400 + hours * 3_600 + minutes * 60 + seconds)
+    let named = usize::try_from(days.rem_euclid(7)).ok()?;
+    (WEEKDAYS[named] == *weekday).then_some(days * 86_400 + hours * 3_600 + minutes * 60 + seconds)
 }
 
 /// When a process started, as an opaque token this host can compare a later
@@ -2087,7 +2111,19 @@ mod tests {
             lstart_seconds("Thu Feb 29 12:00:00 2024"),
             Some(1_709_208_000)
         );
-        for malformed in ["", "Sun Oct 11 19:23 2026", "Sun Okt 11 19:23:36 2026"] {
+        for malformed in [
+            "",
+            "Sun Oct 11 19:23 2026",
+            "Sun Okt 11 19:23:36 2026",
+            "Mon Oct 11 19:23:36 2026",
+            "Sat Feb 29 12:00:00 2025",
+            "Sun Oct 11 24:00:00 2026",
+            "Sun Oct 11 19:60:36 2026",
+            "Sun Oct 11 19:23:60 2026",
+            "Sun Oct 32 19:23:36 2026",
+            "Thu Jan  1 00:00:00 99999999999999999",
+            "Wed Dec 31 23:59:59 1969",
+        ] {
             assert_eq!(lstart_seconds(malformed), None, "{malformed:?}");
         }
         for (now, reading) in [

@@ -1781,10 +1781,18 @@ fn a_live_dispatch_recorded_with_a_legacy_ps_start_token_is_held() {
         .output()
         .expect("ps answers");
     let shifted = String::from_utf8(shifted.stdout).expect("UTF-8");
-    // A year earlier: the same spelling, read as no second near this process's start.
-    let (rest, year) = shifted.trim().rsplit_once(' ').expect("a year");
-    let year: u32 = year.parse().expect("a year");
-    let shifted = format!("{rest} {}", year - 1);
+    // Twelve hours off on the same day: the same spelling and weekday, read as no
+    // second near this process's start.
+    let fields: Vec<&str> = shifted.split_whitespace().collect();
+    let [weekday, month, day, time, year] = fields.as_slice() else {
+        panic!("an lstart answer: {shifted}");
+    };
+    let (hours, rest) = time.split_once(':').expect("a clock");
+    let hours: u32 = hours.parse().expect("hours");
+    let shifted = format!(
+        "{weekday} {month} {day} {:02}:{rest} {year}",
+        (hours + 12) % 24
+    );
     let (driver, driver_token) = fixture.sleeper();
     let started = now_millis() - 600_000;
     // llmlint: ignore[tests_mirror_real_usage] no build of this crate writes the former spelling any more, so the entry an engine before procfs tokens wrote is written here in the shape it took, naming a real live process; the read is the real binary's.

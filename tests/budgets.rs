@@ -585,6 +585,51 @@ fn the_host_view_measurement_records_nothing_from_a_read_that_failed() {
             && stderr.contains("ENOENT"),
         "{stderr}"
     );
+
+    // A record that cannot be written is refused before anything is measured.
+    let file = dir.join("a-file");
+    std::fs::write(&file, "not a directory").expect("a file");
+    let measured = std::process::Command::new("node")
+        .arg(root().join("scripts/host-view-measure.mjs"))
+        .arg(env!("CARGO_BIN_EXE_onepipeline"))
+        .arg(file.join("host-view.json"))
+        .output()
+        .expect("node runs the measurement");
+    let stderr = String::from_utf8_lossy(&measured.stderr);
+    assert_eq!(measured.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("the record cannot be written under")
+            && stderr.contains("name another record path as the second argument"),
+        "{stderr}"
+    );
+
+    // A tracer that cannot run is named, with what makes it run, not the read's remedy.
+    let sleep_only = dir.join("sleep-only");
+    std::fs::create_dir_all(&sleep_only).expect("a PATH");
+    let sleep = std::process::Command::new("sh")
+        .args(["-c", "command -v sleep"])
+        .output()
+        .expect("sh answers");
+    std::os::unix::fs::symlink(
+        String::from_utf8_lossy(&sleep.stdout).trim(),
+        sleep_only.join("sleep"),
+    )
+    .expect("sleep on the PATH");
+    let measured = std::process::Command::new(String::from_utf8_lossy(&node.stdout).trim())
+        .arg(root().join("scripts/host-view-measure.mjs"))
+        .arg(env!("CARGO_BIN_EXE_onepipeline"))
+        .arg(dir.join("traced/host-view.json"))
+        .env("PATH", &sleep_only)
+        .output()
+        .expect("node runs the measurement");
+    let stderr = String::from_utf8_lossy(&measured.stderr);
+    assert_eq!(measured.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("`strace` could not run")
+            && stderr.contains("next: install `strace` on PATH")
+            && !dir.join("traced/host-view.json").exists(),
+        "{stderr}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

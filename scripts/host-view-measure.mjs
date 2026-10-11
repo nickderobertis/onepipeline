@@ -22,7 +22,15 @@
 // measurement fails. `tests/e2e/host_view.rs` holds the same under this tree's build.
 
 import { spawn, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  accessSync,
+  constants,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -58,6 +66,13 @@ if (!binary) {
 
 const NEXT =
   "pass an installed release build of this tree's onepipeline (`cargo install --path .`), on Linux, with `npm ci` done; a read that answered wrongly is a defect of the view, which `just test-e2e 'test(/^host_view::/)'` reproduces against this tree's own build";
+/** An error carrying the next step its own failure needs, in place of {@link NEXT}. */
+const failed = (message, next) => Object.assign(new Error(message), { next });
+const recordRefused = (error) =>
+  failed(
+    `the record cannot be written under ${dirname(RECORD)}: ${error.message}`,
+    `make ${dirname(RECORD)} a writable directory, or name another record path as the second argument`,
+  );
 let work = null;
 let runs = null;
 const children = [];
@@ -221,7 +236,10 @@ function traced(manifest, label) {
   try {
     observed = journalOpens(binary, ["host", "--json"], join(work, `${label}.strace`));
   } catch (error) {
-    throw new Error(`${label}: ${error.message}`);
+    throw failed(
+      `${label}: ${error.message}`,
+      "install `strace` on PATH and let this user trace its own children (`kernel.yama.ptrace_scope` 0 or 1), then measure again",
+    );
   }
   holds(manifest, JSON.parse(observed.stdout), `${label} traced read`);
   return steadyOpens(observed, manifest.ended, manifest.live_runs, label);
@@ -243,6 +261,13 @@ function steady(manifest, label) {
 }
 
 try {
+  // Where the record goes is settled before minutes are spent measuring for it.
+  try {
+    mkdirSync(dirname(RECORD), { recursive: true });
+    accessSync(dirname(RECORD), constants.W_OK);
+  } catch (error) {
+    throw recordRefused(error);
+  }
   work = mkdtempSync(join(tmpdir(), "host-view-measure-"));
   runs = join(work, "runs");
   // The read's whole environment: the root, the host name the fixture's records
@@ -324,23 +349,32 @@ try {
   // The reporter's own check, so a figure this writes and that one reads by
   // another name fails here, where it was measured.
   validateRecord(record);
-  mkdirSync(dirname(RECORD), { recursive: true });
-  writeFileSync(RECORD, JSON.stringify(record, null, 2));
+  try {
+    writeFileSync(RECORD, JSON.stringify(record, null, 2));
+  } catch (error) {
+    throw recordRefused(error);
+  }
   console.log(
     `host-view-time: ${measured.walls.map((ms) => ms.toFixed(1)).join(", ")} ms; record at ${RECORD}`,
   );
 } catch (error) {
-  console.error(`host-view-measure: ${error.message}\nnext: ${NEXT}`);
+  console.error(`host-view-measure: ${error.message}\nnext: ${error.next ?? NEXT}`);
   process.exitCode = 1;
 } finally {
   for (const child of children) child.kill("SIGKILL");
   if (work !== null) {
+    // The steady reads leave ended journals unreadable; what restoring them said
+    // is reported beside a removal that failed, which it is the likeliest cause of.
+    const restored = spawnSync("chmod", ["-R", "u+rwX", work], { encoding: "utf8" });
     try {
-      spawnSync("chmod", ["-R", "u+rwX", work]);
       rmSync(work, { recursive: true, force: true });
     } catch (error) {
+      const chmod =
+        restored.error || restored.status !== 0
+          ? `; restoring its permissions: \`chmod\` ${failure(restored)}`
+          : "";
       console.error(
-        `host-view-measure: the fixture under ${work} could not be removed (${error.message})\nnext: remove it by hand`,
+        `host-view-measure: the fixture under ${work} could not be removed (${error.message}${chmod})\nnext: run \`chmod -R u+rwX ${work}\`, then remove it`,
       );
       process.exitCode = 1;
     }
