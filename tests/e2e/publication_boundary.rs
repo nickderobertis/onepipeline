@@ -2923,7 +2923,9 @@ fn the_validator_refuses_to_judge_a_malformed_document_and_reads_commands_as_the
         &["boundary", "validate-envelope", "--run", "shaped"],
         "{\"commands\": [",
     );
-    unparsed.exited(REFUSED).err_has("the envelope on stdin is not JSON");
+    unparsed
+        .exited(REFUSED)
+        .err_has("the envelope on stdin is not JSON");
     assert!(unparsed.stdout.is_empty(), "{}", unparsed.stdout);
     names_no_node(&world, "shaped", &unparsed.stderr);
     // What is not an envelope, a record or a surface is judged by nothing, so it is

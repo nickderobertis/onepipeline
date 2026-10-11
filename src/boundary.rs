@@ -988,27 +988,33 @@ impl Judged {
     }
 }
 
-/// Every string inside `value`, keys excepted, in document order.
+/// Every string inside `value`, each mapping's keys included, in document order: a key
+/// of a mapping a payload carries — a `requeue`'s `amend`, say — is as much what it says
+/// as the value beside it.
 fn strings_of(value: &serde_json::Value, out: &mut Vec<String>) {
     match value {
         serde_json::Value::String(text) => out.push(text.clone()),
         serde_json::Value::Array(values) => values.iter().for_each(|value| strings_of(value, out)),
-        serde_json::Value::Object(fields) => {
-            fields.values().for_each(|value| strings_of(value, out))
-        }
+        serde_json::Value::Object(fields) => fields.iter().for_each(|(key, value)| {
+            out.push(key.clone());
+            strings_of(value, out);
+        }),
         _ => {}
     }
 }
 
-/// Every string a command's payload carries: all of it but the command's own `op`, which
-/// is the wire word for what kind of command it is rather than anything it says.
+/// Every string a command's payload carries: all of it but the command's own `op` and its
+/// own field names, which are the channel's wire words for what kind of command it is and
+/// where each part sits rather than anything it says.
 fn payload_strings(command: &crate::channel::Command) -> Vec<String> {
-    let mut payload = serde_json::to_value(command).unwrap_or_default();
-    if let Some(fields) = payload.as_object_mut() {
-        fields.remove("op");
-    }
+    let payload = serde_json::to_value(command).unwrap_or_default();
     let mut text = Vec::new();
-    strings_of(&payload, &mut text);
+    if let Some(fields) = payload.as_object() {
+        fields
+            .iter()
+            .filter(|(field, _)| field.as_str() != "op")
+            .for_each(|(_, value)| strings_of(value, &mut text));
+    }
     text
 }
 
@@ -1752,6 +1758,26 @@ pub(crate) fn check(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A key of a mapping a command carries is screened like the value beside it, and the
+    /// command's own `op` and field names — the channel's wire words — are not. No command
+    /// the channel takes carries a mapping whose keys are free text that a value does not
+    /// repeat (`consumes` is keyed by the `deps` it names), so no journey can isolate this.
+    #[test]
+    fn a_payload_carries_the_keys_of_its_mappings_and_not_its_own_wire_words() {
+        let command: crate::channel::Command = serde_json::from_value(serde_json::json!({
+            "op": "requeue",
+            "id": "loose",
+            "amend": {"consumes": {"secret-dependency": "crate"}},
+        }))
+        .expect("a requeue");
+        let text = payload_strings(&command);
+        assert!(text.contains(&"secret-dependency".to_owned()), "{text:?}");
+        assert!(text.contains(&"consumes".to_owned()), "{text:?}");
+        for wire in ["op", "requeue", "id", "amend"] {
+            assert!(!text.contains(&wire.to_owned()), "{wire} in {text:?}");
+        }
+    }
 
     /// Repositories answered from a table: a name ending `-public` is public, and every
     /// term check refuses text carrying `secret`.
