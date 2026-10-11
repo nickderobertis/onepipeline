@@ -1408,54 +1408,115 @@ fn a_settlement_dispatch_or_claim_that_is_not_one_refuses_the_launch() {
             "the refusal minted a run"
         );
     };
-    let mut typo = stored["b"].clone();
-    typo["brnach"] = typo["branch"].take();
-    restate(&world, &project, "b", "onepipeline.settlement", typo);
-    refused(&[
-        "node 'b'",
-        "`onepipeline.settlement` is not a settlement",
-        "`brnach`",
-    ]);
+    // Each settlement a store could hold that is not one, and what the refusal names.
+    let settlement = &stored["b"];
+    let with = |edit: &dyn Fn(&mut Value)| {
+        let mut changed = settlement.clone();
+        edit(&mut changed);
+        changed
+    };
+    let settlements = [
+        (with(&|s| s["brnach"] = s["branch"].take()), "`brnach`"),
+        (json!("failed"), "not a mapping"),
+        (
+            with(&|s| s["status"] = json!("finished")),
+            "unknown variant",
+        ),
+        (with(&|s| s["remote"] = json!("teleported")), "`remote`"),
+        (
+            with(&|s| {
+                s["base"] = json!("me/a");
+                s["stack"] = json!({"parents": [], "stack_base": null});
+            }),
+            "no usable parent",
+        ),
+        (
+            with(&|s| {
+                s["base"] = json!("me/a");
+                s["stack"] = json!({"parents": [{"node": "a", "branch": "me/a", "head": "1f2e"}],
+                                    "stack_base": null, "root": "main"});
+            }),
+            "`root`",
+        ),
+        (
+            with(&|s| {
+                s["base"] = json!("me/a");
+                s["stack"] = json!({"parents": [{"node": "a", "branch": "me/a", "head": "1f2e",
+                                                  "tip": "x"}],
+                                    "stack_base": null});
+            }),
+            "`tip`",
+        ),
+    ];
+    for (bad, says) in settlements {
+        restate(&world, &project, "b", "onepipeline.settlement", bad);
+        refused(&[
+            "node 'b'",
+            "`onepipeline.settlement` is not a settlement",
+            says,
+        ]);
+    }
     restate(
         &world,
         &project,
         "b",
         "onepipeline.settlement",
-        stored["b"].clone(),
+        settlement.clone(),
     );
 
+    // Each dispatch that is not one.
+    let at = "2026-10-11T00:00:00.000Z";
+    let dispatches = [
+        (json!({"branch": settlement["branch"]}), "missing field"),
+        (
+            json!({"branch": "", "base": stored["a"]["branch"], "opened_at": at}),
+            "not one a session can name",
+        ),
+        (
+            json!({"branch": settlement["branch"], "base": stored["a"]["branch"],
+                   "opened_at": "this morning"}),
+            "not an RFC 3339 instant",
+        ),
+        (
+            json!({"branch": settlement["branch"], "base": stored["a"]["branch"],
+                   "opened_at": at, "host": "builder"}),
+            "unknown field",
+        ),
+    ];
+    for (bad, says) in dispatches {
+        restate(&world, &project, "b", "onepipeline.dispatch", bad);
+        refused(&["node 'b'", "`onepipeline.dispatch` is not a dispatch", says]);
+    }
     restate(
         &world,
         &project,
         "b",
         "onepipeline.dispatch",
-        json!({"branch": stored["b"]["branch"]}),
-    );
-    refused(&[
-        "node 'b'",
-        "`onepipeline.dispatch` is not a dispatch",
-        "missing field",
-    ]);
-    restate(
-        &world,
-        &project,
-        "b",
-        "onepipeline.dispatch",
-        json!({"branch": stored["b"]["branch"], "base": stored["a"]["branch"],
-               "opened_at": "2026-10-11T00:00:00.000Z"}),
+        json!({"branch": settlement["branch"], "base": stored["a"]["branch"], "opened_at": at}),
     );
 
-    let key =
-        onetaskgraph_plugin_api::MetadataKey::new("onepipeline.driver".to_owned()).expect("a key");
-    let id: onetaskgraph_core::GlobalId = project.parse().expect("a qualified project");
-    world
-        .store_call(|engine| async move {
-            engine
-                .set_project_metadata(&id, &key, &json!({"run": "elsewhere"}))
-                .await
-        })
-        .unwrap_or_else(|why| panic!("the store refused the write: {why}"));
-    refused(&["`onepipeline.driver` is not a claim", "missing field"]);
+    // Each claim that is not one.
+    let claim = json!({"run": "elsewhere", "host": "builder", "session": null, "pid": 7,
+                       "claimed_at": at});
+    let mut leased = claim.clone();
+    leased["lease"] = json!(30);
+    let mut untimed = claim.clone();
+    untimed["claimed_at"] = json!("yesterday");
+    let claims = [
+        (json!({"run": "elsewhere"}), "missing field"),
+        (json!("elsewhere"), "not a mapping"),
+        (leased, "`lease`"),
+        (untimed, "not an RFC 3339 instant"),
+    ];
+    for (bad, says) in claims {
+        let key = onetaskgraph_plugin_api::MetadataKey::new("onepipeline.driver".to_owned())
+            .expect("a key");
+        let id: onetaskgraph_core::GlobalId = project.parse().expect("a qualified project");
+        world
+            .store_call(|engine| async move { engine.set_project_metadata(&id, &key, &bad).await })
+            .unwrap_or_else(|why| panic!("the store refused the write: {why}"));
+        refused(&["`onepipeline.driver` is not a claim", says]);
+    }
 }
 
 /// The branch a node is pinned to is the latest the store knows it worked on: a dispatch the

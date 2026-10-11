@@ -377,9 +377,8 @@ pub(crate) struct ClaimWatch {
     // llmlint: ignore-end[invalid_states_unrepresentable]
     /// The run's own directory, where the store's request to be left alone is kept.
     run_dir: std::path::PathBuf,
-    /// Whether this driver is a launch's, whose own read of the claim — the one that let it
-    /// launch — covers its first pass; an adoption's first pass reads it again.
-    launched: bool,
+    /// Which kind of driver this is, which decides whether its first pass reads the claim.
+    driving: Driving,
     /// The claim this run's launch knowingly took over: still on the store until this
     /// driver's first projection replaces it, and no sign that anybody else drives.
     displaced: Option<DriverClaim>,
@@ -400,7 +399,11 @@ impl ClaimWatch {
             run: paths.run.clone(),
             host: crate::sys::hostname(),
             run_dir: paths.dir.clone(),
-            launched: launch.adoptions == 0,
+            driving: if launch.adoptions == 0 {
+                Driving::Launched
+            } else {
+                Driving::Adopted
+            },
             displaced: taken_over(paths),
             last: None,
             every: idle_claim_check(),
@@ -477,11 +480,21 @@ impl ClaimWatch {
     /// driver is, an adoption's is not. Marks the idle clock from now, so a covered first pass
     /// is not read again as an idle one.
     pub(crate) fn covered_by_the_launch(&mut self) -> bool {
-        if self.launched {
+        let covered = self.driving == Driving::Launched;
+        if covered {
             self.last = Some(Instant::now());
         }
-        self.launched
+        covered
     }
+}
+
+/// Which kind of driver a claim watch is a driver's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Driving {
+    /// A launch's: the read of the claim that let it launch covers its first pass.
+    Launched,
+    /// An adoption's: nothing read the claim for it, so its first pass does.
+    Adopted,
 }
 
 /// Release this run's claim on its project directly, where the closeout's own projection —
@@ -558,6 +571,7 @@ fn idle_claim_check() -> Duration {
 /// The interval the seam's value names: a positive whole number of seconds, and the shipped
 /// interval for anything else — unset, blank, zero or not a number — so a seam set wrong
 /// never turns the check off.
+// llmlint: ignore[changed_behavior_has_e2e] what a fallback here produces is the shipped ten-minute interval, which a journey could only observe by idling a driver for ten minutes; the journeys that set the seam drive the parsed value end to end (`an_idle_superseded_driver_notices_within_one_idle_check_and_publishes_nothing`), and this module's `an_idle_driver_reads_its_claim_at_least_every_ten_minutes` holds every value that falls back.
 fn idle_claim_check_of(seam: Option<&str>) -> Duration {
     seam.and_then(|seconds| seconds.trim().parse::<u64>().ok())
         .filter(|seconds| *seconds > 0)
@@ -656,6 +670,17 @@ mod tests {
             .map(|key| (*key).to_owned())
             .collect();
         assert_eq!(stored, settled);
+        let set = |keys: &[&str]| -> std::collections::BTreeSet<String> {
+            keys.iter().map(|key| (*key).to_owned()).collect()
+        };
+        assert_eq!(
+            set(&STACK_KEYS),
+            properties::<crate::payload::SettledStack>()
+        );
+        assert_eq!(
+            set(&STACK_PARENT_KEYS),
+            properties::<crate::payload::StackParent>()
+        );
     }
 
     /// Entry 116's block is what this build does: its keys are the ones this build reads and
