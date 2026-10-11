@@ -207,7 +207,6 @@ pub(crate) fn read(root: &Path) -> HostReading {
     }
 }
 
-/// What one run contributes.
 #[derive(Default)]
 struct RunRead {
     rows: Vec<DispatchRow>,

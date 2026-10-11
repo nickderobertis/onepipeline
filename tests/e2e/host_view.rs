@@ -26,6 +26,14 @@
 // writes — the journals are a recorded run's own records — and the view under test is the
 // real compiled binary, read the way an operator reads it.
 
+// llmlint: ignore-file[expensive_tests_stay_behind_their_own_edge] measured: the module's
+// seven journeys run in 35-60 seconds on a loaded host, two of them generating a 100-run root of
+// ~260 MB of journals, and the release build they time is made by the recipe ahead of the suite.
+// They exercise `hostview`, `checkpoint`, `summary`, `views`, `sys` and `freespace` through the
+// compiled binary, and read the recorded run under `tests/recorded/` and the budget reporter, so
+// any change under `src/` can move what they hold; the narrowest edge they can honestly sit
+// behind is the crate's, which is this target's. The declaration in `main.rs` says the same.
+
 #![cfg(target_os = "linux")]
 
 use std::collections::{BTreeMap, BTreeSet};

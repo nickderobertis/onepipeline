@@ -211,7 +211,6 @@ pub(crate) fn render(readings: &[FreeSpace]) -> String {
     out
 }
 
-/// How a line names one root.
 fn named(root: &FreeSpaceRoot) -> String {
     let path = root.path.as_ref().map_or_else(String::new, |path| {
         crate::views::one_line(&path.display().to_string())
