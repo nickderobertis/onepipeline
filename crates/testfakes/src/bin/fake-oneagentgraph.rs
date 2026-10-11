@@ -1819,6 +1819,10 @@ const SCRATCH_DIR_ENV: &str = "ONEPIPELINE_NODE_SCRATCH_DIR";
 const SESSION_ENV: &str = "ONEVCS_SESSION";
 const RUNS_DIR_ENV: &str = "ONEPIPELINE_RUNS_DIR";
 
+/// The variable a flow's program is started with, which the engine must never
+/// hand a dispatch — spelled here for [`SCRATCH_DIR_ENV`]'s reason.
+const FLOW_ENV: &str = "ONEPIPELINE_FLOW";
+
 /// The variable naming who this dispatch's channel sessions listen for.
 ///
 /// Spelled here rather than taken from the crate under test, for the reason
@@ -2322,6 +2326,9 @@ fn emit(
             // — absent where the engine handed none, for `scratch_dir`'s reason.
             "session": std::env::var(SESSION_ENV).ok(),
             "runs_dir": std::env::var(RUNS_DIR_ENV).ok(),
+            // And the flow, which a dispatch is never handed: reported so a
+            // journey can assert its absence from the run's own record.
+            "flow": std::env::var(FLOW_ENV).ok(),
             // And who this dispatch asks its manager as, so a journey can assert
             // from the store that a real dispatch is given one and that no two
             // share it.

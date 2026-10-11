@@ -507,6 +507,11 @@ pub fn all_runs(root: &Path) -> RunIndex {
             continue;
         };
         // llmlint: ignore-end[changed_behavior_has_e2e]
+        // The flows a runs root holds sit in one directory of their own beside
+        // the runs, and it is no claim to be a run.
+        if name == crate::flow::FLOWS_DIR {
+            continue;
+        }
         let paths = RunPaths::under(root, &name);
         let launch = paths.launch();
         let named = launch
@@ -1052,6 +1057,17 @@ pub struct LaunchRecord {
     /// reader that holds the record and not the paths. See [`crate::agents`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oneharness_sessions: Option<PathBuf>,
+    /// The flow this run was launched in, or empty for a run that belongs to
+    /// none.
+    ///
+    /// Written by `start` alone, and only where `ONEPIPELINE_FLOW` named a live
+    /// flow of the launching session under this runs root; everything else is a
+    /// run of no flow. While that flow is live, a qualifying watch of it counts
+    /// as watching this run — divergence entry 114 states the rule. Omitted when
+    /// empty, like every other field added to this record after it shipped, so
+    /// every record written before it reads unchanged.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub flow: String,
 }
 
 impl LaunchRecord {
@@ -3633,6 +3649,7 @@ mod tests {
             template_root: String::new(),
             require_rendered: false,
             oneharness_sessions: None,
+            flow: String::new(),
             envelope_reviewer_bar: Default::default(),
         }
     }
@@ -4574,6 +4591,7 @@ mod tests {
             template_root: String::new(),
             require_rendered: false,
             oneharness_sessions: None,
+            flow: String::new(),
             envelope_reviewer_bar: Default::default(),
         };
         assert!(!record.owned_by(sys::UNKNOWN_LAUNCHER));
@@ -4617,6 +4635,7 @@ mod tests {
             template_root: String::new(),
             require_rendered: false,
             oneharness_sessions: None,
+            flow: String::new(),
             envelope_reviewer_bar: Default::default(),
         };
         let label = record.owner_label("mine");
@@ -5228,6 +5247,38 @@ mod tests {
             torn_tails(&path).is_empty(),
             "an append that healed nothing reported a loss"
         );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A runs root holding flows lists exactly its runs, and names no skipped
+    /// root for the directory the flows are kept in: it is no claim to be a run.
+    #[test]
+    fn a_runs_root_holding_flows_lists_exactly_its_runs() {
+        let root = scratch("index-flows");
+        for name in ["b-run", "a-run"] {
+            let paths = RunPaths::under(&root, name);
+            paths.create().expect("a run directory");
+            write_json(&paths.launch(), &serde_json::json!({})).expect("a launch record");
+        }
+        let flow = crate::flow::paths(&root, "plan");
+        fs::create_dir_all(flow.channel_dir()).expect("a flow's channel");
+        fs::create_dir_all(flow.watchers()).expect("a flow's leases");
+        write_json(
+            &flow.dir.join("flow.json"),
+            &serde_json::json!({"flow_id": "plan"}),
+        )
+        .expect("a flow record");
+
+        let index = all_runs(&root);
+        assert_eq!(
+            index
+                .runs
+                .iter()
+                .map(|run| run.run.as_str())
+                .collect::<Vec<_>>(),
+            ["a-run", "b-run"]
+        );
+        assert!(index.skipped.is_empty(), "{:?}", index.skipped);
         fs::remove_dir_all(&root).ok();
     }
 
