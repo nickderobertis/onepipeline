@@ -3060,13 +3060,17 @@ fn a_published_node_readied_in_the_pass_its_dependency_is_found_landed_is_held_f
         .with_env("ONEPIPELINE_MERGE_PATH_BACKOFF_SECONDS", "1");
     world.write_graphs();
     let (engine_repo, _consumer) = two_repositories(&world);
+    // The engine's visibility is declared, so the publication's write boundary
+    // takes the rule's word and asks the host nothing: the two reads the outage
+    // refuses stay the closeout's and the publication's own.
     std::fs::write(
         world.onevcs_home().join("rules.yml"),
-        "version: 3\n\
+        "version: 4\n\
          rules:\n\
          \x20 - match: {host: github.com, owner: owner, name: engine}\n\
          \x20   publication: change-auto\n\
          \x20   approvals: none\n\
+         \x20   visibility: private\n\
          default:\n\
          \x20 publication: local-direct\n\
          \x20 approvals: none\n",
