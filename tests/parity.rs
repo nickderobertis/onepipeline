@@ -1227,6 +1227,56 @@ fn shutdown_is_the_sdks_report_and_exit_code() {
     let _ = std::fs::remove_dir_all(&onevcs_home);
 }
 
+/// A directory for [`unpublished_host`], named for nothing but uniqueness and
+/// removed when dropped.
+///
+/// Not under a [`Fixture`]'s descriptively named root, and deliberately: the
+/// origin is a local path, so `onevcs` flattens it into **one directory name**
+/// under the state root, and every character of this root is spent twice in a
+/// session clone's paths — once as their prefix and again inside that name. Under
+/// a Windows runner's temporary directory, `onepipeline-parity-<pid>-unpublished`
+/// took `.git/hooks/applypatch-msg.sample` to 265 characters, and `git clone
+/// --shared` failed with "Filename too long" before the session opened.
+/// [`the_unpublished_host_keeps_every_path_it_writes_inside_windows_max_path`]
+/// holds the budget on every platform.
+struct VcsScratch(PathBuf);
+
+impl VcsScratch {
+    fn new(tag: &str) -> Self {
+        let root = std::env::temp_dir().join(format!("op-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        Self(root)
+    }
+}
+
+impl Drop for VcsScratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// The temporary directory of a Windows CI runner, in the longer of the two forms
+/// a path under it reaches `git` in: the verbatim `\\?\` spelling a canonical
+/// path carries into an identity's flattened name.
+const WINDOWS_RUNNER_TEMP: &str = r"\\?\C:\Users\runneradmin\AppData\Local\Temp";
+
+/// The longest path Windows opens without long-path support, its terminating
+/// NUL excluded.
+const WINDOWS_MAX_PATH: usize = 259;
+
+/// The length `path` would have on a Windows runner: each place it spends this
+/// platform's temporary directory — as its own prefix, or flattened into an
+/// identity's directory name, which keeps its length — spends
+/// [`WINDOWS_RUNNER_TEMP`] there instead. `root_name` is the last component of the
+/// directory made under the temporary directory, which each such place carries.
+fn windows_length(path: &Path, root_name: &str) -> usize {
+    let temp = std::env::temp_dir();
+    let temp = temp.to_string_lossy();
+    let temp = temp.trim_end_matches(['/', '\\']);
+    let spent = path.to_string_lossy().matches(root_name).count();
+    path.to_string_lossy().len() - spent * temp.len() + spent * WINDOWS_RUNNER_TEMP.len()
+}
+
 /// A state root of its own for `unpublished`: one registered repository and one
 /// branch a session labelled for [`SESSION`] left preserved, made through the
 /// linked `onevcs` over real git. Answers the environment both sides run under.
@@ -1311,7 +1361,8 @@ fn unpublished_host(root: &Path) -> Vec<(&'static str, String)> {
 fn unpublished_lists_decides_refuses_and_acknowledges_as_the_sdk_does() {
     let fixture = Fixture::new("unpublished");
     let _env = fixture.enter();
-    let scratch = fixture.root.parent().expect("the fixture root").join("vcs");
+    let host_root = VcsScratch::new("u");
+    let scratch = host_root.0.clone();
     let environment = unpublished_host(&scratch);
     let binary = |args: &[&str]| {
         fixture
@@ -1413,4 +1464,50 @@ fn unpublished_lists_decides_refuses_and_acknowledges_as_the_sdk_does() {
     for (key, _) in &environment {
         std::env::remove_var(key);
     }
+}
+
+/// Every path [`unpublished_host`] leaves — a session clone's hooks, objects and
+/// worktree metadata among them — fits inside Windows' MAX_PATH once projected
+/// onto a Windows runner's temporary directory, so the parity journey that opens a
+/// session there opens it on Linux and Windows alike.
+#[test]
+fn the_unpublished_host_keeps_every_path_it_writes_inside_windows_max_path() {
+    let fixture = Fixture::new("unpublished-paths");
+    let _env = fixture.enter();
+    let host_root = VcsScratch::new("w");
+    let environment = unpublished_host(&host_root.0);
+    for (key, _) in &environment {
+        std::env::remove_var(key);
+    }
+    let root_name = host_root
+        .0
+        .file_name()
+        .expect("a named root")
+        .to_string_lossy()
+        .into_owned();
+    let mut longest: Option<(usize, PathBuf)> = None;
+    let mut pending = vec![host_root.0.clone()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).expect("the host's tree reads") {
+            let path = entry.expect("an entry").path();
+            let length = windows_length(&path, &root_name);
+            if longest.as_ref().is_none_or(|(most, _)| length > *most) {
+                longest = Some((length, path.clone()));
+            }
+            if path.is_dir() && !path.is_symlink() {
+                pending.push(path);
+            }
+        }
+    }
+    let (length, path) = longest.expect("the host wrote something");
+    assert!(
+        path.components().any(|part| part.as_os_str() == "clone"),
+        "the longest path is a session clone's, which is the one MAX_PATH bites: {}",
+        path.display()
+    );
+    assert!(
+        length <= WINDOWS_MAX_PATH,
+        "{} would be {length} characters on a Windows runner, past MAX_PATH ({WINDOWS_MAX_PATH})",
+        path.display()
+    );
 }
