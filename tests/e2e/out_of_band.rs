@@ -312,13 +312,36 @@ fn a_green_branch_landed_on_a_team_repository_reports_the_review_draft_word() {
     }
 }
 
-/// How many `gh` invocations the host has been asked so far.
-fn gh_call_count(world: &World) -> usize {
+/// The arguments of every `gh` invocation the host has been asked so far, in order.
+fn gh_calls(world: &World) -> Vec<Value> {
     world
         .invocations()
-        .iter()
+        .into_iter()
         .filter(|call| call["tool"] == "gh")
-        .count()
+        .map(|call| call["args"].clone())
+        .collect()
+}
+
+/// Whether one recorded `gh` invocation only reads: an `api` request naming no
+/// method, field or input, which `gh` sends as a `GET`.
+fn only_reads(args: &Value) -> bool {
+    let args = args.as_array().expect("an invocation carries args");
+    args.first().is_some_and(|verb| verb == "api")
+        && !args.iter().any(|arg| {
+            arg.as_str().is_some_and(|arg| {
+                [
+                    "-X",
+                    "--method",
+                    "-f",
+                    "-F",
+                    "--field",
+                    "--raw-field",
+                    "--input",
+                ]
+                .iter()
+                .any(|flag| arg == *flag || arg.starts_with(&format!("{flag}=")))
+            })
+        })
 }
 
 /// Where the origin holds `branch`, or `None` where it holds no such branch.
@@ -350,9 +373,14 @@ const BOUNDS: [&str; 5] = [
 ];
 
 /// A bound set to something that is not one is refused, naming it, **before** a
-/// landing pushes anything or asks the host anything — for both verbs and every
-/// bound — and the refusal is word for word and code for code what `onevcs`'s own
-/// command line makes.
+/// landing pushes anything or asks the host to write anything — for both verbs and
+/// every bound — and the refusal, and every read of the host made before it, is
+/// word for word and code for code what `onevcs`'s own command line makes.
+///
+/// A read can precede the refusal because `onevcs` 0.45.0 screens a publication
+/// against its confidentiality boundary before it pushes, and that screen first
+/// reads whether the destination is public; the journey holds that read to the
+/// sibling's own, rather than to a list of its calls restated here.
 ///
 /// Held against the real `onevcs` binary rather than against a copy of its
 /// sentence: the two are run with the same bound over the same world, so a
@@ -378,7 +406,7 @@ fn an_unusable_bound_is_refused_before_a_landing_pushes_or_touches_the_host() {
         };
         for bound in BOUNDS {
             let (world, repository) = prepared();
-            let asked_before = gh_call_count(&world);
+            let asked_before = gh_calls(&world).len();
             let pushed_before = origin_ref(&repository, BRANCH);
             let checkout = repository.checkout.to_string_lossy().into_owned();
             let args = [
@@ -400,10 +428,10 @@ fn an_unusable_bound_is_refused_before_a_landing_pushes_or_touches_the_host() {
                 stderr.contains(bound) && stderr.contains("\"soon\""),
                 "{verb} {bound}: the refusal does not name the bound and its value: {stderr}"
             );
-            assert_eq!(
-                gh_call_count(&world),
-                asked_before,
-                "{verb} {bound}: the host was asked something before the refusal"
+            let asked = gh_calls(&world).split_off(asked_before);
+            assert!(
+                asked.iter().all(only_reads),
+                "{verb} {bound}: the host was asked to write before the refusal: {asked:?}"
             );
             assert_eq!(
                 origin_ref(&repository, BRANCH),
@@ -422,6 +450,7 @@ fn an_unusable_bound_is_refused_before_a_landing_pushes_or_touches_the_host() {
             // world would meet a branch already attested.
             let (apart, apart_repository) = prepared();
             let apart_checkout = apart_repository.checkout.to_string_lossy().into_owned();
+            let apart_asked_before = gh_calls(&apart).len();
             let own = [
                 onevcs_verb,
                 BRANCH,
@@ -447,6 +476,11 @@ fn an_unusable_bound_is_refused_before_a_landing_pushes_or_touches_the_host() {
                     String::from_utf8_lossy(&sibling.stderr).as_ref()
                 ),
                 "{verb} {bound}: the refusal is not the one onevcs makes"
+            );
+            assert_eq!(
+                asked,
+                gh_calls(&apart).split_off(apart_asked_before),
+                "{verb} {bound}: the host was asked other than onevcs asks it before the refusal"
             );
         }
     }
@@ -1767,3 +1801,46 @@ fn a_retried_nodes_branch_lands_under_its_latest_replacements_title() {
     );
 }
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
+/// The term scope an operator names reaches the linked `onevcs` landing: a scope
+/// naming an identity no registry holds leaves the boundary check unavailable, so
+/// both verbs refuse before anything reaches the host, while the same landing with
+/// the default scope, over a fresh world, opens its change request.
+#[test]
+fn a_named_term_scope_reaches_the_landing_it_fronts() {
+    const UNREGISTERED: &str = "github.com/nobody/unregistered";
+    for verb in ["publish-branch", "repo-recover"] {
+        for scope in [Some(UNREGISTERED), None] {
+            let world = World::new(&format!("oob-term-scope-{verb}-{}", scope.is_some()));
+            let repository = world.repository("change-open", &[]);
+            if verb == "publish-branch" {
+                branch_with_work(&world, &repository);
+            } else {
+                preserved_branch(&world, &repository);
+            }
+            let mut landing = vec![
+                verb,
+                BRANCH,
+                "--no-draft",
+                "--repo",
+                "service",
+                "--title",
+                "feat: add the widget",
+            ];
+            landing.extend(scope.iter().flat_map(|scope| ["--term-scope", scope]));
+            let landed = world.run(&landing);
+            if scope.is_some() {
+                landed.err_has("not registered");
+                assert_ne!(landed.code, 0, "{verb}: a scoped landing was not refused");
+                assert!(
+                    opened(&world).is_empty(),
+                    "{verb}: a refused landing opened a change request\n{}",
+                    world.dump()
+                );
+            } else {
+                landed.exited(0);
+                assert_eq!(opened(&world).len(), 1, "{verb}\n{}", world.dump());
+            }
+        }
+    }
+}
