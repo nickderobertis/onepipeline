@@ -1545,18 +1545,30 @@ fn commit_and_land_on_base(args: &[String], name: &str, base: &str) {
 }
 
 /// Whether the dispatch's worktree holds a merge in progress.
+///
+/// `git rev-parse -q --verify` exits 0 when `MERGE_HEAD` exists and 1 when it does
+/// not; anything else — git not starting, or exiting otherwise because the worktree
+/// is no repository — fails the dispatch rather than reading as no merge.
 fn merging(args: &[String]) -> bool {
     let worktree = session_worktree(args, "asking whether a merge is in progress");
-    std::process::Command::new("git")
+    let ran = std::process::Command::new("git")
         .args(["rev-parse", "-q", "--verify", "MERGE_HEAD"])
         .current_dir(&worktree)
         .stdin(std::process::Stdio::null())
-        // The answer is the exit status alone: what git prints goes nowhere, since
-        // this process's own stdout is the envelope stream it relays.
+        // What git prints to stdout goes nowhere, since this process's own stdout is
+        // the envelope stream it relays.
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+        .output();
+    match ran {
+        Ok(ran) if ran.status.success() => true,
+        Ok(ran) if ran.status.code() == Some(1) => false,
+        Ok(ran) => fake::fail(&format!(
+            "`git rev-parse -q --verify MERGE_HEAD` exited {}: {}",
+            ran.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&ran.stderr).trim()
+        )),
+        Err(why) => fake::fail(&format!("`git` could not be started: {why}")),
+    }
 }
 
 /// Conclude the merge a session opened with, where it opened with one.

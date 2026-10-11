@@ -251,8 +251,6 @@ pub(crate) fn splice(description: &str, block: &str) -> String {
             return format!("{}{block}{}", &description[..open], &description[end..]);
         }
     } // llmlint: ignore-end[changed_behavior_has_e2e]
-      // Appended after every byte of the description, trailing whitespace included,
-      // with only the newlines it lacks to put a blank line before the block.
     let separator = if description.is_empty() || description.ends_with("\n\n") {
         ""
     } else if description.ends_with('\n') {

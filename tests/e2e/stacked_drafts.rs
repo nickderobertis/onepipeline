@@ -816,6 +816,39 @@ fn an_explicit_base_branch_is_the_root_of_the_stack_base() {
     assert!(x.get("branch").is_none(), "{x}");
 }
 
+/// A node pinned to a branch of its own cuts nothing under the host's prefix, so
+/// opening it after a node that did leaves the prefix the run read off that cut:
+/// the stack base over both still carries it.
+#[test]
+fn a_pinned_parent_leaves_the_prefix_a_stack_base_is_named_with() {
+    let world = team_world("stack-pinned");
+    let repo = service(&world);
+    for id in ["a", "p", "e"] {
+        world.script(&format!("{id}.work"), &format!("{id}'s change\n"));
+    }
+    let mut p = lifecycle("p", &[]);
+    p["branch"] = json!("pinned/p");
+    let run = "pinned";
+    // One at a time and in plan order, so `p`'s session opens after `a`'s cut.
+    settle(
+        &world,
+        run,
+        vec![lifecycle("a", &[]), p, lifecycle("e", &["a", "p"])],
+        &[],
+    );
+
+    assert_eq!(settled(&world, run, "p")["branch"], "pinned/p");
+    let e = settled(&world, run, "e");
+    let stack_base = format!("{PREFIX}stack-base/{run}/e");
+    assert_eq!(e["status"], "done", "{e}");
+    assert_eq!(e["base"], stack_base.as_str(), "{e}");
+    assert_eq!(e["stack"]["stack_base"], stack_base.as_str(), "{e}");
+    assert_eq!(
+        changed_against(&world, &repo, &stack_base, text(&e["branch"], "e's branch")),
+        ["e.md"]
+    );
+}
+
 /// A second publication of a stacked node — a re-dispatch onto its branch after its
 /// checks failed — assembles its stack base again, still leaves exactly one Stack
 /// block, and keeps text written outside it between the two publications. A third,

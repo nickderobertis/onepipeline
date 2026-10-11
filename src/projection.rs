@@ -1612,7 +1612,10 @@ fn fold_session(state: &mut RunState, event: &Envelope) {
     // the shorter account of the same open this crate relays beside it: reported
     // where one was applied, and absent on a fresh cut where none was. A continued
     // or resumed session, and one pinned to the node's own `branch`, cut nothing,
-    // so they say nothing about it.
+    // so they say nothing about it. `tests/e2e/stacked_drafts.rs` opens each after
+    // a cut and names a stack base with the prefix: a continued retry in
+    // `landing_dependents_of_unlanded_parents_are_drafted_on_them`, a pinned node in
+    // `a_pinned_parent_leaves_the_prefix_a_stack_base_is_named_with`.
     let pinned = state
         .graph
         .get(node)
