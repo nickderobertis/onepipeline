@@ -1714,6 +1714,9 @@ fn a_plan_naming_no_private_repository_derives_no_term_even_where_the_registry_c
 fn a_live_edit_naming_b_puts_b_in_the_run_scope_for_the_validator_replies_and_store_writes() {
     let (world, _, _, _) = scoped_world("scope-edit");
     world.script("generalize.wait", "hold");
+    // The producer's example names B, which the run does not name when it starts.
+    world.script("generalize.work-at", "examples/generic/sample.md");
+    world.script("generalize.work", "modelled on owner/beta\n");
     let project = world.plan("grown", &exported_plan("grown"));
     world.run(&["start", &project, "--detach"]).exited(0);
     world.until("the producer to be in flight", |world| {
@@ -1747,7 +1750,13 @@ fn a_live_edit_naming_b_puts_b_in_the_run_scope_for_the_validator_replies_and_st
     world.until("the write-back to meet the new scope", |world| {
         projections(world, "grown").contains("boundary-refused")
     });
+    // And the consumer dispatched after the edit exports over the new scope: the example
+    // naming B is refused.
     world.release("generalize.go");
+    until_settled(&world, "grown", "examples");
+    let detail = detail_of(&world, "grown", "examples");
+    assert!(detail.contains("public output carries a term"), "{detail}");
+    assert!(tasks_of(&world, "examples").is_empty());
 }
 
 #[test]
@@ -2536,40 +2545,90 @@ fn a_consumer_pinned_to_a_branch_that_is_not_its_export_never_opens_a_session() 
 #[test]
 fn a_shutdown_preserves_a_public_branch_over_the_run_scope_and_not_the_whole_registry() {
     let (world, _, _, library) = scoped_world("scope-shutdown");
-    world.script("generalize.work-at", "examples/generic/sample.md");
-    world.script("generalize.work", "a generic example\n");
-    // The consumer commits work naming B — which this run does not name — and holds.
-    world.script("examples.work", "cites owner/beta\n");
-    world.script("examples.commit-saying", "feat: cite the example");
-    world.script("examples.wait", "hold");
-    let project = world.plan("stopped", &exported_plan("stopped"));
+    // The run names A — a parked node in its repository — and two public nodes hold their
+    // sessions while the work in each is committed: one naming only B, which the run does
+    // not name, and one naming A.
+    world.script("holds-b.wait", "hold");
+    world.script("holds-a.wait", "hold");
+    let mut keeper = lifecycle("keeper", &[]);
+    keeper["parked"] = json!(true);
+    let project = world.plan(
+        "stopped",
+        &mixed_plan(
+            "stopped",
+            vec![keeper, public("holds-b", &[]), public("holds-a", &[])],
+            vec![],
+        ),
+    );
     world.run(&["start", &project, "--detach"]).exited(0);
-    world.until("the consumer to hold its session", |world| {
-        !branches_of(world, "stopped", "examples").is_empty()
+    let opened = |world: &World, node: &str| {
+        world
+            .events_of("stopped", "session-opened")
+            .into_iter()
+            .find(|event| event["labels"]["node"] == node)
+            .map(|event| event["payload"].clone())
+    };
+    world.until("both sessions to open", |world| {
+        opened(world, "holds-b").is_some() && opened(world, "holds-a").is_some()
     });
-    world.until("the consumer to have committed", |world| {
-        world.fakes.join("examples.wait").is_file()
-            && world.invocations().iter().any(|call| {
-                call["tool"] == "oneagentgraph" && call.to_string().contains("examples")
-            })
-    });
-    let branch = branches_of(&world, "stopped", "examples")
-        .pop()
-        .expect("the consumer's branch");
+    let mut branches = std::collections::BTreeMap::new();
+    for (node, said) in [
+        ("holds-b", "see owner/beta"),
+        ("holds-a", "see owner/service"),
+    ] {
+        let session = opened(&world, node).expect("a session");
+        let worktree = std::path::PathBuf::from(
+            session["worktree"]
+                .as_str()
+                .expect("the session's worktree"),
+        );
+        std::fs::write(worktree.join("NOTES.md"), format!("{said}\n")).expect("the work");
+        crate::harness::git(&world, &worktree, &["add", "-A"]);
+        crate::harness::git(&world, &worktree, &["commit", "-qm", "docs: add notes"]);
+        branches.insert(
+            node,
+            session["branch"]
+                .as_str()
+                .expect("the session's branch")
+                .to_owned(),
+        );
+    }
     let shutdown = world.run(&["shutdown", "stopped", "--grace", "1"]);
-    // The public branch went to the public origin: what it carries names only B, which
-    // the run's scope does not hold.
-    let pushed = crate::harness::git(
-        &world,
-        &library.origin,
-        &["ls-remote", ".", &format!("refs/heads/{branch}")],
+    let on_origin = |branch: &str| {
+        crate::harness::git(
+            &world,
+            &library.origin,
+            &["ls-remote", ".", &format!("refs/heads/{branch}")],
+        )
+        .trim()
+        .to_owned()
+    };
+    // The branch naming only B was kept on the public origin, carrying that work.
+    assert!(
+        !on_origin(&branches["holds-b"]).is_empty(),
+        "the branch naming only B was not preserved:\n{}\n{}",
+        shutdown.stdout,
+        shutdown.stderr
+    );
+    assert_eq!(
+        crate::harness::git(
+            &world,
+            &library.origin,
+            &["show", &format!("{}:NOTES.md", branches["holds-b"])],
+        )
+        .trim(),
+        "see owner/beta"
+    );
+    // The branch naming A was refused, and nothing of it reached the public origin.
+    assert!(
+        on_origin(&branches["holds-a"]).is_empty(),
+        "a branch naming the run's private repository reached the public origin"
     );
     assert!(
-        !pushed.trim().is_empty(),
-        "the consumer's branch was not preserved:\n{}\n{}\n{}",
+        format!("{}{}", shutdown.stdout, shutdown.stderr).contains("public output carries a term"),
+        "{}\n{}",
         shutdown.stdout,
-        shutdown.stderr,
-        world.dump()
+        shutdown.stderr
     );
 }
 
@@ -3196,4 +3255,131 @@ fn a_public_branch_a_node_keeps_is_preserved_over_the_run_scope_and_not_the_whol
             .contains("public output carries a term"),
         "{a}"
     );
+}
+
+#[test]
+fn an_unknown_an_unregistered_and_a_local_only_repository_are_each_private() {
+    let (world, _, _) = mixed_world("boundary-unknowns");
+    // A hosted repository the host is never asked about and no rule declares — unknown —
+    // a local checkout with no origin, and a repository the host never registered.
+    let gamma = world.extra_repository("gamma");
+    // Local-only: its origin is a repository on this disk, which no host can be asked
+    // about.
+    let local_origin = world.root.join("local-only.git");
+    std::fs::create_dir_all(&local_origin).expect("a scratch directory");
+    crate::harness::git(
+        &world,
+        &local_origin,
+        &["init", "-q", "--bare", "--initial-branch=main"],
+    );
+    crate::harness::git(
+        &world,
+        &world.root,
+        &["clone", "-q", &local_origin.to_string_lossy(), "local-only"],
+    );
+    let local = world.root.join("local-only");
+    std::fs::write(local.join("README.md"), "local\n").expect("a file");
+    crate::harness::git(&world, &local, &["add", "-A"]);
+    crate::harness::git(&world, &local, &["commit", "-qm", "chore: seed"]);
+    crate::harness::git(&world, &local, &["push", "-q", "-u", "origin", "main"]);
+    world.register(&local, None);
+    std::fs::write(
+        world.onevcs_home().join("rules.yml"),
+        "version: 4\nrules:\n  - match: {owner: owner, name: service}\n    visibility: \
+         private\n  - match: {owner: owner, name: library}\n    visibility: public\n\
+         default:\n  publication: local-direct\n  approvals: none\n",
+    )
+    .expect("the rules file is written");
+    drop(gamma);
+    for (name, repo) in [
+        ("unknown", "gamma".to_owned()),
+        ("local-only", local.to_string_lossy().into_owned()),
+        ("unregistered", "github.com/owner/ghost".to_owned()),
+    ] {
+        let mut upstream = lifecycle("upstream", &[]);
+        upstream["repo"] = json!(repo);
+        upstream["parked"] = json!(true);
+        let reason = refused_by_check(
+            &world,
+            name,
+            &mixed_plan(name, vec![upstream, public("after", &["upstream"])], vec![]),
+        );
+        assert!(reason.contains("private node upstream"), "{name}: {reason}");
+    }
+
+    // An unregistered repository in a run's scope makes its checks unavailable, never a
+    // pass: named beside a public node's own repository, it is in scope though nothing
+    // can be opened there.
+    let mut both = public("both", &[]);
+    both["repo"] = json!("github.com/owner/library");
+    both["parked"] = json!(true);
+    let mut plain = public("plain", &[]);
+    plain["parked"] = json!(true);
+    let project = world.plan("ghosted", &mixed_plan("ghosted", vec![both, plain], vec![]));
+    let identifier = project.strip_prefix("plans:").expect("a plans project");
+    for entry in std::fs::read_dir(world.store().join("tasks").join(identifier))
+        .expect("the plan's tasks")
+        .flatten()
+    {
+        let held = std::fs::read_to_string(entry.path()).expect("a task");
+        if held.contains("onepipeline.id: both") {
+            let named = held.replacen(
+                "- github.com/owner/library\n",
+                "- github.com/owner/library\n- github.com/owner/ghost\n",
+                1,
+            );
+            assert_ne!(held, named, "the task names no repository list");
+            std::fs::write(entry.path(), named).expect("the task names both");
+        }
+    }
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the run to be recorded", |world| {
+        !world.events_of("ghosted", "run-started").is_empty()
+    });
+    validated(
+        &world,
+        "ghosted",
+        &json!({"version": 3, "commands": [note("plain", "a plain note")]}),
+    )
+    .exited(exit_for("unavailable"))
+    .err_has("could not judge");
+}
+
+#[test]
+fn a_private_node_written_back_is_private_on_the_store_s_own_field() {
+    // A plans source declared private, which takes private items.
+    let world = World::new("boundary-written-private")
+        .with_env("ONETASKGRAPH_SOURCES__PLANS__VISIBILITY", "private");
+    world.script("keep.wait", "hold");
+    let project = world.plan(
+        "classified",
+        &plan_of("classified", vec![crate::harness::agent("keep", &[])]),
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the keeper to be in flight", |world| {
+        !world.events_of("classified", "node-dispatched").is_empty()
+    });
+    let mut secret = crate::harness::agent("secret", &[]);
+    secret["classification"] = json!("private");
+    secret["parked"] = json!(true);
+    reply(&world, "classified", json!([{"op": "add", "node": secret}]));
+    world.until("the write-back to create the node's item", |world| {
+        world
+            .store_tasks(&project)
+            .iter()
+            .any(|task| task["item"]["metadata"]["onepipeline.id"] == "secret")
+    });
+    let created = world
+        .store_tasks(&project)
+        .into_iter()
+        .find(|task| task["item"]["metadata"]["onepipeline.id"] == "secret")
+        .expect("the node's item");
+    assert_eq!(created["item"]["classification"], "private", "{created}");
+    assert!(
+        created["item"]["metadata"]
+            .get("onepipeline.classification")
+            .is_none(),
+        "the classification was written as a reserved key: {created}"
+    );
+    world.release("keep.go");
 }
