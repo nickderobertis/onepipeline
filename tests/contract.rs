@@ -8514,6 +8514,9 @@ fn the_readmes_interface_claims_match_the_code_they_describe() {
         EXIT_WATCH_ELAPSED,
         EXIT_NODE_SETTLED,
         EXIT_RUN_CHANGED,
+        // `watch --flow`'s own two, which the same passage states.
+        onepipeline::error::EXIT_RUN_JOINED,
+        onepipeline::error::EXIT_FLOW_FAILED,
     ]
     .iter()
     .map(i32::to_string)
@@ -9847,21 +9850,21 @@ fn the_host_reading_is_the_committed_schema_with_the_version_1_keys() {
         assert!(words("Role").contains(word), "Role lacks {word}");
     }
 
-    // And `docs/contract-divergences.md` entry 114, which proposes the reading,
+    // And `docs/contract-divergences.md` entry 115, which proposes the reading,
     // names exactly these keys and the proof's two words: a key the type gains or
     // loses and the proposal does not fails here.
     let record = std::fs::read_to_string(repo_root().join("docs/contract-divergences.md"))
         .expect("the divergences record");
     let entry = record
-        .split("\n## 114. ")
+        .split("\n## 115. ")
         .nth(1)
         .and_then(|entry| entry.split("\n## ").next())
-        .expect("entry 114 proposes the host reading");
+        .expect("entry 115 proposes the host reading");
     let bullet = entry
         .split("\n- `onepipeline host --json` prints")
         .nth(1)
         .and_then(|bullet| bullet.split("\n- ").next())
-        .expect("entry 114 lists the reading's keys");
+        .expect("entry 115 lists the reading's keys");
     let named: BTreeSet<String> = bullet
         .split('`')
         .skip(1)
@@ -9886,7 +9889,7 @@ fn the_host_reading_is_the_committed_schema_with_the_version_1_keys() {
     }
     assert_eq!(
         named, stated,
-        "docs/contract-divergences.md entry 114 names other keys than the reading has"
+        "docs/contract-divergences.md entry 115 names other keys than the reading has"
     );
 }
 

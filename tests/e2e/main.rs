@@ -112,6 +112,13 @@ mod driver_exit;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod envelope_reviewer;
 mod filter;
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] a flow is `flow`,
+// `flowwatch`, `unwatched`, `watchers`, `watch`, `stopguard`, `ask` and `driver` at once —
+// a real `flow run` launching real runs through the real binary — so the narrowest edge
+// these journeys can honestly sit behind is the crate's. One of them measures the wake
+// reserve on the wall clock, which is the behaviour under test and about ten seconds.
+mod flow;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod holds;
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] six journeys, one to
 // three minutes together on a loaded host, nearly all of it one cold read of a generated
