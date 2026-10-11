@@ -75,6 +75,7 @@ mod ask;
 mod changes;
 mod checkpoint;
 mod concurrency;
+mod continuation;
 mod criteria;
 mod crossdag;
 mod destination;

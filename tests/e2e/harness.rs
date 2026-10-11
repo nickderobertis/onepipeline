@@ -725,6 +725,9 @@ pub struct World {
     /// `scripted-source` rather than straight through `local-md`. See
     /// [`World::through_scripted_source`].
     pub scripted: bool,
+    /// The `onevcs` state root this world's commands carry, where it is not the
+    /// world's own: a host [`on_host`](World::on_host) made has one of its own.
+    pub home: Option<PathBuf>,
 }
 
 impl World {
@@ -760,6 +763,7 @@ impl World {
             session: format!("session-{name}"),
             environment: Vec::new(),
             scripted: false,
+            home: None,
         };
         for dir in [&world.runs, &world.fakes, &world.project] {
             std::fs::create_dir_all(dir).expect("a scratch directory");
@@ -778,7 +782,56 @@ impl World {
             session: session.to_string(),
             environment: self.environment.clone(),
             scripted: self.scripted,
+            home: self.home.clone(),
         }
+    }
+
+    /// The same project seen from **another host**: the same plans store, the same origin
+    /// and the same stand-in GitHub, and none of this host's own state — an empty runs root,
+    /// a fresh `onevcs` state root holding only a clone of the origin registered under the
+    /// same alias and this host's rules, its own launching session, and `HOSTNAME` set to
+    /// `host`, which is the name the binary records as the host it drives on.
+    ///
+    /// What a cold host is: everything it can know about the project is what the store says,
+    /// and everything it publishes goes through the one host every other host publishes
+    /// through. It shares this world's scratch root, so it is dropped with it, never before.
+    pub fn on_host(&self, host: &str) -> Self {
+        LIVE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let at = self.root.join("hosts").join(host);
+        let home = at.join("onevcs-home");
+        let runs = at.join("runs");
+        for dir in [&home, &runs] {
+            std::fs::create_dir_all(dir).expect("a scratch directory");
+        }
+        let mut environment = self.environment.clone();
+        environment.push(("HOSTNAME".to_owned(), host.to_owned()));
+        let world = Self {
+            root: self.root.clone(),
+            runs,
+            fakes: self.fakes.clone(),
+            project: self.project.clone(),
+            session: format!("{}-on-{host}", self.session),
+            environment,
+            scripted: self.scripted,
+            home: Some(home.clone()),
+        };
+        let rules = self.onevcs_home().join("rules.yml");
+        if rules.is_file() {
+            std::fs::copy(&rules, home.join("rules.yml")).expect("the host's rules are copied");
+        }
+        let origin = self.root.join("origin.git");
+        if origin.is_dir() {
+            git(
+                &world,
+                &at,
+                &["clone", &origin.to_string_lossy(), "service"],
+            );
+            world.register(
+                &at.join("service"),
+                Some("https://github.com/owner/service.git"),
+            );
+        }
+        world
     }
 
     /// The same world, with one more environment variable on every command it
@@ -1388,7 +1441,9 @@ impl World {
     /// Per world, so a journey's registry, sessions, streams, and locks are its
     /// own and never the operator's `~/.onevcs`.
     pub fn onevcs_home(&self) -> PathBuf {
-        self.root.join("onevcs-home")
+        self.home
+            .clone()
+            .unwrap_or_else(|| self.root.join("onevcs-home"))
     }
 
     /// A repository this world's lifecycle nodes publish from.

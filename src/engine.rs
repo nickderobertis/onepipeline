@@ -563,7 +563,81 @@ pub(crate) enum Message {
     /// The note-delivery thread's answer for the one envelope it was handed:
     /// what each of its commands' conversations said. See [`NoteDeliveries`].
     NoteAnswered(Box<NoteAnswer>),
+    /// A lifecycle dispatch is ready to publish, and waits for the pass that reads the
+    /// project's claim to say whether it may. See [`publication_cleared`].
+    PublicationDue(Box<PublicationDue>),
 }
+
+/// One publication waiting on the next pass's claim check.
+pub(crate) struct PublicationDue {
+    /// Answered `true` to publish, `false` where another run has taken the project over.
+    pub(crate) answer: Sender<bool>,
+}
+
+/// Ask the loop whether a lifecycle node may publish now, and wait for its answer.
+///
+/// The publication is one of the things a pass reads its project's claim for: the pass
+/// that receives this reads the claim once for every dispatch and publication it makes, and
+/// answers each. A loop that has gone without answering answers nothing that could refuse,
+/// so the publication goes ahead as it did before a claim existed.
+pub(crate) fn publication_cleared(tx: &Sender<Message>, node: &str) -> bool {
+    let (answer, answered) = mpsc::channel();
+    if tx
+        .send(Message::PublicationDue(Box::new(PublicationDue { answer })))
+        .is_err()
+    {
+        return true;
+    }
+    let cleared = answered.recv().unwrap_or(true);
+    if !cleared {
+        eprintln!("onepipeline: node '{node}': its publication is withheld, the project having been taken over");
+    }
+    cleared
+}
+
+/// Record that another run's claim superseded this driver: the record first, then a
+/// non-blocking surface saying what it means, and the board left to that run.
+fn supersede(
+    paths: &RunPaths,
+    journal: &mut Journal,
+    writeback: Option<&crate::writeback::Writeback>,
+    by: crate::payload::DriverClaim,
+) -> Result<()> {
+    if let Some(writeback) = writeback {
+        writeback.retire();
+    }
+    let message = format!(
+        "driver-superseded: run '{}' on host '{}' claimed this project at {}, so this driver \
+         dispatches and publishes nothing more; a dispatch in flight settles unpublished with \
+         its branch kept, for that run to continue",
+        by.run, by.host, by.claimed_at
+    );
+    journal.emit(
+        journal::PipelineKind::DriverSuperseded,
+        journal::labels(&paths.run, None),
+        journal::object(&crate::payload::DriverSuperseded { by })?,
+    )?;
+    eprintln!("onepipeline: run '{}': {message}", paths.run);
+    raise(
+        paths,
+        journal,
+        Surface {
+            id: 0,
+            kind: DRIVER_SUPERSEDED.into(),
+            message,
+            source: crate::channel::source::PROPOSAL.into(),
+            blocking: false,
+            queued_at: sys::now_millis(),
+            abandoned: false,
+            asker: None,
+            workstream: None,
+            correlation: None,
+        },
+    )
+}
+
+/// The kind of the non-blocking surface a superseded driver raises.
+pub(crate) const DRIVER_SUPERSEDED: &str = "driver-superseded";
 
 /// A node's settlement, and the thread that is waiting to hear it was recorded.
 ///
@@ -1215,6 +1289,15 @@ fn converge(
     // arrange; the compatibility behaviour there is intentionally the absence of a writer.
     let writeback = crate::writeback::Writeback::start(paths, launch);
     // llmlint: ignore-end[changed_behavior_has_e2e]
+    // Who the project's store says drives it, read where this driver is about to do
+    // something a takeover should stop: at launch and adoption, at the start of each pass
+    // that would dispatch or publish — once for all of that pass's — and on an idle
+    // interval. Never before each dispatch or publication on its own.
+    let mut claims = crate::continuation::ClaimWatch::of_run(paths, launch);
+    let claimed_at = sys::now_rfc3339();
+    let mut superseded = false;
+    // Publications waiting on the next pass's claim check.
+    let mut publications: Vec<PublicationDue> = Vec::new();
     let channel = ChannelState::of_run(paths, launch);
     let rules = executor_rules()?;
     let (tx, rx): (Sender<Message>, Receiver<Message>) = mpsc::channel();
@@ -1451,30 +1534,72 @@ fn converge(
         // once per driver — a launch's and an adoption's alike — and bounded by the store's
         // command deadline, so a store that fails or stalls reports it and delays nothing more.
         // Every later projection stays on the worker's own thread.
+        // The claim at launch and adoption, before this driver claims anything itself; and on
+        // the idle interval, for a driver with nothing to dispatch or publish.
+        let mut read_this_pass = false;
+        if !superseded {
+            if let Some(watch) = claims.as_mut() {
+                if !claimed || watch.idle_check_due() || !publications.is_empty() {
+                    read_this_pass = true;
+                    if let Some(by) = watch.check() {
+                        supersede(paths, journal, writeback.as_ref(), by)?;
+                        superseded = true;
+                    }
+                }
+            }
+        }
+        // Every publication waiting is answered by this pass's one reading.
+        for due in publications.drain(..) {
+            let _ = due.answer.send(!superseded);
+        }
         if !claimed {
             claimed = true;
-            if let Some(writeback) = &writeback {
+            if let Some(writeback) = writeback.as_ref().filter(|_| !superseded) {
+                if let Some(watch) = &claims {
+                    writeback.hold(&watch.mine(&launch.session, &claimed_at));
+                }
                 writeback.publish(paths, launch, state, &statuses);
                 writeback.wait_for_first_attempt();
                 unpublished = false;
             }
         }
         workspaces.begin_pass(|node| in_flight.contains_key(node));
-        let started_here = start_ready(
-            paths,
-            journal,
-            state,
-            &statuses,
-            &rules,
-            launch,
-            &tx,
-            &mut in_flight,
-            &paused,
-            &releases,
-            &mut workspaces,
-            &mut stacking,
-            &notes_in_flight,
-        )?;
+        // The pass reads the claim once, at the first dispatch it is about to make, where it
+        // has not already read it: one read covering every dispatch it makes.
+        let mut found: Option<crate::payload::DriverClaim> = None;
+        let started_here = if superseded {
+            false
+        } else {
+            let mut admit = || {
+                if !read_this_pass {
+                    read_this_pass = true;
+                    found = claims
+                        .as_mut()
+                        .and_then(crate::continuation::ClaimWatch::check);
+                }
+                found.is_none()
+            };
+            start_ready(
+                paths,
+                journal,
+                state,
+                &statuses,
+                &rules,
+                launch,
+                &tx,
+                &mut in_flight,
+                &paused,
+                &releases,
+                &mut workspaces,
+                &mut stacking,
+                &notes_in_flight,
+                &mut admit,
+            )?
+        };
+        if let Some(by) = found {
+            supersede(paths, journal, writeback.as_ref(), by)?;
+            superseded = true;
+        }
         if started_here {
             derived = None;
             unpublished = true;
@@ -1512,7 +1637,11 @@ fn converge(
             report_unprojected(paths, journal, writeback)?;
         }
 
-        if in_flight.is_empty() && watching_merge_paths.is_empty() && deliveries.idle() {
+        // A superseded driver ends once what it had in flight has settled: what is left of
+        // the project is the run that took it over's to drive.
+        if in_flight.is_empty()
+            && (superseded || watching_merge_paths.is_empty() && deliveries.idle())
+        {
             // Nothing is running and nothing became ready, so no further
             // message can arrive: the graph is as converged as it will get.
             // A merge path still being asked about is the exception the second
@@ -1525,7 +1654,7 @@ fn converge(
             // arrive through the channel — which is the other way this loop is
             // over, and it leaves the same way: not before this driver has taken
             // the queue's last claim.
-            if graph::is_terminal(&statuses) || !any_node_can_still_move(&statuses) {
+            if superseded || graph::is_terminal(&statuses) || !any_node_can_still_move(&statuses) {
                 match close_out_and_drain(
                     paths,
                     journal,
@@ -1589,6 +1718,11 @@ fn converge(
             workspaces.next_read(),
             // The pace at which an idle driver next asks the schedule.
             maintenance.next_due(),
+            // And when it next reads who claims its project.
+            claims.as_ref().filter(|_| !superseded).map_or(
+                Duration::MAX,
+                crate::continuation::ClaimWatch::until_idle_check,
+            ),
         ];
         let deadline = if moved {
             Duration::ZERO
@@ -1670,6 +1804,7 @@ fn converge(
         // long a settlement waits, which is proportional to what a pass costs on the host.
         // Every journey drives this code — it is the only path a message reaches the
         // journal by — and one written to prove the wait passed against both builds.
+        let mut opened_a_session = false;
         for message in arrived {
             // llmlint: ignore-end[changed_behavior_has_e2e]
             match message {
@@ -1693,9 +1828,12 @@ fn converge(
                         }
                         // The session this dispatch opened is on its identity's
                         // records from here, so a capacity reading counts it and
-                        // the loop's own count of it ends.
+                        // the loop's own count of it ends — and the board is told
+                        // which branch the node is working on, so a host holding
+                        // none of this run's state can pin it there.
                         if crate::vcs::is_session_opened(&envelope.kind) {
                             workspaces.placed(&node);
+                            opened_a_session = true;
                         }
                     }
                     journal.relay(&envelope)?;
@@ -1907,6 +2045,8 @@ fn converge(
                         }
                     }
                 }
+                // Answered by the next pass's claim check, which this arrival is what wakes.
+                Message::PublicationDue(due) => publications.push(*due),
                 Message::Settled(settled) => {
                     let settlement = &settled.settlement;
                     in_flight.remove(&settlement.node);
@@ -1928,6 +2068,13 @@ fn converge(
             }
         }
 
+        // A session opened is a change to what the board says: its node's dispatch, which
+        // the next pass projects.
+        if opened_a_session {
+            state.refresh(paths);
+            derived = None;
+            unpublished = true;
+        }
         // A dispatch that has recorded nothing for long enough is reported, and
         // the wait above ends when the earliest of those thresholds comes due —
         // so this is asked when it can have an answer rather than forty times a
@@ -5449,6 +5596,7 @@ fn start_ready(
     workspaces: &mut crate::pool::Workspaces,
     stacking: &mut StackingPlacement,
     notes_in_flight: &DeliveriesInFlight,
+    admit: &mut dyn FnMut() -> bool,
 ) -> Result<bool> {
     // Nothing new starts once this run's shutdown has begun. Asked here rather
     // than left to the teardown that is coming: the driver goes on scheduling
@@ -5623,6 +5771,12 @@ fn start_ready(
                     continue;
                 }
             }
+        }
+        // The project's claim, read once for this pass where nothing before this dispatch
+        // read it: a run that has taken the project over leaves this one dispatching nothing.
+        if !admit() {
+            workspaces.keep_resuming(&node.id, resume);
+            break;
         }
         let cancel = CancellationToken::new();
         // llmlint: ignore-block[changed_behavior_has_e2e] each `?` is the refusal of a
@@ -5875,6 +6029,10 @@ fn spawn(
             .as_ref()
             .and_then(|_| crate::branchname::Naming::of_run(&paths, launch)),
         notes_in_flight: notes_in_flight.clone(),
+        claimed: launch
+            .project
+            .parse::<crate::taskgraph::QualifiedId>()
+            .is_ok(),
     };
     std::thread::Builder::new()
         .name(format!("dispatch-{}", node.id))

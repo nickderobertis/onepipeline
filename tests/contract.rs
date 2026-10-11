@@ -2274,6 +2274,90 @@ fn the_stacked_settlement_is_what_the_divergence_record_names() {
     );
 }
 
+/// Entry 116's continuation is this build's own: its two kinds are spelled by
+/// `PipelineKind`, the settlement it journals with `continued` and the claim both kinds
+/// carry are admitted by the registered documents — and a claim missing a key it always
+/// carries is refused — its two flags are `start`'s, and `ProjectDriven` refuses with the
+/// prefix it names, at exit 2.
+#[test]
+fn the_continuation_is_what_the_divergence_record_names() {
+    use onepipeline::event::PipelineKind;
+    use onepipeline::payload::{registry, schema_of};
+    let block = divergence_block("116.");
+    let kinds: Vec<String> =
+        serde_json::from_value(block["event_kinds"].clone()).expect("entry 116 names its kinds");
+    assert_eq!(
+        kinds,
+        [
+            PipelineKind::DriverTakenOver,
+            PipelineKind::DriverSuperseded
+        ]
+        .map(|kind| kind.as_str().to_owned())
+    );
+    let registry = registry();
+    registry
+        .check(&schema_of(PipelineKind::NodeSettled), &block["settlement"])
+        .unwrap_or_else(|why| panic!("entry 116's settlement is refused: {why}"));
+    let mut unsourced = block["settlement"].clone();
+    unsourced["continued"]
+        .as_object_mut()
+        .expect("a continuation")
+        .remove("source");
+    assert!(
+        registry
+            .check(&schema_of(PipelineKind::NodeSettled), &unsourced)
+            .is_err(),
+        "a continuation naming no source was admitted"
+    );
+    let claim = block["driver"].clone();
+    for (kind, key) in [
+        (PipelineKind::DriverTakenOver, "previous"),
+        (PipelineKind::DriverSuperseded, "by"),
+    ] {
+        let id = schema_of(kind);
+        registry
+            .check(&id, &serde_json::json!({ key: claim }))
+            .unwrap_or_else(|why| panic!("entry 116's claim is refused as {kind}: {why}"));
+        let mut pidless = claim.clone();
+        pidless.as_object_mut().expect("a claim").remove("pid");
+        assert!(
+            registry
+                .check(&id, &serde_json::json!({ key: pidless }))
+                .is_err(),
+            "a {kind} claim with no pid was admitted"
+        );
+    }
+    let start = Cli::command();
+    let start = start
+        .find_subcommand("start")
+        .expect("`start` is a verb of the binary");
+    let flags: BTreeSet<String> = start
+        .get_arguments()
+        .filter_map(|argument| argument.get_long())
+        .map(|flag| format!("--{flag}"))
+        .collect();
+    for flag in block["start_flags"]
+        .as_array()
+        .expect("entry 116 names its flags")
+    {
+        let flag = flag.as_str().expect("a flag");
+        assert!(flags.contains(flag), "`start` takes no {flag}");
+    }
+    let refused = onepipeline::error::Error::ProjectDriven {
+        run: claim["run"].as_str().expect("a run").to_owned(),
+        host: claim["host"].as_str().expect("a host").to_owned(),
+        claimed_at: claim["claimed_at"].as_str().expect("a time").to_owned(),
+    };
+    assert_eq!(refused.exit_code(), EXIT_REFUSED);
+    assert!(
+        refused
+            .to_string()
+            .starts_with(block["refusal_prefix"].as_str().expect("a prefix")),
+        "{refused}"
+    );
+    assert_eq!(block["idle_claim_check_seconds"], serde_json::json!(600));
+}
+
 /// The release-adoption surface this build carries **beyond** the contract is
 /// exactly what the divergence record proposes.
 ///
@@ -6389,7 +6473,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // undocumented wire; a kind the contract lists and the enum does not carry is
     // a promise nothing keeps. `PIPELINE_KINDS` is what `Journal::emit` accepts,
     // so this is the emitted set and not a second copy of it.
-    assert_eq!(PIPELINE_KINDS.len(), 39, "the closed set changed size");
+    assert_eq!(PIPELINE_KINDS.len(), 41, "the closed set changed size");
     let listed: BTreeSet<String> = backticked()
         .into_iter()
         .filter(|token| {
@@ -6398,7 +6482,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
         .collect();
     // The kinds the contract does not list are exactly the ones the divergence
     // record proposes, and no others: a kind neither document names fails here.
-    let proposed: BTreeSet<String> = ["40.", "47.", "55.", "65.", "70.", "92."]
+    let proposed: BTreeSet<String> = ["40.", "47.", "55.", "65.", "70.", "92.", "116."]
         .into_iter()
         .flat_map(|entry| {
             serde_json::from_value::<Vec<String>>(divergence_block(entry)["event_kinds"].clone())

@@ -58,6 +58,10 @@ pub struct Launch {
     /// The note deliveries the loop has handed off and not yet recorded, which
     /// a re-dispatch waits for before it reads the notes it is composed with.
     pub(crate) notes_in_flight: engine::DeliveriesInFlight,
+    /// Whether the run's project carries a driver claim the loop reads before a
+    /// publication: every run launched from a store, and none an older record names
+    /// no project for.
+    pub(crate) claimed: bool,
 }
 
 /// Run one lifecycle node to settlement, re-dispatching it while its
@@ -811,6 +815,25 @@ fn attempt_once(
         );
     }
 
+    // The publication is one of the things the run's claim is read for: the loop's next pass
+    // reads it once for all it starts, and a run that has taken the project over leaves this
+    // node's work kept on its branch, unpublished.
+    if launch.claimed && !engine::publication_cleared(tx, &node.id) {
+        return withhold(
+            node,
+            Opened {
+                worktree: worktree.as_deref(),
+                base: base.as_deref(),
+                began,
+                token: &token,
+                branch,
+            },
+            stream,
+            tx,
+            &whose,
+            vcs_filter,
+        );
+    }
     let mut attempted = publish(
         executor,
         paths,
@@ -1152,25 +1175,7 @@ fn preserve(
     // close below adds a commit only where the tree still held something, and
     // says which when it does.
     let committed = worktree.and_then(crate::vcs::worktree_head);
-    let followed_through = stream.map(crate::vcs::Follower::finish).unwrap_or_default();
-    let mut refused = close(Some(token));
-    let deadline = Instant::now() + TERMINATOR_GRACE;
-    while refused.is_some() && Instant::now() < deadline {
-        std::thread::sleep(TERMINATOR_POLL);
-        refused = close(Some(token));
-    }
-    let answered = match (&refused, &branch, node.repo.as_deref()) {
-        (Some(why), _, _) => Err(format!(
-            "the session would not close ({why}), so nothing was pushed from it"
-        )),
-        (None, Some(branch), Some(repo)) => crate::vcs::preserve_branch(repo, branch),
-        // llmlint: ignore[changed_behavior_has_e2e] every session `onevcs` opens names
-        // its branch and every lifecycle node names its `repo`, so no invocation reaches
-        // a kept branch with neither; it settles as the infrastructure failure it would
-        // be rather than behind an unwrap.
-        (None, _, _) => Err("the session named no branch to preserve".to_owned()),
-    };
-    relay_session_events(tx, Some(token), whose, followed_through, filter, refused);
+    let answered = close_and_keep(node, token, branch.as_deref(), stream, tx, whose, filter);
     match answered {
         Ok(preserved) => {
             let remote = crate::vcs::preservation_word(preserved.outcome);
@@ -1221,6 +1226,102 @@ fn preserve(
             })
         }
     }
+}
+
+/// Close a lifecycle node's session and put its branch on the identity's origin, then read
+/// the session's stream through: what [`preserve`] keeps a branch by, and what [`withhold`]
+/// leaves one by for the run that took the project over.
+///
+/// A refused close is asked again for the relay's grace, and only a closed session's branch is
+/// pushed — see [`preserve`] for why.
+fn close_and_keep(
+    node: &Node,
+    token: &onevcs::SessionToken,
+    branch: Option<&str>,
+    stream: Option<crate::vcs::Follower>,
+    tx: &Sender<Message>,
+    whose: &Labels,
+    filter: Option<&EventFilter>,
+) -> std::result::Result<onevcs::Preserved, String> {
+    let followed_through = stream.map(crate::vcs::Follower::finish).unwrap_or_default();
+    let mut refused = close(Some(token));
+    let deadline = Instant::now() + TERMINATOR_GRACE;
+    while refused.is_some() && Instant::now() < deadline {
+        std::thread::sleep(TERMINATOR_POLL);
+        refused = close(Some(token));
+    }
+    let answered = match (&refused, branch, node.repo.as_deref()) {
+        (Some(why), _, _) => Err(format!(
+            "the session would not close ({why}), so nothing was pushed from it"
+        )),
+        (None, Some(branch), Some(repo)) => crate::vcs::preserve_branch(repo, branch),
+        // llmlint: ignore[changed_behavior_has_e2e] every session `onevcs` opens names
+        // its branch and every lifecycle node names its `repo`, so no invocation reaches
+        // a kept branch with neither; it settles as the infrastructure failure it would
+        // be rather than behind an unwrap.
+        (None, _, _) => Err("the session named no branch to preserve".to_owned()),
+    };
+    relay_session_events(tx, Some(token), whose, followed_through, filter, refused);
+    answered
+}
+
+/// Settle a node whose publication the run's claim check withheld: another run took the
+/// project over, so nothing is drafted or published, the branch is put on the origin for that
+/// run to continue, and the node settles `cancelled` saying where its work is.
+///
+/// `cancelled` rather than `failed`: nothing about the work was refused, and a launch reading
+/// the settlement back pins the node to the branch it names, as it pins any dispatch that left
+/// one.
+fn withhold(
+    node: &Node,
+    opened: Opened<'_>,
+    stream: Option<crate::vcs::Follower>,
+    tx: &Sender<Message>,
+    whose: &Labels,
+    filter: Option<&EventFilter>,
+) -> Attempt {
+    let Opened {
+        worktree,
+        token,
+        branch,
+        ..
+    } = opened;
+    let branch = branch.or_else(|| crate::vcs::working_session(token).map(|open| open.branch));
+    let committed = worktree.and_then(crate::vcs::worktree_head);
+    let answered = close_and_keep(node, token, branch.as_deref(), stream, tx, whose, filter);
+    let name = branch.as_deref().unwrap_or("the session's branch");
+    let (detail, head, remote) = match answered {
+        Ok(preserved) => (
+            format!(
+                "not published: another run took the project over before this node published, \
+                 so its work is kept on {} ({}) for that run to continue",
+                preserved.branch,
+                crate::vcs::preservation_word(preserved.outcome)
+            ),
+            preserved
+                .commit
+                .as_deref()
+                .and_then(crate::vcs::usable)
+                .or(committed),
+            Some(preserved.outcome),
+        ),
+        Err(why) => (
+            format!(
+                "not published: another run took the project over before this node published; \
+                 onevcs could not put {name} on the origin ({why}), so the work stays on the \
+                 local branch {name}"
+            ),
+            committed,
+            None,
+        ),
+    };
+    Attempt::settled(Settlement {
+        detail: Some(crate::views::one_line(&detail)),
+        head,
+        branch,
+        remote,
+        ..Settlement::plain(&node.id, NodeStatus::Cancelled, None)
+    })
 }
 
 /// Draft the change request's body, write it onto the change request the

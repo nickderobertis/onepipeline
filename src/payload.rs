@@ -543,6 +543,82 @@ pub(crate) struct NodeSettled {
     /// present exactly when it had any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) stack: Option<SettledStack>,
+    /// Where a settlement this run did not reach itself came from: present exactly on
+    /// the settlement a launch read back from its project's store and continued,
+    /// rather than dispatched. Entry 116 of `docs/contract-divergences.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) continued: Option<Continued>,
+}
+
+/// A settlement a launch continued from its project's store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct Continued {
+    /// Where the settlement was read: the project's store.
+    pub(crate) source: ContinuedSource,
+    // llmlint: ignore-block[invalid_states_unrepresentable] a wire document, as the
+    // continuation entry spells it: a run id is a string on the wire, as `run_id` on every
+    // label already is.
+    /// The run the project's driver claim named when the launch read it, `null` where
+    /// the project carried none.
+    pub(crate) run: Option<String>,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
+}
+
+/// Where a continued settlement was read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ContinuedSource {
+    /// The project's own `onepipeline.settlement`, on its store.
+    Store,
+}
+
+// llmlint: ignore-block[invalid_states_unrepresentable] a wire document, as the continuation
+// entry spells it: a run id, a host name, a session and an RFC 3339 instant are strings on the
+// wire, as the launch record and `driver-exited` already carry them.
+/// A project's `onepipeline.driver` claim: the run driving it, the host and launching
+/// session that run is driven from, its driver's pid, and when it claimed.
+///
+/// The document a journal record carries, and so no stricter than any other payload here;
+/// the store's copy is external input, and `continuation::claim_of` refuses one carrying a
+/// key this shape does not name before it is read as one.
+// llmlint: ignore[boundary_inputs_validated] the rule stated at this module's head: no payload document denies unknown fields; the store boundary checks its keys in `continuation::claim_of`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct DriverClaim {
+    /// The run that claims the project.
+    pub(crate) run: String,
+    /// The host its driver runs on.
+    pub(crate) host: String,
+    /// The session that launched it, `null` where none was named.
+    pub(crate) session: Option<String>,
+    /// Its driver's pid, meaningful on `host`.
+    pub(crate) pid: u32,
+    /// When the claim was written, RFC 3339.
+    pub(crate) claimed_at: String,
+}
+// llmlint: ignore-end[invalid_states_unrepresentable]
+
+impl DriverClaim {
+    /// Whether this claim names the run `run` driven on `host`: the one test of "names this
+    /// run" — a pid changes with every adoption, and a run id alone repeats across hosts.
+    pub(crate) fn names(&self, run: &str, host: &str) -> bool {
+        self.run == run && self.host == host
+    }
+}
+
+/// `driver-taken-over`: the claim a `start --take-over` passed.
+// llmlint: ignore[boundary_inputs_validated] the rule stated at this module's head: no payload document denies unknown fields, so a newer build's record still reads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct DriverTakenOver {
+    /// The claim the project carried when the launch read it.
+    pub(crate) previous: DriverClaim,
+}
+
+/// `driver-superseded`: the claim a driver found naming another run.
+// llmlint: ignore[boundary_inputs_validated] the rule stated at this module's head: no payload document denies unknown fields, so a newer build's record still reads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct DriverSuperseded {
+    /// The claim the driver read.
+    pub(crate) by: DriverClaim,
 }
 
 /// The stack a lifecycle node was drafted on: the stack parents its branch was
@@ -1573,6 +1649,8 @@ payload_messages! {
     HostShutdown => "host-shutdown";
     BranchesSuperseded => "branches-superseded";
     BranchesRetired => "branches-retired";
+    DriverTakenOver => "driver-taken-over";
+    DriverSuperseded => "driver-superseded";
 }
 
 #[cfg(test)]

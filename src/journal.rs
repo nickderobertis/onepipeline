@@ -214,6 +214,24 @@ pub fn payload(fields: &[(&str, Value)]) -> Map<String, Value> {
     map
 }
 
+/// A payload serialized from one of [`crate::payload`]'s documents.
+///
+/// # Errors
+///
+/// [`Error::Invalid`](crate::Error::Invalid) where the document does not serialize as a
+/// mapping, which no payload type of this crate does.
+pub(crate) fn object<T: serde::Serialize>(document: &T) -> crate::Result<Map<String, Value>> {
+    match serde_json::to_value(document) {
+        Ok(Value::Object(payload)) => Ok(payload),
+        Ok(other) => Err(crate::Error::Invalid(format!(
+            "a payload serialized as {other}, not a mapping"
+        ))),
+        Err(why) => Err(crate::Error::Invalid(format!(
+            "a payload did not serialize: {why}"
+        ))),
+    }
+}
+
 /// Every envelope in a run's journal, in the order it was appended.
 ///
 /// A line this build cannot parse is skipped rather than ending the read: a

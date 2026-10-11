@@ -55,7 +55,7 @@ pub enum DriverLiveness {
 }
 // llmlint: ignore-end[names_match_behavior]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::event::{Envelope, Source};
@@ -2477,6 +2477,19 @@ pub(crate) fn status_reporting(view: &RunView, providers: Providers) -> String {
             out.push_str(&shutdown.line(&view.paths.run));
         }
         out.push_str(&driver_exit_lines(view));
+        // What this run carried on from its project's store rather than ran, and where each
+        // node it continued stands: a reader of a run launched on a host that never ran
+        // them would otherwise find drafts with no dispatch behind them.
+        if let Some(from) = FromTheStore::of(view) {
+            out.push_str(&from.line());
+            for node in from.continued.keys() {
+                out.push_str(&format!(
+                    "  {node}: continued from the store{}
+",
+                    from.where_it_stands(view, node)
+                ));
+            }
+        }
         let statuses = view.state.statuses();
         for (id, node_status) in &statuses {
             if *node_status != NodeStatus::Running {
@@ -4088,6 +4101,91 @@ fn journal_loss_line(view: &RunView) -> String {
     )
 }
 
+/// What a run carried on from its project's store: each node it continued, with the run the
+/// store's claim named when the launch read it, and how many nodes the run dispatched itself.
+///
+/// Read off the run's own records — the `node-settled` a launch journals `continued` for each
+/// lineage its store held `done`, and every `node-dispatched` — so a run launched before
+/// continuation existed has none, and says nothing.
+struct FromTheStore {
+    continued: BTreeMap<String, Option<String>>,
+    dispatched: usize,
+}
+
+impl FromTheStore {
+    fn of(view: &RunView) -> Option<Self> {
+        let mut continued = BTreeMap::new();
+        let mut dispatched = BTreeSet::new();
+        for event in &view.events {
+            if event.source != crate::event::Source::Pipeline {
+                continue;
+            }
+            let Some(node) = event.labels.node.clone() else {
+                continue;
+            };
+            match crate::journal::PipelineKind::from_wire(&event.kind) {
+                Some(crate::journal::PipelineKind::NodeSettled) => {
+                    if let Some(from) = event.payload.get("continued") {
+                        let run = from
+                            .get("run")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned);
+                        continued.insert(node, run);
+                    }
+                }
+                Some(crate::journal::PipelineKind::NodeDispatched) => {
+                    dispatched.insert(node);
+                }
+                _ => {}
+            }
+        }
+        (!continued.is_empty()).then_some(Self {
+            continued,
+            dispatched: dispatched.len(),
+        })
+    }
+
+    /// The run's line: launched here from the store, how many nodes it continued and from
+    /// which run, and how many it dispatched.
+    fn line(&self) -> String {
+        let runs: BTreeSet<&str> = self
+            .continued
+            .values()
+            .filter_map(|run| run.as_deref())
+            .collect();
+        let from = match runs.into_iter().collect::<Vec<_>>().as_slice() {
+            [] => String::new(),
+            [run] => format!(" from run '{run}'"),
+            several => format!(" from runs {}", several.join(", ")),
+        };
+        format!(
+            "  launched on this host from the store: {} continued{from}, {} dispatched\n",
+            counted(self.continued.len(), "node"),
+            counted(self.dispatched, "node")
+        )
+    }
+
+    /// Where one continued node's work stands: its branch and its change request.
+    fn where_it_stands(&self, view: &RunView, node: &str) -> String {
+        let mut said = String::new();
+        if let Some(branch) = view.state.branches.get(node) {
+            said.push_str(&format!(" on {branch}"));
+        }
+        if let Some(url) = view.state.change_urls.get(node) {
+            said.push_str(&format!(" — {url}"));
+        }
+        said
+    }
+}
+
+/// `count` of `what`, pluralised.
+fn counted(count: usize, what: &str) -> String {
+    match count {
+        1 => format!("1 {what}"),
+        _ => format!("{count} {what}s"),
+    }
+}
+
 /// `onepipeline results` — per-node outcomes, with each node's own evidence.
 // llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the second source is `docs/contract-divergences.md` entry 33, and the gate reconciling it is `tests/contract.rs`: it refuses an entry that is neither marked resolved with the contract naming what its ruling adopted, nor marked open with the proposal it waits on. Entry 33 is open and states this exact proposal, because the contract is approved verbatim and amending it is the planner's, never this repository's.
 pub fn results(view: &RunView) -> String {
@@ -4101,6 +4199,10 @@ pub fn results(view: &RunView) -> String {
         graph::state_of(&view.state.statuses()).as_str()
     );
     let shut_down = HostShutdown::of(view);
+    let from_the_store = FromTheStore::of(view);
+    if let Some(from) = &from_the_store {
+        out.push_str(&from.line());
+    }
     let statuses = view.state.statuses();
     for node in view.state.graph.iter() {
         let status = statuses
@@ -4188,6 +4290,16 @@ pub fn results(view: &RunView) -> String {
                 session.branch(),
                 session.token().0
             ));
+        }
+        // A node this run did not dispatch, because its project's store held it settled.
+        if from_the_store
+            .as_ref()
+            .is_some_and(|from| from.continued.contains_key(&node.id))
+        {
+            out.push_str(" — continued from the store");
+            if let Some(branch) = view.state.branches.get(&node.id) {
+                out.push_str(&format!(" on {branch}"));
+            }
         }
         // The one piece of evidence a person actually opens — and, for a change
         // nothing has landed, what it is drafted against.

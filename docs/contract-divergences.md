@@ -9601,3 +9601,191 @@ conflicted stack base ends without one, and
 `tests/contract.rs`'s `the_stacked_settlement_is_what_the_divergence_record_names`
 checks the block above against the registered `node-settled` document, and
 `tests/e2e/publish_preserve.rs` keeps every preserve-stacking journey.
+
+## 116. A project could be carried on only by the host that ran it, and nothing kept two hosts from driving it at once — OPEN
+
+**Proposal, for the planner who owns the contract: a launch continues its project
+from the store, and a best-effort claim on the project says which run drives it.**
+The contract's plan-store paragraph has a launch read a project's plan and nothing
+else: the `onepipeline.settlement` the write-back projects was skipped as
+projection-only, `start` journalled no settlement before its loop, and so a relaunch
+dispatched every node again on fresh branches — a second set of drafts beside the
+ones reviewers were reading. The store recorded no run, host or base, and nothing
+told a new host that another host's run was live. The rules below are the ones the
+approved design of `authoring:pr-feedback-rework` states (node `op-continue`), with
+the two readings its manager ruled on; the contract's wording is unchanged until it
+is ruled on.
+
+### The settlement, read
+
+A task's `onepipeline.settlement` is now **read** on load into continuation state,
+and still never into a plan field. It is the head's last `node-settled` payload,
+verbatim — `status`, `outcome`, `detail`, `branch`, `change_url`, `landing`, and
+entry 115's `base`, `head` and `stack` — and it is read through the registered
+`node-settled` document, so a settlement that is not one refuses the launch naming
+the node. The keys the write-back projects beside it —
+`onepipeline.landing`, `onepipeline.landing_commit`, `onepipeline.change_url` and
+`onepipeline.landing_evidence`, with entry 80's `onepipeline.node` and
+`onepipeline.supersedes` and the two keys below — are read past as no node field.
+Before this, a project whose published node had closed on them was refused at
+relaunch, naming `change_url` as a field nobody authored.
+
+**By the manager's ruling**, a retried lineage's settlement is the **head's** and is
+journalled under the **plan node's** id — the lineage root's, which carries the
+head's definition, since that is the node a relaunch launches (entry 80): a record
+labelled with the head's own id would name a node the launched plan does not hold.
+
+### `onepipeline.dispatch`
+
+A task key, `{"branch": string, "base": string, "opened_at": RFC 3339}`, written by
+the projection that follows a node's session opening and removed by the one that
+follows its settlement. `branch` is the session's, `base` the one `onevcs`'s
+`session-opened` names, and `opened_at` that record's own time. A cold host reads it
+to pin an in-flight node to the branch it was working on.
+
+### `onepipeline.driver`
+
+A project key, `{"run": string, "host": string, "session": string | null, "pid":
+integer, "claimed_at": RFC 3339}`, written with a driver's first projection — a
+launch's and an adoption's — wherever what last landed is not that claim. It is
+released at closeout and at `stop` only where the stored claim still names this run
+(its `run` and `host`): the releasing projection reads the project first, writes the
+claim `null` where it does, and where it names another run writes **nothing at all**
+to the project — neither the claim nor the closeout's release of unstarted nodes —
+because that run drives it now. `shutdown` keeps it, so the run stays adoptable.
+
+**By the manager's ruling**, a release writes `null` rather than removing the key:
+`onetaskgraph` 0.4.0's narrow project write only adds or replaces a key — tasks have
+`metadata_remove`, projects nothing — and every reader in this build reads `null`
+exactly as it reads the key absent. A removal verb is proposed to `onetaskgraph` as a
+follow-up.
+
+### The launch
+
+`onepipeline start <source:project>`, before its first dispatch:
+
+- **continues** each lineage whose head settlement is `done`: it journals that
+  `node-settled` with every stored field plus `continued: {"source": "store", "run":
+  <the claim's run, or null where the project carried none>}`, so the fold restores
+  the node's branch, change request, base, head, landing and stack, which entry
+  115's placement reads; nothing is dispatched for it and no branch or change request
+  is opened;
+- **pins** a lifecycle node whose head settlement is `failed`, `cancelled` or
+  `parked` with a branch, or which carries `onepipeline.dispatch` — the dispatch's
+  branch first — to that branch, by the plan node's own `branch`, as `adopt` pins an
+  abandoned dispatch: its next dispatch continues the branch, and its publication
+  adopts the change request open from it (`onevcs`'s `find_changes`). A node the plan
+  already pins keeps the plan's branch;
+- restores only what it reads. A draft merged on the host since the store was
+  written is the readjustment's to act on (node `op-readjust`), after this fold and
+  before the first dispatch.
+
+`status` and `results` read a continued node as `continued from the store on <branch>`
+with its change request, and the run as `launched on this host from the store: <n>
+nodes continued[ from run '<run>'], <m> nodes dispatched`, read off the run's own
+records.
+
+### `--fresh`
+
+`start --fresh` ignores every settlement and dispatch key, which is the previous
+behaviour, and is refused (`refused: --fresh refused: …`, exit 2) while any lifecycle
+node's settlement holds a change request whose landing is not `landed`, naming each
+node and its change request, because running it again would open a second one.
+
+### `--take-over` and `ProjectDriven`
+
+A launch reads `onepipeline.driver` off the same read as its plan, so a store read
+that fails refuses the launch rather than defaulting to no claim. Any claim refuses
+the launch with a new `Error` variant, `ProjectDriven { run, host, claimed_at }`, exit
+2, its message starting `project driven elsewhere refused:` and naming `--take-over`
+— and, where the claim's host is this one, `onepipeline adopt <run>`: a run of this
+host is the one to carry on, whether its driver is live or gone. `--take-over` passes
+any claim, journals `driver-taken-over {previous: <claim>}` beside `run-started`, and
+the run's first projection writes its own claim.
+
+### The supersession check
+
+A live driver reads the claim at launch and adoption (before its first projection),
+once at the start of each pass that would dispatch or publish — at the first dispatch
+the pass is about to make, or for the publications waiting on it, one read covering
+every dispatch and publication that pass makes — and on its idle loop every 600
+seconds, and never before an individual dispatch or publication. A claim naming a run
+other than this one (its `run` and `host`) and other than the one this launch took
+over **supersedes** it: it dispatches and publishes nothing more, journals
+`driver-superseded {by: <claim>}`, raises a non-blocking `driver-superseded` surface,
+projects nothing more to the store, and ends once its dispatches in flight have
+settled. A dispatch whose publication was withheld closes its session, puts its branch
+on the origin (`onevcs::preserve`) and settles `cancelled` naming where its work is,
+which a later launch pins. A publication cleared by a pass that read the claim before
+a takeover still runs; that is the bound's cost, by the manager's ruling, which holds
+the plan store's share of a review round's GitHub quota down.
+
+### What the claim does not prevent
+
+The store offers no compare-and-set on any write — `onetaskgraph`'s plugin protocol
+says so, and neither GitHub Projects nor Linear has a conditional update — so the
+claim is a non-atomic record. **A race between two launches on different hosts at the
+same moment is not prevented**: both can read no claim and both launch; the later
+claim wins on the store, and the other driver stops at its next check. The window
+runs from a takeover to the previous driver's next check; it is narrowed, not closed.
+The duplicate guards on remote writes are the ones already in force: a publication
+adopts the change request open from its branch and never opens a second, and replies
+carry idempotency keys (node `onevcs-review`). A branch's **first** change request has
+no such guard — each host cuts its branch under its own prefix — so two hosts
+first-publishing one node at the same instant can each open one; that is an accepted
+limit, by the manager's ruling.
+
+**A test seam.** `ONEPIPELINE_IDLE_CLAIM_CHECK_SECONDS` shortens the 600-second idle
+check, in whole seconds. It exists so a journey can show an idle driver noticing a
+takeover without waiting ten minutes; nothing an operator configures sets it.
+
+**What would close it.** A ruling adding the read settlement, the two keys, the
+launch semantics, both flags, the variant and the two kinds to the plan-store,
+CLI and event paragraphs.
+
+```json
+{
+  "event_kinds": ["driver-taken-over", "driver-superseded"],
+  "store_keys": {
+    "task": ["onepipeline.settlement", "onepipeline.dispatch"],
+    "project": ["onepipeline.driver"]
+  },
+  "dispatch": {"branch": "me/c", "base": "me/b", "opened_at": "2026-10-11T17:40:58.551Z"},
+  "driver": {
+    "run": "drafts",
+    "host": "builder",
+    "session": "claude-code:3f9a1c2e",
+    "pid": 41790,
+    "claimed_at": "2026-10-11T17:40:58.551Z"
+  },
+  "settlement": {
+    "status": "done",
+    "outcome": "change-review-draft",
+    "branch": "me/c",
+    "change_url": "https://github.com/owner/service/pull/3",
+    "landing": "unlanded",
+    "head": "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+    "base": "me/b",
+    "stack": {
+      "parents": [{"node": "b", "branch": "me/b", "head": "1f2e3d4c5b6a79881726354453627180918a7b6c"}],
+      "stack_base": null
+    },
+    "continued": {"source": "store", "run": "drafts"}
+  },
+  "start_flags": ["--fresh", "--take-over"],
+  "refusal_prefix": "project driven elsewhere refused:",
+  "surface_kind": "driver-superseded",
+  "idle_claim_check_seconds": 600,
+  "test_seam": "ONEPIPELINE_IDLE_CLAIM_CHECK_SECONDS"
+}
+```
+
+**What this build does.** `tests/e2e/continuation.rs` drives each rule through the
+compiled binary over a real `local-md` store and the real linked `onevcs` over a real
+origin, with GitHub at `onevcs`'s `ONEVCS_GH` seam shared by every host:
+`a_cold_host_continues_a_drafted_stack_from_the_store_and_dispatches_none_of_it`
+continues a three-node stack drafted on a team identity from a host with no runs root
+and a fresh `ONEVCS_HOME`. `src/taskgraph.rs`'s
+`what_a_run_projected_is_read_past_as_no_plan_field` reads every projected key past,
+and `tests/contract.rs`'s `the_continuation_is_what_the_divergence_record_names`
+holds the block above to the registered documents and the parser.

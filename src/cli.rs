@@ -645,6 +645,21 @@ pub struct StartArgs {
     /// concurrent run or no conflict between the two runs' changes is expected.
     #[arg(long)]
     pub acknowledge_concurrent: bool,
+    /// Run the project afresh, ignoring the settlements its last driver left on it.
+    ///
+    /// Without it a launch **continues** the project from the store: a node settled
+    /// `done` is not dispatched again, and one that left a branch is pinned to it.
+    /// Refused while a lifecycle node's settlement holds a change request nothing has
+    /// landed, naming each, because running it again would open a second one.
+    #[arg(long)]
+    pub fresh: bool,
+    /// Launch even though the project's driver claim names another run, and claim it
+    /// for this one.
+    ///
+    /// The claim is best effort: the run it names stops at its next claim check, and
+    /// two launches on two hosts at the same moment are not prevented.
+    #[arg(long)]
+    pub take_over: bool,
     /// The launch config: what this launch declares about its run, as one
     /// document. Each flag below overrides the part of it that it names.
     #[arg(long, value_name = "FILE")]
