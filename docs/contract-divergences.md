@@ -9508,13 +9508,15 @@ the plan-schema paragraph, and the three keys to the `node-settled` payload.
 the compiled binary and the real linked `onevcs` over a real origin, with GitHub at
 `onevcs`'s `ONEVCS_GH` seam:
 `landing_dependents_of_unlanded_parents_are_drafted_on_them` runs `a → b`,
-`a, c → e` and `a, b → g` on a team identity, plus `f` stacked on `a` whose checks
-fail; it reads each session's base, each change request's base and description,
+`a, c → e`, `a, b → g` and `b, c → h` on a team identity, plus `f` stacked on `a`
+whose checks fail; it reads each session's base, each change request's base and description,
 each branch's diff against its base, the worker's and the drafter's tasks, and
 `status` and `results` after the run settled.
 `a_conflicting_stack_base_is_concluded_by_the_node_s_own_worker` has `a` and `c`
 write one file and `e`'s worker conclude the stack base's merge.
 `a_dependent_of_a_landed_parent_is_placed_on_the_root` holds the landed case,
+`a_parent_spelled_by_another_name_for_the_repository_is_stacked_on` a parent named
+by its checkout's path,
 `an_explicit_base_branch_is_the_root_of_the_stack_base` the explicit root and an
 assembly refused before any session opened,
 `a_republished_stack_keeps_one_block_and_the_text_around_it` a second publication

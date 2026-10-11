@@ -323,6 +323,13 @@ fn protection(args: &[String], dir: &Path, path: &str) -> ExitCode {
             let visibility = read_if_present(&dir.join("gh.visibility"))
                 .map(|word| word.trim().to_owned())
                 .unwrap_or_else(|| "private".to_owned());
+            // GitHub's three words and no other: a script spelling a fourth is a
+            // fixture that means something this host cannot answer.
+            if !["public", "private", "internal"].contains(&visibility.as_str()) {
+                fake::fail(&format!(
+                    "gh.visibility holds {visibility:?}, which is not public, private or internal"
+                ));
+            }
             println!(
                 "{}",
                 serde_json::json!({

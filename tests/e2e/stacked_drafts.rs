@@ -160,7 +160,8 @@ fn service(world: &World) -> Repository {
 }
 
 /// The journey the stack exists for, on a team repository: `a → b`, `a, c → e`,
-/// `a, b → g`, and `f` stacked on `a` whose checks fail. Each change request is a
+/// `a, b → g`, `f` stacked on `a` whose checks fail, and `b, c → h` — a stack
+/// base over a parent that is itself stacked, whose root is the lowest change's. Each change request is a
 /// draft based on what is below it and showing only its own change, says so in an
 /// engine-written Stack block, and `status` and `results` name each one and what it
 /// is drafted against after the whole run has settled.
@@ -168,7 +169,7 @@ fn service(world: &World) -> Repository {
 fn landing_dependents_of_unlanded_parents_are_drafted_on_them() {
     let world = team_world("stack-drafts").with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "1");
     let repo = service(&world);
-    for id in ["a", "b", "c", "e", "f", "g"] {
+    for id in ["a", "b", "c", "e", "f", "g", "h"] {
         world.script(&format!("{id}.work"), &format!("{id}'s change\n"));
     }
     // Checked by the worker before it writes: the parent's work is already in the
@@ -190,6 +191,7 @@ fn landing_dependents_of_unlanded_parents_are_drafted_on_them() {
             lifecycle("e", &["a", "c"]),
             lifecycle("g", &["a", "b"]),
             lifecycle("f", &["a"]),
+            lifecycle("h", &["b", "c"]),
         ],
         &["--pr-author-graph", &drafter],
     );
@@ -287,11 +289,41 @@ fn landing_dependents_of_unlanded_parents_are_drafted_on_them() {
     );
     let g_branch = text(&g["branch"], "g's branch");
     assert_eq!(changed_against(&world, &repo, b_branch, g_branch), ["g.md"]);
-    let stack_bases = git(&world, &repo.origin, &["branch", "--list", "*stack-base/*"]);
+    // `h` stands on `b`, which stands on `a`: its stack base is cut from the root
+    // `a` was drafted against, and carries all three below it.
+    let h = settled(&world, run, "h");
+    let h_base = format!("{PREFIX}stack-base/{run}/h");
+    assert_eq!(h["base"], h_base.as_str(), "{h}");
     assert_eq!(
-        stack_bases.trim(),
-        stack_base,
-        "only e assembled a stack base"
+        h["stack"],
+        json!({
+            "parents": [
+                {"node": "b", "branch": b_branch, "head": b["head"]},
+                {"node": "c", "branch": c_branch, "head": c["head"]},
+            ],
+            "stack_base": h_base,
+        }),
+        "{h}"
+    );
+    for (file, by) in [("a.md", "a"), ("b.md", "b"), ("c.md", "c")] {
+        assert_eq!(
+            file_on(&world, &repo, &h_base, file),
+            format!("{by}'s change")
+        );
+    }
+    assert_eq!(
+        changed_against(&world, &repo, &h_base, text(&h["branch"], "h's branch")),
+        ["h.md"]
+    );
+    let stack_bases: Vec<String> =
+        git(&world, &repo.origin, &["branch", "--list", "*stack-base/*"])
+            .lines()
+            .map(|line| line.trim().to_owned())
+            .collect();
+    assert_eq!(
+        stack_bases,
+        [stack_base.clone(), h_base.clone()],
+        "only e and h assembled one"
     );
 
     // The worker is told what it is stacked on, and so is the drafter.
@@ -581,6 +613,35 @@ fn a_stack_block_the_host_will_not_take_leaves_the_publication_as_it_settled() {
     assert!(
         !text(&change["body"], "b's body").contains(OPEN),
         "{change}"
+    );
+}
+
+/// A parent spelled by another name for the same repository — its registered
+/// checkout's path rather than its alias — is a stack parent all the same.
+#[test]
+fn a_parent_spelled_by_another_name_for_the_repository_is_stacked_on() {
+    let world = team_world("stack-aliases");
+    let repo = service(&world);
+    world.script("a.work", "a's change\n");
+    world.script("b.work", "b's change\n");
+    world.script("b.requires-file", "a.md");
+    let mut b = lifecycle("b", &["a"]);
+    b["repo"] = json!(repo.checkout.to_string_lossy());
+    let run = "aliases";
+    settle(&world, run, vec![lifecycle("a", &[]), b], &[]);
+    let a = settled(&world, run, "a");
+    let b = settled(&world, run, "b");
+    assert_eq!(b["status"], "done", "{b}");
+    assert_eq!(b["base"], a["branch"], "{b}");
+    assert_eq!(b["stack"]["parents"][0]["node"], "a", "{b}");
+    assert_eq!(
+        changed_against(
+            &world,
+            &repo,
+            text(&a["branch"], "a's branch"),
+            text(&b["branch"], "b's branch")
+        ),
+        ["b.md"]
     );
 }
 

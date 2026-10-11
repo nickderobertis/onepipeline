@@ -784,7 +784,17 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     // and conflict where their branches meet.
     if let Some(body) = fake::node_script(dir, &key, "work") {
         let name = fake::node_script(dir, &key, "work-file")
-            .map(|stem| stem.trim().to_owned())
+            .map(|stem| {
+                let stem = stem.trim().to_owned();
+                // A stem and nothing more: a separator or a parent reference would
+                // write outside the worktree the dispatch was handed.
+                if stem.is_empty() || stem.contains(['/', '\\']) || stem.contains("..") {
+                    fake::fail(&format!(
+                        "{key}.work-file holds {stem:?}, which is not a file stem"
+                    ));
+                }
+                stem
+            })
             .unwrap_or_else(|| fake::segment(&key));
         write_work(args, &name, &body);
     }

@@ -64,11 +64,16 @@ pub(crate) enum Stack {
     OnParent(Parent),
     /// On a stack base `onevcs` assembles from `root` and each parent, in order.
     OnStackBase {
+        // llmlint: ignore-block[invalid_states_unrepresentable] both are the `String`s
+        // `onevcs::StackBaseRequest` takes them as — the contract the stack base is
+        // assembled through fixes that shape — and `onevcs` holds each to git's ref-name
+        // grammar where it reads them, refusing the assembly otherwise.
         /// The root the base is cut from: the node's own `base_branch`, or the base
         /// the lowest change of the stack was drafted against.
         root: String,
         /// The stack base's branch, `<host prefix>stack-base/<plan>/<node>`.
         branch: String,
+        // llmlint: ignore-end[invalid_states_unrepresentable]
         /// The stack parents, two or more, in the node's declared dependency order.
         parents: Vec<Parent>,
     },

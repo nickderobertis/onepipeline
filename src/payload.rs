@@ -562,12 +562,13 @@ pub(crate) struct SettledStack {
 }
 
 impl SettledStack {
-    /// Whether every name and commit it carries is one a branch or a commit can
-    /// be — what [`crate::vcs::usable`] accepts — and its parents are not empty.
+    /// Whether every node, name and commit it carries is one a view can print on a
+    /// line of its own — what [`crate::vcs::usable`] accepts — and its parents are
+    /// not empty.
     pub(crate) fn is_usable(&self) -> bool {
         !self.parents.is_empty()
             && self.parents.iter().all(|parent| {
-                !parent.node.is_empty()
+                crate::vcs::usable(&parent.node).is_some()
                     && crate::vcs::usable(&parent.branch).is_some()
                     && crate::vcs::usable(&parent.head).is_some()
             })

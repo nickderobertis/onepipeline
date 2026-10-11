@@ -179,6 +179,10 @@ pub struct RunState {
     /// for this run's sessions — `""` once it cut one and reported none — which is
     /// what a stack base is named under. `None` until a session cut a branch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    // llmlint: ignore[invalid_states_unrepresentable] the prefix is the plain string `onevcs`
+    // reports and every branch beside it in this struct is, checked where it enters by
+    // `vcs::usable` — the only thing that writes it — and `onevcs` itself holds no newtype
+    // for it to borrow.
     pub(crate) branch_prefix: Option<String>,
     /// The branches an idle pass of this run's driver retired as holding no work
     /// beyond their base, folded from its `branches-retired`.
@@ -1625,8 +1629,9 @@ fn fold_session(state: &mut RunState, event: &Envelope) {
         .get("branch_prefix")
         .and_then(|prefix| prefix.get("prefix"))
         .and_then(Value::as_str)
+        .and_then(crate::vcs::usable)
     {
-        state.branch_prefix = Some(prefix.to_owned());
+        state.branch_prefix = Some(prefix);
     } else if cut {
         state.branch_prefix = Some(String::new());
     }
