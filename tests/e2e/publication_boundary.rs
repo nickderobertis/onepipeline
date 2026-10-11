@@ -2203,7 +2203,104 @@ fn a_stricter_clearance_is_never_downgraded() {
         )
         .exited(REFUSED)
         .err_has("private node classified-2");
+    // Nor does a requeue's amendment stating it public: a parked private node requeued so
+    // is as private as it was.
+    let mut parked = public("parked-private", &[]);
+    parked["classification"] = json!("private");
+    parked["parked"] = json!(true);
+    reply(
+        &world,
+        "retried-strict",
+        json!([{"op": "add", "node": parked}]),
+    );
+    reply(
+        &world,
+        "retried-strict",
+        json!([{"op": "requeue", "id": "parked-private", "amend": {"classification": "public"}}]),
+    );
+    world
+        .run_with_stdin(
+            &["reply", "retried-strict"],
+            &json!({"version": 3, "commands": [
+                {"op": "add", "node": public("downstream-2", &["parked-private"])}
+            ]})
+            .to_string(),
+        )
+        .exited(REFUSED)
+        .err_has("private node parked-private");
     world.release("held.go");
+}
+
+#[test]
+fn a_private_repository_a_task_names_beside_its_own_makes_it_private_and_puts_it_in_scope() {
+    let (world, private, _) = mixed_world("boundary-secondary");
+    declare_terms(&world, &private, &["zephyrine"]);
+    // A node landing in the public repository whose task also names the private one.
+    let mut both = public("both", &[]);
+    both["repo"] = json!("github.com/owner/library");
+    both["parked"] = json!(true);
+    let mut downstream = public("downstream", &["both"]);
+    downstream["repo"] = json!("github.com/owner/library");
+    downstream["parked"] = json!(true);
+    let name_both = |world: &World, project: &str| {
+        let identifier = project.strip_prefix("plans:").expect("a plans project");
+        let tasks = world.store().join("tasks").join(identifier);
+        for entry in std::fs::read_dir(&tasks)
+            .expect("the plan's tasks")
+            .flatten()
+        {
+            let held = std::fs::read_to_string(entry.path()).expect("a task");
+            if held.contains("onepipeline.id: both") {
+                let named = held.replacen(
+                    "- github.com/owner/library\n",
+                    "- github.com/owner/library\n- github.com/owner/service\n",
+                    1,
+                );
+                assert_ne!(held, named, "the task names no repository list");
+                std::fs::write(entry.path(), named).expect("the task names both");
+            }
+        }
+    };
+    // It is private: a public node may not depend on it.
+    let refused = world.plan(
+        "secondary",
+        &mixed_plan("secondary", vec![both.clone(), downstream], vec![]),
+    );
+    name_both(&world, &refused);
+    let checked = world.run(&["plan", "check", &refused, "--json"]);
+    checked.exited(HAS_REFUSALS);
+    assert!(
+        checked.stdout.contains("private node both"),
+        "{}",
+        checked.stdout
+    );
+
+    // And its private repository is in the run's scope, though no node lands there.
+    let mut plain = public("plain", &[]);
+    plain["parked"] = json!(true);
+    let project = world.plan(
+        "scoped-by-record",
+        &mixed_plan("scoped-by-record", vec![both, plain], vec![]),
+    );
+    name_both(&world, &project);
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the run to be recorded", |world| {
+        !world
+            .events_of("scoped-by-record", "run-started")
+            .is_empty()
+    });
+    validated(
+        &world,
+        "scoped-by-record",
+        &json!({"version": 3, "commands": [note("plain", "follow the zephyrine layout")]}),
+    )
+    .exited(exit_for("refuse"));
+    validated(
+        &world,
+        "scoped-by-record",
+        &json!({"version": 3, "commands": [note("plain", "follow the plain layout")]}),
+    )
+    .exited(exit_for("pass"));
 }
 
 /// Every branch a mixed run's public side cuts or exports, as the record names it.
@@ -2695,6 +2792,45 @@ fn the_validator_refuses_to_judge_a_malformed_document_and_reads_commands_as_the
             {"op": "reparent", "id": "loose", "deps": ["keeper"]},
             to("loose"),
         ]}),
+    )
+    .exited(exit_for("pass"));
+
+    // So is a requeue's amendment: amended into the public repository, the parked keeper
+    // is public, and the same note to it is refused.
+    validated(
+        &world,
+        "shaped",
+        &json!({"version": 3, "commands": [to("keeper")]}),
+    )
+    .exited(exit_for("pass"));
+    validated(
+        &world,
+        "shaped",
+        &json!({"version": 3, "commands": [
+            {"op": "requeue", "id": "keeper", "amend": {"repo": "library"}},
+            to("keeper"),
+        ]}),
+    )
+    .exited(exit_for("refuse"));
+
+    // A routed reply — the record the bus routes a reply into, wrapping it — is judged as
+    // the envelope it carries: its commands and its text addressed to no node.
+    validated(
+        &world,
+        "shaped",
+        &json!({"id": 0, "at": 0, "reply": {"version": 3, "commands": [to("examples")]}}),
+    )
+    .exited(exit_for("refuse"));
+    validated(
+        &world,
+        "shaped",
+        &json!({"id": 0, "at": 0, "reply": {"completion": false, "message": "a zephyrine aside"}}),
+    )
+    .exited(exit_for("refuse"));
+    validated(
+        &world,
+        "shaped",
+        &json!({"id": 0, "at": 0, "reply": {"completion": false, "message": "a plain aside"}}),
     )
     .exited(exit_for("pass"));
 

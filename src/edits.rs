@@ -2002,8 +2002,10 @@ fn compile_requeue(
     }
     // The amended node is validated as the node it produces, so a malformed pin
     // is refused at submission rather than at the next dispatch.
-    let amended: Node = serde_json::from_value(merged)
+    let mut amended: Node = serde_json::from_value(merged)
         .map_err(|e| refuse(format!("requeue: amended node '{id}' is invalid: {e}")))?;
+    // An amendment states what a node is to do, never that it is less private than it was.
+    amended.classification = amended.classification.strictest(node.classification);
     graph::validate_node(&amended).map_err(|e| refuse(e.to_string()))?;
     // What the requeue states, and only that: a node left as it was launched is
     // the run's graph, which was held to C6b where it was loaded.
@@ -2551,7 +2553,9 @@ pub fn apply(graph: &mut Graph, operation: &Operation) {
                     object.insert(key.clone(), value.clone());
                 }
             }
-            if let Ok(amended) = serde_json::from_value::<Node>(merged) {
+            if let Ok(mut amended) = serde_json::from_value::<Node>(merged) {
+                // As the requeue compiled it: never less private than the node it amends.
+                amended.classification = amended.classification.strictest(existing.classification);
                 graph.insert(amended);
             }
         }
