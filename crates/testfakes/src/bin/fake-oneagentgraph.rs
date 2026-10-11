@@ -1884,6 +1884,15 @@ fn write_work_at(args: &[String], at: &str, body: &str) {
     let Some(workspace) = fake::flag(args, "--dir") else {
         fake::fail("writing a dispatch's work needs its --dir to write into");
     };
+    // The workspace the dispatch was given, which exists: only the directories under it
+    // that the document names are made here.
+    let workspace = std::path::Path::new(&workspace);
+    if !workspace.is_dir() {
+        fake::fail(&format!(
+            "a dispatch was given --dir {}, which is not a directory",
+            workspace.display()
+        ));
+    }
     // A path inside the workspace, as a journey means it: a root or a `..` would write
     // somewhere the dispatch was never given, which is a misconfigured journey.
     let relative = std::path::Path::new(at);
@@ -1897,7 +1906,7 @@ fn write_work_at(args: &[String], at: &str, body: &str) {
             "work-at holds {at:?}, which is not a relative path inside the workspace"
         ));
     }
-    let path = std::path::Path::new(&workspace).join(relative);
+    let path = workspace.join(relative);
     if let Some(parent) = path.parent() {
         if let Err(error) = std::fs::create_dir_all(parent) {
             fake::fail(&format!("cannot make {}: {error}", parent.display()));
