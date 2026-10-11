@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.64.0](https://github.com/nickderobertis/onepipeline/compare/v0.63.7...v0.64.0) - 2026-10-10
+
+### Added
+
+- *(deps)* [**breaking**] link the oneagentgraph and onejudge with judge settings ([#840](https://github.com/nickderobertis/onepipeline/pull/840))
+
+## [0.63.7](https://github.com/nickderobertis/onepipeline/compare/v0.63.6...v0.63.7) - 2026-10-10
+
+### Added
+
+- *(deps)* link the onetaskgraph release that prints a project's dependency graph ([#833](https://github.com/nickderobertis/onepipeline/pull/833))
+
+## [0.63.6](https://github.com/nickderobertis/onepipeline/compare/v0.63.5...v0.63.6) - 2026-10-09
+
+### Added
+
+- *(channel)* replay the commands a dead driver claimed, linking the fixed onevcs and onetaskgraph ([#827](https://github.com/nickderobertis/onepipeline/pull/827))
+
 ## [0.63.5](https://github.com/nickderobertis/onepipeline/compare/v0.63.4...v0.63.5) - 2026-10-09
 
 ### Fixed

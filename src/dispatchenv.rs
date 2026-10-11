@@ -915,6 +915,68 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A harness judge carrying onejudge `settings` is still a harness judge
+    /// whose config the launch reads, whether the graph wrote them or an
+    /// override did — and so is every judge of a panel carrying the member's
+    /// `judge_settings`.
+    #[test]
+    fn a_harness_judge_carrying_settings_still_names_its_env_from_sources() {
+        let root = scratch("judge-settings");
+        let write = |name: &str, text: &str| {
+            std::fs::write(root.join(name), text).expect("the fixture is written");
+        };
+        write("worker.toml", "harnesses = [\"claude-code\"]\n");
+        write(
+            "judge.toml",
+            "harnesses = [\"codex:review\"]\n[harness.codex.variant.review.env_from]\n\
+             CODEX_HOME = \"HOST_CODEX_HOME\"\n",
+        );
+        write(
+            "second.toml",
+            "harnesses = [\"claude-code:alt\"]\n[harness.claude-code.variant.alt.env_from]\n\
+             CLAUDE_CONFIG_DIR = \"HOST_ALT_HOME\"\n",
+        );
+        write("base.yaml", "system_prompt: Do the work.\n");
+        write(
+            "graph.yaml",
+            "version: 10\nname: node-scope\nmembers:\n  worker:\n    kind: onejudge\n    \
+             base_config: ./base.yaml\n    agent:\n      oneharness_config: ./worker.toml\n    \
+             judge_settings:\n      allow_writable_judges: true\n    \
+             judge:\n      - oneharness_config: ./judge.toml\n        \
+             settings:\n          instructions: ./look.md\n      \
+             - oneharness_config: ./second.toml\n    mode: bypass\n",
+        );
+        let graph = graph_at(&root.join("graph.yaml"));
+        let sources = |sets: &[String]| -> Vec<String> {
+            env_from_sources(&graph, sets)
+                .expect("the sources read")
+                .into_iter()
+                .map(|named| named.source)
+                .collect()
+        };
+
+        assert_eq!(
+            sources(&[]),
+            vec!["HOST_CODEX_HOME".to_string(), "HOST_ALT_HOME".to_string()],
+            "a judge's settings hid its config from the walk"
+        );
+        assert_eq!(
+            sources(&["members.worker.judge.1.settings.events=true".to_string()]),
+            vec!["HOST_CODEX_HOME".to_string(), "HOST_ALT_HOME".to_string()],
+            "settings an override added hid the judge's config from the walk"
+        );
+        let why = validate(&graph, &[], &BTreeMap::new()).expect_err("both sources are missing");
+        assert!(
+            why.contains(&format!(
+                "{} names harness variant 'codex:review' whose env_from source \
+                 'HOST_CODEX_HOME'",
+                root.join("judge.toml").display()
+            )),
+            "{why}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// A record naming no hook adds nothing and reads nothing: the graph it would
     /// have checked need not even exist.
     #[test]

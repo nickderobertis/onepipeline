@@ -2732,6 +2732,7 @@ fn judge_kinds() -> [&'static str; 3] {
             oneharness_config: ConfigRef("oneharness.judge.toml".into()),
             model: None,
             label: None,
+            settings: Default::default(),
         })
         .kind(),
         JudgeSide::Llmlint(JudgeLlmlint {
@@ -2741,11 +2742,13 @@ fn judge_kinds() -> [&'static str; 3] {
             diff_base: None,
             args: Vec::new(),
             label: None,
+            settings: Default::default(),
         })
         .kind(),
         JudgeSide::Command(JudgeCommand {
             command: Vec::new(),
             label: None,
+            settings: Default::default(),
         })
         .kind(),
     ]

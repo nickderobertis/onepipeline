@@ -58,7 +58,9 @@ fn main() -> ExitCode {
 
 /// Which side of a two-party member's conversation this turn is.
 ///
-/// Decided by `--events`, which onejudge sets on the agent side and only there.
+/// Decided by `--stream`, which onejudge sets on the agent side and only there.
+/// Not by `--events`: onejudge asks a judge for its tool events too, by default
+/// under a writable posture and whenever its settings say `events: true`.
 /// Deciding it from the *prompt* would be a double reading the conversation
 /// instead of the argv it was invoked with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -213,24 +215,22 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
             "oneharness run requires the prompt, on `--prompt-file -` or on `--prompt`",
         );
     };
-    let side = if args.iter().any(|arg| arg == "--events") {
+    // Streaming is the agent side's, and only its: onejudge asks for it there and
+    // reads the buffered document everywhere else, so a judgement is never
+    // streamed and an agent turn always is.
+    let side = if args.iter().any(|arg| arg == "--stream") {
         Side::Agent
     } else {
         Side::Judge
     };
-    // Streaming is the agent side's, and only its: onejudge asks for it there and
-    // reads the buffered document everywhere else, so a double that streamed a
-    // judgement would put NDJSON where one report was expected.
-    let streaming = args.iter().any(|arg| arg == "--stream");
     let view = match View::of(args) {
         Ok(view) => view,
         Err(refusal) => return fake::refuse(&refusal),
     };
-    if (side == Side::Agent) != streaming {
-        return fake::refuse(&format!(
-            "oneharness run was asked for {side:?} work and {}--stream",
-            if streaming { "" } else { "no " }
-        ));
+    // The agent side's events are what its stream carries, so a stream asked
+    // for without them is a turn whose activity nothing could relay.
+    if side == Side::Agent && !args.iter().any(|arg| arg == "--events") {
+        return fake::refuse("oneharness run was asked to stream with no --events");
     }
     // The config is something `oneagentgraph` composed rather than passed
     // through, and both sides carry one: the judge side names its own, and the
