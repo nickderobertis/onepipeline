@@ -3994,25 +3994,39 @@ pub(crate) enum Staged {
     Retitle(Box<ValidatedRetitle>),
 }
 
-/// A `retitle`, judged and not yet written: what it compiled to, and the session
-/// the node's change request is addressed through.
+/// A `retitle`, judged and not yet written: the one operation it compiled to, and
+/// the session the node's change request is addressed through.
+///
+/// Built only by [`staged_retitle`], from a compile that produced exactly one
+/// `retitled`, so the operation a delivery reads is always that one.
 pub(crate) struct ValidatedRetitle {
-    /// What the compile staged — the title moving on the graph.
-    compiled: Vec<edits::Operation>,
+    /// What the compile staged — the title moving on the graph — held as the
+    /// one-element slice later commands of the envelope are validated against.
+    compiled: [edits::Operation; 1],
     /// The node's last session, where the run's record names one.
     session: Option<onevcs::SessionToken>,
 }
 
 /// Stage a compiled `retitle` for the delivery phase, addressed through the
-/// session the node's last dispatch opened.
+/// session the node's last dispatch opened. A compile that produced anything but
+/// one `retitled` — none of this build's — is staged as compiled, writing nothing.
 pub(crate) fn staged_retitle(
     compiled: Vec<edits::Operation>,
     session: Option<&crate::vcs::DispatchSession>,
 ) -> Staged {
-    Staged::Retitle(Box::new(ValidatedRetitle {
-        compiled,
-        session: session.map(|session| session.token().clone()),
-    }))
+    match <[edits::Operation; 1]>::try_from(compiled) {
+        Ok(one @ [edits::Operation::Retitled { .. }]) => {
+            Staged::Retitle(Box::new(ValidatedRetitle {
+                compiled: one,
+                session: session.map(|session| session.token().clone()),
+            }))
+        }
+        // llmlint: ignore[changed_behavior_has_e2e] `compile_retitle` returns exactly one
+        // `retitled` or refuses, so no command reaches this arm; it is the type's, written
+        // out so a later compile that changed that stages nothing it cannot deliver.
+        Ok(other) => Staged::Compiled(other.into()),
+        Err(other) => Staged::Compiled(other),
+    }
 }
 
 /// Write a `retitle`'s title onto the node's change request, through
@@ -4025,11 +4039,11 @@ pub(crate) fn staged_retitle(
 /// for the node, the host holds no open change request from its branch, or the
 /// host would not take the title.
 fn retitle_change(validated: &ValidatedRetitle) -> Result<Vec<edits::Operation>> {
-    let Some(edits::Operation::Retitled {
+    let [edits::Operation::Retitled {
         node, to, reason, ..
-    }) = validated.compiled.first()
+    }] = &validated.compiled
     else {
-        return Ok(validated.compiled.clone());
+        return Ok(validated.compiled.to_vec());
     };
     // llmlint: ignore-block[changed_behavior_has_e2e] the three refusals before the write
     // need a node whose change request is open on the run's record and whose session is not
