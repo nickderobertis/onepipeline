@@ -1892,6 +1892,9 @@ fn a_registry_less_runs_last_stop_decides_whether_its_dispatch_is_gone() {
 /// run past it with no current summary is listed in `skipped` with its reason,
 /// in both forms. A run past it with a registry is decided from its entries: a
 /// held one is a row, and a stale one is gone.
+///
+/// And a run under the bound whose journal the read has to fold, and cannot open,
+/// is refused the same way, rather than folded to nothing and left out.
 #[test]
 fn a_journal_past_the_bound_is_never_opened_and_a_run_it_leaves_undecided_is_refused() {
     let world = World::new("host-view-bound").with_env("HOSTNAME", HOST);
@@ -1958,6 +1961,20 @@ fn a_journal_past_the_bound_is_never_opened_and_a_run_it_leaves_undecided_is_ref
     );
     grown(&fixture, "huge-live");
 
+    // And a run under the bound whose journal the read would have to fold, cold, and
+    // cannot open: a fold of nothing would leave its dispatch out.
+    let journal = seed.journal(&mut draw, "unreadable", 40 * 1024, started, false, &[], &[]);
+    fixture.write_run(
+        &seed,
+        "unreadable",
+        &journal,
+        None,
+        reaped_pid(),
+        "linux-proc-stat:1",
+        &[],
+    );
+    fixture.readable(&["unreadable".to_owned()], false);
+
     let read = traced(
         &world,
         &crate::harness::binary(),
@@ -1977,21 +1994,41 @@ fn a_journal_past_the_bound_is_never_opened_and_a_run_it_leaves_undecided_is_ref
 
     let (reading, text) = both_forms(&world, "past the bound");
     assert_eq!(verdicts(&reading), verdicts(&read.reading));
-    let skipped = reading["skipped"].as_array().expect("skipped");
-    assert_eq!(skipped.len(), 1, "{reading}");
-    assert!(skipped[0]["path"]
-        .as_str()
-        .expect("a path")
-        .ends_with("huge-registry-less"));
-    let reason = skipped[0]["reason"].as_str().expect("a reason");
+    let skipped: BTreeMap<String, String> = reading["skipped"]
+        .as_array()
+        .expect("skipped")
+        .iter()
+        .map(|skipped| {
+            let path = Path::new(skipped["path"].as_str().expect("a path"));
+            (
+                path.file_name()
+                    .expect("a name")
+                    .to_string_lossy()
+                    .into_owned(),
+                skipped["reason"].as_str().expect("a reason").to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        skipped.keys().collect::<Vec<_>>(),
+        ["huge-registry-less", "unreadable"],
+        "{reading}"
+    );
+    let reason = &skipped["huge-registry-less"];
     assert!(
         reason.contains("past the 1073741824 a host read opens")
             && reason.contains("its dispatch registry cannot be read"),
         "{reason}"
     );
     assert!(
-        text.contains("1 run root(s) skipped:")
-            && text.contains("huge-registry-less: its journal is"),
+        skipped["unreadable"].starts_with("its journal cannot be read"),
+        "{}",
+        skipped["unreadable"]
+    );
+    assert!(
+        text.contains("2 run root(s) skipped:")
+            && text.contains("huge-registry-less: its journal is")
+            && text.contains("unreadable: its journal cannot be read"),
         "{text}"
     );
     let rows = verdicts(&reading).rows;

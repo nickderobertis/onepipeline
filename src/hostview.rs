@@ -228,6 +228,7 @@ fn read_run(paths: &RunPaths) -> Result<RunRead, String> {
             return from_the_registry(paths, &launch, &registry_of(paths), journal_bytes)
         }
         None => {
+            foldable(paths)?;
             let _cold = phase("cold-fold");
             crate::hostphases::add("cold-journal-bytes", journal_bytes);
             RunSummary::of(paths).map_err(|error| error.to_string())?
@@ -244,7 +245,7 @@ fn read_run(paths: &RunPaths) -> Result<RunRead, String> {
         if past_the_bound {
             return from_the_registry(paths, &launch, &registry, journal_bytes);
         }
-        return Ok(live(paths, &launch, &registry));
+        return live(paths, &launch, &registry);
     }
     // Ended: every process the run recorded is proved over. Its verdict comes off
     // the checkpoint where that covers the whole journal the summary stamps, and
@@ -259,6 +260,7 @@ fn read_run(paths: &RunPaths) -> Result<RunRead, String> {
             return from_the_registry(paths, &launch, &registry, journal_bytes)
         }
         None => {
+            foldable(paths)?;
             let state = {
                 let _cold = phase("cold-fold");
                 crate::hostphases::add("cold-journal-bytes", journal_bytes);
@@ -317,13 +319,29 @@ fn driver_proved_gone(launch: &LaunchRecord) -> bool {
 ///
 /// Not [`crate::views::RunView::open`], which also parses the whole merged store
 /// into memory for a caller that renders events: the rows need only the fold.
-fn live(paths: &RunPaths, launch: &LaunchRecord, registry: &Registry) -> RunRead {
+fn live(paths: &RunPaths, launch: &LaunchRecord, registry: &Registry) -> Result<RunRead, String> {
+    foldable(paths)?;
     let state = {
         let _fold = phase("live-fold");
         crate::hostphases::add("live-journal-bytes", crate::summary::journal_stamp(paths).0);
         crate::checkpoint::fold_and_checkpoint(paths)
     };
-    rows_of(paths, launch, registry, &state, Stops::NotEvidence)
+    Ok(rows_of(paths, launch, registry, &state, Stops::NotEvidence))
+}
+
+/// Refuse a run whose journal this read has to fold and cannot open.
+///
+/// A fold of a journal that cannot be read is a fold of nothing, and a run folded
+/// to nothing records nothing running — its dispatches would be left out rather
+/// than flagged. A run with no journal yet is a real state, and is folded as one.
+fn foldable(paths: &RunPaths) -> Result<(), String> {
+    match std::fs::File::open(paths.journal()) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(format!(
+            "its journal cannot be read, and this read has to fold it to say what the run \
+             has running: {error}"
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// Whether a recorded stop may stand in for a registry that cannot be read.
