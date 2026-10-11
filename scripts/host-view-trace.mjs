@@ -23,7 +23,8 @@ const READ_FD = /^\w+\(\d+<([^>]*)>/;
 function runOf(path, dir = "/") {
   if (basename(path) !== JOURNAL) return null;
   const full = resolve(dir, path);
-  if (full.includes("\\")) throw new Error(`a journal path strace escaped cannot be read back: ${full}`);
+  if (full.includes("\\"))
+    throw new Error(`a journal path strace escaped cannot be read back: ${full}`);
   return basename(dirname(full));
 }
 
@@ -66,7 +67,9 @@ export function journalOpens(command, args, into, options = {}) {
   );
   if (done.error) throw new Error(`\`strace\` could not run: ${done.error.message}`);
   if (done.status !== 0)
-    throw new Error(`\`strace ${command} ${args.join(" ")}\` exited ${done.status ?? `on ${done.signal}`}: ${done.stderr}`);
+    throw new Error(
+      `\`strace ${command} ${args.join(" ")}\` exited ${done.status ?? `on ${done.signal}`}: ${done.stderr}`,
+    );
   let trace;
   try {
     trace = readFileSync(into, "utf8");
@@ -99,7 +102,8 @@ export function journalOpens(command, args, into, options = {}) {
     if (!isOpen && !isRead) continue;
     const named = body.match(isOpen ? OPENAT : READ_FD);
     if (!named) {
-      if (body.includes(JOURNAL)) throw new Error(`a traced call names a journal unreadably: ${raw}`);
+      if (body.includes(JOURNAL))
+        throw new Error(`a traced call names a journal unreadably: ${raw}`);
       continue;
     }
     const run = isOpen ? runOf(named[2], named[1]) : runOf(named[1]);
@@ -111,7 +115,8 @@ export function journalOpens(command, args, into, options = {}) {
     else opened.set(run, (opened.get(run) ?? 0) + (isRead && count > 0 ? count : 0));
   }
   const cut = [...pending.values()].filter((call) => call.includes(JOURNAL));
-  if (cut.length > 0) throw new Error(`a traced call on a journal never finished: ${cut.join("; ")}`);
+  if (cut.length > 0)
+    throw new Error(`a traced call on a journal never finished: ${cut.join("; ")}`);
   return { stdout: done.stdout, opened, refused };
 }
 

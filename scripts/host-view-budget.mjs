@@ -193,7 +193,10 @@ function validateDetail(held) {
     if (!isObject(size)) fail(`scaling.sizes[${n}] must be an object`);
     milliseconds(size.median_ms, `scaling.sizes[${n}].median_ms`);
     reads(size.reads_ms, `scaling.sizes[${n}].reads_ms`);
-    if (!Number.isSafeInteger(size.ended_journal_bytes_opened) || size.ended_journal_bytes_opened < 0) {
+    if (
+      !Number.isSafeInteger(size.ended_journal_bytes_opened) ||
+      size.ended_journal_bytes_opened < 0
+    ) {
       fail(`scaling.sizes[${n}].ended_journal_bytes_opened must be a nonnegative count of bytes`);
     }
     if (
