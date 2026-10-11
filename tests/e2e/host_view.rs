@@ -1277,6 +1277,34 @@ fn recorded(phases: &Option<Value>, names: &[&str], quantity: &str, label: &str)
         line["quantities"][quantity].is_u64(),
         "{label}: the read counted no `{quantity}`: {line}"
     );
+    // Each figure is a measurement rather than a placeholder: none negative, and
+    // the whole read on a CPU for some of its time.
+    for (name, phase) in line["phases"].as_object().expect("phases") {
+        for figure in ["wall_ms", "cpu_ms", "runq_ms", "blocked_ms"] {
+            assert!(
+                phase[figure].as_f64().is_some_and(|ms| ms >= 0.0),
+                "{label}: `{name}` {figure}: {phase}"
+            );
+        }
+        assert!(
+            phase["read_bytes"].is_u64() && phase["count"].as_u64() >= Some(1),
+            "{label}: `{name}`: {phase}"
+        );
+    }
+    assert!(
+        line["cpu_ms"].as_f64().is_some_and(|ms| ms > 0.0),
+        "{label}: {line}"
+    );
+    // A fold reads at least the journal bytes it counts.
+    let folded = if quantity == "live-journal-bytes" {
+        "live-fold"
+    } else {
+        "cold-fold"
+    };
+    assert!(
+        line["phases"][folded]["read_bytes"].as_u64() >= line["quantities"][quantity].as_u64(),
+        "{label}: `{folded}` read fewer bytes than the journals it folded: {line}"
+    );
     assert!(
         line["process_start_ms"].is_number() && line["exit_ms"].is_number(),
         "{label}: the read marked no start or end of its work: {line}"
@@ -2429,4 +2457,36 @@ fn a_runs_root_that_cannot_be_read_is_the_readings_root_error() {
         "{}",
         text.stdout
     );
+}
+
+/// The phase record is measurement, never a condition of the answer: asked to
+/// append to a path it cannot write, `host` still answers and exits as it always
+/// does; asked to append to a file, it appends one line of its phases.
+#[test]
+fn a_phase_record_that_cannot_be_written_costs_the_read_nothing() {
+    let world = World::new("host-view-phases").with_env("HOSTNAME", HOST);
+    let mut unwritable = world.cmd(&["host", "--json"]);
+    unwritable.env(PHASES_ENV, &world.root);
+    let read = invoke(unwritable);
+    has_the_version_1_keys(&read.reading());
+
+    let recorded = world.root.join("phases.jsonl");
+    let mut written = world.cmd(&["host"]);
+    written.env(PHASES_ENV, &recorded);
+    let read = invoke(written);
+    assert_eq!(read.code, Some(0), "{}", read.stderr);
+    assert!(
+        read.stdout.contains("no live dispatches"),
+        "{}",
+        read.stdout
+    );
+    let lines = std::fs::read_to_string(&recorded).expect("the phase record");
+    assert_eq!(lines.lines().count(), 1, "{lines}");
+    let line: Value = serde_json::from_str(lines.trim()).expect("one JSON line");
+    for name in ["event-registry", "list", "free-space", "render"] {
+        assert!(
+            line["phases"][name]["wall_ms"].is_number(),
+            "no `{name}`: {line}"
+        );
+    }
 }

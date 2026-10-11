@@ -679,6 +679,12 @@ pub(crate) fn fold_ended(paths: &RunPaths) -> RunState {
 /// cost this exists to remove. What stands in for it is the summary's own
 /// freshness rule — a journal rewritten in place moves its modification time, so
 /// the summary that stamped it is no longer current and this is not reached.
+// llmlint: ignore-block[boundary_inputs_validated] the seal is chained over the covered
+// journal bytes before the state, so no part of it can be checked without reading every one
+// of them, which is the cost this exists to remove. The document is still refused at another
+// version, as another run's, or as anything but this build's shape (`readable`), and what
+// stands in for the seal is the summary's stamp — the trust every listing already places in
+// that document — as the plan that added this read ruled.
 pub(crate) fn covering_whole(
     paths: &RunPaths,
     journal_len: u64,
@@ -690,6 +696,7 @@ pub(crate) fn covering_whole(
         })
         .map(|checkpoint| checkpoint.state)
 }
+// llmlint: ignore-end[boundary_inputs_validated]
 
 /// Whether a fold may cover the records sharing the journal's last timestamp.
 #[derive(Clone, Copy, PartialEq, Eq)]
