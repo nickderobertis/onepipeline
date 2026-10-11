@@ -818,3 +818,56 @@ fn the_host_view_measurement_counts_the_journals_a_traced_read_opened() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The build the measurement records is read from the binary it timed, so a debug build
+/// passed for the release one is named as what it is and the reporter refuses its record.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_host_view_measurement_reads_the_build_from_the_binary() {
+    let dir = scratch("host-view-build");
+    let build = |binary: &std::path::Path| -> String {
+        let read = std::process::Command::new("node")
+            .args(["--input-type=module", "-e"])
+            .arg(format!(
+                "import {{ buildOf }} from {:?}; console.log(buildOf(process.argv[1]))",
+                root()
+                    .join("scripts/host-view-budget.mjs")
+                    .display()
+                    .to_string()
+            ))
+            .arg(binary)
+            .output()
+            .expect("node reads the build");
+        assert!(
+            read.status.success(),
+            "{}",
+            String::from_utf8_lossy(&read.stderr)
+        );
+        String::from_utf8_lossy(&read.stdout).trim().to_owned()
+    };
+    let debug = std::path::Path::new(env!("CARGO_BIN_EXE_onepipeline"));
+    assert_eq!(build(debug), "unstripped");
+    // Stripped as the release profile's `strip = true` leaves it.
+    let stripped = dir.join("onepipeline");
+    std::fs::copy(debug, &stripped).expect("a copy of the binary");
+    let strip = std::process::Command::new("strip")
+        .arg(&stripped)
+        .status()
+        .expect("binutils' strip runs");
+    assert!(strip.success());
+    assert_eq!(build(&stripped), "release");
+    let script = dir.join("onepipeline.sh");
+    std::fs::write(&script, "#!/bin/sh\n").expect("a script");
+    assert_eq!(build(&script), "not an ELF executable");
+
+    // And a record of the unstripped build is one the reporter refuses.
+    let record = dir.join("target/budget-records/host-view.json");
+    std::fs::create_dir_all(record.parent().expect("a parent")).expect("the record's directory");
+    let mut held = host_view_record();
+    held["steady"]["build"] = serde_json::json!("unstripped");
+    std::fs::write(&record, held.to_string()).expect("a record");
+    let result = dir.join("result.json");
+    let refused = host_view_report(&dir, Some(&result));
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("steady.build must be release"));
+}

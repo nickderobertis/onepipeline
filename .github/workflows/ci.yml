@@ -408,7 +408,7 @@ jobs:
       # The `host-view-time` budget times the binary users run, and this is the job
       # that builds it from this revision, so it is measured here against that very
       # binary and adds no build of its own: the fixture, the reads and the check,
-      # through the prebuilt checker `npm ci` installs. Linux only, where the
+      # through the prebuilt checker the recipe installs. Linux only, where the
       # fixture's live dispatches prove their procfs start tokens.
       - if: matrix.os == 'ubuntu-latest'
         uses: actions/setup-node@v4
@@ -420,9 +420,7 @@ jobs:
           tool: just
       - name: Measure and check host-view-time against the installed binary
         if: matrix.os == 'ubuntu-latest'
-        run: |
-          npm ci --no-audit --no-fund
-          just host-view-budget "$(command -v onepipeline)"
+        run: just host-view-budget "$(command -v onepipeline)"
 
   # The README's from-source one-liner, read out of README.md and run verbatim.
   # The command is not spelled again here: the README is its one source, so this

@@ -35,7 +35,7 @@ import {
   stampSparse,
   startToken,
 } from "../tests/e2e/host_view_fixture.mjs";
-import { BREAKDOWN, READS, SCALING, validateRecord } from "./host-view-budget.mjs";
+import { BREAKDOWN, buildOf, READS, SCALING, validateRecord } from "./host-view-budget.mjs";
 import { journalOpens, steadyOpens } from "./host-view-trace.mjs";
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -261,7 +261,9 @@ try {
       stale_entries: manifest.expected.stale.length,
     },
     steady: {
-      build: "release",
+      // Read from the binary, so the reporter's release-only check refuses a
+      // measurement of any other build.
+      build: buildOf(binary),
       reads_ms: measured.walls,
       median_ms: median(measured.walls),
       load1: measured.load,

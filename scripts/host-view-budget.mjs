@@ -79,6 +79,33 @@ function readRecord() {
   return validateRecord(held);
 }
 
+/**
+ * The build a binary is, read from its own ELF section table rather than taken
+ * from whoever passed it: `release` when it carries neither a symbol table nor
+ * debug info, as this crate's release profile (`strip = true`) leaves it;
+ * `unstripped` when it carries either, as a debug build does; `not an ELF
+ * executable` for anything else.
+ */
+export function buildOf(path) {
+  const elf = readFileSync(path);
+  // ELF64, little-endian: the only shape the Linux runners the budget is taken on build.
+  if (elf.length < 64 || elf.readUInt32BE(0) !== 0x7f454c46 || elf[4] !== 2 || elf[5] !== 1) {
+    return "not an ELF executable";
+  }
+  const offset = Number(elf.readBigUInt64LE(0x28));
+  const size = elf.readUInt16LE(0x3a);
+  const count = elf.readUInt16LE(0x3c);
+  const header = (n) => offset + n * size;
+  if (count === 0 || header(count) > elf.length) return "not an ELF executable";
+  const strings = Number(elf.readBigUInt64LE(header(elf.readUInt16LE(0x3e)) + 0x18));
+  const names = new Set();
+  for (let n = 0; n < count; n += 1) {
+    const start = strings + elf.readUInt32LE(header(n));
+    names.add(elf.toString("latin1", start, elf.indexOf(0, start)));
+  }
+  return names.has(".symtab") || names.has(".debug_info") ? "unstripped" : "release";
+}
+
 /** Refuse a record this command cannot vouch for; answer it otherwise. */
 export function validateRecord(held) {
   if (held === null || typeof held !== "object" || held.schema_version !== 1) {

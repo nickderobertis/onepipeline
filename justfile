@@ -107,6 +107,13 @@ _ensure-strace:
         just _strace-preflight; \
       fi
 
+# The locked Node packages `host-view-budget` reads — the onebudgetspec SDK and
+# its prebuilt checker — installed from `package-lock.json` when they are absent,
+# so a fresh CI runner and a laptop reach them through the same recipe.
+_ensure-node-modules:
+    @[ -e node_modules/.bin/onebudgetspec ] && [ -e node_modules/@onebudgetspec/sdk/package.json ] \
+      || npm ci --silent --no-audit --no-fund
+
 # Asked ahead of the tiers that hold those journeys, so the missing tool is
 # named up front rather than by a panic inside a journey.
 _strace-preflight:
@@ -558,6 +565,7 @@ budgets:
 # Measure `host-view-time` against an installed release binary, and check it.
 host-view-budget binary:
     @just _ensure-strace
+    @just _ensure-node-modules
     @node scripts/host-view-measure.mjs "$1"
     @node_modules/.bin/onebudgetspec check budgets.yaml --id host-view-time
 
