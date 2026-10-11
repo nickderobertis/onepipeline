@@ -202,6 +202,23 @@ pub const EXIT_NODE_SETTLED: i32 = 6;
 /// Divergence entry 99 records the ruling that added it.
 pub const EXIT_RUN_CHANGED: i32 = 7;
 
+/// A watch of a flow saw a member run launched after it armed, or one past its
+/// cursor.
+///
+/// `watch --flow`'s own, and a code of its own because the run that joined is
+/// the fact the supervisor acts on: a run nothing else announces, which the
+/// flow launched between two of its stages. Divergence entry 114 states it.
+pub const EXIT_RUN_JOINED: i32 = 8;
+
+/// A watched flow ended with a non-zero status, or its holder died with no
+/// ending recorded.
+///
+/// `watch --flow`'s own. A flow ending `0` is the wait settling, which `0` already
+/// says; one that failed is owed closure until somebody acknowledges it, so it is
+/// told apart by its status rather than by the words beside it. Divergence entry
+/// 114 states it.
+pub const EXIT_FLOW_FAILED: i32 = 9;
+
 #[cfg(test)]
 mod tests {
     use super::*;

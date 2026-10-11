@@ -7446,7 +7446,7 @@ const RULINGS: &[(&str, &str)] = &[
     // The repository publication boundary: the manager's rulings on what this build
     // decided beyond the approved interface, stated by the contract's own paragraph.
     (
-        "114.",
+        "115.",
         "every write-back write a store whose configuration opts into the boundary makes",
     ),
 ];
@@ -8537,6 +8537,9 @@ fn the_readmes_interface_claims_match_the_code_they_describe() {
         EXIT_WATCH_ELAPSED,
         EXIT_NODE_SETTLED,
         EXIT_RUN_CHANGED,
+        // `watch --flow`'s own two, which the same passage states.
+        onepipeline::error::EXIT_RUN_JOINED,
+        onepipeline::error::EXIT_FLOW_FAILED,
     ]
     .iter()
     .map(i32::to_string)

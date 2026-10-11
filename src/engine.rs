@@ -11663,6 +11663,7 @@ mod tests {
             template_root: String::new(),
             require_rendered: false,
             oneharness_sessions: None,
+            flow: String::new(),
             envelope_reviewer_bar: Default::default(),
         }
     }

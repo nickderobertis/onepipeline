@@ -1844,6 +1844,64 @@ mod unix_interrupt {
     }
 }
 
+/// From now on, send every SIGINT, SIGTERM and SIGHUP this process receives to
+/// `child` instead of ending this process of it.
+///
+/// What `flow run` waits for its program under: the program is what the signal
+/// was meant for, and the flow's ending is recorded only once the program has
+/// ended of it. The handler does one async-signal-safe thing — `kill` — so no
+/// thread or pipe is needed. A signal this process was started ignoring stays
+/// ignored, because it would not have reached the program through this process
+/// either. Never undone: the caller exits once `child` has.
+///
+/// On Windows nothing is installed: a console's Ctrl-C reaches every process
+/// attached to it, the program among them.
+pub(crate) fn forward_terminating_signals(child: u32) {
+    #[cfg(unix)]
+    unix_forward::to(child);
+    #[cfg(not(unix))]
+    let _ = child;
+}
+
+#[cfg(unix)]
+mod unix_forward {
+    use std::sync::atomic::{AtomicI32, Ordering};
+
+    /// The program the signals go to, or `0` before one is named — read by the
+    /// handler, which may touch nothing but an atomic.
+    static CHILD: AtomicI32 = AtomicI32::new(0);
+
+    extern "C" fn relay(signal: libc::c_int) {
+        let child = CHILD.load(Ordering::SeqCst);
+        if child > 0 {
+            // SAFETY: `kill` is async-signal-safe and touches no memory.
+            unsafe { libc::kill(child, signal) };
+        }
+    }
+
+    pub(super) fn to(child: u32) {
+        CHILD.store(libc::pid_t::try_from(child).unwrap_or(0), Ordering::SeqCst);
+        for signal in super::unix_interrupt::HELD {
+            // SAFETY: `sigaction` with a null new action only reads the current
+            // one into memory this frame owns.
+            let mut was: libc::sigaction = unsafe { std::mem::zeroed() };
+            unsafe { libc::sigaction(signal, std::ptr::null(), &raw mut was) };
+            if was.sa_sigaction == libc::SIG_IGN {
+                continue;
+            }
+            // SAFETY: as above; the new action's handler is `relay`, which is
+            // async-signal-safe, and its mask is empty.
+            let mut now: libc::sigaction = unsafe { std::mem::zeroed() };
+            now.sa_sigaction = relay as extern "C" fn(libc::c_int) as libc::sighandler_t;
+            now.sa_flags = libc::SA_RESTART;
+            unsafe {
+                libc::sigemptyset(&raw mut now.sa_mask);
+                libc::sigaction(signal, &raw const now, std::ptr::null_mut());
+            }
+        }
+    }
+}
+
 /// The session that launched a run, as the harness's environment reports it.
 ///
 /// Detected from the exported environment and never from process ancestry, and
