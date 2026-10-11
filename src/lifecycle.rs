@@ -2765,6 +2765,11 @@ impl ReworkDrafting {
     /// net diff, and the `title_check` it is asked to answer.
     fn section(&self) -> String {
         let diff = match &self.net_diff {
+            // llmlint: ignore[changed_behavior_has_e2e] a branch level with its base is
+            // settled by `publish` before any drafting is composed, so a rework reaches here
+            // with an empty patch only where its worktree changes cancel out uncommitted —
+            // said rather than shown as an empty fence. `a_net_diff_is_the_whole_change_
+            // against_its_base_and_leaves_the_index_alone` holds what the patch is.
             Ok(patch) if patch.trim().is_empty() => {
                 "The branch carries no change against its base.".to_owned()
             }

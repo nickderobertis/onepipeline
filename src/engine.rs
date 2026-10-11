@@ -5991,6 +5991,14 @@ fn start_restacks(
     workspaces: &mut crate::pool::Workspaces,
     notes_in_flight: &DeliveriesInFlight,
 ) -> Result<bool> {
+    // llmlint: ignore-block[changed_behavior_has_e2e] the three holds a restack shares with
+    // a dispatch — a shutdown begun, a decision point holding the draft, its identity with no
+    // room — are `start_ready`'s own, asked here of the same `shutdown`, `paused` and
+    // `workspaces` values and driven for a dispatch by `tests/e2e/shutdown.rs`, `holds.rs` and
+    // the pool journeys of `lifecycle.rs`. A restack-specific journey would have to land one of
+    // them in the seconds between a parent's push and the pass that reads it, which no hold of
+    // the doubles is placed to do; `restacks_owed` itself, and the concurrency bound beside
+    // these, are driven by every restack journey in `tests/e2e/rework.rs`.
     if crate::shutdown::begun(paths) {
         return Ok(false);
     }
@@ -6013,7 +6021,7 @@ fn start_restacks(
             if workspaces.admit(&node.id, &request) == crate::pool::Admission::Held {
                 continue;
             }
-        }
+        } // llmlint: ignore-end[changed_behavior_has_e2e]
         journal.emit(
             journal::PipelineKind::NodeRestackStarted,
             journal::labels(&paths.run, Some(&node.id)),
