@@ -557,10 +557,10 @@ function manifestOf(value) {
   for (const key of ["held", "unproven", "stale", "stopped"]) {
     const pairs = value.expected[key];
     if (!Array.isArray(pairs) || pairs.some((pair) => !Array.isArray(pair) || pair.length !== 2)) refuse(`expected.${key} must be [run, node] pairs`);
-    names(
-      pairs.map((pair) => pair[0]),
-      `expected.${key}`,
-    );
+    pairs.forEach(([run, node], n) => {
+      runName(run, `expected.${key}[${n}] run`);
+      if (typeof node !== "string" || !RUN_NAME.test(node)) refuse(`expected.${key}[${n}] node must be a node name, not ${JSON.stringify(node)}`);
+    });
   }
   for (const key of ["live_runs", "ended", "settled"]) names(value[key], key);
   names(value.expected.skipped, "expected.skipped");
