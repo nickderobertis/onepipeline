@@ -560,7 +560,6 @@ fn an_unconcluded_stack_base_merge_fails_the_node_naming_it() {
 /// branch prefix, so the stack base is named under none.
 #[test]
 fn a_worker_that_fails_the_stack_base_merge_fails_the_node() {
-    // A host that configures no branch prefix, so the stack base is named under none.
     let world = World::new("stack-merge-fails");
     team_repository(&world);
     world.script("gh.checks", GREEN);
