@@ -4312,6 +4312,42 @@ mod tests {
 
     /// A settlement's `base` and `stack` are folded per node, and the node's newer
     /// settlement naming a base and no stack drops the stack its older one named.
+    /// A restack folds the node running until its settlement, and a driver that
+    /// adopts the run after the one running it died reads the node `done` again —
+    /// what its restack started from — rather than dispatching its work afresh.
+    #[test]
+    fn a_restack_its_driver_died_in_leaves_the_node_done_for_the_adopter() {
+        let settled = pipeline(
+            journal::PipelineKind::NodeSettled,
+            1,
+            Some("b"),
+            &[
+                ("status", json!("done")),
+                ("outcome", json!("change-review-draft")),
+                ("branch", json!("me/b")),
+                ("head", json!("1f2e3d")),
+            ],
+        );
+        let started = pipeline(
+            journal::PipelineKind::NodeRestackStarted,
+            2,
+            Some("b"),
+            &[
+                ("node", json!("b")),
+                ("onto", json!([{"branch": "me/a", "head": "9f8e7d"}])),
+                ("cause", json!("rework")),
+            ],
+        );
+        let restacking = fold(&[settled.clone(), started.clone()]);
+        assert_eq!(restacking.recorded["b"], Recorded::At(NodeStatus::Running));
+        assert_eq!(restacking.restacking["b"][0].head, "9f8e7d");
+        assert_eq!(restacking.branch_heads["me/b"], "1f2e3d");
+        let adopted = pipeline(journal::PipelineKind::DriverAdopted, 3, None, &[]);
+        let state = fold(&[settled, started, adopted]);
+        assert_eq!(state.recorded["b"], Recorded::At(NodeStatus::Done));
+        assert!(state.restacking.is_empty(), "{:?}", state.restacking);
+    }
+
     #[test]
     fn a_settlement_s_base_and_stack_are_folded_and_a_later_unstacked_one_drops_the_stack() {
         let settled = |seq: u64, fields: &[(&str, Value)]| {

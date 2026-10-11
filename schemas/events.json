@@ -3263,6 +3263,189 @@
           }
         }
       }
+    },
+    {
+      "id": "agent.pipeline.change-retitled@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "node": {
+            "type": "string",
+            "description": "The node."
+          },
+          "from": {
+            "type": "string",
+            "description": "The title the change request carried before."
+          },
+          "to": {
+            "type": "string",
+            "description": "The title it carries now."
+          },
+          "by": {
+            "$ref": "#/$defs/RetitledBy",
+            "description": "Who decided it."
+          }
+        },
+        "required": [
+          "node",
+          "from",
+          "to",
+          "by"
+        ],
+        "description": "`change-retitled`: a lifecycle node's change request carries a new title.",
+        "title": "ChangeRetitled",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "RetitledBy": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "op",
+                "description": "A `rework` stating a title."
+              },
+              {
+                "type": "string",
+                "const": "drafter",
+                "description": "The body drafter's `replaced` verdict on a rework's publication."
+              },
+              {
+                "type": "string",
+                "const": "retitle",
+                "description": "A `retitle`."
+              }
+            ],
+            "description": "Who retitled a change request, as `change-retitled` names it."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.title-unverified@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "node": {
+            "type": "string",
+            "description": "The node."
+          },
+          "title": {
+            "type": "string",
+            "description": "The title it kept."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why nothing verified it."
+          }
+        },
+        "required": [
+          "node",
+          "title",
+          "reason"
+        ],
+        "description": "`title-unverified`: a rework's publication left its change request's title\nunchanged without anything saying it still describes the change.",
+        "title": "TitleUnverified",
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "id": "agent.pipeline.node-restack-started@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "node": {
+            "type": "string",
+            "description": "The node."
+          },
+          "onto": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/RestackOnto"
+            },
+            "description": "Each stack parent's branch and the head it is brought onto: at least one.",
+            "minItems": 1
+          },
+          "cause": {
+            "$ref": "#/$defs/RestackCause",
+            "description": "Why."
+          }
+        },
+        "required": [
+          "node",
+          "onto",
+          "cause"
+        ],
+        "description": "`node-restack-started`: a draft began being brought onto its stack parents'\nnew heads.",
+        "title": "NodeRestackStarted",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "RestackOnto": {
+            "type": "object",
+            "properties": {
+              "branch": {
+                "type": "string",
+                "description": "The stack parent's branch."
+              },
+              "head": {
+                "type": "string",
+                "description": "The commit it stands at."
+              }
+            },
+            "required": [
+              "branch",
+              "head"
+            ],
+            "description": "One branch a restack brings a draft onto, and the head it brings it onto."
+          },
+          "RestackCause": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "rework",
+                "description": "A stack parent's rework republished with new commits."
+              },
+              {
+                "type": "string",
+                "const": "restack",
+                "description": "A stack parent's own restack republished with new commits."
+              }
+            ],
+            "description": "Why a draft is restacked."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.node-restacked@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "node": {
+            "type": "string",
+            "description": "The node."
+          },
+          "head": {
+            "type": "string",
+            "description": "The commit the node's branch stands at after the restack."
+          },
+          "agent_dispatched": {
+            "type": "boolean",
+            "description": "Whether an agent was dispatched to conclude a conflict."
+          },
+          "outcome": {
+            "type": "string",
+            "description": "The publication's outcome word, as the node's settlement carries it."
+          }
+        },
+        "required": [
+          "node",
+          "head",
+          "agent_dispatched",
+          "outcome"
+        ],
+        "description": "`node-restacked`: a restack published.",
+        "title": "NodeRestacked",
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
     }
   ]
 }

@@ -5643,6 +5643,11 @@ mod tests {
                 "docs/contract-divergences.md does not name the task field `{field}`"
             );
         }
+        // The key a rework's replacement carries what it answers under — entry 116's.
+        assert!(
+            divergence.contains(&format!("`{}`", crate::taskgraph::REWORK_KEY)),
+            "docs/contract-divergences.md does not name the rework key"
+        );
         // The keys that say which attempt of a lineage an item carries, beside the
         // `onepipeline.id` the contract already names — entry 80's.
         let lineage = [NODE_KEY, SUPERSEDES_KEY];

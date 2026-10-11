@@ -2133,6 +2133,8 @@ fn op_of(command: &Edit) -> &'static str {
         Edit::Amend { .. } => "amend",
         Edit::Note { .. } => "note",
         Edit::Finding { .. } => "finding",
+        Edit::Rework { .. } => "rework",
+        Edit::Retitle { .. } => "retitle",
     }
 }
 
@@ -2272,6 +2274,114 @@ fn the_stacked_settlement_is_what_the_divergence_record_names() {
         block["block_markers"],
         serde_json::json!(["<!-- onepipeline:stack -->", "<!-- /onepipeline:stack -->"])
     );
+}
+
+/// The rework surface entry 116 proposes is this build's own: its two ops
+/// round-trip through the public command type and are granted to the planner
+/// alone, its four kinds are kinds this build emits whose records the registered
+/// documents admit — and refuse with an unknown word in a closed field — and its
+/// surface kind is the one this build raises.
+#[test]
+fn the_rework_surface_is_what_the_divergence_record_names() {
+    use onepipeline::payload::{registry, schema_of};
+    let block = divergence_block("116.");
+
+    let fixtures: Vec<Value> =
+        serde_json::from_value(block["ops"].clone()).expect("entry 116 names its ops");
+    let monitor_may: BTreeSet<String> = serde_json::from_value(block["monitor_may_issue"].clone())
+        .expect("entry 116 says which of them the monitor may issue");
+    assert!(monitor_may.is_empty(), "{block}");
+    let named: Vec<&str> = fixtures
+        .iter()
+        .map(|fixture| fixture["op"].as_str().expect("the fixture names its op"))
+        .collect();
+    assert_eq!(named, ["rework", "retitle"]);
+    for fixture in &fixtures {
+        let op = fixture["op"].as_str().expect("the fixture names its op");
+        assert!(!OPS.contains(&op), "`{op}` is on the contract's own list");
+        let edit: Edit = serde_json::from_value(fixture.clone())
+            .unwrap_or_else(|e| panic!("`{op}` deserializes: {e}"));
+        assert_eq!(op_of(&edit), op, "`{op}` deserialized into another variant");
+        assert_eq!(onepipeline::channel::op_of(&edit), op);
+        assert_eq!(
+            &serde_json::to_value(&edit).expect("serializes"),
+            fixture,
+            "`{op}` round-trips unchanged"
+        );
+        allows(Author::planner(), &edit)
+            .unwrap_or_else(|e| panic!("the planner was refused `{op}`: {e}"));
+        let refused = allows(Author::from("monitor"), &edit)
+            .expect_err("an author other than the planner is granted it");
+        assert!(refused.to_string().contains(op), "{refused}");
+    }
+    // The compiled-in allowlist declares no author but the planner, so no default
+    // grant names another.
+    let allowlist = onepipeline::channel::layout::allowlist();
+    assert_eq!(
+        allowlist
+            .authors()
+            .iter()
+            .map(|author| author.as_str().to_owned())
+            .collect::<Vec<_>>(),
+        ["planner"]
+    );
+    // A command missing what the op requires is refused at the wire.
+    for missing in ["reason", "instruction"] {
+        let mut partial = fixtures[0].clone();
+        partial.as_object_mut().expect("an object").remove(missing);
+        assert!(
+            serde_json::from_value::<Edit>(partial).is_err(),
+            "a rework with no `{missing}` was read"
+        );
+    }
+
+    let kinds: Vec<String> =
+        serde_json::from_value(block["event_kinds"].clone()).expect("entry 116 names its kinds");
+    let registry = registry();
+    for kind in &kinds {
+        let emitted = PipelineKind::from_wire(&EventKind(kind.clone()))
+            .unwrap_or_else(|| panic!("{kind} is not a kind this build emits"));
+        assert!(PIPELINE_KINDS.contains(&emitted));
+        let record = block["records"][kind.as_str()].clone();
+        registry
+            .check(&schema_of(emitted), &record)
+            .unwrap_or_else(|why| panic!("entry 116's {kind} is refused: {why}"));
+    }
+    let retitled = schema_of(PipelineKind::ChangeRetitled);
+    let mut record = block["records"]["change-retitled"].clone();
+    for by in block["retitled_by"]
+        .as_array()
+        .expect("entry 116 names who retitles")
+    {
+        record["by"] = by.clone();
+        registry
+            .check(&retitled, &record)
+            .expect("a retitler the entry names");
+    }
+    record["by"] = json!("someone");
+    assert!(registry.check(&retitled, &record).is_err());
+    let started = schema_of(PipelineKind::NodeRestackStarted);
+    let mut record = block["records"]["node-restack-started"].clone();
+    for cause in block["restack_causes"]
+        .as_array()
+        .expect("entry 116 names the causes")
+    {
+        record["cause"] = cause.clone();
+        registry
+            .check(&started, &record)
+            .expect("a cause the entry names");
+    }
+    record["cause"] = json!("whim");
+    assert!(registry.check(&started, &record).is_err());
+    record["cause"] = json!("rework");
+    record["onto"] = json!([]);
+    assert!(
+        registry.check(&started, &record).is_err(),
+        "a restack onto nothing was admitted"
+    );
+
+    assert_eq!(block["surface_kind"], SurfaceKind::TITLE_UNVERIFIED);
+    assert_eq!(block["rework_metadata_key"], "onepipeline.rework");
 }
 
 /// The release-adoption surface this build carries **beyond** the contract is
@@ -6389,7 +6499,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // undocumented wire; a kind the contract lists and the enum does not carry is
     // a promise nothing keeps. `PIPELINE_KINDS` is what `Journal::emit` accepts,
     // so this is the emitted set and not a second copy of it.
-    assert_eq!(PIPELINE_KINDS.len(), 39, "the closed set changed size");
+    assert_eq!(PIPELINE_KINDS.len(), 43, "the closed set changed size");
     let listed: BTreeSet<String> = backticked()
         .into_iter()
         .filter(|token| {
@@ -6398,7 +6508,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
         .collect();
     // The kinds the contract does not list are exactly the ones the divergence
     // record proposes, and no others: a kind neither document names fails here.
-    let proposed: BTreeSet<String> = ["40.", "47.", "55.", "65.", "70.", "92."]
+    let proposed: BTreeSet<String> = ["40.", "47.", "55.", "65.", "70.", "92.", "116."]
         .into_iter()
         .flat_map(|entry| {
             serde_json::from_value::<Vec<String>>(divergence_block(entry)["event_kinds"].clone())

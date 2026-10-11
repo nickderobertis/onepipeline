@@ -626,7 +626,9 @@
         "finding",
         "amend",
         "note",
-        "settle"
+        "settle",
+        "rework",
+        "retitle"
       ],
       "authors": {
         "planner": {

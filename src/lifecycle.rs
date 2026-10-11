@@ -4621,4 +4621,41 @@ mod tests {
         let steps = ordered_steps(&node).expect("an outside reference does not deadlock");
         assert_eq!(steps.len(), 1);
     }
+
+    /// The `title_check` verdicts and the net diff's cap entry 116 states are the
+    /// ones a rework's publication reads and shows.
+    #[test]
+    fn the_title_check_and_the_net_diff_cap_are_entry_116s() {
+        let record = include_str!("../docs/contract-divergences.md");
+        let block: serde_json::Value = record
+            .split("\n## ")
+            .find(|entry| entry.starts_with("116."))
+            .and_then(|entry| entry.split("```json").nth(1))
+            .and_then(|rest| rest.split("```").next())
+            .map(|block| serde_json::from_str(block).expect("entry 116's block is JSON"))
+            .expect("the record carries entry 116's block");
+        assert_eq!(
+            block["net_diff_cap_bytes"],
+            serde_json::json!(crate::vcs::NET_DIFF_CAP)
+        );
+        assert_eq!(
+            title_check_of(Some(&block["title_check"])),
+            Ok(TitleCheck::Replaced(
+                "feat(reader): retry a failed plan read".to_owned()
+            ))
+        );
+        for verdict in block["title_check_verdicts"]
+            .as_array()
+            .expect("the verdicts")
+        {
+            let check = serde_json::json!({"verdict": verdict, "title": "fix: x"});
+            assert!(title_check_of(Some(&check)).is_ok(), "{verdict}");
+        }
+        assert!(title_check_of(Some(&serde_json::json!({"verdict": "maybe"}))).is_err());
+        assert!(title_check_of(None).is_err());
+        assert!(title_check_of(Some(
+            &serde_json::json!({"verdict": "replaced", "title": "nope"})
+        ))
+        .is_err());
+    }
 }

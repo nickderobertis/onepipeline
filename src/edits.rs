@@ -6345,4 +6345,47 @@ mod tests {
         let why = refused_over(&graph, &frontier, &retitle_of("a", "fix: x", " "));
         assert!(why.contains("the reason cannot be blank"), "{why}");
     }
+
+    /// Entry 116's block, read out of the divergence record.
+    fn entry_116() -> serde_json::Value {
+        let record = include_str!("../docs/contract-divergences.md");
+        let entry = record
+            .split("\n## ")
+            .find(|entry| entry.starts_with("116."))
+            .expect("the record carries entry 116");
+        let block = entry
+            .split("```json")
+            .nth(1)
+            .and_then(|rest| rest.split("```").next())
+            .expect("entry 116 carries a json block");
+        serde_json::from_str(block).expect("entry 116's block is JSON")
+    }
+
+    /// The operations entry 116 proposes are kinds the enum serializes, and the
+    /// replacement a rework names by default is the shape it states.
+    #[test]
+    fn the_rework_operations_and_default_replacement_are_entry_116s() {
+        let block = entry_116();
+        let kinds: Vec<String> =
+            serde_json::from_value(block["operation_kinds"].clone()).expect("a list");
+        let known = every_operation_kind();
+        for kind in &kinds {
+            assert!(
+                known.contains(kind),
+                "{kind} is no operation this build records"
+            );
+        }
+        let (mut graph, frontier) = reworkable();
+        let operations = compile(&mut graph, &frontier, &rework_of("a")).expect("accepted");
+        let shape = block["default_replacement"]
+            .as_str()
+            .expect("a shape")
+            .replace("{root}", "a")
+            .replace("{n}", "1");
+        assert!(matches!(
+            &operations[0],
+            Operation::ReworkRequested { replacement, .. } if *replacement == shape
+        ));
+        assert_eq!(operations[0].kind(), kinds[0]);
+    }
 }
