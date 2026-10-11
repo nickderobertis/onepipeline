@@ -1228,9 +1228,9 @@ pub(crate) fn validate_subject(title: &str) -> std::result::Result<(), String> {
     if scope.is_some_and(|scope| scope.trim().is_empty() || scope.contains(['(', ')'])) {
         return Err("it is not a Conventional Commit subject: its scope is empty".to_owned());
     }
-    if description.trim().is_empty() {
-        return Err("it is not a Conventional Commit subject: its description is empty".to_owned());
-    }
+    // A description is never empty here: the title was trimmed, so text follows
+    // the `: ` it was split on.
+    debug_assert!(!description.is_empty());
     Ok(())
 }
 

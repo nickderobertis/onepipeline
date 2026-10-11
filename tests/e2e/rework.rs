@@ -1435,6 +1435,19 @@ fn a_rework_the_run_cannot_take_is_refused_naming_why() {
             .exited(crate::harness::REFUSED)
             .err_has(says);
     }
+    // Each way a subject is not one, refused by the title rule naming why.
+    for (title, says) in [
+        ("fix: one line\nand another", "a line break"),
+        ("fix(reader: unclosed", "its scope is not closed"),
+        ("Fix: shouting", "is not a lowercase word"),
+        ("fix(): nothing scoped", "its scope is empty"),
+        ("fix((a)): nested", "its scope is empty"),
+        ("fix(reader):  ", "no `type: description` separator"),
+    ] {
+        reply(&world, run, json!([with("title", json!(title))]))
+            .exited(crate::harness::REFUSED)
+            .err_has(says);
+    }
     assert_eq!(world.events_of(run, "edit-committed").len(), committed);
 
     // `broken` failed, so the run ends unfinished whatever the rework does: the
@@ -1464,6 +1477,18 @@ fn a_rework_the_run_cannot_take_is_refused_naming_why() {
     let again = settled(&world, run, "a-rework-2");
     assert_eq!(again["outcome"], "change-review-draft", "{again}");
     assert_eq!(again["branch"], settled(&world, run, "a")["branch"]);
+    // A breaking change's subject is one.
+    reply(
+        &world,
+        run,
+        json!([{"op": "retitle", "id": "a-rework-2", "title": "feat(a)!: break a",
+                "reason": "the change breaks a"}]),
+    )
+    .exited(0);
+    assert_eq!(
+        change_from(&world, text(&again["branch"], "a's branch"))["title"],
+        "feat(a)!: break a"
+    );
 
     // The item the lineage projected onto carries what its latest rework answers.
     world.until_store("the second rework to reach the store", |world| {
