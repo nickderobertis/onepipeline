@@ -239,6 +239,7 @@ pub fn publish(
             title,
             body: body.map(str::to_owned),
             draft: draft.cloned(),
+            term_scope: onevcs::TermScope::Registry,
         },
         &NodeCancellation(cancel),
     )
@@ -339,6 +340,7 @@ pub fn describe_change(
         &onevcs::ChangeDescription {
             title,
             body: body.to_owned(),
+            term_scope: onevcs::TermScope::Registry,
         },
     )
     .map_err(refusal)
@@ -953,6 +955,7 @@ pub fn preserve_branch(repo: &str, branch: &str) -> std::result::Result<onevcs::
     onevcs::preserve(&onevcs::PreserveRequest {
         repo: repo.to_owned(),
         branch: branch.to_owned(),
+        term_scope: onevcs::TermScope::Registry,
     })
     .map_err(|refusal| refusal.to_string())
 }

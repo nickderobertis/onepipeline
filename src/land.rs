@@ -376,6 +376,7 @@ impl Landing {
                     title: title(&args.title)?,
                     body: body(&args.body, &args.body_file)?,
                     policy: args.policy,
+                    term_scope: args.term_scope.scope(),
                 }))
             }
             onevcs::cli::Command::Recover(args) => Some(Self::Recover(onevcs::RecoverRequest {
@@ -383,6 +384,7 @@ impl Landing {
                 branch: args.branch.clone(),
                 title: title(&args.title)?,
                 body: body(&args.body, &args.body_file)?,
+                term_scope: args.term_scope.scope(),
             })),
             _ => None,
         }
