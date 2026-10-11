@@ -116,7 +116,10 @@ use crate::graph::{Landing, NodeStatus};
 use crate::ledger::{LaunchRecord, RunPaths};
 use crate::plan::Node;
 use crate::projection::RunState;
-use crate::taskgraph::{QualifiedId, Store, NODE_KEY, SUPERSEDES_KEY};
+use crate::taskgraph::{
+    QualifiedId, Store, CHANGE_URL_KEY, LANDING_COMMIT_KEY, LANDING_EVIDENCE_KEY, LANDING_KEY,
+    NODE_KEY, SUPERSEDES_KEY,
+};
 
 const SHADOW_SOURCE: &str = "onepipeline-writeback";
 /// The reserved key naming the plan node a destination item is the shadow of: the
@@ -126,22 +129,14 @@ const ID_KEY: &str = "onepipeline.id";
 // key in `taskgraph`, because the plan reader has to skip them exactly as it skips that
 // one; [`tests::every_word_and_key_this_projection_writes_is_named_by_the_divergence`]
 // holds them to entry 80 of `docs/contract-divergences.md`.
-/// The reserved key saying whether the change a node published reached its base.
-///
-/// Named once, and held against the document that records them by
-/// [`tests::every_word_and_key_this_projection_writes_is_named_by_the_divergence`]:
-/// `docs/contract.md` fixes a narrower vocabulary than this projection writes, so
-/// what these three and the words below are reconciled against is
-/// `docs/contract-divergences.md`, where that departure is recorded.
-const LANDING_KEY: &str = "onepipeline.landing";
-/// The reserved key naming the commit a landed change reached its base at.
-const LANDING_COMMIT_KEY: &str = "onepipeline.landing_commit";
-/// The reserved key naming where a person reads the change a node published.
-const CHANGE_URL_KEY: &str = "onepipeline.change_url";
-/// The reserved key naming the evidence tier a landing rests on, where that is not
-/// the run's own observation: an operator's statement, settled from evidence —
-/// see [`StatedLanding::tier`](crate::edits::StatedLanding::tier).
-const LANDING_EVIDENCE_KEY: &str = "onepipeline.landing_evidence";
+// The landing keys — whether the change a node published reached its base, the commit it
+// reached it at, where a person reads the change, and the evidence tier a stated landing rests
+// on (see [`StatedLanding::tier`](crate::edits::StatedLanding::tier)) — live beside the
+// settlement key in `taskgraph` too, for the same reason the lineage keys do: the plan reader
+// skips them. Each is held against the document that records them by
+// [`tests::every_word_and_key_this_projection_writes_is_named_by_the_divergence`]:
+// `docs/contract.md` fixes a narrower vocabulary than this projection writes, so what they and
+// the words below are reconciled against is `docs/contract-divergences.md`.
 /// The shadow task's own top-level field carrying the tickets a node delivers, held against
 /// the same document as the words and keys above.
 const DELIVERS_FIELD: &str = "delivers";

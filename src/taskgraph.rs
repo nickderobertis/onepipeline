@@ -91,14 +91,49 @@ pub(crate) const NODE_KEY: &str = "onepipeline.node";
 /// written only where the head is not the root.
 pub(crate) const SUPERSEDES_KEY: &str = "onepipeline.supersedes";
 
+/// Projection-only metadata saying whether the change a node published reached its base.
+pub(crate) const LANDING_KEY: &str = "onepipeline.landing";
+/// Projection-only metadata naming the commit a landed change reached its base at.
+pub(crate) const LANDING_COMMIT_KEY: &str = "onepipeline.landing_commit";
+/// Projection-only metadata naming where a person reads the change a node published.
+pub(crate) const CHANGE_URL_KEY: &str = "onepipeline.change_url";
+/// Projection-only metadata naming the evidence tier a stated landing rests on.
+pub(crate) const LANDING_EVIDENCE_KEY: &str = "onepipeline.landing_evidence";
+
+/// Projection-only metadata naming the branch, base and opening time of a node's dispatch
+/// whose session is open and which has not settled yet: written when the session opens and
+/// removed when the node settles, so a host holding none of the run's state can pin an
+/// in-flight node to its branch. Entry 116 of `docs/contract-divergences.md` names it.
+pub(crate) const DISPATCH_KEY: &str = "onepipeline.dispatch";
+
+/// Projection-only **project** metadata naming the driver that claims the project: its run,
+/// host, launching session, pid and when it claimed. Best effort and not atomic — entry 116
+/// of `docs/contract-divergences.md` says what it does and does not prevent. A release
+/// writes it `null`, because the store has no removal of a project key, and every reader
+/// reads `null` exactly as it reads the key absent.
+pub(crate) const DRIVER_KEY: &str = "onepipeline.driver";
+
 /// The reserved keys the write-back owns and no node field answers to.
 ///
 /// A project a run projected onto — its own, where the plan's store is the destination —
 /// carries them on every task, so a relaunch reads past them the way it reads past a
 /// settlement: what it launches is the lineage head's definition under the root's id,
 /// which is what the item says. Reading them as node fields refused the relaunch of every
-/// project a run had written to, naming `node` as a field nobody authored.
-const PROJECTION_ONLY: &[&str] = &[SETTLEMENT_KEY, NODE_KEY, SUPERSEDES_KEY];
+/// project a run had written to, naming `node` as a field nobody authored — and, until
+/// entry 116, every project a published node had closed on, naming `landing`.
+const PROJECTION_ONLY: &[&str] = &[
+    SETTLEMENT_KEY,
+    NODE_KEY,
+    SUPERSEDES_KEY,
+    LANDING_KEY,
+    LANDING_COMMIT_KEY,
+    CHANGE_URL_KEY,
+    LANDING_EVIDENCE_KEY,
+    DISPATCH_KEY,
+];
+
+/// The reserved **project** keys the engine owns and no plan setting answers to.
+const PROJECT_PROJECTION_ONLY: &[&str] = &[DRIVER_KEY];
 
 /// A reserved key this mapping fills from the task itself, and where it comes
 /// from — so a project stating it is told which end to edit rather than having
@@ -358,6 +393,9 @@ impl Reader {
 
         let mut document = Map::new();
         for (key, value) in &held.item.metadata {
+            if PROJECT_PROJECTION_ONLY.contains(&key.as_str()) {
+                continue;
+            }
             let Some(field) = key.strip_prefix(RESERVED) else {
                 continue;
             };
@@ -1418,6 +1456,62 @@ mod tests {
         );
         // Each task's own metadata, verbatim, keys this engine does not read included.
         assert_eq!(read.metadata["test"]["team.owner"], json!("qa"));
+    }
+
+    /// Everything a run projects onto a project it launched from — the settlement, the
+    /// lineage keys, the landing keys, an open dispatch, and the project's driver claim — is
+    /// the engine's record of the run and no plan field, so a relaunch reads the plan the
+    /// project held before any of it was written, and the raw metadata still carries each one
+    /// for the continuation to read.
+    #[test]
+    fn what_a_run_projected_is_read_past_as_no_plan_field() {
+        let mut projected = node("build");
+        let written = json!({
+            SETTLEMENT_KEY: {"status": "done", "outcome": "change-review-draft",
+                             "branch": "me/build", "landing": "unlanded"},
+            NODE_KEY: "build",
+            SUPERSEDES_KEY: ["build-0"],
+            LANDING_KEY: "unlanded",
+            LANDING_COMMIT_KEY: "d3adb33f",
+            CHANGE_URL_KEY: "https://github.com/acme/widget/pull/4",
+            LANDING_EVIDENCE_KEY: "stated",
+            DISPATCH_KEY: {"branch": "me/build", "base": "main",
+                           "opened_at": "2026-10-11T00:00:00Z"},
+        });
+        projected
+            .as_object_mut()
+            .expect("a mapping")
+            .extend(written.as_object().expect("a mapping").clone());
+        let claim = json!({"run": "ship", "host": "builder", "session": null, "pid": 7,
+                           "claimed_at": "2026-10-11T00:00:00Z"});
+        let read = load(store(
+            json!({DRIVER_KEY: claim}),
+            vec![task(
+                "t-build",
+                projected,
+                json!({"repositories": ["github.com/acme/widget"]}),
+            )],
+            vec![],
+        ))
+        .unwrap_or_else(|load| panic!("the projected project was refused: {}", refusal(Err(load))));
+        let plain = load(store(
+            json!({}),
+            vec![task(
+                "t-build",
+                node("build"),
+                json!({"repositories": ["github.com/acme/widget"]}),
+            )],
+            vec![],
+        ))
+        .unwrap_or_else(|_| panic!("the plain project reads"));
+        assert_eq!(read.plan, plain.plan, "a projected key reached the plan");
+        for (key, value) in written.as_object().expect("a mapping") {
+            assert_eq!(
+                &read.metadata["build"][key], value,
+                "{key} was not kept verbatim"
+            );
+        }
+        assert_eq!(read.project_metadata[DRIVER_KEY], claim);
     }
 
     /// A body's surrounding whitespace is the store's layout, so a step is handed the body
