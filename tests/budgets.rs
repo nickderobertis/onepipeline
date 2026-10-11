@@ -7,9 +7,10 @@
 //! journey writes being one the checker parses as a value, and the command refusing to report a
 //! measurement it did not take.
 //!
-//! `host-view-time` is held here the same way: its entry, and its command — which runs no
-//! journey at all, only reads the record `tests/e2e/host_view.rs` leaves — reporting that
-//! record and refusing one it cannot vouch for.
+//! `host-view-time` is held here the same way: its entry, its command — which runs no
+//! journey at all, only reads the record `scripts/host-view-measure.mjs` leaves — reporting
+//! that record and refusing one it cannot vouch for, and the measurement refusing to record a
+//! read that failed.
 
 #[cfg(unix)]
 #[path = "e2e/budget_result.rs"]
@@ -467,4 +468,49 @@ fn the_host_view_measurement_and_journeys_share_one_generator() {
         "{}",
         String::from_utf8_lossy(&unasked.stderr)
     );
+}
+
+/// The measurement records a read only when the read answered: a binary that fails, and one
+/// that exits 0 having recorded no phases, each fail the measurement naming what to do next,
+/// and neither leaves a record behind.
+#[cfg(unix)]
+#[test]
+fn the_host_view_measurement_records_nothing_from_a_read_that_failed() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = scratch("host-view-measure");
+    let record = root().join("target/budget-records/host-view.json");
+    let before = std::fs::metadata(&record)
+        .and_then(|about| about.modified())
+        .ok();
+    for (name, body, says) in [
+        ("failing", "echo refused >&2; exit 3", "exited 3"),
+        ("silent", "echo '{}'", "recorded no phase line"),
+    ] {
+        let binary = dir.join(name);
+        std::fs::write(&binary, format!("#!/bin/sh\n{body}\n")).expect("a stand-in binary");
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755))
+            .expect("executable");
+        let measured = std::process::Command::new("node")
+            .arg(root().join("scripts/host-view-measure.mjs"))
+            .arg(&binary)
+            .output()
+            .expect("node runs the measurement");
+        let stderr = String::from_utf8_lossy(&measured.stderr);
+        assert_eq!(measured.status.code(), Some(1), "{name}: {stderr}");
+        assert!(
+            stderr.contains("host-view-measure: the cold read")
+                && stderr.contains(says)
+                && stderr.contains("next: pass an installed release build"),
+            "{name}: {stderr}"
+        );
+        assert_eq!(
+            std::fs::metadata(&record)
+                .and_then(|about| about.modified())
+                .ok(),
+            before,
+            "{name}: a failed measurement wrote the record"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }

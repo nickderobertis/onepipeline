@@ -16,11 +16,18 @@
 // Live dispatches are real processes the caller starts and owns: their pids and
 // procfs start tokens are handed in, so whoever started them is who ends them.
 //
+// llmlint: ignore-file[tests_mirror_real_usage] this file is the generator: what is under
+// test is `onepipeline host` over a runs root a host accumulates over weeks — hundreds of
+// ended runs, long-dead drivers, a 3.6 GiB journal, engines older than the dispatch registry
+// — which no test can produce through the engine in its lifetime. Every document is in the
+// shape the engine writes, every journal is a recorded run's own records, a summary stamp
+// moved stands in for the writer that keeps it current, and every read of the root is the
+// real binary's. `tests/e2e/host_view.rs` drives a real adoption through the engine.
+//
 // As a command:
 //   host_view_fixture.mjs generate RUNS PROCESSES.json   writes the 100-run root, prints its manifest
 //   host_view_fixture.mjs grow RUNS MANIFEST.json TOTAL    grows it with ended history, prints the manifest
 //   host_view_fixture.mjs cold RUNS MANIFEST.json          forgets every ended run's derived documents
-//   host_view_fixture.mjs readable RUNS MANIFEST.json yes|no   every ended journal, but the sparse one's
 //   host_view_fixture.mjs stamp-sparse RUNS MANIFEST.json BINARY   the sparse run's summary, as its writer keeps it
 //   host_view_fixture.mjs run RUNS SPEC.json               writes one run, shaped as SPEC says
 //   host_view_fixture.mjs append RUNS SPEC.json            appends SPEC's ending to a run's journal
@@ -499,33 +506,106 @@ export function append(runs, spec) {
   appendFileSync(path, lines(ending(spec.run, lastMillis(readFileSync(path, "utf8")), spec.ending)));
 }
 
+// What the command is handed is checked before anything is written: a run's name
+// becomes a path under the root, so it is a plain name and nothing else.
+const RUN_NAME = /^[a-z0-9][a-z0-9-]*$/;
+
+function refuse(message) {
+  throw new Error(`refused: ${message}`);
+}
+
+function runName(value, what) {
+  if (typeof value !== "string" || !RUN_NAME.test(value)) refuse(`${what} must be a run name, not ${JSON.stringify(value)}`);
+  return value;
+}
+
+function count(value, what) {
+  if (!Number.isSafeInteger(value) || value < 0) refuse(`${what} must be a nonnegative integer`);
+  return value;
+}
+
+function root(value) {
+  if (typeof value !== "string" || value === "") refuse("the runs root must be a path");
+  return value;
+}
+
+function processOf(value, what) {
+  if (typeof value !== "object" || value === null || !Number.isSafeInteger(value.pid) || value.pid <= 0 || typeof value.token !== "string") {
+    refuse(`${what} must be {pid, token} of a live process`);
+  }
+  return value;
+}
+
+function processes(value) {
+  if (!Array.isArray(value?.drivers) || value.drivers.length !== 2) refuse("processes.drivers must name two drivers");
+  value.drivers.forEach((driver, n) => processOf(driver, `processes.drivers[${n}]`));
+  const shape = [2, 2, 1];
+  if (!Array.isArray(value.entries) || value.entries.length !== shape.length) refuse("processes.entries must name three runs' dispatches");
+  value.entries.forEach((run, i) => {
+    if (!Array.isArray(run) || run.length !== shape[i]) refuse(`processes.entries[${i}] must name ${shape[i]} dispatch(es)`);
+    run.forEach((process, k) => processOf(process, `processes.entries[${i}][${k}]`));
+  });
+  return value;
+}
+
+function manifestOf(value) {
+  const names = (list, what) => {
+    if (!Array.isArray(list)) refuse(`${what} must be a list of run names`);
+    for (const name of list) runName(name, what);
+  };
+  if (typeof value !== "object" || value === null || typeof value.expected !== "object") refuse("not a manifest this generator wrote");
+  for (const key of ["held", "unproven", "stale", "stopped"]) {
+    const pairs = value.expected[key];
+    if (!Array.isArray(pairs) || pairs.some((pair) => !Array.isArray(pair) || pair.length !== 2)) refuse(`expected.${key} must be [run, node] pairs`);
+    names(
+      pairs.map((pair) => pair[0]),
+      `expected.${key}`,
+    );
+  }
+  for (const key of ["live_runs", "ended", "settled"]) names(value[key], key);
+  names(value.expected.skipped, "expected.skipped");
+  runName(value.sparse_run, "sparse_run");
+  count(value.sparse_records, "sparse_records");
+  return value;
+}
+
+function specOf(value) {
+  if (typeof value !== "object" || value === null) refuse("a run's spec must be an object");
+  runName(value.run, "the spec's run");
+  if ("started_ms" in value) count(value.started_ms, "started_ms");
+  if (value.ending !== undefined && !Array.isArray(value.ending)) refuse("ending must be a list");
+  if (value.registry !== undefined && value.registry !== null && !Array.isArray(value.registry)) refuse("registry must be a list or null");
+  if (value.driver !== undefined) processOf(value.driver, "driver");
+  if (value.grow_to !== undefined) count(value.grow_to, "grow_to");
+  if (value.size !== undefined) count(value.size, "size");
+  return value;
+}
+
 function command(argv) {
   const [verb, ...args] = argv;
   const out = (value) => process.stdout.write(`${JSON.stringify(value)}\n`);
   switch (verb) {
     case "generate":
-      return out(generate(args[0], readJson(args[1])));
-    case "grow":
-      return out(grow(args[0], readJson(args[1]), Number(args[2])));
-    case "cold":
-      return cold(args[0], readJson(args[1]));
-    case "readable": {
-      const manifest = readJson(args[1]);
-      const yes = args[2] === "yes";
-      return readable(
-        args[0],
-        manifest.ended.filter((run) => !yes || run !== manifest.sparse_run),
-        yes,
-      );
+      return out(generate(root(args[0]), processes(readJson(args[1]))));
+    case "grow": {
+      const total = Number(args[2]);
+      if (!Number.isSafeInteger(total) || total < 100) refuse(`grow wants a total of at least 100 run roots, not ${args[2]}`);
+      return out(grow(root(args[0]), manifestOf(readJson(args[1])), total));
     }
+    case "cold":
+      return cold(root(args[0]), manifestOf(readJson(args[1])));
     case "stamp-sparse":
-      return stampSparse(args[0], readJson(args[1]), args[2]);
+      if (!args[2]) refuse("stamp-sparse wants the binary that reads the run");
+      return stampSparse(root(args[0]), manifestOf(readJson(args[1])), args[2]);
     case "run":
-      return writeOne(args[0], readJson(args[1]));
-    case "append":
-      return append(args[0], readJson(args[1]));
+      return writeOne(root(args[0]), specOf(readJson(args[1])));
+    case "append": {
+      const spec = specOf(readJson(args[1]));
+      if (!Array.isArray(spec.ending)) refuse("append wants an ending");
+      return append(root(args[0]), spec);
+    }
     default:
-      throw new Error(`unknown verb ${verb}: generate, grow, cold, readable, stamp-sparse, run or append`);
+      throw new Error(`unknown verb ${verb}: generate, grow, cold, stamp-sparse, run or append`);
   }
 }
 

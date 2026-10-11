@@ -207,10 +207,12 @@ function detail(held) {
 function main() {
   try {
     const held = readRecord();
-    next = "ensure ONEBUDGETSPEC_RESULT names a writable file, then rerun 'just budgets'";
+    next =
+      "ensure ONEBUDGETSPEC_RESULT names a writable file, then rerun 'node_modules/.bin/onebudgetspec check budgets.yaml --id host-view-time'";
     const reported = report(Math.max(...held.steady.reads_ms), detail(held));
     if (!reported) {
-      next = "invoke this command through 'just budgets'";
+      next =
+        "invoke this command through 'node_modules/.bin/onebudgetspec check budgets.yaml --id host-view-time', which 'just host-view-budget BINARY' runs";
       throw new Error("ONEBUDGETSPEC_RESULT is missing; invoke through onebudgetspec");
     }
   } catch (error) {

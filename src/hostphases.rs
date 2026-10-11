@@ -11,8 +11,9 @@
 //! the read folded.
 //!
 //! Counted and **written** only where [`HOST_PHASES_ENV`] names a file — which
-//! `tests/e2e/host_view.rs` does, and no other run of this binary — and then the
-//! read appends one JSON line to it as it ends. Absent, no phase samples anything.
+//! `tests/e2e/host_view.rs` and `scripts/host-view-measure.mjs` do, and no other
+//! run of this binary — and then the read appends one JSON line to it as it ends.
+//! Absent, no phase samples anything.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;

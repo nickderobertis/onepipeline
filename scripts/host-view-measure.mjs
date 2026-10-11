@@ -163,7 +163,7 @@ try {
   const generatedMs = Number(process.hrtime.bigint() - generating) / 1e6;
 
   cold(runs, manifest);
-  const coldRead = read(["--json"], "cold");
+  const coldRead = read(["--json"], "the cold read");
   holds(manifest, JSON.parse(coldRead.stdout), "the cold read");
   stampSparse(runs, manifest, binary);
 
@@ -228,7 +228,9 @@ try {
     `host-view-time: ${measured.walls.map((ms) => ms.toFixed(1)).join(", ")} ms; record at ${RECORD}`,
   );
 } catch (error) {
-  console.error(`host-view-measure: ${error.message}`);
+  console.error(
+    `host-view-measure: ${error.message}\nnext: pass an installed release build of this tree's onepipeline (\`cargo install --path .\`), on Linux, with \`npm ci\` done; a read that answered wrongly is a defect of the view, which \`just test-e2e 'test(/^host_view::/)'\` reproduces against this tree's own build`,
+  );
   process.exitCode = 1;
 } finally {
   for (const child of children) child.kill("SIGKILL");
