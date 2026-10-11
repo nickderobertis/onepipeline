@@ -335,7 +335,7 @@ const RESOLVED_KEPT: usize = 8;
 // a host read, which no journey can observe here: every repository this suite registers has
 // a visibility its rules file states, and a declared visibility is never asked of the host.
 // Recomputation on a changed shape is
-// `publication_boundary::a_live_edit_naming_b_puts_b_in_the_run_scope_for_every_check_after_it`.
+// `publication_boundary::a_live_edit_naming_b_puts_b_in_the_run_scope_for_the_validator_replies_and_store_writes`.
 pub(crate) fn of_run(plan: &Plan) -> Resolved {
     let key = shape(plan);
     if let Ok(cached) = RESOLVED.lock() {

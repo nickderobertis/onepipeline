@@ -654,9 +654,9 @@ resolver = "2"
 #
 # `onevcs` 0.46.0 is the floor because it is the release the boundary work this crate
 # composes was pinned against (`src/boundary.rs`: the term matcher, `TermScope`,
-# `PublicWriteInput` and `export`), and `tests/e2e/boundary.rs` drives that surface
-# against the linked release. A **requirement**, because `^0.45` admits no 0.46.x;
-# `onevcs-testing` 0.14.0 requires exactly `=0.46.0`, so the pair moves as one.
+# `PublicWriteInput` and `export`), and `tests/e2e/publication_boundary.rs` drives
+# that surface against the linked release. A **requirement**, because `^0.45` admits no
+# 0.46.x; `onevcs-testing` 0.14.0 requires exactly `=0.46.0`, so the pair moves as one.
 #
 # `oneagentgraph` 0.5.4 is the floor because it relays a turn's `message` and
 # `reasoning` items as `turn-activity` under their own kind — the agent's words,
