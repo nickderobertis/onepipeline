@@ -74,9 +74,30 @@ pub(crate) enum Stack {
         /// The stack base's branch, `<host prefix>stack-base/<plan>/<node>`.
         branch: String,
         // llmlint: ignore-end[invalid_states_unrepresentable]
-        /// The stack parents, two or more, in the node's declared dependency order.
-        parents: Vec<Parent>,
+        /// The stack parents, in the node's declared dependency order.
+        parents: Several,
     },
+}
+
+/// Two or more stack parents: what a stack base merges, and the only way one is
+/// held, so a stack base of fewer is not a value this crate can make.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Several(Vec<Parent>);
+
+impl Several {
+    /// `parents`, where there are at least two of them, and them back otherwise.
+    pub(crate) fn of(parents: Vec<Parent>) -> Result<Self, Vec<Parent>> {
+        if parents.len() >= 2 {
+            Ok(Self(parents))
+        } else {
+            Err(parents)
+        }
+    }
+
+    /// The parents, in order.
+    pub(crate) fn as_slice(&self) -> &[Parent] {
+        &self.0
+    }
 }
 
 impl Stack {
@@ -93,7 +114,7 @@ impl Stack {
     pub(crate) fn parents(&self) -> &[Parent] {
         match self {
             Self::OnParent(parent) => std::slice::from_ref(parent),
-            Self::OnStackBase { parents, .. } => parents,
+            Self::OnStackBase { parents, .. } => parents.as_slice(),
         }
     }
 
@@ -136,7 +157,7 @@ impl Stack {
                     "Drafted against the stack base `{branch}`, which merges `{root}` and each \
                      change below:"
                 );
-                for parent in parents {
+                for parent in parents.as_slice() {
                     said.push_str(&format!(
                         "\n- `{}` (`{}`): {}",
                         parent.node,
@@ -318,14 +339,12 @@ pub(crate) fn placement(
             change_url: state.change_urls.get(*id).cloned(),
         });
     }
-    let mut parents = parents.into_iter();
-    let Some(first) = parents.next() else {
-        return Ok(None);
+    let parents = match Several::of(parents) {
+        Ok(several) => several,
+        // One, or none: a node every dependency of which was dropped places as before.
+        Err(mut fewer) => return Ok(fewer.pop().map(Stack::OnParent)),
     };
-    let rest: Vec<Parent> = parents.collect();
-    if rest.is_empty() {
-        return Ok(Some(Stack::OnParent(first)));
-    }
+    let first = &parents.as_slice()[0];
     let Some(root) = node
         .base_branch
         .clone()
@@ -345,7 +364,7 @@ pub(crate) fn placement(
             plan,
             &node.id,
         ),
-        parents: std::iter::once(first).chain(rest).collect(),
+        parents,
     }))
 }
 
@@ -404,7 +423,7 @@ mod tests {
             Some(branch) => Stack::OnStackBase {
                 root: "main".into(),
                 branch: branch.into(),
-                parents,
+                parents: Several::of(parents).expect("a stack base of two parents"),
             },
         }
     }

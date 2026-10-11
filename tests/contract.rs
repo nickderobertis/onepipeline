@@ -2255,6 +2255,12 @@ fn the_stacked_settlement_is_what_the_divergence_record_names() {
         registry.check(&id, &flat).is_err(),
         "a stack with no parent list was admitted"
     );
+    let mut parentless = settlement.clone();
+    parentless["stack"]["parents"] = serde_json::json!([]);
+    assert!(
+        registry.check(&id, &parentless).is_err(),
+        "a stack with no parents was admitted"
+    );
     let mut earlier = settlement.as_object().expect("a settlement").clone();
     for key in ["base", "head", "stack"] {
         earlier.remove(key);

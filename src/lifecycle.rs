@@ -700,7 +700,7 @@ fn attempt_once(
                     executor,
                     paths,
                     node,
-                    (root, branch, parents),
+                    (root, branch, parents.as_slice()),
                     &merging,
                     cancel,
                     tx,

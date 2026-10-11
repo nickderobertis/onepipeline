@@ -547,9 +547,11 @@ pub(crate) struct NodeSettled {
 
 /// The stack a lifecycle node was drafted on: the stack parents its branch was
 /// placed on, and the stack base merging them when there were several.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct SettledStack {
-    /// Each stack parent, in the node's declared dependency order.
+    /// Each stack parent, in the node's declared dependency order: at least one.
+    // llmlint: ignore[invalid_states_unrepresentable] a wire document's list, as the stacked drafts contract spells it: its published schema states `minItems: 1`, the fold refuses an empty one (`is_usable`) before anything places on it, and its one writer builds it from `stack::Stack`, whose stack base holds `stack::Several`.
+    #[schemars(length(min = 1))]
     pub(crate) parents: Vec<StackParent>,
     // llmlint: ignore-block[invalid_states_unrepresentable] a wire document, as the stacked
     // drafts contract spells it: `stack_base` is the branch `onevcs::StackBase` names as a

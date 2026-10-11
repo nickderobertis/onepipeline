@@ -1135,7 +1135,8 @@
                 "items": {
                   "$ref": "#/$defs/StackParent"
                 },
-                "description": "Each stack parent, in the node's declared dependency order."
+                "description": "Each stack parent, in the node's declared dependency order: at least one.",
+                "minItems": 1
               },
               "stack_base": {
                 "type": [
