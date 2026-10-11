@@ -264,8 +264,9 @@ fn user(args: &[String]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// `gh api repos/R/rules/branches/B` and
-/// `gh api repos/R/branches/B/protection/required_status_checks`
+/// `gh api repos/R/rules/branches/B`,
+/// `gh api repos/R/branches/B/protection/required_status_checks`, and
+/// `gh api repos/R`
 ///
 /// Which checks the base's merge path **declares** required, which `onevcs` 0.36.0
 /// reads before it watches a draft: a draft's green is every declared check passed
@@ -312,6 +313,24 @@ fn protection(args: &[String], dir: &Path, path: &str) -> ExitCode {
         ["repos", _, _, "branches", _, "protection", "required_status_checks"] => {
             eprintln!("gh: Branch not protected (HTTP 404)");
             ExitCode::from(1)
+        }
+        // The repository itself, which `onevcs` 0.44.0 on asks for its visibility at
+        // every write that could reach a public destination. `private` unless a
+        // journey scripts `gh.visibility`: a private destination is one the public
+        // boundary screens nothing for, which is what every journey here wrote
+        // before there was a boundary to ask.
+        ["repos", _, _] => {
+            let visibility = read_if_present(&dir.join("gh.visibility"))
+                .map(|word| word.trim().to_owned())
+                .unwrap_or_else(|| "private".to_owned());
+            println!(
+                "{}",
+                serde_json::json!({
+                    "visibility": visibility,
+                    "private": visibility != "public",
+                })
+            );
+            ExitCode::SUCCESS
         }
         _ => fake::refuse(&format!("unknown gh api path '{path}'")),
     }
