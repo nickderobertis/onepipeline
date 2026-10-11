@@ -569,16 +569,48 @@ function manifestOf(value) {
   return value;
 }
 
+const TEARDOWNS = ["signalled", "partly-signalled", "undetermined", null];
+
 function specOf(value) {
   if (typeof value !== "object" || value === null) refuse("a run's spec must be an object");
   runName(value.run, "the spec's run");
-  if ("started_ms" in value) count(value.started_ms, "started_ms");
-  if (value.ending !== undefined && !Array.isArray(value.ending)) refuse("ending must be a list");
-  if (value.registry !== undefined && value.registry !== null && !Array.isArray(value.registry)) refuse("registry must be a list or null");
+  count(value.started_ms, "started_ms");
+  for (const key of ["settled", "rounds"]) {
+    if (value[key] !== undefined && typeof value[key] !== "boolean") refuse(`${key} must be true or false`);
+  }
+  if (value.nodes !== undefined) {
+    if (!Array.isArray(value.nodes)) refuse("nodes must be a list of node names");
+    value.nodes.forEach((node) => runName(node, "a node"));
+  }
+  if (value.draw !== undefined) count(value.draw, "draw");
+  if (value.ending !== undefined) endingOf(value.ending);
+  if (value.registry !== undefined && value.registry !== null) {
+    if (!Array.isArray(value.registry)) refuse("registry must be a list or null");
+    value.registry.forEach((item, n) => {
+      if (typeof item !== "object" || item === null) refuse(`registry[${n}] must be an entry`);
+      runName(item.node, `registry[${n}].node`);
+      count(item.recorded_ms, `registry[${n}].recorded_ms`);
+      if (item.pid !== undefined) processOf({ pid: item.pid, token: item.token }, `registry[${n}]`);
+    });
+  }
   if (value.driver !== undefined) processOf(value.driver, "driver");
   if (value.grow_to !== undefined) count(value.grow_to, "grow_to");
   if (value.size !== undefined) count(value.size, "size");
   return value;
+}
+
+/** An ending: each item exactly one of `{stopped: teardown}`, `{adopted: true}`, `{dispatched: node}`. */
+function endingOf(items) {
+  if (!Array.isArray(items)) refuse("ending must be a list");
+  items.forEach((item, n) => {
+    const keys = typeof item === "object" && item !== null ? Object.keys(item) : [];
+    if (keys.length !== 1) refuse(`ending[${n}] must name one record`);
+    if (keys[0] === "stopped" && TEARDOWNS.includes(item.stopped)) return;
+    if (keys[0] === "adopted" && item.adopted === true) return;
+    if (keys[0] === "dispatched") return void runName(item.dispatched, `ending[${n}].dispatched`);
+    refuse(`ending[${n}] names no record this generator writes: ${JSON.stringify(item)}`);
+  });
+  return items;
 }
 
 function command(argv) {
@@ -600,8 +632,9 @@ function command(argv) {
     case "run":
       return writeOne(root(args[0]), specOf(readJson(args[1])));
     case "append": {
-      const spec = specOf(readJson(args[1]));
-      if (!Array.isArray(spec.ending)) refuse("append wants an ending");
+      const spec = readJson(args[1]);
+      runName(spec?.run, "the run to append to");
+      endingOf(spec.ending);
       return append(root(args[0]), spec);
     }
     default:

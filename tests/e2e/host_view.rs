@@ -901,6 +901,7 @@ fn the_host_view_answers_a_host_sized_root_steady_cold_and_steady_again() {
     );
     opened_no_ended_journal(&fixture.ended, &after_cold, "the read after the cold one");
 
+    // llmlint: ignore[tests_mirror_real_usage] the 3.6 GiB journal is a sparse file, so no writer appended its records; its summary is written by this build's own read over the records alone and then stamped to the grown file, standing in for the journal writer that keeps a real one current — the generator's head says why the root is generated.
     fixture.stamp_sparse(&world, &program);
     let mut sizes = Vec::new();
     for total in [100, 400, 800] {

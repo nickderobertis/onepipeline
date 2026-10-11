@@ -45,20 +45,36 @@ if (!binary) {
   process.exit(2);
 }
 
-const work = mkdtempSync(join(tmpdir(), "host-view-measure-"));
-const runs = join(work, "runs");
-// The read's whole environment: the root, the host name the fixture's records
-// carry, and a state root of its own for the linked `onevcs`.
-process.env.ONEPIPELINE_RUNS_DIR = runs;
-process.env.HOSTNAME = HOST;
-process.env.ONEVCS_HOME = join(work, "onevcs-home");
+const NEXT =
+  "pass an installed release build of this tree's onepipeline (`cargo install --path .`), on Linux, with `npm ci` done; a read that answered wrongly is a defect of the view, which `just test-e2e 'test(/^host_view::/)'` reproduces against this tree's own build";
+let work = null;
+let runs = null;
 const children = [];
 
 /** A real process standing in for a dispatch or a driver, and its start token. */
 function sleeper() {
   const child = spawn("sleep", ["86400"], { stdio: "ignore" });
+  // A process that could not start is reported where it is asked for, below.
+  child.on("error", () => {});
   children.push(child);
+  if (!child.pid) throw new Error("`sleep` could not be started to hold a live dispatch");
   return { pid: child.pid, token: startToken(child.pid) };
+}
+
+/** Why a subprocess did not answer, from everything `spawnSync` knows of it. */
+const failure = (done) =>
+  done.error
+    ? `could not run: ${done.error.message}`
+    : `exited ${done.status ?? `on ${done.signal}`}: ${done.stderr}`;
+
+/** A wall-clock mark the read stamped, in nanoseconds since the epoch, or null where it stamped none. */
+function mark(value, label, name) {
+  if (value === undefined) return null;
+  // Nanoseconds since the epoch are past the safe-integer range, and parse as a
+  // number to well under a microsecond, which is all a millisecond figure needs.
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0)
+    throw new Error(`${label}: the read's \`${name}\` mark is not a time: ${value}`);
+  return value;
 }
 
 const load1 = () => Number(readFileSync("/proc/loadavg", "utf8").split(/\s+/)[0]);
@@ -76,21 +92,29 @@ function read(args, label) {
     env: { ...process.env, ONEPIPELINE_HOST_PHASES: phases },
   });
   const wallMs = Number(process.hrtime.bigint() - began) / 1e6;
-  if (done.status !== 0)
-    throw new Error(`${label}: \`host ${args.join(" ")}\` exited ${done.status}: ${done.stderr}`);
-  let line = null;
+  if (done.error || done.status !== 0)
+    throw new Error(`${label}: \`host ${args.join(" ")}\` ${failure(done)}`);
+  let text;
   try {
-    line = JSON.parse(readFileSync(phases, "utf8").trim().split("\n").pop());
-  } catch {
-    throw new Error(`${label}: the read recorded no phase line`);
+    text = readFileSync(phases, "utf8");
+  } catch (error) {
+    throw new Error(`${label}: the read recorded no phase line (${error.message})`);
+  }
+  let line;
+  try {
+    line = JSON.parse(text.trim().split("\n").pop());
+  } catch (error) {
+    throw new Error(`${label}: the read's phase line is not JSON (${error.message})`);
   }
   const marks = line.marks_unix_ns ?? {};
+  const run = mark(marks.run, label, "run");
+  const flushed = mark(marks.flushed, label, "flushed");
   const breakdown = Object.fromEntries(
     BREAKDOWN.map(([key, name]) => [key, line.phases?.[name]?.wall_ms ?? null]),
   );
   Object.assign(breakdown, {
-    process_start_ms: marks.run ? Math.max(0, marks.run / 1e6 - spawnedMs) : null,
-    exit_ms: marks.flushed ? Math.max(0, spawnedMs + wallMs - marks.flushed / 1e6) : null,
+    process_start_ms: run === null ? null : Math.max(0, run / 1e6 - spawnedMs),
+    exit_ms: flushed === null ? null : Math.max(0, spawnedMs + wallMs - flushed / 1e6),
     live_runs_folded: line.phases?.["live-fold"]?.count ?? 0,
     live_journal_bytes: line.quantities?.["live-journal-bytes"] ?? 0,
     cold_journal_bytes: line.quantities?.["cold-journal-bytes"] ?? null,
@@ -154,6 +178,13 @@ function steady(manifest, label) {
 }
 
 try {
+  work = mkdtempSync(join(tmpdir(), "host-view-measure-"));
+  runs = join(work, "runs");
+  // The read's whole environment: the root, the host name the fixture's records
+  // carry, and a state root of its own for the linked `onevcs`.
+  process.env.ONEPIPELINE_RUNS_DIR = runs;
+  process.env.HOSTNAME = HOST;
+  process.env.ONEVCS_HOME = join(work, "onevcs-home");
   const processes = {
     drivers: [sleeper(), sleeper()],
     entries: [[sleeper(), sleeper()], [sleeper(), sleeper()], [sleeper()]],
@@ -170,8 +201,9 @@ try {
   const measured = steady(manifest, "steady");
   readable(runs, manifest.ended, false);
   const text = spawnSync(binary, ["host"], { encoding: "utf8" });
-  if (text.status !== 0 || !text.stdout.includes("UNPROVEN"))
-    throw new Error(`the text form did not render the reading: ${text.stderr}`);
+  if (text.error || text.status !== 0) throw new Error(`the text form: \`host\` ${failure(text)}`);
+  if (!text.stdout.includes("UNPROVEN"))
+    throw new Error(`the text form did not render the reading:\n${text.stdout}`);
 
   const sizes = [
     {
@@ -228,12 +260,19 @@ try {
     `host-view-time: ${measured.walls.map((ms) => ms.toFixed(1)).join(", ")} ms; record at ${RECORD}`,
   );
 } catch (error) {
-  console.error(
-    `host-view-measure: ${error.message}\nnext: pass an installed release build of this tree's onepipeline (\`cargo install --path .\`), on Linux, with \`npm ci\` done; a read that answered wrongly is a defect of the view, which \`just test-e2e 'test(/^host_view::/)'\` reproduces against this tree's own build`,
-  );
+  console.error(`host-view-measure: ${error.message}\nnext: ${NEXT}`);
   process.exitCode = 1;
 } finally {
   for (const child of children) child.kill("SIGKILL");
-  spawnSync("chmod", ["-R", "u+rwX", work]);
-  rmSync(work, { recursive: true, force: true });
+  if (work !== null) {
+    try {
+      spawnSync("chmod", ["-R", "u+rwX", work]);
+      rmSync(work, { recursive: true, force: true });
+    } catch (error) {
+      console.error(
+        `host-view-measure: the fixture under ${work} could not be removed (${error.message})\nnext: remove it by hand`,
+      );
+      process.exitCode = 1;
+    }
+  }
 }
