@@ -792,6 +792,12 @@ pub(crate) fn ensure_export(
     // The kept branch was pushed from the session's own clone, so it is made reachable
     // from the producer's registered checkout — which is where an export reads it — first.
     // Ref plumbing only: nothing is checked out and nothing is published.
+    // llmlint: ignore[changed_behavior_has_e2e] a kept branch is already in the producer's
+    // registered checkout wherever its session's clone was cut from it, which is every
+    // journey this suite can drive, so the import is a no-op there and cannot be made to
+    // fail without placing a different branch under a name `onevcs` minted at random a
+    // moment before. What a failure answers is the neutral refusal below, the detail kept
+    // in the driver's own log.
     onevcs::import_branch(&onevcs::ImportRequest {
         repo: std::path::PathBuf::from(&export.from),
         branch: export.branch.clone(),
@@ -837,6 +843,12 @@ pub(crate) fn ensure_export(
         exported_head: exported.head,
     });
     let bytes = serde_json::to_vec_pretty(&recorded).map_err(|error| error.to_string())?;
+    // llmlint: ignore[changed_behavior_has_e2e] reached only by a write that fails in the
+    // instant between an export `onevcs` made and its record: the record was read a moment
+    // before, in the same directory, and every journal write of the run goes there too, so
+    // no journey can make this one write fail without failing those first or racing the
+    // export. What it answers is the export's own outcome, unrecorded, which the next
+    // attempt exports again under a fresh name rather than starting from the default base.
     crate::ledger::write_atomic(&path, &bytes, crate::ledger::Durability::Record)
         .map_err(|error| format!("the export was made but could not be recorded: {error}"))?;
     Ok(exported.branch)
@@ -887,9 +899,11 @@ fn strings_of(value: &serde_json::Value, out: &mut Vec<String>) {
     }
 }
 
-/// The commands a document carries: a reply envelope's, a routed record's, or a reply
-/// a record wraps.
-fn commands_of(document: &serde_json::Value) -> Vec<serde_json::Value> {
+/// The commands a document carries — a reply envelope's, a routed record's, or a reply
+/// a record wraps — each read as the channel's own [`Command`](crate::channel::Command),
+/// which refuses an op it does not know and a field no op takes. `None` for a document
+/// one of whose commands is not one.
+fn commands_of(document: &serde_json::Value) -> Option<Vec<crate::channel::Command>> {
     let mut commands = Vec::new();
     for found in [
         document.get("commands"),
@@ -898,11 +912,11 @@ fn commands_of(document: &serde_json::Value) -> Vec<serde_json::Value> {
     .into_iter()
     .flatten()
     {
-        if let Some(listed) = found.as_array() {
-            commands.extend(listed.iter().cloned());
+        for listed in found.as_array()? {
+            commands.push(serde_json::from_value(listed.clone()).ok()?);
         }
     }
-    commands
+    Some(commands)
 }
 
 /// The text a document carries that no command addresses to a node: a verdict's message
@@ -924,95 +938,86 @@ fn untargeted_of(document: &serde_json::Value) -> Vec<String> {
     text
 }
 
-/// The node a command is about: the node it adds or retries in, else the one it names.
-fn target_of(command: &serde_json::Value) -> Option<String> {
-    command
-        .pointer("/node/id")
-        .or_else(|| command.get("id"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned)
-}
-
-/// `plan` with `commands`' added and replacement nodes in it, so a node an envelope
-/// introduces is judged by the clearance it will have.
-fn prospective(plan: &Plan, commands: &[serde_json::Value]) -> Plan {
-    let mut prospective = plan.clone();
-    for command in commands {
-        let Some(node) = command
-            .get("node")
-            .and_then(|node| serde_json::from_value::<Node>(node.clone()).ok())
-        else {
+/// The run as `commands` would leave it, so a node an envelope adds or retries in is
+/// judged by the clearance it will have: each one compiled by the engine's own edit
+/// validator and folded exactly as the reconciler folds it. `Err` names the first command
+/// that would not apply, which is the command the engine refuses.
+fn prospective(
+    state: &crate::projection::RunState,
+    commands: &[crate::channel::Command],
+) -> Result<crate::projection::RunState, usize> {
+    let mut staged = state.clone();
+    for (index, command) in commands.iter().enumerate() {
+        if !matches!(
+            command,
+            crate::channel::Command::Add { .. } | crate::channel::Command::Retry { .. }
+        ) {
             continue;
-        };
-        let op = command.get("op").and_then(serde_json::Value::as_str);
-        if let (Some("retry"), Some(old)) = (op, command.get("id").and_then(|id| id.as_str())) {
-            let superseded = prospective
-                .tasks
-                .iter()
-                .find(|held| held.id == old)
-                .cloned();
-            let mut node = node;
-            if let Some(superseded) = superseded {
-                if node.deps.is_empty() {
-                    node.deps = superseded.deps.clone();
-                }
-                if node.task_record.is_none() {
-                    node.task_record = superseded.task_record.clone();
-                }
-                node.classification = node.classification.strictest(superseded.classification);
-            }
-            prospective.export_edges = edges_now(
-                &prospective.export_edges,
-                &std::iter::once((old.to_owned(), node.id.clone())).collect(),
-            );
-            for held in &mut prospective.tasks {
-                for dep in &mut held.deps {
-                    if dep == old {
-                        dep.clone_from(&node.id);
-                    }
-                }
-            }
-            prospective.tasks.retain(|held| held.id != old);
-            prospective.tasks.push(node);
-        } else {
-            prospective.tasks.retain(|held| held.id != node.id);
-            prospective.tasks.push(node);
         }
+        let mut candidate = staged.graph.clone();
+        let operations = crate::edits::compile(
+            &mut candidate,
+            &staged.frontier(),
+            crate::channel::Author::planner(),
+            command,
+        )
+        .map_err(|_| index)?;
+        crate::projection::fold_operations(&mut staged, &operations, None);
     }
-    prospective
+    Ok(staged)
 }
 
-/// What a command naming a node the plan does not hold is, to the boundary.
+/// What a command naming a node the run does not hold — or one the engine would not
+/// apply — is, to the boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Unknown {
     /// Unavailable: the bus validator, which nothing judges after, cannot pass a command
     /// it has no clearance to judge by.
     Unavailable,
-    /// Left to the engine's own validation, which refuses a command naming no node in
-    /// words that say so, before anything is applied.
+    /// Left to the engine's own validation, which refuses such a command in words that
+    /// say why, before anything is applied.
     Elsewhere,
 }
 
 /// Judge one document — a reply envelope, a routed command record, a surface — against
-/// the run whose plan stands at `plan`.
+/// the run `state` describes.
 ///
 /// Only a mixed plan is judged: an all-public one derives no term and an all-private one
 /// has nowhere public for anything to reach. In one, every command addressed to a public
-/// node is checked over its whole prospective payload, in the run's own term scope; one
-/// addressed to a private node passes; and text addressed to no node is checked as
-/// public. A command naming a node the plan does not hold has no clearance to judge it
-/// by, and is what `unknown` says.
+/// node — by [`crate::channel::target_of`], the engine's own reading of what a command is
+/// about — is checked over its whole prospective payload, in the run's own term scope;
+/// one addressed to a private node passes; and text addressed to no node is checked as
+/// public. A command naming a node the run does not hold, or one the engine would not
+/// apply, has no clearance to judge it by, and is what `unknown` says.
 pub(crate) fn judge(
-    plan: &Plan,
+    state: &crate::projection::RunState,
     document: &serde_json::Value,
     oracle: &mut dyn Oracle,
     unknown: Unknown,
 ) -> Judged {
-    let commands = commands_of(document);
-    let prospective = prospective(plan, &commands);
+    let unjudgeable = |why: &str| match unknown {
+        Unknown::Unavailable => Some(Judged::Unavailable(format!(
+            "the publication boundary could not judge {why}"
+        ))),
+        Unknown::Elsewhere => None,
+    };
+    let Some(commands) = commands_of(document) else {
+        return unjudgeable("what it was handed: a command in it is not one this build reads")
+            .unwrap_or(Judged::Pass);
+    };
+    let staged = match prospective(state, &commands) {
+        Ok(staged) => staged,
+        Err(index) => {
+            let op = crate::channel::op_of(&commands[index]);
+            if let Some(judged) = unjudgeable(&format!("`{op}`: it would not apply to this run")) {
+                return judged;
+            }
+            state.clone()
+        }
+    };
     // Asked afresh every time, never from memory: a repository whose visibility changed
     // since the last envelope is judged by what it is now.
-    let resolved = resolve(&prospective, oracle);
+    let resolved = resolve(&plan_now(&staged), oracle);
     if !resolved.mixed() {
         return Judged::Pass;
     }
@@ -1038,22 +1043,24 @@ pub(crate) fn judge(
         })
     };
     for command in &commands {
-        let op = command
-            .get("op")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("a command");
+        let op = crate::channel::op_of(command);
         let mut text = Vec::new();
-        strings_of(command, &mut text);
-        match target_of(command) {
-            Some(target) if !prospective.tasks.iter().any(|node| node.id == target) => {
-                match unknown {
-                    Unknown::Unavailable => {
-                        return Judged::Unavailable(format!(
-                            "the publication boundary could not judge `{op}`: the node it names \
-                             has no clearance in this run"
-                        ))
-                    }
-                    Unknown::Elsewhere => {}
+        strings_of(
+            &serde_json::to_value(command).unwrap_or_default(),
+            &mut text,
+        );
+        // What a command is about, as the engine reads it — but a retry is judged as the
+        // replacement it puts in, which is the node its payload becomes.
+        let target = match command {
+            crate::channel::Command::Retry { node, .. } => Some(node.id.clone()),
+            _ => crate::channel::target_of(command),
+        };
+        match target {
+            Some(target) if !resolved.clearances.contains_key(&target) => {
+                if let Some(judged) = unjudgeable(&format!(
+                    "`{op}`: the node it names has no clearance in this run"
+                )) {
+                    return judged;
                 }
             }
             Some(target) => {
@@ -1079,18 +1086,13 @@ pub(crate) fn judge(
 /// Refuse what [`judge`] does not pass, for the engine's own submissions and the commands
 /// its reconciler takes up — a direct `reply`, `note` or `attest`, a queued envelope, and
 /// one a dead driver had claimed — so a caller that never meets the bus meets the same
-/// rule. A command naming a node the run does not hold is left to the engine's own
-/// refusal of it.
+/// rule. A command naming a node the run does not hold, or one that would not apply, is
+/// left to the engine's own refusal of it.
 pub(crate) fn guard(
     state: &crate::projection::RunState,
     document: &serde_json::Value,
 ) -> crate::Result<()> {
-    match judge(
-        &plan_now(state),
-        document,
-        &mut Onevcs::default(),
-        Unknown::Elsewhere,
-    ) {
+    match judge(state, document, &mut Onevcs::default(), Unknown::Elsewhere) {
         Judged::Pass => Ok(()),
         judged => Err(crate::Error::Refused(
             judged.reason().unwrap_or_default().to_owned(),
@@ -1115,7 +1117,7 @@ pub(crate) fn validate_envelope(
     }
     let view = crate::views::RunView::open(paths)?;
     Ok(judge(
-        &plan_now(&view.state),
+        &view.state,
         &document,
         &mut Onevcs::default(),
         Unknown::Unavailable,
@@ -1615,6 +1617,7 @@ mod tests {
             id: id.into(),
             repo: Some(repo.into()),
             title: Some(format!("feat: {id}")),
+            persona: Some("engineer".into()),
             task: Some(format!("## What\n{id}\n\n## Acceptance criteria\n- done")),
             deps: deps.iter().map(|dep| (*dep).to_owned()).collect(),
             ..Node::default()
@@ -1857,6 +1860,11 @@ mod tests {
     #[test]
     fn an_envelope_is_judged_by_where_each_command_lands() {
         let mut table = Table::default();
+        let state_of = |plan: Plan| crate::projection::RunState {
+            graph: crate::graph::Graph::from_plan(&plan),
+            plan: Some(plan),
+            ..crate::projection::RunState::default()
+        };
         let mixed = plan(
             vec![
                 producer(),
@@ -1864,6 +1872,7 @@ mod tests {
             ],
             vec![edge("generalize", "examples")],
         );
+        let mixed = state_of(mixed);
         let note = |id: &str, text: &str| {
             serde_json::json!({"commands": [
                 {"op": "note", "id": id, "addressee": "worker", "text": text}
@@ -1914,14 +1923,14 @@ mod tests {
         ));
         // A node an envelope adds is judged by the clearance it will have.
         let added = serde_json::json!({"commands": [{"op": "add", "node": {
-            "id": "more", "repo": "lib-public", "title": "feat: secret things",
+            "id": "more", "repo": "lib-public", "title": "feat: more things",
+            "persona": "engineer",
+            "task": "## What\nThe secret things.\n\n## Acceptance criteria\n- done",
         }}]});
-        assert!(matches!(
-            judge(&mixed, &added, &mut table, Unknown::Unavailable),
-            Judged::Refuse(_)
-        ));
+        let judged_add = judge(&mixed, &added, &mut table, Unknown::Unavailable);
+        assert!(matches!(judged_add, Judged::Refuse(_)), "{judged_add:?}");
         // An all-private plan has nothing public to protect.
-        let private = plan(vec![lifecycle("a", "inner", &[])], vec![]);
+        let private = state_of(plan(vec![lifecycle("a", "inner", &[])], vec![]));
         assert_eq!(
             judge(
                 &private,

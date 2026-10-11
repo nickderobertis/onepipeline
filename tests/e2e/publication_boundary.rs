@@ -2403,3 +2403,86 @@ fn publish_branch_and_repo_recover_forward_a_scope_they_are_given() {
         recovered.stdout, recovered.stderr
     );
 }
+
+#[test]
+fn the_validator_refuses_to_judge_a_malformed_document_and_reads_commands_as_the_engine_does() {
+    let (world, _) = held_mixed_run("shaped", &["zephyrine"]);
+    // What is not an envelope, a record or a surface is judged by nothing, so it is
+    // never passed.
+    for (document, said) in [
+        (json!(["not", "a", "mapping"]), "not a mapping"),
+        (json!({"commands": {"op": "note"}}), "not a list"),
+        (json!({"commands": [{"id": "examples"}]}), "names no `op`"),
+        (json!({"reply": "not a mapping"}), "not a mapping"),
+        (
+            json!({"commands": [{"op": "summon", "id": "examples"}]}),
+            "not one this build reads",
+        ),
+        (
+            json!({"commands": [{"op": "note", "id": "examples", "addressee": "worker",
+                                 "text": "plain", "colour": "blue"}]}),
+            "not one this build reads",
+        ),
+    ] {
+        validated(&world, "shaped", &document)
+            .exited(exit_for("unavailable"))
+            .err_has(said);
+    }
+
+    // An attestation is about the human node its reference names: one classified private
+    // is private, so its reference — a private name — passes.
+    // (The plan below adds that node through the engine's own edit.)
+    let mut approval = crate::harness::human("zephyrine-approval", &[]);
+    approval["task"] = json!("Approve the generalized example.");
+    approval["classification"] = json!("private");
+    // A parked node in the private repository keeps it named by the run — in its term
+    // scope — whatever a retry below does to the producer.
+    let mut keeper = lifecycle("keeper", &[]);
+    keeper["parked"] = json!(true);
+    reply(
+        &world,
+        "shaped",
+        json!([{"op": "add", "node": approval}, {"op": "add", "node": keeper}]),
+    );
+    world.until("the approval to join the graph", |world| {
+        world
+            .events_of("shaped", "edit-committed")
+            .iter()
+            .any(|event| event["payload"]["command"]["op"] == "add")
+    });
+    validated(
+        &world,
+        "shaped",
+        &json!({"version": 3, "commands": [{"op": "attest", "ref": "zephyrine-approval"}]}),
+    )
+    .exited(exit_for("pass"));
+    validated(
+        &world,
+        "shaped",
+        &json!({"version": 3, "commands": [{"op": "attest", "ref": "nowhere"}]}),
+    )
+    .exited(exit_for("unavailable"));
+
+    // A retry is judged by the replacement it would put in: retried into the public
+    // repository, the producer's replacement is public and its private term refused;
+    // retried where it was, it stays private and passes.
+    let mut into_public = public("generalize-2", &[]);
+    into_public["task"] =
+        json!("## What\nShip the zephyrine example.\n\n## Acceptance criteria\n- it is published.");
+    validated(
+        &world,
+        "shaped",
+        &json!({"version": 3, "commands": [{"op": "retry", "id": "generalize", "node": into_public}]}),
+    )
+    .exited(exit_for("refuse"));
+    let mut in_place = producer("generalize-2", &[]);
+    in_place["task"] =
+        json!("## What\nShip the zephyrine example.\n\n## Acceptance criteria\n- it is published.");
+    validated(
+        &world,
+        "shaped",
+        &json!({"version": 3, "commands": [{"op": "retry", "id": "generalize", "node": in_place}]}),
+    )
+    .exited(exit_for("pass"));
+    world.release("generalize.go");
+}
