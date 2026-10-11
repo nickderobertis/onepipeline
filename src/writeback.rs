@@ -975,7 +975,15 @@ impl Writeback {
         }
     }
 
-    fn is_retired(&self) -> bool {
+    /// Whether a projection this driver handed the worker has yet to land — taken, and still
+    /// being attempted, or queued behind one: what a closeout that has spent its window asks.
+    pub(crate) fn still_landing(&self) -> bool {
+        let (lock, _) = &*self.pending;
+        lock.lock().is_ok_and(|pending| pending.unlanded())
+    }
+
+    /// Whether another run took the project over, so this driver writes nothing more to it.
+    pub(crate) fn is_retired(&self) -> bool {
         self.retired.load(std::sync::atomic::Ordering::SeqCst)
     }
 
@@ -1733,6 +1741,16 @@ enum Kept {
     Unreadable(String),
 }
 
+/// The driver claim this run last landed on its project, off its landed baseline: `None`
+/// where the baseline cannot be read or holds none.
+pub(crate) fn landed_claim(run_dir: &Path) -> Option<Value> {
+    let text = std::fs::read_to_string(run_dir.join(WRITEBACK_LANDED_FILE)).ok()?;
+    serde_json::from_str::<LandedBaseline>(&text)
+        .ok()?
+        .project_metadata
+        .remove(DRIVER_KEY)
+}
+
 /// Whether the run's store has asked to be left alone for a while yet — or holds a wait this
 /// build cannot read, which may be one — so a read of it would be asked inside the wait.
 pub(crate) fn store_asked_to_wait(run_dir: &Path) -> bool {
@@ -2177,6 +2195,28 @@ fn carry_the_difference(
                         delivered: Vec::new(),
                     });
                 }
+            } else {
+                // Released at once, beside the read that found it still this run's: the
+                // window between the two is the one a successor's claim could fall into, and
+                // a status the store refuses further down must not leave the claim standing.
+                let named = MetadataKey::new(DRIVER_KEY.to_owned())
+                    .map_err(|why| Failed::from(format!("project key '{DRIVER_KEY}': {why}")))?;
+                attempt
+                    .call(
+                        StoreCall::ProjectMetadataSet,
+                        Deadline::Floor,
+                        attempt.engine.set_project_metadata(
+                            &snapshot.project.global(),
+                            &named,
+                            &Value::Null,
+                        ),
+                    )?
+                    .map_err(|error| Failed::engine(PROJECT_METADATA_SET, &error))?;
+                baseline
+                    .landed
+                    .project_metadata
+                    .insert(DRIVER_KEY.into(), Value::Null);
+                baseline.save();
             }
         }
     }

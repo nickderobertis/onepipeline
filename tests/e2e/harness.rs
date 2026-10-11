@@ -794,7 +794,8 @@ impl World {
     ///
     /// What a cold host is: everything it can know about the project is what the store says,
     /// and everything it publishes goes through the one host every other host publishes
-    /// through. It shares this world's scratch root, so it is dropped with it, never before.
+    /// through. It shares this world's scratch root and removes only its own directory under
+    /// it when it is dropped, so the world it was made from is whole until that one goes.
     pub fn on_host(&self, host: &str) -> Self {
         LIVE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let at = self.root.join("hosts").join(host);
@@ -3801,7 +3802,13 @@ impl World {
 impl Drop for World {
     fn drop(&mut self) {
         self.stop_the_runs_it_can();
-        let _ = std::fs::remove_dir_all(&self.root);
+        // A host [`on_host`](World::on_host) made removes only what is its own: the world it
+        // was made from still has runs to stop and a root to remove.
+        let removed = match &self.home {
+            Some(home) => home.parent().unwrap_or(&self.root),
+            None => &self.root,
+        };
+        let _ = std::fs::remove_dir_all(removed);
         // The links this process made, released with the last world that could
         // still have spawned through them, so a suite leaves nothing in the
         // target directory. Best-effort: Windows refuses to unlink a running

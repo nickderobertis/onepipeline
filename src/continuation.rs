@@ -303,6 +303,56 @@ impl ClaimWatch {
     }
 }
 
+/// Release this run's claim on its project directly, where the closeout's own projection —
+/// bounded by the closeout window — has not landed the release yet: a store slower than the
+/// window would otherwise leave a run that has let go of the project claiming it, and refuse
+/// the next host's launch over a run that is over.
+///
+/// Read first, as every release is, and written `null` only where the stored claim still
+/// names this run on this host; each call bounded by [`CLAIM_READ_DEADLINE`]. Best effort:
+/// what could not be done is said on standard error.
+pub(crate) fn release_left_standing(
+    paths: &crate::ledger::RunPaths,
+    launch: &crate::ledger::LaunchRecord,
+) {
+    let Ok(project) = launch.project.parse::<QualifiedId>() else {
+        return;
+    };
+    let host = crate::sys::hostname();
+    let ours = |claim: Option<&Value>| {
+        claim
+            .and_then(|claim| serde_json::from_value::<DriverClaim>(claim.clone()).ok())
+            .is_some_and(|claim| claim.names(&paths.run, &host))
+    };
+    if !ours(crate::writeback::landed_claim(&paths.dir).as_ref())
+        || crate::writeback::store_asked_to_wait(&paths.dir)
+    {
+        return;
+    }
+    let store = Store::at(&launch.dir);
+    let released = store
+        .project_metadata_within(&project, CLAIM_READ_DEADLINE)
+        .and_then(|metadata| {
+            if !ours(metadata.get(DRIVER_KEY)) {
+                return Ok(());
+            }
+            store.set_project_metadata_within(
+                &project,
+                DRIVER_KEY,
+                &Value::Null,
+                CLAIM_READ_DEADLINE,
+            )
+        });
+    if let Err(why) = released {
+        eprintln!(
+            "onepipeline: run '{}' could not release its claim on {}: {why}; a launch elsewhere \
+             is refused over it until it is taken over",
+            paths.run,
+            project.as_str()
+        );
+    }
+}
+
 /// The claim this run's `start --take-over` passed, off its own `driver-taken-over`.
 fn taken_over(paths: &crate::ledger::RunPaths) -> Option<DriverClaim> {
     crate::journal::read(&paths.journal())

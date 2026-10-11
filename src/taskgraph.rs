@@ -338,6 +338,55 @@ impl Store {
         Ok(found.item.metadata.into_iter().collect())
     }
 
+    /// Set one key of one project's metadata, within `within`: what a driver releases its
+    /// claim by when the closeout's own projection did not land it in time.
+    ///
+    /// # Errors
+    ///
+    /// As [`project_metadata_within`](Self::project_metadata_within).
+    pub(crate) fn set_project_metadata_within(
+        &self,
+        id: &QualifiedId,
+        key: &str,
+        value: &Value,
+        within: std::time::Duration,
+    ) -> Result<()> {
+        let built = self
+            .engine(&Layer::default())
+            .map_err(|error| Error::Sibling {
+                tool: STORE,
+                message: format!(
+                    "the configuration discovered from {} cannot be read: {error}",
+                    self.dir.display()
+                ),
+            })?;
+        let reader = Reader::over(built)?;
+        let named = MetadataKey::new(key.to_owned()).map_err(|why| Error::Sibling {
+            tool: STORE,
+            message: format!("project key '{key}': {why}"),
+        })?;
+        let global = id.global();
+        reader
+            .call(async {
+                tokio::time::timeout(
+                    within,
+                    reader.engine.set_project_metadata(&global, &named, value),
+                )
+                .await
+            })
+            .map_err(|_| Error::Sibling {
+                tool: STORE,
+                message: format!(
+                    "project metadata set of '{}' did not answer within {} seconds",
+                    id.as_str(),
+                    within.as_secs()
+                ),
+            })?
+            .map_err(|error| failed("project metadata set", id.as_str(), &error))?;
+        let _ = reader.call(reader.engine.end_command());
+        Ok(())
+    }
+
     fn load(&self, project: &QualifiedId) -> std::result::Result<Read, Load> {
         let built = self
             .engine(&Layer::default())
