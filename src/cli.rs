@@ -1067,7 +1067,8 @@ pub struct WatchArgs {
     pub read: TargetArgs,
     /// How long to wait before giving up, in seconds. `0` reads once and
     /// returns; `none` does not bound the wait at all. Omitted, the wake budget
-    /// `ONEPIPELINE_WAKE_BUDGET` names less a 2-second wake reserve, else 300.
+    /// `ONEPIPELINE_WAKE_BUDGET` names less the wake reserve `docs/stop-guard.md`
+    /// states, else 300.
     #[arg(long, value_name = "SECONDS|none", default_value_t = default_watch_timeout())]
     pub timeout: WatchTimeout,
     /// How long a silence may last before this stream says it is still there,

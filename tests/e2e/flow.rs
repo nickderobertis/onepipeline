@@ -2196,27 +2196,22 @@ fn a_flow_watch_reports_each_settlement_and_each_join_in_turn() {
 
     flow.open("join");
     flow.reached(&world, "joined");
-    // The run that joins first is holding a surface: the line its join ends on
-    // counts it.
-    world.until("the first joined run's channel", |world| {
-        world.run_file("joinone", "launch.json").is_file()
-    });
-    world
-        .run(&[
-            "surface",
-            "joinone",
-            "--kind",
-            "finding",
-            "--message",
-            "held",
-        ])
-        .exited(0);
+    // Both runs that joined are holding a surface: the line the first join ends
+    // on counts both, the second run's though its join is not reported yet.
+    for run in ["joinone", "jointwo"] {
+        world.until("the joined run's record", |world| {
+            world.run_file(run, "launch.json").is_file()
+        });
+        world
+            .run(&["surface", run, "--kind", "finding", "--message", "held"])
+            .exited(0);
+    }
     let first = look(Some(&second.cursor()), "run-joined");
     first.ended_on(EXIT_RUN_JOINED, "run-joined");
     assert_eq!(first.record["run_id"], json!("joinone"));
     assert_eq!(
         first.record["unread"]["count"],
-        json!(1),
+        json!(2),
         "{}",
         first.record
     );

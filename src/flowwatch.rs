@@ -353,21 +353,23 @@ fn pass(
     // its surfaces and its settlements are this very pass's to answer rather
     // than lost behind a flow that ended in the same instant.
     let mut joined: Option<String> = None;
-    for run in members {
-        if known.contains_key(&run) {
+    for run in &members {
+        if known.contains_key(run) {
             continue;
         }
-        known.insert(run.clone(), Cursor::start(&run));
+        known.insert(run.clone(), Cursor::start(run));
         if selected.run_joined {
-            joined = Some(run);
+            joined = Some(run.clone());
             break;
         }
     }
-    // Counted over every run entered so far, the one that just joined among
-    // them, so the line a join ends on counts what that run is holding too.
+    // Counted over every run of the flow — those this watch has entered and
+    // those that joined and it has not reported yet — so the line a join ends on
+    // counts what every member is holding.
+    let every: std::collections::BTreeSet<&String> = members.iter().chain(known.keys()).collect();
     let unread = flow.channel().queue().waiting.len()
-        + known
-            .keys()
+        + every
+            .into_iter()
             .map(|run| {
                 crate::channel::ChannelState::new(&RunPaths::under(root, run))
                     .queue()
