@@ -62,8 +62,6 @@ const HOST: &str = "host-view-fixture";
 /// How long after a run records a dispatch its registry entry is stamped: the
 /// executor writes it once the dispatch has launched.
 const ENTRY_AFTER_MS: u64 = 1_000;
-/// The budget `host-view-time` judges each steady single read against.
-const BUDGET_MS: f64 = 100.0;
 /// The variable asking `onepipeline host` to append its phase breakdown to a file.
 const PHASES_ENV: &str = "ONEPIPELINE_HOST_PHASES";
 /// The phases a steady read over a fixture records, by the names `src/hostview.rs`,
@@ -1513,7 +1511,6 @@ fn the_host_view_answers_a_host_sized_root_steady_cold_and_steady_again() {
     assert_eq!(debug.verdicts, cold_verdicts, "the two builds disagree");
 
     record(json!({
-        "budget_ms": BUDGET_MS,
         "runs_root": {
             "run_roots": fixture.roots(),
             "live_dispatches": fixture.expected.held.len(),

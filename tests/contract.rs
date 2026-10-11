@@ -9846,6 +9846,48 @@ fn the_host_reading_is_the_committed_schema_with_the_version_1_keys() {
     for word in ["\"runs-root\"", "\"workspaces\""] {
         assert!(words("Role").contains(word), "Role lacks {word}");
     }
+
+    // And `docs/contract-divergences.md` entry 114, which proposes the reading,
+    // names exactly these keys and the proof's two words: a key the type gains or
+    // loses and the proposal does not fails here.
+    let record = std::fs::read_to_string(repo_root().join("docs/contract-divergences.md"))
+        .expect("the divergences record");
+    let entry = record
+        .split("\n## 114. ")
+        .nth(1)
+        .and_then(|entry| entry.split("\n## ").next())
+        .expect("entry 114 proposes the host reading");
+    let bullet = entry
+        .split("\n- `onepipeline host --json` prints")
+        .nth(1)
+        .and_then(|bullet| bullet.split("\n- ").next())
+        .expect("entry 114 lists the reading's keys");
+    let named: BTreeSet<String> = bullet
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .filter(|token| {
+            token
+                .chars()
+                .all(|character| character.is_ascii_lowercase() || character == '_')
+        })
+        .map(str::to_owned)
+        .collect();
+    let mut stated: BTreeSet<String> = ["held", "unproven"].map(str::to_owned).into();
+    for schema in [
+        &generated,
+        &defs["FreeSpace"],
+        &defs["FreeSpaceRoot"],
+        &defs["DispatchRow"],
+        &defs["Gone"],
+        &defs["SkippedRoot"],
+    ] {
+        stated.extend(keys(schema));
+    }
+    assert_eq!(
+        named, stated,
+        "docs/contract-divergences.md entry 114 names other keys than the reading has"
+    );
 }
 
 /// The run reading `status <RUN> --json` prints is the document

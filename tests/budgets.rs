@@ -280,7 +280,6 @@ fn host_view_report(
 fn host_view_record() -> serde_json::Value {
     serde_json::json!({
         "schema_version": 1,
-        "budget_ms": 100.0,
         "runs_root": {"run_roots": 100, "live_dispatches": 5, "stale_entries": 4},
         "steady": {
             "build": "release",
@@ -337,6 +336,13 @@ fn the_host_view_reporter_reports_the_slowest_steady_read_of_the_record_alone() 
         ("/steady/runs_opened", serde_json::json!("live-0")),
         ("/steady_debug/reads_ms", serde_json::json!([-1.0])),
         ("/cold/read_ms", serde_json::json!("slow")),
+        ("/steady/breakdown/live_fold_ms", serde_json::json!(-4.0)),
+        (
+            "/steady/breakdown/live_runs_folded",
+            serde_json::json!("three"),
+        ),
+        ("/steady/median_ms", serde_json::json!("13")),
+        ("/steady/load1", serde_json::json!(-1.0)),
         ("/scaling/sizes", serde_json::json!("all of them")),
         ("/scaling/sizes/0/runs_opened", serde_json::json!([1])),
         (

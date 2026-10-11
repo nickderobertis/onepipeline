@@ -9418,13 +9418,15 @@ dispatches. And a script could read the answer only by parsing text.
 **What this build does.**
 
 - `onepipeline host --json` prints one JSON object on one line and exits as the text
-  form does. Its keys, every one always present: `schema_version` (`1`), `host`,
-  `root`, `root_error`, `free_space` (each `{roots: [{role, path, measured_at}],
-  free_bytes, total_bytes, error}`), `dispatches` (each `{run, node, launcher,
-  age_ms, proof: "held" | "unproven", unproven}`, in the text form's order), `gone`
-  (each `{run, node, reason}`: stale registry entries, and the dispatches of runs
-  proven ended) and `skipped` (each `{path, reason}`; the runs root itself is
-  `root_error`, never here).
+  form does. Its keys, every one always present: `schema_version`, always 1;
+  `host`; `root`; `root_error`; `free_space`, each with `roots` (each `role` — the
+  runs root or the workspaces — `path` and `measured_at`), `free_bytes`,
+  `total_bytes` and `error`; `dispatches`, in the text form's order, each with
+  `run`, `node`, `launcher`, `age_ms`, `proof` — `held` or `unproven` — and
+  `unproven`; `gone`, each with `run`, `node` and `reason`, for stale registry
+  entries and the dispatches of runs proven ended; and `skipped`, each with `path`
+  and `reason` — the runs root itself is `root_error`, never here.
+  `tests/contract.rs` holds this list to the schema.
 - One type is the reading: `views::HostReading`, with `DispatchRow`, `ProofWord`,
   `Gone`, `SkippedRoot`, `FreeSpace`, `FreeSpaceRoot`, `FreeSpaceRole` and
   `HOST_READING_SCHEMA_VERSION` published beside it. The text form renders it, so

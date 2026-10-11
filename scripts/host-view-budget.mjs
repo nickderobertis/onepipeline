@@ -87,20 +87,36 @@ function object(value, name) {
   }
 }
 
+// Every figure a breakdown, a median or a load carries is a nonnegative number, or
+// null where the read did not measure it.
+function figure(value, name) {
+  if (value !== undefined && value !== null && (typeof value !== "number" || !Number.isFinite(value) || value < 0)) {
+    fail(`${name} must be a nonnegative number or null`);
+  }
+}
+
+function breakdownOf(value, name) {
+  object(value, name);
+  for (const [key, field] of Object.entries(value ?? {})) figure(field, `${name}.${key}`);
+}
+
 // The detail's fields are each optional — a record holds what the journeys that ran
 // wrote — but each one present has the shape the detail reads it as.
 function validateDetail(held) {
-  object(held.steady.breakdown, "steady.breakdown");
+  breakdownOf(held.steady.breakdown, "steady.breakdown");
+  figure(held.steady.median_ms, "steady.median_ms");
+  figure(held.steady.load1, "steady.load1");
   if (held.steady.runs_opened !== undefined) names(held.steady.runs_opened, "steady.runs_opened");
   object(held.steady_debug, "steady_debug");
   if (held.steady_debug !== undefined) {
     reads(held.steady_debug.reads_ms, "steady_debug.reads_ms");
-    object(held.steady_debug.breakdown, "steady_debug.breakdown");
+    figure(held.steady_debug.median_ms, "steady_debug.median_ms");
+    breakdownOf(held.steady_debug.breakdown, "steady_debug.breakdown");
   }
   object(held.cold, "cold");
   if (held.cold !== undefined) {
     milliseconds(held.cold.read_ms, "cold.read_ms");
-    object(held.cold.breakdown, "cold.breakdown");
+    breakdownOf(held.cold.breakdown, "cold.breakdown");
   }
   object(held.scaling, "scaling");
   if (held.scaling !== undefined) {
