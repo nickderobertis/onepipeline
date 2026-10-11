@@ -1551,6 +1551,10 @@ fn merging(args: &[String]) -> bool {
         .args(["rev-parse", "-q", "--verify", "MERGE_HEAD"])
         .current_dir(&worktree)
         .stdin(std::process::Stdio::null())
+        // The answer is the exit status alone: what git prints goes nowhere, since
+        // this process's own stdout is the envelope stream it relays.
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .is_ok_and(|status| status.success())
 }

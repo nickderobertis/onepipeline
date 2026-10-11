@@ -2479,6 +2479,10 @@ fn a_cancelled_run_reads_no_merge_path_once_its_push_has_landed() {
     let settled = &world.events_of(&run, "node-settled")[0]["payload"];
     // It settles as the stop, saying the push ran and where the work is.
     assert_eq!(settled["status"], "cancelled", "{settled}");
+    // And, like every lifecycle settlement past its session's open, what it was
+    // based on and the commit its branch stands at.
+    assert_eq!(settled["base"], "main", "{settled}");
+    assert!(settled["head"].is_string(), "{settled}");
     let detail = settled["detail"]
         .as_str()
         .expect("the settlement says why")

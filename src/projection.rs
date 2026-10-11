@@ -179,10 +179,7 @@ pub struct RunState {
     /// for this run's sessions — `""` once it cut one and reported none — which is
     /// what a stack base is named under. `None` until a session cut a branch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    // llmlint: ignore[invalid_states_unrepresentable] the prefix is the plain string `onevcs`
-    // reports and every branch beside it in this struct is, checked where it enters by
-    // `vcs::usable` — the only thing that writes it — and `onevcs` itself holds no newtype
-    // for it to borrow.
+    // llmlint: ignore[invalid_states_unrepresentable] the prefix is the plain string `onevcs` reports and every branch beside it in this struct is, checked where it enters by `vcs::usable` — the only thing that writes it, apart from the empty string a cut under no prefix is — and `onevcs` itself holds no newtype for it to borrow.
     pub(crate) branch_prefix: Option<String>,
     /// The branches an idle pass of this run's driver retired as holding no work
     /// beyond their base, folded from its `branches-retired`.
