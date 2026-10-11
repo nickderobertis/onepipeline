@@ -536,3 +536,160 @@ fn the_host_view_measurement_records_nothing_from_a_read_that_failed() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// What one tracer-driven read through `scripts/host-view-trace.mjs` answers, over
+/// `sh -c script` in `dir`: the journals it opened and refused, and what holding it to a
+/// steady read (`old` ended, `live-0` live) answered or refused.
+#[cfg(target_os = "linux")]
+fn traced_opens(dir: &std::path::Path, script: &str, path: Option<&str>) -> serde_json::Value {
+    let module = root().join("scripts/host-view-trace.mjs");
+    let driver = format!(
+        r#"import {{ journalOpens, steadyOpens }} from {module:?};
+const out = {{}};
+try {{
+  const seen = journalOpens("sh", ["-c", process.argv[1]], "trace.out");
+  out.opened = Object.fromEntries(seen.opened);
+  out.refused = [...seen.refused].sort();
+  out.steady = steadyOpens(seen, ["old"], ["live-0"], "read");
+}} catch (error) {{
+  out.error = error.message;
+}}
+console.log(JSON.stringify(out));"#,
+        module = module.display().to_string()
+    );
+    let mut command = std::process::Command::new("node");
+    command
+        .args(["--input-type=module", "-e", &driver, script])
+        .current_dir(dir);
+    if let Some(path) = path {
+        command.env("PATH", path);
+    }
+    let output = command.output().expect("node runs the tracer module");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("the driver's JSON")
+}
+
+/// The measurement's record says from the kernel which journals each scaling read opened:
+/// `scripts/host-view-trace.mjs` runs a real process under the real `strace` and counts the
+/// bytes it read from each run's journal, including from many processes reading at once, whose
+/// calls the tracer splits. A read that opened or merely tried an ended run's journal, or opened
+/// other runs' than the live ones, is refused, naming them; so is a tracer that would not run,
+/// and a traced command that failed.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_host_view_measurement_counts_the_journals_a_traced_read_opened() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = scratch("host-view-trace");
+    let journal = |run: &str| dir.join(run).join("events.jsonl");
+    for (run, body) in [("live-0", "a live record\n"), ("old", "an ended record\n")] {
+        std::fs::create_dir_all(dir.join(run)).expect("a run root");
+        std::fs::write(journal(run), body).expect("a journal");
+    }
+    std::fs::write(dir.join("other.txt"), "not a journal\n").expect("a file");
+    let live_bytes = "a live record\n".len() as u64;
+    let unreadable = |yes: bool| {
+        std::fs::set_permissions(
+            journal("old"),
+            std::fs::Permissions::from_mode(if yes { 0o000 } else { 0o644 }),
+        )
+        .expect("the ended journal's mode");
+    };
+
+    // Steady: the live journal read, the ended one never reached.
+    let steady = traced_opens(&dir, "cat live-0/events.jsonl other.txt", None);
+    assert_eq!(
+        steady["opened"],
+        serde_json::json!({"live-0": live_bytes}),
+        "{steady}"
+    );
+    assert_eq!(
+        steady["steady"],
+        serde_json::json!({"ended_journal_bytes_opened": 0, "runs_opened": ["live-0"]}),
+        "{steady}"
+    );
+
+    // Twenty readers at once: every byte each read is counted, whichever calls the tracer split.
+    let many = traced_opens(
+        &dir,
+        "for i in $(seq 20); do cat live-0/events.jsonl & done; wait",
+        None,
+    );
+    assert_eq!(
+        many["opened"],
+        serde_json::json!({"live-0": 20 * live_bytes}),
+        "{many}"
+    );
+
+    // An ended journal tried and refused by its mode is refused, as is one opened and read.
+    unreadable(true);
+    let tried = traced_opens(
+        &dir,
+        "cat live-0/events.jsonl; cat old/events.jsonl 2>/dev/null; true",
+        None,
+    );
+    assert_eq!(tried["refused"], serde_json::json!(["old"]), "{tried}");
+    assert!(
+        tried["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("tried to open ended runs' journals: old")),
+        "{tried}"
+    );
+    unreadable(false);
+    let read = traced_opens(&dir, "cat live-0/events.jsonl old/events.jsonl", None);
+    assert_eq!(
+        read["opened"]["old"],
+        serde_json::json!("an ended record\n".len()),
+        "{read}"
+    );
+    assert!(
+        read["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("ended runs' journals: old")),
+        "{read}"
+    );
+
+    // A read that opened no live journal is not the live runs' read.
+    let none = traced_opens(&dir, "cat other.txt", None);
+    assert!(
+        none["error"].as_str().is_some_and(
+            |error| error.contains("opened the journals of no run, not the live runs live-0")
+        ),
+        "{none}"
+    );
+
+    // A traced command that failed, and a tracer that would not run, answer nothing.
+    let failed = traced_opens(&dir, "cat live-0/events.jsonl; exit 3", None);
+    assert!(
+        failed["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("exited 3")),
+        "{failed}"
+    );
+    let fake = dir.join("bin");
+    std::fs::create_dir_all(&fake).expect("a bin directory");
+    std::fs::write(
+        fake.join("strace"),
+        "#!/bin/sh\necho 'ptrace refused' >&2\nexit 1\n",
+    )
+    .expect("a refusing tracer");
+    std::fs::set_permissions(fake.join("strace"), std::fs::Permissions::from_mode(0o755))
+        .expect("executable");
+    let path = format!(
+        "{}:{}",
+        fake.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let refused = traced_opens(&dir, "cat live-0/events.jsonl", Some(&path));
+    assert!(
+        refused["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("exited 1: ptrace refused")),
+        "{refused}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

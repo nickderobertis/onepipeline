@@ -24,7 +24,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   cold,
@@ -36,6 +36,7 @@ import {
   startToken,
 } from "../tests/e2e/host_view_fixture.mjs";
 import { BREAKDOWN, READS, SCALING, validateRecord } from "./host-view-budget.mjs";
+import { journalOpens, steadyOpens } from "./host-view-trace.mjs";
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
 const RECORD = join(REPO, "target", "budget-records", "host-view.json");
@@ -165,79 +166,16 @@ function holds(manifest, reading, label) {
   if (problems.length > 0) throw new Error(`${label}: ${problems.join("; ")}`);
 }
 
-/** The run a path names, where it is a run's journal. */
-const runOf = (path) => (path.endsWith("/events.jsonl") ? basename(dirname(path)) : null);
-
-/**
- * One untimed `host --json` read under `strace`: the runs whose journals it opened,
- * with the bytes it read from each, and those it tried and failed to open. Throws
- * where the tracer would not run, since an observation nobody made is not one of
- * nothing.
- */
+/** One untimed `host --json` read under `strace`, held to the answer and to what a steady read may open. */
 function traced(manifest, label) {
-  const into = join(work, `${label}.strace`);
-  const done = spawnSync(
-    "strace",
-    [
-      "-f",
-      "--seccomp-bpf",
-      "-qq",
-      "-y",
-      "-e",
-      "trace=openat,open,read,pread64",
-      "-e",
-      "signal=none",
-      "-o",
-      into,
-      binary,
-      "host",
-      "--json",
-    ],
-    { encoding: "utf8" },
-  );
-  if (done.error || done.status !== 0)
-    throw new Error(`${label}: \`strace ... host --json\` ${failure(done)}`);
-  holds(manifest, JSON.parse(done.stdout), `${label} traced read`);
-  let trace;
+  let observed;
   try {
-    trace = readFileSync(into, "utf8");
+    observed = journalOpens(binary, ["host", "--json"], join(work, `${label}.strace`));
   } catch (error) {
-    throw new Error(`${label}: the tracer left no trace (${error.message})`);
+    throw new Error(`${label}: ${error.message}`);
   }
-  if (!trace.includes("openat(")) throw new Error(`${label}: the tracer recorded no open`);
-  const opened = new Map();
-  const refused = new Set();
-  for (const line of trace.split("\n")) {
-    const body = line.slice(line.indexOf(" ") + 1);
-    const result = body.slice(body.lastIndexOf("= ") + 2).trim();
-    if (body.startsWith("openat(") || body.startsWith("open(")) {
-      const run = runOf(body.split('"')[1] ?? "");
-      if (run === null) continue;
-      if (result.startsWith("-")) refused.add(run);
-      else if (!opened.has(run)) opened.set(run, 0);
-    } else if (body.startsWith("read(") || body.startsWith("pread64(")) {
-      const path = body.match(/<([^>]*)>/)?.[1];
-      const run = path === undefined ? null : runOf(path);
-      if (run === null) continue;
-      opened.set(run, (opened.get(run) ?? 0) + (Number.parseInt(result, 10) || 0));
-    }
-  }
-  const ended = new Set(manifest.ended);
-  const reached = [...new Set([...opened.keys(), ...refused])].filter((run) => ended.has(run));
-  if (reached.length > 0)
-    throw new Error(`${label}: the read opened or tried to open ended runs' journals: ${reached.join(", ")}`);
-  const runsOpened = [...opened.keys()].sort();
-  const live = [...manifest.live_runs].sort();
-  if (runsOpened.join() !== live.join())
-    throw new Error(
-      `${label}: the read opened the journals of ${runsOpened.join(", ") || "no run"}, not the live runs ${live.join(", ")}`,
-    );
-  return {
-    ended_journal_bytes_opened: [...opened]
-      .filter(([run]) => ended.has(run))
-      .reduce((sum, [, bytes]) => sum + bytes, 0),
-    runs_opened: runsOpened,
-  };
+  holds(manifest, JSON.parse(observed.stdout), `${label} traced read`);
+  return steadyOpens(observed, manifest.ended, manifest.live_runs, label);
 }
 
 const median = (walls) => [...walls].sort((a, b) => a - b)[Math.floor(walls.length / 2)];
