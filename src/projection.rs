@@ -4316,8 +4316,6 @@ mod tests {
         );
     }
 
-    /// A settlement's `base` and `stack` are folded per node, and the node's newer
-    /// settlement naming a base and no stack drops the stack its older one named.
     /// A restack folds the node running until its settlement, and a driver that
     /// adopts the run after the one running it died reads the node `done` again —
     /// what its restack started from — rather than dispatching its work afresh.
@@ -4354,6 +4352,8 @@ mod tests {
         assert!(state.restacking.is_empty(), "{:?}", state.restacking);
     }
 
+    /// A settlement's `base` and `stack` are folded per node, and the node's newer
+    /// settlement naming a base and no stack drops the stack its older one named.
     #[test]
     fn a_settlement_s_base_and_stack_are_folded_and_a_later_unstacked_one_drops_the_stack() {
         let settled = |seq: u64, fields: &[(&str, Value)]| {
