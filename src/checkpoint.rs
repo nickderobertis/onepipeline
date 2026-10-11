@@ -671,20 +671,25 @@ pub(crate) fn fold_ended(paths: &RunPaths) -> RunState {
     projected.into_state()
 }
 
-/// An ended run's folded state off its checkpoint alone, where that
-/// covers exactly the journal a current `summary.json` stamps — `journal_len`
-/// bytes and `event_count` records — so the journal is not opened.
+/// An ended run's folded state off its checkpoint alone, where that covers
+/// exactly the journal a **current** `summary.json` stamps — `journal_len` bytes
+/// and `event_count` records — so the journal is not opened.
 ///
-/// The seal is not re-taken: re-taking it reads every covered byte, which is the
-/// cost this exists to remove. What stands in for it is the summary's own
-/// freshness rule — a journal rewritten in place moves its modification time, so
-/// the summary that stamped it is no longer current and this is not reached.
+/// **The seal is not re-taken here, and that is an accepted trust assumption.**
+/// Re-taking it reads every covered byte, which is the cost this exists to remove.
+/// What stands in for it is the summary's stamp: a current summary (its journal
+/// length and modification time match the journal's) proves the journal has not
+/// moved since that summary was written. It proves nothing about this document:
+/// **an edit to the checkpoint's state that keeps its run, its version and its
+/// coverage counts is not detected on this path.** The assumption holds only
+/// here: a checkpoint whose counts differ from the current summary's is refused,
+/// and the caller then folds through [`fold_ended`], which verifies the seal or
+/// refolds the journal, as every cold read does.
 // llmlint: ignore-block[boundary_inputs_validated] the seal is chained over the covered
 // journal bytes before the state, so no part of it can be checked without reading every one
 // of them, which is the cost this exists to remove. The document is still refused at another
-// version, as another run's, or as anything but this build's shape (`readable`), and what
-// stands in for the seal is the summary's stamp — the trust every listing already places in
-// that document — as the plan that added this read ruled.
+// version, as another run's, or as anything but this build's shape (`readable`); the manager
+// accepted the trust assumption the doc comment above states, under its conditions.
 pub(crate) fn covering_whole(
     paths: &RunPaths,
     journal_len: u64,
