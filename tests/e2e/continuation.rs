@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 use serde_json::{json, Value};
 
 use crate::draft_lifecycle::{team_repository, GREEN};
-use crate::harness::{lifecycle, plan_of, World};
+use crate::harness::{agent, lifecycle, plan_of, World};
 
 /// The host's branch prefix every team journey here runs under.
 const PREFIX: &str = "me/";
@@ -454,4 +454,323 @@ fn a_parked_node_is_continued_pinned_to_its_branch_and_adopts_its_draft() {
     b.as_object_mut().expect("a settlement").remove("outcome");
     restate(&world, &project, "b", "onepipeline.settlement", b.clone());
     the_pinned_node_continues_its_branch_and_its_draft(&world, &project, run, &stored);
+}
+
+/// The claim the store holds for `project`, once it names `run`: read back off the board,
+/// as a host that holds none of the run's state would read it.
+fn until_claimed_by(world: &World, project: &str, run: &str) -> Value {
+    world.until(
+        &format!("the store to name {run} as the project's driver"),
+        |world| stored_claim(world, project)["run"] == run,
+    );
+    stored_claim(world, project)
+}
+
+/// The metadata the board's item for node `node` carries.
+fn item_metadata(world: &World, project: &str, node: &str) -> Value {
+    world
+        .store_tasks(project)
+        .into_iter()
+        .find(|task| task["item"]["metadata"]["onepipeline.id"] == node)
+        .map(|task| task["item"]["metadata"].clone())
+        .unwrap_or_else(|| panic!("the board holds no item for {node}"))
+}
+
+/// A run continuing `a → b` dispatches `b` on its branch, and the board says so while it
+/// works — `onepipeline.dispatch` naming the branch and the base, its stale settlement gone,
+/// and the run's claim. A host shutdown leaves both on the board. A cold host is refused the
+/// claimed project, naming the run that holds it and `--take-over`; taking it over journals
+/// the claim it passed, pins `b` to the branch the dispatch key names, and publishes it onto
+/// the draft already open from it, opening nothing — and its own settlement removes the key.
+#[test]
+fn an_in_flight_dispatch_left_on_the_store_is_continued_by_a_host_that_takes_the_project_over() {
+    let run = "inflight";
+    let (world, project, stored) = a_failed_draft("continue-dispatch", run);
+    let branch = stored["b"]["branch"]
+        .as_str()
+        .expect("b's branch")
+        .to_owned();
+    world.script("b.wait", "hold");
+    world
+        .run_from(&world.project, &["start", &project, "--detach"])
+        .exited(0);
+    let held = format!("{run}-2");
+    let claim = until_claimed_by(&world, &project, &held);
+    let launched = world.run_json(&held, "launch.json");
+    assert_eq!(claim["host"], launched["host"], "{claim}");
+    assert_eq!(claim["pid"], launched["pid"], "{claim}");
+    assert_eq!(claim["session"], json!(world.session), "{claim}");
+    assert!(claim["claimed_at"].is_string(), "{claim}");
+    world.until("b's dispatch to reach the board", |world| {
+        item_metadata(world, &project, "b")
+            .get("onepipeline.dispatch")
+            .is_some()
+    });
+    let b = item_metadata(&world, &project, "b");
+    let dispatch = &b["onepipeline.dispatch"];
+    assert_eq!(dispatch["branch"], json!(branch), "{dispatch}");
+    assert_eq!(dispatch["base"], stored["a"]["branch"], "{dispatch}");
+    assert!(dispatch["opened_at"].is_string(), "{dispatch}");
+    assert!(
+        b.get("onepipeline.settlement").is_none(),
+        "the board still holds the settlement b's dispatch superseded: {b}"
+    );
+
+    let shutdown = world.run(&["shutdown", &held, "--grace", "1"]);
+    assert!(
+        [0, 2].contains(&shutdown.code),
+        "the shutdown failed: {}\n{}",
+        shutdown.stdout,
+        shutdown.stderr
+    );
+    assert_eq!(
+        stored_claim(&world, &project),
+        claim,
+        "the shutdown released the claim"
+    );
+    assert_eq!(
+        item_metadata(&world, &project, "b")["onepipeline.dispatch"],
+        *dispatch,
+        "the shutdown took b's dispatch off the board"
+    );
+
+    world.unscript("b.wait");
+    world.script("gh.checks.2", GREEN);
+    let created = created_from(&world);
+    std::fs::remove_dir_all(&world.runs).expect("the runs root is removed");
+    let cold = world.on_host("host-b");
+    let refused = cold.run_from(&cold.project, &["start", &project, "--attach"]);
+    refused.exited(2);
+    assert!(
+        refused
+            .stderr
+            .contains("onepipeline: project driven elsewhere refused:"),
+        "{}",
+        refused.stderr
+    );
+    for named in [format!("run '{held}'"), "--take-over".to_owned()] {
+        assert!(refused.stderr.contains(&named), "{}", refused.stderr);
+    }
+    assert!(!refused.stderr.contains("adopt"), "{}", refused.stderr);
+    assert!(
+        !cold.run_file(run, "launch.json").exists(),
+        "the refusal minted a run"
+    );
+
+    launch(&cold, run, &project, &["--take-over"]).exited(0);
+    let taken = cold.events_of(run, "driver-taken-over");
+    assert_eq!(taken.len(), 1, "{taken:?}");
+    assert_eq!(taken[0]["payload"]["previous"], claim);
+    assert_eq!(dispatched(&cold, run), vec!["b".to_owned()]);
+    assert_eq!(sessions_opened(&cold, run), vec![branch.clone()]);
+    assert_eq!(created_from(&world), created, "a change request was opened");
+    let opened = changes_from(&world, &branch);
+    assert_eq!(opened.len(), 1, "{opened:?}");
+    assert!(held_as_draft(&world, &opened[0]["number"]), "{opened:?}");
+    let b = settled(&cold, run, "b");
+    assert_eq!(b["outcome"], "change-review-draft", "{b}");
+    let item = item_metadata(&world, &project, "b");
+    assert!(
+        item.get("onepipeline.dispatch").is_none(),
+        "b's settlement left its dispatch on the board: {item}"
+    );
+    assert_eq!(item["onepipeline.settlement"]["status"], "done", "{item}");
+    assert_eq!(stored_claim(&world, &project), Value::Null);
+    drop(cold);
+}
+
+/// Launch `nodes` as project `name`, detached, and answer the project's id.
+fn launch_detached(world: &World, name: &str, nodes: Vec<Value>) -> String {
+    let project = world.plan(name, &plan_of(name, nodes));
+    world
+        .run_from(&world.project, &["start", &project, "--detach"])
+        .exited(0);
+    project
+}
+
+/// A run's claim is on the store while its driver drives it — naming the run, this host,
+/// its launching session and its driver's pid — and is gone once the run closes out, and
+/// once a `stop` ends a run before it settles.
+#[test]
+fn the_claim_is_held_while_a_run_drives_and_released_at_closeout_and_at_stop() {
+    let world = World::new("claim-lifecycle");
+    world.script("closes.wait", "hold");
+    let closes = launch_detached(&world, "closes", vec![agent("closes", &[])]);
+    let claim = until_claimed_by(&world, &closes, "closes");
+    let launched = world.run_json("closes", "launch.json");
+    assert_eq!(claim["host"], launched["host"], "{claim}");
+    assert_eq!(claim["pid"], launched["pid"], "{claim}");
+    assert_eq!(claim["session"], json!(world.session), "{claim}");
+    world.release("closes.go");
+    world.until("the run to close out", |world| {
+        world.run_file("closes", "result.json").is_file()
+    });
+    world.until("the closeout to release the claim", |world| {
+        stored_claim(world, &closes) == Value::Null
+    });
+
+    world.script("stopped.wait", "hold");
+    let stopped = launch_detached(&world, "stopped", vec![agent("stopped", &[])]);
+    until_claimed_by(&world, &stopped, "stopped");
+    world.run(&["stop", "stopped"]).exited(0);
+    assert_eq!(
+        stored_claim(&world, &stopped),
+        Value::Null,
+        "the stop left the claim standing"
+    );
+}
+
+/// A claim naming a run of **this** host refuses a launch whether that run's driver is
+/// live or gone, naming the run to `adopt` and `--take-over`; and `--take-over` passes the
+/// claim of a run whose driver a shutdown ended, journalling the claim it passed.
+#[test]
+fn a_claim_of_this_hosts_own_run_refuses_a_launch_naming_adopt_live_or_gone() {
+    let world = World::new("claim-this-host");
+    world.script("work.wait", "hold");
+    let project = launch_detached(&world, "mine", vec![agent("work", &[])]);
+    let claim = until_claimed_by(&world, &project, "mine");
+    let said = |refused: &crate::harness::Run| {
+        refused.exited(2);
+        for named in [
+            "onepipeline: project driven elsewhere refused:",
+            "run 'mine'",
+            "`onepipeline adopt mine`",
+            "--take-over",
+        ] {
+            assert!(
+                refused.stderr.contains(named),
+                "{named}: {}",
+                refused.stderr
+            );
+        }
+    };
+    // Live: its driver is driving it now.
+    said(&world.run_from(&world.project, &["start", &project, "--attach"]));
+    assert!(
+        !world.run_file("mine-2", "launch.json").exists(),
+        "the refusal minted a run"
+    );
+
+    // Gone: a shutdown ended its driver and kept the claim, so the run stays adoptable.
+    let shutdown = world.run(&["shutdown", "mine", "--grace", "1"]);
+    assert!([0, 2].contains(&shutdown.code), "{}", shutdown.stderr);
+    assert_eq!(stored_claim(&world, &project), claim);
+    said(&world.run_from(&world.project, &["start", &project, "--attach"]));
+
+    world.unscript("work.wait");
+    world
+        .run_from(
+            &world.project,
+            &["start", &project, "--attach", "--take-over"],
+        )
+        .exited(0);
+    let taken = world.events_of("mine-2", "driver-taken-over");
+    assert_eq!(taken.len(), 1, "{taken:?}");
+    assert_eq!(taken[0]["payload"]["previous"], claim);
+    assert_eq!(world.run_json("mine-2", "result.json")["state"], "complete");
+    assert_eq!(stored_claim(&world, &project), Value::Null);
+}
+
+/// A store that cannot be read refuses the launch rather than reading it as unclaimed.
+#[test]
+fn a_launch_whose_store_cannot_be_read_is_refused_rather_than_read_as_unclaimed() {
+    let world = World::new("claim-unreadable").through_scripted_source();
+    let project = world.plan("unread", &plan_of("unread", vec![agent("work", &[])]));
+    world.store_refuses(
+        "get_project",
+        &json!({"kind": "unavailable", "message": "the board is down"}),
+    );
+    let refused = world.run_from(&world.project, &["start", &project, "--attach"]);
+    refused.exited(2);
+    assert!(
+        refused.stderr.contains("the board is down"),
+        "{}",
+        refused.stderr
+    );
+    assert!(
+        !world.run_file("unread", "launch.json").exists(),
+        "the refusal minted a run"
+    );
+}
+
+/// After a host takes the project over, the run it took it from neither closes out nor
+/// stops over the successor's claim: its closeout and a `stop` of it each leave that claim
+/// on the store as it was, and a third launch while the successor drives is refused naming
+/// the successor's run.
+#[test]
+fn a_successors_claim_survives_the_closeout_and_the_stop_of_the_run_it_took_over() {
+    let world = World::new("claim-successor");
+    let first = world.rendezvous("first");
+    let closes = launch_detached(&world, "closes", vec![agent("first", &[])]);
+    let mine = first.arrived();
+    until_claimed_by(&world, &closes, "closes");
+    let successor = world.on_host("host-b");
+    successor
+        .run_from(
+            &successor.project,
+            &["start", &closes, "--detach", "--take-over"],
+        )
+        .exited(0);
+    let theirs = first.arrived();
+    world.until("the successor's claim to reach the store", |world| {
+        stored_claim(world, &closes)["host"] == "host-b"
+    });
+    let claimed = stored_claim(&world, &closes);
+    let third = world.on_host("host-c");
+    let refused = third.run_from(&third.project, &["start", &closes, "--attach"]);
+    refused.exited(2);
+    assert!(
+        refused
+            .stderr
+            .contains("project driven elsewhere refused: run 'closes' on host 'host-b'"),
+        "{}",
+        refused.stderr
+    );
+    // The run taken over finishes its one node and closes out with nothing left to start.
+    mine.release();
+    world.until("the run taken over to close out", |world| {
+        world.run_file("closes", "result.json").is_file()
+    });
+    assert_eq!(
+        stored_claim(&world, &closes),
+        claimed,
+        "the closeout took the claim"
+    );
+
+    // And one stopped while its successor drives.
+    let second = world.rendezvous("second");
+    let stops = launch_detached(&world, "stops", vec![agent("second", &[])]);
+    let held = second.arrived();
+    until_claimed_by(&world, &stops, "stops");
+    successor
+        .run_from(
+            &successor.project,
+            &["start", &stops, "--detach", "--take-over"],
+        )
+        .exited(0);
+    let theirs_too = second.arrived();
+    world.until("the successor's claim to reach the store", |world| {
+        stored_claim(world, &stops)["host"] == "host-b"
+    });
+    let claimed = stored_claim(&world, &stops);
+    world.run(&["stop", "stops"]).exited(0);
+    assert_eq!(
+        stored_claim(&world, &stops),
+        claimed,
+        "the stop took the claim"
+    );
+    drop(held);
+
+    theirs.release();
+    theirs_too.release();
+    for (run, project) in [("closes", &closes), ("stops", &stops)] {
+        successor.until("the successor to close out", |world| {
+            world.run_file(run, "result.json").is_file()
+        });
+        world.until("the successor to release its claim", |world| {
+            stored_claim(world, project) == Value::Null
+        });
+    }
+    drop(third);
+    drop(successor);
 }
