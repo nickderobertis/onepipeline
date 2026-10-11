@@ -3047,8 +3047,23 @@ fn report_of(
         // practice: an identity whose answer the schema refused, and the next
         // one, which conformed and put nothing in it. A consumer that stopped at
         // the refusal would report a schema that is working as the fault.
+        // `pr-author.title-check` is the `title_check` a drafter answers beside its
+        // body — a JSON value written verbatim, so a journey states a `keeps`, a
+        // `replaced` naming a subject, or a verdict no reader accepts — and nothing
+        // where it is not scripted, which is every drafter written before the field.
+        let checked = |mut answered: serde_json::Value| {
+            if let Some(check) = fake::node_script(&fake::script_dir(), "pr-author", "title-check")
+            {
+                let check: serde_json::Value =
+                    serde_json::from_str(&check).unwrap_or_else(|error| {
+                        fake::fail(&format!("pr-author.title-check is not JSON: {error}"))
+                    });
+                answered["structured"]["title_check"] = check;
+            }
+            answered
+        };
         let results = match &answer {
-            Drafted::Body(body) => vec![stepped_past, answered("claude-code", body, true)],
+            Drafted::Body(body) => vec![stepped_past, checked(answered("claude-code", body, true))],
             Drafted::SchemaRefused(attempted) => {
                 vec![stepped_past, answered("claude-code", attempted, false)]
             }

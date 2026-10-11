@@ -91,6 +91,11 @@ pub(crate) const NODE_KEY: &str = "onepipeline.node";
 /// written only where the head is not the root.
 pub(crate) const SUPERSEDES_KEY: &str = "onepipeline.supersedes";
 
+/// Projection-only metadata on a rework's replacement: the node it replaces, the
+/// reason, the instruction and each review comment it answers, so any host knows
+/// which comments a rework is answering.
+pub(crate) const REWORK_KEY: &str = "onepipeline.rework";
+
 /// The reserved keys the write-back owns and no node field answers to.
 ///
 /// A project a run projected onto — its own, where the plan's store is the destination —
@@ -98,7 +103,7 @@ pub(crate) const SUPERSEDES_KEY: &str = "onepipeline.supersedes";
 /// settlement: what it launches is the lineage head's definition under the root's id,
 /// which is what the item says. Reading them as node fields refused the relaunch of every
 /// project a run had written to, naming `node` as a field nobody authored.
-const PROJECTION_ONLY: &[&str] = &[SETTLEMENT_KEY, NODE_KEY, SUPERSEDES_KEY];
+const PROJECTION_ONLY: &[&str] = &[SETTLEMENT_KEY, NODE_KEY, SUPERSEDES_KEY, REWORK_KEY];
 
 /// A reserved key this mapping fills from the task itself, and where it comes
 /// from — so a project stating it is told which end to edit rather than having

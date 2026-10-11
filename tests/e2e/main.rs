@@ -206,6 +206,13 @@ mod recorded_support;
 // the very changes they exist to catch. Same grounds as `mod maintenance` above.
 mod retirement;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these journeys
+// exercise is `edits`' rework, `engine`'s restack scheduling, `lifecycle`'s republication
+// and `views` together, against the linked `onevcs` over real git and a bare origin — so the
+// narrowest edge they can honestly sit behind is the crate itself, which is this target's.
+// Same grounds as `mod retirement` above.
+mod rework;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod run_end_hooks;
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these journeys
 // exercise is one reading across `views`, `hooks`, `summary`, `unwatched` and the `status`

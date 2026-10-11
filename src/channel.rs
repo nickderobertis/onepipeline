@@ -859,6 +859,9 @@ impl SurfaceKind {
     /// An edit an author other than the planner applied on its own judgement,
     /// reported after the fact; the surface's source is that author's word.
     pub const EDIT_APPLIED: &'static str = "edit-applied";
+    /// A rework's change request whose title nothing verified still describes the
+    /// change, raised non-blocking and answered by a `retitle` of its node.
+    pub const TITLE_UNVERIFIED: &'static str = "title-unverified";
     /// The engine's check-in kind.
     pub fn check_in() -> Self {
         Self(Self::CHECK_IN.into())

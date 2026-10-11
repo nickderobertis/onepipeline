@@ -620,6 +620,30 @@ pub(crate) fn drafted(reports: &[Value]) -> Drafted {
 }
 // llmlint: ignore-end[boundary_inputs_validated]
 
+/// The `title_check` a drafting dispatch answered beside the body [`drafted`]
+/// takes: read off the same result, so a verdict is never taken from one
+/// candidate and the body from another. `None` where that result carries none,
+/// and where no result drafted a body.
+///
+/// The value is handed back as the drafter wrote it; what it has to be is the
+/// caller's question, since only a rework's publication asks it.
+pub(crate) fn title_check(reports: &[Value]) -> Option<Value> {
+    reports
+        .iter()
+        .flat_map(results)
+        .filter(|result| result.get("schema_valid").and_then(Value::as_bool) == Some(true))
+        .filter_map(|result| result.get("structured"))
+        .find(|structured| {
+            structured
+                .get("body")
+                .and_then(Value::as_str)
+                .is_some_and(|body| !body.trim().is_empty())
+        })
+        .and_then(|structured| structured.get("title_check"))
+        .filter(|check| !check.is_null())
+        .cloned()
+}
+
 /// One turn of a retained transcript.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Turn {

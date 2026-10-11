@@ -2508,6 +2508,21 @@ pub(crate) fn status_reporting(view: &RunView, providers: Providers) -> String {
                 None => out.push_str(&format!(" — {}", DriverLiveness::Undriven.as_str())),
                 Some(activity) => out.push_str(&format!(" — {}", working(activity))),
             }
+            // A restack is the node's own settled draft being moved, which the
+            // word `running` alone would read as its work being done again.
+            if let Some(onto) = view.state.restacking.get(id) {
+                out.push_str(&format!(
+                    "; restacking onto {}",
+                    onto.iter()
+                        .map(|onto| format!(
+                            "{} at {}",
+                            one_line(&onto.branch),
+                            one_line(&onto.head)
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(" and ")
+                ));
+            }
             out.push('\n');
         }
         // A node whose cancellation is still out there. Under its own word,
@@ -2562,6 +2577,28 @@ pub(crate) fn status_reporting(view: &RunView, providers: Providers) -> String {
                     node.id,
                     one_line(amendment)
                 ));
+            }
+        }
+        // What review asked of the drafts it sent back, what bringing each draft
+        // onto its parents' new heads did, and which titles nothing verified: a
+        // stack of drafts in review moves without any node failing, and this is
+        // where a reader sees it move.
+        for node in view.state.reworks.keys() {
+            if let Some(reworked) = rework_phrase(&view.state, node) {
+                out.push_str(&format!("  {}: {reworked}\n", one_line(node)));
+            }
+        }
+        for (id, node_status) in &statuses {
+            if *node_status != NodeStatus::Done {
+                continue;
+            }
+            if let Some(restacked) = restack_phrase(&view.state, id) {
+                out.push_str(&format!("  {id}: {restacked}\n"));
+            }
+        }
+        for id in view.state.titles_unverified.keys() {
+            if let Some(title) = unverified_title_phrase(&view.state, id) {
+                out.push_str(&format!("  {}: {title}\n", one_line(id)));
             }
         }
         // What refused, for the nodes that failed. A failed node otherwise reads
@@ -3186,6 +3223,9 @@ fn outstanding_landings(view: &RunView, render: &Rendering) -> Outstanding {
         // deliberately holding and will lift itself. It has a line of its own,
         // which says what it is waiting on.
         .filter(|(node, _)| statuses.get(*node) != Some(&NodeStatus::CompleteDraft))
+        // A reworked node's change is its replacement's now — the same branch and
+        // the same change request — so it is counted once, under the replacement.
+        .filter(|(node, _)| !view.state.reworks.contains_key(*node))
     {
         match reported_landing(view, render, node).stands() {
             Stands::NotLanded => outstanding.not_landed.push(node.clone()),
@@ -3834,6 +3874,9 @@ fn superseded_suffix(view: &RunView, event: &Envelope) -> String {
         return String::new();
     };
     match view.state.superseded.get(node) {
+        Some(replacement) if view.state.reworks.contains_key(node) => {
+            format!("  — reworked as {}", one_line(replacement))
+        }
         Some(replacement) => format!("  — superseded, retried as {}", one_line(replacement)),
         None => String::new(),
     }
@@ -4196,7 +4239,13 @@ pub fn results(view: &RunView) -> String {
         } else if let Some(url) = view.state.change_urls.get(&node.id) {
             out.push_str(&format!(" — {url}"));
         }
+        if let Some(restacked) = restack_phrase(&view.state, &node.id) {
+            out.push_str(&format!(" — {restacked}"));
+        }
         out.push('\n');
+        if let Some(title) = unverified_title_phrase(&view.state, &node.id) {
+            out.push_str(&format!("      {title}\n"));
+        }
         // Before the detail, because it is what the detail is evidence *for*: the
         // detail is the producer's own sentence about how the dispatch ended, and
         // this says what that means for the node — which used to be a thing a
@@ -4289,13 +4338,98 @@ pub fn results(view: &RunView) -> String {
 fn superseded_lines(view: &RunView) -> String {
     let mut out = String::new();
     for (node, replacement) in &view.state.superseded {
-        out.push_str(&format!(
-            "  {:<24} superseded — retried as {}\n",
-            one_line(node),
-            one_line(replacement)
-        ));
+        match rework_phrase(&view.state, node) {
+            Some(reworked) => out.push_str(&format!("  {:<24} {reworked}\n", one_line(node))),
+            None => out.push_str(&format!(
+                "  {:<24} superseded — retried as {}\n",
+                one_line(node),
+                one_line(replacement)
+            )),
+        }
     }
     out
+}
+
+/// What a `rework` asked of the node it superseded — its replacement, its reason
+/// and the review comments it answers — or `None` for a node no rework replaced.
+///
+/// Named once because `results` and `status` both say it, for the reason
+/// [`preserved_phrase`] is.
+fn rework_phrase(state: &RunState, id: &str) -> Option<String> {
+    let rework = state.reworks.get(id)?;
+    let answering = if rework.comments.is_empty() {
+        "naming no review comment".to_owned()
+    } else {
+        format!(
+            "answering {}",
+            rework
+                .comments
+                .iter()
+                .map(|comment| one_line(&comment.url))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    Some(format!(
+        "reworked — as {}: {}; {answering}",
+        one_line(&rework.replacement),
+        one_line(&rework.reason)
+    ))
+}
+
+/// What the last restack a node published did — the parent it was brought onto,
+/// at which commit, and whether an agent turn was spent on it — or `None` for a
+/// node never restacked.
+fn restack_phrase(state: &RunState, id: &str) -> Option<String> {
+    let record = state.restacks.get(id)?;
+    let parent = |onto: &crate::payload::RestackOnto| {
+        let node = state.stacks.get(id).and_then(|stack| {
+            stack
+                .parents
+                .iter()
+                .find(|parent| parent.branch == onto.branch)
+                .map(|parent| parent.node.clone())
+        });
+        match node {
+            Some(node) => format!(
+                "{}'s branch {} at {}",
+                one_line(&node),
+                one_line(&onto.branch),
+                one_line(&onto.head)
+            ),
+            None => format!("{} at {}", one_line(&onto.branch), one_line(&onto.head)),
+        }
+    };
+    Some(format!(
+        "restacked onto {}, {} an agent turn",
+        record
+            .onto
+            .iter()
+            .map(parent)
+            .collect::<Vec<_>>()
+            .join(" and "),
+        if record.restacked.agent_dispatched {
+            "with"
+        } else {
+            "without"
+        }
+    ))
+}
+
+/// A node whose rework left its change request's title unverified: the title it
+/// kept, why nothing checked it, and the op that sets one — or `None`.
+fn unverified_title_phrase(state: &RunState, id: &str) -> Option<String> {
+    let unverified = state.titles_unverified.get(id)?;
+    Some(format!(
+        "title unverified — {:?}{}: {}; `retitle` sets one",
+        one_line(&unverified.title),
+        state
+            .change_urls
+            .get(id)
+            .map(|url| format!(" on {}", one_line(url)))
+            .unwrap_or_default(),
+        one_line(&unverified.reason)
+    ))
 }
 
 /// `onepipeline transcript` — one dispatch's turns, its tools, and its words.

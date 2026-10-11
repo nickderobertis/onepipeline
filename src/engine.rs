@@ -501,8 +501,19 @@ pub struct Settlement {
     /// The stack a lifecycle node was drafted on, where it had stack parents.
     /// Boxed, because only a stacked node's settlement carries one.
     pub(crate) stack: Option<Box<crate::payload::SettledStack>>,
+    /// What a restack of the node did, on the settlement that ends one: the
+    /// `node-restacked` the loop records ahead of it.
+    pub(crate) restacked: Option<Restacked>,
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
+
+/// What one restack did beyond its publication.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Restacked {
+    /// Whether an agent was dispatched to conclude a conflict — the node's own
+    /// merge, or its stack base's.
+    pub(crate) agent_dispatched: bool,
+}
 
 impl Settlement {
     /// A node that settled without a dispatch.
@@ -522,6 +533,7 @@ impl Settlement {
             completed_steps: Vec::new(),
             base: None,
             stack: None,
+            restacked: None,
         }
     }
 }
@@ -563,6 +575,50 @@ pub(crate) enum Message {
     /// The note-delivery thread's answer for the one envelope it was handed:
     /// what each of its commands' conversations said. See [`NoteDeliveries`].
     NoteAnswered(Box<NoteAnswer>),
+    /// A rework's publication wrote a new title onto its change request.
+    ChangeRetitled(Box<crate::payload::ChangeRetitled>),
+    /// A rework's publication left its change request's title unverified.
+    TitleUnverified(Box<UnverifiedTitle>),
+}
+
+/// A rework's title nothing verified, on its way to the record and the planner:
+/// the record's own payload, and the change request a person reads it on.
+pub(crate) struct UnverifiedTitle {
+    /// What `title-unverified` records.
+    pub unverified: crate::payload::TitleUnverified,
+    /// Where a person reads the change request it is the title of.
+    pub change_url: String,
+}
+
+/// The non-blocking surface a title nothing verified raises: the node, the
+/// title, the change request, and the `retitle` that sets one.
+///
+/// A report rather than a question: nothing waits on it, and a `retitle` of the
+/// node — or a later publication that retitles it — is what clears the title's
+/// unverified state on the run's record.
+fn title_unverified_surface(title: &UnverifiedTitle) -> Surface {
+    let node = &title.unverified.node;
+    Surface {
+        id: 0,
+        kind: crate::channel::SurfaceKind::TITLE_UNVERIFIED.into(),
+        message: format!(
+            "node '{node}' was reworked and its change request {url} still carries the title \
+             {current:?}, which nothing verified still describes the change: {reason}.\n\
+             Read the change and answer with a `retitle` of '{node}' naming a Conventional \
+             Commit subject — or one restating this title, if it still says what the change \
+             does.",
+            url = title.change_url,
+            current = title.unverified.title,
+            reason = title.unverified.reason,
+        ),
+        source: crate::channel::source::RECONCILER.into(),
+        blocking: false,
+        queued_at: sys::now_millis(),
+        abandoned: false,
+        asker: None,
+        workstream: Some(node.clone()),
+        correlation: None,
+    }
 }
 
 /// A node's settlement, and the thread that is waiting to hear it was recorded.
@@ -1480,6 +1536,28 @@ fn converge(
             unpublished = true;
             moved = true;
         }
+        // And every draft stacked on a branch the run has seen move since the
+        // draft settled, within what the plan's concurrency leaves: brought onto
+        // the new head the moment its parent pushed, before that parent's checks.
+        let statuses = statuses_of(&mut derived, state);
+        if start_restacks(
+            paths,
+            journal,
+            state,
+            &statuses,
+            &rules,
+            launch,
+            &tx,
+            &mut in_flight,
+            &paused,
+            &releases,
+            &mut workspaces,
+            &notes_in_flight,
+        )? {
+            derived = None;
+            unpublished = true;
+            moved = true;
+        }
 
         // Why every node the loop is not running and has not settled is not
         // running, after the dispatches this pass started: a node the frontier
@@ -1907,9 +1985,52 @@ fn converge(
                         }
                     }
                 }
+                // Before the node's settlement, which the dispatch thread sends
+                // after these: the title the settlement's publication left is on the
+                // record when the settlement is.
+                Message::ChangeRetitled(retitled) => {
+                    journal.emit(
+                        journal::PipelineKind::ChangeRetitled,
+                        journal::labels(&paths.run, Some(&retitled.node)),
+                        payload_of(&*retitled),
+                    )?;
+                    state.refresh(paths);
+                    derived = None;
+                    unpublished = true;
+                }
+                Message::TitleUnverified(title) => {
+                    journal.emit(
+                        journal::PipelineKind::TitleUnverified,
+                        journal::labels(&paths.run, Some(&title.unverified.node)),
+                        payload_of(&title.unverified),
+                    )?;
+                    raise(paths, journal, title_unverified_surface(&title))?;
+                    state.refresh(paths);
+                }
                 Message::Settled(settled) => {
                     let settlement = &settled.settlement;
                     in_flight.remove(&settlement.node);
+                    // A restack says what it did ahead of the node's ordinary
+                    // settlement, which follows it as any settlement does.
+                    if let Some(restacked) = settlement.restacked {
+                        journal.emit(
+                            journal::PipelineKind::NodeRestacked,
+                            journal::labels(&paths.run, Some(&settlement.node)),
+                            payload_of(&crate::payload::NodeRestacked {
+                                node: settlement.node.clone(),
+                                head: settlement
+                                    .head
+                                    .clone()
+                                    .or_else(|| state.heads.get(&settlement.node).cloned())
+                                    .unwrap_or_default(),
+                                agent_dispatched: restacked.agent_dispatched,
+                                outcome: settlement
+                                    .outcome
+                                    .clone()
+                                    .unwrap_or_else(|| settlement.status.as_str().to_owned()),
+                            }),
+                        )?;
+                    }
                     settle(paths, journal, settlement)?;
                     // Only now may the dispatch thread let go of the registry
                     // entries its node's dispatches held: the settlement is on
@@ -5765,6 +5886,18 @@ fn start_ready(
         // every node a plan naming neither new field carries — and the dispatch
         // is then composed exactly as it always was.
         let references = releases.references(&node);
+        // A rework's replacement publishes onto the change request its branch
+        // already holds, and checks its title against the change it now makes.
+        let course = match state
+            .reworks
+            .values()
+            .find(|rework| rework.replacement == node.id)
+        {
+            Some(rework) => Coursed::Rework(crate::lifecycle::Reworking {
+                title_stated: rework.title.is_some(),
+            }),
+            None => Coursed::Work,
+        };
         spawn(
             paths,
             rules,
@@ -5772,6 +5905,7 @@ fn start_ready(
             &node,
             &references,
             stack,
+            course,
             cancel.clone(),
             tx.clone(),
             resume,
@@ -5796,6 +5930,102 @@ fn start_ready(
         state.refresh(paths);
     }
     Ok(settled_here)
+}
+
+/// Start the restack every draft owes, bounded by `concurrency` beside the
+/// dispatches already running: see [`crate::stack::restacks_owed`] for which
+/// drafts owe one.
+///
+/// Each is recorded `node-restack-started`, naming the heads it brings the node
+/// onto, before it is spawned, and is in flight as a dispatch is — counted against
+/// the plan's concurrency, refused a `rework` over, and settled through the same
+/// message. Nothing starts once the run's shutdown has begun, nothing a decision
+/// point holds is restacked, and a node whose identity has no room for the
+/// session is left for a later pass.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the reconcile loop's borrowed state, as `start_ready` takes it"
+)]
+fn start_restacks(
+    paths: &RunPaths,
+    journal: &mut Journal,
+    state: &mut Projected,
+    statuses: &BTreeMap<String, NodeStatus>,
+    rules: &ExecutorRules,
+    launch: &LaunchRecord,
+    tx: &Sender<Message>,
+    in_flight: &mut BTreeMap<String, Dispatch>,
+    paused: &BTreeSet<String>,
+    releases: &crate::release::Watch,
+    workspaces: &mut crate::pool::Workspaces,
+    notes_in_flight: &DeliveriesInFlight,
+) -> Result<bool> {
+    if crate::shutdown::begun(paths) {
+        return Ok(false);
+    }
+    let concurrency = state.graph.concurrency as usize;
+    let owed = crate::stack::restacks_owed(state, statuses, &|node| {
+        in_flight.contains_key(node) || paused.contains(node)
+    });
+    let mut started = false;
+    for owed in owed {
+        if in_flight.len() >= concurrency {
+            break;
+        }
+        let Some(mut node) = state.graph.get(&owed.node).cloned() else {
+            continue;
+        };
+        node.branch = Some(owed.branch.clone());
+        node.base_branch = Some(owed.stack.base().to_owned());
+        node.resume = None;
+        if let Some(request) = crate::vcs::request_for(&node) {
+            if workspaces.admit(&node.id, &request) == crate::pool::Admission::Held {
+                continue;
+            }
+        }
+        journal.emit(
+            journal::PipelineKind::NodeRestackStarted,
+            journal::labels(&paths.run, Some(&node.id)),
+            payload_of(&crate::payload::NodeRestackStarted {
+                node: node.id.clone(),
+                onto: owed.onto(),
+                cause: owed.cause,
+            }),
+        )?;
+        let cancel = CancellationToken::new();
+        let references = releases.references(&node);
+        spawn(
+            paths,
+            rules,
+            launch,
+            &node,
+            &references,
+            Some(owed.stack),
+            Coursed::Restack,
+            cancel.clone(),
+            tx.clone(),
+            None,
+            notes_in_flight,
+        )?;
+        let now = Instant::now();
+        in_flight.insert(
+            node.id.clone(),
+            Dispatch {
+                node,
+                cancel,
+                started: now,
+                last_progress: now,
+                reported_quiet: false,
+                control: None,
+                presentations: crate::note::Presentations::default(),
+            },
+        );
+        started = true;
+    }
+    if started {
+        state.refresh(paths);
+    }
+    Ok(started)
 }
 
 /// Whether a node `node` superseded still has a dispatch in flight, which holds the
@@ -5896,6 +6126,14 @@ fn may_hold_a_note(state: &RunState, node: &str) -> bool {
     state.dispatched_at.contains_key(node) || state.pending_context.contains_key(node)
 }
 
+/// What one spawned execution is beyond the node's own task, owned so it can
+/// cross to the dispatch thread: [`crate::lifecycle::Course`]'s three.
+enum Coursed {
+    Work,
+    Rework(crate::lifecycle::Reworking),
+    Restack,
+}
+
 /// Run one node's dispatch on a thread, reporting back to the single writer.
 #[allow(
     clippy::too_many_arguments,
@@ -5910,6 +6148,7 @@ fn spawn(
     node: &Node,
     references: &[crate::plan::CrossRepoReference],
     stack: Option<crate::stack::Stack>,
+    course: Coursed,
     cancel: CancellationToken,
     tx: Sender<Message>,
     resume: Option<Box<crate::lifecycle::Continuation>>,
@@ -5966,6 +6205,11 @@ fn spawn(
                     &node,
                     &references,
                     stack.as_ref(),
+                    match &course {
+                        Coursed::Work => crate::lifecycle::Course::Work,
+                        Coursed::Rework(rework) => crate::lifecycle::Course::Rework(rework),
+                        Coursed::Restack => crate::lifecycle::Course::Restack,
+                    },
                     &cancel,
                     &tx,
                     &ended,

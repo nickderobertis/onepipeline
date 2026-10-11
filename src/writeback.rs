@@ -292,6 +292,9 @@ struct Snapshot {
     /// The replacement each superseded node was retried under — what a lineage is read off,
     /// and nothing else: never a title, never an id's suffix.
     superseded: BTreeMap<String, String>,
+    /// What each rework's replacement answers, keyed by the replacement: the record
+    /// `onepipeline.rework` carries on its item.
+    reworks: BTreeMap<String, Value>,
     project_metadata: BTreeMap<String, Value>,
     /// Whether a node the run has not started is written as claimed or released.
     claim: Claim,
@@ -988,6 +991,7 @@ fn snapshot_of(
         stated_landings: state.stated_landings.clone(),
         settlements: settlements(paths),
         superseded: state.superseded.clone(),
+        reworks: reworks_of(state),
         project_metadata: state
             .plan
             .as_ref()
@@ -3255,6 +3259,27 @@ fn write_shadow(
     Ok(())
 }
 
+/// The `onepipeline.rework` record of each rework's replacement, keyed by the
+/// replacement: the node it replaces, the reason, the instruction and each review
+/// comment's id and URL.
+fn reworks_of(state: &RunState) -> BTreeMap<String, Value> {
+    state
+        .reworks
+        .iter()
+        .map(|(replaces, rework)| {
+            (
+                rework.replacement.clone(),
+                json!({
+                    "replaces": replaces,
+                    "reason": rework.reason,
+                    "instruction": rework.instruction,
+                    "comments": rework.comments,
+                }),
+            )
+        })
+        .collect()
+}
+
 /// Targeted updates bypass the copy, so they must also replace the shadow's old documents.
 fn refresh_shadow(snapshot: &Snapshot, baseline: &Baseline) -> Result<(), String> {
     let tasks = snapshot
@@ -3347,6 +3372,9 @@ fn task_document(
     metadata.insert(NODE_KEY.into(), json!(head));
     if !superseded.is_empty() {
         metadata.insert(SUPERSEDES_KEY.into(), json!(superseded));
+    }
+    if let Some(rework) = snapshot.reworks.get(head.as_str()) {
+        metadata.insert(crate::taskgraph::REWORK_KEY.into(), rework.clone());
     }
     for (key, value) in wire {
         metadata.insert(format!("onepipeline.{key}"), value);
@@ -5865,6 +5893,7 @@ mod tests {
                     stated_landings: BTreeMap::new(),
                     settlements: BTreeMap::new(),
                     superseded: BTreeMap::new(),
+                    reworks: BTreeMap::new(),
                     project_metadata: BTreeMap::from([(
                         "onepipeline.concurrency".into(),
                         json!(4),

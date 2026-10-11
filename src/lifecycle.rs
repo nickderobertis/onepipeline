@@ -98,6 +98,7 @@ pub fn execute(
     node: &Node,
     references: &[crate::plan::CrossRepoReference],
     stack: Option<&crate::stack::Stack>,
+    course: Course<'_>,
     cancel: &crate::executor::CancellationToken,
     tx: &Sender<Message>,
     ended: &engine::EndedDispatches,
@@ -105,6 +106,7 @@ pub fn execute(
 ) -> engine::Ending {
     let mut placed = Placed {
         stack: stack.map(|stack| Box::new(stack.settled(&BTreeMap::new()))),
+        restacking: matches!(course, Course::Restack),
         ..Placed::default()
     };
     match execute_placed(
@@ -114,6 +116,7 @@ pub fn execute(
         node,
         references,
         stack,
+        course,
         cancel,
         tx,
         ended,
@@ -149,6 +152,11 @@ struct Placed {
     change_url: Option<String>,
     /// The stack it was drafted on, where it had stack parents.
     stack: Option<Box<crate::payload::SettledStack>>,
+    /// Whether this execution is a restack of the node.
+    restacking: bool,
+    /// Whether any attempt dispatched an agent: what a restack's settlement
+    /// reports it did.
+    agent_dispatched: bool,
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 // llmlint: ignore-block[invalid_states_unrepresentable] the graph references below are the
@@ -172,6 +180,9 @@ impl Placed {
                     .flatten()
             }),
             stack: settlement.stack.clone().or_else(|| self.stack.clone()),
+            restacked: self.restacking.then_some(engine::Restacked {
+                agent_dispatched: self.agent_dispatched,
+            }),
             ..settlement
         }
     }
@@ -188,6 +199,7 @@ fn execute_placed(
     node: &Node,
     references: &[crate::plan::CrossRepoReference],
     stack: Option<&crate::stack::Stack>,
+    course: Course<'_>,
     cancel: &crate::executor::CancellationToken,
     tx: &Sender<Message>,
     ended: &engine::EndedDispatches,
@@ -251,8 +263,8 @@ fn execute_placed(
     };
     loop {
         let preserved = match attempt_once(
-            executor, paths, launch, &node, references, stack, &notes, cancel, tx, ended, attempt,
-            placed,
+            executor, paths, launch, &node, references, stack, course, &notes, cancel, tx, ended,
+            attempt, placed,
         ) {
             Attempt::Settled(settlement) => return engine::Ending::Settled(*settlement),
             Attempt::Preserving(preserved) => preserved,
@@ -514,6 +526,7 @@ fn attempt_once(
     node: &Node,
     references: &[crate::plan::CrossRepoReference],
     stack: Option<&crate::stack::Stack>,
+    course: Course<'_>,
     notes: &[crate::note::RecordedNote],
     cancel: &crate::executor::CancellationToken,
     tx: &Sender<Message>,
@@ -596,7 +609,45 @@ fn attempt_once(
         .map(|resume| resume.completed_steps.clone())
         .unwrap_or_default();
 
-    for (step, controls) in &steps {
+    // A restack's first attempt opens the node's own branch on its stack base
+    // itself, rather than through a dispatch: `onevcs` merges the base's new head
+    // in at the open, and an agent is dispatched only where that merge stopped on
+    // a conflict. A later attempt — its publication refused — is a re-dispatch on
+    // the same branch like any other, and runs the steps below.
+    let restacking = matches!(course, Course::Restack) && attempt == std::num::NonZeroU32::MIN;
+    // Whether the node's own merge needed an agent, which is what decides whether
+    // its content changed and so whether its publication drafts.
+    let mut merged_by_agent = false;
+    if restacking {
+        match restack_open(
+            executor, paths, launch, node, references, stack, &steps, notes, cancel, tx, ended,
+            attempt, placed,
+        ) {
+            Ok(opened) => {
+                merged_by_agent = opened.merged_by_agent;
+                worktree = Some(opened.session.worktree.clone());
+                base = Some(opened.session.base.clone());
+                placed.base = base.clone();
+                branch = Some(opened.session.branch.clone());
+                handed = opened.session.conflict.clone();
+                stream = crate::vcs::follow(
+                    &opened.session.token,
+                    vcs_filter,
+                    relay_into(tx, whose.clone()),
+                );
+                session = Some(opened.session.token.clone());
+                if let Some(settled) = opened.settled {
+                    check_criteria(node, worktree.as_deref(), tx);
+                    end_session(stream, tx, session.as_ref(), &whose, vcs_filter);
+                    return Attempt::settled(Settlement { branch, ..settled });
+                }
+            }
+            Err(ended) => return *ended,
+        }
+    }
+    let steps_now: &[(Step, NodeControls)] = if restacking { &[] } else { &steps };
+
+    for (step, controls) in steps_now {
         if declared_steps && completed.iter().any(|id| id == &step.id) {
             // Already on the preserved branch. Re-running it would redo work the
             // branch carries, which for a step that opened a change is not
@@ -707,13 +758,14 @@ fn attempt_once(
                     ended,
                     attempt,
                 ) {
-                    Ok(assembled) => {
+                    Ok((assembled, dispatched)) => {
                         let heads = assembled
                             .parents
                             .iter()
                             .map(|parent| (parent.branch.clone(), parent.head.0.clone()))
                             .collect();
                         placed.stack = Some(Box::new(assembling.settled(&heads)));
+                        placed.agent_dispatched |= dispatched;
                     }
                     Err(ended) => return *ended,
                 }
@@ -740,6 +792,7 @@ fn attempt_once(
             engine::Attempted::Drained(drained) => *drained,
             engine::Attempted::Exhausted(refusal) => return Attempt::Exhausted(Box::new(refusal)),
         };
+        placed.agent_dispatched = true;
         // The session the dispatch opened is what publication needs, whether or
         // not the step succeeded: a cancelled step's commits are preserved on
         // the branch it left behind.
@@ -811,6 +864,14 @@ fn attempt_once(
         );
     }
 
+    // What the publication drafts: a restack whose own merge was clean changed
+    // nothing of the node's content and drafts nothing, and a rework's checks its
+    // title against the change it now makes.
+    let closeout = match course {
+        Course::Restack if restacking && !merged_by_agent => Closeout::Untouched,
+        Course::Rework(rework) => Closeout::Reworked(rework),
+        Course::Restack | Course::Work => Closeout::Drafted,
+    };
     let mut attempted = publish(
         executor,
         paths,
@@ -827,6 +888,7 @@ fn attempt_once(
         &token,
         branch,
         attempt,
+        closeout,
     );
     if let Attempt::Preserving(preserved) = &mut attempted {
         preserved.handed = handed;
@@ -850,6 +912,162 @@ fn attempt_once(
     placed.change_url = crate::vcs::change_opened_in(&token).or_else(|| placed.change_url.take());
     end_session(stream, tx, Some(&token), &whose, vcs_filter);
     attempted
+}
+
+/// What a lifecycle node's execution is, beyond its own task.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Course<'a> {
+    /// Its work, dispatched as the plan states it.
+    Work,
+    /// A rework's replacement: its work, published onto the change request
+    /// already open from its branch, with its title checked against the change.
+    Rework(&'a Reworking),
+    /// A restack: its branch brought onto its stack parents' new heads by a
+    /// merge, an agent dispatched only to conclude a conflict.
+    Restack,
+}
+
+/// The session a restack's first attempt opened, and what that took.
+struct RestackOpened {
+    /// The node's own session, on its branch, with its stack base merged in.
+    session: onevcs::Session,
+    /// Whether the node's own merge stopped on a conflict an agent concluded.
+    merged_by_agent: bool,
+    /// The settlement, where the agent concluding that merge did not succeed.
+    settled: Option<Settlement>,
+}
+
+/// Open a restack's session: its stack base advanced first, where it has one,
+/// and the node's own branch opened on its base with that base's new head merged
+/// in — by `onevcs`, at the open, and never by a rebase: each draft's diff against
+/// its base stays its own.
+///
+/// A merge that stopped on a conflict is handed to the node's own worker, in
+/// that session, with the merge-in-progress task — the stack base's through
+/// [`assemble`], the node's own here.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one attempt's whole context, which is `attempt_once`'s own"
+)]
+fn restack_open(
+    executor: &dyn Executor,
+    paths: &RunPaths,
+    launch: &Launch,
+    node: &Node,
+    references: &[crate::plan::CrossRepoReference],
+    stack: Option<&crate::stack::Stack>,
+    steps: &[(Step, NodeControls)],
+    notes: &[crate::note::RecordedNote],
+    cancel: &crate::executor::CancellationToken,
+    tx: &Sender<Message>,
+    ended: &engine::EndedDispatches,
+    attempt: std::num::NonZeroU32,
+    placed: &mut Placed,
+) -> std::result::Result<RestackOpened, Box<Attempt>> {
+    let failed = |why: String| {
+        Box::new(Attempt::settled(Settlement {
+            detail: Some(crate::views::one_line(&format!(
+                "the restack could not open the node's branch: {why}"
+            ))),
+            branch: node.branch.clone(),
+            ..Settlement::plain(
+                &node.id,
+                NodeStatus::Failed,
+                Some(engine::INFRASTRUCTURE_FAILURE),
+            )
+        }))
+    };
+    // llmlint: ignore-block[changed_behavior_has_e2e] the engine starts a restack only for a
+    // node naming a `repo` and settled with a branch, and every node it validated has a step
+    // to dispatch: neither arm is a state a plan can put a restack in.
+    let (Some(mut request), Some((step, controls))) =
+        (crate::vcs::request_for(node), steps.first())
+    else {
+        return Err(failed(
+            "the node names no repository or step to restack".into(),
+        ));
+    }; // llmlint: ignore-end[changed_behavior_has_e2e]
+    request.branch_name = None;
+    let graph = engine::node_graph(
+        step.agent_graph.as_ref().or(node.agent_graph.as_ref()),
+        &launch.node_graph,
+    );
+    let task = with_stack(step.rendered_task_carrying(node, references, notes), stack);
+    if let Some(
+        assembling @ crate::stack::Stack::OnStackBase {
+            root,
+            branch,
+            parents,
+        },
+    ) = stack
+    {
+        let merging = Merging {
+            graph: &graph,
+            task: &task,
+            persona: step.persona.as_deref(),
+            controls: *controls,
+        };
+        let (assembled, dispatched) = assemble(
+            executor,
+            paths,
+            node,
+            (root, branch, parents.as_slice()),
+            &merging,
+            cancel,
+            tx,
+            ended,
+            attempt,
+        )?;
+        let heads = assembled
+            .parents
+            .iter()
+            .map(|parent| (parent.branch.clone(), parent.head.0.clone()))
+            .collect();
+        placed.stack = Some(Box::new(assembling.settled(&heads)));
+        placed.agent_dispatched |= dispatched;
+    }
+    let labels = engine::dispatch_labels(&paths.run, &node.id, None, node.persona.as_deref());
+    let session = crate::executor::open_session(&request, &labels)
+        .map_err(|error| failed(error.to_string()))?;
+    let Some(merge) = crate::vcs::merge_in_progress(&session) else {
+        return Ok(RestackOpened {
+            session,
+            merged_by_agent: false,
+            settled: None,
+        });
+    };
+    let task = crate::plan::with_merge_in_progress(&task, &merge);
+    let declared_steps = node.steps.is_some();
+    let build = |attempt| DispatchRequest {
+        graph: graph.clone(),
+        task: task.clone(),
+        labels: engine::dispatch_labels(
+            &paths.run,
+            &node.id,
+            declared_steps.then_some(step.id.as_str()),
+            step.persona.as_deref(),
+        ),
+        controls: *controls,
+        workspace: WorkspaceSpec::Path(session.worktree.clone()),
+        cancel: cancel.clone(),
+        attempt,
+    };
+    placed.agent_dispatched = true;
+    let drained = match engine::attempt(executor, node, cancel, tx, &build, ended, attempt) {
+        engine::Attempted::Drained(drained) => *drained,
+        // llmlint: ignore[changed_behavior_has_e2e] an exhausted pool is a session open's
+        // refusal, and this dispatch opens none: it runs in the worktree of the session the
+        // restack already opened.
+        engine::Attempted::Exhausted(refusal) => {
+            return Err(Box::new(Attempt::Exhausted(Box::new(refusal))))
+        }
+    };
+    let settled = (drained.settlement.status != NodeStatus::Done).then_some(drained.settlement);
+    Ok(RestackOpened {
+        session,
+        merged_by_agent: true,
+        settled,
+    })
 }
 
 /// `task`, with the Stack section after it where the node has stack parents.
@@ -937,7 +1155,7 @@ fn assemble(
     tx: &Sender<Message>,
     ended: &engine::EndedDispatches,
     attempt: std::num::NonZeroU32,
-) -> Result<onevcs::StackBase, Box<Attempt>> {
+) -> Result<(onevcs::StackBase, bool), Box<Attempt>> {
     let failed = |why: String| {
         Box::new(Attempt::settled(Settlement {
             detail: Some(format!(
@@ -988,7 +1206,7 @@ fn assemble(
         let (session, conflict) = match &assembled.outcome {
             onevcs::StackBaseOutcome::Created
             | onevcs::StackBaseOutcome::Advanced
-            | onevcs::StackBaseOutcome::Unchanged => return Ok(assembled),
+            | onevcs::StackBaseOutcome::Unchanged => return Ok((assembled, concluded > 0)),
             onevcs::StackBaseOutcome::Conflicted { session, conflict } => (session, conflict),
             // llmlint: ignore-block[changed_behavior_has_e2e] `StackBaseOutcome` is
             // `#[non_exhaustive]`, and the linked release answers the four outcomes above
@@ -1252,6 +1470,7 @@ fn publish(
     token: &onevcs::SessionToken,
     branch: Option<String>,
     attempt: std::num::NonZeroU32,
+    closeout: Closeout<'_>,
 ) -> Attempt {
     // A branch level with its base has nothing to draft a body for and nothing
     // to push, so neither is spent on it. Asked of the session's own record —
@@ -1291,29 +1510,65 @@ fn publish(
     // Whether it was this session's worker that drafted it, read before this
     // closeout writes anything of its own onto the same stream.
     let worker_drafted = held.is_some() && crate::vcs::change_drafted_in(token);
+    // What a rework's drafter is shown beside the task: the title the change
+    // request carries now, and the patch the change makes against its base after
+    // this rework — the hunks, not a summary of them.
+    let reworked = match closeout {
+        Closeout::Reworked(_) => Some(ReworkDrafting {
+            title: node
+                .title
+                .clone()
+                .or_else(|| held.as_ref().map(|change| change.title.clone()))
+                .unwrap_or_default(),
+            base: base.unwrap_or_default().to_owned(),
+            net_diff: match worktree.zip(base) {
+                Some((worktree, base)) => crate::vcs::net_diff(worktree, base),
+                None => Err("the session's record named no worktree and base to read it in".into()),
+            },
+        }),
+        Closeout::Drafted | Closeout::Untouched => None,
+    };
     // The plan's own body wins outright and spends no dispatch: a planner who
-    // wrote the change request has already done the drafting.
-    let (body, undrafted) = match node.body.clone() {
-        Some(body) => (Some(body), None),
-        // `None` is a launch that named no drafting graph, which drafts nothing
-        // and is not a failure: this crate ships the flag, not the document.
-        None => match drafted(
-            executor,
-            paths,
-            launch,
-            node,
-            stack,
-            worktree,
-            held.as_ref(),
-            cancel,
-            tx,
-            ended,
-            attempt,
-        ) {
-            None => (None, None),
-            Some(Drafted::Body(body)) => (Some(body), None),
-            Some(Drafted::Undrafted(ending)) => (None, Some(ending)),
-        },
+    // wrote the change request has already done the drafting. A restack whose
+    // merge needed no agent drafts nothing either: its content did not change,
+    // so its body and its title stand as they are.
+    let drafting = if matches!(closeout, Closeout::Untouched) {
+        None
+    } else {
+        match node.body.clone() {
+            Some(body) => Some(Drafting::Planned(body)),
+            // `None` is a launch that named no drafting graph, which drafts nothing
+            // and is not a failure: this crate ships the flag, not the document.
+            None => drafted(
+                executor,
+                paths,
+                launch,
+                node,
+                stack,
+                reworked.as_ref(),
+                worktree,
+                held.as_ref(),
+                cancel,
+                tx,
+                ended,
+                attempt,
+            )
+            .map(Drafting::Drafted),
+        }
+    };
+    // Which title a rework's change request carries, decided before anything is
+    // written: the op's, else the drafter's valid `replaced` one, else the one it
+    // has — said to be unverified wherever nothing checked it.
+    let titled = match closeout {
+        Closeout::Reworked(rework) => Some(rework_title(node, rework, drafting.as_ref())),
+        Closeout::Drafted | Closeout::Untouched => None,
+    };
+    let (body, undrafted) = match drafting {
+        None => (None, None),
+        Some(Drafting::Planned(body)) | Some(Drafting::Drafted(Drafted::Body(body, _))) => {
+            (Some(body), None)
+        }
+        Some(Drafting::Drafted(Drafted::Undrafted(ending))) => (None, Some(ending)),
     };
     // Said twice, and only where a drafting dispatch was configured and
     // attempted: in the run's own record at the moment it happened, and on the
@@ -1343,22 +1598,35 @@ fn publish(
     // settlement says so beside the publication's own words, exactly as a
     // drafting failure is said — the body exists, and the reader is owed the
     // reason it is not on the change request.
-    let (described, undescribed) = match (&held, &body) {
-        (Some(change), Some(body)) => {
-            match crate::vcs::describe_change(token, node.title.as_deref(), body) {
-                Ok(_) => (true, None),
-                Err(error) => {
-                    let why = format!(
-                        "the drafted description was not written onto {}: {error}",
-                        change.url
-                    );
-                    eprintln!("onepipeline: node '{}': {why}", node.id);
-                    (false, Some(why))
-                }
-            }
-        }
-        _ => (false, None),
+    // A rework's title is the one decided above, written with the body — or on
+    // its own over the description the host holds, where the op stated one and
+    // nothing was drafted to write with it.
+    let title = match &titled {
+        Some(Titled::Changed { to, .. }) => Some(to.as_str()),
+        _ => node.title.as_deref(),
     };
+    let rewritten = match (&held, &body, &titled) {
+        (Some(change), Some(body), _) => Some((change, body.as_str())),
+        (Some(change), None, Some(Titled::Changed { .. })) => Some((change, change.body.as_str())),
+        _ => None,
+    };
+    let (described, undescribed) = match rewritten {
+        Some((change, written)) => match crate::vcs::describe_change(token, title, written) {
+            Ok(_) => (body.is_some(), None),
+            Err(error) => {
+                let why = format!(
+                    "the drafted description was not written onto {}: {error}",
+                    change.url
+                );
+                eprintln!("onepipeline: node '{}': {why}", node.id);
+                (false, Some(why))
+            }
+        },
+        None => (false, None),
+    };
+    if let (Some(titled), Some(change)) = (titled, &held) {
+        report_title(node, titled, change, undescribed.is_none(), tx);
+    }
     // One aside beside a publication's own words, and **not** only an undrafted
     // body: a body that was not drafted, or one that was drafted and could not
     // be written onto the change request. Never both — the second needs a body
@@ -2443,6 +2711,200 @@ const NO_DESCRIPTION: &str = "(the worker left no description)";
 /// and the two environment variables that verb reads.
 const WORKER_TRANSCRIPT_HEADING: &str = "## Worker transcript";
 
+/// What a lifecycle node's publication drafts.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Closeout<'a> {
+    /// A first publication, or a republication whose content changed: drafted
+    /// as every publication is.
+    Drafted,
+    /// A rework's: drafted, and its title held against the change's net diff.
+    Reworked(&'a Reworking),
+    /// A restack whose merge needed no agent: the content did not change, so it is
+    /// published as it stands, its body and its title untouched.
+    Untouched,
+}
+
+/// What a rework's publication knows of the rework it publishes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Reworking {
+    /// Whether the op stated the title, which then outranks the drafter's.
+    pub(crate) title_stated: bool,
+}
+
+/// What a rework's drafting dispatch is shown beside the task.
+struct ReworkDrafting {
+    /// The title the change request carries now.
+    title: String,
+    /// The branch the change is drafted against.
+    base: String,
+    /// The change's patch against that base, or why it could not be read.
+    net_diff: std::result::Result<String, String>,
+}
+
+/// The heading the rework's current title is shown under.
+const CURRENT_TITLE_HEADING: &str = "## Current title";
+
+/// The heading the rework's net diff is shown under.
+const NET_DIFF_HEADING: &str = "## Net diff";
+
+/// The heading the rework's title check is asked for under.
+const TITLE_CHECK_HEADING: &str = "## Title check";
+
+impl ReworkDrafting {
+    /// The sections a rework's drafting task ends with: the current title, the
+    /// net diff, and the `title_check` it is asked to answer.
+    fn section(&self) -> String {
+        let diff = match &self.net_diff {
+            Ok(patch) if patch.trim().is_empty() => {
+                "The branch carries no change against its base.".to_owned()
+            }
+            Ok(patch) => format!(
+                "The patch this change makes against its base `{}`, as the branch stands \
+                 after this rework:\n\n```diff\n{}\n```",
+                self.base,
+                patch.trim_end()
+            ),
+            Err(why) => format!("The net diff could not be read: {why}"),
+        };
+        format!(
+            "{CURRENT_TITLE_HEADING}\n\n{title}\n\n{NET_DIFF_HEADING}\n\n{diff}\n\n\
+             {TITLE_CHECK_HEADING}\n\nThis change request was reworked, so its title may no \
+             longer say what it does. Beside `body`, answer `title_check`: \
+             `{{\"verdict\": \"keeps\"}}` when the current title above still describes the net \
+             diff, or `{{\"verdict\": \"replaced\", \"title\": \"<subject>\"}}` with a Conventional \
+             Commit subject of at most {limit} characters when it does not.",
+            title = self.title,
+            limit = onevcs::provenance::SUBJECT_LIMIT,
+        )
+    }
+}
+
+/// What a publication's closeout had to write as the change request's body.
+enum Drafting {
+    /// The plan's own.
+    Planned(String),
+    /// What the drafting dispatch ended with.
+    Drafted(Drafted),
+}
+
+/// The title a rework's change request is left with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Titled {
+    /// The one it carries, which the drafter's `keeps` verified.
+    Kept,
+    /// A new one, and who decided it.
+    Changed {
+        to: String,
+        by: crate::payload::RetitledBy,
+    },
+    /// The one it carries, which nothing verified, and why.
+    Unverified(String),
+}
+
+/// What a body drafter's `title_check` said, read and held to the title rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TitleCheck {
+    /// The current title still describes the net change.
+    Keeps,
+    /// It does not, and this subject does.
+    Replaced(String),
+}
+
+/// Read a drafter's `title_check`, or say what is wrong with it.
+fn title_check_of(check: Option<&serde_json::Value>) -> std::result::Result<TitleCheck, String> {
+    let Some(check) = check else {
+        return Err("the drafter's answer carried no `title_check`".to_owned());
+    };
+    match check.get("verdict").and_then(serde_json::Value::as_str) {
+        Some("keeps") => Ok(TitleCheck::Keeps),
+        Some("replaced") => {
+            let Some(title) = check.get("title").and_then(serde_json::Value::as_str) else {
+                return Err(
+                    "the drafter's `title_check` said `replaced` and named no title".to_owned(),
+                );
+            };
+            crate::graph::validate_subject(title)
+                .map(|()| TitleCheck::Replaced(title.trim().to_owned()))
+                .map_err(|why| {
+                    format!(
+                        "the drafter's `title_check` replaced the title with {title:?}, which \
+                         the title rule refuses: {why}"
+                    )
+                })
+        }
+        Some(other) => Err(format!(
+            "the drafter's `title_check` verdict {other:?} is neither `keeps` nor `replaced`"
+        )),
+        None => Err("the drafter's `title_check` names no verdict".to_owned()),
+    }
+}
+
+/// The title a rework's change request is left with: the op's where it stated
+/// one; else the drafter's valid `replaced` subject; else the one it carries —
+/// verified by a `keeps`, and unverified wherever the drafting was unavailable
+/// or its answer carried no valid `title_check`.
+fn rework_title(node: &Node, rework: &Reworking, drafting: Option<&Drafting>) -> Titled {
+    if rework.title_stated {
+        if let Some(title) = &node.title {
+            return Titled::Changed {
+                to: title.clone(),
+                by: crate::payload::RetitledBy::Op,
+            };
+        }
+    }
+    match drafting {
+        None => Titled::Unverified("no body drafter is configured".to_owned()),
+        Some(Drafting::Planned(_)) => Titled::Unverified(
+            "the plan states the body, so no drafter read the net change".to_owned(),
+        ),
+        Some(Drafting::Drafted(Drafted::Undrafted(ending))) => Titled::Unverified(ending.why()),
+        Some(Drafting::Drafted(Drafted::Body(_, check))) => match title_check_of(check.as_ref()) {
+            Ok(TitleCheck::Keeps) => Titled::Kept,
+            Ok(TitleCheck::Replaced(to)) => Titled::Changed {
+                to,
+                by: crate::payload::RetitledBy::Drafter,
+            },
+            Err(why) => Titled::Unverified(why),
+        },
+    }
+}
+
+/// Hand what became of a rework's title to the loop: a retitle where the host
+/// took a new one, and an unverified title where nothing checked the one it kept.
+fn report_title(
+    node: &Node,
+    titled: Titled,
+    held: &onevcs::SessionChange,
+    written: bool,
+    tx: &Sender<Message>,
+) {
+    match titled {
+        Titled::Changed { to, by } if written && to != held.title => {
+            let _ = tx.send(Message::ChangeRetitled(Box::new(
+                crate::payload::ChangeRetitled {
+                    node: node.id.clone(),
+                    from: held.title.clone(),
+                    to,
+                    by,
+                },
+            )));
+        }
+        Titled::Changed { .. } | Titled::Kept => {}
+        Titled::Unverified(reason) => {
+            let _ = tx.send(Message::TitleUnverified(Box::new(
+                engine::UnverifiedTitle {
+                    unverified: crate::payload::TitleUnverified {
+                        node: node.id.clone(),
+                        title: held.title.clone(),
+                        reason: engine::bounded(&crate::views::one_line(&reason)),
+                    },
+                    change_url: held.url.to_string(),
+                },
+            )));
+        }
+    }
+}
+
 /// The whole task one drafting dispatch is given.
 ///
 /// One composition, in a fixed order, every heading a `##` so it sits beside the
@@ -2458,10 +2920,14 @@ fn drafting_task(
     run: &str,
     held: Option<&onevcs::SessionChange>,
     stack: Option<&crate::stack::Stack>,
+    reworked: Option<&ReworkDrafting>,
 ) -> String {
     let mut task = format!("{DRAFTING_TASK}\n\n{}", node.rendered_task());
     if let Some(stack) = stack {
         task.push_str(&format!("\n\n{}", stack.drafting_section()));
+    }
+    if let Some(reworked) = reworked {
+        task.push_str(&format!("\n\n{}", reworked.section()));
     }
     if let Some(change) = held {
         let description = if change.body.trim().is_empty() {
@@ -2536,8 +3002,9 @@ pub(crate) fn out_of_band_drafting_task(branch: &str, base: &str, commits: &str)
 /// publication to proceed with no body: the two are what a change request opens
 /// with, not whether it opens.
 pub(crate) enum Drafted {
-    /// It drafted the change request's body.
-    Body(String),
+    /// It drafted the change request's body, and the `title_check` it answered
+    /// beside it where it answered one.
+    Body(String, Option<serde_json::Value>),
     /// It ended with none, and which of the three endings it was.
     Undrafted(Undrafted),
 }
@@ -2631,6 +3098,7 @@ fn drafted(
     launch: &Launch,
     node: &Node,
     stack: Option<&crate::stack::Stack>,
+    reworked: Option<&ReworkDrafting>,
     worktree: Option<&std::path::Path>,
     held: Option<&onevcs::SessionChange>,
     cancel: &crate::executor::CancellationToken,
@@ -2655,7 +3123,7 @@ fn drafted(
         executor,
         DispatchRequest {
             graph: oneagentgraph::config::ConfigRef(graph.to_owned()),
-            task: drafting_task(node, &paths.run, held, stack),
+            task: drafting_task(node, &paths.run, held, stack, reworked),
             labels: engine::dispatch_labels(&paths.run, &node.id, None, Some(PR_AUTHOR_PERSONA)),
             // None of the node's own: the drafting dispatch is not the node's work,
             // and a turn budget written for that work would be spent twice — once on
@@ -2773,7 +3241,9 @@ pub(crate) fn draft(
                 .filter_map(|kept| crate::report::read(kept))
                 .collect();
             match crate::report::drafted(&kept) {
-                crate::report::Drafted::Body(body) => Drafted::Body(body),
+                crate::report::Drafted::Body(body) => {
+                    Drafted::Body(body, crate::report::title_check(&kept))
+                }
                 crate::report::Drafted::SchemaRefused => {
                     Drafted::Undrafted(Undrafted::SchemaRefused)
                 }
@@ -3631,8 +4101,8 @@ mod tests {
             title: "wip: the worker's".to_owned(),
             body: String::new(),
         };
-        let with = drafting_task(&node, "run-1", Some(&held), None);
-        let without = drafting_task(&node, "run-1", None, None);
+        let with = drafting_task(&node, "run-1", Some(&held), None, None);
+        let without = drafting_task(&node, "run-1", None, None, None);
         assert!(with.starts_with(DRAFTING_TASK) && without.starts_with(DRAFTING_TASK));
         let positions: Vec<usize> = [
             DRAFTING_TASK,
@@ -3672,6 +4142,7 @@ mod tests {
                 draft: false,
                 ..held
             }),
+            None,
             None,
         );
         assert!(described.contains(&format!("{DESCRIPTION_HEADING}\n## What\nHalf written.")));
@@ -3814,6 +4285,7 @@ mod tests {
             &node,
             &[],
             None,
+            Course::Work,
             &crate::executor::CancellationToken::new(),
             &tx,
             &engine::EndedDispatches::none(),

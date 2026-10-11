@@ -2288,6 +2288,88 @@ pub(crate) fn usable(value: &str) -> Option<String> {
     Some(value.to_owned())
 }
 
+/// How much of a rework's net diff its drafting dispatch is shown, in bytes.
+pub(crate) const NET_DIFF_CAP: usize = 200 * 1024;
+
+/// The patch a session's change makes against its base, as its worktree stands
+/// now — committed or not, new files included — capped at [`NET_DIFF_CAP`] with a
+/// line saying where and how much was cut.
+///
+/// Compared from the merge base of the branch and the base's remote-tracking ref,
+/// or the base itself where there is no such ref, which is what the change
+/// request shows a reviewer. Read through a scratch index of its own, so the
+/// worktree's own index — which the publication commits from — is untouched.
+///
+/// # Errors
+///
+/// What git refused, in its own words.
+pub(crate) fn net_diff(
+    worktree: &std::path::Path,
+    base: &str,
+) -> std::result::Result<String, String> {
+    let scratch = std::env::temp_dir().join(format!(
+        "onepipeline-net-diff-{}-{}.index",
+        std::process::id(),
+        crate::sys::now_millis()
+    ));
+    let git = |args: &[&str]| -> std::result::Result<String, String> {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(worktree)
+            .env("GIT_INDEX_FILE", &scratch)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .map_err(|error| format!("cannot run `git {}`: {error}", args.join(" ")))?;
+        if !output.status.success() {
+            return Err(format!(
+                "`git {}` exited {}: {}",
+                args.join(" "),
+                output.status.code().unwrap_or(-1),
+                crate::views::one_line(&String::from_utf8_lossy(&output.stderr))
+            ));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    };
+    let read = (|| {
+        let remote = format!("refs/remotes/origin/{base}");
+        let compared = if git(&["for-each-ref", "--format=%(refname)", &remote])?
+            .trim()
+            .is_empty()
+        {
+            base.to_owned()
+        } else {
+            format!("origin/{base}")
+        };
+        let from = git(&["merge-base", &compared, "HEAD"])?.trim().to_owned();
+        git(&["read-tree", "HEAD"])?;
+        git(&["add", "--all", "--", "."])?;
+        git(&["diff", "--cached", "--no-color", "--no-ext-diff", &from])
+    })();
+    let _ = std::fs::remove_file(&scratch);
+    read.map(|patch| capped(patch, NET_DIFF_CAP))
+}
+
+/// `patch`, cut at the last line end at or before `cap` bytes where it is longer,
+/// with a line saying where it was cut and how much is not shown.
+fn capped(patch: String, cap: usize) -> String {
+    if patch.len() <= cap {
+        return patch;
+    }
+    let mut cut = cap;
+    while !patch.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    if let Some(line_end) = patch[..cut].rfind('\n') {
+        cut = line_end + 1;
+    }
+    format!(
+        "{}[the net diff was cut here, at byte {cut} of {}: the last {} bytes are not shown]\n",
+        &patch[..cut],
+        patch.len(),
+        patch.len() - cut
+    )
+}
+
 /// Whether an envelope is a session opening, in `onevcs`'s own vocabulary.
 ///
 /// Asked through that library's enum rather than against a string of this
@@ -2720,6 +2802,19 @@ mod tests {
             },
             &crate::event::Labels::default(),
         )
+    }
+
+    #[test]
+    fn a_net_diff_over_its_cap_is_cut_at_a_line_end_saying_where_and_how_much() {
+        let patch = "+one\n+two\n+three\n".to_owned();
+        assert_eq!(capped(patch.clone(), patch.len()), patch);
+        let cut = capped(patch.clone(), 10);
+        assert!(cut.starts_with("+one\n+two\n["), "{cut}");
+        assert!(
+            cut.contains("at byte 10 of 17: the last 7 bytes are not shown"),
+            "{cut}"
+        );
+        assert!(!cut.contains("three"), "{cut}");
     }
 
     /// The conflict a session opened with rides its `session-opened` envelope in
