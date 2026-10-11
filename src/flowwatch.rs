@@ -290,7 +290,13 @@ fn resume(root: &std::path::Path, flow: &Flow, token: &str) -> Result<BTreeMap<S
     }
     let members = flow.members()?;
     let mut known = BTreeMap::new();
-    for place in places.split('/').filter(|place| !place.is_empty()) {
+    // No member is spelled as nothing at all; otherwise every place is one run,
+    // named once.
+    let places: Vec<&str> = match places {
+        "" => Vec::new(),
+        places => places.split('/').collect(),
+    };
+    for place in places {
         // The byte follows the last `@`, so a run id carrying one reads back.
         let (run, at) = place.rsplit_once('@').ok_or_else(refusal)?;
         if !members.iter().any(|member| member == run) {
@@ -303,7 +309,11 @@ fn resume(root: &std::path::Path, flow: &Flow, token: &str) -> Result<BTreeMap<S
             &RunPaths::under(root, run),
             &format!("{WATCH_CURSOR_VERSION}:{run}:{at}"),
         )?;
-        known.insert(run.to_owned(), cursor);
+        if known.insert(run.to_owned(), cursor).is_some() {
+            return Err(Error::Invalid(format!(
+                "cursor '{token}' names run '{run}' twice; a flow's cursor places each run once"
+            )));
+        }
     }
     Ok(known)
 }

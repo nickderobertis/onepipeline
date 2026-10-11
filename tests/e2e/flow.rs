@@ -683,6 +683,12 @@ fn a_flow_that_launches_no_run_reports_and_asks_on_its_own_channel() {
     assert_eq!(flow.ended(), 0);
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the wait this journey
+// measures is the behaviour under test — a watch returning within its wake budget, which
+// only a clock can show — and it is `flow`, `flowwatch`, `watch`, `watchers` and `unwatched`
+// at once, so the narrowest edge it can honestly sit behind is the crate's, as the `mod
+// flow` declaration in `tests/e2e/main.rs` says; `tests/e2e/wake_budget.rs` keeps its own
+// timed journeys behind the same edge for the same reason.
 /// Under a wake budget a `watch --flow` given no `--timeout` returns within it,
 /// measured on the wall clock; one whose `--timeout` equals the budget does not
 /// qualify, naming the reserve; and with the budget as a flag, the line names
@@ -747,6 +753,7 @@ fn a_flow_watch_returns_within_its_wake_budget_and_only_a_reserved_one_qualifies
     flow.open("end");
     assert_eq!(flow.ended(), 0);
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// The workload the before-and-after pictures show: one session owning one
 /// settled run closed with `unwatched --acknowledge`, plus one flow. With the
@@ -996,6 +1003,29 @@ fn chmod(path: &std::path::Path, mode: u32) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("chmod");
 }
 
+// llmlint: ignore-block[tests_mirror_real_usage] no verb writes a flow document it did not
+// mean to — a holder writes its own record and ending, `start` its membership, `unwatched`
+// its acknowledgement, a watch its terms — and what these journeys put on disk is what
+// another build, a writer that died mid-write, a copied runs root or an engine before the
+// terms record leaves: states the readers must answer for, which no verb of this build
+// reaches. Every such write and removal is made here, at this one site, and every claim
+// afterwards is read off the compiled binary's own streams.
+/// Put `body` at `path` under a flow's directory, or take what is there away
+/// where `body` is `None`: the one way a journey stages a flow document no verb
+/// writes.
+fn tampered(path: &std::path::Path, body: Option<&str>) {
+    match body {
+        Some(body) => {
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir).expect("a directory");
+            }
+            std::fs::write(path, body).expect("the document is written");
+        }
+        None => std::fs::remove_file(path).expect("the document goes"),
+    }
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
 /// A journey running as root is not refused by permission bits, so a journey
 /// whose refusals rest on them fails saying so — never passes having staged
 /// nothing.
@@ -1065,18 +1095,28 @@ fn the_flow_flags_refuse_what_a_flow_cannot_be_asked() {
     // Records this build did not write, each written by hand: one that is not a
     // record, and one naming another flow.
     let flows = world.runs.join(".flows");
-    std::fs::create_dir_all(flows.join("broken")).expect("a directory");
-    std::fs::write(flows.join("broken").join("flow.json"), "{").expect("a torn record");
+    tampered(&flows.join("broken").join("flow.json"), Some("{"));
     world
         .run(&["next", "--flow", "broken"])
         .exited(REFUSED)
         .err_has("record cannot be read");
-    std::fs::create_dir_all(flows.join("copied")).expect("a directory");
-    std::fs::copy(
-        flows.join("live").join("flow.json"),
-        flows.join("copied").join("flow.json"),
-    )
-    .expect("a copied record");
+    tampered(
+        &flows.join("copied").join("flow.json"),
+        Some(&std::fs::read_to_string(flows.join("live").join("flow.json")).expect("a record")),
+    );
+    // A record this host will not read is refused as one, naming why.
+    permissions_bind(&world);
+    let sealed = Flowing::start(&world, "sealed", &[gate(&world, "sealed-end")]);
+    let record = flows.join("sealed").join("flow.json");
+    chmod(&record, 0o000);
+    let refused = world.run(&["next", "--flow", "sealed"]);
+    chmod(&record, 0o644);
+    refused
+        .exited(REFUSED)
+        .err_has("record cannot be read")
+        .err_has("denied");
+    sealed.open("sealed-end");
+    assert_eq!(sealed.ended(), 0);
     world
         .run(&["next", "--flow", "copied"])
         .exited(REFUSED)
@@ -1114,6 +1154,15 @@ fn the_flow_flags_refuse_what_a_flow_cannot_be_asked() {
         ("flow:1:other:", "printed by a watch of flow 'other'"),
         ("flow:1:live:solo@0", "not a run of flow 'live'"),
         ("flow:1:live:member@99999999", "whose store holds"),
+        (
+            "flow:1:live:/member@0",
+            "not a cursor this build reads for a flow",
+        ),
+        (
+            "flow:1:live:member@0//member@0",
+            "not a cursor this build reads for a flow",
+        ),
+        ("flow:1:live:member@0/member@0", "names run 'member' twice"),
     ] {
         world
             .run(&[
@@ -1145,8 +1194,10 @@ fn the_flow_flags_refuse_what_a_flow_cannot_be_asked() {
         let mut written = record.clone();
         written["flow_id"] = json!(id);
         written[key] = value;
-        std::fs::create_dir_all(flows.join(id)).expect("a directory");
-        std::fs::write(flows.join(id).join("flow.json"), written.to_string()).expect("a record");
+        tampered(
+            &flows.join(id).join("flow.json"),
+            Some(&written.to_string()),
+        );
         world
             .run(&["next", "--flow", id])
             .exited(REFUSED)
@@ -1155,13 +1206,14 @@ fn the_flow_flags_refuse_what_a_flow_cannot_be_asked() {
     let mut ended = Flowing::start(&world, "versioned-ending", &[gate(&world, "never")]);
     ended.child.kill().expect("SIGKILL reaches the holder");
     let _ = ended.child.wait();
-    std::fs::write(
-        flows.join("versioned-ending").join("ending.json"),
-        json!({"schema_version": 2, "flow_id": "versioned-ending", "status": 0,
-               "at": "2026-10-10T00:00:00.000Z"})
-        .to_string(),
-    )
-    .expect("an ending at another version");
+    tampered(
+        &flows.join("versioned-ending").join("ending.json"),
+        Some(
+            &json!({"schema_version": 2, "flow_id": "versioned-ending", "status": 0,
+                    "at": "2026-10-10T00:00:00.000Z"})
+            .to_string(),
+        ),
+    );
     unwatched(&world, &[])
         .err_has("flow versioned-ending: its ending cannot be read")
         .err_has("schema_version");
@@ -1188,13 +1240,14 @@ fn the_flow_flags_refuse_what_a_flow_cannot_be_asked() {
     // by hand, one that is not that document and one naming another run are no
     // run of the flow, and no watch reports either joining.
     let members = flows.join("live").join("members");
-    std::fs::write(members.join("forged.json"), "{").expect("a forged membership");
-    std::fs::write(
-        members.join("ghost.json"),
-        json!({"schema_version": 1, "run_id": "member", "at": "2026-10-10T00:00:00.000Z"})
-            .to_string(),
-    )
-    .expect("a membership naming another run");
+    tampered(&members.join("forged.json"), Some("{"));
+    tampered(
+        &members.join("ghost.json"),
+        Some(
+            &json!({"schema_version": 1, "run_id": "member", "at": "2026-10-10T00:00:00.000Z"})
+                .to_string(),
+        ),
+    );
     let placed = format!(
         "flow:1:live:member@{}",
         std::fs::metadata(world.run_file("member", "events.jsonl"))
@@ -1282,9 +1335,11 @@ fn a_flow_whose_evidence_cannot_be_read_is_named_and_never_passed() {
     let world = World::new("flow-unreadable");
     let flows = world.runs.join(".flows");
     let garbled = Flowing::start(&world, "garbled", &[gate(&world, "end")]);
-    // Written by hand: an ending no holder wrote, while the holder lives.
-    std::fs::write(flows.join("garbled").join("ending.json"), "not a record")
-        .expect("a torn ending");
+    // An ending no holder wrote, while the holder lives.
+    tampered(
+        &flows.join("garbled").join("ending.json"),
+        Some("not a record"),
+    );
     let asked = unwatched(&world, &[]);
     asked.exited(EXIT_SUCCESS);
     assert!(asked.stdout.is_empty(), "{}", asked.stdout);
@@ -1304,13 +1359,14 @@ fn a_flow_whose_evidence_cannot_be_read_is_named_and_never_passed() {
         .run(&["watch", "--flow", "garbled", "--timeout", "0"])
         .exited(WATCH_ELAPSED);
     // Another flow's ending is not this one's.
-    std::fs::write(
-        flows.join("garbled").join("ending.json"),
-        json!({"schema_version": 1, "flow_id": "elsewhere", "status": 0,
-               "at": "2026-10-10T00:00:00.000Z"})
-        .to_string(),
-    )
-    .expect("another flow's ending");
+    tampered(
+        &flows.join("garbled").join("ending.json"),
+        Some(
+            &json!({"schema_version": 1, "flow_id": "elsewhere", "status": 0,
+                    "at": "2026-10-10T00:00:00.000Z"})
+            .to_string(),
+        ),
+    );
     unwatched(&world, &[])
         .exited(EXIT_SUCCESS)
         .err_has("flow 'elsewhere''s ending, not this flow's");
@@ -1324,7 +1380,7 @@ fn a_flow_whose_evidence_cannot_be_read_is_named_and_never_passed() {
         ])
         .exited(REFUSED)
         .err_has("is live");
-    std::fs::remove_file(flows.join("garbled").join("ending.json")).expect("the ending goes");
+    tampered(&flows.join("garbled").join("ending.json"), None);
     garbled.open("end");
     assert_eq!(garbled.ended(), 0);
 
@@ -1332,9 +1388,37 @@ fn a_flow_whose_evidence_cannot_be_read_is_named_and_never_passed() {
     gone.child.kill().expect("SIGKILL reaches the holder");
     let _ = gone.child.wait();
     let acknowledgements = flows.join("gone").join("acknowledgements");
-    std::fs::create_dir_all(&acknowledgements).expect("a directory");
-    // Written by hand: an acknowledgement no verb wrote.
-    std::fs::write(acknowledgements.join("torn.json"), "{").expect("a torn acknowledgement");
+    // Acknowledgements that read, and are not this session's word about this
+    // flow, close nothing: one of another flow, and one of another session.
+    for (name, flow, session) in [
+        ("another-flow", "elsewhere", world.session.as_str()),
+        ("another-session", "gone", "a-stranger"),
+    ] {
+        tampered(
+            &acknowledgements.join(format!("{name}.json")),
+            Some(
+                &json!({"schema_version": 1, "flow_id": flow, "session": session,
+                        "reason": "not this session's word", "at": "2026-10-10T00:00:00.000Z"})
+                .to_string(),
+            ),
+        );
+    }
+    unwatched(&world, &[])
+        .exited(RUNS_UNWATCHED)
+        .out_has("flow gone")
+        .out_has("DIED");
+    // An acknowledgements directory this host will not read is an unknown.
+    permissions_bind(&world);
+    chmod(&acknowledgements, 0o000);
+    let sealed = unwatched(&world, &[]);
+    let sealed_verdict = verdict(&world, &[]);
+    chmod(&acknowledgements, 0o755);
+    sealed.exited(EXIT_SUCCESS).err_has(
+        "flow gone: whether it is closed cannot be said: its acknowledgements cannot be read",
+    );
+    assert_eq!(sealed_verdict["verdict"], json!("warn"), "{sealed_verdict}");
+    // An acknowledgement no verb wrote.
+    tampered(&acknowledgements.join("torn.json"), Some("{"));
     let asked = unwatched(&world, &[]);
     asked.exited(EXIT_SUCCESS);
     assert!(asked.stdout.is_empty(), "{}", asked.stdout);
@@ -1761,11 +1845,32 @@ fn a_flow_watch_says_what_it_waits_on_and_where() {
         let refused = world.run(&["watch", "--flow", "talky", "--timeout", "0"]);
         chmod(&members, 0o755);
         refused.exited(REFUSED).err_has("runs cannot be read");
+        // And while a watch waits: it ends refusing, rather than going on blind
+        // to every run that joins.
+        let waiting = watching(
+            &world,
+            "talky",
+            &["--timeout", "600", "--until", "run-joined"],
+        );
+        chmod(&members, 0o000);
+        let ended = waiting.child.wait_with_output().expect("the watch ends");
+        chmod(&members, 0o755);
+        assert_eq!(ended.status.code(), Some(REFUSED), "{ended:?}");
+        assert!(
+            String::from_utf8_lossy(&ended.stderr).contains("runs cannot be read"),
+            "{ended:?}"
+        );
     }
     flow.open("end");
     assert_eq!(flow.ended(), 0);
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the wait this journey
+// measures is the behaviour under test — a watch returning within its wake budget, which
+// only a clock can show — and it is `flow`, `flowwatch`, `watch`, `watchers` and `unwatched`
+// at once, so the narrowest edge it can honestly sit behind is the crate's, as the `mod
+// flow` declaration in `tests/e2e/main.rs` says; `tests/e2e/wake_budget.rs` keeps its own
+// timed journeys behind the same edge for the same reason.
 /// Under a wake budget a flow watch qualifies only on every term a run watch's
 /// does: one of another session's, one with no deadline, and one that does not
 /// return on a surface each fail, in their own words; one whose terms are gone
@@ -1799,14 +1904,14 @@ fn a_flow_watch_qualifies_only_on_every_term_and_a_run_watch_keeps_the_reserve()
     }
     let armed = watching(&world, "rules", &["--timeout", "60"]);
     unwatched(&world, &budget).exited(EXIT_SUCCESS);
-    // Removed by hand: the terms beside the live lease, as an engine before the
-    // terms record leaves a lease.
+    // The terms beside the live lease taken away, as an engine before the terms
+    // record leaves a lease.
     let terms = world.runs.join(".flows").join("rules").join("watch-terms");
     for entry in std::fs::read_dir(&terms)
         .expect("the terms directory")
         .flatten()
     {
-        std::fs::remove_file(entry.path()).expect("the terms go");
+        tampered(&entry.path(), None);
     }
     let asked = unwatched(&world, &budget);
     asked.exited(EXIT_SUCCESS);
@@ -1864,6 +1969,7 @@ fn a_flow_watch_qualifies_only_on_every_term_and_a_run_watch_keeps_the_reserve()
         spawned.elapsed()
     );
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// A flow's reply is judged under the bus configuration the flow was registered
 /// with, and refused whole — with nothing queued — when it is not an envelope,
