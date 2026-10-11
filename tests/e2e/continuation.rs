@@ -215,6 +215,19 @@ fn a_cold_host_continues_a_drafted_stack_from_the_store_and_dispatches_none_of_i
     );
     let created = created_from(&world);
     assert_eq!(created.len(), 3, "{created:?}");
+    // Each published node's item carries the write-back's landing keys beside its settlement,
+    // and the project still reads as a plan.
+    for id in ["a", "b", "c"] {
+        let item = item_metadata(&world, &project, id);
+        assert_eq!(
+            item["onepipeline.change_url"], stored[id]["change_url"],
+            "{item}"
+        );
+        assert_eq!(item["onepipeline.landing"], "unlanded", "{item}");
+    }
+    world
+        .run_from(&world.project, &["plan", "check", &project])
+        .exited(0);
 
     // The host that ran it is gone: its runs root with it, and the cold host has its own.
     std::fs::remove_dir_all(&world.runs).expect("the runs root is removed");
