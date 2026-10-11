@@ -1743,6 +1743,26 @@ fn a_plan_naming_no_private_repository_derives_no_term_even_where_the_registry_c
         &json!({"version": 3, "commands": [note("notes", "owner/service and owner/beta")]}),
     )
     .exited(0);
+    // A plan that is not mixed passes without resolving the nodes a command names...
+    validated(
+        &world,
+        "public-only",
+        &json!({"version": 3, "commands": [note("nowhere", "owner/service")]}),
+    )
+    .exited(exit_for("pass"));
+    // ...and what is judged is the plan the envelope would leave: one adding a private
+    // node makes it mixed, where a node it does not hold has no clearance to judge by.
+    let mut hidden = crate::harness::agent("hidden", &[]);
+    hidden["classification"] = json!("private");
+    validated(
+        &world,
+        "public-only",
+        &json!({"version": 3, "commands": [
+            {"op": "add", "node": hidden},
+            note("nowhere", "owner/service"),
+        ]}),
+    )
+    .exited(exit_for("unavailable"));
 }
 
 #[test]
