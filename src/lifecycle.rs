@@ -140,7 +140,8 @@ struct Placed {
     /// read before its session closed. A dispatch that ended before its closeout
     /// says where its branch stands itself, and nothing here adds to that.
     head: Option<String>,
-    /// The change request a session of the node opened.
+    /// The change request a session of the node opened, which a settlement that
+    /// did not finish the node names.
     change_url: Option<String>,
     /// The stack it was drafted on, where it had stack parents.
     stack: Option<Box<crate::payload::SettledStack>>,
@@ -152,10 +153,14 @@ impl Placed {
         Settlement {
             base: settlement.base.clone().or_else(|| self.base.clone()),
             head: settlement.head.clone().or_else(|| self.head.clone()),
-            change_url: settlement
-                .change_url
-                .clone()
-                .or_else(|| self.change_url.clone()),
+            // Only where the node did not finish: a failed or cancelled node is the
+            // one whose change request no publication outcome named, and the one a
+            // reader has to be sent to.
+            change_url: settlement.change_url.clone().or_else(|| {
+                (settlement.status != NodeStatus::Done)
+                    .then(|| self.change_url.clone())
+                    .flatten()
+            }),
             stack: settlement.stack.clone().or_else(|| self.stack.clone()),
             ..settlement
         }

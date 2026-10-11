@@ -2700,7 +2700,10 @@ pub(crate) fn status_reporting(view: &RunView, providers: Providers) -> String {
 fn open_change_phrase(view: &RunView, render: &Rendering, id: &str) -> Option<String> {
     let state = &view.state;
     let url = state.change_urls.get(id)?;
-    if !matches!(reported_landing(view, render, id).stands(), Stands::NotLanded) {
+    if !matches!(
+        reported_landing(view, render, id).stands(),
+        Stands::NotLanded
+    ) {
         return None;
     }
     let parent = |parent: &crate::payload::StackParent| {
