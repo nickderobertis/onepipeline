@@ -695,7 +695,7 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 oneagentgraph = "0.5.6"
-onevcs = "0.44.1"
+onevcs = "0.45.0"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is
@@ -905,7 +905,7 @@ oneharness-core = "0.24.1"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.13.6"
+onevcs-testing = "0.13.7"
 # The store, linked: `src/taskgraph.rs` says how the engine calls it. `-plugin-api` is
 # named for the values the store answers with, and `-local-md` for the plugin
 # `crates/testfakes` hosts in process.
@@ -923,9 +923,9 @@ onevcs-testing = "0.13.6"
 # updates it, source values winning shared keys (onetaskgraph #3567), so re-copying a
 # plan no longer deletes the design approvals recorded on the board's document.
 # `justfile`'s `onetaskgraph-version` moves with this release.
-onetaskgraph-core = "=0.3.12"
-onetaskgraph-plugin-api = "=0.3.12"
-onetaskgraph-local-md = "=0.3.12"
+onetaskgraph-core = "=0.4.0"
+onetaskgraph-plugin-api = "=0.4.0"
+onetaskgraph-local-md = "=0.4.0"
 # Not engines: two crates both members use, pinned once so they build against one version.
 # `just engines-current` reads only the engines its script names.
 sha2 = "0.10"
