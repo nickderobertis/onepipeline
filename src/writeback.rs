@@ -1769,17 +1769,13 @@ impl Attempt {
                 Classified::of_config(&error),
             )
         })?;
-        // A store whose configuration opted into the public boundary has its writes
-        // checked by the linked `onevcs` rather than by the commands it names — the same
-        // check, answered in process — over the run's own term scope.
-        let engine = if built.engine.boundary_active() {
-            built
-                .engine
-                .with_write_policy(std::sync::Arc::new(crate::boundary::WritePolicy))
-                .with_term_scope(Some(snapshot.term_scope.clone()))
-        } else {
-            built.engine
-        };
+        // Every write the engine makes to a store is checked by the linked `onevcs` — in
+        // place of whatever commands its configuration names, and whether or not that
+        // configuration opted into the boundary — over the run's own term scope.
+        let engine = built
+            .engine
+            .with_write_policy(std::sync::Arc::new(crate::boundary::WritePolicy))
+            .with_term_scope(Some(snapshot.term_scope.clone()));
         Ok(Self {
             runtime: crate::taskgraph::runtime()
                 .map_err(|error| format!("the store cannot be called: {error}"))?,
