@@ -1316,7 +1316,6 @@ fn converge(
     let mut claims = crate::continuation::ClaimWatch::of_run(paths, launch);
     let claimed_at = sys::now_rfc3339();
     let mut superseded = false;
-    // Publications waiting on the next pass's claim check.
     let mut publications: Vec<PublicationDue> = Vec::new();
     let channel = ChannelState::of_run(paths, launch);
     let rules = executor_rules()?;
@@ -6064,7 +6063,7 @@ fn spawn(
             .as_ref()
             .and_then(|_| crate::branchname::Naming::of_run(&paths, launch)),
         notes_in_flight: notes_in_flight.clone(),
-        claimed: launch
+        publication_gated: launch
             .project
             .parse::<crate::taskgraph::QualifiedId>()
             .is_ok(),

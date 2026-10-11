@@ -149,6 +149,10 @@ const SETTLEMENT_KEYS: [&str; 12] = [
     "stack",
 ];
 
+/// Every key a stored settlement's `stack` carries, and every key one of its parents does.
+const STACK_KEYS: [&str; 2] = ["parents", "stack_base"];
+const STACK_PARENT_KEYS: [&str; 3] = ["node", "branch", "head"];
+
 /// One node's stored settlement, read at the store boundary: `None` where the task carries
 /// none, and a refusal naming the node where it carries anything that is not a settlement —
 /// a value that is not a mapping, a key no settlement carries, or a field of the wrong shape.
@@ -174,6 +178,24 @@ fn settlement_of(node: &str, metadata: Option<&Map<String, Value>>) -> Result<Op
         return Err(refused(format!(
             "it carries `{key}`, which no settlement does"
         )));
+    }
+    if let Some(stack) = settlement.get("stack").and_then(Value::as_object) {
+        if let Some(key) = stack.keys().find(|key| !STACK_KEYS.contains(&key.as_str())) {
+            return Err(refused(format!(
+                "its `stack` carries `{key}`, which no stack does"
+            )));
+        }
+        let parents = stack.get("parents").and_then(Value::as_array);
+        for parent in parents.into_iter().flatten().filter_map(Value::as_object) {
+            if let Some(key) = parent
+                .keys()
+                .find(|key| !STACK_PARENT_KEYS.contains(&key.as_str()))
+            {
+                return Err(refused(format!(
+                    "a parent of its `stack` carries `{key}`, which no stack parent does"
+                )));
+            }
+        }
     }
     let read = serde_json::from_value::<crate::payload::NodeSettled>(stored.clone())
         .map_err(|why| refused(why.to_string()))?;
@@ -406,9 +428,16 @@ impl ClaimWatch {
         // A store that asked to be left alone is asked nothing inside the wait: every further
         // call extends a limiter nothing reports. The write-back is waiting it out too, and
         // the next check after it has passed reads the claim.
+        // llmlint: ignore-block[changed_behavior_has_e2e] driven end to end by `tests/e2e/store.rs`'s
+        // `a_stop_inside_a_rate_limit_wait_releases_only_once_the_wait_has_passed` and
+        // `a_closeout_inside_a_rate_limit_wait_asks_the_store_nothing`, which hold that an adopted
+        // driver inside a wait the store asked for makes no store call at all — the adoption's own
+        // claim read was the one call each caught before this skip existed — and that the driver
+        // reaches the store again once the wait has passed.
         if crate::writeback::store_asked_to_wait(&self.run_dir) {
             return None;
         }
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         let read = self
             .store
             .project_metadata_within(&self.project, CLAIM_READ_DEADLINE)
@@ -523,9 +552,14 @@ fn taken_over(paths: &crate::ledger::RunPaths) -> Option<DriverClaim> {
 
 /// The idle check's interval: [`IDLE_CLAIM_CHECK`], or the test seam's whole seconds.
 fn idle_claim_check() -> Duration {
-    std::env::var(IDLE_CLAIM_CHECK_ENV)
-        .ok()
-        .and_then(|seconds| seconds.trim().parse::<u64>().ok())
+    idle_claim_check_of(std::env::var(IDLE_CLAIM_CHECK_ENV).ok().as_deref())
+}
+
+/// The interval the seam's value names: a positive whole number of seconds, and the shipped
+/// interval for anything else — unset, blank, zero or not a number — so a seam set wrong
+/// never turns the check off.
+fn idle_claim_check_of(seam: Option<&str>) -> Duration {
+    seam.and_then(|seconds| seconds.trim().parse::<u64>().ok())
         .filter(|seconds| *seconds > 0)
         .map_or(IDLE_CLAIM_CHECK, Duration::from_secs)
 }
@@ -543,6 +577,14 @@ mod tests {
     fn an_idle_driver_reads_its_claim_at_least_every_ten_minutes() {
         assert!(IDLE_CLAIM_CHECK <= Duration::from_secs(600));
         assert_eq!(IDLE_CLAIM_CHECK, Duration::from_secs(600));
+        assert_eq!(idle_claim_check_of(Some(" 5 ")), Duration::from_secs(5));
+        for unusable in [None, Some(""), Some("0"), Some("-5"), Some("soon")] {
+            assert_eq!(
+                idle_claim_check_of(unusable),
+                IDLE_CLAIM_CHECK,
+                "{unusable:?}"
+            );
+        }
     }
 
     #[test]
@@ -713,6 +755,18 @@ mod tests {
             (
                 json!({"status": "failed", "remote": "teleported"}),
                 "`remote`",
+            ),
+            (
+                json!({"status": "done", "base": "me/a", "stack": {
+                    "parents": [{"node": "a", "branch": "me/a", "head": "1f2e", "tip": "x"}],
+                    "stack_base": null}}),
+                "`tip`",
+            ),
+            (
+                json!({"status": "done", "base": "me/a", "stack": {
+                    "parents": [{"node": "a", "branch": "me/a", "head": "1f2e"}],
+                    "stack_base": null, "root": "main"}}),
+                "`root`",
             ),
         ] {
             let refused = settlement_of("b", Some(&settlement(bad)))

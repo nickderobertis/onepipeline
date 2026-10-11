@@ -2356,9 +2356,9 @@ fn carry_the_difference(
         baseline.save();
     }
     // llmlint: ignore-end[changed_behavior_has_e2e]
-    // The driver claim last, after the work it claims has landed: held where what landed is
-    // not this driver's claim, and released — `null`, since the store removes no project key —
-    // where what landed is this run's and the read above found it still there.
+    // A claim to hold, last, after the work it claims has landed, wherever what landed is not
+    // this driver's claim. A release was made at the attempt's start, beside its read; what
+    // is left of one here is only a baseline that still names this run, written `null`.
     let claimed = match &snapshot.driver {
         DriverWrite::Hold(claim) => serde_json::to_value(claim)
             .ok()

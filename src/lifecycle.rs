@@ -58,10 +58,10 @@ pub struct Launch {
     /// The note deliveries the loop has handed off and not yet recorded, which
     /// a re-dispatch waits for before it reads the notes it is composed with.
     pub(crate) notes_in_flight: engine::DeliveriesInFlight,
-    /// Whether the run's project carries a driver claim the loop reads before a
-    /// publication: every run launched from a store, and none an older record names
+    /// Whether a publication waits for the loop's claim check before it is made: every run
+    /// launched from a store, whose project a driver claims, and none an older record names
     /// no project for.
-    pub(crate) claimed: bool,
+    pub(crate) publication_gated: bool,
 }
 
 /// Run one lifecycle node to settlement, re-dispatching it while its
@@ -818,7 +818,7 @@ fn attempt_once(
     // The publication is one of the things the run's claim is read for: the loop's next pass
     // reads it once for all it starts, and a run that has taken the project over leaves this
     // node's work kept on its branch, unpublished.
-    if launch.claimed && !engine::publication_cleared(tx, &node.id) {
+    if launch.publication_gated && !engine::publication_cleared(tx, &node.id) {
         return withhold(
             node,
             Opened {
