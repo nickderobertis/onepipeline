@@ -9394,7 +9394,17 @@ none, and `src/payload.rs`'s
 `a_record_written_before_records_named_their_envelope_still_reads` holds each of the
 four documents to an older record and a newer one.
 
-## 114. What the repository publication boundary decides beyond its approved interface — OPEN
+## 114. What the repository publication boundary decides beyond its approved interface — RESOLVED
+
+**Ruling: the manager accepted 1, 2, 4, 5, 6 and 7 as built, and 3 as opt-in only;
+`docs/contract.md`'s *Repository publication boundary* paragraph stands as the
+amendment of record.** On 3, the user agreed the boundary is inactive for a store
+whose configuration has not opted in, so the linked `WritePolicy` is never supplied to
+every store write. On 5, `validate-envelope` passes a prospective plan that is not
+mixed without resolving the nodes a command names, and returns unavailable (exit `2`)
+for a command naming a node a mixed plan does not hold. On 7, a dispatch accepts a
+consumer's pinned branch only where a recorded export of that consumer's own edge — its
+producer, the consumer and both repositories — made that branch.
 
 **Proposal, for the planner who owns the contract.** The design the user approved
 for the repository publication boundary fixes the shared interfaces: the
