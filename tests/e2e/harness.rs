@@ -1761,11 +1761,19 @@ impl World {
     /// under the flattened identity directory *inside* the state root, which on
     /// Windows leaves the deepest files git writes — a pack index in the clone —
     /// past MAX_PATH even from a short root.
+    ///
+    /// `maintenance.auto` is off: git 2.47 and later follow every commit with a
+    /// detached `git maintenance run --auto`, whose daemonized child can still be
+    /// inside a session's worktree when a journey closes that session, and onevcs
+    /// refuses to close a session with a process working in its run root.
     pub fn gitconfig(&self) -> PathBuf {
         let path = self.root.join("gitconfig");
         if !path.is_file() {
-            std::fs::write(&path, "[core]\n\tlongpaths = true\n")
-                .expect("the world's git config is written");
+            std::fs::write(
+                &path,
+                "[core]\n\tlongpaths = true\n[maintenance]\n\tauto = false\n",
+            )
+            .expect("the world's git config is written");
         }
         path
     }
