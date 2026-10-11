@@ -182,10 +182,11 @@ function validateDetail(held) {
   milliseconds(held.cold.read_ms, "cold.read_ms");
   breakdownOf(held.cold.breakdown, "cold.breakdown");
   if (!isObject(held.scaling)) fail("scaling must be the scaling reads");
-  const roots = SCALING.map((size) => String(size)).join(", ");
+  const roots = SCALING.join(", ");
   if (
     !Array.isArray(held.scaling.sizes) ||
-    held.scaling.sizes.map((size) => size?.run_roots).join(", ") !== roots
+    held.scaling.sizes.length !== SCALING.length ||
+    held.scaling.sizes.some((size, n) => size?.run_roots !== SCALING[n])
   ) {
     fail(`scaling.sizes must be the reads over ${roots} run roots, in that order`);
   }

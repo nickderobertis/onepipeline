@@ -375,6 +375,8 @@ fn the_host_view_reporter_reports_the_slowest_steady_read_of_the_record_alone() 
         ("/scaling/sizes", serde_json::json!("all of them")),
         ("/scaling/sizes/0/median_ms", serde_json::json!(null)),
         ("/scaling/sizes/2/run_roots", serde_json::json!(1600)),
+        ("/scaling/sizes/0/run_roots", serde_json::json!("100")),
+        ("/scaling/sizes/1/run_roots", serde_json::json!([400])),
         ("/scaling/sizes/1/reads_ms", serde_json::json!([])),
         (
             "/scaling/sizes/1/ended_journal_bytes_opened",
