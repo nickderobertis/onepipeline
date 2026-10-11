@@ -3064,3 +3064,53 @@ fn a_ticket_of_a_private_source_is_never_named_on_a_plan_store_that_is_not_priva
     );
     world.release("keep.go");
 }
+
+#[test]
+fn every_side_of_a_mixed_plan_is_told_which_it_is_on() {
+    let (world, _, _) = mixed_world("boundary-sides");
+    world.script("generalize.work-at", "examples/generic/sample.md");
+    world.script("generalize.work", "a generic example\n");
+    world.script("examples.work", "built on it\n");
+    world.script("inner.work", "private work\n");
+    let mut plan = exported_plan("sides");
+    let nodes = plan["tasks"].as_array_mut().expect("nodes");
+    // A private node that produces nothing, and a direct node naming no repository.
+    nodes.push(lifecycle("inner", &[]));
+    nodes.push(crate::harness::agent("notes", &[]));
+    let project = world.plan("sides", &plan);
+    world.run(&["start", &project, "--attach"]).settled();
+    let task_of = |opening: &str| {
+        world
+            .invocations()
+            .into_iter()
+            .filter(|call| call["tool"] == "oneagentgraph")
+            .filter_map(|call| {
+                let args = call["args"].as_array()?.clone();
+                let at = args.iter().position(|arg| arg == "--task")?;
+                args.get(at + 1)?.as_str().map(str::to_owned)
+            })
+            .find(|task| task.starts_with(opening))
+            .unwrap_or_else(|| panic!("no dispatch opened {opening:?}"))
+    };
+    // The private node that produces nothing is told it is private and how private work
+    // reaches a public node.
+    let inner = task_of("## What\nShip inner.");
+    assert!(
+        inner.contains(r#"{"boundary":{"mixed":true,"clearance":"private"}}"#),
+        "{inner}"
+    );
+    assert!(inner.contains("This node is private."), "{inner}");
+    assert!(
+        inner.contains("generalize -> preserve -> export -> consume"),
+        "{inner}"
+    );
+    // The direct node naming no repository and depending on nothing is public, and told
+    // so, with no branch to cut.
+    let notes = task_of("## What\nDo notes.");
+    assert!(
+        notes.contains(r#"{"boundary":{"mixed":true,"clearance":"public"}}"#),
+        "{notes}"
+    );
+    assert!(notes.contains("This node is public."), "{notes}");
+    assert!(notes.contains("Everything it writes is public"), "{notes}");
+}

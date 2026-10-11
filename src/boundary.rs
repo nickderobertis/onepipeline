@@ -976,12 +976,23 @@ fn strings_of(value: &serde_json::Value, out: &mut Vec<String>) {
     match value {
         serde_json::Value::String(text) => out.push(text.clone()),
         serde_json::Value::Array(values) => values.iter().for_each(|value| strings_of(value, out)),
-        serde_json::Value::Object(fields) => fields
-            .iter()
-            .filter(|(key, _)| key.as_str() != "op")
-            .for_each(|(_, value)| strings_of(value, out)),
+        serde_json::Value::Object(fields) => {
+            fields.values().for_each(|value| strings_of(value, out))
+        }
         _ => {}
     }
+}
+
+/// Every string a command's payload carries: all of it but the command's own `op`, which
+/// is the wire word for what kind of command it is rather than anything it says.
+fn payload_strings(command: &crate::channel::Command) -> Vec<String> {
+    let mut payload = serde_json::to_value(command).unwrap_or_default();
+    if let Some(fields) = payload.as_object_mut() {
+        fields.remove("op");
+    }
+    let mut text = Vec::new();
+    strings_of(&payload, &mut text);
+    text
 }
 
 /// The commands a document carries — a reply envelope's, a routed record's, or a reply
@@ -1149,11 +1160,7 @@ pub(crate) fn judge(
     };
     for command in &commands {
         let op = crate::channel::op_of(command);
-        let mut text = Vec::new();
-        strings_of(
-            &serde_json::to_value(command).unwrap_or_default(),
-            &mut text,
-        );
+        let text = payload_strings(command);
         // What a command is about, as the engine reads it — but a retry is judged as the
         // replacement it puts in, which is the node its payload becomes.
         let target = match command {
