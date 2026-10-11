@@ -1192,9 +1192,11 @@ pub(crate) fn judge(
                     return judged;
                 }
             }
-            Some((Some(clearance), target)) => {
+            // The refusal names the op and never the node: a public node's id may itself be
+            // what carries the private term.
+            Some((Some(clearance), _)) => {
                 if clearance == Clearance::Public {
-                    if let Some(judged) = ask(text, &format!("`{op}` for public node {target}")) {
+                    if let Some(judged) = ask(text, &format!("`{op}` for a public node")) {
                         return judged;
                     }
                 }

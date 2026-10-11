@@ -137,7 +137,15 @@ fn refused_by_check(world: &World, name: &str, plan: &Value) -> String {
         refusals[0]["node"].is_null(),
         "a boundary refusal reports the node it is about: {answered}"
     );
-    refusals[0]["reason"].as_str().expect("a reason").to_owned()
+    let reason = refusals[0]["reason"].as_str().expect("a reason").to_owned();
+    let ids: Vec<&str> = plan["tasks"]
+        .as_array()
+        .expect("the plan's nodes")
+        .iter()
+        .filter_map(|node| node["id"].as_str())
+        .collect();
+    names_none(world, &reason, &ids);
+    reason
 }
 
 /// Assert `reason` names none of `ids`, beyond the guidance every refusal carries — whose
@@ -146,7 +154,7 @@ fn names_none(world: &World, reason: &str, ids: &[&str]) {
     let said = reason.replace(&guidance(world), "");
     for id in ids {
         assert!(
-            !said.contains(id),
+            !mentions(&said, id),
             "a boundary refusal names node {id:?}:\n{reason}"
         );
     }
@@ -225,7 +233,9 @@ fn an_ordinary_private_to_public_dependency_is_refused_at_load_carrying_the_host
     world
         .run(&["start", &project, "--attach"])
         .exited(REFUSED)
-        .err_has("ordinary dependency");
+        .err_has("ordinary dependency")
+        .err_lacks("inner")
+        .err_lacks("outer");
     assert!(
         !world
             .runs
@@ -453,9 +463,7 @@ fn a_live_edit_adding_an_ordinary_private_to_public_dependency_is_refused_before
         {"op": "add", "node": public("outer", &["inner"])},
     ]})
     .to_string();
-    world
-        .run_with_stdin(&["reply", "edited"], &ordinary)
-        .exited(REFUSED)
+    refused_reply(&world, "edited", &ordinary)
         .err_has("ordinary dependency")
         .err_has("generalize -> preserve -> export -> consume")
         .err_lacks("inner")
@@ -467,9 +475,7 @@ fn a_live_edit_adding_an_ordinary_private_to_public_dependency_is_refused_before
         {"op": "add", "node": public("lander", &["keeper"])},
     ]})
     .to_string();
-    world
-        .run_with_stdin(&["reply", "edited"], &unexported)
-        .exited(REFUSED)
+    refused_reply(&world, "edited", &unexported)
         .err_has("ordinary dependency")
         .err_lacks("keeper")
         .err_lacks("lander");
@@ -481,9 +487,7 @@ fn a_live_edit_adding_an_ordinary_private_to_public_dependency_is_refused_before
         {"op": "add", "node": public("outer", &["relay"])},
     ]})
     .to_string();
-    world
-        .run_with_stdin(&["reply", "edited"], &relayed)
-        .exited(REFUSED)
+    refused_reply(&world, "edited", &relayed)
         .err_has("depends on a private node")
         .err_lacks("relay")
         .err_lacks("inner")
@@ -924,17 +928,7 @@ fn an_export_that_changes_a_path_outside_its_directory_is_refused_and_its_consum
     let consumer = settled(&world, "outside", "examples");
     assert_eq!(consumer["status"], "failed", "{consumer}\n{}", world.dump());
     assert_eq!(consumer["outcome"], "infrastructure-failure");
-    let detail = world
-        .events_of("outside", "node-settled")
-        .into_iter()
-        .find(|event| event["labels"]["node"] == "examples")
-        .map(|event| {
-            event["payload"]["detail"]
-                .as_str()
-                .unwrap_or_default()
-                .to_owned()
-        })
-        .unwrap_or_default();
+    let detail = detail_of(&world, "outside", "examples");
     assert!(detail.contains("outside the export directory"), "{detail}");
     for private_name in ["service", "generalize", "elsewhere"] {
         assert!(!detail.contains(private_name), "{detail}");
@@ -1045,17 +1039,7 @@ fn a_producer_named_with_a_private_term_is_given_a_neutral_branch_and_exports_on
     );
     let refused = settled(&world, "zephyrine-dirty", "more-examples");
     assert_eq!(refused["outcome"], "infrastructure-failure", "{refused}");
-    let detail = world
-        .events_of("zephyrine-dirty", "node-settled")
-        .into_iter()
-        .find(|event| event["labels"]["node"] == "more-examples")
-        .map(|event| {
-            event["payload"]["detail"]
-                .as_str()
-                .unwrap_or_default()
-                .to_owned()
-        })
-        .unwrap_or_default();
+    let detail = detail_of(&world, "zephyrine-dirty", "more-examples");
     assert!(
         detail.contains("public output carries a term of a private repository in a commit message"),
         "{detail}"
@@ -1069,10 +1053,66 @@ fn a_producer_named_with_a_private_term_is_given_a_neutral_branch_and_exports_on
 
 /// Judge `document` with the compiled validator, as a bus's `command` validator runs it.
 fn validated(world: &World, run: &str, document: &Value) -> crate::harness::Run {
-    world.run_with_stdin(
+    let validated = world.run_with_stdin(
         &["boundary", "validate-envelope", "--run", run],
         &document.to_string(),
-    )
+    );
+    if validated.code != 0 {
+        names_no_node(world, run, &validated.stderr);
+    }
+    validated
+}
+
+/// A direct `reply` to `run` the engine refuses, its refusal naming no node of the run.
+fn refused_reply(world: &World, run: &str, envelope: &str) -> crate::harness::Run {
+    let replied = world.run_with_stdin(&["reply", run], envelope);
+    replied.exited(REFUSED);
+    names_no_node(world, run, &replied.stderr);
+    replied
+}
+
+/// Every node id `run` has held: the plan it launched with, and every node an accepted
+/// edit added or put in place of another.
+fn node_ids(world: &World, run: &str) -> std::collections::BTreeSet<String> {
+    let launched = world.run_json(run, "plan.json");
+    let mut ids: std::collections::BTreeSet<String> = launched["tasks"]
+        .as_array()
+        .expect("the launched plan's nodes")
+        .iter()
+        .filter_map(|node| node["id"].as_str().map(str::to_owned))
+        .collect();
+    ids.extend(
+        world
+            .events_of(run, "edit-committed")
+            .iter()
+            .filter_map(|event| event["payload"]["command"]["node"]["id"].as_str())
+            .map(str::to_owned),
+    );
+    ids
+}
+
+/// Whether `text` names `id` as a word of its own — not as part of a longer id, a path or
+/// a branch name.
+fn mentions(text: &str, id: &str) -> bool {
+    let joins = |c: char| c.is_alphanumeric() || matches!(c, '-' | '_' | '/');
+    text.match_indices(id).any(|(at, _)| {
+        let before = text[..at].chars().next_back();
+        let after = text[at + id.len()..].chars().next();
+        !before.is_some_and(joins) && !after.is_some_and(joins)
+    })
+}
+
+/// Assert `said`, a refusal or a settlement's detail in `run`, names none of the run's
+/// nodes — beyond the guidance a refusal carries, whose own words name the `generalize`
+/// step.
+fn names_no_node(world: &World, run: &str, said: &str) {
+    let said = said.replace(&guidance(world), "");
+    for id in node_ids(world, run) {
+        assert!(
+            !mentions(&said, &id),
+            "a boundary refusal in {run} names node {id:?}:\n{said}"
+        );
+    }
 }
 
 /// One note command to `id`.
@@ -1108,7 +1148,7 @@ fn the_compiled_validator_judges_targeted_and_untargeted_content_and_refuses_wha
     );
     refused
         .exited(exit_for("refuse"))
-        .err_has("public node examples");
+        .err_has("for a public node");
     assert!(!refused.stderr.contains("zephyrine"), "{}", refused.stderr);
     validated(
         &world,
@@ -1345,10 +1385,7 @@ fn a_payload_once_passed_is_judged_again_after_the_terms_change_whatever_a_bus_c
         &["commit", "-qam", "chore: restore it"],
     );
     // The same bytes are judged again, through the bus and directly, and refused.
-    world
-        .run_with_stdin(&["reply", "bussed"], &payload.to_string())
-        .exited(REFUSED)
-        .err_has("public node examples");
+    refused_reply(&world, "bussed", &payload.to_string()).err_has("for a public node");
     validated(&world, "bussed", &payload).exited(1);
     let committed: Vec<Value> = world.events_of("bussed", "edit-committed");
     let notes = committed
@@ -1365,14 +1402,9 @@ fn a_direct_reply_and_note_meet_the_same_check_without_any_bus() {
     let (world, _) = held_mixed_run("direct", &["zephyrine"]);
     let leaking =
         json!({"version": 3, "commands": [note("examples", "follow the zephyrine layout")]});
-    world
-        .run_with_stdin(&["reply", "direct"], &leaking.to_string())
-        .exited(REFUSED)
-        .err_has("public node examples");
+    refused_reply(&world, "direct", &leaking.to_string()).err_has("for a public node");
     let unknown = json!({"version": 3, "commands": [note("nowhere", "anything")]});
-    world
-        .run_with_stdin(&["reply", "direct"], &unknown.to_string())
-        .exited(REFUSED);
+    refused_reply(&world, "direct", &unknown.to_string());
     assert!(
         world
             .events_of("direct", "edit-committed")
@@ -1391,11 +1423,7 @@ fn a_direct_reply_and_note_meet_the_same_check_without_any_bus() {
         "the zephyrine step is slow",
     ]);
     refused.exited(REFUSED);
-    assert!(
-        !refused.stderr.contains("generalize"),
-        "the refusal names a private node:\n{}",
-        refused.stderr
-    );
+    names_no_node(&world, "direct", &refused.stderr);
     assert!(
         world
             .events_of("direct", "planner-surface-queued")
@@ -1451,7 +1479,7 @@ fn an_envelope_queued_past_every_submission_check_and_one_replayed_by_an_adopter
     });
     let answered = outcome_of(&world, "replayed", 0).expect("an outcome");
     assert!(
-        answered.to_string().contains("public node examples"),
+        answered.to_string().contains("for a public node"),
         "the queued leak was not refused by the boundary: {answered}"
     );
 
@@ -1471,7 +1499,7 @@ fn an_envelope_queued_past_every_submission_check_and_one_replayed_by_an_adopter
     });
     let answered = outcome_of(&world, "replayed", 1).expect("an outcome");
     assert!(
-        answered.to_string().contains("public node examples"),
+        answered.to_string().contains("for a public node"),
         "the replayed leak was not refused by the boundary: {answered}"
     );
     assert!(
@@ -1530,7 +1558,7 @@ fn saying(world: &World, id: &str, said: &str) -> Value {
 
 /// The detail a node settled with.
 fn detail_of(world: &World, run: &str, node: &str) -> String {
-    world
+    let detail = world
         .events_of(run, "node-settled")
         .into_iter()
         .rev()
@@ -1541,7 +1569,9 @@ fn detail_of(world: &World, run: &str, node: &str) -> String {
                 .unwrap_or_default()
                 .to_owned()
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    names_no_node(world, run, &detail);
+    detail
 }
 
 /// What the write-back recorded of each attempt to project the run onto its store.
@@ -1859,9 +1889,7 @@ fn a_live_edit_naming_b_puts_b_in_the_run_scope_for_the_validator_replies_and_st
             .any(|event| event["payload"]["command"]["op"] == "add")
     });
     validated(&world, "grown", &naming_b).exited(1);
-    world
-        .run_with_stdin(&["reply", "grown"], &naming_b.to_string())
-        .exited(REFUSED);
+    refused_reply(&world, "grown", &naming_b.to_string());
     // The write-back's retained store checks over the new scope too: the node it creates
     // names B's repository, which the store, now deriving B's terms, refuses to put on a
     // plans source that is not private.
@@ -2321,17 +2349,16 @@ fn a_stricter_clearance_is_never_downgraded() {
     );
     // The replacement is as private as what it replaced: a public node depending on it
     // is still an ordinary private-to-public dependency.
-    world
-        .run_with_stdin(
-            &["reply", "retried-strict"],
-            &json!({"version": 3, "commands": [
-                {"op": "add", "node": public("downstream", &["classified-2"])}
-            ]})
-            .to_string(),
-        )
-        .exited(REFUSED)
-        .err_has("depends on a private node")
-        .err_lacks("classified");
+    refused_reply(
+        &world,
+        "retried-strict",
+        &json!({"version": 3, "commands": [
+            {"op": "add", "node": public("downstream", &["classified-2"])}
+        ]})
+        .to_string(),
+    )
+    .err_has("depends on a private node")
+    .err_lacks("classified");
     // Nor does a requeue's amendment stating it public: a parked private node requeued so
     // is as private as it was.
     let mut parked = public("parked-private", &[]);
@@ -2347,17 +2374,16 @@ fn a_stricter_clearance_is_never_downgraded() {
         "retried-strict",
         json!([{"op": "requeue", "id": "parked-private", "amend": {"classification": "public"}}]),
     );
-    world
-        .run_with_stdin(
-            &["reply", "retried-strict"],
-            &json!({"version": 3, "commands": [
-                {"op": "add", "node": public("downstream-2", &["parked-private"])}
-            ]})
-            .to_string(),
-        )
-        .exited(REFUSED)
-        .err_has("depends on a private node")
-        .err_lacks("parked-private");
+    refused_reply(
+        &world,
+        "retried-strict",
+        &json!({"version": 3, "commands": [
+            {"op": "add", "node": public("downstream-2", &["parked-private"])}
+        ]})
+        .to_string(),
+    )
+    .err_has("depends on a private node")
+    .err_lacks("parked-private");
     world.release("held.go");
 }
 
@@ -3108,16 +3134,15 @@ fn the_validator_refuses_to_judge_a_malformed_document_and_reads_commands_as_the
         "shaped",
         json!([{"op": "cancel", "id": "examples", "reason": "hold it while the export waits"}]),
     );
-    world
-        .run_with_stdin(
-            &["reply", "shaped"],
-            &json!({"version": 3, "commands": [
-                {"op": "requeue", "id": "examples", "amend": {"base_branch": "topic"}},
-            ]})
-            .to_string(),
-        )
-        .exited(REFUSED)
-        .err_has("alternate private context");
+    refused_reply(
+        &world,
+        "shaped",
+        &json!({"version": 3, "commands": [
+            {"op": "requeue", "id": "examples", "amend": {"base_branch": "topic"}},
+        ]})
+        .to_string(),
+    )
+    .err_has("alternate private context");
     assert!(
         world
             .events_of("shaped", "edit-committed")
@@ -3463,6 +3488,11 @@ fn a_public_branch_a_node_keeps_is_preserved_over_the_run_scope_and_not_the_whol
     );
     let a = settlement("cites-a");
     assert_eq!(a["outcome"], "infrastructure-failure", "{a}");
+    names_no_node(
+        &world,
+        "kept-public",
+        a["detail"].as_str().unwrap_or_default(),
+    );
     assert!(
         a["detail"]
             .as_str()
