@@ -368,13 +368,43 @@ fn rows_of(
             }
             registry => registry.proves(node),
         };
-        let age_ms = state
-            .dispatched_at
-            .get(node)
-            .map(|at| sys::now_millis().saturating_sub(*at));
+        let dispatched_at = state.dispatched_at.get(node).copied();
+        let proof = match proof {
+            Proof::Stale(_) if recorded_after_every_entry(registry, node, dispatched_at) => {
+                Proof::Unproven(
+                    "the run recorded this dispatch after every entry its registry holds for \
+                     it, and those are of an earlier attempt that is gone, so nothing here \
+                     names its process yet"
+                        .to_string(),
+                )
+            }
+            proof => proof,
+        };
+        let age_ms = dispatched_at.map(|at| sys::now_millis().saturating_sub(at));
         push(&mut read, paths, launch, node, age_ms, proof);
     }
     read
+}
+
+/// Whether the run recorded `node`'s current dispatch after every registry entry
+/// it holds for that node was written.
+///
+/// A driver records a dispatch before the executor writes its entry, so an entry
+/// stamped before the recorded dispatch is an earlier attempt's: one that is
+/// stale says that attempt ended, and nothing about the dispatch the run is
+/// running now — which is what a re-dispatch after an adoption looks like until
+/// its own entry lands. An entry whose stamp cannot be read is not counted as
+/// earlier.
+fn recorded_after_every_entry(registry: &Registry, node: &str, dispatched_at: Option<u64>) -> bool {
+    let (Registry::Read(by_node), Some(dispatched_at)) = (registry, dispatched_at) else {
+        return false;
+    };
+    by_node.get(node).is_some_and(|records| {
+        records.iter().all(|record| {
+            crate::projection::millis_of(&record.dispatched_at)
+                .is_some_and(|written| written < dispatched_at)
+        })
+    })
 }
 
 /// Why a stopped registry-less run's dispatch is gone.
