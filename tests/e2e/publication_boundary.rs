@@ -2795,6 +2795,26 @@ fn the_validator_refuses_to_judge_a_malformed_document_and_reads_commands_as_the
     )
     .exited(exit_for("pass"));
 
+    // A node an envelope drops is judged by the clearance it had: dropping the public
+    // loose node with a reason naming a private term is refused.
+    validated(
+        &world,
+        "shaped",
+        &json!({"version": 3, "commands": [
+            {"op": "drop", "id": "loose", "dependents": "detach",
+             "reason": "the zephyrine copy replaces it"},
+        ]}),
+    )
+    .exited(exit_for("refuse"));
+    validated(
+        &world,
+        "shaped",
+        &json!({"version": 3, "commands": [
+            {"op": "drop", "id": "loose", "dependents": "detach", "reason": "not needed"},
+        ]}),
+    )
+    .exited(exit_for("pass"));
+
     // So is a requeue's amendment: amended into the public repository, the parked keeper
     // is public, and the same note to it is refused.
     validated(
@@ -3113,4 +3133,67 @@ fn every_side_of_a_mixed_plan_is_told_which_it_is_on() {
     );
     assert!(notes.contains("This node is public."), "{notes}");
     assert!(notes.contains("Everything it writes is public"), "{notes}");
+}
+
+#[test]
+fn a_public_branch_a_node_keeps_is_preserved_over_the_run_scope_and_not_the_whole_registry() {
+    let (world, _, _, library) = scoped_world("scope-kept");
+    // The run names A (a parked node in its repository) and keeps two branches of the
+    // public repository: one naming only B, which it does not name, and one naming A.
+    let kept = |id: &str, said: &str| {
+        world.script(&format!("{id}.work"), &format!("{said}\n"));
+        let mut node = public(id, &[]);
+        node["publish"] = json!("preserve");
+        node
+    };
+    let mut keeper = lifecycle("keeper", &[]);
+    keeper["parked"] = json!(true);
+    let project = world.plan(
+        "kept-public",
+        &mixed_plan(
+            "kept-public",
+            vec![
+                keeper,
+                kept("cites-b", "see owner/beta"),
+                kept("cites-a", "see owner/service"),
+            ],
+            vec![],
+        ),
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
+    for node in ["cites-b", "cites-a"] {
+        until_settled(&world, "kept-public", node);
+    }
+    let settlement = |node: &str| {
+        world
+            .events_of("kept-public", "node-settled")
+            .into_iter()
+            .find(|event| event["labels"]["node"] == node)
+            .expect("a settlement")["payload"]
+            .clone()
+    };
+    let b = settlement("cites-b");
+    assert_eq!(b["outcome"], "preserved", "{b}\n{}", world.dump());
+    let pushed = crate::harness::git(
+        &world,
+        &library.origin,
+        &[
+            "ls-remote",
+            ".",
+            &format!("refs/heads/{}", b["branch"].as_str().unwrap_or("x")),
+        ],
+    );
+    assert!(
+        !pushed.trim().is_empty(),
+        "the branch naming only B was not kept"
+    );
+    let a = settlement("cites-a");
+    assert_eq!(a["outcome"], "infrastructure-failure", "{a}");
+    assert!(
+        a["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("public output carries a term"),
+        "{a}"
+    );
 }
