@@ -8073,25 +8073,6 @@ fn a_pooled_identity_holds_the_second_node_until_the_first_hands_its_slot_back()
     let other = world.extra_repository("other");
     let unread = world.extra_repository("unread");
     pool_one_slot_no_overflow(&world);
-    // Each repository's visibility is declared, so a publication's write boundary
-    // takes the rule's word rather than probing the fake host, which answers no
-    // visibility: an unanswered probe screens the write, and the `unread` node's
-    // commit message names its own repository, a term of a private one.
-    std::fs::write(
-        world.onevcs_home().join("rules.yml"),
-        "version: 4\n\
-         rules:\n\
-         \x20 - match: {host: github.com, owner: owner, name: service}\n\
-         \x20   visibility: private\n\
-         \x20 - match: {host: github.com, owner: owner, name: other}\n\
-         \x20   visibility: private\n\
-         \x20 - match: {host: github.com, owner: owner, name: unread}\n\
-         \x20   visibility: private\n\
-         default:\n\
-         \x20 publication: local-direct\n\
-         \x20 approvals: none\n",
-    )
-    .expect("the rules file is written");
     // The identity directory exists once a session has been placed under it, so
     // one is opened and closed in this process to find it — and then a file is
     // put where the survey expects a directory.

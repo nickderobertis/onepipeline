@@ -1441,13 +1441,19 @@ impl World {
         );
         git(self, &checkout, &["push", "-u", "origin", "main"]);
 
-        // Version 3, which is the shape with no `gate:` in it at all: what
-        // verifies a change is the repository's own merge path, so the rules file
-        // says only how the change is published and whether it needs approving.
+        // No `gate:` in it at all: what verifies a change is the repository's own
+        // merge path, so the rules file says only how the change is published and
+        // whether it needs approving. Version 4 for its one rule, which declares
+        // every fixture repository private: undeclared, a publication probes the
+        // host for its visibility with `gh api repos/{owner}/{name}`, which the
+        // fake host answers with none, and that probe would both spend a scripted
+        // outage meant for the merge-path read and screen the write for the terms
+        // of the very repositories it names.
         std::fs::write(
             home.join("rules.yml"),
             format!(
-                "version: 3\nrules: []\ndefault:\n  publication: {publication}\n  approvals: \
+                "version: 4\nrules:\n  - match: {{host: github.com, owner: owner}}\n    \
+                 visibility: private\ndefault:\n  publication: {publication}\n  approvals: \
                  none\n"
             ),
         )
