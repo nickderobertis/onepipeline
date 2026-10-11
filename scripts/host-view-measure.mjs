@@ -41,7 +41,7 @@ import { journalOpens, steadyOpens } from "./host-view-trace.mjs";
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
 const binary = process.argv[2];
 // Where the record goes: the budget's own place unless a caller names another, as
-// `tests/budgets.rs` does to measure this tree's build without standing in for the
+// `tests/e2e/host_view.rs` does to measure this tree's build without standing in for the
 // release binary's record.
 const RECORD = process.argv[3] ?? join(REPO, "target", "budget-records", "host-view.json");
 if (!binary) {
