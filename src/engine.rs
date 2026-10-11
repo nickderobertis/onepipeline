@@ -570,7 +570,6 @@ pub(crate) enum Message {
 
 /// One publication waiting on the next pass's claim check.
 pub(crate) struct PublicationDue {
-    /// Where the pass's answer goes.
     pub(crate) answer: Sender<PublicationVerdict>,
 }
 

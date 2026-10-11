@@ -1435,7 +1435,6 @@ fn a_settlement_dispatch_or_claim_that_is_not_one_refuses_the_launch() {
             "the refusal minted a run"
         );
     };
-    // Each settlement a store could hold that is not one, and what the refusal names.
     let settlement = &stored["b"];
     let with = |edit: &dyn Fn(&mut Value)| {
         let mut changed = settlement.clone();
@@ -1450,6 +1449,10 @@ fn a_settlement_dispatch_or_claim_that_is_not_one_refuses_the_launch() {
             "unknown variant",
         ),
         (with(&|s| s["remote"] = json!("teleported")), "`remote`"),
+        (with(&|s| s["branch"] = json!("me/b\nme/c")), "`branch`"),
+        (with(&|s| s["base"] = json!("")), "`base`"),
+        (with(&|s| s["head"] = json!("4b82 5dc6")), "`head`"),
+        (with(&|s| s["change_url"] = json!("")), "`change_url`"),
         (
             with(&|s| {
                 s["base"] = json!("me/a");
@@ -1491,7 +1494,6 @@ fn a_settlement_dispatch_or_claim_that_is_not_one_refuses_the_launch() {
         settlement.clone(),
     );
 
-    // Each dispatch that is not one.
     let at = "2026-10-11T00:00:00.000Z";
     let dispatches = [
         (json!({"branch": settlement["branch"]}), "missing field"),
@@ -1522,7 +1524,6 @@ fn a_settlement_dispatch_or_claim_that_is_not_one_refuses_the_launch() {
         json!({"branch": settlement["branch"], "base": stored["a"]["branch"], "opened_at": at}),
     );
 
-    // Each claim that is not one.
     let claim = json!({"run": "elsewhere", "host": "builder", "session": null, "pid": 7,
                        "claimed_at": at});
     let mut leased = claim.clone();
@@ -1531,9 +1532,15 @@ fn a_settlement_dispatch_or_claim_that_is_not_one_refuses_the_launch() {
     untimed["claimed_at"] = json!("yesterday");
     let mut unnamed = claim.clone();
     unnamed["host"] = json!("");
+    let mut unrun = claim.clone();
+    unrun["run"] = json!("else\nwhere");
+    let mut unsessioned = claim.clone();
+    unsessioned["session"] = json!("two words");
     let claims = [
         (json!({"run": "elsewhere"}), "missing field"),
         (unnamed, "`host`"),
+        (unrun, "`run`"),
+        (unsessioned, "`session`"),
         (json!("elsewhere"), "not a mapping"),
         (leased, "`lease`"),
         (untimed, "not an RFC 3339 instant"),

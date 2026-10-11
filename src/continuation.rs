@@ -520,7 +520,6 @@ impl ClaimWatch {
     }
 }
 
-/// Which kind of driver a claim watch is a driver's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Driving {
     /// A launch's: the read of the claim that let it launch covers its first pass.
