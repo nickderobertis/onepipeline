@@ -2913,6 +2913,23 @@ fn the_validator_refuses_to_judge_a_malformed_document_and_reads_commands_as_the
     )
     .exited(exit_for("pass"));
 
+    // A command naming no node is judged as public text over its own payload: a
+    // completion whose reason names a private term is refused.
+    validated(
+        &world,
+        "shaped",
+        &json!({"version": 3, "commands": [
+            {"op": "complete", "reason": "the zephyrine example shipped"},
+        ]}),
+    )
+    .exited(exit_for("refuse"));
+    validated(
+        &world,
+        "shaped",
+        &json!({"version": 3, "commands": [{"op": "complete", "reason": "all shipped"}]}),
+    )
+    .exited(exit_for("pass"));
+
     // A retry is judged by the replacement it would put in: retried into the public
     // repository, the producer's replacement is public and its private term refused;
     // retried where it was, it stays private and passes.
@@ -2934,7 +2951,56 @@ fn the_validator_refuses_to_judge_a_malformed_document_and_reads_commands_as_the
         &json!({"version": 3, "commands": [{"op": "retry", "id": "generalize", "node": in_place}]}),
     )
     .exited(exit_for("pass"));
+
+    // A live edit giving the consumer an alternate base is refused, and not committed: it
+    // is parked, then requeued with an amendment naming one.
+    reply(
+        &world,
+        "shaped",
+        json!([{"op": "cancel", "id": "examples", "reason": "hold it while the export waits"}]),
+    );
+    world
+        .run_with_stdin(
+            &["reply", "shaped"],
+            &json!({"version": 3, "commands": [
+                {"op": "requeue", "id": "examples", "amend": {"base_branch": "topic"}},
+            ]})
+            .to_string(),
+        )
+        .exited(REFUSED)
+        .err_has("alternate private context");
+    assert!(
+        world
+            .events_of("shaped", "edit-committed")
+            .iter()
+            .all(|event| event["payload"]["command"]["op"] != "requeue"),
+        "the refused requeue was committed"
+    );
     world.release("generalize.go");
+}
+
+#[test]
+fn a_consumer_whose_neutrality_cannot_be_checked_is_refused_at_load() {
+    let (world, private, _) = mixed_world("boundary-unchecked");
+    // The private repository's committed declaration cannot be read, so no term check
+    // over the run's scope can decide.
+    std::fs::write(
+        private.checkout.join("private-terms.toml"),
+        "schema_version = 1\nterms = [\n",
+    )
+    .expect("a broken declaration");
+    crate::harness::git(&world, &private.checkout, &["add", "-A"]);
+    crate::harness::git(
+        &world,
+        &private.checkout,
+        &["commit", "-qm", "chore: break it"],
+    );
+    let reason = refused_by_check(&world, "unchecked", &exported_plan("unchecked"));
+    assert!(reason.contains("must be neutral"), "{reason}");
+    assert!(
+        reason.contains("the public boundary check is unavailable"),
+        "{reason}"
+    );
 }
 
 #[cfg(unix)]
