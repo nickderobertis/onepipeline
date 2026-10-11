@@ -543,10 +543,14 @@ fn an_unconcluded_stack_base_merge_fails_the_node_naming_it() {
 }
 
 /// The node's worker failing in the stack base's session settles the node on that
-/// failure, with nothing of its own session opened.
+/// failure, with nothing of its own session opened — on a host that configures no
+/// branch prefix, so the stack base is named under none.
 #[test]
 fn a_worker_that_fails_the_stack_base_merge_fails_the_node() {
-    let world = team_world("stack-merge-fails");
+    // A host that configures no branch prefix, so the stack base is named under none.
+    let world = World::new("stack-merge-fails");
+    team_repository(&world);
+    world.script("gh.checks", GREEN);
     world.script("a.work", "a wrote this\n");
     world.script("c.work", "c wrote this\n");
     world.script("a.work-file", "shared");
@@ -579,7 +583,7 @@ fn a_worker_that_fails_the_stack_base_merge_fails_the_node() {
     assert!(e.get("base").is_none() && e.get("branch").is_none(), "{e}");
     assert_eq!(
         e["stack"]["stack_base"],
-        format!("{PREFIX}stack-base/{run}/e"),
+        format!("stack-base/{run}/e"),
         "{e}"
     );
 }
@@ -735,23 +739,46 @@ fn an_explicit_base_branch_is_the_root_of_the_stack_base() {
 }
 
 /// A second publication of a stacked node — a re-dispatch onto its branch after its
-/// checks failed — still leaves exactly one Stack block, and text written outside it
-/// between the two publications is kept.
+/// checks failed — assembles its stack base again, still leaves exactly one Stack
+/// block, and keeps text written outside it between the two publications.
+///
+/// The root moves between the two attempts, so the second assembly advances the
+/// stack base over it rather than finding it as it was, and the continued branch
+/// carries it while its change request still shows only its own change.
 #[test]
 fn a_republished_stack_keeps_one_block_and_the_text_around_it() {
     let world = team_world("stack-republish").with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "2");
+    let repo = service(&world);
     world.script("a.work", "a's change\n");
+    world.script("c.work", "c's change\n");
     world.script("f.work-anew", "f's change");
-    // `f`'s change request is the second the host opens; its checks fail.
-    world.script("gh.checks.2", RED);
+    // `f`'s change request is the third the host opens; its checks fail.
+    world.script("gh.checks.3", RED);
     let meeting = world.rendezvous("f");
     let run = "republish";
-    let mut plan = plan_of(run, vec![lifecycle("a", &[]), lifecycle("f", &["a"])]);
+    let mut plan = plan_of(
+        run,
+        vec![
+            lifecycle("a", &[]),
+            lifecycle("c", &[]),
+            lifecycle("f", &["a", "c"]),
+        ],
+    );
     plan["concurrency"] = json!(1);
     let path = world.plan(run, &plan);
     world.run(&["start", &path, "--detach"]).exited(0);
+    let stack_base = format!("{PREFIX}stack-base/{run}/f");
 
-    meeting.arrived().release();
+    // While the first attempt works, the root moves on.
+    let first = meeting.arrived();
+    let assembled_first = git(&world, &repo.origin, &["rev-parse", &stack_base]);
+    let checkout = &repo.checkout;
+    std::fs::write(checkout.join("root.md"), "the root moved\n").expect("a file");
+    git(&world, checkout, &["add", "root.md"]);
+    git(&world, checkout, &["commit", "-m", "chore: move the root"]);
+    git(&world, checkout, &["push", "origin", "main"]);
+    first.release();
+
     let second = meeting.arrived();
     // The first publication opened the change request and wrote its block.
     let opened = world.fakes.join("gh").join("opened.jsonl");
@@ -763,7 +790,7 @@ fn a_republished_stack_keeps_one_block_and_the_text_around_it() {
     let edited: Vec<String> = changes
         .into_iter()
         .map(|mut change| {
-            if change["number"] == 2 {
+            if change["number"] == 3 {
                 let body = text(&change["body"], "f's body").to_owned();
                 assert!(
                     body.contains(OPEN),
@@ -782,16 +809,7 @@ fn a_republished_stack_keeps_one_block_and_the_text_around_it() {
 
     let f = settled(&world, run, "f");
     assert_eq!(f["outcome"], "checks-failed", "{f}");
-    let description = change_from(&world, text(&f["branch"], "f's branch"))["body"]
-        .as_str()
-        .expect("a body")
-        .to_owned();
-    let block = one_block(&description, "A reviewer wrote this.");
-    assert!(
-        description.trim_end().ends_with("And this."),
-        "{description}"
-    );
-    assert!(block.contains(text(&settled(&world, run, "a")["change_url"], "a's url")));
+    assert_eq!(f["base"], stack_base.as_str(), "{f}");
     assert_eq!(
         world
             .events_of(run, "node-dispatched")
@@ -801,6 +819,44 @@ fn a_republished_stack_keeps_one_block_and_the_text_around_it() {
         2,
         "f was published twice"
     );
+    // Assembled again over the moved root: advanced, forward-only, and carried.
+    let assembled_second = git(&world, &repo.origin, &["rev-parse", &stack_base]);
+    assert_ne!(
+        assembled_first, assembled_second,
+        "the stack base did not advance"
+    );
+    git(
+        &world,
+        &repo.origin,
+        &[
+            "merge-base",
+            "--is-ancestor",
+            assembled_first.trim(),
+            &stack_base,
+        ],
+    );
+    let f_branch = text(&f["branch"], "f's branch");
+    for branch in [stack_base.as_str(), f_branch] {
+        assert_eq!(file_on(&world, &repo, branch, "root.md"), "the root moved");
+    }
+    assert_eq!(
+        changed_against(&world, &repo, &stack_base, f_branch),
+        ["f.md"]
+    );
+
+    let description = change_from(&world, f_branch)["body"]
+        .as_str()
+        .expect("a body")
+        .to_owned();
+    let block = one_block(&description, "A reviewer wrote this.");
+    assert!(
+        description.trim_end().ends_with("And this."),
+        "{description}"
+    );
+    assert!(block.contains(&stack_base), "{block}");
+    for parent in ["a", "c"] {
+        assert!(block.contains(text(&settled(&world, run, parent)["change_url"], "url")));
+    }
 }
 
 /// The settlement's `base`, `head` and `stack` reach the store the plan was read

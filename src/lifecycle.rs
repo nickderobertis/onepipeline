@@ -132,6 +132,10 @@ pub fn execute(
 /// branch stood at before the session closed, the change request it holds — and
 /// stamped onto the settlement [`execute`] returns, so a failure settled after a
 /// spent re-dispatch budget names them exactly as a success does.
+// llmlint: ignore-end[invalid_states_unrepresentable]
+// llmlint: ignore-block[invalid_states_unrepresentable] `base`, `head` and `change_url` hold
+// what goes onto `Settlement`'s own `Option<String>` fields of those names and are read
+// nowhere else: a newtype here would be unwrapped at the one place it is read.
 #[derive(Debug, Default)]
 struct Placed {
     /// The base the node's session opened on, once one did.
@@ -146,6 +150,12 @@ struct Placed {
     /// The stack it was drafted on, where it had stack parents.
     stack: Option<Box<crate::payload::SettledStack>>,
 }
+// llmlint: ignore-end[invalid_states_unrepresentable]
+// llmlint: ignore-block[invalid_states_unrepresentable] the graph references below are the
+// same validated, launch-recorded strings the engine carries — the launch record's own
+// fields, read off it strictly and passed straight back into oneagentgraph's transparent
+// ConfigRef. Another newtype would duplicate that sibling type and widen this
+// path-resolution change across unrelated composition.
 
 impl Placed {
     /// `settlement`, with what it did not say itself filled in from here.
@@ -686,13 +696,16 @@ fn attempt_once(
                     persona: step.persona.as_deref(),
                     controls: *controls,
                 };
-                let base = StackBaseOf {
-                    root,
-                    branch,
-                    parents,
-                };
                 match assemble(
-                    executor, paths, node, &base, &merging, cancel, tx, ended, attempt,
+                    executor,
+                    paths,
+                    node,
+                    (root, branch, parents),
+                    &merging,
+                    cancel,
+                    tx,
+                    ended,
+                    attempt,
                 ) {
                     Ok(assembled) => {
                         let heads = assembled
@@ -898,15 +911,9 @@ struct Merging<'a> {
     controls: crate::controls::NodeControls,
 }
 
-/// The stack base a node is placed on, as its placement named it.
-struct StackBaseOf<'a> {
-    root: &'a str,
-    branch: &'a str,
-    parents: &'a [crate::stack::Parent],
-}
-
-/// Assemble the stack base `base` names, handing any merge that stops on a
-/// conflict to the node's own worker and assembling again once it concludes.
+/// Assemble the stack base `branch` on `root` from `parents`, handing any merge
+/// that stops on a conflict to the node's own worker and assembling again once it
+/// concludes.
 ///
 /// Bounded at one conclusion per merge the assembly makes — the root's and each
 /// parent's — because a stack base whose every merge was concluded has nothing
@@ -924,19 +931,18 @@ fn assemble(
     executor: &dyn Executor,
     paths: &RunPaths,
     node: &Node,
-    base: &StackBaseOf<'_>,
+    (root, branch, parents): (&str, &str, &[crate::stack::Parent]),
     merging: &Merging<'_>,
     cancel: &crate::executor::CancellationToken,
     tx: &Sender<Message>,
     ended: &engine::EndedDispatches,
     attempt: std::num::NonZeroU32,
 ) -> Result<onevcs::StackBase, Box<Attempt>> {
-    let branch = base.branch;
     let failed = |why: String| {
         Box::new(Attempt::settled(Settlement {
             detail: Some(format!(
                 "the stack base {branch} could not be assembled from {}: {why}",
-                base.parents
+                parents
                     .iter()
                     .map(|parent| parent.branch.as_str())
                     .collect::<Vec<_>>()
@@ -960,12 +966,8 @@ fn assemble(
     let request = onevcs::StackBaseRequest {
         repo,
         branch: branch.to_owned(),
-        root: base.root.to_owned(),
-        parents: base
-            .parents
-            .iter()
-            .map(|parent| parent.branch.clone())
-            .collect(),
+        root: root.to_owned(),
+        parents: parents.iter().map(|parent| parent.branch.clone()).collect(),
         labels: BTreeMap::from([
             (
                 crate::executor::SESSION_RUN_LABEL.to_owned(),
@@ -997,7 +999,7 @@ fn assemble(
                 )))
             } // llmlint: ignore-end[changed_behavior_has_e2e]
         };
-        if concluded > base.parents.len() {
+        if concluded > parents.len() {
             return Err(failed(format!(
                 "its merge conflicted again after the worker was handed {concluded} merge(s) \
                  to conclude, so the conflict is still in session {}",

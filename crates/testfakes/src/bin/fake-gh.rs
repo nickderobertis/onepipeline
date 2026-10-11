@@ -320,26 +320,51 @@ fn protection(args: &[String], dir: &Path, path: &str) -> ExitCode {
         // boundary screens nothing for, which is what every journey here wrote
         // before there was a boundary to ask.
         ["repos", _, _] => {
-            let visibility = read_if_present(&dir.join("gh.visibility"))
-                .map(|word| word.trim().to_owned())
-                .unwrap_or_else(|| "private".to_owned());
-            // GitHub's three words and no other: a script spelling a fourth is a
-            // fixture that means something this host cannot answer.
-            if !["public", "private", "internal"].contains(&visibility.as_str()) {
-                fake::fail(&format!(
-                    "gh.visibility holds {visibility:?}, which is not public, private or internal"
-                ));
-            }
+            let visibility = match read_if_present(&dir.join("gh.visibility")) {
+                None => Visibility::Private,
+                Some(word) => Visibility::of(word.trim()).unwrap_or_else(|| {
+                    fake::fail(&format!(
+                        "gh.visibility holds {word:?}, which is not public, private or internal"
+                    ))
+                }),
+            };
             println!(
                 "{}",
                 serde_json::json!({
-                    "visibility": visibility,
-                    "private": visibility != "public",
+                    "visibility": visibility.word(),
+                    "private": visibility != Visibility::Public,
                 })
             );
             ExitCode::SUCCESS
         }
         _ => fake::refuse(&format!("unknown gh api path '{path}'")),
+    }
+}
+
+/// A repository's visibility, in GitHub's three words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Visibility {
+    Public,
+    Private,
+    Internal,
+}
+
+impl Visibility {
+    fn of(word: &str) -> Option<Self> {
+        match word {
+            "public" => Some(Self::Public),
+            "private" => Some(Self::Private),
+            "internal" => Some(Self::Internal),
+            _ => None,
+        }
+    }
+
+    fn word(self) -> &'static str {
+        match self {
+            Self::Public => "public",
+            Self::Private => "private",
+            Self::Internal => "internal",
+        }
     }
 }
 

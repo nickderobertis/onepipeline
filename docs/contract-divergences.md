@@ -9520,7 +9520,8 @@ by its checkout's path,
 `an_explicit_base_branch_is_the_root_of_the_stack_base` the explicit root and an
 assembly refused before any session opened,
 `a_republished_stack_keeps_one_block_and_the_text_around_it` a second publication
-over a description a reviewer edited,
+over a description a reviewer edited, its stack base assembled again over a root
+that moved,
 `a_stack_block_the_host_will_not_take_leaves_the_publication_as_it_settled` a
 refused write of the block, `an_unconcluded_stack_base_merge_fails_the_node_naming_it`
 and `a_worker_that_fails_the_stack_base_merge_fails_the_node` the two ways a
