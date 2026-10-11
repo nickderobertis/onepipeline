@@ -905,9 +905,11 @@ fn attempt_once(
     // attempt did not reach — one after a spent re-dispatch budget among them —
     // names both. Read off the worktree and the session's own stream, so it asks
     // the host nothing more.
-    placed.head = worktree
-        .as_deref()
-        .and_then(crate::vcs::worktree_head)
+    //
+    // The commit the publication pushed first: a publication that merged its base
+    // again as it synced gave the origin a commit the worktree never held.
+    placed.head = crate::vcs::pushed_head_in(&token)
+        .or_else(|| worktree.as_deref().and_then(crate::vcs::worktree_head))
         .or_else(|| placed.head.take());
     placed.change_url = crate::vcs::change_opened_in(&token).or_else(|| placed.change_url.take());
     end_session(stream, tx, Some(&token), &whose, vcs_filter);

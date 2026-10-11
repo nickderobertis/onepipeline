@@ -1777,6 +1777,17 @@ fn converge(
                         }
                     }
                     journal.relay(&envelope)?;
+                    // A branch a node of this run pushed is a branch every draft
+                    // stacked on it may now owe a restack against, and that is
+                    // decided from the record — so the record is read again here,
+                    // on the push, rather than waiting for the publication that
+                    // made it to settle.
+                    if envelope.source == crate::event::Source::Vcs
+                        && crate::vcs::is_push(&envelope.kind)
+                    {
+                        state.refresh(paths);
+                        derived = None;
+                    }
                     // Once the turn itself is in the store: a presentation the
                     // stream shows is recorded after the turn that made it, on
                     // the member the notes were addressed to.

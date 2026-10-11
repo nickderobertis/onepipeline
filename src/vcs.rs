@@ -1432,6 +1432,31 @@ pub fn session_tip(token: &SessionToken) -> SessionTip {
         .map_or(SessionTip::Unknown, SessionTip::At)
 }
 
+/// The commit a session's publication last put on its own branch at the origin,
+/// when it put one there.
+///
+/// Read off the session's own stream, as [`change_opened_in`] reads its change
+/// request: the last accepted `push` of the branch carrying the `head` `onevcs`
+/// records on a push of the publication's own branch. What the origin was given
+/// is the branch's head, whatever the worktree's own `HEAD` says — a publication
+/// that merged its base again as it synced pushes a commit the worktree never
+/// held. `None` when nothing was pushed, or the stream cannot be read.
+pub(crate) fn pushed_head_in(token: &SessionToken) -> Option<String> {
+    events(token, None)
+        .iter()
+        .rev()
+        .filter(|envelope| is_push(&envelope.kind))
+        .filter(|envelope| {
+            envelope
+                .payload
+                .get("accepted")
+                .and_then(|accepted| accepted.as_bool())
+                == Some(true)
+        })
+        .find_map(|envelope| envelope.payload.get("head").and_then(|head| head.as_str()))
+        .and_then(usable)
+}
+
 /// The change request one session's work reached, when it reached one.
 ///
 /// Read off the session's **own stream**, which is where `onevcs` records a
