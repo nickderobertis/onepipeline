@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.66.0](https://github.com/nickderobertis/onepipeline/compare/v0.65.0...v0.66.0) - 2026-10-11
+
+### Added
+
+- *(flow)* hold a session for a launch flow that starts runs over time ([#849](https://github.com/nickderobertis/onepipeline/pull/849))
+
 ## [0.65.0](https://github.com/nickderobertis/onepipeline/compare/v0.64.0...v0.65.0) - 2026-10-11
 
 ### Added
