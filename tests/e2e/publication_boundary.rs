@@ -1336,7 +1336,9 @@ fn a_direct_reply_and_note_meet_the_same_check_without_any_bus() {
         refused.stderr
     );
     assert!(
-        world.events_of("direct", "planner-surface-queued").is_empty(),
+        world
+            .events_of("direct", "planner-surface-queued")
+            .is_empty(),
         "a refused surface was queued"
     );
     world
@@ -2562,16 +2564,38 @@ fn a_consumer_pinned_to_a_branch_that_is_not_its_export_never_opens_a_session() 
     world.script("generalize.work", "a generic example\n");
     world.script("examples.fail", "1");
     world.script("held.wait", "hold");
-    let mut plan = exported_plan("pinned");
-    plan["tasks"]
-        .as_array_mut()
-        .expect("nodes")
-        .push(crate::harness::agent("held", &[]));
+    // One producer exported to two consumers in the same repository and directory: two
+    // recorded exports alike in everything but the consumer each was made for.
+    let plan = mixed_plan(
+        "pinned",
+        vec![
+            producer("generalize", &[]),
+            public("examples", &["generalize"]),
+            public("others", &["generalize"]),
+            crate::harness::agent("held", &[]),
+        ],
+        vec![edge("generalize", "examples"), edge("generalize", "others")],
+    );
     let project = world.plan("pinned", &plan);
     world.run(&["start", &project, "--detach"]).exited(0);
     until_settled(&world, "pinned", "examples");
+    until_settled(&world, "pinned", "others");
+    let record: Value = serde_json::from_str(
+        &std::fs::read_to_string(world.run_file("pinned", "exports.json"))
+            .expect("the run recorded its exports"),
+    )
+    .expect("the record is JSON");
+    let exports = record.as_array().expect("a list of exports");
+    assert_eq!(exports.len(), 2, "{record}");
+    let theirs = exports
+        .iter()
+        .find(|export| export["consumer"] == "others")
+        .and_then(|export| export["exported"].as_str())
+        .expect("the other consumer's export is recorded");
+    // Pinned to an export the run did record, and of its own producer — but another
+    // consumer's.
     let mut elsewhere = public("examples-2", &[]);
-    elsewhere["branch"] = json!("elsewhere");
+    elsewhere["branch"] = json!(theirs);
     reply(
         &world,
         "pinned",
@@ -2587,10 +2611,11 @@ fn a_consumer_pinned_to_a_branch_that_is_not_its_export_never_opens_a_session() 
         replacement["payload"]["outcome"], "infrastructure-failure",
         "{replacement}"
     );
+    let detail = detail_of(&world, "pinned", "examples-2");
+    assert!(detail.contains("not its export"), "{detail}");
     assert!(
-        detail_of(&world, "pinned", "examples-2").contains("not its export"),
-        "{}",
-        detail_of(&world, "pinned", "examples-2")
+        !detail.contains("generalize"),
+        "the refusal names its private producer: {detail}"
     );
     assert!(branches_of(&world, "pinned", "examples-2").is_empty());
     world.release("held.go");

@@ -570,6 +570,9 @@ struct Context {
 pub(crate) struct Export {
     /// The producer's node id, which only the private record names.
     pub(crate) producer: String,
+    /// The consumer's node id as the plan launched it — its lineage root, which a retry's
+    /// replacement keeps — so a record is one edge's whoever is dispatched for it.
+    pub(crate) consumer: String,
     /// The producer's repository.
     pub(crate) from: String,
     /// The producer's kept branch.
@@ -628,6 +631,7 @@ pub(crate) fn dispatching(
     node: &Node,
     kept: &BTreeMap<String, String>,
     heads: &BTreeMap<String, String>,
+    superseded: &BTreeMap<String, String>,
 ) -> Result<Dispatching, String> {
     let term_scope = resolved.term_scope();
     if !resolved.mixed() {
@@ -695,6 +699,7 @@ pub(crate) fn dispatching(
                     .ok_or_else(|| "its export producer names no repository".to_owned())?;
                 export = Some(Export {
                     producer: edge.from.clone(),
+                    consumer: lineage_root(&node.id, superseded),
                     from: producer,
                     branch: branch.clone(),
                     head: heads.get(&edge.from).cloned(),
@@ -788,6 +793,7 @@ fn host_prefix() -> Result<String, String> {
 #[serde(deny_unknown_fields)]
 struct Recorded {
     producer: String,
+    consumer: String,
     from: String,
     branch: String,
     head: Option<String>,
@@ -800,10 +806,12 @@ struct Recorded {
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
 impl Recorded {
-    /// Whether this record is an export of `export`'s own edge: the same producer, into
-    /// the same repository and directory.
+    /// Whether this record is an export of `export`'s own edge: the same producer and
+    /// consumer, out of and into the same repositories, and into the same directory.
     fn of_edge(&self, export: &Export) -> bool {
         self.producer == export.producer
+            && self.consumer == export.consumer
+            && self.from == export.from
             && self.to == export.to
             && self.target_directory == export.target_directory
     }
@@ -855,6 +863,14 @@ pub(crate) fn ensure_export(
     export: &Export,
     term_scope: &onevcs::TermScope,
 ) -> Result<String, String> {
+    // A run's dispatches are threads of its one driver, and two consumers dispatched on one
+    // pass would each read the record, export, and write it back without the other's
+    // export: held from the read to the write, so every export is recorded and one edge is
+    // exported once.
+    static RECORDING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _recording = RECORDING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let path = exports_path(paths);
     let mut recorded = recorded(paths)?;
     // The producer's kept branch is the work: a producer kept again is a replacement under
@@ -918,6 +934,7 @@ pub(crate) fn ensure_export(
     .map_err(|refused| refused.to_string())?;
     recorded.push(Recorded {
         producer: export.producer.clone(),
+        consumer: export.consumer.clone(),
         from: export.from.clone(),
         branch: export.branch.clone(),
         head: export.head.clone(),
@@ -1478,6 +1495,20 @@ pub(crate) fn normalized(directory: &str) -> bool {
         && directory
             .split('/')
             .all(|segment| !matches!(segment, "" | "." | "..") && segment != ".git")
+}
+
+/// The id the plan launched `id` under: the node a chain of `retry` replacements ending at
+/// `id` began from, or `id` itself where nothing replaced anything to make it.
+fn lineage_root(id: &str, superseded: &BTreeMap<String, String>) -> String {
+    let mut id = id.to_owned();
+    let mut seen = BTreeSet::new();
+    while let Some((replaced, _)) = superseded.iter().find(|(_, next)| **next == id) {
+        if !seen.insert(id.clone()) {
+            break;
+        }
+        id.clone_from(replaced);
+    }
+    id
 }
 
 /// The export edges as they stand after the run's supersessions: an edge naming a node
@@ -2149,5 +2180,22 @@ mod tests {
         let now = edges_now(&[edge("generalize", "examples")], &superseded);
         assert_eq!(now[0].to, "examples-3");
         assert_eq!(now[0].from, "generalize");
+    }
+
+    #[test]
+    fn a_replacement_is_traced_back_to_the_node_the_plan_launched() {
+        let superseded: BTreeMap<String, String> = [
+            ("examples".to_owned(), "examples-2".to_owned()),
+            ("examples-2".to_owned(), "examples-3".to_owned()),
+            ("cycle-a".to_owned(), "cycle-b".to_owned()),
+            ("cycle-b".to_owned(), "cycle-a".to_owned()),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(lineage_root("examples-3", &superseded), "examples");
+        assert_eq!(lineage_root("examples", &superseded), "examples");
+        assert_eq!(lineage_root("others", &superseded), "others");
+        // A record no engine writes, a cycle, still ends rather than looping.
+        assert!(["cycle-a", "cycle-b"].contains(&lineage_root("cycle-a", &superseded).as_str()));
     }
 }

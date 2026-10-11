@@ -5527,23 +5527,28 @@ fn start_ready(
             let resolved = crate::boundary::of_run(&now);
             (now, resolved)
         });
-        let dispatching =
-            match crate::boundary::dispatching(resolved, now, &node, &state.branches, &state.heads)
-            {
-                Ok(dispatching) => dispatching,
-                Err(detail) => {
-                    settle(
-                        paths,
-                        journal,
-                        &Settlement {
-                            detail: Some(detail),
-                            ..failed(&node.id, INFRASTRUCTURE_FAILURE)
-                        },
-                    )?;
-                    settled_here = true;
-                    continue;
-                }
-            };
+        let dispatching = match crate::boundary::dispatching(
+            resolved,
+            now,
+            &node,
+            &state.branches,
+            &state.heads,
+            &state.superseded,
+        ) {
+            Ok(dispatching) => dispatching,
+            Err(detail) => {
+                settle(
+                    paths,
+                    journal,
+                    &Settlement {
+                        detail: Some(detail),
+                        ..failed(&node.id, INFRASTRUCTURE_FAILURE)
+                    },
+                )?;
+                settled_here = true;
+                continue;
+            }
+        };
 
         // A lifecycle node is asked for only where its identity has room for
         // the session it would open. Held, it is **skipped** rather than broken
