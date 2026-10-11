@@ -301,7 +301,7 @@ export function generate(runs, processes, now = Date.now()) {
   const seed = readSeed();
   mkdirSync(runs, { recursive: true });
   const expected = { held: [], unproven: [], stale: [], stopped: [], skipped: [] };
-  const manifest = { expected, live_runs: [], ended: [], settled: [], sparse_run: "huge-ended", sparse_records: 0 };
+  const manifest = { expected, live_runs: [], ended: [], settled: [], sparse_run: "huge-ended", sparse_record_bytes: 0 };
   const hoursAgo = now - 3 * 3_600_000;
   const mib = (value) => Math.floor(value * MIB);
   // Of every 90 journals, 45 at or below 0.2 MiB, 36 up to 2.6 MiB, 8 up to 28.7 MiB and one of 29.
@@ -362,7 +362,7 @@ export function generate(runs, processes, now = Date.now()) {
   const sparse = manifest.sparse_run;
   const sparseText = journal(seed, draw, { run: sparse, size: MIB / 5, startMs: hoursAgo - 40 * 86_400_000, settled: true });
   writeRun(runs, seed, { run: sparse, journal: sparseText, registry: [] });
-  manifest.sparse_records = Buffer.byteLength(sparseText);
+  manifest.sparse_record_bytes = Buffer.byteLength(sparseText);
   truncateSync(join(runs, sparse, "events.jsonl"), SPARSE_BYTES);
   manifest.ended.push(sparse);
 
@@ -441,7 +441,7 @@ export function stampSparse(runs, manifest, binary) {
   const journalPath = join(runs, manifest.sparse_run, "events.jsonl");
   readable(runs, manifest.ended, false);
   readable(runs, [manifest.sparse_run], true);
-  truncateSync(journalPath, manifest.sparse_records);
+  truncateSync(journalPath, manifest.sparse_record_bytes);
   const read = spawnSync(binary, ["host"], { stdio: ["ignore", "ignore", "pipe"] });
   if (read.status !== 0) throw new Error(`${binary} host exited ${read.status}: ${read.stderr}`);
   truncateSync(journalPath, SPARSE_BYTES);
@@ -565,7 +565,7 @@ function manifestOf(value) {
   for (const key of ["live_runs", "ended", "settled"]) names(value[key], key);
   names(value.expected.skipped, "expected.skipped");
   runName(value.sparse_run, "sparse_run");
-  count(value.sparse_records, "sparse_records");
+  count(value.sparse_record_bytes, "sparse_record_bytes");
   return value;
 }
 

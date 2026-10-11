@@ -353,6 +353,7 @@ try {
   const unrecorded = BREAKDOWN.filter(
     ([key]) => record.steady.breakdown[key] === null && record.cold.breakdown[key] === null,
   ).map(([, name]) => name);
+  // llmlint: ignore[changed_behavior_has_e2e] only a whole measurement that succeeded reaches this — a fixture, its cold read and every steady and scaling read — and `tests/e2e/host_view.rs`'s journey already pays two of those; its successful run is what shows every BREAKDOWN phase recorded, and this branch is the guard for a later rename.
   if (unrecorded.length > 0)
     throw new Error(
       `no read recorded the phase(s) ${unrecorded.join(", ")} that BREAKDOWN names: rename them in scripts/host-view-budget.mjs to the phases src/hostview.rs, src/lib.rs and src/driver.rs enter`,
@@ -361,6 +362,7 @@ try {
   // another name fails here, where it was measured.
   validateRecord(record);
   try {
+    // llmlint: ignore[changed_behavior_has_e2e] reaching this write's refusal takes a whole successful measurement; its message is `recordRefused`'s, which `tests/budgets.rs` drives through the preflight refusal above, before anything is measured.
     writeFileSync(RECORD, JSON.stringify(record, null, 2));
   } catch (error) {
     throw recordRefused(error);

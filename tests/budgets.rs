@@ -511,8 +511,9 @@ fn the_host_view_measurement_and_journeys_share_one_generator() {
 }
 
 /// The measurement records a read only when the read answered: a binary that fails, one that
-/// exits 0 having recorded no phases, and one whose phase line is empty each fail the
-/// measurement naming what to do next, and none leaves a record behind.
+/// exits 0 having recorded no phases, and one whose phase line is empty, not JSON or
+/// stamped with no time each fail the measurement naming what to do next, and none leaves
+/// a record behind; nor does one whose fixture cannot be removed afterwards.
 #[cfg(unix)]
 #[test]
 fn the_host_view_measurement_records_nothing_from_a_read_that_failed() {
@@ -536,6 +537,16 @@ fn the_host_view_measurement_records_nothing_from_a_read_that_failed() {
             "hollow",
             "echo '{}' > \"$ONEPIPELINE_HOST_PHASES\"",
             "lacks its marks, phases, quantities or read bytes",
+        ),
+        (
+            "malformed",
+            "echo 'not json' > \"$ONEPIPELINE_HOST_PHASES\"",
+            "the read's phase line is not JSON",
+        ),
+        (
+            "unmarked",
+            "echo '{\"marks_unix_ns\":{\"run\":0,\"flushed\":1},\"phases\":{},\"quantities\":{},\"read_bytes\":0}' > \"$ONEPIPELINE_HOST_PHASES\"",
+            "the read's `run` mark is not a time: 0",
         ),
         ("repeating", repeating.as_str(), "repeats; gone entry "),
     ] {
@@ -564,6 +575,30 @@ fn the_host_view_measurement_records_nothing_from_a_read_that_failed() {
             "{name}: a failed measurement wrote the record"
         );
     }
+
+    // A fixture that cannot be removed afterwards fails the measurement, naming the
+    // fixture and how to remove it: here its read locks the directory it was made in.
+    let tmp = dir.join("tmp");
+    std::fs::create_dir_all(&tmp).expect("a temporary directory");
+    let locking = dir.join("locking");
+    std::fs::write(&locking, format!("#!/bin/sh\nchmod 0500 {tmp:?}\nexit 3\n"))
+        .expect("a stand-in binary");
+    std::fs::set_permissions(&locking, std::fs::Permissions::from_mode(0o755)).expect("executable");
+    let measured = std::process::Command::new("node")
+        .arg(root().join("scripts/host-view-measure.mjs"))
+        .arg(&locking)
+        .env("TMPDIR", &tmp)
+        .output()
+        .expect("node runs the measurement");
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).expect("unlocked");
+    let stderr = String::from_utf8_lossy(&measured.stderr);
+    assert_eq!(measured.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("host-view-measure: the fixture under ")
+            && stderr.contains("could not be removed (")
+            && stderr.contains("next: run `chmod -R u+rwX "),
+        "{stderr}"
+    );
 
     // A live dispatch's process that cannot start says why, from the spawn itself.
     let node = std::process::Command::new("node")

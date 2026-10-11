@@ -23,7 +23,7 @@
 // writes — the journals are a recorded run's own records — and the view under test is the
 // real compiled binary, read the way an operator reads it.
 
-// llmlint: ignore-file[expensive_tests_stay_behind_their_own_edge] measured: the module's eight
+// llmlint: ignore-file[expensive_tests_stay_behind_their_own_edge] measured: the module's ten
 // journeys take about five minutes on a loaded host (290 s at load1 about 17), nearly all of it three cold reads of the
 // generated 100-run root's ~260 MB of journals by this suite's debug build — one by the
 // journey over the root, two by the budget measurement's own journey (168 s run alone at load1
