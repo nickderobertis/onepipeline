@@ -150,11 +150,16 @@ struct Watching {
 }
 
 /// Arm `watch --flow <flow>` from `world` with `args`, and return once its lease
-/// is on disk beside the flow.
+/// is on disk beside the flow, or once it has already returned.
+///
+/// A watch with an event already waiting, or given `--timeout 0`, writes its
+/// lease and removes it again within one look of this wait, so on a loaded host
+/// the lease alone can come and go unseen; the watch having exited is the same
+/// proof that it armed, and what it said is read by [`Watching::returned`].
 fn watching(world: &World, flow: &str, args: &[&str]) -> Watching {
     let mut argv = vec!["watch", "--flow", flow];
     argv.extend_from_slice(args);
-    let child = world
+    let mut child = world
         .cmd(&argv)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -170,7 +175,7 @@ fn watching(world: &World, flow: &str, args: &[&str]) -> Watching {
                     .to_str()
                     .is_some_and(|name| name.starts_with(&mine))
             })
-        })
+        }) || child.try_wait().is_ok_and(|exited| exited.is_some())
     });
     Watching { child }
 }
