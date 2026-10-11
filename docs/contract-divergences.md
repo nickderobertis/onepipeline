@@ -9404,7 +9404,9 @@ every store write. On 5, `validate-envelope` passes a prospective plan that is n
 mixed without resolving the nodes a command names, and returns unavailable (exit `2`)
 for a command naming a node a mixed plan does not hold. On 7, a dispatch accepts a
 consumer's pinned branch only where a recorded export of that consumer's own edge — its
-producer, the consumer and both repositories — made that branch.
+producer, the consumer and both repositories — made that branch, so each record in
+`exports.json` also names its consumer, by the id the plan launched it under, which a
+retry's replacement keeps.
 
 **Proposal, for the planner who owns the contract.** The design the user approved
 for the repository publication boundary fixes the shared interfaces: the
