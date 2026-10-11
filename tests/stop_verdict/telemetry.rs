@@ -200,24 +200,32 @@ pub(super) fn source_fingerprint(root: &Path) -> String {
     digest(serde_json::to_string(&pairs).expect("pairs").as_bytes())
 }
 
-/// The key structure of a JSON value: every object's keys, recursively, with
-/// arrays read through their first element.
+/// The type structure of a JSON value: every object's keys, each array as
+/// `{"array": <its first element's structure>}`, and each other value as the
+/// JSON Schema type it is — `integer` and `number` told apart — so a field whose
+/// type moves on one side and not the other fails the comparison.
 fn shape_of(value: &serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
     match value {
-        serde_json::Value::Object(map) => serde_json::Value::Object(
+        Value::Object(map) => Value::Object(
             map.iter()
                 .map(|(key, value)| (key.clone(), shape_of(value)))
                 .collect(),
         ),
-        serde_json::Value::Array(items) => items
-            .iter()
-            .find(|item| item.is_object())
-            .map_or(serde_json::Value::Null, shape_of),
-        _ => serde_json::Value::Null,
+        Value::Array(items) => {
+            serde_json::json!({"array": items.first().map_or(Value::Null, shape_of)})
+        }
+        Value::Number(number) if number.is_f64() => "number".into(),
+        Value::Number(_) => "integer".into(),
+        Value::String(_) => "string".into(),
+        Value::Bool(_) => "boolean".into(),
+        Value::Null => "null".into(),
     }
 }
 
-/// The same key structure as the checked schema states it.
+/// The same type structure as the checked schema states it. An object whose keys
+/// are data rather than fields is `{"map": <its values' structure>}`, and a
+/// nullable field is its non-null option, which is the one the sample writes.
 fn shape_of_schema(schema: &serde_json::Value, root: &serde_json::Value) -> serde_json::Value {
     let schema = match schema.get("$ref").and_then(serde_json::Value::as_str) {
         Some(reference) => {
@@ -246,17 +254,27 @@ fn shape_of_schema(schema: &serde_json::Value, root: &serde_json::Value) -> serd
                 .collect(),
         );
     }
+    if let Some(values) = schema
+        .get("additionalProperties")
+        .filter(|values| values.is_object())
+    {
+        return serde_json::json!({"map": shape_of_schema(values, root)});
+    }
     if let Some(items) = schema.get("items") {
-        return shape_of_schema(items, root);
+        return serde_json::json!({"array": shape_of_schema(items, root)});
     }
     if let Some(any) = schema.get("anyOf").and_then(|a| a.as_array()) {
         return any
             .iter()
             .map(|option| shape_of_schema(option, root))
-            .find(|shape| !shape.is_null())
+            .find(|shape| shape != "null")
             .unwrap_or(serde_json::Value::Null);
     }
-    serde_json::Value::Null
+    schema
+        .get("type")
+        .filter(|kind| kind.is_string())
+        .cloned()
+        .unwrap_or_else(|| panic!("a leaf schema states one type: {schema}"))
 }
 
 /// A record with every optional field present, as the drift test writes it.
@@ -304,12 +322,18 @@ fn the_checked_schema_is_the_shape_this_producer_writes() {
     let schema: serde_json::Value =
         serde_json::from_slice(&std::fs::read(path).expect("the checked schema"))
             .expect("schema JSON");
-    let mut written = serde_json::to_value(sample_record()).expect("a record serializes");
-    // A map whose keys are data rather than fields: its values are what the schema
-    // states, so it is compared as a leaf.
-    written["workloads"][0]["class_counts"] = serde_json::Value::Null;
+    let written = serde_json::to_value(sample_record()).expect("a record serializes");
+    let mut shape = shape_of(&written);
+    // A map whose keys are data rather than fields: what the schema states is its
+    // values' type.
+    let counts = written["workloads"][0]["class_counts"]
+        .as_object()
+        .expect("class counts are a map");
+    shape["workloads"]["array"]["class_counts"] = serde_json::json!({
+        "map": shape_of(counts.values().next().expect("the sample counts a class"))
+    });
     assert_eq!(
-        shape_of(&written),
+        shape,
         shape_of_schema(&schema, &schema),
         "the producer and the read-only reader must share one shape"
     );
