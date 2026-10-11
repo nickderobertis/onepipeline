@@ -662,7 +662,7 @@ pub(crate) fn fold_and_checkpoint(paths: &RunPaths) -> RunState {
 /// The document keeps its shape, version and seal, so a reader at an older pin
 /// verifies it as it verifies any other, finds nothing past the marker, and —
 /// writing only when the marker moves — leaves it as it is.
-pub(crate) fn fold_ended(paths: &RunPaths) -> RunState {
+pub(crate) fn fold_ended_and_checkpoint(paths: &RunPaths) -> RunState {
     let mut projected = Projected::open(paths);
     let rest = journal::finished_records_after(&paths.journal(), projected.coverage.bytes);
     if !rest.is_empty() {
@@ -683,7 +683,7 @@ pub(crate) fn fold_ended(paths: &RunPaths) -> RunState {
 /// **an edit to the checkpoint's state that keeps its run, its version and its
 /// coverage counts is not detected on this path.** The assumption holds only
 /// here: a checkpoint whose counts differ from the current summary's is refused,
-/// and the caller then folds through [`fold_ended`], which verifies the seal or
+/// and the caller then folds through [`fold_ended_and_checkpoint`], which verifies the seal or
 /// refolds the journal, as every cold read does.
 // llmlint: ignore-block[boundary_inputs_validated] the seal is chained over the covered
 // journal bytes before the state, so no part of it can be checked without reading every one
@@ -708,7 +708,7 @@ pub(crate) fn covering_whole(
 enum OpenInstant {
     /// Held back, for a run that may still record.
     HeldBack,
-    /// Covered, for a run proved ended. See [`fold_ended`].
+    /// Covered, for a run proved ended. See [`fold_ended_and_checkpoint`].
     Covered,
 }
 
@@ -1131,7 +1131,7 @@ mod tests {
         assert_eq!(held["state"]["stop"], json!("not-stopped"));
         assert!(covering_whole(&paths, len, records).is_none());
 
-        let ended = folded_as(&fold_ended(&paths));
+        let ended = folded_as(&fold_ended_and_checkpoint(&paths));
         let covered = document(&paths);
         assert_eq!(covered["coverage"]["bytes"].as_u64(), Some(len));
         assert_eq!(covered["state"]["stop"], json!("workers-signalled"));
@@ -1164,7 +1164,7 @@ mod tests {
     fn a_record_appended_past_an_extended_checkpoint_folds_to_the_whole_store() {
         let root = scratch("ended-then-appended");
         let paths = a_stopped_run(&root, "r-appended");
-        let _ = fold_ended(&paths);
+        let _ = fold_ended_and_checkpoint(&paths);
         let len = journal_len(&paths);
         an_instant_later();
         Journal::open(&paths)
@@ -1187,7 +1187,7 @@ mod tests {
         assert!(covering_whole(&paths, journal_len(&paths), 4).is_none());
 
         // Covered again, then a record at the covered instant that sorts in front.
-        let _ = fold_ended(&paths);
+        let _ = fold_ended_and_checkpoint(&paths);
         let last = crate::ledger::read_records(&paths.journal())
             .last()
             .and_then(|record| serde_json::from_str::<Value>(&record.text).ok())

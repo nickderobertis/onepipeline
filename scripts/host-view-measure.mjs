@@ -238,7 +238,9 @@ function traced(manifest, label) {
   } catch (error) {
     throw failed(
       `${label}: ${error.message}`,
-      "install `strace` on PATH and let this user trace its own children (`kernel.yama.ptrace_scope` 0 or 1), then measure again",
+      error.tracer
+        ? "install `strace` on PATH and let this user trace its own children (`kernel.yama.ptrace_scope` 0 or 1), then measure again"
+        : undefined,
     );
   }
   holds(manifest, JSON.parse(observed.stdout), `${label} traced read`);
@@ -346,6 +348,15 @@ try {
     cold: { read_ms: coldRead.wallMs, breakdown: coldRead.breakdown, generation_ms: generatedMs },
     scaling: { sizes, increments },
   };
+  // `BREAKDOWN` restates the binary's phase names; one neither read recorded is a
+  // name the binary does not emit, which would otherwise read as unmeasured.
+  const unrecorded = BREAKDOWN.filter(
+    ([key]) => record.steady.breakdown[key] === null && record.cold.breakdown[key] === null,
+  ).map(([, name]) => name);
+  if (unrecorded.length > 0)
+    throw new Error(
+      `no read recorded the phase(s) ${unrecorded.join(", ")} that BREAKDOWN names: rename them in scripts/host-view-budget.mjs to the phases src/hostview.rs, src/lib.rs and src/driver.rs enter`,
+    );
   // The reporter's own check, so a figure this writes and that one reads by
   // another name fails here, where it was measured.
   validateRecord(record);

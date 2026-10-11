@@ -1746,6 +1746,84 @@ fn a_phase_record_that_cannot_be_written_costs_the_read_nothing() {
     }
 }
 
+/// A legacy `ps lstart` token is compared within the one second it is spelled to:
+/// a live process whose entry reads a second off what `ps` says now is held, and
+/// one two seconds off is an `UNPROVEN` row, never gone.
+///
+/// `ps` is a double on the view's `PATH` for those two pids alone, answering one
+/// fixed start, so the second apart is the test's to set rather than the host
+/// clock's; every other pid, and the liveness of these two, is the host's own.
+// llmlint: ignore[tests_mirror_real_usage] the drift a legacy token suffers is a recomputed boot time, which no test may move on a shared host; the `ps` double fixes the start it answers for two real live processes, and the read is the real binary's.
+#[test]
+fn a_legacy_start_token_a_second_off_is_held_and_two_seconds_off_is_unproven() {
+    let world = World::new("host-view-legacy-second").with_env("HOSTNAME", HOST);
+    let mut fixture = Fixture::empty(&world);
+    let (near, _) = fixture.sleeper();
+    let (far, _) = fixture.sleeper();
+    let (driver, driver_token) = fixture.sleeper();
+    let real_ps = Command::new("sh")
+        .args(["-c", "command -v ps"])
+        .output()
+        .expect("sh answers");
+    let doubles = world.root.join("ps-double");
+    std::fs::create_dir_all(&doubles).expect("a directory for the double");
+    let double = doubles.join("ps");
+    std::fs::write(
+        &double,
+        format!(
+            "#!/bin/sh\ncase \"$2\" in {near}|{far}) echo 'Sun Oct 11 19:23:36 2026'; exit 0;; esac\nexec {} \"$@\"\n",
+            String::from_utf8_lossy(&real_ps.stdout).trim()
+        ),
+    )
+    .expect("the double");
+    std::fs::set_permissions(&double, std::fs::Permissions::from_mode(0o755))
+        .expect("an executable double");
+    let started = now_millis() - 600_000;
+    fixture.run(
+        &world,
+        &json!({"run": "legacy-second", "started_ms": started,
+        "nodes": ["build"], "ending": [{"dispatched": "build"}],
+        "driver": {"pid": driver, "token": driver_token},
+        "registry": [
+            {"node": "plan", "pid": near, "token": "Sun Oct 11 19:23:37 2026", "recorded_ms": started},
+            {"node": "build", "pid": far, "token": "Sun Oct 11 19:23:38 2026", "recorded_ms": now_millis()},
+        ]}),
+    );
+    fixture
+        .expected
+        .held
+        .insert(("legacy-second".to_owned(), "plan".to_owned()));
+    fixture
+        .expected
+        .unproven
+        .insert(("legacy-second".to_owned(), "build".to_owned()));
+    let mut command = world.cmd(&["host", "--json"]);
+    let path = command
+        .get_envs()
+        .find(|(key, _)| *key == "PATH")
+        .and_then(|(_, value)| value)
+        .expect("the world names a PATH")
+        .to_owned();
+    let mut leading = doubles.into_os_string();
+    leading.push(":");
+    leading.push(path);
+    command.env("PATH", leading);
+    let reading = invoke(command).reading();
+    holds(&fixture.expected, &reading, "a second off");
+    let build = reading["dispatches"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .find(|row| row["node"] == "build")
+        .expect("the two-seconds-off entry's row");
+    assert!(
+        build["unproven"]
+            .as_str()
+            .is_some_and(|why| why.contains("older `ps` spelling")),
+        "{build}"
+    );
+}
+
 /// A live dispatch whose registry entry an engine before procfs tokens wrote — the
 /// `ps -o lstart=` spelling, read in UTC and the C locale — is still a held row: the
 /// view asks `ps` for that spelling only when an entry carries it, and compares it

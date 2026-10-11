@@ -28,7 +28,7 @@
 //! 4. **Cold**: a run whose summary is absent, stale or at another version, or an
 //!    ended one whose checkpoint does not cover the whole journal, is folded once
 //!    from its journal and both documents are left current — an ended run's
-//!    checkpoint covering every record (see [`crate::checkpoint::fold_ended`]) —
+//!    checkpoint covering every record (see [`crate::checkpoint::fold_ended_and_checkpoint`]) —
 //!    so the next read is steady.
 //!
 //! **No journal past [`MAX_COLD_JOURNAL_BYTES`] is opened, in any state.** Such a
@@ -270,7 +270,7 @@ fn read_run(paths: &RunPaths) -> Result<RunRead, String> {
             let state = {
                 let _cold = phase("cold-fold");
                 crate::hostphases::add("cold-journal-bytes", journal_bytes);
-                crate::checkpoint::fold_ended(paths)
+                crate::checkpoint::fold_ended_and_checkpoint(paths)
             };
             // The fold read the journal as it stands now, which a driver adopting
             // the run may have grown since the proof above. Asked again after it, so

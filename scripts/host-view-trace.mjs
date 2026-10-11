@@ -42,7 +42,9 @@ const RESULT = /\) += (-?\d+)(?:<[^>]*>)?(?: E[A-Z0-9]+ \([^)]*\))?$/;
  * bytes read from that run's journal, and `refused`, the runs whose journal it
  * tried and failed to open. Throws where the tracer did not run, or the command
  * did not exit 0, or a traced call cannot be read: an observation nobody made is
- * not one of nothing.
+ * not one of nothing. An error the tracer itself caused carries `tracer: true`, so
+ * a caller can tell it from the traced command's own failure, whose exit status
+ * `strace` passes on as its own.
  */
 export function journalOpens(command, args, into, options = {}) {
   // A trace an earlier read left at `into` is not this read's.
@@ -65,18 +67,20 @@ export function journalOpens(command, args, into, options = {}) {
     ],
     { encoding: "utf8", ...options },
   );
-  if (done.error) throw new Error(`\`strace\` could not run: ${done.error.message}`);
-  if (done.status !== 0)
-    throw new Error(
-      `\`strace ${command} ${args.join(" ")}\` exited ${done.status ?? `on ${done.signal}`}: ${done.stderr}`,
-    );
+  const tracerFailed = (message) => Object.assign(new Error(message), { tracer: true });
+  if (done.error) throw tracerFailed(`\`strace\` could not run: ${done.error.message}`);
+  if (done.status !== 0) {
+    const message = `\`strace ${command} ${args.join(" ")}\` exited ${done.status ?? `on ${done.signal}`}: ${done.stderr}`;
+    // `-qq` silences strace's own chatter, so a line of its own is its failure.
+    throw /^strace: /m.test(done.stderr) ? tracerFailed(message) : new Error(message);
+  }
   let trace;
   try {
     trace = readFileSync(into, "utf8");
   } catch (error) {
-    throw new Error(`the tracer left no trace (${error.message})`);
+    throw tracerFailed(`the tracer left no trace (${error.message})`);
   }
-  if (!/\bopenat\(/.test(trace)) throw new Error("the tracer recorded no open");
+  if (!/\bopenat\(/.test(trace)) throw tracerFailed("the tracer recorded no open");
 
   const opened = new Map();
   const refused = new Set();

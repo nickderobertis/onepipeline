@@ -635,7 +635,8 @@ fn the_host_view_measurement_records_nothing_from_a_read_that_failed() {
 
 /// What one tracer-driven read through `scripts/host-view-trace.mjs` answers, over
 /// `sh -c script` in `dir`: the journals it opened and refused, and what holding it to a
-/// steady read (`old` ended, `live-0` live) answered or refused.
+/// steady read (`old` ended, `live-0` live) answered or refused, and whether a refusal
+/// was the tracer's own.
 #[cfg(target_os = "linux")]
 fn traced_opens(dir: &std::path::Path, script: &str, env: &[(&str, String)]) -> serde_json::Value {
     let module = root().join("scripts/host-view-trace.mjs");
@@ -649,6 +650,7 @@ try {{
   out.steady = steadyOpens(seen, ["old"], ["live-0"], "read");
 }} catch (error) {{
   out.error = error.message;
+  out.tracer = error.tracer === true;
 }}
 console.log(JSON.stringify(out));"#,
         module = module.display().to_string()
@@ -817,7 +819,8 @@ fn the_host_view_measurement_counts_the_journals_a_traced_read_opened() {
     assert!(
         failed["error"]
             .as_str()
-            .is_some_and(|error| error.contains("exited 3")),
+            .is_some_and(|error| error.contains("exited 3"))
+            && failed["tracer"] == false,
         "{failed}"
     );
 
@@ -828,7 +831,7 @@ fn the_host_view_measurement_counts_the_journals_a_traced_read_opened() {
     std::fs::create_dir_all(&fake).expect("a bin directory");
     std::fs::write(
         fake.join("strace"),
-        "#!/bin/sh\n[ -n \"$FAKE_TRACE\" ] || { echo 'ptrace refused' >&2; exit 1; }\n\
+        "#!/bin/sh\n[ -n \"$FAKE_TRACE\" ] || { echo 'strace: ptrace refused' >&2; exit 1; }\n\
          while [ \"$1\" != -o ]; do shift; done\n\
          [ \"$FAKE_TRACE\" = none ] || cp \"$FAKE_TRACE\" \"$2\"\n",
     )
@@ -848,14 +851,16 @@ fn the_host_view_measurement_counts_the_journals_a_traced_read_opened() {
     assert!(
         absent["error"]
             .as_str()
-            .is_some_and(|error| error.contains("`strace` could not run")),
+            .is_some_and(|error| error.contains("`strace` could not run"))
+            && absent["tracer"] == true,
         "{absent}"
     );
     let refused = traced_opens(&dir, "true", &[("PATH", path.clone())]);
     assert!(
         refused["error"]
             .as_str()
-            .is_some_and(|error| error.contains("exited 1: ptrace refused")),
+            .is_some_and(|error| error.contains("exited 1: strace: ptrace refused"))
+            && refused["tracer"] == true,
         "{refused}"
     );
     let open = "1 openat(AT_FDCWD</r>, \"live-0/events.jsonl\", O_RDONLY";
