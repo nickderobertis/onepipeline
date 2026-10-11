@@ -1539,7 +1539,11 @@ fn converge(
         let mut read_this_pass = false;
         if !superseded {
             if let Some(watch) = claims.as_mut() {
-                if !claimed || watch.idle_check_due() || !publications.is_empty() {
+                // A launch's own read of the claim — the one that let it launch — covers its
+                // first pass; an adoption reads it again before claiming anything.
+                if !claimed && watch.covered_by_the_launch() {
+                    read_this_pass = true;
+                } else if !claimed || watch.idle_check_due() || !publications.is_empty() {
                     read_this_pass = true;
                     if let Some(by) = watch.check() {
                         supersede(paths, journal, writeback.as_ref(), by)?;

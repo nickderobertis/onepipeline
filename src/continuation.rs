@@ -26,9 +26,7 @@ use serde_json::{json, Map, Value};
 
 use crate::error::{Error, Result};
 use crate::payload::DriverClaim;
-use crate::taskgraph::{
-    QualifiedId, Read, Store, StoredKind, DISPATCH_KEY, DRIVER_KEY, SETTLEMENT_KEY,
-};
+use crate::taskgraph::{QualifiedId, Read, Store, DISPATCH_KEY, DRIVER_KEY, SETTLEMENT_KEY};
 
 /// The longest an idle driver goes between two reads of its project's claim.
 ///
@@ -42,6 +40,11 @@ pub(crate) const IDLE_CLAIM_CHECK: Duration = Duration::from_secs(600);
 /// Read only so a journey can show an idle driver noticing a takeover without waiting
 /// ten minutes; entry 116 names it as a seam, and nothing an operator configures sets it.
 pub(crate) const IDLE_CLAIM_CHECK_ENV: &str = "ONEPIPELINE_IDLE_CLAIM_CHECK_SECONDS";
+
+/// The longest one read of the claim may take before the driver goes on without its answer:
+/// a store that does not answer has not said anybody else drives, and a reconcile pass that
+/// waited on it for longer would hold every dispatch behind a board.
+pub(crate) const CLAIM_READ_DEADLINE: Duration = Duration::from_secs(20);
 
 /// The keys a claim carries, and the only ones: the store's copy is external input.
 const CLAIM_KEYS: [&str; 5] = ["run", "host", "session", "pid", "claimed_at"];
@@ -197,12 +200,16 @@ pub(crate) struct ClaimWatch {
     project: QualifiedId,
     run: String,
     host: String,
+    /// The run's own directory, where the store's request to be left alone is kept.
+    run_dir: std::path::PathBuf,
+    /// Whether this driver is a launch's, whose own read of the claim — the one that let it
+    /// launch — covers its first pass; an adoption's first pass reads it again.
+    launched: bool,
     /// The claim this run's launch knowingly took over: still on the store until this
     /// driver's first projection replaces it, and no sign that anybody else drives.
     displaced: Option<DriverClaim>,
     last: Option<Instant>,
     every: Duration,
-    reads: usize,
 }
 
 impl ClaimWatch {
@@ -217,10 +224,11 @@ impl ClaimWatch {
             project,
             run: paths.run.clone(),
             host: crate::sys::hostname(),
+            run_dir: paths.dir.clone(),
+            launched: launch.adoptions == 0,
             displaced: taken_over(paths),
             last: None,
             every: idle_claim_check(),
-            reads: 0,
         })
     }
 
@@ -242,11 +250,16 @@ impl ClaimWatch {
     /// best effort, and a store that cannot be read has not said anybody else drives.
     pub(crate) fn check(&mut self) -> Option<DriverClaim> {
         self.last = Some(Instant::now());
-        self.reads += 1;
+        // A store that asked to be left alone is asked nothing inside the wait: every further
+        // call extends a limiter nothing reports. The write-back is waiting it out too, and
+        // the next check after it has passed reads the claim.
+        if crate::writeback::store_asked_to_wait(&self.run_dir) {
+            return None;
+        }
         let read = self
             .store
-            .item(&self.project, StoredKind::Project)
-            .and_then(|project| claim_of(self.project.as_str(), &project.metadata));
+            .project_metadata_within(&self.project, CLAIM_READ_DEADLINE)
+            .and_then(|metadata| claim_of(self.project.as_str(), &metadata));
         match read {
             Ok(claim) => claim.filter(|claim| self.supersedes(claim)),
             Err(why) => {
@@ -277,6 +290,16 @@ impl ClaimWatch {
     /// Whether the idle check is due.
     pub(crate) fn idle_check_due(&self) -> bool {
         self.until_idle_check() == Duration::ZERO
+    }
+
+    /// Whether the first pass is covered by the read that let this run launch: a launch's
+    /// driver is, an adoption's is not. Marks the idle clock from now, so a covered first pass
+    /// is not read again as an idle one.
+    pub(crate) fn covered_by_the_launch(&mut self) -> bool {
+        if self.launched {
+            self.last = Some(Instant::now());
+        }
+        self.launched
     }
 }
 

@@ -933,15 +933,11 @@ fn start(args: &StartArgs) -> Result<i32> {
     let read = store.read_plan(&project).map_err(Error::from)?;
     graph::validate(&read.plan)?;
     // Who drives the project, off that same read: a read that failed has already refused
-    // the launch above, so a claim is never defaulted to none. Any claim refuses a launch
-    // that does not take the project over, before anything is minted.
+    // the launch above, so a claim is never defaulted to none.
     let claim = crate::continuation::claim_of(project.as_str(), &read.project_metadata)?;
-    crate::continuation::admit(claim.as_ref(), args.take_over)?;
     // What the project's last driver left on it, which a launch continues rather than runs
-    // again — unless it is told `--fresh`, which is refused while running afresh would open
-    // a second change request beside one nothing has landed.
+    // again — unless it is told `--fresh`.
     let continuation = if args.fresh {
-        crate::continuation::refuse_fresh_over_unlanded(project.as_str(), &read)?;
         crate::continuation::Continuation::default()
     } else {
         crate::continuation::continuation_of(&read, claim.as_ref())?
@@ -1190,6 +1186,14 @@ fn start(args: &StartArgs) -> Result<i32> {
     // sessions for it before a source refuses the filter it was handed.
     let filters = declared_filters(declared.filters, args)?;
 
+    // The project's own state last, once everything this invocation states has been read and
+    // checked, and still before anything is minted: any claim refuses a launch that does not
+    // take the project over, and `--fresh` is refused while running afresh would open a
+    // second change request beside one nothing has landed.
+    crate::continuation::admit(claim.as_ref(), args.take_over)?;
+    if args.fresh {
+        crate::continuation::refuse_fresh_over_unlanded(project.as_str(), &read)?;
+    }
     let root = ledger::runs_root();
     let run = mint_run_id(&plan, project.native(), &root);
     let holdings = concurrency::holders(&plan)?;

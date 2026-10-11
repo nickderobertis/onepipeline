@@ -1733,6 +1733,12 @@ enum Kept {
     Unreadable(String),
 }
 
+/// Whether the run's store has asked to be left alone for a while yet — or holds a wait this
+/// build cannot read, which may be one — so a read of it would be asked inside the wait.
+pub(crate) fn store_asked_to_wait(run_dir: &Path) -> bool {
+    !matches!(AskedWait::kept(run_dir), Kept::Nothing)
+}
+
 /// How often a driver looks again at a kept wait it could not read, while it asks the store
 /// nothing on it: soon enough that repairing the file puts the board back in step promptly.
 const UNREADABLE_WAIT_RECHECK: Duration = Duration::from_secs(2);
@@ -7714,6 +7720,60 @@ mod tests {
             .project_metadata
             .insert("onepipeline.concurrency".to_owned(), json!(4));
         assert!(super::moved_project_keys(&snapshot, &landed).is_empty());
+    }
+
+    /// The driver claim asks the store something exactly where it would change it: a claim to
+    /// hold that is not what landed, or a release of a claim that landed naming this run — and
+    /// never a release of another run's, or a projection that leaves the claim alone.
+    #[test]
+    fn the_driver_claim_differs_only_where_it_would_be_written() {
+        let snapshot = Fixture::new("driver-claim").snapshot;
+        let mine = json!({"run": "ship", "host": "builder", "session": null, "pid": 7,
+                          "claimed_at": "2026-10-11T00:00:00Z"});
+        let mut theirs = mine.clone();
+        theirs["host"] = json!("elsewhere");
+        let mut baseline = super::Baseline {
+            path: std::path::PathBuf::from("unused"),
+            landed: LandedBaseline::empty(&snapshot.project),
+        };
+        let hold = super::DriverWrite::Hold(mine.clone());
+        let release = super::DriverWrite::Release {
+            run: "ship".to_owned(),
+            host: "builder".to_owned(),
+        };
+        assert!(
+            baseline.driver_differs(&hold),
+            "an unheld claim was not written"
+        );
+        assert!(
+            !baseline.driver_differs(&release),
+            "an unheld claim was released"
+        );
+        baseline
+            .landed
+            .project_metadata
+            .insert(super::DRIVER_KEY.to_owned(), mine.clone());
+        assert!(
+            !baseline.driver_differs(&hold),
+            "a landed claim was written again"
+        );
+        assert!(
+            baseline.driver_differs(&release),
+            "this run's claim was not released"
+        );
+        baseline
+            .landed
+            .project_metadata
+            .insert(super::DRIVER_KEY.to_owned(), theirs);
+        assert!(baseline.driver_differs(&hold));
+        assert!(
+            !baseline.driver_differs(&release),
+            "another run's claim was released"
+        );
+        assert!(!baseline.driver_differs(&super::DriverWrite::Leave));
+        let mut unchanged = snapshot.clone();
+        unchanged.driver = super::DriverWrite::Leave;
+        assert!(!baseline.project_differs(&unchanged));
     }
 
     /// A shadow store whose path is not UTF-8 is refused by name before the store is opened,

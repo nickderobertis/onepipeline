@@ -300,6 +300,44 @@ impl Store {
         })
     }
 
+    /// One project's own metadata, read within `within`: what a driver reads the project's
+    /// claim out of, bounded so a store that does not answer cannot hold the reconcile loop.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Sibling`] for a configuration that does not load, a store that cannot answer
+    /// or does not answer in time, and a project the store does not hold.
+    pub(crate) fn project_metadata_within(
+        &self,
+        id: &QualifiedId,
+        within: std::time::Duration,
+    ) -> Result<BTreeMap<String, Value>> {
+        let built = self
+            .engine(&Layer::default())
+            .map_err(|error| Error::Sibling {
+                tool: STORE,
+                message: format!(
+                    "the configuration discovered from {} cannot be read: {error}",
+                    self.dir.display()
+                ),
+            })?;
+        let reader = Reader::over(built)?;
+        let global = id.global();
+        let read = reader
+            .call(async { tokio::time::timeout(within, reader.engine.project(&global)).await })
+            .map_err(|_| Error::Sibling {
+                tool: STORE,
+                message: format!(
+                    "project show of '{}' did not answer within {} seconds",
+                    id.as_str(),
+                    within.as_secs()
+                ),
+            })?
+            .map_err(|error| failed("project show", id.as_str(), &error))?;
+        let found = one(&global, "project show", read)?;
+        Ok(found.item.metadata.into_iter().collect())
+    }
+
     fn load(&self, project: &QualifiedId) -> std::result::Result<Read, Load> {
         let built = self
             .engine(&Layer::default())
