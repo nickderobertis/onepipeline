@@ -264,6 +264,12 @@ impl Flow {
         &self.paths.run
     }
 
+    /// The id, typed: [`Flow::open`] admitted it before reading the flow, and
+    /// registration minted it from a `--name` already admitted.
+    pub(crate) fn flow_id(&self) -> FlowId {
+        FlowId(self.paths.run.clone())
+    }
+
     /// Where the flow stands now.
     ///
     /// # Errors
@@ -583,7 +589,7 @@ pub(crate) fn launching_in(root: &Path, session: &str) -> Option<Flow> {
 /// A membership that cannot be written is said on standard error and leaves the
 /// run in no flow: a run a flow watch cannot see must not be counted as watched
 /// by it, and judged on its own it is owed a watch of its own.
-pub(crate) fn join(root: &Path, run: &str, session: &str) -> Option<String> {
+pub(crate) fn join(root: &Path, run: &str, session: &str) -> Option<FlowId> {
     let flow = launching_in(root, session)?;
     let member = Member {
         schema_version: FLOW_SCHEMA_VERSION,
@@ -594,7 +600,7 @@ pub(crate) fn join(root: &Path, run: &str, session: &str) -> Option<String> {
         &members_dir(&flow.paths).join(format!("{run}.json")),
         &member,
     ) {
-        Ok(()) => Some(flow.id().to_owned()),
+        Ok(()) => Some(flow.flow_id()),
         // llmlint: ignore-block[changed_behavior_has_e2e] a flow directory the launching
         // process cannot write while its record reads is a host condition no portable journey
         // stages; what it must do is fall back to a run of no flow, which every journey

@@ -1317,7 +1317,7 @@ fn start(args: &StartArgs) -> Result<i32> {
         require_rendered: templates.require_rendered,
         // llmlint: ignore-end[changed_behavior_has_e2e]
         oneharness_sessions: Some(sessions_file(&paths)?),
-        flow: flow.unwrap_or_default(),
+        flow: flow.map(|id| id.as_str().to_owned()).unwrap_or_default(),
     };
     record.driven_by_this_process();
     // The record is durable *before* anything that reads it exists. The engine

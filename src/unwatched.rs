@@ -367,19 +367,20 @@ pub(crate) fn asked(root: &Path, session: &str, budget: Option<WakeBudget>) -> R
     let flows = crate::flow::of_session(root, session)?;
     // The session's live flows a qualifying watch is on: a run launched in one
     // counts as watched by that watch while the flow lives.
-    let mut watched_flows: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut watched_flows: std::collections::BTreeSet<crate::flow::FlowId> =
+        std::collections::BTreeSet::new();
     for flow in &flows {
         match owed_by_flow(flow, session, budget) {
             FlowOwes::Nothing => {}
             FlowOwes::Watched => {
-                watched_flows.insert(flow.id().to_owned());
+                watched_flows.insert(flow.flow_id());
             }
             FlowOwes::Line(line) => reported.push(line),
             FlowOwes::Unknown(why) => unknown.push(format!("flow {}: {why}\n", flow.id())),
         }
     }
     for (paths, flow) in owned.runs {
-        if flow.is_some_and(|flow| watched_flows.contains(flow.as_str())) {
+        if flow.is_some_and(|flow| watched_flows.contains(&flow)) {
             continue;
         }
         let summary = match decide(&paths, session) {

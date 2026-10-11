@@ -837,8 +837,9 @@ own channel or a member run's, `6` on a member run's node settling, `8`
 alone returns on a run joining and nothing else of the three. `--filter` and
 `--all` are a run's alone. [`docs/stop-guard.md`](docs/stop-guard.md#flows)
 states it, with the flow's own channel and what `unwatched` owes a flow. Under a
-wake budget a watch given no `--timeout` gives up two seconds before the budget,
-so it has returned by the time the budget is spent.
+wake budget a watch given no `--timeout` gives up the wake reserve
+[`docs/stop-guard.md`](docs/stop-guard.md#the-wake-reserve) names before the budget, so it
+has returned by the time the budget is spent.
 
 ## Where a dispatch runs
 
