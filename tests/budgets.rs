@@ -313,8 +313,12 @@ fn host_view_record() -> serde_json::Value {
             "sizes": [
                 {"run_roots": 100, "ended_runs": 88, "reads_ms": [10.0], "median_ms": 10.0, "load1": 2.5},
                 {"run_roots": 400, "ended_runs": 361, "reads_ms": [18.0], "median_ms": 18.0, "load1": 2.5},
+                {"run_roots": 800, "ended_runs": 725, "reads_ms": [30.0], "median_ms": 30.0, "load1": 2.5},
             ],
-            "increments": [{"from": 100, "to": 400, "ms_per_ended_run": 0.03}],
+            "increments": [
+                {"from": 100, "to": 400, "ms_per_ended_run": 0.03},
+                {"from": 400, "to": 800, "ms_per_ended_run": 0.03},
+            ],
         },
     })
 }
@@ -361,6 +365,8 @@ fn the_host_view_reporter_reports_the_slowest_steady_read_of_the_record_alone() 
         ("/steady/load1", serde_json::json!(-1.0)),
         ("/scaling/sizes", serde_json::json!("all of them")),
         ("/scaling/sizes/0/median_ms", serde_json::json!(null)),
+        ("/scaling/sizes/2/run_roots", serde_json::json!(1600)),
+        ("/scaling/increments/1/to", serde_json::json!(1600)),
         (
             "/scaling/increments/0/ms_per_ended_run",
             serde_json::json!(null),

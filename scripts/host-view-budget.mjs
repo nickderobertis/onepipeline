@@ -13,6 +13,8 @@ import { report } from "@onebudgetspec/sdk";
 const record = "target/budget-records/host-view.json";
 // What the budget's workload states, and so what a record has to have measured.
 export const READS = 5;
+/** The run roots the scaling reads are taken over, in order: the same live set, more ended history. */
+export const SCALING = [100, 400, 800];
 /**
  * The breakdown of one read, as the record names each figure, and the phase of
  * `src/hostview.rs`, `src/lib.rs` and `src/driver.rs` it is read from: the one list
@@ -104,12 +106,6 @@ export function validateRecord(held) {
 
 const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 
-function count(value, name) {
-  if (!Number.isSafeInteger(value) || value < 0) {
-    fail(`${name} must be a nonnegative integer`);
-  }
-}
-
 // Every figure a breakdown, a median or a load carries is a nonnegative number, or
 // null where the read did not measure it.
 function figure(value, name) {
@@ -141,18 +137,28 @@ function validateDetail(held) {
   milliseconds(held.cold.read_ms, "cold.read_ms");
   breakdownOf(held.cold.breakdown, "cold.breakdown");
   if (!isObject(held.scaling)) fail("scaling must be the scaling reads");
-  if (!Array.isArray(held.scaling.sizes) || held.scaling.sizes.length === 0)
-    fail("scaling.sizes must be a nonempty array");
+  const roots = SCALING.map((size) => String(size)).join(", ");
+  if (
+    !Array.isArray(held.scaling.sizes) ||
+    held.scaling.sizes.map((size) => size?.run_roots).join(", ") !== roots
+  ) {
+    fail(`scaling.sizes must be the reads over ${roots} run roots, in that order`);
+  }
   held.scaling.sizes.forEach((size, n) => {
     if (!isObject(size)) fail(`scaling.sizes[${n}] must be an object`);
-    count(size.run_roots, `scaling.sizes[${n}].run_roots`);
     milliseconds(size.median_ms, `scaling.sizes[${n}].median_ms`);
   });
-  if (!Array.isArray(held.scaling.increments)) fail("scaling.increments must be an array");
+  if (
+    !Array.isArray(held.scaling.increments) ||
+    held.scaling.increments.length !== SCALING.length - 1
+  ) {
+    fail("scaling.increments must hold one step between each two sizes");
+  }
   held.scaling.increments.forEach((step, n) => {
     if (!isObject(step)) fail(`scaling.increments[${n}] must be an object`);
-    count(step.from, `scaling.increments[${n}].from`);
-    count(step.to, `scaling.increments[${n}].to`);
+    if (step.from !== SCALING[n] || step.to !== SCALING[n + 1]) {
+      fail(`scaling.increments[${n}] must step from ${SCALING[n]} to ${SCALING[n + 1]} run roots`);
+    }
     if (typeof step.ms_per_ended_run !== "number" || !Number.isFinite(step.ms_per_ended_run)) {
       fail(`scaling.increments[${n}].ms_per_ended_run must be a finite number`);
     }

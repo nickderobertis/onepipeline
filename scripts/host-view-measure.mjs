@@ -32,7 +32,7 @@ import {
   stampSparse,
   startToken,
 } from "../tests/e2e/host_view_fixture.mjs";
-import { BREAKDOWN, READS, validateRecord } from "./host-view-budget.mjs";
+import { BREAKDOWN, READS, SCALING, validateRecord } from "./host-view-budget.mjs";
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
 const RECORD = join(REPO, "target", "budget-records", "host-view.json");
@@ -207,14 +207,14 @@ try {
 
   const sizes = [
     {
-      run_roots: 100,
+      run_roots: SCALING[0],
       ended_runs: manifest.ended.length,
       reads_ms: measured.walls,
       median_ms: median(measured.walls),
       load1: measured.load,
     },
   ];
-  for (const total of [400, 800]) {
+  for (const total of SCALING.slice(1)) {
     grow(runs, manifest, total);
     const grown = steady(manifest, `scaling-${total}`);
     sizes.push({

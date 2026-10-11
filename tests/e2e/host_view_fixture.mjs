@@ -591,6 +591,7 @@ function specOf(value) {
       runName(item.node, `registry[${n}].node`);
       count(item.recorded_ms, `registry[${n}].recorded_ms`);
       if (item.pid !== undefined) processOf({ pid: item.pid, token: item.token }, `registry[${n}]`);
+      else if (item.token !== undefined && typeof item.token !== "string") refuse(`registry[${n}].token must be a start token`);
     });
   }
   if (value.driver !== undefined) processOf(value.driver, "driver");

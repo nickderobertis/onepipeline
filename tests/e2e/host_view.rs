@@ -1707,3 +1707,43 @@ fn a_phase_record_that_cannot_be_written_costs_the_read_nothing() {
         );
     }
 }
+
+/// A live dispatch whose registry entry an engine before procfs tokens wrote — the
+/// `ps -o lstart=` spelling, read in UTC and the C locale — is still a held row: the
+/// view asks `ps` for that spelling only when an entry carries it.
+#[test]
+fn a_live_dispatch_recorded_with_a_legacy_ps_start_token_is_held() {
+    let world = World::new("host-view-legacy-token").with_env("HOSTNAME", HOST);
+    let mut fixture = Fixture::empty(&world);
+    let (pid, _) = fixture.sleeper();
+    // Asked of `ps` the way the former engine asked it, rather than of the crate.
+    let listed = Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "lstart="])
+        .env("TZ", "UTC")
+        .env("LC_ALL", "C")
+        .output()
+        .expect("ps answers");
+    let legacy = String::from_utf8(listed.stdout)
+        .expect("UTF-8")
+        .trim()
+        .to_owned();
+    assert!(
+        !legacy.is_empty() && !legacy.starts_with("linux-proc-stat:"),
+        "{legacy}"
+    );
+    let (driver, driver_token) = fixture.sleeper();
+    let started = now_millis() - 600_000;
+    // llmlint: ignore[tests_mirror_real_usage] no build of this crate writes the former spelling any more, so the entry an engine before procfs tokens wrote is written here in the shape it took, naming a real live process; the read is the real binary's.
+    fixture.run(
+        &world,
+        &json!({"run": "legacy", "started_ms": started,
+        "driver": {"pid": driver, "token": driver_token},
+        "registry": [{"node": "plan", "pid": pid, "token": legacy, "recorded_ms": started}]}),
+    );
+    fixture
+        .expected
+        .held
+        .insert(("legacy".to_owned(), "plan".to_owned()));
+    let (reading, _) = both_forms(&world, "a legacy token");
+    holds(&fixture.expected, &reading, "a legacy token");
+}
