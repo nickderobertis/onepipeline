@@ -216,6 +216,23 @@ fn settlement_of(node: &str, metadata: Option<&Map<String, Value>>) -> Result<Op
     if read.stack.as_ref().is_some_and(|stack| !stack.is_usable()) {
         return Err(refused("its `stack` names no usable parent".to_owned()));
     }
+    // Every name it carries is printed on a view's line and handed to a session, so each has
+    // to be one a line can carry — the check every name a session reports is held to.
+    for (field, name) in [
+        ("branch", &read.branch),
+        ("base", &read.base),
+        ("head", &read.head),
+        ("change_url", &read.change_url),
+    ] {
+        if let Some(name) = name
+            .as_ref()
+            .filter(|name| crate::vcs::usable(name).is_none())
+        {
+            return Err(refused(format!(
+                "its `{field}` is {name:?}, not a name a line can carry"
+            )));
+        }
+    }
     if let Some(remote) = settlement.get("remote") {
         if remote
             .as_str()
@@ -802,6 +819,10 @@ mod tests {
             (
                 json!({"status": "failed", "remote": "teleported"}),
                 "`remote`",
+            ),
+            (
+                json!({"status": "failed", "branch": "me/b\nme/c"}),
+                "`branch`",
             ),
             (
                 json!({"status": "done", "base": "me/a", "stack": {

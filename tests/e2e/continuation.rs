@@ -904,9 +904,23 @@ fn a_landed_project_relaunches_continuing_it_and_runs_afresh_with_fresh() {
         "store"
     );
 
+    // A dispatch the store still holds is part of what `--fresh` ignores: the node is cut a
+    // branch of its own rather than pinned to the stale one.
+    restate(
+        &world,
+        &project,
+        "work",
+        "onepipeline.dispatch",
+        json!({"branch": "stale/work", "base": "main", "opened_at": "2026-10-11T00:00:00.000Z"}),
+    );
     let fresh = format!("{run}-3");
     launch(&world, &fresh, &project, &["--fresh"]).exited(0);
     assert_eq!(dispatched(&world, &fresh), vec!["work".to_owned()]);
+    let opened = sessions_opened(&world, &fresh);
+    assert!(
+        !opened.is_empty() && !opened.contains(&"stale/work".to_owned()),
+        "--fresh pinned the node to the stored dispatch: {opened:?}"
+    );
     assert!(settled(&world, &fresh, "work").get("continued").is_none());
     assert_eq!(world.run_json(&fresh, "result.json")["state"], "complete");
 }
@@ -1758,4 +1772,65 @@ fn a_claim_neither_release_can_land_is_left_standing_and_said() {
     world.store_stops_holding("set_project_metadata");
     drop(release);
     drop(projection);
+}
+
+/// A closeout releasing a claim that is no longer on the store — somebody cleared it — still
+/// projects the run's ending, and writes no claim; one finding a claim that is not one leaves
+/// it as it stands and writes nothing to the project at all, since it cannot tell whose it is.
+#[test]
+fn a_closeout_over_a_cleared_or_mangled_claim_writes_no_claim_of_its_own() {
+    let world = World::new("claim-cleared-or-mangled");
+    let set_claim = |project: &str, value: Value| {
+        let key = onetaskgraph_plugin_api::MetadataKey::new("onepipeline.driver".to_owned())
+            .expect("a key");
+        let id: onetaskgraph_core::GlobalId = project.parse().expect("a qualified project");
+        world
+            .store_call(
+                |engine| async move { engine.set_project_metadata(&id, &key, &value).await },
+            )
+            .unwrap_or_else(|why| panic!("the store refused the write: {why}"));
+    };
+    let statuses = |project: &str| -> Vec<Value> {
+        world
+            .store_tasks(project)
+            .iter()
+            .map(|task| task["item"]["status"]["name"].clone())
+            .collect()
+    };
+
+    world.script("cleared.wait", "hold");
+    let cleared = launch_detached(&world, "cleared", vec![agent("cleared", &[])]);
+    until_claimed_by(&world, &cleared, "cleared");
+    set_claim(&cleared, Value::Null);
+    world.release("cleared.go");
+    world.until("the run to settle", |world| {
+        world.run_file("cleared", "result.json").is_file()
+    });
+    world.until("the closeout to reach the board", |_| {
+        statuses(&cleared) == vec![json!("done")]
+    });
+    assert_eq!(stored_claim(&world, &cleared), Value::Null);
+
+    world.script("mangled.wait", "hold");
+    let mangled = launch_detached(&world, "mangled", vec![agent("mangled", &[])]);
+    until_claimed_by(&world, &mangled, "mangled");
+    let stranger = json!({"run": "mangled", "host": "", "session": null, "pid": 7,
+                          "claimed_at": "2026-10-11T00:00:00.000Z"});
+    set_claim(&mangled, stranger.clone());
+    world.release("mangled.go");
+    world.until("the run to settle", |world| {
+        world.run_file("mangled", "result.json").is_file()
+    });
+    let projections =
+        std::fs::read_to_string(world.run_file("mangled", "writeback-projections.jsonl"))
+            .expect("the run recorded its projections");
+    let closeout: Value =
+        serde_json::from_str(projections.lines().last().expect("a line")).expect("a record");
+    assert_eq!(closeout["items"], json!([]), "{closeout}");
+    assert_eq!(closeout["calls"], json!({"project-show": 1}), "{closeout}");
+    assert_eq!(
+        stored_claim(&world, &mangled),
+        stranger,
+        "the claim was touched"
+    );
 }
