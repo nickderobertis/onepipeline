@@ -664,6 +664,17 @@ resolver = "2"
 # 0.13.7 requires exactly `=0.45.0` and carries the full-size recovery fixture
 # `tests/stop_verdict/` builds, so the pair moves as one.
 #
+# `onevcs` 0.46.0 is the floor because it is the release the stop-verdict plan's
+# onevcs nodes published together — the scoped decision read above, the fast
+# recoverable read and the real host's reuse — and the one the plan names this
+# node's adoption against. Nothing here calls what it adds (a change request's
+# review comments and replies). Its write boundary probes a hosted repository's
+# visibility with one `gh api repos/{owner}/{name}` before publishing, as 0.45.0's
+# already did, so a journey that scripts a host outage by a count of `gh` calls
+# declares that visibility in its rules rather than spending the count on the
+# probe. A **requirement**, because `^0.45` admits no 0.46.x; `onevcs-testing`
+# 0.14.0 requires exactly `=0.46.0`, so the pair moves as one.
+#
 # `oneagentgraph` 0.5.4 is the floor because it relays a turn's `message` and
 # `reasoning` items as `turn-activity` under their own kind — the agent's words,
 # with no tool name — which `src/views.rs` and `src/projection.rs` render as what
@@ -707,7 +718,7 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 oneagentgraph = "0.5.6"
-onevcs = "0.45.0"
+onevcs = "0.46.0"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is
@@ -917,7 +928,7 @@ oneharness-core = "0.24.1"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.13.7"
+onevcs-testing = "0.14.0"
 # The store, linked: `src/taskgraph.rs` says how the engine calls it. `-plugin-api` is
 # named for the values the store answers with, and `-local-md` for the plugin
 # `crates/testfakes` hosts in process.
