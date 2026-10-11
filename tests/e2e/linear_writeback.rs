@@ -1128,33 +1128,60 @@ fn command_end_refusal_and_timeout_rebuild_the_workers_store() {
     scenario.finish();
 }
 
+/// The loopback GitHub GraphQL endpoint `tests/e2e/github_loopback.py` serves, for as long as
+/// this is held: its directory, where `state.json` holds the board and every request it was
+/// sent, and the URL it listens on.
+struct GitHubEndpoint {
+    child: std::process::Child,
+    dir: PathBuf,
+    url: String,
+}
+
+impl GitHubEndpoint {
+    /// Serve the board under `world`, seeding each issue named in `seeded` with that caller
+    /// metadata beside its own.
+    fn serve(world: &World, seeded: &Value) -> Self {
+        let dir = world.root.join("github-endpoint");
+        std::fs::create_dir_all(&dir).expect("endpoint directory");
+        let seed = dir.join("seeded.json");
+        std::fs::write(&seed, seeded.to_string()).expect("seeded metadata");
+        let child = std::process::Command::new("python3")
+            .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/e2e/github_loopback.py"))
+            .arg(&dir)
+            .arg(&seed)
+            .spawn()
+            .expect("loopback endpoint starts");
+        world.until("the GitHub endpoint to listen", |_| {
+            dir.join("endpoint").is_file()
+        });
+        let url = std::fs::read_to_string(dir.join("endpoint")).expect("endpoint URL");
+        Self { child, dir, url }
+    }
+
+    fn state(&self) -> Value {
+        serde_json::from_str(
+            &std::fs::read_to_string(self.dir.join("state.json")).expect("endpoint state"),
+        )
+        .expect("endpoint JSON")
+    }
+}
+
+impl Drop for GitHubEndpoint {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 /// A reused GitHub Projects source must release its command snapshot: a metadata-only
 /// settlement keeps both a person's new body and a Status move made since the previous one.
 #[test]
 fn a_reused_github_store_keeps_body_edits_and_status_moves_between_settlements() {
-    struct Endpoint(std::process::Child);
-    impl Drop for Endpoint {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
     let world = World::new("github-command-boundary")
         .with_env("ONEPIPELINE_LOOPBACK_BOARD_TOKEN", "loopback-token");
     world.script("anchor.wait", "hold");
-    let endpoint_dir = world.root.join("github-endpoint");
-    std::fs::create_dir_all(&endpoint_dir).expect("endpoint directory");
-    let _endpoint = Endpoint(
-        std::process::Command::new("python3")
-            .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/e2e/github_loopback.py"))
-            .arg(&endpoint_dir)
-            .spawn()
-            .expect("loopback endpoint starts"),
-    );
-    world.until("the GitHub endpoint to listen", |_| {
-        endpoint_dir.join("endpoint").is_file()
-    });
-    let endpoint = std::fs::read_to_string(endpoint_dir.join("endpoint")).expect("endpoint URL");
+    let served = GitHubEndpoint::serve(&world, &json!({}));
+    let endpoint = served.url.clone();
     let rejected = std::process::Command::new("python3").args(["-c", r#"
 import json, sys, urllib.request, urllib.error
 base = sys.argv[1]
@@ -1200,12 +1227,7 @@ graphql(mutation, {"input":{"id":"work","title":"work"}})
     let started = from_the_launch_directory(&world, &launch, &["start", "board:plan", "--detach"]);
     world.run_on(started, "start --detach").exited(0);
     let run = "github-edits";
-    let read = || -> Value {
-        serde_json::from_str(
-            &std::fs::read_to_string(endpoint_dir.join("state.json")).expect("endpoint state"),
-        )
-        .expect("endpoint JSON")
-    };
+    let read = || served.state();
     world.until("the launch projections", |_| {
         read()["issues"]["anchor"]["status"] == "In Progress"
     });
@@ -1267,6 +1289,180 @@ graphql(mutation, {"input":{"id":"work","title":"work"}})
     world.until("the run to settle", |world| {
         world.run_file(run, "result.json").is_file()
     });
+}
+
+/// The `Host` value the adopting host files a follow-up with, under the key and path its
+/// `followups` source projects onto the board.
+const FOLLOW_UP_HOST: &str = "build-box-7.example";
+
+/// Every board-field write in `requests` to one item, in order: the field's id and the value
+/// written, `Value::Null` for a clear. The batched field-update document is refused by the
+/// endpoint, so a write the store batched fails the journey rather than passing unread here.
+fn field_writes(requests: &[Value], item: &str) -> Vec<(String, Value)> {
+    let mut writes = Vec::new();
+    for request in requests {
+        let query = request["query"].as_str().unwrap_or_default();
+        let variables = &request["variables"];
+        let inputs: Vec<(&Value, bool)> = if query.contains("updateProjectV2ItemFieldValue(") {
+            vec![(&variables["input"], false)]
+        } else if query.contains("clearProjectV2ItemFieldValue(") {
+            vec![(&variables["input"], true)]
+        } else {
+            Vec::new()
+        };
+        for (input, clear) in inputs {
+            if input["itemId"] == format!("ITEM-{item}") {
+                let value = if clear {
+                    Value::Null
+                } else {
+                    input["value"].clone()
+                };
+                writes.push((
+                    input["fieldId"].as_str().unwrap_or_default().to_owned(),
+                    value,
+                ));
+            }
+        }
+    }
+    writes
+}
+
+fn body_writes(requests: &[Value], issue: &str) -> Vec<String> {
+    requests
+        .iter()
+        .filter(|request| {
+            request["query"]
+                .as_str()
+                .is_some_and(|query| query.contains("updateIssue("))
+                && request["variables"]["input"]["id"] == issue
+        })
+        .filter_map(|request| {
+            request["variables"]["input"]["body"]
+                .as_str()
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
+/// A plan held on a GitHub board whose source projects `orchestrator.follow-up.host` onto the
+/// board's `Host` text field — the `metadata_fields` entry the adopting host's `followups` source
+/// ships — is read by the engine without refusal, and settled through it. Each settlement's
+/// write-back reaches its own item through the linked store, and neither writes `Host`: the field
+/// follows the value only when a write changes it, and a settlement changes no
+/// `orchestrator.follow-up` — the copy that files a follow-up is what puts it there. The log's
+/// reader is shown able to see a `Host` write, so its silence is evidence.
+#[test]
+fn a_github_source_projecting_a_follow_ups_host_is_read_and_settled_without_writing_host() {
+    let world = World::new("github-host-field")
+        .with_env("ONEPIPELINE_LOOPBACK_BOARD_TOKEN", "loopback-token");
+    world.script("anchor.wait", "hold");
+    let served = GitHubEndpoint::serve(
+        &world,
+        &json!({"work": {"orchestrator.follow-up": {"host": FOLLOW_UP_HOST}}}),
+    );
+    let launch = world.root.join("github-launch");
+    std::fs::create_dir_all(&launch).expect("launch directory");
+    std::fs::write(launch.join("onetaskgraph.yaml"), format!(
+        "sources:\n  board:\n    plugin: github-projects\n    config:\n      owner: generic\n      project_number: 1\n      token_env: ONEPIPELINE_LOOPBACK_BOARD_TOKEN\n      endpoint: {}/graphql\n      metadata_fields: [{{field: Host, key: orchestrator.follow-up, path: [host]}}]\n      status_mapping:\n        todo: Todo\n        queued: Queued\n        in-progress: In Progress\n        unknown: Needs Attention\n        done: Done\n        cancelled: Canceled\n",
+        served.url
+    )).expect("store configuration");
+    let started = from_the_launch_directory(&world, &launch, &["start", "board:plan", "--detach"]);
+    world.run_on(started, "start --detach").exited(0);
+    let run = "github-edits";
+    world.until("the launch projections", |_| {
+        served.state()["issues"]["anchor"]["status"] == "In Progress"
+    });
+    let requests = || {
+        served.state()["requests"]
+            .as_array()
+            .expect("a request log")
+            .clone()
+    };
+    let settled = |id: &str| -> (String, Vec<Value>) {
+        let sent = requests().len();
+        let evidence = format!("{id} settled on the board");
+        let mut command = settle("done", &evidence);
+        command["id"] = json!(id);
+        world
+            .run_with_stdin(
+                &["reply", run],
+                &json!({"version": 2, "commands": [command]}).to_string(),
+            )
+            .exited(0);
+        world.until("the settlement to land", |_| {
+            let state = served.state();
+            state["issues"][id]["status"] == "Done"
+                && state["issues"][id]["body"]
+                    .as_str()
+                    .is_some_and(|body| body.contains(&evidence))
+        });
+        world.until("the projection record to land", |world| {
+            std::fs::read_to_string(
+                world.run_file(run, onepipeline::cli::WRITEBACK_PROJECTIONS_FILE),
+            )
+            .is_ok_and(|text| {
+                text.lines()
+                    .last()
+                    .is_some_and(|line| line.contains("projected"))
+            })
+        });
+        std::thread::sleep(Duration::from_millis(1500));
+        (evidence, requests()[sent..].to_vec())
+    };
+
+    for id in ["work", "other"] {
+        let (evidence, spent) = settled(id);
+        assert_eq!(
+            field_writes(&spent, id),
+            [("STATUS".to_owned(), json!({"singleSelectOptionId": "Done"}))],
+            "{id}'s settlement must move its Status and write no other board field"
+        );
+        assert!(
+            body_writes(&spent, id)
+                .iter()
+                .any(|body| body.contains(&evidence)),
+            "{id}'s settlement evidence never reached its issue: {spent:?}"
+        );
+    }
+    let state = served.state();
+    let log = requests();
+    for id in ["anchor", "work", "other"] {
+        assert!(
+            field_writes(&log, id)
+                .iter()
+                .all(|(field, _)| field != "HOST"),
+            "the run wrote {id}'s Host field: {:?}",
+            field_writes(&log, id)
+        );
+        assert_eq!(state["issues"][id]["host"], Value::Null, "{state}");
+    }
+    assert!(
+        state["issues"]["work"]["body"]
+            .as_str()
+            .is_some_and(|body| body.contains(FOLLOW_UP_HOST)),
+        "the follow-up's own host value must survive its settlement: {state}"
+    );
+
+    world.release("anchor.go");
+    world.until("the run to settle", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+
+    // The reader above is not blind to a Host write: one sent as the store sends a lone field
+    // write is read back as what it set.
+    let wrote = std::process::Command::new("python3").args(["-c", r#"
+import json, sys, urllib.request
+host = {"projectId": "BOARD", "itemId": "ITEM-other", "fieldId": "HOST", "value": {"text": sys.argv[2]}}
+query = "mutation($input:UpdateProjectV2ItemFieldValueInput!){updateProjectV2ItemFieldValue(input:$input){projectV2Item{id}}}"
+body = json.dumps({"query": query, "variables": {"input": host}}).encode()
+urllib.request.urlopen(urllib.request.Request(sys.argv[1] + "/graphql", data=body)).read()
+"#, &served.url, FOLLOW_UP_HOST]).status().expect("the Host write reaches the endpoint");
+    assert!(wrote.success());
+    assert_eq!(
+        field_writes(&requests(), "other").last(),
+        Some(&("HOST".to_owned(), json!({"text": FOLLOW_UP_HOST})))
+    );
+    assert_eq!(served.state()["issues"]["other"]["host"], FOLLOW_UP_HOST);
 }
 
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]

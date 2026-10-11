@@ -1771,6 +1771,11 @@ fn a_run_journalled_before_records_named_their_envelope_reads_the_same() {
     world.until("the run to settle and its driver to let go", |world| {
         !world.events_of(run, "driver-exited").is_empty()
     });
+    // The success hook outlives the driver, and `status` reads it as still running
+    // until it ends: both readings must be taken after it has.
+    world.until("the success hook to finish", |world| {
+        !world.events_of(run, "run-hook-finished").is_empty()
+    });
     let named = world.journal(run);
     let carrying = |journal: &[Value]| {
         journal
