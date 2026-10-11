@@ -4824,7 +4824,7 @@ fn a_settled_landing_is_what_the_release_is_correlated_through(name: &str, spell
     let mut landed = engine();
     landed["id"] = json!("landed");
     // No edge from `broken` to `landed`: a dependent of `landed`'s unlanded change
-    // is placed on its branch (`docs/contract-divergences.md` entry 114), and then
+    // is placed on its branch (`docs/contract-divergences.md` entry 115), and then
     // the commit this journey states as the landing would be on `broken`'s branch
     // too — a commit two pieces of work answer to, which `onevcs` refuses to
     // resolve. `broken` keeps a branch of its own, and the journey waits for both.

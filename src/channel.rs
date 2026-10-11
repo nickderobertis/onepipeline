@@ -1225,6 +1225,19 @@ impl ChannelState {
         }
     }
 
+    /// The channel kept in `paths`' channel directory under `config` — or the
+    /// profile as declared, where it names none — for a channel no launch record
+    /// carries the configuration of: a flow's own.
+    pub(crate) fn configured(
+        paths: &crate::ledger::RunPaths,
+        config: Option<&onemessagebus::Config>,
+    ) -> Self {
+        Self {
+            config: config.map(|config| Arc::new(config.clone())),
+            ..Self::new(paths)
+        }
+    }
+
     /// The bus's local transport over this run's channel directory.
     fn transport(&self) -> crate::Result<Arc<dyn Transport>> {
         self.transport

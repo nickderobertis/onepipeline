@@ -2220,7 +2220,7 @@ fn divergence_block(number: &str) -> Value {
     serde_json::from_str(block).unwrap_or_else(|e| panic!("entry {number}'s block is JSON: {e}"))
 }
 
-/// The stacked settlement entry 114 proposes is what this build registers for
+/// The stacked settlement entry 115 proposes is what this build registers for
 /// `node-settled`: the record its block writes — `base`, `head`, and a `stack` of
 /// parents with a stack base — is admitted by the published document, a stack parent
 /// missing its head or a stack whose parents are not a list is refused at its own
@@ -2229,13 +2229,13 @@ fn divergence_block(number: &str) -> Value {
 fn the_stacked_settlement_is_what_the_divergence_record_names() {
     use onepipeline::event::PipelineKind;
     use onepipeline::payload::{registry, schema_of};
-    let block = divergence_block("114.");
+    let block = divergence_block("115.");
     let id = schema_of(PipelineKind::NodeSettled);
     let registry = registry();
     let settlement = block["settlement"].clone();
     registry
         .check(&id, &settlement)
-        .unwrap_or_else(|why| panic!("entry 114's settlement is refused: {why}"));
+        .unwrap_or_else(|why| panic!("entry 115's settlement is refused: {why}"));
     assert_eq!(
         settlement["base"], settlement["stack"]["stack_base"],
         "the entry's node is placed on its stack base"
@@ -8568,6 +8568,9 @@ fn the_readmes_interface_claims_match_the_code_they_describe() {
         EXIT_WATCH_ELAPSED,
         EXIT_NODE_SETTLED,
         EXIT_RUN_CHANGED,
+        // `watch --flow`'s own two, which the same passage states.
+        onepipeline::error::EXIT_RUN_JOINED,
+        onepipeline::error::EXIT_FLOW_FAILED,
     ]
     .iter()
     .map(i32::to_string)
