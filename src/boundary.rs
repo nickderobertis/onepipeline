@@ -1085,14 +1085,13 @@ pub(crate) enum Unknown {
 /// Judge one document — a reply envelope, a routed command record, a surface — against
 /// the run `state` describes.
 ///
-/// Every command addressed to a public node — by [`crate::channel::target_of`], the
-/// engine's own reading of what a command is about, at the clearance the node has once the
-/// envelope's edits apply, or had where an edit removes it — is checked over its whole
-/// payload; one addressed to a private node passes; and text addressed to no node is
-/// checked as public in every run, whatever its plan's shape. Each check derives its terms
-/// from the private repositories the run names before or after the envelope. A command
-/// naming a node the run does not hold, or one the engine would not apply, has no
-/// clearance to judge it by, and is what `unknown` says.
+/// Only a mixed plan is judged: an all-public one derives no term and an all-private one
+/// has nowhere public for anything to reach. In one, every command addressed to a public
+/// node — by [`crate::channel::target_of`], the engine's own reading of what a command is
+/// about — is checked over its whole prospective payload, in the run's own term scope;
+/// one addressed to a private node passes; and text addressed to no node is checked as
+/// public. A command naming a node the run does not hold, or one the engine would not
+/// apply, has no clearance to judge it by, and is what `unknown` says.
 pub(crate) fn judge(
     state: &crate::projection::RunState,
     document: &serde_json::Value,
@@ -1120,31 +1119,24 @@ pub(crate) fn judge(
         }
     };
     // Asked afresh every time, never from memory: a repository whose visibility changed
-    // since the last envelope is judged by what it is now. Both sides of the envelope's
-    // edits are read — the run as it stands and as the edits would leave it — and no plan
-    // passes for its shape alone: an all-private plan's text may yet reach somewhere
-    // public, and an edit that drops the last public node is still a command about it.
-    let before = resolve(&plan_now(state), oracle);
+    // since the last envelope is judged by what it is now.
     let resolved = resolve(&plan_now(&staged), oracle);
-    // A node is judged by the clearance it has once the envelope's edits apply, and one an
-    // edit removes by the clearance it had.
-    let clearance_of = |target: &str| {
-        resolved
-            .clearances
-            .get(target)
-            .or_else(|| before.clearances.get(target))
-            .copied()
-    };
-    // The terms of every private repository either side names: dropping the last node
-    // naming one does not take its terms out of the check of the envelope that drops it.
-    let scope: Vec<String> = before
-        .scope
+    if !resolved.mixed() {
+        return Judged::Pass;
+    }
+    // A node an envelope drops is gone from the graph it leaves, so its own command is
+    // judged by the clearance the node had: resolved only where an envelope drops one.
+    let before = commands
         .iter()
-        .chain(&resolved.scope)
-        .cloned()
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
+        .any(|command| matches!(command, crate::channel::Command::Drop { .. }))
+        .then(|| resolve(&plan_now(state), oracle));
+    let clearance_of = |target: &str| {
+        resolved.clearances.get(target).copied().or_else(|| {
+            before
+                .as_ref()
+                .and_then(|before| before.clearances.get(target).copied())
+        })
+    };
     let mut ask = |text: Vec<String>, about: &str| -> Option<Judged> {
         if text.is_empty() {
             return None;
@@ -1154,7 +1146,7 @@ pub(crate) fn judge(
             text,
             paths: Vec::new(),
             metadata: Vec::new(),
-            scope: onevcs::TermScope::Identities(scope.clone()),
+            scope: resolved.term_scope(),
         });
         let reason = verdict.reason()?;
         Some(match verdict {

@@ -1319,6 +1319,41 @@ fn a_direct_reply_and_note_meet_the_same_check_without_any_bus() {
             .all(|event| event["payload"]["command"]["op"] != "note"),
         "a refused note was committed"
     );
+    // A surface raised at its own verb is text addressed to no node, so it is checked as
+    // public before anything is queued.
+    let refused = world.run(&[
+        "surface",
+        "direct",
+        "--kind",
+        "check-in",
+        "--message",
+        "the zephyrine step is slow",
+    ]);
+    refused.exited(REFUSED);
+    assert!(
+        !refused.stderr.contains("generalize"),
+        "the refusal names a private node:\n{}",
+        refused.stderr
+    );
+    assert!(
+        world.events_of("direct", "planner-surface-queued").is_empty(),
+        "a refused surface was queued"
+    );
+    world
+        .run(&[
+            "surface",
+            "direct",
+            "--kind",
+            "check-in",
+            "--message",
+            "the examples step is slow",
+        ])
+        .exited(0);
+    assert_eq!(
+        world.events_of("direct", "planner-surface-queued").len(),
+        1,
+        "the clean surface was not queued"
+    );
     let clean = json!({"version": 3, "commands": [note("examples", "follow the plain layout")]});
     let replied = world.run_with_stdin(&["reply", "direct"], &clean.to_string());
     assert!(
