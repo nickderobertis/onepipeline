@@ -388,7 +388,9 @@ fn names_an_unloadable_session(target: &Target) -> bool {
         .any(|token| providers.vcs.session(&SessionToken(token.clone())).is_err())
 }
 
-/// The listing for one selection, read and decided.
+/// Read `selection` and decide over what it answers. A failed read, a row a
+/// session target's launcher label does not name, and a row not read whole each
+/// make the verdict unanswered, so none of them can read as `none`.
 fn listing(
     request: &UnpublishedRequest,
     selection: &Selection,
@@ -520,7 +522,8 @@ fn counts(landed: &Landed) -> bool {
     matches!(landed, Landed::No | Landed::Unknown | Landed::InPart { .. })
 }
 
-/// One `onevcs` row as this listing states it.
+/// A row onevcs reports a holder for is in flight: shown, and never counted,
+/// whatever its landing or its holding says.
 fn shaped(
     row: Recoverable,
     acknowledgement: Option<AcknowledgedBranch>,
@@ -628,7 +631,9 @@ fn run_root(row: &Recoverable, unresolved: &mut Vec<String>) -> Option<PathBuf> 
     Some(parent.to_path_buf())
 }
 
-/// A row's disk reading.
+/// Measured under the run root only, and no symbolic link is followed: one in
+/// place of the run root or the worktree is said, and one in place of a build
+/// output directory is passed over.
 fn disk(row: &Recoverable, unresolved: &mut Vec<String>) -> Disk {
     let Some(root) = run_root(row, unresolved) else {
         return Disk {
