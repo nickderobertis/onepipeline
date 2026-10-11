@@ -702,6 +702,13 @@ fn edit_named(edit: &Envelope) -> String {
                 views::one_line(&node),
                 views::one_line(&replacement)
             )),
+            crate::edits::Operation::ReworkRequested {
+                node, replacement, ..
+            } => Some(format!(
+                "{} reworked as {}",
+                views::one_line(&node),
+                views::one_line(&replacement)
+            )),
             _ => None,
         })
         .collect();

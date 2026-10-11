@@ -1163,6 +1163,12 @@ fn a_rework_of_a_settled_run_makes_it_live_and_its_hook_fires_again_at_the_new_e
         "b: restacked onto a-rework-1's branch {a_branch} at "
     ));
     status.out_has(", without an agent turn");
+    // The first ending's hook is read as superseded by the edit that reopened the
+    // run, which says what it reworked.
+    world
+        .run(&["results", run])
+        .out_has("edit committed at ")
+        .out_has(": a reworked as a-rework-1");
 }
 
 /// The planner is the only author `rework` and `retitle` are granted to: a bus
