@@ -1753,7 +1753,11 @@ fn a_phase_record_that_cannot_be_written_costs_the_read_nothing() {
 /// `ps` is a double on the view's `PATH` for those two pids alone, answering one
 /// fixed start, so the second apart is the test's to set rather than the host
 /// clock's; every other pid, and the liveness of these two, is the host's own.
-// llmlint: ignore[tests_mirror_real_usage] the drift a legacy token suffers is a recomputed boot time, which no test may move on a shared host; the `ps` double fixes the start it answers for two real live processes, and the read is the real binary's.
+// llmlint: ignore-block[tests_mirror_real_usage] the drift a legacy token suffers is a
+// recomputed boot time, which no test may move on a shared host: the `ps` double fixes the
+// start it answers for two real live processes, and nothing else. Their run, as an engine
+// before procfs tokens left it, is the generator's, for the reason at its head; no build of
+// this crate writes that spelling any more. The read is the real binary's.
 #[test]
 fn a_legacy_start_token_a_second_off_is_held_and_two_seconds_off_is_unproven() {
     let world = World::new("host-view-legacy-second").with_env("HOSTNAME", HOST);
@@ -1823,6 +1827,7 @@ fn a_legacy_start_token_a_second_off_is_held_and_two_seconds_off_is_unproven() {
         "{build}"
     );
 }
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// A live dispatch whose registry entry an engine before procfs tokens wrote — the
 /// `ps -o lstart=` spelling, read in UTC and the C locale — is still a held row: the
