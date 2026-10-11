@@ -68,12 +68,123 @@ pub(crate) fn claim_of(
             if let Some(key) = claim.keys().find(|key| !CLAIM_KEYS.contains(&key.as_str())) {
                 return Err(refused(format!("it carries `{key}`, which no claim does")));
             }
-            serde_json::from_value(Value::Object(claim.clone()))
-                .map(Some)
-                .map_err(|why| refused(why.to_string()))
+            let claim: DriverClaim = serde_json::from_value(Value::Object(claim.clone()))
+                .map_err(|why| refused(why.to_string()))?;
+            if crate::projection::millis_of(&claim.claimed_at).is_none() {
+                return Err(refused(format!(
+                    "its `claimed_at` is {:?}, not an RFC 3339 instant",
+                    claim.claimed_at
+                )));
+            }
+            Ok(Some(claim))
         }
         Some(other) => Err(refused(format!("it holds {other}, not a mapping"))),
     }
+}
+
+/// A node's `onepipeline.dispatch`: the branch its open session works on, the base it opened
+/// against, and when it opened. The one shape the write-back writes and a launch reads.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StoredDispatch {
+    // llmlint: ignore-block[invalid_states_unrepresentable] a store document's fields, as entry
+    // 116 spells them: a branch, a base and an RFC 3339 instant are strings on the store, as on
+    // every settlement beside them, and `dispatch_of` refuses one that is not each.
+    /// The branch the session works on.
+    pub(crate) branch: String,
+    /// The base it opened against.
+    pub(crate) base: String,
+    /// When it opened, RFC 3339.
+    pub(crate) opened_at: String,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
+}
+
+/// One node's stored dispatch, read at the store boundary: `None` where the task carries
+/// none, and a refusal naming the node where it carries anything that is not one.
+pub(crate) fn dispatch_of(
+    node: &str,
+    metadata: &Map<String, Value>,
+) -> Result<Option<StoredDispatch>> {
+    let refused = |why: String| {
+        Error::Invalid(format!(
+            "node '{node}': `{DISPATCH_KEY}` is not a dispatch: {why}"
+        ))
+    };
+    let Some(stored) = metadata
+        .get(DISPATCH_KEY)
+        .filter(|stored| !stored.is_null())
+    else {
+        return Ok(None);
+    };
+    let dispatch: StoredDispatch =
+        serde_json::from_value(stored.clone()).map_err(|why| refused(why.to_string()))?;
+    if crate::vcs::usable(&dispatch.branch).is_none()
+        || crate::vcs::usable(&dispatch.base).is_none()
+    {
+        return Err(refused(format!(
+            "its branch {:?} or base {:?} is not one a session can name",
+            dispatch.branch, dispatch.base
+        )));
+    }
+    if crate::projection::millis_of(&dispatch.opened_at).is_none() {
+        return Err(refused(format!(
+            "its `opened_at` is {:?}, not an RFC 3339 instant",
+            dispatch.opened_at
+        )));
+    }
+    Ok(Some(dispatch))
+}
+
+/// Every key a stored settlement may carry: the registered `node-settled` document's, and
+/// `remote`, which the settling writer adds beside them for a node whose branch it put on an
+/// origin. `continued` is this build's own record of a launch, and never a stored field.
+const SETTLEMENT_KEYS: [&str; 12] = [
+    "status",
+    "outcome",
+    "detail",
+    "branch",
+    "change_url",
+    "cause",
+    "head",
+    "remote",
+    "landing",
+    "completed_steps",
+    "base",
+    "stack",
+];
+
+/// One node's stored settlement, read at the store boundary: `None` where the task carries
+/// none, and a refusal naming the node where it carries anything that is not a settlement —
+/// a value that is not a mapping, a key no settlement carries, or a field of the wrong shape.
+fn settlement_of(
+    node: &str,
+    metadata: Option<&Map<String, Value>>,
+) -> Result<Option<Map<String, Value>>> {
+    let refused = |why: String| {
+        Error::Invalid(format!(
+            "node '{node}': `{SETTLEMENT_KEY}` is not a settlement: {why}"
+        ))
+    };
+    let Some(stored) = metadata
+        .and_then(|metadata| metadata.get(SETTLEMENT_KEY))
+        .filter(|stored| !stored.is_null())
+    else {
+        return Ok(None);
+    };
+    let Some(settlement) = stored.as_object() else {
+        return Err(refused(format!("it holds {stored}, not a mapping")));
+    };
+    if let Some(key) = settlement
+        .keys()
+        .find(|key| !SETTLEMENT_KEYS.contains(&key.as_str()))
+    {
+        return Err(refused(format!(
+            "it carries `{key}`, which no settlement does"
+        )));
+    }
+    serde_json::from_value::<crate::payload::NodeSettled>(stored.clone())
+        .map_err(|why| refused(why.to_string()))?;
+    Ok(Some(settlement.clone()))
 }
 
 /// Whether a launch may go ahead over the claim its read found: any claim refuses it, by
@@ -102,12 +213,17 @@ pub(crate) fn refuse_fresh_over_unlanded(project: &str, read: &Read) -> Result<(
         .tasks
         .iter()
         .filter(|node| node.repo.is_some())
-        .filter_map(|node| {
-            let settlement = stored_settlement(read, &node.id)?;
-            let url = settlement.get("change_url")?.as_str()?;
-            (settlement.get("landing").and_then(Value::as_str) != Some("landed"))
-                .then(|| format!("'{}' ({url})", node.id))
+        .map(|node| {
+            let settlement = settlement_of(&node.id, read.metadata.get(&node.id))?;
+            Ok(settlement.and_then(|settlement| {
+                let url = settlement.get("change_url")?.as_str()?;
+                (settlement.get("landing").and_then(Value::as_str) != Some("landed"))
+                    .then(|| format!("'{}' ({url})", node.id))
+            }))
         })
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
         .collect();
     if unlanded.is_empty() {
         return Ok(());
@@ -123,11 +239,25 @@ pub(crate) fn refuse_fresh_over_unlanded(project: &str, read: &Read) -> Result<(
 /// What a launch continues from its project's store.
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct Continuation {
-    /// Each node continued `done`, in plan order, with the settlement it journals: the
-    /// stored one whole, marked `continued`.
-    pub(crate) settled: Vec<(String, Map<String, Value>)>,
+    /// Each node continued `done`, in plan order, with the settlement it journals.
+    pub(crate) settled: Vec<(String, Continued)>,
     /// Each node pinned to the branch it left, in plan order.
     pub(crate) pinned: Vec<(String, String)>,
+}
+
+/// A `node-settled` a launch journals for a node its store held `done`: the stored settlement
+/// whole — every field carried verbatim, which is what restores the node — marked `continued`.
+///
+/// Built only by [`continuation_of`], from a settlement [`settlement_of`] read through the
+/// registered document and its own key set, so a payload of this type is always one.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Continued(Map<String, Value>);
+
+impl Continued {
+    /// The payload the `node-settled` carries.
+    pub(crate) fn payload(&self) -> Map<String, Value> {
+        self.0.clone()
+    }
 }
 
 /// Read what a launch continues out of the project it read.
@@ -140,27 +270,24 @@ pub(crate) fn continuation_of(read: &Read, claim: Option<&DriverClaim>) -> Resul
     let mut continued = Continuation::default();
     let from = json!({"source": "store", "run": claim.map(|claim| claim.run.clone())});
     for node in &read.plan.tasks {
-        let settlement = stored_settlement(read, &node.id);
-        if let Some(settlement) = settlement {
-            // The settlement is external input, so it is read through the document a
-            // `node-settled` is held to before anything of it is journalled.
-            serde_json::from_value::<crate::payload::NodeSettled>(Value::Object(
-                settlement.clone(),
-            ))
-            .map_err(|why| {
-                Error::Invalid(format!(
-                    "node '{}': `{SETTLEMENT_KEY}` is not a settlement: {why}",
-                    node.id
-                ))
-            })?;
-        }
+        // Both are external input, read through the shape each is held to before anything
+        // of either is journalled or pinned.
+        let metadata = read.metadata.get(&node.id);
+        let settlement = settlement_of(&node.id, metadata)?;
+        let dispatch = match metadata {
+            Some(metadata) => dispatch_of(&node.id, metadata)?,
+            None => None,
+        };
         let status = settlement
+            .as_ref()
             .and_then(|settlement| settlement.get("status"))
             .and_then(Value::as_str);
         if status == Some("done") {
-            let mut payload = settlement.cloned().unwrap_or_default();
+            let mut payload = settlement.clone().unwrap_or_default();
             payload.insert("continued".to_owned(), from.clone());
-            continued.settled.push((node.id.clone(), payload));
+            continued
+                .settled
+                .push((node.id.clone(), Continued(payload)));
             continue;
         }
         // A pin is a lifecycle node's alone — only a session cuts a branch — and one the
@@ -168,26 +295,19 @@ pub(crate) fn continuation_of(read: &Read, claim: Option<&DriverClaim>) -> Resul
         if node.repo.is_none() || node.branch.is_some() {
             continue;
         }
-        let dispatched = read
-            .metadata
-            .get(&node.id)
-            .and_then(|metadata| metadata.get(DISPATCH_KEY))
-            .and_then(|dispatch| dispatch.get("branch"))
-            .and_then(Value::as_str);
+        // A dispatch the store still holds opened after the settlement beside it, since a
+        // settlement removes the key: its branch is the one the work was last on.
         let left = settlement
+            .as_ref()
             .filter(|_| status.is_some_and(|status| PINNING.contains(&status)))
             .and_then(|settlement| settlement.get("branch"))
-            .and_then(Value::as_str);
-        if let Some(branch) = dispatched.or(left).and_then(crate::vcs::usable) {
+            .and_then(Value::as_str)
+            .and_then(crate::vcs::usable);
+        if let Some(branch) = dispatch.map(|dispatch| dispatch.branch).or(left) {
             continued.pinned.push((node.id.clone(), branch));
         }
     }
     Ok(continued)
-}
-
-/// The settlement one node's task carries, where it carries one as a mapping.
-fn stored_settlement<'a>(read: &'a Read, node: &str) -> Option<&'a Map<String, Value>> {
-    read.metadata.get(node)?.get(SETTLEMENT_KEY)?.as_object()
 }
 
 /// What a driver knows about its project's claim, and when it last asked.
@@ -384,7 +504,7 @@ mod tests {
 
     fn claim(run: &str, host: &str) -> Value {
         json!({"run": run, "host": host, "session": null, "pid": 7,
-               "claimed_at": "2026-10-11T00:00:00Z"})
+               "claimed_at": "2026-10-11T00:00:00.000Z"})
     }
 
     #[test]
@@ -410,10 +530,13 @@ mod tests {
         assert!(!held.names("ship", "elsewhere"));
         let mut extra = claim("ship", "builder");
         extra["lease"] = json!(30);
+        let mut untimed = claim("ship", "builder");
+        untimed["claimed_at"] = json!("yesterday");
         for (bad, says) in [
             (extra, "`lease`"),
             (json!("ship"), "not a mapping"),
             (json!({"run": "ship"}), "missing field"),
+            (untimed, "not an RFC 3339 instant"),
         ] {
             let refused = claim_of("p", &BTreeMap::from([(DRIVER_KEY.to_owned(), bad)]))
                 .expect_err("refused")
@@ -431,5 +554,134 @@ mod tests {
         ));
         assert!(admit(Some(&held), true).is_ok());
         assert!(admit(None, false).is_ok());
+    }
+
+    /// The properties a payload type's registered document names.
+    fn properties<T: schemars::JsonSchema>() -> std::collections::BTreeSet<String> {
+        let schema = serde_json::to_value(schemars::schema_for!(T)).expect("a schema renders");
+        schema["properties"]
+            .as_object()
+            .expect("a document with properties")
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    /// The keys the store boundary admits are the registered documents' own: a field a
+    /// payload type gains is a field the boundary admits, rather than one it refuses.
+    #[test]
+    fn the_store_boundary_admits_exactly_the_keys_the_documents_name() {
+        let claim: std::collections::BTreeSet<String> =
+            CLAIM_KEYS.iter().map(|key| (*key).to_owned()).collect();
+        assert_eq!(claim, properties::<DriverClaim>());
+        let mut settled = properties::<crate::payload::NodeSettled>();
+        settled.remove("continued");
+        settled.insert("remote".to_owned());
+        let stored: std::collections::BTreeSet<String> = SETTLEMENT_KEYS
+            .iter()
+            .map(|key| (*key).to_owned())
+            .collect();
+        assert_eq!(stored, settled);
+    }
+
+    /// Entry 116's block is what this build does: its keys are the ones this build reads and
+    /// writes, its dispatch and claim read as the boundary reads them, its surface and seam
+    /// are the ones the engine raises and reads, and its interval is the constant.
+    #[test]
+    fn entry_116s_block_is_this_builds_continuation() {
+        let record = include_str!("../docs/contract-divergences.md");
+        let entry = record
+            .split("\n## ")
+            .find(|entry| entry.starts_with("116."))
+            .expect("the divergence record carries entry 116");
+        let block: Value = serde_json::from_str(
+            entry
+                .split("```json")
+                .nth(1)
+                .and_then(|rest| rest.split("```").next())
+                .expect("entry 116 carries a json block"),
+        )
+        .expect("the block is JSON");
+        assert_eq!(
+            block["store_keys"],
+            json!({"task": [SETTLEMENT_KEY, DISPATCH_KEY], "project": [DRIVER_KEY]})
+        );
+        assert_eq!(
+            block["surface_kind"],
+            json!(crate::engine::DRIVER_SUPERSEDED)
+        );
+        assert_eq!(block["test_seam"], json!(IDLE_CLAIM_CHECK_ENV));
+        assert_eq!(
+            block["idle_claim_check_seconds"],
+            json!(IDLE_CLAIM_CHECK.as_secs())
+        );
+        let metadata: Map<String, Value> = [(DISPATCH_KEY.to_owned(), block["dispatch"].clone())]
+            .into_iter()
+            .collect();
+        assert!(dispatch_of("c", &metadata)
+            .expect("the dispatch reads")
+            .is_some());
+        let project = BTreeMap::from([(DRIVER_KEY.to_owned(), block["driver"].clone())]);
+        assert!(claim_of("p", &project).expect("the claim reads").is_some());
+        let mut settlement = block["settlement"].clone();
+        settlement
+            .as_object_mut()
+            .expect("a settlement")
+            .remove("continued");
+        let task: Map<String, Value> = [(SETTLEMENT_KEY.to_owned(), settlement)]
+            .into_iter()
+            .collect();
+        assert!(settlement_of("c", Some(&task))
+            .expect("the settlement reads")
+            .is_some());
+    }
+
+    /// A dispatch or a settlement that is not one refuses, naming the node and what is wrong.
+    #[test]
+    fn a_stored_dispatch_or_settlement_that_is_not_one_is_refused_naming_the_node() {
+        let dispatch = |value: Value| -> Map<String, Value> {
+            [(DISPATCH_KEY.to_owned(), value)].into_iter().collect()
+        };
+        assert_eq!(dispatch_of("b", &Map::new()).expect("none"), None);
+        for (bad, says) in [
+            (json!({"branch": "me/b", "base": "main"}), "missing field"),
+            (
+                json!({"branch": "me/b", "base": "main", "opened_at": "now"}),
+                "not an RFC 3339 instant",
+            ),
+            (
+                json!({"branch": "", "base": "main", "opened_at": "2026-10-11T00:00:00.000Z"}),
+                "not one a session can name",
+            ),
+            (
+                json!({"branch": "me/b", "base": "main", "opened_at": "2026-10-11T00:00:00.000Z",
+                       "host": "builder"}),
+                "unknown field",
+            ),
+        ] {
+            let refused = dispatch_of("b", &dispatch(bad))
+                .expect_err("refused")
+                .to_string();
+            assert!(
+                refused.contains("node 'b'") && refused.contains(says),
+                "{refused}"
+            );
+        }
+        let settlement = |value: Value| -> Map<String, Value> {
+            [(SETTLEMENT_KEY.to_owned(), value)].into_iter().collect()
+        };
+        for (bad, says) in [
+            (json!("done"), "not a mapping"),
+            (json!({"status": "done", "brnach": "me/b"}), "`brnach`"),
+            (json!({"status": "finished"}), "unknown variant"),
+        ] {
+            let refused = settlement_of("b", Some(&settlement(bad)))
+                .expect_err("refused")
+                .to_string();
+            assert!(
+                refused.contains("node 'b'") && refused.contains(says),
+                "{refused}"
+            );
+        }
     }
 }

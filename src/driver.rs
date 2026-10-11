@@ -1463,7 +1463,7 @@ fn start(args: &StartArgs) -> Result<i32> {
         open.emit(
             journal::PipelineKind::NodeSettled,
             journal::labels(&run, Some(node)),
-            settlement.clone(),
+            settlement.payload(),
         )?;
     }
     if !continuation.settled.is_empty() || !continuation.pinned.is_empty() {

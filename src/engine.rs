@@ -570,8 +570,17 @@ pub(crate) enum Message {
 
 /// One publication waiting on the next pass's claim check.
 pub(crate) struct PublicationDue {
-    /// Answered `true` to publish, `false` where another run has taken the project over.
-    pub(crate) answer: Sender<bool>,
+    /// Where the pass's answer goes.
+    pub(crate) answer: Sender<PublicationVerdict>,
+}
+
+/// What a pass's claim check answers a publication waiting on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PublicationVerdict {
+    /// The project is still this run's: publish.
+    Publish,
+    /// Another run has taken the project over: keep the work, publish nothing.
+    Withhold,
 }
 
 /// Ask the loop whether a lifecycle node may publish now, and wait for its answer.
@@ -582,17 +591,28 @@ pub(crate) struct PublicationDue {
 /// so the publication goes ahead as it did before a claim existed.
 pub(crate) fn publication_cleared(tx: &Sender<Message>, node: &str) -> bool {
     let (answer, answered) = mpsc::channel();
+    // llmlint: ignore-block[changed_behavior_has_e2e] neither failure has an invocation behind
+    // it: the loop owns its receiver for as long as any dispatch it started is in flight — it
+    // holds a node's settlement until the thread reports it — so a send it refuses and an answer
+    // it drops are each a loop that has already gone, which no journey can arrange while a
+    // dispatch is waiting on it. What a publication does then is what it did before a claim
+    // existed; `continuation::a_superseded_driver_publishes_nothing_after_the_check_but_finishes_a_publication_under_way`
+    // drives both answers the loop does give.
     if tx
         .send(Message::PublicationDue(Box::new(PublicationDue { answer })))
         .is_err()
     {
         return true;
     }
-    let cleared = answered.recv().unwrap_or(true);
-    if !cleared {
-        eprintln!("onepipeline: node '{node}': its publication is withheld, the project having been taken over");
+    let verdict = answered.recv().unwrap_or(PublicationVerdict::Publish);
+    // llmlint: ignore-end[changed_behavior_has_e2e]
+    if verdict == PublicationVerdict::Withhold {
+        eprintln!(
+            "onepipeline: node '{node}': its publication is withheld, the project having been \
+             taken over"
+        );
     }
-    cleared
+    verdict == PublicationVerdict::Publish
 }
 
 /// Record that another run's claim superseded this driver: the record first, then a
@@ -1554,7 +1574,11 @@ fn converge(
         }
         // Every publication waiting is answered by this pass's one reading.
         for due in publications.drain(..) {
-            let _ = due.answer.send(!superseded);
+            let _ = due.answer.send(if superseded {
+                PublicationVerdict::Withhold
+            } else {
+                PublicationVerdict::Publish
+            });
         }
         if !claimed {
             claimed = true;

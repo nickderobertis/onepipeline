@@ -305,7 +305,7 @@ struct Snapshot {
 #[derive(Clone, Debug, PartialEq)]
 enum DriverWrite {
     /// Write this claim wherever what landed is not it: a driver's every projection.
-    Hold(Value),
+    Hold(crate::payload::DriverClaim),
     /// The run is letting go: where what landed is this run's claim, read the store's, and
     /// write it `null` if it still names `run` on `host` — or, where it names another run,
     /// write **nothing** at all, because that run drives the project now.
@@ -888,7 +888,7 @@ pub struct Writeback {
     /// The copy's per-item budget, which bounds the launch wait as it bounds the copy.
     per_item: NonZeroU64,
     /// The claim this driver writes on the project, once it has made one.
-    held: Mutex<Option<Value>>,
+    held: Mutex<Option<crate::payload::DriverClaim>>,
     /// Whether another run has taken the project over, after which this driver writes
     /// nothing more to it: its board is that run's now.
     retired: std::sync::atomic::AtomicBool,
@@ -958,8 +958,8 @@ impl Writeback {
     /// Write `claim` on the project from this driver's next projection on, wherever what
     /// landed is not it.
     pub(crate) fn hold(&self, claim: &crate::payload::DriverClaim) {
-        if let (Ok(mut held), Ok(claim)) = (self.held.lock(), serde_json::to_value(claim)) {
-            *held = Some(claim);
+        if let Ok(mut held) = self.held.lock() {
+            *held = Some(claim.clone());
         }
     }
 
@@ -1126,13 +1126,13 @@ fn dispatches(paths: &RunPaths, state: &RunState) -> BTreeMap<String, Value> {
     }
     open.into_iter()
         .filter_map(|(node, session)| {
-            let (base, at) = opened.remove(&node)?;
-            let dispatch = json!({
-                "branch": session.branch().as_str(),
-                "base": base,
-                "opened_at": at,
-            });
-            Some((node, dispatch))
+            let (base, opened_at) = opened.remove(&node)?;
+            let dispatch = crate::continuation::StoredDispatch {
+                branch: session.branch().as_str().to_owned(),
+                base,
+                opened_at,
+            };
+            Some((node, serde_json::to_value(dispatch).ok()?))
         })
         .collect()
 }
@@ -2359,9 +2359,9 @@ fn carry_the_difference(
     // not this driver's claim, and released — `null`, since the store removes no project key —
     // where what landed is this run's and the read above found it still there.
     let claimed = match &snapshot.driver {
-        DriverWrite::Hold(claim) => {
-            (baseline.landed.project_metadata.get(DRIVER_KEY) != Some(claim)).then(|| claim.clone())
-        }
+        DriverWrite::Hold(claim) => serde_json::to_value(claim)
+            .ok()
+            .filter(|claim| baseline.landed.project_metadata.get(DRIVER_KEY) != Some(claim)),
         DriverWrite::Release { run, host } => {
             baseline.holds_claim_of(run, host).then_some(Value::Null)
         }
@@ -3107,7 +3107,10 @@ impl Baseline {
     /// not what landed, or a release of a claim that landed naming this run.
     fn driver_differs(&self, driver: &DriverWrite) -> bool {
         match driver {
-            DriverWrite::Hold(claim) => self.landed.project_metadata.get(DRIVER_KEY) != Some(claim),
+            DriverWrite::Hold(claim) => {
+                self.landed.project_metadata.get(DRIVER_KEY)
+                    != serde_json::to_value(claim).ok().as_ref()
+            }
             DriverWrite::Release { run, host } => self.holds_claim_of(run, host),
             DriverWrite::Leave => false,
         }
@@ -7769,14 +7772,14 @@ mod tests {
     fn the_driver_claim_differs_only_where_it_would_be_written() {
         let snapshot = Fixture::new("driver-claim").snapshot;
         let mine = json!({"run": "ship", "host": "builder", "session": null, "pid": 7,
-                          "claimed_at": "2026-10-11T00:00:00Z"});
+                          "claimed_at": "2026-10-11T00:00:00.000Z"});
         let mut theirs = mine.clone();
         theirs["host"] = json!("elsewhere");
         let mut baseline = super::Baseline {
             path: std::path::PathBuf::from("unused"),
             landed: LandedBaseline::empty(&snapshot.project),
         };
-        let hold = super::DriverWrite::Hold(mine.clone());
+        let hold = super::DriverWrite::Hold(serde_json::from_value(mine.clone()).expect("a claim"));
         let release = super::DriverWrite::Release {
             run: "ship".to_owned(),
             host: "builder".to_owned(),

@@ -383,7 +383,6 @@ impl Store {
                 ),
             })?
             .map_err(|error| failed("project metadata set", id.as_str(), &error))?;
-        let _ = reader.call(reader.engine.end_command());
         Ok(())
     }
 

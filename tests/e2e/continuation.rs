@@ -431,20 +431,103 @@ fn a_failed_node_is_continued_pinned_to_its_branch_and_adopts_its_draft() {
     the_pinned_node_continues_its_branch_and_its_draft(&world, &project, run, &stored);
 }
 
-/// A node its last driver settled `cancelled` with a branch and a draft — a dispatch a
-/// manager cancelled while its publication was being retried — is continued the same way.
+/// A node a manager cancelled while its publication was being retried — its draft already
+/// open, its checks red — settles `cancelled` with its branch and that draft, and the board
+/// shows it `parked`: a cold host continues it pinned to that branch, and its draft adopted.
 #[test]
 fn a_cancelled_node_is_continued_pinned_to_its_branch_and_adopts_its_draft() {
     let run = "cancelled";
-    let (world, project, mut stored) = a_failed_draft("continue-cancelled", run);
-    let b = stored.get_mut("b").expect("b's settlement");
-    b["status"] = json!("cancelled");
-    b.as_object_mut().expect("a settlement").remove("outcome");
-    restate(&world, &project, "b", "onepipeline.settlement", b.clone());
-    the_pinned_node_continues_its_branch_and_its_draft(&world, &project, run, &stored);
+    let world = team_world("continue-cancelled")
+        .with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "2")
+        .with_env(crate::harness::CANCEL_GRACE_ENV, "1");
+    world.script("a.work", "a's change\n");
+    world.script("b.work-anew", "b's change");
+    world.script("gh.checks.2", RED);
+    let b_dispatches = world.rendezvous("b");
+    let project = author(
+        &world,
+        run,
+        vec![lifecycle("a", &[]), lifecycle("b", &["a"])],
+    );
+    world
+        .run_from(&world.project, &["start", &project, "--detach"])
+        .exited(0);
+    // The first dispatch publishes, its checks red; the retry is held, and cancelled.
+    b_dispatches.arrived().release();
+    let retry = b_dispatches.arrived();
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [{"op": "cancel", "id": "b"}]}).to_string(),
+        )
+        .exited(0);
+    world.until("the run to settle", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+    drop(retry);
+    let stored = stored_settlements(&world, &project);
+    assert_eq!(stored["b"]["status"], "cancelled", "{stored:#?}");
+    for field in ["branch", "change_url"] {
+        assert!(
+            stored["b"][field].is_string(),
+            "b stored no {field}: {stored:#?}"
+        );
+    }
+    let item = world
+        .store_tasks(&project)
+        .into_iter()
+        .find(|task| task["item"]["metadata"]["onepipeline.id"] == "b")
+        .expect("b's item");
+    assert_eq!(item["item"]["status"]["name"], "parked", "{item}");
+    world.unscript("b.rendezvous");
+
+    // The park is the manager's, and the board carries it: a host continuing the project
+    // leaves the node parked until somebody requeues it — and then continues its branch.
+    let branch = stored["b"]["branch"]
+        .as_str()
+        .expect("b's branch")
+        .to_owned();
+    let created = created_from(&world);
+    world.script("gh.checks.2", GREEN);
+    std::fs::remove_dir_all(&world.runs).expect("the runs root is removed");
+    let cold = world.on_host("host-b");
+    let continued = cold.run_from(&cold.project, &["start", &project, "--attach"]);
+    assert!(
+        cold.run_file(run, "result.json").is_file(),
+        "the continuation did not settle: {}",
+        continued.stderr
+    );
+    assert_eq!(
+        dispatched(&cold, run),
+        Vec::<String>::new(),
+        "a parked node was dispatched"
+    );
+    assert_eq!(settled(&cold, run, "a")["continued"]["source"], "store");
+    cold.run_with_stdin(
+        &["reply", run],
+        &json!({"version": 2, "commands": [{"op": "requeue", "id": "b"}]}).to_string(),
+    )
+    .exited(0);
+    cold.run_from(&cold.project, &["adopt", run]).settled();
+    assert_eq!(dispatched(&cold, run), vec!["b".to_owned()]);
+    assert_eq!(sessions_opened(&cold, run), vec![branch.clone()]);
+    assert_eq!(created_from(&world), created, "a change request was opened");
+    let b = settled(&cold, run, "b");
+    assert_eq!(b["outcome"], "change-review-draft", "{b}");
+    assert_eq!(b["change_url"], stored["b"]["change_url"], "{b}");
+    let held = changes_from(&world, &branch);
+    assert_eq!(held.len(), 1, "{held:?}");
+    assert!(held_as_draft(&world, &held[0]["number"]), "{held:?}");
+    drop(cold);
 }
 
-/// A node its last driver left `parked` with a branch and a draft is continued the same way.
+/// A node whose stored settlement says `parked` with a branch and a draft is continued the
+/// same way.
+// llmlint: ignore-block[tests_mirror_real_usage] no build of this crate settles a node
+// `parked` — a park is derived, and the dispatch a `cancel` ends settles `cancelled`, which
+// the journey above produces through the CLI — so the one way a store holds a `parked`
+// settlement is a writer other than this build: the store is external input, and stating the
+// document that writer left is the journey's whole subject.
 #[test]
 fn a_parked_node_is_continued_pinned_to_its_branch_and_adopts_its_draft() {
     let run = "parked";
@@ -455,6 +538,7 @@ fn a_parked_node_is_continued_pinned_to_its_branch_and_adopts_its_draft() {
     restate(&world, &project, "b", "onepipeline.settlement", b.clone());
     the_pinned_node_continues_its_branch_and_its_draft(&world, &project, run, &stored);
 }
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// The claim the store holds for `project`, once it names `run`: read back off the board,
 /// as a host that holds none of the run's state would read it.
@@ -1167,7 +1251,17 @@ fn an_idle_superseded_driver_notices_within_one_idle_check_and_publishes_nothing
     world.until("the superseded driver to end", |world| {
         world.run_file("idle", "result.json").is_file()
     });
-    assert_eq!(settled(&world, "idle", "l")["status"], "cancelled");
+    // Its branch could not be put on the origin — the successor had already published it —
+    // so the work is kept where it is, and the settlement says where.
+    let withheld = settled(&world, "idle", "l");
+    assert_eq!(withheld["status"], "cancelled", "{withheld}");
+    let detail = withheld["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.starts_with("not published")
+            && detail.contains("push rejected")
+            && detail.contains(&format!("so the work stays on the local branch {branch}")),
+        "{withheld}"
+    );
     assert_eq!(changes_from(&world, &branch).len(), 1);
     one_change_request_per_branch(&world);
     drop(successor);
@@ -1282,4 +1376,261 @@ fn two_cold_hosts_launching_one_project_at_once_leave_one_driver_and_every_draft
         assert_eq!(changes_from(&world, head).len(), 1, "{head}");
         assert!(held_as_draft(&world, &draft["number"]), "{draft}");
     }
+}
+
+/// What a store holds for a project is external input: a settlement, a dispatch or a claim
+/// that is not one refuses the launch before anything is minted, naming the node or the key
+/// and what is wrong, rather than being read as absent.
+#[test]
+fn a_settlement_dispatch_or_claim_that_is_not_one_refuses_the_launch() {
+    let run = "malformed";
+    let (world, project, stored) = a_failed_draft("continue-malformed", run);
+    let refused = |what: &[&str]| {
+        let refused = world.run_from(&world.project, &["start", &project, "--attach"]);
+        refused.exited(2);
+        for named in what {
+            assert!(
+                refused.stderr.contains(named),
+                "{named}: {}",
+                refused.stderr
+            );
+        }
+        assert!(
+            !world.run_file(&format!("{run}-2"), "launch.json").exists(),
+            "the refusal minted a run"
+        );
+    };
+    let mut typo = stored["b"].clone();
+    typo["brnach"] = typo["branch"].take();
+    restate(&world, &project, "b", "onepipeline.settlement", typo);
+    refused(&[
+        "node 'b'",
+        "`onepipeline.settlement` is not a settlement",
+        "`brnach`",
+    ]);
+    restate(
+        &world,
+        &project,
+        "b",
+        "onepipeline.settlement",
+        stored["b"].clone(),
+    );
+
+    restate(
+        &world,
+        &project,
+        "b",
+        "onepipeline.dispatch",
+        json!({"branch": stored["b"]["branch"]}),
+    );
+    refused(&[
+        "node 'b'",
+        "`onepipeline.dispatch` is not a dispatch",
+        "missing field",
+    ]);
+    restate(
+        &world,
+        &project,
+        "b",
+        "onepipeline.dispatch",
+        json!({"branch": stored["b"]["branch"], "base": stored["a"]["branch"],
+               "opened_at": "2026-10-11T00:00:00.000Z"}),
+    );
+
+    let key =
+        onetaskgraph_plugin_api::MetadataKey::new("onepipeline.driver".to_owned()).expect("a key");
+    let id: onetaskgraph_core::GlobalId = project.parse().expect("a qualified project");
+    world
+        .store_call(|engine| async move {
+            engine
+                .set_project_metadata(&id, &key, &json!({"run": "elsewhere"}))
+                .await
+        })
+        .unwrap_or_else(|why| panic!("the store refused the write: {why}"));
+    refused(&["`onepipeline.driver` is not a claim", "missing field"]);
+}
+
+/// The branch a node is pinned to is the latest the store knows it worked on: a dispatch the
+/// store still holds opened after the settlement beside it, so its branch wins over the
+/// settlement's — and a branch the plan authored on the task wins over both.
+#[test]
+fn a_dispatchs_branch_wins_over_a_settlements_and_an_authored_branch_over_both() {
+    let run = "precedence";
+    let (world, project, stored) = a_failed_draft("continue-precedence", run);
+    // The branch a failed node preserved is projected as its plan's own `branch`; taken off,
+    // what is left to pin it is the store's own record of where it worked.
+    restate(&world, &project, "b", "onepipeline.branch", Value::Null);
+    restate(
+        &world,
+        &project,
+        "b",
+        "onepipeline.dispatch",
+        json!({"branch": "me/precedence/b-again", "base": stored["a"]["branch"],
+               "opened_at": "2026-10-11T00:00:00.000Z"}),
+    );
+    world.script("gh.checks.2", GREEN);
+    std::fs::remove_dir_all(&world.runs).expect("the runs root is removed");
+    let cold = world.on_host("host-b");
+    launch(&cold, run, &project, &[]).exited(0);
+    assert_eq!(
+        sessions_opened(&cold, run),
+        vec!["me/precedence/b-again".to_owned()],
+        "b was not dispatched on the branch its dispatch named"
+    );
+
+    // Back as it was, a dispatch beside the settlement again, and a branch the plan authored.
+    restate(
+        &world,
+        &project,
+        "b",
+        "onepipeline.settlement",
+        stored["b"].clone(),
+    );
+    restate(
+        &world,
+        &project,
+        "b",
+        "onepipeline.dispatch",
+        json!({"branch": "me/precedence/b-again", "base": stored["a"]["branch"],
+               "opened_at": "2026-10-11T00:00:00.000Z"}),
+    );
+    restate(
+        &world,
+        &project,
+        "b",
+        "onepipeline.branch",
+        json!("me/precedence/authored"),
+    );
+    let again = format!("{run}-2");
+    let colder = world.on_host("host-c");
+    launch(&colder, run, &project, &[]).exited(0);
+    assert_eq!(
+        sessions_opened(&colder, run),
+        vec!["me/precedence/authored".to_owned()],
+        "b was not dispatched on the branch the plan authored"
+    );
+    assert!(!colder.run_file(&again, "launch.json").exists());
+    drop(colder);
+    drop(cold);
+}
+
+/// A claim read the store does not answer is given up on at its deadline rather than holding
+/// the driver: an adoption whose read of the claim is held goes on driving once the deadline
+/// passes, says why on its log, and claims the project.
+#[test]
+fn an_adoption_whose_claim_read_is_not_answered_goes_on_driving_after_its_deadline() {
+    let world = World::new("claim-read-deadline").through_scripted_source();
+    world.script("work.wait", "hold");
+    let project = launch_detached(&world, "deadline", vec![agent("work", &[])]);
+    until_claimed_by(&world, &project, "deadline");
+    world.run(&["stop", "deadline"]).exited(0);
+    let held = world.store_holds("get_project");
+    let since = std::time::Instant::now();
+    world.run(&["adopt", "deadline", "--detach"]).exited(0);
+    let read = held.arrived();
+    world.until("the adoption to go on past its claim read", |world| {
+        world.events_of("deadline", "node-dispatched").len() == 2
+    });
+    assert!(
+        since.elapsed() >= std::time::Duration::from_secs(20),
+        "the adoption dispatched {:?} after it began, inside the claim read's deadline",
+        since.elapsed()
+    );
+    world.until_run_file_holds("deadline", "driver.log", "did not answer within 20 seconds");
+    world.store_stops_holding("get_project");
+    read.release();
+    until_claimed_by(&world, &project, "deadline");
+    world.release("work.go");
+    world.until("the adopted run to settle", |world| {
+        world.run_file("deadline", "result.json").is_file()
+    });
+}
+
+/// A closeout whose projection is still in flight when its window ends — the store slow to
+/// answer the claim's release — does not leave the claim standing: the driver releases it
+/// itself, the same read and the same write, before it lets go of the run.
+#[test]
+fn a_closeout_still_releasing_when_its_window_ends_releases_the_claim_itself() {
+    let world = World::new("claim-slow-closeout").through_scripted_source();
+    world.script("work.wait", "hold");
+    let project = launch_detached(&world, "slowclose", vec![agent("work", &[])]);
+    until_claimed_by(&world, &project, "slowclose");
+    let writes = world.store_holds("set_project_metadata");
+    world.release("work.go");
+    // The closeout's own release, held past its window.
+    let projection = writes.arrived();
+    // The driver's: let through.
+    writes.arrived().release();
+    world.until("the run to settle", |world| {
+        world.run_file("slowclose", "result.json").is_file()
+    });
+    assert_eq!(
+        stored_claim(&world, &project),
+        Value::Null,
+        "the run let go with its claim still standing"
+    );
+    world.store_stops_holding("set_project_metadata");
+    projection.release();
+}
+
+/// A superseded driver whose withheld node's branch nobody has published yet puts that branch
+/// on the origin, and its settlement says so — the work is there for the run that took the
+/// project over, and no change request was opened for it.
+#[test]
+fn a_withheld_publication_puts_its_branch_on_the_origin_when_nothing_else_has() {
+    let world = team_world("superseded-kept").with_env("ONEPIPELINE_IDLE_CLAIM_CHECK_SECONDS", "2");
+    world.script("l.work", "l's change\n");
+    let l = world.rendezvous("l");
+    let project = launch_detached(&world, "kept", vec![lifecycle("l", &[])]);
+    let mine = l.arrived();
+    until_claimed_by(&world, &project, "kept");
+    world.until("l's dispatch to reach the board", |world| {
+        item_metadata(world, &project, "l")
+            .get("onepipeline.dispatch")
+            .is_some()
+    });
+    let branch = item_metadata(&world, &project, "l")["onepipeline.dispatch"]["branch"]
+        .as_str()
+        .expect("l's branch")
+        .to_owned();
+    let successor = world.on_host("host-b");
+    successor
+        .run_from(
+            &successor.project,
+            &["start", &project, "--detach", "--take-over"],
+        )
+        .exited(0);
+    // The successor's own dispatch of `l` stays held: it publishes nothing here.
+    let theirs = l.arrived();
+    until_claimed_on(&world, &project, "host-b");
+    world.until("the first driver to notice the takeover", |world| {
+        !world.events_of("kept", "driver-superseded").is_empty()
+    });
+    mine.release();
+    world.until("the superseded driver to end", |world| {
+        world.run_file("kept", "result.json").is_file()
+    });
+    let withheld = settled(&world, "kept", "l");
+    assert_eq!(withheld["status"], "cancelled", "{withheld}");
+    assert_eq!(withheld["remote"], "pushed", "{withheld}");
+    let detail = withheld["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.starts_with("not published")
+            && detail.contains(&format!("kept on {branch} (pushed)")),
+        "{withheld}"
+    );
+    let origin = world.root.join("origin.git");
+    let on_origin = crate::harness::git(&world, &origin, &["rev-parse", &branch]);
+    assert_eq!(
+        on_origin.trim(),
+        withheld["head"].as_str().expect("a head"),
+        "the origin does not hold the withheld work"
+    );
+    assert!(
+        changes_from(&world, &branch).is_empty(),
+        "a change request was opened"
+    );
+    successor.run(&["stop", "kept", "--force"]).exited(0);
+    drop(theirs);
+    drop(successor);
 }
