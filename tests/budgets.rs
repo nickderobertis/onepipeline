@@ -523,6 +523,12 @@ fn the_host_view_measurement_records_nothing_from_a_read_that_failed() {
     let before = std::fs::metadata(&record)
         .and_then(|about| about.modified())
         .ok();
+    // This tree's binary, its reading repeated a dispatch row and a gone entry: a
+    // repeat is a wrong answer, and must not be merged into a right-looking one.
+    let repeating = format!(
+        "{:?} \"$@\" | node -e 'let s = \"\"; process.stdin.on(\"data\", (d) => (s += d)).on(\"end\", () => {{ const r = JSON.parse(s); r.dispatches.push(r.dispatches[0]); r.gone.push(r.gone[0]); console.log(JSON.stringify(r)); }})'",
+        env!("CARGO_BIN_EXE_onepipeline")
+    );
     for (name, body, says) in [
         ("failing", "echo refused >&2; exit 3", "exited 3"),
         ("silent", "echo '{}'", "recorded no phase line"),
@@ -531,6 +537,7 @@ fn the_host_view_measurement_records_nothing_from_a_read_that_failed() {
             "echo '{}' > \"$ONEPIPELINE_HOST_PHASES\"",
             "lacks its marks, phases, quantities or read bytes",
         ),
+        ("repeating", repeating.as_str(), "repeats; gone entry "),
     ] {
         let binary = dir.join(name);
         std::fs::write(&binary, format!("#!/bin/sh\n{body}\n")).expect("a stand-in binary");
@@ -557,6 +564,27 @@ fn the_host_view_measurement_records_nothing_from_a_read_that_failed() {
             "{name}: a failed measurement wrote the record"
         );
     }
+
+    // A live dispatch's process that cannot start says why, from the spawn itself.
+    let node = std::process::Command::new("node")
+        .args(["-p", "process.execPath"])
+        .output()
+        .expect("node runs");
+    let no_sleep = dir.join("no-sleep");
+    std::fs::create_dir_all(&no_sleep).expect("an empty PATH");
+    let measured = std::process::Command::new(String::from_utf8_lossy(&node.stdout).trim())
+        .arg(root().join("scripts/host-view-measure.mjs"))
+        .arg(env!("CARGO_BIN_EXE_onepipeline"))
+        .env("PATH", &no_sleep)
+        .output()
+        .expect("node runs the measurement");
+    let stderr = String::from_utf8_lossy(&measured.stderr);
+    assert_eq!(measured.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("`sleep` could not be started to hold a live dispatch: could not run:")
+            && stderr.contains("ENOENT"),
+        "{stderr}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

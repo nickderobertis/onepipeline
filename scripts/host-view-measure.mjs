@@ -65,10 +65,16 @@ const children = [];
 /** A real process standing in for a dispatch or a driver, and its start token. */
 function sleeper() {
   const child = spawn("sleep", ["86400"], { stdio: "ignore" });
-  // A process that could not start is reported where it is asked for, below.
+  // `spawn` emits its failure only on a later tick, after this has thrown; the cause
+  // is asked of `spawnSync` instead, which answers it here.
   child.on("error", () => {});
   children.push(child);
-  if (!child.pid) throw new Error("`sleep` could not be started to hold a live dispatch");
+  if (!child.pid) {
+    const asked = spawnSync("sleep", ["0"]);
+    throw new Error(
+      `\`sleep\` could not be started to hold a live dispatch: ${asked.error ? failure(asked) : "it starts when asked again, so the cause did not persist"}`,
+    );
+  }
   return { pid: child.pid, token: startToken(child.pid) };
 }
 
@@ -152,6 +158,17 @@ function read(args, label) {
 
 const key = (pair) => pair.join("/");
 
+/** Each item's key, naming any that repeat: a repeat is a wrong reading, never merged away. */
+function keyed(items, keyOf, what, problems) {
+  const keyed = new Map();
+  for (const item of items) {
+    const at = keyOf(item);
+    if (keyed.has(at)) problems.push(`${what} ${at} repeats`);
+    keyed.set(at, item);
+  }
+  return keyed;
+}
+
 /** Hold one `--json` reading to the fixture's answer; throw naming what differs. */
 function holds(manifest, reading, label) {
   const problems = [];
@@ -159,7 +176,12 @@ function holds(manifest, reading, label) {
   if (reading.schema_version !== 1 || reading.host !== HOST || reading.root_error !== null) {
     problems.push(`the reading's header is not version 1's over ${HOST}`);
   }
-  const rows = new Map(reading.dispatches.map((row) => [key([row.run, row.node]), row]));
+  const rows = keyed(
+    reading.dispatches,
+    (row) => key([row.run, row.node]),
+    "dispatch row",
+    problems,
+  );
   for (const pair of expected.held) {
     if (rows.get(key(pair))?.proof !== "held") problems.push(`live ${key(pair)} is not a held row`);
   }
@@ -172,7 +194,11 @@ function holds(manifest, reading, label) {
   if (rows.size !== wantRows.size || [...rows.keys()].some((row) => !wantRows.has(row))) {
     problems.push(`rows ${[...rows.keys()].join(", ")} are not the fixture's`);
   }
-  const gone = new Map(reading.gone.map((item) => [key([item.run, item.node]), item.reason]));
+  const gone = new Map(
+    [...keyed(reading.gone, (item) => key([item.run, item.node]), "gone entry", problems)].map(
+      ([at, item]) => [at, item.reason],
+    ),
+  );
   const wantGone = new Set([...expected.stale, ...expected.stopped].map(key));
   if (gone.size !== wantGone.size || [...gone.keys()].some((item) => !wantGone.has(item))) {
     problems.push(`gone ${[...gone.keys()].join(", ")} is not the fixture's`);
