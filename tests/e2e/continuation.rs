@@ -1502,8 +1502,11 @@ fn a_settlement_dispatch_or_claim_that_is_not_one_refuses_the_launch() {
     leased["lease"] = json!(30);
     let mut untimed = claim.clone();
     untimed["claimed_at"] = json!("yesterday");
+    let mut unnamed = claim.clone();
+    unnamed["host"] = json!("");
     let claims = [
         (json!({"run": "elsewhere"}), "missing field"),
+        (unnamed, "`host`"),
         (json!("elsewhere"), "not a mapping"),
         (leased, "`lease`"),
         (untimed, "not an RFC 3339 instant"),
@@ -1517,6 +1520,23 @@ fn a_settlement_dispatch_or_claim_that_is_not_one_refuses_the_launch() {
             .unwrap_or_else(|why| panic!("the store refused the write: {why}"));
         refused(&["`onepipeline.driver` is not a claim", says]);
     }
+    // And `--take-over` passes even a claim that is not one, saying so.
+    let taken = world.run_from(
+        &world.project,
+        &["start", &project, "--attach", "--take-over"],
+    );
+    assert!(
+        taken
+            .stderr
+            .contains("--take-over passes a claim that is not one"),
+        "{}",
+        taken.stderr
+    );
+    assert!(
+        world.run_file(&format!("{run}-2"), "result.json").is_file(),
+        "the takeover did not run: {}",
+        taken.stderr
+    );
 }
 
 /// The branch a node is pinned to is the latest the store knows it worked on: a dispatch the

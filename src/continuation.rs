@@ -66,6 +66,18 @@ pub(crate) fn claim_of(
             }
             let claim: DriverClaim = serde_json::from_value(Value::Object(claim.clone()))
                 .map_err(|why| refused(why.to_string()))?;
+            // Each name is printed on a refusal's line and compared as an identity, so it has
+            // to be one a line can carry: not empty, nothing but what prints.
+            for (field, name) in [("run", Some(&claim.run)), ("host", Some(&claim.host))]
+                .into_iter()
+                .chain([("session", claim.session.as_ref())])
+            {
+                if let Some(name) = name.filter(|name| crate::vcs::usable(name).is_none()) {
+                    return Err(refused(format!(
+                        "its `{field}` is {name:?}, not a name a line can carry"
+                    )));
+                }
+            }
             if crate::projection::millis_of(&claim.claimed_at).is_none() {
                 return Err(refused(format!(
                     "its `claimed_at` is {:?}, not an RFC 3339 instant",
@@ -418,7 +430,8 @@ impl ClaimWatch {
         DriverClaim {
             run: self.run.clone(),
             host: self.host.clone(),
-            session: Some(session.to_owned()).filter(|session| !session.is_empty()),
+            // Only a session a line can carry, which is the only one `claim_of` reads back.
+            session: crate::vcs::usable(session),
             pid: crate::sys::pid(),
             claimed_at: claimed_at.to_owned(),
         }
@@ -625,11 +638,15 @@ mod tests {
         extra["lease"] = json!(30);
         let mut untimed = claim("ship", "builder");
         untimed["claimed_at"] = json!("yesterday");
+        let unnamed = claim("ship", "");
+        let broken = claim("ship\nrm -rf", "builder");
         for (bad, says) in [
             (extra, "`lease`"),
             (json!("ship"), "not a mapping"),
             (json!({"run": "ship"}), "missing field"),
             (untimed, "not an RFC 3339 instant"),
+            (unnamed, "`host`"),
+            (broken, "`run`"),
         ] {
             let refused = claim_of("p", &BTreeMap::from([(DRIVER_KEY.to_owned(), bad)]))
                 .expect_err("refused")

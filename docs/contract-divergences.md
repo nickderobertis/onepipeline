@@ -9708,6 +9708,17 @@ host is the one to carry on, whether its driver is live or gone. `--take-over` p
 any claim, journals `driver-taken-over {previous: <claim>}` beside `run-started`, and
 the run's first projection writes its own claim.
 
+What a store holds is external input, so each of the three documents is read through
+its own shape and refuses the launch, naming the node or the key and what is wrong,
+where it is not one: a settlement carrying a key no settlement carries — at its top, in
+its `stack` or in a stack parent — a stack with no usable parent, or a `remote` no
+preservation answers with; a dispatch missing a field, carrying one it does not have,
+naming a branch or base no session can, or an `opened_at` that is not an RFC 3339
+instant; and a claim of the wrong shape, with a `run`, `host` or `session` a line
+cannot carry or a `claimed_at` that is not an instant. `--take-over` passes even a
+claim that is not one, and says so, so a mangled claim never leaves a project that
+cannot be launched.
+
 ### The supersession check
 
 A live driver reads the claim at launch — the launch's own read, which refused or

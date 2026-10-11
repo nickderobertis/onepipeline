@@ -934,7 +934,16 @@ fn start(args: &StartArgs) -> Result<i32> {
     graph::validate(&read.plan)?;
     // Who drives the project, off that same read: a read that failed has already refused
     // the launch above, so a claim is never defaulted to none.
-    let claim = crate::continuation::claim_of(project.as_str(), &read.project_metadata)?;
+    // A claim that is not one refuses the launch, unless the launch takes the project over:
+    // otherwise a project whose claim a stranger mangled could never be launched again.
+    let claim = match crate::continuation::claim_of(project.as_str(), &read.project_metadata) {
+        Ok(claim) => claim,
+        Err(refused) if args.take_over => {
+            eprintln!("onepipeline: --take-over passes a claim that is not one: {refused}");
+            None
+        }
+        Err(refused) => return Err(refused),
+    };
     // What the project's last driver left on it, which a launch continues rather than runs
     // again — unless it is told `--fresh`.
     let continuation = if args.fresh {
