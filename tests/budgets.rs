@@ -541,7 +541,7 @@ fn the_host_view_measurement_records_nothing_from_a_read_that_failed() {
 /// `sh -c script` in `dir`: the journals it opened and refused, and what holding it to a
 /// steady read (`old` ended, `live-0` live) answered or refused.
 #[cfg(target_os = "linux")]
-fn traced_opens(dir: &std::path::Path, script: &str, path: Option<&str>) -> serde_json::Value {
+fn traced_opens(dir: &std::path::Path, script: &str, env: &[(&str, String)]) -> serde_json::Value {
     let module = root().join("scripts/host-view-trace.mjs");
     let driver = format!(
         r#"import {{ journalOpens, steadyOpens }} from {module:?};
@@ -557,13 +557,16 @@ try {{
 console.log(JSON.stringify(out));"#,
         module = module.display().to_string()
     );
-    let mut command = std::process::Command::new("node");
+    // Found on this process's PATH, so a case may hand the driver another.
+    let node = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|dir| dir.join("node"))
+        .find(|node| node.is_file())
+        .expect("node on PATH");
+    let mut command = std::process::Command::new(node);
     command
         .args(["--input-type=module", "-e", &driver, script])
-        .current_dir(dir);
-    if let Some(path) = path {
-        command.env("PATH", path);
-    }
+        .current_dir(dir)
+        .envs(env.iter().map(|(key, value)| (key, value)));
     let output = command.output().expect("node runs the tracer module");
     assert!(
         output.status.success(),
@@ -577,8 +580,8 @@ console.log(JSON.stringify(out));"#,
 /// `scripts/host-view-trace.mjs` runs a real process under the real `strace` and counts the
 /// bytes it read from each run's journal, including from many processes reading at once, whose
 /// calls the tracer splits. A read that opened or merely tried an ended run's journal, or opened
-/// other runs' than the live ones, is refused, naming them; so is a tracer that would not run,
-/// and a traced command that failed.
+/// other runs' than the live ones, is refused, naming them; so is a traced command that failed,
+/// a tracer that would not run or left no trace, and a trace with a call it cannot account for.
 #[cfg(target_os = "linux")]
 #[test]
 fn the_host_view_measurement_counts_the_journals_a_traced_read_opened() {
@@ -601,7 +604,7 @@ fn the_host_view_measurement_counts_the_journals_a_traced_read_opened() {
     };
 
     // Steady: the live journal read, the ended one never reached.
-    let steady = traced_opens(&dir, "cat live-0/events.jsonl other.txt", None);
+    let steady = traced_opens(&dir, "cat live-0/events.jsonl other.txt", &[]);
     assert_eq!(
         steady["opened"],
         serde_json::json!({"live-0": live_bytes}),
@@ -617,7 +620,7 @@ fn the_host_view_measurement_counts_the_journals_a_traced_read_opened() {
     let many = traced_opens(
         &dir,
         "for i in $(seq 20); do cat live-0/events.jsonl & done; wait",
-        None,
+        &[],
     );
     assert_eq!(
         many["opened"],
@@ -630,7 +633,7 @@ fn the_host_view_measurement_counts_the_journals_a_traced_read_opened() {
     let tried = traced_opens(
         &dir,
         "cat live-0/events.jsonl; cat old/events.jsonl 2>/dev/null; true",
-        None,
+        &[],
     );
     assert_eq!(tried["refused"], serde_json::json!(["old"]), "{tried}");
     assert!(
@@ -640,7 +643,7 @@ fn the_host_view_measurement_counts_the_journals_a_traced_read_opened() {
         "{tried}"
     );
     unreadable(false);
-    let read = traced_opens(&dir, "cat live-0/events.jsonl old/events.jsonl", None);
+    let read = traced_opens(&dir, "cat live-0/events.jsonl old/events.jsonl", &[]);
     assert_eq!(
         read["opened"]["old"],
         serde_json::json!("an ended record\n".len()),
@@ -654,7 +657,7 @@ fn the_host_view_measurement_counts_the_journals_a_traced_read_opened() {
     );
 
     // A read that opened no live journal is not the live runs' read.
-    let none = traced_opens(&dir, "cat other.txt", None);
+    let none = traced_opens(&dir, "cat other.txt", &[]);
     assert!(
         none["error"].as_str().is_some_and(
             |error| error.contains("opened the journals of no run, not the live runs live-0")
@@ -662,21 +665,59 @@ fn the_host_view_measurement_counts_the_journals_a_traced_read_opened() {
         "{none}"
     );
 
-    // A traced command that failed, and a tracer that would not run, answer nothing.
-    let failed = traced_opens(&dir, "cat live-0/events.jsonl; exit 3", None);
+    // A journal read with `pread64` counts as one read with `read`.
+    let pread = traced_opens(
+        &dir,
+        "python3 -I -c \"import os; os.pread(os.open('live-0/events.jsonl', os.O_RDONLY), 64, 0)\"",
+        &[],
+    );
+    assert_eq!(
+        pread["opened"],
+        serde_json::json!({"live-0": live_bytes}),
+        "{pread}"
+    );
+
+    // An open a reader was killed inside has no result to read it by, so it is no observation.
+    let fifo = dir.join("live-1");
+    std::fs::create_dir_all(&fifo).expect("a run root");
+    let made = std::process::Command::new("mkfifo")
+        .arg(fifo.join("events.jsonl"))
+        .status()
+        .expect("mkfifo runs");
+    assert!(made.success());
+    let killed = traced_opens(
+        &dir,
+        "cat live-1/events.jsonl & sleep 0.3; kill -9 $!; true",
+        &[],
+    );
+    assert!(
+        killed["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("a traced call on live-1's journal has no result")),
+        "{killed}"
+    );
+
+    // A traced command that failed answers nothing.
+    let failed = traced_opens(&dir, "cat live-0/events.jsonl; exit 3", &[]);
     assert!(
         failed["error"]
             .as_str()
             .is_some_and(|error| error.contains("exited 3")),
         "{failed}"
     );
+
+    // Neither does a tracer that is not there, one that refuses, one that leaves no trace, or a
+    // trace that cannot be what a traced read did. The stand-in tracer writes `FAKE_TRACE`'s
+    // file where `-o` asks, or refuses where it names none.
     let fake = dir.join("bin");
     std::fs::create_dir_all(&fake).expect("a bin directory");
     std::fs::write(
         fake.join("strace"),
-        "#!/bin/sh\necho 'ptrace refused' >&2\nexit 1\n",
+        "#!/bin/sh\n[ -n \"$FAKE_TRACE\" ] || { echo 'ptrace refused' >&2; exit 1; }\n\
+         while [ \"$1\" != -o ]; do shift; done\n\
+         [ \"$FAKE_TRACE\" = none ] || cp \"$FAKE_TRACE\" \"$2\"\n",
     )
-    .expect("a refusing tracer");
+    .expect("a stand-in tracer");
     std::fs::set_permissions(fake.join("strace"), std::fs::Permissions::from_mode(0o755))
         .expect("executable");
     let path = format!(
@@ -684,12 +725,62 @@ fn the_host_view_measurement_counts_the_journals_a_traced_read_opened() {
         fake.display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    let refused = traced_opens(&dir, "cat live-0/events.jsonl", Some(&path));
+    let absent = traced_opens(
+        &dir,
+        "true",
+        &[("PATH", dir.join("nothing").display().to_string())],
+    );
+    assert!(
+        absent["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("`strace` could not run")),
+        "{absent}"
+    );
+    let refused = traced_opens(&dir, "true", &[("PATH", path.clone())]);
     assert!(
         refused["error"]
             .as_str()
             .is_some_and(|error| error.contains("exited 1: ptrace refused")),
         "{refused}"
     );
+    let open = "1 openat(AT_FDCWD, \"live-0/events.jsonl\", O_RDONLY";
+    for (name, trace, says) in [
+        ("none", None, "the tracer left no trace"),
+        (
+            "no-open",
+            Some("1 read(0</dev/null>, \"\", 64) = 0\n".to_owned()),
+            "recorded no open",
+        ),
+        (
+            "orphan",
+            Some(format!("{open}) = 3\n2 <... read resumed>\"x\", 64) = 1\n")),
+            "a call resumed that never began",
+        ),
+        (
+            "cut",
+            Some(format!("{open} <unfinished ...>\n")),
+            "a traced call on a journal never finished",
+        ),
+    ] {
+        let fixture = match trace {
+            Some(trace) => {
+                let file = dir.join(format!("{name}.trace"));
+                std::fs::write(&file, trace).expect("a trace");
+                file.display().to_string()
+            }
+            None => "none".to_owned(),
+        };
+        let answered = traced_opens(
+            &dir,
+            "true",
+            &[("PATH", path.clone()), ("FAKE_TRACE", fixture)],
+        );
+        assert!(
+            answered["error"]
+                .as_str()
+                .is_some_and(|error| error.contains(says)),
+            "{name}: {answered}"
+        );
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }

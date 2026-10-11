@@ -6,10 +6,9 @@
 // opened. `tests/budgets.rs` drives it over real processes opening real journals.
 
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { basename, dirname } from "node:path";
 
-/** The run a path names, where it is a run's journal. */
 const runOf = (path) => (path.endsWith("/events.jsonl") ? basename(dirname(path)) : null);
 
 // `-f` follows every thread and child; a call one thread was in when another's
@@ -29,6 +28,8 @@ const RESULT = /\) += (-?\d+)(?:<[^>]*>)?(?: E[A-Z0-9]+ \([^)]*\))?$/;
  * not one of nothing.
  */
 export function journalOpens(command, args, into, options = {}) {
+  // A trace an earlier read left at `into` is not this read's.
+  rmSync(into, { force: true });
   const done = spawnSync(
     "strace",
     [
@@ -37,7 +38,7 @@ export function journalOpens(command, args, into, options = {}) {
       "-qq",
       "-y",
       "-e",
-      "trace=openat,open,read,pread64",
+      "trace=openat,read,pread64",
       "-e",
       "signal=none",
       "-o",
@@ -56,7 +57,7 @@ export function journalOpens(command, args, into, options = {}) {
   } catch (error) {
     throw new Error(`the tracer left no trace (${error.message})`);
   }
-  if (!/\b(openat|open)\(/.test(trace)) throw new Error("the tracer recorded no open");
+  if (!/\bopenat\(/.test(trace)) throw new Error("the tracer recorded no open");
 
   const opened = new Map();
   const refused = new Set();
@@ -77,7 +78,7 @@ export function journalOpens(command, args, into, options = {}) {
       line = `${resumed[1]} ${head}${resumed[3]}`;
     }
     const body = line.slice(line.indexOf(" ") + 1);
-    const isOpen = body.startsWith("openat(") || body.startsWith("open(");
+    const isOpen = body.startsWith("openat(");
     const isRead = body.startsWith("read(") || body.startsWith("pread64(");
     if (!isOpen && !isRead) continue;
     const run = isOpen
@@ -90,6 +91,8 @@ export function journalOpens(command, args, into, options = {}) {
     if (isOpen && count < 0) refused.add(run);
     else opened.set(run, (opened.get(run) ?? 0) + (isRead && count > 0 ? count : 0));
   }
+  const cut = [...pending.values()].filter((call) => /events\.jsonl/.test(call));
+  if (cut.length > 0) throw new Error(`a traced call on a journal never finished: ${cut.join("; ")}`);
   return { stdout: done.stdout, opened, refused };
 }
 
