@@ -48,59 +48,10 @@ use std::process::Command;
 use serde_json::{json, Value};
 
 use harness::{plan_of, World};
-use repo::{ensure_repo, gh, gh_try, missing, Cause};
-
-/// The scratch repository this journey publishes to when nothing names another.
-pub const DEFAULT_SMOKE_REPO: &str = "nickderobertis/onepipeline-smoke";
-
-/// The variable that names a different scratch repository.
-pub const SMOKE_REPO_ENV: &str = "ONEPIPELINE_SMOKE_REPO";
-
-/// What a repository's name has to end with for this journey to touch it.
-///
-/// The whole guard, and deliberately a crude one: this journey pushes branches,
-/// opens pull requests, and merges them, and the cost of pointing it at a
-/// repository somebody works in is not recoverable. A name nobody would give a
-/// repository they cared about is a rule a misconfiguration cannot slip past,
-/// where "is it the one I meant?" is a judgement a program cannot make.
-pub const SCRATCH_SUFFIX: &str = "-smoke";
+use repo::{ensure_repo, gh, gh_try, missing, scratch_repo, Cause};
 
 /// The one substitution, named where a reader of a failure will look for it.
 const WHAT_STANDS_IN: &str = "only the paid model turn stands in; git, onevcs, and GitHub are real";
-
-fn main_repo() -> String {
-    std::env::var(SMOKE_REPO_ENV)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_SMOKE_REPO.to_owned())
-}
-
-/// The scratch repository, or a refusal naming why this is not one.
-///
-/// Asserted **before the first mutating call**: creating the repository is
-/// already a mutation, so the check cannot live any later than this.
-fn scratch_repo() -> String {
-    let slug = main_repo();
-    let parts: Vec<&str> = slug.split('/').collect();
-    let [owner, name] = parts[..] else {
-        panic!(
-            "{SMOKE_REPO_ENV}={slug:?} does not name one repository as owner/name, and this \
-             journey pushes branches and merges pull requests — it will not guess"
-        )
-    };
-    assert!(
-        !owner.is_empty() && !name.is_empty(),
-        "{SMOKE_REPO_ENV}={slug:?} names an empty owner or repository"
-    );
-    assert!(
-        name.ends_with(SCRATCH_SUFFIX),
-        "{SMOKE_REPO_ENV}={slug:?} is not a scratch repository: this journey pushes branches, \
-         opens pull requests, and merges them, so it runs only against a repository whose name \
-         ends in {SCRATCH_SUFFIX:?}. Point it at one, or leave it unset for \
-         {DEFAULT_SMOKE_REPO:?}."
-    );
-    slug
-}
 
 /// Who GitHub says is calling, or a refusal naming the missing credential.
 fn authenticated_user() -> String {
@@ -380,7 +331,7 @@ fn a_lifecycle_node_opens_a_real_pull_request_merges_it_and_the_base_advances() 
     // repository at once, and two runs sharing a branch name would each publish
     // the other's work. The pid alone does not make one — see [`run_stamp`].
     let branch = format!(
-        "onepipeline-smoke/{}-{}-{}",
+        "smoke-run/{}-{}-{}",
         std::process::id(),
         world
             .root

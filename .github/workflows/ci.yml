@@ -275,7 +275,7 @@ jobs:
   # composition against the world.
   #
   # It calls `just smoke-real`, which is the same entry point a person runs
-  # locally — the `onepipeline-smoke` project's uncached `smoke` target: the
+  # locally — the `onepipeline-real-smoke` project's uncached `smoke` target: the
   # journey is defined once, in the test binary, and never reimplemented as
   # workflow steps. The credential is named rather than
   # embedded, and the journey refuses loudly rather than skipping when it is
@@ -290,19 +290,24 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just,nextest
-      # `just smoke-real` runs the `onepipeline-smoke` project's Nx target.
+      # `just smoke-real` runs the `onepipeline-real-smoke` project's Nx target.
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
       # The journey's own refusal names GH_TOKEN, the variable; a red job needs
       # the name of the secret to go set. Given a presence signal rather than the
       # PAT itself — nothing here needs the value.
-      - name: The smoke's credential is present
+      - name: The smoke's credential and scratch repository are present
         env:
           HAS_CREDENTIAL: ${{ secrets.RELEASE_PLZ_TOKEN != '' }}
+          HAS_SMOKE_REPO: ${{ secrets.ONEPIPELINE_SMOKE_REPO != '' }}
         run: |
           if [ "$HAS_CREDENTIAL" != "true" ]; then
             echo "::error::the real-everything smoke needs the RELEASE_PLZ_TOKEN secret, passed as GH_TOKEN. Set it to a PAT that can push to, open a pull request on, and merge in the scratch repository. This job never skips and never falls back to a fake." >&2
+            exit 1
+          fi
+          if [ "$HAS_SMOKE_REPO" != "true" ]; then
+            echo "::error::the real-everything smoke needs the ONEPIPELINE_SMOKE_REPO secret: the scratch repository it publishes to, as owner/name with a name ending in -smoke. This job never skips and never guesses a repository." >&2
             exit 1
           fi
       - name: Real onevcs, real git, real GitHub
@@ -323,9 +328,10 @@ jobs:
           # without talking to GitHub.
           GH_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
           # llmlint: ignore-end[least_privilege_grants]
-          # No ONEPIPELINE_SMOKE_REPO: the journey's own default is the scratch
-          # repository, and naming it here again would be a second place for it
-          # to be wrong. Set it only to point a run somewhere else.
+          # The scratch repository the journey publishes to: configuration,
+          # never a default in the tree, and a secret rather than a variable so
+          # its name is masked in the log. Unset, the journey fails naming it.
+          ONEPIPELINE_SMOKE_REPO: ${{ secrets.ONEPIPELINE_SMOKE_REPO }}
 
   # The 0.28.2 channel compatibility tier: a channel this build writes, read by
   # the pinned `onepipeline-cli` 0.28.2 wheel, and the other way round. Its own job
