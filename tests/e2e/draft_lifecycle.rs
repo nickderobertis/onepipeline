@@ -635,7 +635,6 @@ fn a_skipped_required_check_is_named_and_never_shown_as_passed() {
     );
 }
 
-/// Where in the run's journal the first event of `kind` matching `which` sits.
 fn position_of(world: &World, run: &str, kind: &str, which: impl Fn(&Value) -> bool) -> usize {
     world
         .journal(run)
@@ -707,7 +706,6 @@ fn a_needs_gated_draft_is_held_while_a_check_on_its_head_runs_and_lifted_once_gr
     let run = "needs";
     settled_run(&world, run, vec![lifecycle("service", &[])], &[]).settled();
 
-    // The draft reported `build` still running while `lint` was absent.
     let running = position_of(&world, run, "change-check", |event| {
         event["payload"]["name"] == "build" && event["payload"]["status"] == "in_progress"
     });
@@ -741,7 +739,6 @@ fn a_draft_whose_head_has_a_workflow_run_in_progress_is_held_until_it_is_green()
     settled_run(&world, run, vec![lifecycle("service", &[])], &[]).settled();
 
     lifted_once_green(&world, run);
-    // The host was asked what is running on the head, both reads.
     let asked = |read: &str| {
         gh_calls(&world)
             .iter()

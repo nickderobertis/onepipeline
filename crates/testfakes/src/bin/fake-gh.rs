@@ -1344,7 +1344,6 @@ impl Activity {
             .collect()
     }
 
-    /// One line of `kind`'s script, or why it is not one.
     fn parse(kind: Kind, line: &str) -> Result<Self, String> {
         let (shape, tail) = match kind {
             Kind::Run => ("NAME STATUS CONCLUSION", 2),
