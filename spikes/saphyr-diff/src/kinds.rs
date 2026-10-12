@@ -234,6 +234,44 @@ fn emitted<T: Serialize + DeserializeOwned + PartialEq + Debug>(s: &mut Section,
     }
 }
 
+/// Whole-document emission of a schema-less read (`serde_json::Value`, preserve_order):
+/// serde_norway's bytes against serde-saphyr's under every listed serializer variant, each
+/// difference categorized with its hunk, the per-variant identical count noted, and each
+/// output re-read by serde-saphyr (default and strict_booleans) and serde_norway.
+fn emitted_value(s: &mut Section, doc: &Doc, label: &str, identical: &mut BTreeMap<&'static str, usize>) {
+    let Ok(value) = norway::<Json>(&doc.text) else { return };
+    let before = serde_norway::to_string(&value).expect("norway emits");
+    for (variant, opts) in ser_variants().into_iter().filter(|(l, _)| listed(l)) {
+        let after = emit(&value, variant, opts);
+        if after == before {
+            *identical.entry(variant).or_default() += 1;
+        } else {
+            for (category, example) in categorize(&before, &after) {
+                s.differ(format!("{label} [{variant}]: {category}\n{example}"), &doc.name);
+            }
+        }
+        for (reader, back) in [
+            ("serde-saphyr default", saphyr::<Json>(&after, De::Default)),
+            ("serde-saphyr strict_booleans", saphyr::<Json>(&after, De::StrictBooleans)),
+            ("serde_norway", norway::<Json>(&after)),
+        ] {
+            match back {
+                Ok(back) if back.to_string() == value.to_string() => {}
+                other => s.differ(format!("{label} [{variant}]: re-read by {reader} differs: {other:?}"), &doc.name),
+            }
+        }
+    }
+}
+
+fn identical_notes(s: &mut Section, label: &str, compared: usize, identical: &BTreeMap<&'static str, usize>) {
+    for (variant, _) in ser_variants().into_iter().filter(|(l, _)| listed(l)) {
+        s.notes.push(format!(
+            "{label}: serde-saphyr [{variant}] byte-identical to today on {}/{compared}",
+            identical.get(variant).copied().unwrap_or(0)
+        ));
+    }
+}
+
 /// What the user reads from a real loader: today's text, and the same with the serde part
 /// replaced by serde-saphyr's — the code after serde is shared, so where both crates read the
 /// same typed value the whole outcome is the same.
@@ -360,11 +398,16 @@ struct RegistrationFile {
 
 pub fn templates(c: &Corpus, r: &mut Report) {
     let s = r.section("templates.yaml (RegistrationFile)");
+    let mut identical = BTreeMap::new();
     for doc in &c.templates {
         s.compared += 1;
         let _: Option<RegistrationFile> = typed(s, doc, "read", De::Default);
         schemaless(s, doc, &doc.text, "schema-less");
+        // RegistrationFile is Deserialize-only: emit the preserve_order Value.
+        emitted_value(s, doc, "write (whole document, serde_json::Value)", &mut identical);
     }
+    let n = c.templates.len();
+    identical_notes(s, "write", n, &identical);
 }
 
 /// Today's hop: YAML -> serde_json::Value -> overrides -> serde_norway::Value -> GraphConfig.
@@ -476,11 +519,15 @@ pub fn front_matter(c: &Corpus, r: &mut Report) {
 }
 
 pub fn contract_blocks(c: &Corpus, r: &mut Report) {
-    let s = r.section("docs/contract.md yaml blocks (schema-less)");
+    let s = r.section("docs/contract.md yaml blocks (schema-less read and write)");
+    let mut identical = BTreeMap::new();
     for doc in &c.contract_blocks {
         s.compared += 1;
         schemaless(s, doc, &doc.text, "block");
+        emitted_value(s, doc, "write (whole block, serde_json::Value)", &mut identical);
     }
+    let n = c.contract_blocks.len();
+    identical_notes(s, "write", n, &identical);
     let s = r.section("other committed YAML (schema-less, for completeness)");
     for doc in &c.other_yaml {
         s.compared += 1;
@@ -521,9 +568,15 @@ fn ser_variants() -> Vec<(&'static str, serde_saphyr::SerializerOptions)> {
     o.folded_wrap_chars = usize::MAX;
     o.yaml_12 = true;
     v.push((NOFOLD12_STRIP, o));
+    let mut o = d();
+    o.folded_wrap_chars = usize::MAX;
+    o.yaml_12 = true;
+    v.push((NOFOLD12_STRIP_SQ, o));
     v
 }
 
+pub const NOFOLD12_STRIP_SQ: &str =
+    "folded_wrap_chars=MAX,yaml_12 (header stripped) + blank-line strip + code re-quotes double-quoted scalars whose only escapes are \\\" and \\\\ as single-quoted";
 pub const NOFOLD_STRIP: &str = "folded_wrap_chars=MAX + code strips blank-line indentation in literal blocks";
 pub const NOFOLD12_STRIP: &str =
     "folded_wrap_chars=MAX,yaml_12 (header stripped) + code strips blank-line indentation in literal blocks";
@@ -583,12 +636,14 @@ pub fn strip_blank_block_lines(text: &str) -> String {
 /// One emission under one variant, with the code change the variant's label names.
 pub fn emit<T: Serialize>(value: &T, label: &str, opts: serde_saphyr::SerializerOptions) -> String {
     let out = serde_saphyr::to_string_with_options(value, opts).unwrap();
-    let out = if label == NOFOLD12 || label == NOFOLD12_STRIP {
+    let out = if label == NOFOLD12 || label == NOFOLD12_STRIP || label == NOFOLD12_STRIP_SQ {
         out.strip_prefix("%YAML 1.2\n---\n").map(str::to_owned).unwrap_or(out)
     } else {
         out
     };
-    if label == NOFOLD_STRIP || label == NOFOLD12_STRIP {
+    if label == NOFOLD12_STRIP_SQ {
+        single_quote(&strip_blank_block_lines(&out))
+    } else if label == NOFOLD_STRIP || label == NOFOLD12_STRIP {
         strip_blank_block_lines(&out)
     } else {
         out
@@ -597,7 +652,127 @@ pub fn emit<T: Serialize>(value: &T, label: &str, opts: serde_saphyr::Serializer
 
 /// The variants whose every difference is listed (the others are counted only).
 fn listed(label: &str) -> bool {
-    matches!(label, "default") || label == NOFOLD || label == NOFOLD12 || label == NOFOLD_STRIP || label == NOFOLD12_STRIP
+    matches!(label, "default")
+        || label == NOFOLD
+        || label == NOFOLD12
+        || label == NOFOLD_STRIP
+        || label == NOFOLD12_STRIP
+        || label == NOFOLD12_STRIP_SQ
+}
+
+/// The code alternative for the quote-style difference: a double-quoted scalar that starts
+/// a key or value position (line start, after `- `, or after `: `), closes on the same line
+/// and holds no escape but `\"` and `\\` is rewritten single-quoted, its `'` doubled — the style
+/// serde_norway chooses for a string that needs quoting but no escapes. Lines inside block
+/// scalars are left alone.
+pub fn single_quote(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut block: Option<usize> = None;
+    for line in text.split_inclusive('\n') {
+        let content = line.trim_end_matches('\n');
+        let indent = content.len() - content.trim_start_matches(' ').len();
+        if let Some(b) = block {
+            if content.trim().is_empty() || indent > b {
+                out.push_str(line);
+                continue;
+            }
+            block = None;
+        }
+        let mut rewritten = String::new();
+        let bytes = content.as_bytes();
+        let mut i = 0;
+        let mut at_token = true;
+        while i < bytes.len() {
+            let c = bytes[i];
+            if at_token && c == b' ' {
+                rewritten.push(' ');
+                i += 1;
+                continue;
+            }
+            if at_token && c == b'-' && bytes.get(i + 1) == Some(&b' ') {
+                rewritten.push_str("- ");
+                i += 2;
+                continue;
+            }
+            if at_token && c == b'"' {
+                // The closing quote: the first `"` not escaped by a backslash.
+                let mut j = i + 1;
+                while j < bytes.len() && bytes[j] != b'"' {
+                    j += if bytes[j] == b'\\' { 2 } else { 1 };
+                }
+                if j < bytes.len() {
+                    // `\"` and `\\` are the escapes single quotes can carry (as a bare `"` and a
+                    // bare backslash); any other escape keeps the scalar double-quoted.
+                    let mut body = String::new();
+                    let mut chars = content[i + 1..j].chars();
+                    let mut plain = true;
+                    while let Some(ch) = chars.next() {
+                        if ch == '\\' {
+                            match chars.next() {
+                                Some(e @ ('"' | '\\')) => body.push(e),
+                                _ => {
+                                    plain = false;
+                                    break;
+                                }
+                            }
+                        } else {
+                            body.push(ch);
+                        }
+                    }
+                    if plain {
+                        rewritten.push('\'');
+                        rewritten.push_str(&body.replace('\'', "''"));
+                        rewritten.push('\'');
+                        i = j + 1;
+                        at_token = false;
+                        continue;
+                    }
+                }
+                // Other escapes present: copy the scalar through as it is.
+                let j = (j + 1).min(bytes.len());
+                rewritten.push_str(&content[i..j]);
+                i = j;
+                at_token = false;
+                continue;
+            }
+            if !at_token && c == b':' && bytes.get(i + 1) == Some(&b' ') {
+                rewritten.push_str(": ");
+                i += 2;
+                at_token = true;
+                continue;
+            }
+            if c == b'\'' && at_token {
+                // A single-quoted scalar: copy it through, `''` included.
+                let mut j = i + 1;
+                while j < bytes.len() {
+                    if bytes[j] == b'\'' {
+                        if bytes.get(j + 1) == Some(&b'\'') { j += 2; continue; }
+                        break;
+                    }
+                    j += 1;
+                }
+                let j = (j + 1).min(bytes.len());
+                rewritten.push_str(&content[i..j]);
+                i = j;
+                at_token = false;
+                continue;
+            }
+            let ch = content[i..].chars().next().unwrap();
+            rewritten.push(ch);
+            i += ch.len_utf8();
+            at_token = false;
+        }
+        let trimmed = rewritten.trim_end();
+        if trimmed.ends_with('|') || trimmed.ends_with('>') || trimmed.ends_with("|-") || trimmed.ends_with(">-")
+            || trimmed.ends_with("|+") || trimmed.ends_with(">+")
+            || trimmed.rsplit(' ').next().is_some_and(|t| t.len() >= 2 && (t.starts_with('|') || t.starts_with('>')) && t[1..].chars().all(|c| c.is_ascii_digit() || c == '-' || c == '+'))
+        {
+            block = Some(indent);
+        }
+        out.push_str(&rewritten);
+        out.push_str(&line[content.len()..]);
+    }
+    out
 }
 
 pub fn writeback_emission(c: &Corpus, scratch: &Path, r: &mut Report) {
@@ -698,6 +873,10 @@ fn local_md(stores: BTreeMap<String, Vec<(String, Json, String)>>, scratch: &Pat
                 let (label, opts) = ser_variants().into_iter().find(|(l, _)| *l == NOFOLD12_STRIP).unwrap();
                 emit(v, label, opts)
             })),
+            (NOFOLD12_STRIP_SQ, Box::new(|v: &Json| {
+                let (label, opts) = ser_variants().into_iter().find(|(l, _)| *l == NOFOLD12_STRIP_SQ).unwrap();
+                emit(v, label, opts)
+            })),
         ] {
             let root = scratch.join(format!("store{}", sources.len())).join(run);
             for sub in ["projects", "tasks", "documents"] {
@@ -731,7 +910,7 @@ fn local_md(stores: BTreeMap<String, Vec<(String, Json, String)>>, scratch: &Pat
             s.compared += 1;
             if rel.starts_with("tasks/") { tasks += 1 } else { projects += 1 }
             let x = read(0);
-            for (i, who) in [(1, "saphyr default"), (2, NOFOLD12), (3, NOFOLD12_STRIP)] {
+            for (i, who) in [(1, "saphyr default"), (2, NOFOLD12), (3, NOFOLD12_STRIP), (4, NOFOLD12_STRIP_SQ)] {
                 let y = read(i);
                 if x != y {
                     s.differ(format!("[{who}] local-md read differs\nbefore: {x:?}\nafter:  {y:?}"), &name);
@@ -757,7 +936,7 @@ fn local_md(stores: BTreeMap<String, Vec<(String, Json, String)>>, scratch: &Pat
                     let after_read = rt.block_on(src.get_task(&tid)).map(|t| norm(serde_json::to_value(t).unwrap(), root)).map_err(|e| e.to_string());
                     edits.push((st, md, line_diff(&pre, &post), after_read));
                 }
-                for (i, who) in [(1, "saphyr default"), (2, NOFOLD12), (3, NOFOLD12_STRIP)] {
+                for (i, who) in [(1, "saphyr default"), (2, NOFOLD12), (3, NOFOLD12_STRIP), (4, NOFOLD12_STRIP_SQ)] {
                     if edits[0] != edits[i] {
                         s.differ(
                             format!(
@@ -799,7 +978,8 @@ pub fn branches_file(r: &mut Report) {
 }
 
 pub fn ci_workflows(c: &Corpus, r: &mut Report) {
-    let s = r.section("tests/ci_workflows.rs (workflow walks, `on:` key, scalar())");
+    let s = r.section("tests/ci_workflows.rs (workflow walks, `on:` key, scalar(), whole-document write)");
+    let mut identical = BTreeMap::new();
     for doc in &c.workflows {
         s.compared += 1;
         let today: serde_norway::Value = match serde_norway::from_str(&doc.text) {
@@ -831,6 +1011,7 @@ pub fn ci_workflows(c: &Corpus, r: &mut Report) {
             }
         }
         schemaless(s, doc, &doc.text, "workflow");
+        emitted_value(s, doc, "write (whole document, serde_json::Value)", &mut identical);
         // scalar(): every non-string scalar, rendered by each crate.
         let mut scalars = Vec::new();
         collect_scalars(&today, &mut scalars);
@@ -843,6 +1024,8 @@ pub fn ci_workflows(c: &Corpus, r: &mut Report) {
             }
         }
     }
+    let n = c.workflows.len();
+    identical_notes(s, "write", n, &identical);
 }
 
 fn collect_scalars(v: &serde_norway::Value, out: &mut Vec<serde_norway::Value>) {
