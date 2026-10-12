@@ -1494,7 +1494,7 @@ dependencies = [
 
 [[package]]
 name = "onepipeline"
-version = "0.68.0"
+version = "0.68.1"
 dependencies = [
  "async-trait",
  "clap",
