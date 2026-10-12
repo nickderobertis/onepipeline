@@ -2299,6 +2299,10 @@ fn graph_run() -> String {
 /// consumer keys what it keeps of a stream — a retained report among it — by
 /// the stream and its `seq`, so a later dispatch reusing an earlier one's pid
 /// would be read as that one's records.
+// llmlint: ignore[changed_behavior_has_e2e] no test can make the OS hand a process an
+// earlier one's pid, which is the only condition this guards; the regression it closes
+// is `rework::a_title_nothing_verified_is_left_unverified_until_a_retitle_sets_one`
+// failing on `cross (windows-latest)`, where pids are reused, and that journey is the gate.
 fn stream() -> String {
     static STARTED: std::sync::OnceLock<u128> = std::sync::OnceLock::new();
     let started = STARTED.get_or_init(|| {

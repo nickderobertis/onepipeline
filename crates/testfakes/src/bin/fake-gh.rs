@@ -31,7 +31,7 @@
 //! anything.
 
 use onepipeline_testfakes as fake;
-use std::num::NonZeroU64;
+use std::num::{NonZeroU32, NonZeroU64};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -1402,7 +1402,7 @@ fn merged_at(dir: &Path, id: &str) -> PathBuf {
 #[serde(deny_unknown_fields)]
 struct Seeded {
     path: String,
-    line: u32,
+    line: NonZeroU32,
     base: Sha,
     head: Sha,
     body: String,
@@ -1495,13 +1495,17 @@ fn review_read(args: &[String], dir: &Path) -> ExitCode {
         field("owner").unwrap_or_default(),
         field("name").unwrap_or_default()
     );
-    let Some(opened) = field("number")
-        .and_then(|number| number.parse::<NonZeroU64>().ok())
-        .and_then(|number| {
-            opened_changes(dir)
-                .into_iter()
-                .find(|opened| opened.number == number && opened.repo == repo)
-        })
+    // A number that is not a pull request's is refused, as GitHub refuses a
+    // variable that is not its `Int!`, rather than read as one it does not hold.
+    let given = field("number").unwrap_or_default();
+    let Ok(number) = given.parse::<NonZeroU64>() else {
+        return fake::refuse(&format!(
+            "gh api graphql was given number={given:?}, not a pull request's number"
+        ));
+    };
+    let Some(opened) = opened_changes(dir)
+        .into_iter()
+        .find(|opened| opened.number == number && opened.repo == repo)
     else {
         // What GitHub answers for a pull request it does not hold: data, and none.
         println!(
@@ -1605,7 +1609,7 @@ fn seeded_threads(dir: &Path, opened: &Opened, url: &str) -> Vec<serde_json::Val
 /// The hunk of the diff from `base` to `head` — from their merge base, as a change
 /// request's diff is — that shows `line` of `path` on its new side, or nothing when
 /// no hunk does.
-fn hunk_at(origin: &Path, base: &str, head: &str, path: &str, line: u32) -> Option<String> {
+fn hunk_at(origin: &Path, base: &str, head: &str, path: &str, line: NonZeroU32) -> Option<String> {
     let answer = std::process::Command::new("git")
         .arg("--git-dir")
         .arg(origin)
@@ -1631,6 +1635,7 @@ fn hunk_at(origin: &Path, base: &str, head: &str, path: &str, line: u32) -> Opti
             hunk.push('\n');
         }
     }
+    let line = line.get();
     hunks.into_iter().find(|hunk| {
         // `@@ -a,b +c,d @@`: the new side starts at `c` and spans `d` lines, one
         // where `d` is left out.

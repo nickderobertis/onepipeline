@@ -347,7 +347,8 @@ fn position(journal: &[Value], kind: &str, node: &str) -> usize {
 /// concurrently, and `c` only after `b` pushed; no agent and no drafter is dispatched
 /// for any of them; every branch only grows, by merge commits, with no forced push;
 /// each change request keeps its base and shows only its own change; a review thread
-/// seeded on `b` stays on its line; and every draft is a draft again at the end.
+/// seeded on `b` stays on its line, while one on the line of `a` the rework rewrote
+/// is outdated; and every draft is a draft again at the end.
 #[test]
 fn a_rework_restacks_every_draft_stacked_on_it_by_merges_alone() {
     let world = team_world("rework-stack");
@@ -404,6 +405,8 @@ fn a_rework_restacks_every_draft_stacked_on_it_by_merges_alone() {
         );
     };
     on_line(review_threads(&world, &change_from(&world, &branch("b"))));
+    // And one on the line of `a.md` the rework is about to rewrite.
+    seed_thread(&world, &change_from(&world, &branch("a")), "a.md", 1);
     // Every push the origin takes from here on has to fast-forward.
     git(
         &world,
@@ -544,6 +547,20 @@ fn a_rework_restacks_every_draft_stacked_on_it_by_merges_alone() {
     // The review thread on `b` is still on its line and not outdated, as the host
     // reports it through `onevcs`'s review read.
     on_line(review_threads(&world, &change_from(&world, &branch("b"))));
+    // The one on the line of `a` the rework rewrote is outdated, and on no line.
+    let on_a = review_threads(&world, &change_from(&world, &branch("a")));
+    assert_eq!(on_a.len(), 1, "{on_a:#?}");
+    let kind = &on_a[0]["kind"];
+    assert_eq!(kind["path"], "a.md", "{kind}");
+    assert_eq!(
+        kind["outdated"], true,
+        "the thread on a was not outdated: {kind}"
+    );
+    assert_eq!(
+        kind["line"],
+        Value::Null,
+        "the thread on a is on a line: {kind}"
+    );
 }
 
 /// A rework that conflicts with the draft above it: `b`'s own worker is dispatched
@@ -1122,7 +1139,14 @@ fn a_title_nothing_verified_is_left_unverified_until_a_retitle_sets_one() {
     assert!(retitled(&world, run, "f-rework-1").is_empty());
     world.unscript("gh.edit-refused");
 
-    // The remedy: a retitle sets the title through the host and clears it.
+    // The remedy: a retitle sets the title through the host and clears it, and
+    // leaves the description the change request already carries as it was.
+    let a_branch = text(&settled(&world, run, "a-rework-1")["branch"], "a's branch").to_owned();
+    let a_body = change_from(&world, &a_branch)["body"].clone();
+    assert!(
+        a_body.as_str().is_some_and(|body| !body.is_empty()),
+        "{a_body}"
+    );
     let committed_before = world.events_of(run, "edit-committed").len();
     reply(
         &world,
@@ -1131,11 +1155,11 @@ fn a_title_nothing_verified_is_left_unverified_until_a_retitle_sets_one() {
                 "reason": "nothing verified the title the rework kept"}]),
     )
     .exited(0);
-    let a_branch = text(&settled(&world, run, "a-rework-1")["branch"], "a's branch").to_owned();
     assert_eq!(
         change_from(&world, &a_branch)["title"],
         "fix(a): say what a does now"
     );
+    assert_eq!(change_from(&world, &a_branch)["body"], a_body);
     assert_eq!(
         retitled(&world, run, "a-rework-1"),
         [
