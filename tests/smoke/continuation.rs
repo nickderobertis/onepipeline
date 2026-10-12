@@ -20,7 +20,7 @@
 // stand-in is the paid model turn, at oneharness's own documented per-harness override, as
 // `main.rs` states for this whole tier.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use crate::harness::{agent, plan_of, World};
-use crate::repo::{ensure_repo, gh, gh_try, missing};
+use crate::repo::{ensure_repo, gh, gh_try, missing, Cause};
 use crate::{authenticated_user, git, git_credentials, run_stamp, scratch_repo};
 
 /// The alias every host registers its clone of the scratch repository under, and so the
@@ -81,21 +81,184 @@ fn claim(world: &World, project: &str) -> Value {
     panic!("the store answered for its project only in part: {said}");
 }
 
-/// What the journey created on GitHub, closed however it ends: every pull request — with its
-/// branch — on the scratch repository whose title carries this run's stamp.
+/// What one invocation of the journey opened on the scratch repository: the pull requests,
+/// by number, and the branches every host recorded publishing under the run's prefix.
+#[derive(Default)]
+struct Tracked {
+    pulls: BTreeSet<u64>,
+    branches: BTreeSet<String>,
+}
+
+impl Tracked {
+    /// Add what `world` recorded for `run`: every `branch`, `url` and `change_url` its
+    /// journal's `onevcs` records and settlements carry, wherever in the payload they sit.
+    fn read(&mut self, world: &World, run: &str, slug: &str, prefix: &str) {
+        let pulls = format!("https://github.com/{slug}/pull/");
+        for event in world.journal(run) {
+            if event["source"] != "vcs" && event["kind"] != "node-settled" {
+                continue;
+            }
+            let mut pending = vec![&event["payload"]];
+            while let Some(value) = pending.pop() {
+                match value {
+                    Value::Object(fields) => {
+                        for (key, value) in fields {
+                            match (key.as_str(), value.as_str()) {
+                                ("branch", Some(branch)) if branch.starts_with(prefix) => {
+                                    self.branches.insert(branch.to_owned());
+                                }
+                                ("url" | "change_url", Some(url)) => {
+                                    if let Some(number) = url
+                                        .strip_prefix(&pulls)
+                                        .and_then(|rest| rest.parse::<u64>().ok())
+                                    {
+                                        self.pulls.insert(number);
+                                    }
+                                }
+                                _ => pending.push(value),
+                            }
+                        }
+                    }
+                    Value::Array(values) => pending.extend(values),
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+/// What the journey created on the scratch repository, and its cleanup.
 ///
-/// Found by listing rather than by what the journey recorded as it went, so a journey that
-/// failed before it read back what it made still leaves nothing behind; and declared before
-/// every world, so it drops after them — once each world has stopped the drivers it started,
-/// which would otherwise go on publishing to the repository after it was cleaned.
+/// [`Created::clean`] is the journey's own last step: it closes every pull request the hosts
+/// recorded opening and every open one whose title carries this run's stamp, deletes every
+/// branch under the run's prefix, and then reads each one back from GitHub to show it closed
+/// or gone — answering every failure it met rather than counting it as done. Its `Drop` runs
+/// the same sweep, best-effort, for a journey that failed before that step: declared before
+/// every world, it drops after them, once each has stopped the drivers it started, which
+/// would otherwise go on publishing after it was cleaned. A failure there is printed, since
+/// a panic while unwinding would abort the report of the one that got it there.
 struct Created {
     slug: String,
     stamp: String,
+    /// The prefix every branch of the run is cut under — the run's id and a `/` — once the
+    /// first launch has minted it.
+    prefix: Option<String>,
+    cleaned: bool,
 }
 
-impl Drop for Created {
-    fn drop(&mut self) {
-        let listed = gh_try(&[
+/// What a cleanup met: each step it took, and every failure.
+#[derive(Default)]
+struct Cleanup {
+    observed: Vec<String>,
+    failures: Vec<String>,
+}
+
+impl Cleanup {
+    fn failed(&mut self, what: impl std::fmt::Display) {
+        self.failures.push(what.to_string());
+    }
+}
+
+impl Created {
+    /// Close and delete everything `tracked` names and everything the stamp and the prefix
+    /// find, then read each back.
+    fn clean(&mut self, tracked: &Tracked) -> Cleanup {
+        self.cleaned = true;
+        let mut cleanup = Cleanup::default();
+        let mut pulls = tracked.pulls.clone();
+        let stamped = self.stamped_open(&mut cleanup);
+        let untracked: Vec<u64> = stamped.difference(&tracked.pulls).copied().collect();
+        if !tracked.pulls.is_empty() && !untracked.is_empty() {
+            cleanup.failed(format!(
+                "open pull requests carrying the stamp that no host recorded opening: {untracked:?}"
+            ));
+        }
+        pulls.extend(stamped);
+        let mut branches = tracked.branches.clone();
+        // Highest first, so a stacked pull request is closed before the one under it.
+        for number in pulls.iter().rev() {
+            let Some((state, head)) = self.pull(*number, &mut cleanup) else {
+                continue;
+            };
+            branches.insert(head);
+            if state == "OPEN" {
+                match gh_try(&["pr", "close", &number.to_string(), "--repo", &self.slug]) {
+                    Ok(_) => cleanup.observed.push(format!("closed #{number}")),
+                    Err(refusal) => cleanup.failed(format!("closing #{number}: {refusal}")),
+                }
+            } else {
+                cleanup
+                    .observed
+                    .push(format!("#{number} was already {state}"));
+            }
+        }
+        branches.extend(self.remote_branches(&mut cleanup));
+        for branch in &branches {
+            if !self
+                .prefix
+                .as_deref()
+                .is_some_and(|prefix| branch.starts_with(prefix))
+            {
+                cleanup.failed(format!(
+                    "{branch} is outside the run's prefix {:?}, so it is not deleted",
+                    self.prefix
+                ));
+                continue;
+            }
+            match self.branch_exists(branch, &mut cleanup) {
+                Some(true) => match gh_try(&[
+                    "api",
+                    "-X",
+                    "DELETE",
+                    &format!("repos/{}/git/refs/heads/{branch}", self.slug),
+                ]) {
+                    Ok(_) => cleanup.observed.push(format!("deleted {branch}")),
+                    Err(refusal) => cleanup.failed(format!("deleting {branch}: {refusal}")),
+                },
+                Some(false) => cleanup.observed.push(format!("{branch} was already gone")),
+                None => {}
+            }
+        }
+        // Read back: every pull request closed, every branch gone, nothing left to find.
+        let mut closed = Vec::new();
+        for number in &pulls {
+            match self.pull(*number, &mut cleanup) {
+                Some((state, _)) if state == "CLOSED" => closed.push(*number),
+                Some((state, _)) => {
+                    cleanup.failed(format!("#{number} reads {state} after the cleanup"));
+                }
+                None => {}
+            }
+        }
+        let mut gone = Vec::new();
+        for branch in &branches {
+            match self.branch_exists(branch, &mut cleanup) {
+                Some(false) => gone.push(branch.as_str()),
+                Some(true) => {
+                    cleanup.failed(format!("{branch} is still on the remote after the cleanup"));
+                }
+                None => {}
+            }
+        }
+        let left = self.stamped_open(&mut cleanup);
+        if !left.is_empty() {
+            cleanup.failed(format!("still open after the cleanup: {left:?}"));
+        }
+        let remaining = self.remote_branches(&mut cleanup);
+        if !remaining.is_empty() {
+            cleanup.failed(format!(
+                "branches under the prefix after the cleanup: {remaining:?}"
+            ));
+        }
+        cleanup.observed.push(format!(
+            "read back from GitHub: closed {closed:?} of {pulls:?}; gone {gone:?} of {branches:?}"
+        ));
+        cleanup
+    }
+
+    /// The open pull requests on the scratch repository whose title carries the stamp.
+    fn stamped_open(&self, cleanup: &mut Cleanup) -> BTreeSet<u64> {
+        let listed = match gh_try(&[
             "pr",
             "list",
             "--repo",
@@ -103,38 +266,133 @@ impl Drop for Created {
             "--state",
             "open",
             "--limit",
-            "100",
+            "200",
             "--json",
             "number,title",
-        ])
-        .ok()
-        .and_then(|listed| serde_json::from_str::<Vec<Value>>(&listed).ok())
-        .unwrap_or_default();
-        for pull in listed {
-            if !pull["title"]
-                .as_str()
-                .is_some_and(|title| title.contains(&self.stamp))
-            {
-                continue;
+        ]) {
+            Ok(listed) => listed,
+            Err(refusal) => {
+                cleanup.failed(format!("listing open pull requests: {refusal}"));
+                return BTreeSet::new();
             }
-            let number = pull["number"].to_string();
-            if let Err(refusal) = gh_try(&[
-                "pr",
-                "close",
-                &number,
-                "--repo",
-                &self.slug,
-                "--delete-branch",
-            ]) {
-                eprintln!("smoke: could not close pull request {number}: {refusal}");
+        };
+        let listed: Vec<Value> = match serde_json::from_str(&listed) {
+            Ok(listed) => listed,
+            Err(why) => {
+                cleanup.failed(format!("reading the open pull requests: {why}: {listed}"));
+                return BTreeSet::new();
             }
+        };
+        listed
+            .iter()
+            .filter(|pull| {
+                pull["title"]
+                    .as_str()
+                    .is_some_and(|title| title.contains(&self.stamp))
+            })
+            .filter_map(|pull| pull["number"].as_u64())
+            .collect()
+    }
+
+    /// Pull request `number`'s state and head branch, or the failure that kept them.
+    fn pull(&self, number: u64, cleanup: &mut Cleanup) -> Option<(String, String)> {
+        let read = gh_try(&[
+            "pr",
+            "view",
+            &number.to_string(),
+            "--repo",
+            &self.slug,
+            "--json",
+            "state,headRefName",
+        ]);
+        let read = match read {
+            Ok(read) => read,
+            Err(refusal) => {
+                cleanup.failed(format!("reading #{number}: {refusal}"));
+                return None;
+            }
+        };
+        let pull: Value = match serde_json::from_str(&read) {
+            Ok(pull) => pull,
+            Err(why) => {
+                cleanup.failed(format!("reading #{number}: {why}: {read}"));
+                return None;
+            }
+        };
+        match (pull["state"].as_str(), pull["headRefName"].as_str()) {
+            (Some(state), Some(head)) => Some((state.to_owned(), head.to_owned())),
+            _ => {
+                cleanup.failed(format!("#{number} names no state or head: {pull}"));
+                None
+            }
+        }
+    }
+
+    /// Whether `branch` is on the remote: `None` where GitHub's answer said neither.
+    fn branch_exists(&self, branch: &str, cleanup: &mut Cleanup) -> Option<bool> {
+        match gh_try(&[
+            "api",
+            &format!("repos/{}/git/ref/heads/{branch}", self.slug),
+        ]) {
+            Ok(_) => Some(true),
+            Err(refusal) if refusal.cause == Cause::NotFound => Some(false),
+            Err(refusal) => {
+                cleanup.failed(format!("reading {branch}: {refusal}"));
+                None
+            }
+        }
+    }
+
+    /// Every branch on the remote under the run's prefix.
+    fn remote_branches(&self, cleanup: &mut Cleanup) -> BTreeSet<String> {
+        let Some(prefix) = &self.prefix else {
+            return BTreeSet::new();
+        };
+        let listed = match gh_try(&[
+            "api",
+            &format!("repos/{}/git/matching-refs/heads/{prefix}", self.slug),
+        ]) {
+            Ok(listed) => listed,
+            Err(refusal) => {
+                cleanup.failed(format!("listing branches under {prefix}: {refusal}"));
+                return BTreeSet::new();
+            }
+        };
+        let refs: Vec<Value> = match serde_json::from_str(&listed) {
+            Ok(refs) => refs,
+            Err(why) => {
+                cleanup.failed(format!("reading branches under {prefix}: {why}: {listed}"));
+                return BTreeSet::new();
+            }
+        };
+        refs.iter()
+            .filter_map(|reference| reference["ref"].as_str())
+            .filter_map(|reference| reference.strip_prefix("refs/heads/"))
+            .filter(|branch| branch.starts_with(prefix.as_str()))
+            .map(str::to_owned)
+            .collect()
+    }
+}
+
+impl Drop for Created {
+    fn drop(&mut self) {
+        if self.cleaned {
+            return;
+        }
+        let cleanup = self.clean(&Tracked::default());
+        for step in &cleanup.observed {
+            eprintln!("smoke: cleanup after a failed journey: {step}");
+        }
+        for failure in &cleanup.failures {
+            eprintln!("smoke: cleanup after a failed journey FAILED: {failure}");
         }
     }
 }
 
-/// The open pull requests whose head is `branch` on `slug`.
+/// The open pull requests whose head is `branch` on `slug`; a listing GitHub refused, or one
+/// that does not read, fails the journey rather than reading as none.
 fn open_pulls(slug: &str, branch: &str) -> Vec<Value> {
-    gh_try(&[
+    let listed = gh_try(&[
         "pr",
         "list",
         "--repo",
@@ -146,9 +404,9 @@ fn open_pulls(slug: &str, branch: &str) -> Vec<Value> {
         "--json",
         "number,url,isDraft,baseRefName",
     ])
-    .ok()
-    .and_then(|listed| serde_json::from_str::<Vec<Value>>(&listed).ok())
-    .unwrap_or_default()
+    .unwrap_or_else(|refusal| panic!("listing the pull requests from {branch}: {refusal}"));
+    serde_json::from_str(&listed)
+        .unwrap_or_else(|why| panic!("reading the pull requests from {branch}: {why}: {listed}"))
 }
 
 /// One host of the journey: a world of its own, with a clone of the scratch repository
@@ -286,9 +544,11 @@ fn a_stored_project_is_carried_on_by_a_cold_host_that_takes_it_over() {
     authenticated_user();
     ensure_repo(&slug);
     let stamp = run_stamp();
-    let _residue = Created {
+    let mut residue = Created {
         slug: slug.clone(),
         stamp: stamp.clone(),
+        prefix: None,
+        cleaned: false,
     };
 
     // Its host's name on every command it runs, a `stop` its drop sends included: a driver
@@ -333,6 +593,7 @@ fn a_stored_project_is_carried_on_by_a_cold_host_that_takes_it_over() {
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .next()
         .expect("the launch minted a run");
+    residue.prefix = Some(format!("{run}/"));
     let mut saw_dispatch = None;
     let early = |what: &str| {
         if first.run_file(&run, "result.json").is_file() {
@@ -627,6 +888,38 @@ fn a_stored_project_is_carried_on_by_a_cold_host_that_takes_it_over() {
             assert_eq!(open[0]["isDraft"], true, "{node} on {branch}: {open:?}");
         }
     }
+
+    // The journey's own cleanup, read back through GitHub: every pull request any host
+    // recorded opening is closed and every branch under the run's prefix is gone.
+    let mut tracked = Tracked::default();
+    let prefix = format!("{run}/");
+    for world in [&first, &second].into_iter().chain(&racing) {
+        tracked.read(world, &run, &slug, &prefix);
+    }
+    let mut published = stored.clone();
+    published.insert("c".to_owned(), c["payload"].clone());
+    for (node, settlement) in &published {
+        if let Some(branch) = settlement["branch"].as_str() {
+            assert!(
+                tracked.branches.contains(branch),
+                "{node}'s branch {branch} is not among what the hosts recorded: {:?}",
+                tracked.branches
+            );
+        }
+    }
+    println!(
+        "smoke: the hosts recorded opening pull requests {:?} from branches {:?}",
+        tracked.pulls, tracked.branches
+    );
+    let cleanup = residue.clean(&tracked);
+    for step in &cleanup.observed {
+        println!("smoke: cleanup: {step}");
+    }
+    assert!(
+        cleanup.failures.is_empty(),
+        "the cleanup did not finish: {:#?}",
+        cleanup.failures
+    );
     drop(racing);
     drop(second);
 }
