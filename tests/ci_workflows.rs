@@ -628,7 +628,6 @@ fn the_sweep_reaches_every_project_but_the_live_tiers_journeys() {
     }
 }
 
-/// The key naming the scratch repository the credentialled smoke publishes to.
 const SMOKE_REPO_KEY: &str = "ONEPIPELINE_SMOKE_REPO";
 
 /// Every string a value carries, nested or not, so a check of "nothing here
@@ -740,7 +739,6 @@ fn the_smoke_step_reads_its_scratch_repository_from_the_secret_of_the_same_name(
     }
 }
 
-/// The detector the test above relies on finds what it is for, and only that.
 #[test]
 fn a_hard_coded_scratch_repository_is_recognised() {
     assert_eq!(
