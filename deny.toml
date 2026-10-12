@@ -9,7 +9,9 @@ all-features = true
 
 [advisories]
 yanked = "deny"
-ignore = []
+ignore = [
+    { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml is unmaintained: an unmaintained notice, not a known vulnerability. It reaches this lockfile only through serde_yaml_ng 0.10.0, which onejudge 0.19.0 (directly and via oneagentgraph 0.5.6) and onevcs 0.48.0 (directly and via onevcs-testing 0.16.0) depend on. Temporary: remove this entry once the serde_norway move in onejudge and onevcs, and the release that links them here, lands." },
+]
 
 [licenses]
 # Permissive licenses compatible with this MIT-licensed crate. Adding a
