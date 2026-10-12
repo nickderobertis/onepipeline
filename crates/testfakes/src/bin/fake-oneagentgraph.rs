@@ -2292,8 +2292,21 @@ fn graph_run() -> String {
 }
 
 /// The stream every envelope of this run carries.
+///
+/// The envelope's `stream` is "a unique id per producing process", and the real
+/// sibling mints one from the instant it started beside its pid. A pid alone is
+/// not unique across a run: Windows hands a freed pid straight back, and a
+/// consumer keys what it keeps of a stream — a retained report among it — by
+/// the stream and its `seq`, so a later dispatch reusing an earlier one's pid
+/// would be read as that one's records.
 fn stream() -> String {
-    format!("fake-oneagentgraph-{}", std::process::id())
+    static STARTED: std::sync::OnceLock<u128> = std::sync::OnceLock::new();
+    let started = STARTED.get_or_init(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_millis())
+    });
+    format!("fake-oneagentgraph-{started}-{}", std::process::id())
 }
 
 /// Emit the turn's envelopes, as the sibling would: the tool summary from
