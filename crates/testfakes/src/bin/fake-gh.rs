@@ -645,8 +645,19 @@ fn origin_of(dir: &Path, repo: &str) -> Option<PathBuf> {
 /// A type rather than a `String` because one of these is read off `git`, and a
 /// value that reached `headRefOid` has to have been checked on the way in rather
 /// than trusted for where it came from — `onevcs` decides which checks are about
-/// which commit by comparing it.
+/// which commit by comparing it. Read off a journey's script through the same
+/// check, so a seeded thread naming anything else is refused as it is read.
+#[derive(Debug, serde::Deserialize)]
+#[serde(try_from = "String")]
 struct Sha(String);
+
+impl TryFrom<String> for Sha {
+    type Error = String;
+
+    fn try_from(named: String) -> Result<Self, String> {
+        Self::parse(&named).ok_or_else(|| format!("{named:?} is not an object id"))
+    }
+}
 
 impl Sha {
     fn parse(reported: &str) -> Option<Self> {
@@ -1392,8 +1403,8 @@ fn merged_at(dir: &Path, id: &str) -> PathBuf {
 struct Seeded {
     path: String,
     line: u32,
-    base: String,
-    head: String,
+    base: Sha,
+    head: Sha,
     body: String,
 }
 
@@ -1545,17 +1556,10 @@ fn seeded_threads(dir: &Path, opened: &Opened, url: &str) -> Vec<serde_json::Val
                     opened.number
                 ))
             });
-            let commit = |sha: &str| {
-                Sha::parse(sha).unwrap_or_else(|| {
-                    fake::fail(&format!(
-                        "a seeded thread names {sha:?}, which is not an object id"
-                    ))
-                })
-            };
             let left_in = hunk_at(
                 &origin,
-                commit(&seeded.base).as_str(),
-                commit(&seeded.head).as_str(),
+                seeded.base.as_str(),
+                seeded.head.as_str(),
                 &seeded.path,
                 seeded.line,
             )
