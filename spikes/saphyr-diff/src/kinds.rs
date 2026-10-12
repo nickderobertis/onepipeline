@@ -56,15 +56,19 @@ pub fn saphyr<T: DeserializeOwned>(text: &str, de: De) -> Result<T, String> {
 pub fn saphyr_pathed<T: DeserializeOwned>(text: &str) -> Result<T, String> {
     let mut o = serde_saphyr::Options::default();
     o.with_snippet = false;
-    match serde_saphyr::with_deserializer_from_str_with_options(text, o, |de| Ok(serde_path_to_error::deserialize::<_, T>(de))) {
-        Ok(Ok(v)) => Ok(v),
-        Ok(Err(e)) => {
-            let path = e.path().to_string();
-            let inner = e.into_inner().to_string();
-            Err(if path == "." { inner } else { format!("{path}: {inner}") })
-        }
-        Err(e) => Err(e.to_string()),
-    }
+    // The closure must fail with serde-saphyr's own error (so it stops and keeps its
+    // location); the path is carried out beside it.
+    let path = std::cell::RefCell::new(None::<String>);
+    let result = serde_saphyr::with_deserializer_from_str_with_options(text, o, |de| {
+        serde_path_to_error::deserialize::<_, T>(de).map_err(|e| {
+            *path.borrow_mut() = Some(e.path().to_string());
+            e.into_inner()
+        })
+    });
+    result.map_err(|e| match path.into_inner() {
+        Some(p) if p != "." => format!("{p}: {e}"),
+        _ => e.to_string(),
+    })
 }
 
 /// saphyr 0.2's node tree, flattened into JSON so it compares with the other two. Keys
