@@ -904,6 +904,7 @@ mod tests {
                     ..Node::default()
                 })
                 .collect(),
+            export_edges: Vec::new(),
         }
     }
 

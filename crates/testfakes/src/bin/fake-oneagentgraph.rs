@@ -783,20 +783,33 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     // place of `<key>.md` — a stem, `.md` added — so two nodes can write one path
     // and conflict where their branches meet.
     if let Some(body) = fake::node_script(dir, &key, "work") {
-        let name = fake::node_script(dir, &key, "work-file")
-            .map(|stem| {
-                let stem = stem.trim().to_owned();
-                // A stem and nothing more: a separator or a parent reference would
-                // write outside the worktree the dispatch was handed.
-                if stem.is_empty() || stem.contains(['/', '\\']) || stem.contains("..") {
-                    fake::fail(&format!(
-                        "{key}.work-file holds {stem:?}, which is not a file stem"
-                    ));
-                }
-                stem
-            })
-            .unwrap_or_else(|| fake::segment(&key));
-        write_work(args, &name, &body);
+        // `<key>.work-at` names where, relative to the workspace, the work is written:
+        // a directory an export carries, say. Absent, it is the root file above.
+        match fake::node_script(dir, &key, "work-at") {
+            Some(at) => write_work_at(args, at.trim(), &body),
+            None => {
+                let name = fake::node_script(dir, &key, "work-file")
+                    .map(|stem| {
+                        let stem = stem.trim().to_owned();
+                        // A stem and nothing more: a separator or a parent reference would
+                        // write outside the worktree the dispatch was handed.
+                        if stem.is_empty() || stem.contains(['/', '\\']) || stem.contains("..") {
+                            fake::fail(&format!(
+                                "{key}.work-file holds {stem:?}, which is not a file stem"
+                            ));
+                        }
+                        stem
+                    })
+                    .unwrap_or_else(|| fake::segment(&key));
+                write_work(args, &name, &body);
+            }
+        }
+    }
+
+    // A worker that commits what it wrote itself, under the message scripted as
+    // `<key>.commit-saying`: the subject an export screens with the files.
+    if let Some(message) = fake::node_script(dir, &key, "commit-saying") {
+        commit_saying(args, message.trim());
     }
 
     // A worker that leaves a process of its own working inside its worktree when
@@ -1922,6 +1935,69 @@ fn linger_in_the_worktree(args: &[String], dir: &std::path::Path, key: &str, sec
             }
         }
         Err(error) => fake::fail(&format!("cannot linger in {workspace}: {error}")),
+    }
+}
+
+/// Write one document at `at`, relative to the dispatch's workspace, making the
+/// directories it is under.
+fn write_work_at(args: &[String], at: &str, body: &str) {
+    let Some(workspace) = fake::flag(args, "--dir") else {
+        fake::fail("writing a dispatch's work needs its --dir to write into");
+    };
+    // The workspace the dispatch was given, which exists: only the directories under it
+    // that the document names are made here.
+    let workspace = std::path::Path::new(&workspace);
+    if !workspace.is_dir() {
+        fake::fail(&format!(
+            "a dispatch was given --dir {}, which is not a directory",
+            workspace.display()
+        ));
+    }
+    // A path inside the workspace, as a journey means it: a root or a `..` would write
+    // somewhere the dispatch was never given, which is a misconfigured journey.
+    let relative = std::path::Path::new(at);
+    if at.is_empty()
+        || relative.is_absolute()
+        || relative
+            .components()
+            .any(|part| !matches!(part, std::path::Component::Normal(_)))
+    {
+        fake::fail(&format!(
+            "work-at holds {at:?}, which is not a relative path inside the workspace"
+        ));
+    }
+    let path = workspace.join(relative);
+    if let Some(parent) = path.parent() {
+        if let Err(error) = std::fs::create_dir_all(parent) {
+            fake::fail(&format!("cannot make {}: {error}", parent.display()));
+        }
+    }
+    if let Err(error) = std::fs::write(&path, body) {
+        fake::fail(&format!("cannot write {}: {error}", path.display()));
+    }
+}
+
+/// Commit everything in the dispatch's workspace under `message`.
+fn commit_saying(args: &[String], message: &str) {
+    let Some(workspace) = fake::flag(args, "--dir") else {
+        fake::fail("committing a dispatch's work needs its --dir");
+    };
+    for argv in [vec!["add", "-A"], vec!["commit", "-q", "-m", message]] {
+        let ran = std::process::Command::new("git")
+            .args(&argv)
+            .current_dir(&workspace)
+            .stdin(std::process::Stdio::null())
+            .output();
+        match ran {
+            Ok(ran) if ran.status.success() => {}
+            Ok(ran) => fake::fail(&format!(
+                "`git {}` exited {}: {}",
+                argv.join(" "),
+                ran.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&ran.stderr).trim()
+            )),
+            Err(error) => fake::fail(&format!("cannot run `git {}`: {error}", argv.join(" "))),
+        }
     }
 }
 

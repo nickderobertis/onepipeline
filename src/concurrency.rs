@@ -313,6 +313,7 @@ mod tests {
             name: None,
             concurrency: 4,
             tasks: nodes,
+            export_edges: Vec::new(),
         }
     }
 

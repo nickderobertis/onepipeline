@@ -1105,6 +1105,10 @@ pub fn surface(paths: &RunPaths, kind: SurfaceKind, message: String) -> Result<S
             "a surface carries what it has to say and this one carried nothing".to_owned(),
         ));
     }
+    // The publication boundary, before anything is queued: a check-in or a finding is text
+    // addressed to no node, which a public node may yet be shown.
+    let view = crate::views::RunView::open(paths)?;
+    crate::boundary::guard(&view.state, &json!({ "message": message }))?;
     let source = if kind.as_str() == SurfaceKind::CHECK_IN {
         crate::channel::source::CHECK_IN
     } else {

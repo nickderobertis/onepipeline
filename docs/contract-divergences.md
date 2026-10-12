@@ -11,14 +11,14 @@ owns the contract**, and `docs/contract.md` was amended to carry each ruling. Th
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22, 33, 35–40, 46–73, 76, 80, 84–88, 92, 93, 95, 98, 111 and 113–116 are open**, except **52**, which entry 60
+Entries **10–22, 33, 35–40, 46–73, 76, 80, 84–88, 92, 93, 95, 98, 111, 113–115 and 117 are open**, except **52**, which entry 60
 supersedes: that proposal added a second manager-note op beside `context`, and 60
 collapses the two into one, so the shape lives in 60 and 52 keeps only the
 history that produced it. Each open entry states what the code does today and the
 proposal it is waiting on. Most are questions for a *producer* rather than for
 this crate, because `oneagentgraph` and `onevcs` are independent tools that expose
 general integration hooks only and nothing in them may know about this one; the
-rest — 36 to 40, 46 to 73, 80, 84 to 88, 92, 93, 95, 98, 111 and 113 to 116 — are for the planner who owns the contract, and
+rest — 36 to 40, 46 to 73, 80, 84 to 88, 92, 93, 95, 98, 111, 113 to 115 and 117 — are for the planner who owns the contract, and
 name the sentence in it they would change. Entry 40 is for both: its plan-schema and event-kind
 halves are the contract owner's, and the two things it could not compile are
 `onevcs`'s. Entry 76 is for `onemessagebus` and for a node of this crate's own. An
@@ -9602,7 +9602,86 @@ conflicted stack base ends without one, and
 checks the block above against the registered `node-settled` document, and
 `tests/e2e/publish_preserve.rs` keeps every preserve-stacking journey.
 
-## 116. `onepipeline host` cost every run a root had ever kept, and printed nothing a script reads — OPEN
+## 116. What the repository publication boundary decides beyond its approved interface — RESOLVED
+
+**Ruling: the manager accepted 1, 2, 4, 5, 6 and 7 as built, and 3 as opt-in only;
+`docs/contract.md`'s *Repository publication boundary* paragraph stands as the
+amendment of record.** On 3, the user agreed the boundary is inactive for a store
+whose configuration has not opted in, so the linked `WritePolicy` is never supplied to
+every store write. On 5, `validate-envelope` passes a prospective plan that is not
+mixed without resolving the nodes a command names, and returns unavailable (exit `2`)
+for a command naming a node a mixed plan does not hold. On 7, a dispatch accepts a
+consumer's pinned branch only where a recorded export of that consumer's own edge — its
+producer, the consumer and both repositories — made that branch, so each record in
+`exports.json` also names its consumer, by the id the plan launched it under, which a
+retry's replacement keeps.
+
+**Proposal, for the planner who owns the contract.** The design the user approved
+for the repository publication boundary fixes the shared interfaces: the
+`onepipeline.export_edges` shape, the mixed-only `boundary` template context, the
+public and producer branch shapes, `onepipeline boundary validate-envelope --run`,
+and the run term scope. `docs/contract.md`'s *Repository publication boundary*
+paragraph states them. Building them took seven decisions that text does not make,
+and this build makes each as follows until it is ruled on.
+
+1. **A node naming no repository takes its dependencies' clearance**, the stricter of
+   theirs, and is public with none; a plan is *mixed* only when it holds a private node
+   and a public node naming a repository. Read literally, *the stricter of task
+   classification and repository visibility* makes every repository-less node public,
+   which makes every all-private plan holding a human or direct node mixed — paying the
+   prompt cost the user ruled single-visibility plans never pay — and refuses its
+   ordinary dependencies. Inheriting closes the other door too: a public node cannot
+   reach private work through a repository-less one in between.
+2. **The template context reaches a dispatch in its task**, as a `## Repository
+   boundary` section carrying the `{"boundary": …}` object and its side's guidance,
+   rather than as a field of `DispatchRequest`, a contract type a field would amend for
+   every executor. The task is the one thing the worker and its judge both read.
+3. **The engine supplies a store's `WritePolicy` only where the store's configuration
+   opts into the boundary** — a `write_policy`, or a source declaring a `visibility`.
+   `onetaskgraph` makes a linked policy activate the boundary whatever the
+   configuration says, and an active store reads each destination's visibility before
+   every narrow write; supplying one to every store would add those reads to every
+   write-back the host makes today, against every existing request budget.
+4. **An export is recorded in a private run file, `<run>/exports.json`**, with the
+   producer, its kept branch and head, both directories and both repositories, and the
+   public branch and commit it made — the evidence the design keeps in the private
+   journal — rather than under a new pipeline kind, which would amend the closed
+   `PipelineKind` set and every reader of it for a record no view renders.
+5. **`validate-envelope` judges only a mixed plan, and exits `2` where it cannot
+   decide.** A plan that is not mixed has nothing private that could reach anything
+   public — an all-public one derives no term and an all-private one has no public node
+   — so judging it could only refuse, on a scope naming a repository the host has not
+   registered, what reaches nowhere public. The bus protocol reads `0`
+   as a pass, `1` as a refusal and anything else as unjudged, which it never sends; `2`
+   is this binary's existing refusal code, so no new code is minted. Its
+   `--fingerprint` flag is what a bus pass cache's `bar_fingerprint` runs, so a cached
+   pass is keyed by the scope, the clearances and the scoped terms as well as the bytes.
+6. **Clearance is read by refreshing each repository's visibility through
+   `onevcs::inspect_repository`** at load, at every live edit, and for every envelope
+   judged — one host read per distinct repository — because a recorded visibility is
+   never refreshed except at a write, and a stale `unknown` would make a public
+   repository private and hide a mixed plan's dependency from the rule. A dispatch and
+   a write-back read the resolution the run's plan last took, made again whenever an
+   accepted edit changes what a node names, is classified as, or depends on — which is
+   when the design recomputes the scope — so a visibility that changes under an
+   unchanged plan reaches them at the next such edit, and reaches every load, live edit
+   and envelope at once.
+7. **A consumer's `branch` and `resume` are refused in a document, and checked at
+   dispatch otherwise.** The engine itself pins both on a consumer it cancelled and
+   requeued, to the export's own branch, so a live edit's check cannot tell that pin
+   from an alternate context; a dispatch refuses any pinned branch that is not one of
+   the run's recorded exports, before its session opens. A consumer's `base_branch` is
+   refused at load and every live edit.
+
+`tests/e2e/publication_boundary.rs` drives each against the real engine and the linked
+`onevcs`: the load and live-edit refusals and the guidance they carry; the export base
+through supersession, retry and requeue; an export changing a path outside its
+directory; a producer named with a private term; the run term scope across
+publication, export, store writes and the validator; the store's own command policy
+beside the engine's linked one; the validator over the bus, directly, queued and
+replayed; and every public surface of a mixed run.
+
+## 117. `onepipeline host` cost every run a root had ever kept, and printed nothing a script reads — OPEN
 
 **Proposal, for the planner who owns the contract, approved by the plan
 `host-view-speed` (node `op-host-view`), whose task states the reading below and
