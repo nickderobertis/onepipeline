@@ -1291,59 +1291,95 @@ fn draft_running(dir: &Path, id: &str, change: Change) -> bool {
     (now.saturating_sub(first) as f64) < after * 1000.0
 }
 
-/// One scripted workflow run or check suite on a draft's head:
-/// `NAME STATUS CONCLUSION`, and for a suite its check-run count after them.
+/// Which of the two activity reads a scripted record answers, which decides the
+/// script it is read from and the fields its lines carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    /// A workflow run: `gh.runs.draft`, `NAME STATUS CONCLUSION`.
+    Run,
+    /// A check suite: `gh.suites.draft`, `APP STATUS CONCLUSION RUNS`.
+    Suite,
+}
+
+impl Kind {
+    fn script(self) -> &'static str {
+        match self {
+            Self::Run => "runs.draft",
+            Self::Suite => "suites.draft",
+        }
+    }
+}
+
+/// What a scripted record is beyond its name and state — and a suite alone has a
+/// count of check runs, so a run cannot carry one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Record {
+    Run,
+    /// GitHub's `latest_check_runs_count`.
+    Suite {
+        runs: u64,
+    },
+}
+
+/// One scripted workflow run or check suite on a draft's head.
 ///
 /// Taken from the end of the line, as a [`Check`] is, so a name may carry spaces.
 struct Activity {
     name: String,
     state: State,
-    /// How many check runs a suite has: GitHub's `latest_check_runs_count`.
-    runs: u64,
+    record: Record,
 }
 
 impl Activity {
-    /// Every line of the `.draft` script `what` names, read with `counted` fields
-    /// after the name: three for a run, four for a suite. Fatal on a line it cannot
-    /// read, for [`scripted_checks`]'s reason.
-    fn scripted(dir: &Path, what: &str, counted: bool) -> Vec<Self> {
-        let Some(text) = fake::node_script(dir, "gh", &format!("{what}.draft")) else {
+    /// Every line of the script `kind` reads. Fatal on a line it cannot read, for
+    /// [`scripted_checks`]'s reason.
+    fn scripted(dir: &Path, kind: Kind) -> Vec<Self> {
+        let Some(text) = fake::node_script(dir, "gh", kind.script()) else {
             return Vec::new();
         };
-        let tail = if counted { 3 } else { 2 };
         text.lines()
             .map(str::trim)
             .filter(|line| !line.is_empty())
-            .map(|line| {
-                let fields: Vec<&str> = line.split_whitespace().collect();
-                if fields.len() <= tail {
-                    fake::fail(&format!(
-                        "a scripted gh.{what}.draft line is `NAME STATUS CONCLUSION{}`, and \
-                         {line:?} is not",
-                        if counted { " RUNS" } else { "" }
-                    ));
-                }
-                let (words, tail) = fields.split_at(fields.len() - tail);
-                let name = words.join(" ");
-                let state = State::parse(tail[0], tail[1])
-                    .unwrap_or_else(|why| fake::fail(&format!("{what} {name:?}: {why}")));
-                let runs = if counted {
-                    tail[2].parse().unwrap_or_else(|_| {
-                        fake::fail(&format!("{what} {name:?} counts {:?} check runs", tail[2]))
-                    })
-                } else {
-                    0
-                };
-                Self { name, state, runs }
-            })
+            .map(|line| Self::parse(kind, line).unwrap_or_else(|why| fake::fail(&why)))
             .collect()
+    }
+
+    /// One line of `kind`'s script, or why it is not one.
+    fn parse(kind: Kind, line: &str) -> Result<Self, String> {
+        let (shape, tail) = match kind {
+            Kind::Run => ("NAME STATUS CONCLUSION", 2),
+            Kind::Suite => ("APP STATUS CONCLUSION RUNS", 3),
+        };
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() <= tail {
+            return Err(format!(
+                "a scripted gh.{} line is `{shape}`, and {line:?} is not",
+                kind.script()
+            ));
+        }
+        let (words, tail) = fields.split_at(fields.len() - tail);
+        let name = words.join(" ");
+        let state = State::parse(tail[0], tail[1]).map_err(|why| format!("{name:?}: {why}"))?;
+        let record = match kind {
+            Kind::Run => Record::Run,
+            Kind::Suite => Record::Suite {
+                runs: tail[2]
+                    .parse()
+                    .map_err(|_| format!("suite {name:?} counts {:?} check runs", tail[2]))?,
+            },
+        };
+        Ok(Self {
+            name,
+            state,
+            record,
+        })
     }
 
     /// Where this record stands once the work on the head has finished: completed,
     /// green — except a suite with no check runs, which GitHub leaves as it was for
     /// ever, because nothing in it ever runs.
-    fn finished(self, counted: bool) -> Self {
-        if counted && self.runs == 0 {
+    fn finished(self) -> Self {
+        if self.record == (Record::Suite { runs: 0 }) {
             return self;
         }
         Self {
@@ -1396,24 +1432,18 @@ fn activity_of(
     Ok((sha.0, opened))
 }
 
-/// The scripted `what` records on the change's head: as scripted while its draft is
+/// The scripted `kind` records on the change's head: as scripted while its draft is
 /// still being worked on, [`Activity::finished`] after, and none on a commit no change
 /// request this host opened stands at.
-fn activity(dir: &Path, opened: Option<&Opened>, what: &str, counted: bool) -> Vec<Activity> {
+fn activity(dir: &Path, opened: Option<&Opened>, kind: Kind) -> Vec<Activity> {
     let Some(opened) = opened else {
         return Vec::new();
     };
     let id = opened.number.to_string();
     let running = draft_running(dir, &id, state_of_opened(dir, opened));
-    Activity::scripted(dir, what, counted)
+    Activity::scripted(dir, kind)
         .into_iter()
-        .map(|record| {
-            if running {
-                record
-            } else {
-                record.finished(counted)
-            }
-        })
+        .map(|record| if running { record } else { record.finished() })
         .collect()
 }
 
@@ -1425,6 +1455,12 @@ fn activity(dir: &Path, opened: Option<&Opened>, what: &str, counted: bool) -> V
 /// lifts a draft whose checks show nothing still running, and holds the draft while
 /// a run on its head is not `completed`. Unscripted, it is the commit no workflow ran
 /// on.
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the query and the answer
+// are `onevcs::GitHub::head_activity`'s, which declares neither as data. Its gate is
+// `tests/e2e/draft_lifecycle.rs`: the real linked `onevcs` reads this answer, refuses
+// one short of `total_count` or the list, and treats a refused read as no answer and
+// lifts the draft early, so a query or shape that drifts fails the journeys that hold
+// a draft on it rather than a double nobody checks.
 fn workflow_runs(args: &[String], dir: &Path, path: &str) -> ExitCode {
     if args.len() != 2 {
         return fake::refuse(&format!("gh api {path} takes no flags here: {args:?}"));
@@ -1443,7 +1479,7 @@ fn workflow_runs(args: &[String], dir: &Path, path: &str) -> ExitCode {
         Ok(found) => found,
         Err(refusal) => return refusal,
     };
-    let runs: Vec<serde_json::Value> = activity(dir, opened.as_ref(), "runs", false)
+    let runs: Vec<serde_json::Value> = activity(dir, opened.as_ref(), Kind::Run)
         .iter()
         .enumerate()
         .map(|(index, run)| {
@@ -1472,6 +1508,8 @@ fn workflow_runs(args: &[String], dir: &Path, path: &str) -> ExitCode {
 /// it belongs to, and `latest_check_runs_count` — which `onevcs` reads to set aside
 /// the empty `queued` suite an installed app leaves on every commit. Unscripted, it is
 /// the commit no app has a suite on.
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the same gate as
+// `workflow_runs` above, over the second read `head_activity` makes.
 fn check_suites(args: &[String], dir: &Path, path: &str) -> ExitCode {
     if args.len() != 2 {
         return fake::refuse(&format!("gh api {path} takes no flags here: {args:?}"));
@@ -1486,17 +1524,21 @@ fn check_suites(args: &[String], dir: &Path, path: &str) -> ExitCode {
         Ok(found) => found,
         Err(refusal) => return refusal,
     };
-    let suites: Vec<serde_json::Value> = activity(dir, opened.as_ref(), "suites", true)
+    let suites: Vec<serde_json::Value> = activity(dir, opened.as_ref(), Kind::Suite)
         .iter()
         .enumerate()
         .map(|(index, suite)| {
             let (status, conclusion) = suite.status();
+            let runs = match suite.record {
+                Record::Suite { runs } => runs,
+                Record::Run => fake::fail("a workflow run was read from the suites script"),
+            };
             serde_json::json!({
                 "id": 200 + index,
                 "head_sha": sha,
                 "status": status,
                 "conclusion": conclusion,
-                "latest_check_runs_count": suite.runs,
+                "latest_check_runs_count": runs,
                 "app": {"name": suite.name},
             })
         })
@@ -1509,6 +1551,9 @@ fn check_suites(args: &[String], dir: &Path, path: &str) -> ExitCode {
 }
 
 /// The page size `onevcs` asks both activity reads for, which ends either query.
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the same gate as
+// `workflow_runs` above: `onevcs` keeps its page size private, and a query that no
+// longer ends this way is refused here and fails the journeys holding a draft.
 const PER_PAGE: &str = "per_page=100";
 
 /// `gh pr checks ID --repo R [--required] --json …`

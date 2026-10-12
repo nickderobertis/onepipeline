@@ -756,3 +756,37 @@ fn a_draft_whose_head_has_a_workflow_run_in_progress_is_held_until_it_is_green()
     );
     assert!(asked("/check-suites?") >= 1, "{:?}", gh_calls(&world));
 }
+
+/// And the same hold off the second read: no workflow run is in progress, but an app
+/// keeps its check suite — one with a check run in it — `in_progress` on the head
+/// after that run completed. The host's check-suites read says so, and the draft is
+/// held until the suite completes and the required check reports green.
+#[test]
+fn a_draft_whose_head_has_a_check_suite_in_progress_is_held_until_it_is_green() {
+    let world =
+        World::new("draft-suite").with_env("ONEVCS_DRAFT_CHECKS_GRACE_SECONDS", SHORT_GRACE);
+    world.repository("change-open", &[]);
+    world.script("service.work", "the worker wrote this\n");
+    world.script("gh.no-ready-trigger", "");
+    world.script("gh.draft.finishes-after", RUNS_PAST_GRACE);
+    world.script("gh.checks.draft", "build completed success advisory");
+    world.script("gh.suites.draft", "Some App in_progress - 1");
+    world.script(
+        "gh.checks",
+        "build completed success advisory\nlint completed success required",
+    );
+
+    let run = "suite";
+    settled_run(&world, run, vec![lifecycle("service", &[])], &[]).settled();
+
+    lifted_once_green(&world, run);
+    let suites = gh_calls(&world)
+        .iter()
+        .filter(|call| call.first().map(String::as_str) == Some("api"))
+        .filter(|call| {
+            call.get(1)
+                .is_some_and(|path| path.contains("/check-suites?"))
+        })
+        .count();
+    assert!(suites >= 1, "{:?}", gh_calls(&world));
+}
