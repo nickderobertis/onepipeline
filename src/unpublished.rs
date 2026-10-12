@@ -421,6 +421,17 @@ fn listing(
             });
         }
     };
+    decided(request, recoverable, unresolved, graph)
+}
+
+/// Decide over the rows a read answered: where onevcs's rows enter onepipeline,
+/// and the one place the counting rule is applied to them.
+fn decided(
+    request: &UnpublishedRequest,
+    recoverable: Vec<Recoverable>,
+    mut unresolved: Vec<String>,
+    graph: Option<&Path>,
+) -> Result<Unpublished> {
     let mut unanswered = false;
     if let Target::Session { session } = &request.target {
         for row in &recoverable {
@@ -495,26 +506,22 @@ fn standing(
     acknowledged: &[AcknowledgedBranch],
     unresolved: &mut Vec<String>,
 ) -> Option<AcknowledgedBranch> {
-    let entry = acknowledged
+    // A row with no tip is named whether or not an entry names it: no acknowledgement
+    // can stand for it, so it counts wherever an unacknowledged row would.
+    let Some(tip) = &row.tip else {
+        unresolved.push(format!(
+            "{} [{}]: onevcs could not read its tip, so no acknowledgement stands for it and \
+             it counts",
+            row.branch.branch, row.identity
+        ));
+        return None;
+    };
+    acknowledged
         .iter()
-        .find(|entry| entry.identity == row.identity && entry.branch == row.branch.branch)?;
-    match &row.tip {
-        Some(tip) if *tip == entry.tip => Some(entry.clone()),
-        Some(_) => None,
-        // llmlint: ignore-block[changed_behavior_has_e2e] onevcs answers a `null` tip only for a
-        // ref it enumerated and then could not read, which no journey over real git can
-        // stage without the row itself disappearing; the arm is entry 115's rule that a
-        // row with no tip has no standing acknowledgement and counts.
-        None => {
-            unresolved.push(format!(
-                "{} [{}]: onevcs could not read its tip, so its acknowledgement does not stand \
-                 and it counts",
-                row.branch.branch, row.identity
-            ));
-            None
-            // llmlint: ignore-end[changed_behavior_has_e2e]
-        }
-    }
+        .find(|entry| {
+            entry.identity == row.identity && entry.branch == row.branch.branch && entry.tip == *tip
+        })
+        .cloned()
 }
 
 /// Whether a landing answer is one the counting rule counts: `no`, `unknown`
@@ -1380,6 +1387,90 @@ mod tests {
         ] {
             assert_eq!(land_command(&kept, Some(graph)), kept);
         }
+    }
+
+    /// onevcs answers a `null` tip only for a ref it enumerated and then could not
+    /// read, which no journey over real git can stage without the row disappearing,
+    /// so the row is handed in where onevcs's rows enter onepipeline, in onevcs's
+    /// own serialized shape, and decided by what the listing and the stop guard call.
+    #[test]
+    fn a_row_with_no_tip_counts_and_is_named_whether_or_not_an_entry_names_it() {
+        let session = "manager-1";
+        let row = |branch: &str, held: bool| -> Recoverable {
+            let mut value = serde_json::json!({
+                "identity": "github.com/o/r",
+                "branch": {"branch": branch, "base": "main", "provenance": "complete"},
+                "checkout": "/checkout",
+                "tip": null,
+                "landed": {"state": "no"},
+                "stopped_because": "closed",
+                "recover_command": ["onevcs", "publish-branch", branch, "--repo", "/checkout"],
+                "labels": {"launcher": session},
+            });
+            if held {
+                value["held_by"] = serde_json::json!({"holding": "owner-running", "token": "s-held", "worktree": "/held"});
+            }
+            serde_json::from_value(value).expect("onevcs reads its own row shape")
+        };
+        let directory = std::env::temp_dir().join(format!(
+            "onepipeline-null-tip-{}-{}",
+            std::process::id(),
+            crate::sys::now_millis()
+        ));
+        let request = UnpublishedRequest {
+            target: Target::Session {
+                session: session.to_owned(),
+            },
+            acknowledging: Some(session.to_owned()),
+            acknowledgements: directory.clone(),
+            disk: false,
+            pr_author_graph: None,
+        };
+        let decide = |rows: Vec<Recoverable>| {
+            decided(&request, rows, Vec::new(), None).expect("a read that answered decides")
+        };
+        let named = |listing: &Unpublished, branch: &str| {
+            let document = serde_json::to_value(listing).expect("serializes");
+            document["unresolved"]
+                .as_array()
+                .expect("unresolved is a list")
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .any(|line| line.starts_with(&format!("{branch} [")) && line.contains("tip"))
+        };
+
+        // No entry names it.
+        let listing = decide(vec![row("unread", false), row("held", true)]);
+        assert_eq!(listing.verdict, Verdict::Owed);
+        assert!(listing.rows[0].counted && listing.rows[0].acknowledgement.is_none());
+        assert!(!listing.rows[1].counted, "a held row never counts");
+        assert!(named(&listing, "unread"), "{:?}", listing.unresolved);
+        assert!(named(&listing, "held"), "{:?}", listing.unresolved);
+
+        // An entry names its identity and branch: it still does not stand.
+        let entry = |branch: &str| AcknowledgedBranch {
+            branch: branch.to_owned(),
+            identity: "github.com/o/r".to_owned(),
+            tip: "a".repeat(40),
+            reason: "kept on purpose".to_owned(),
+            at: "2026-10-12T00:00:00Z".to_owned(),
+        };
+        std::fs::create_dir_all(&directory).expect("acknowledgements directory");
+        write_file(
+            &acknowledgement_file(&directory, session),
+            &AcknowledgementFile {
+                version: ACKNOWLEDGEMENT_FILE_VERSION,
+                acknowledged: vec![entry("unread"), entry("held")],
+            },
+        )
+        .expect("writes");
+        let listing = decide(vec![row("unread", false), row("held", true)]);
+        std::fs::remove_dir_all(&directory).expect("cleans up");
+        assert_eq!(listing.verdict, Verdict::Owed);
+        assert!(listing.rows[0].counted && listing.rows[0].acknowledgement.is_none());
+        assert!(!listing.rows[1].counted, "a held row never counts");
+        assert!(named(&listing, "unread"), "{:?}", listing.unresolved);
+        assert!(named(&listing, "held"), "{:?}", listing.unresolved);
     }
 
     #[test]
