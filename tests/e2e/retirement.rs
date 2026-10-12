@@ -3127,3 +3127,140 @@ fn a_died_dispatchs_branch_a_pass_retired_is_named_as_retired() {
         assert_eq!(settled["outcome"], outcome, "{settled}");
     }
 }
+
+/// Publication closeout and the idle sweep must use each branch's own repository
+/// when two identities have colliding change-request numbers and branch names.
+#[test]
+fn publication_and_idle_retirement_keep_open_changes_despite_foreign_merged_numbers() {
+    let world = sweeping_world("retirement-repo-scope");
+    let service = world.repository("change-open", &[]);
+    let other = world.extra_repository("other");
+    world.script("gh.repo-numbering", "1");
+    let graph = world.pr_author_graph();
+    world.script(
+        "pr-author.body",
+        "## What\nKeep each repository's open work.\n",
+    );
+
+    for repo in [&service, &other] {
+        unique(&world, repo, "keep/shared", "open.md");
+    }
+
+    // Opposite numbering: service's merged #1 collides with other's open #1;
+    // other's merged #2 collides with service's open #2.
+    for (alias, repo, branch, merged) in [
+        ("service", &service, "done/foreign", true),
+        ("other", &other, "keep/shared", false),
+        ("other", &other, "done/foreign", true),
+        ("service", &service, "keep/shared", false),
+    ] {
+        if merged {
+            unique(&world, repo, branch, "merged.md");
+        }
+        world
+            .run(&[
+                "publish-branch",
+                branch,
+                "--repo",
+                alias,
+                "--pr-author-graph",
+                &graph,
+            ])
+            .exited(0);
+        if merged {
+            let change = world
+                .changes_opened()
+                .last()
+                .expect("a change opened")
+                .clone();
+            world.script("gh.merged", "1");
+            let output = world
+                .cmd_on(
+                    &crate::harness::double("fake-gh"),
+                    &[
+                        "pr",
+                        "merge",
+                        &change["number"].to_string(),
+                        "--repo",
+                        change["repo"].as_str().expect("repository"),
+                        "--squash",
+                    ],
+                )
+                .output()
+                .expect("the host runs");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            std::fs::remove_file(world.fakes.join("gh.merged"))
+                .expect("later publications stay open");
+            let opposite = if alias == "service" { &other } else { &service };
+            let clone = person(&world, opposite);
+            git(
+                &world,
+                &clone,
+                &[
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    &format!("chore: unrelated landing (#{})", change["number"]),
+                ],
+            );
+            git(&world, &clone, &["push", "origin", "main"]);
+            synced(&world, opposite);
+        }
+    }
+
+    let assert_open = || {
+        for (alias, repo, number) in [("service", &service, "2"), ("other", &other, "1")] {
+            assert!(
+                holds(&world, &repo.origin, "keep/shared"),
+                "{alias}'s open branch disappeared"
+            );
+            let output = world
+                .cmd_on(
+                    &crate::harness::double("fake-gh"),
+                    &[
+                        "pr",
+                        "view",
+                        number,
+                        "--repo",
+                        &format!("owner/{alias}"),
+                        "--json",
+                        "state,mergeCommit",
+                    ],
+                )
+                .output()
+                .expect("the host runs");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let change: Value = serde_json::from_slice(&output.stdout).expect("host JSON");
+            assert_eq!(change["state"], "OPEN", "{alias}: {change}");
+        }
+    };
+    assert_open();
+
+    // A lossless control proves the real driver's retirement sweep completed.
+    lossless(&world, &service, "control/service", "control.md");
+    lossless(&world, &other, "control/other", "control.md");
+    sweeping(
+        &world,
+        "sweeper",
+        crate::harness::agent("hold", &[]),
+        Vec::new(),
+    );
+    until_retired(&world, "sweeper", &["control/service", "control/other"]);
+    world.release("hold.go");
+    world.until("the sweeping driver to close", |world| {
+        world.run_file("sweeper", "result.json").is_file()
+    });
+    assert_open();
+    for alias in ["service", "other"] {
+        let class = classified_in(&world, alias, "keep/shared");
+        assert_eq!(class["reason"], "open-change-request", "{alias}: {class}");
+    }
+}

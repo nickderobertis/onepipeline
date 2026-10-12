@@ -536,8 +536,22 @@ fn record(dir: &Path, id: &str, state: Change) {
 
 /// The next number, derived from the record rather than kept anywhere: nothing
 /// carries a counter between two invocations of a program that exits.
-fn next_number(dir: &Path) -> NonZeroU64 {
-    NonZeroU64::MIN.saturating_add(opened_changes(dir).len() as u64)
+fn next_number(dir: &Path, repo: &str) -> NonZeroU64 {
+    let count = opened_changes(dir)
+        .into_iter()
+        .filter(|opened| !dir.join("gh.repo-numbering").exists() || opened.repo == repo)
+        .count();
+    NonZeroU64::MIN.saturating_add(count as u64)
+}
+
+/// Repository-local numbers let a journey reproduce collisions across identities.
+/// Existing fixtures retain their globally numbered state files.
+fn change_key(dir: &Path, opened: &Opened) -> String {
+    if dir.join("gh.repo-numbering").exists() {
+        format!("{}#{}", opened.repo, opened.number)
+    } else {
+        opened.number.to_string()
+    }
 }
 
 /// `gh pr create --repo R --head H --base B --title T --body B`
@@ -573,7 +587,7 @@ fn create(args: &[String], dir: &Path) -> ExitCode {
         base: flag("--base"),
         title: flag("--title"),
         body: flag("--body"),
-        number: next_number(dir),
+        number: next_number(dir, &flag("--repo")),
     };
     fake::append(
         &dir.join("gh").join("opened.jsonl"),
@@ -582,7 +596,7 @@ fn create(args: &[String], dir: &Path) -> ExitCode {
     );
     record(
         dir,
-        &opened.number.to_string(),
+        &change_key(dir, &opened),
         if drafted { Change::Draft } else { Change::Open },
     );
     println!("{}", url_of(&opened));
@@ -753,7 +767,7 @@ fn list(args: &[String], dir: &Path) -> ExitCode {
         // excluded by `--draft`, never by the state.
         .filter(|change| {
             matches!(
-                recorded(dir, &change.number.to_string()),
+                recorded(dir, &change_key(dir, change)),
                 Some(Change::Open | Change::Draft)
             )
         })
@@ -829,7 +843,7 @@ fn addressed(args: &[String], dir: &Path) -> Result<Opened, ExitCode> {
 /// the record and the state together, so a change request [`addressed`] resolved
 /// and this cannot is a fixture that lost one of the two.
 fn state_of_opened(dir: &Path, opened: &Opened) -> Change {
-    let id = opened.number.to_string();
+    let id = change_key(dir, opened);
     recorded(dir, &id).unwrap_or_else(|| {
         fake::fail(&format!(
             "this host opened change request {id} and has no state for it"
@@ -919,6 +933,8 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
     {
         Some("headRefOid") => "headRefOid",
         Some("state,mergeCommit") => "state,mergeCommit",
+        // Retirement reads the merged head in the same host response as the merge.
+        Some("state,mergeCommit,headRefOid") => "state,mergeCommit,headRefOid",
         Some("statusCheckRollup") => "statusCheckRollup",
         // The rollup *and* the commit it was reported against, in one read.
         // `onevcs` 0.15.0 asks for the pair because a rollup read on its own
@@ -961,12 +977,20 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
         Ok(opened) => opened,
         Err(refusal) => return refusal,
     };
-    let id = opened.number.to_string();
+    let id = change_key(dir, &opened);
     land_armed(dir, &id);
     let state = state_of_opened(dir, &opened);
     let merged = state == Change::Merged;
     let reported = scripted_checks(dir, &id, state);
     let head = head_of(dir, &opened);
+    // A fixture that pushed the host's merge can report its actual base commit.
+    let merge_commit = if dir.join("gh.real-merge-commit").exists() {
+        let mut landed = opened.clone();
+        landed.head = opened.base.clone();
+        head_of(dir, &landed)
+    } else {
+        Sha::parse(MERGE_SHA).expect("the constant merge commit is an object id")
+    };
     println!(
         "{}",
         serde_json::json!({
@@ -984,7 +1008,7 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
             // `pr create` and `pr ready` write, so what this answers is what this
             // host actually did rather than what it was asked to do.
             "isDraft": state == Change::Draft,
-            "mergeCommit": merged.then(|| serde_json::json!({"oid": MERGE_SHA})),
+            "mergeCommit": merged.then(|| serde_json::json!({"oid": merge_commit.as_str()})),
             "mergedAt": merged.then(|| read_if_present(&merged_at(dir, &id))).flatten(),
             // What this host reports about the change request's checks, which is
             // the scripted part: unscripted it reports none, which is the
@@ -1244,7 +1268,7 @@ fn checks(args: &[String], dir: &Path) -> ExitCode {
     };
     let reported = scripted_checks(
         dir,
-        &opened.number.to_string(),
+        &change_key(dir, &opened),
         state_of_opened(dir, &opened),
     );
     if required_only {
@@ -1304,7 +1328,7 @@ fn ready(args: &[String], dir: &Path) -> ExitCode {
         Err(refusal) => return refusal,
     };
     if state_of_opened(dir, &opened) == Change::Draft {
-        record(dir, &opened.number.to_string(), Change::Open);
+        record(dir, &change_key(dir, &opened), Change::Open);
     }
     ExitCode::SUCCESS
 }
@@ -1400,7 +1424,7 @@ fn merge(args: &[String], dir: &Path) -> ExitCode {
         Ok(opened) => opened,
         Err(refusal) => return refusal,
     };
-    let id = opened.number.to_string();
+    let id = change_key(dir, &opened);
     if dir.join("gh.merged").exists() {
         merge_now(dir, &id);
     } else if auto {

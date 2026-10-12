@@ -7049,11 +7049,65 @@ fn a_change_that_merges_before_the_run_settles_is_read_again_and_reported_landed
             "merge",
             "--no-ff",
             "-m",
-            &format!("chore: land the change ({change})"),
+            &format!(
+                "chore: land the change (#{})",
+                change.rsplit('/').next().expect("a change number")
+            ),
             &branch,
         ],
     );
     git(&world, &repository.checkout, &["push", "origin", "main"]);
+    // The fixture's host reports the same merge that was pushed to its origin.
+    world.script("gh.merged", "1");
+    world.script("gh.real-merge-commit", "1");
+    let merged = world
+        .cmd_on(
+            &crate::harness::double("fake-gh"),
+            &[
+                "pr",
+                "merge",
+                change.rsplit('/').next().expect("a change number"),
+                "--repo",
+                "owner/service",
+                "--squash",
+            ],
+        )
+        .output()
+        .expect("the host runs");
+    assert!(
+        merged.status.success(),
+        "{}",
+        String::from_utf8_lossy(&merged.stderr)
+    );
+
+    let reported = world
+        .cmd_on(
+            &crate::harness::double("fake-gh"),
+            &[
+                "pr",
+                "view",
+                change.rsplit('/').next().expect("a change number"),
+                "--repo",
+                "owner/service",
+                "--json",
+                "state,mergeCommit,headRefOid",
+            ],
+        )
+        .output()
+        .expect("the host runs");
+    assert!(
+        reported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reported.stderr)
+    );
+    let reported: serde_json::Value = serde_json::from_slice(&reported.stdout).expect("host JSON");
+    assert_eq!(reported["state"], "MERGED", "{reported}");
+    assert_eq!(reported["headRefOid"], settled["head"], "{reported}");
+    assert_eq!(
+        reported["mergeCommit"]["oid"],
+        git(&world, &repository.checkout, &["rev-parse", "HEAD"]).trim(),
+        "{reported}"
+    );
 
     // The person answers the gate, and a fresh driver closes the run out — which
     // is where the landing is asked about again.
