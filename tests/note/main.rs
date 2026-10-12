@@ -297,13 +297,26 @@ fn a_note_is_queued(queue: &Path) -> bool {
 /// `a_note_that_reaches_the_conversation_after_the_judge_decided_reaches_the_worker`
 /// drives on purpose.
 ///
-/// The courier renames an offer to `<id>.taken.json` as it takes it, and that is
-/// the last hand-over anything outside the member's process can see. What is left
-/// is in-process — the courier reads the offer and queues it on the member's
-/// inbox, whose condition variable wakes the relay, which hands it to the
-/// conversation — with no clock or other process in it, which is what the short
-/// pause covers. The disposition itself cannot be waited for: a note to a held
-/// turn is answered only once this releases it.
+/// **What this guarantees, and the window it leaves.** The gate opens on the
+/// courier's rename of `<id>.offer.json` to `<id>.taken.json` (onemessagebus'
+/// `spool::take_offer`), the last step any process outside the member can see.
+/// The window from there is entirely inside the member's process, on two of its
+/// threads, with no file, no other process and no poll in it: the courier reads
+/// the taken file and queues the note on the member's inbox, whose condition
+/// variable wakes the relay at once (its 50 ms is a timeout on that wait, not a
+/// poll); the relay hands the note to onejudge's `Notes::send`, which queues it
+/// on the conversation's inbox. The window closes there. It has to close before
+/// onejudge's `take_notes`, which runs only after this releases the gate *and*
+/// the judge double has seen the gate (a 10 ms poll), exited, and had its
+/// decision read back — so the 500 ms pause is the only margin added to that,
+/// and it is not one that an observable condition could replace: nothing in
+/// oneagentgraph 0.5.6 or onejudge 0.19.0 writes anything between the rename and
+/// the answer, and the answer comes only after the release. A failure now needs
+/// those two threads to be kept off the CPU for longer than all of that, where
+/// the fixed pause this replaced raced the driver's claim of the envelope, its
+/// delivery thread and the courier's own 20 ms poll across processes. Closing
+/// the window outright needs an acknowledgment from inside oneagentgraph that the
+/// note is in onejudge's inbox, which this repository cannot add.
 ///
 /// A spool that never shows the note taken still releases the turn, so the run
 /// ends, and then fails the journey naming the wait rather than leaving it to an
@@ -3746,7 +3759,12 @@ fn a_note_that_reaches_the_conversation_after_the_judge_decided_reaches_the_work
 
     // The judge decides with nothing in the conversation's inbox, and the worker
     // turn its decision opens is held, so the note arrives while that one is live.
+    // This release is the one the gate refuses: no spool shows a note taken.
     world.script("turn.hold", "hold");
+    assert!(
+        !a_note_was_taken(&world.root),
+        "a note was taken before any was sent, so this release is not the ordering it means"
+    );
     release(&world.fakes, "judge.go");
     world.until(
         "the worker's turn after the judge's decision to open",
