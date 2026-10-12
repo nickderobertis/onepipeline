@@ -35,7 +35,7 @@ mod unix {
 
     fn scratch() -> Scratch {
         let root =
-            std::env::temp_dir().join(format!("onepipeline-smoke-repo-{}", std::process::id()));
+            std::env::temp_dir().join(format!("onepipeline-scratch-repo-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir(&root).expect("a fresh scratch directory");
         Scratch(root)
@@ -199,7 +199,7 @@ mod unix {
         // Named by neither its slug nor its name, so the same sentence stays
         // true after a rename — the case that made it necessary.
         assert!(
-            !description.contains(THROWAWAY) && !description.contains("onepipeline-smoke"),
+            !description.contains(THROWAWAY) && !description.contains(repo::SCRATCH_SUFFIX),
             "the description names no slug: {description:?}"
         );
 
@@ -213,8 +213,12 @@ mod unix {
     }
 
     fn refusal_of(slug: &str) -> String {
-        let panic = std::panic::catch_unwind(|| repo::ensure_repo(slug))
-            .expect_err("a refusal from `gh` fails the smoke rather than being read as an answer");
+        panic_of(|| repo::ensure_repo(slug))
+    }
+
+    fn panic_of(run: impl FnOnce() + std::panic::UnwindSafe) -> String {
+        let panic = std::panic::catch_unwind(run)
+            .expect_err("a refusal fails the smoke rather than being read as an answer");
         match panic.downcast::<String>() {
             Ok(message) => *message,
             Err(panic) => (*panic.downcast::<&str>().expect("a panic message")).to_owned(),
@@ -354,5 +358,68 @@ mod unix {
                 "a missing `gh` fails carrying {carried:?}: {refusal}"
             );
         }
+    }
+
+    /// A synthetic scratch identity, owned by nobody: every `gh` it reaches is
+    /// the stand-in, so it is never looked up anywhere real.
+    const CONFIGURED: &str = "hiddenco/quietharbor-smoke";
+
+    /// The scratch repository is configuration, read from one named key and held
+    /// in no tracked file. Unset — or set to nothing but whitespace — it is a
+    /// refusal naming the key before any `gh` is asked anything, never a skip and
+    /// never a fallback. Set, it is the repository the smoke's first host
+    /// operation reaches, as the stand-in recorded it. A name without the scratch
+    /// suffix is refused before it is touched.
+    ///
+    /// Its own test, and so its own process under nextest: the key and `PATH`
+    /// are both process-global.
+    #[test]
+    fn the_scratch_repository_is_read_from_its_key_and_refused_naming_it_when_unset() {
+        let scratch = scratch();
+
+        for (name, value) in [("unset", None), ("blank", Some("  "))] {
+            let record = stand_in(&scratch.0, name, true);
+            match value {
+                Some(value) => std::env::set_var(repo::SMOKE_REPO_ENV, value),
+                None => std::env::remove_var(repo::SMOKE_REPO_ENV),
+            }
+            let refusal = panic_of(|| repo::ensure_repo(&repo::scratch_repo()));
+            assert!(
+                refusal.contains("ONEPIPELINE_SMOKE_REPO is not set"),
+                "an {name} key is refused naming it: {refusal}"
+            );
+            assert!(
+                !record.exists(),
+                "an {name} key reaches no host at all: {:?}",
+                fs::read_to_string(&record)
+            );
+        }
+
+        std::env::set_var(repo::SMOKE_REPO_ENV, "hiddenco/quietharbor");
+        let record = stand_in(&scratch.0, "not-scratch", true);
+        let refusal = panic_of(|| repo::ensure_repo(&repo::scratch_repo()));
+        assert!(
+            refusal.contains("is not a scratch repository"),
+            "a name without the scratch suffix is refused: {refusal}"
+        );
+        assert!(!record.exists(), "a refused name reaches no host");
+
+        std::env::set_var(repo::SMOKE_REPO_ENV, format!(" {CONFIGURED}\n"));
+        let record = stand_in(&scratch.0, "configured", true);
+        let slug = repo::scratch_repo();
+        assert_eq!(
+            slug, CONFIGURED,
+            "the key's value, trimmed, is the identity"
+        );
+        repo::ensure_repo(&slug);
+        let invocations = recorded(&record);
+        let [probe] = &invocations[..] else {
+            panic!("the configured repository is probed and reused: {invocations:?}")
+        };
+        assert_eq!(
+            argv(probe),
+            ["repo", "view", CONFIGURED, "--json", "name"],
+            "the host is asked about the configured repository and no other"
+        );
     }
 }
