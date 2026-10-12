@@ -692,6 +692,20 @@ fn the_smoke_step_reads_its_scratch_repository_from_the_secret_of_the_same_name(
         "the step running `just smoke-real` maps the {SMOKE_REPO_KEY} secret into its \
          environment as {SMOKE_REPO_KEY}: {run:?}"
     );
+    // The secret the step reads is one `gh-secrets.json` provisions, so the
+    // manifest and its consumer cannot name two different keys.
+    let manifest: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(repo_root().join("gh-secrets.json")).expect("gh-secrets.json reads"),
+    )
+    .expect("gh-secrets.json parses");
+    assert!(
+        manifest["secrets"]
+            .as_array()
+            .expect("gh-secrets.json lists its secrets")
+            .iter()
+            .any(|secret| secret["name"] == SMOKE_REPO_KEY),
+        "gh-secrets.json does not provision the {SMOKE_REPO_KEY} secret the smoke step reads"
+    );
 
     for (file, parsed) in workflows() {
         let mut env_blocks = vec![parsed.get("env")];
