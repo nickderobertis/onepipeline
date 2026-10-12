@@ -554,6 +554,15 @@ impl Projected {
     /// nothing past it sorts in front of — which is the same statement the marker
     /// is chosen by.
     fn take(&mut self, paths: &RunPaths, grown: &[(Option<Envelope>, u64)]) {
+        self.take_with(paths, grown, OpenInstant::HeldBack);
+    }
+
+    fn take_with(
+        &mut self,
+        paths: &RunPaths,
+        grown: &[(Option<Envelope>, u64)],
+        open: OpenInstant,
+    ) {
         crate::loopstats::records_folded(grown.len() as u64);
         // Read **raw and before anything is folded**: the digest has to equal what a
         // later reader takes off the file rather than what these records decoded to,
@@ -561,7 +570,7 @@ impl Projected {
         // document must never carry. Where those bytes cannot be read the marker
         // takes in nothing this pass, which costs the next reader's saving and never
         // an answer.
-        let accountable = extent(&self.coverage, grown);
+        let accountable = extent(&self.coverage, grown, open);
         let taking: u64 = grown[..accountable].iter().map(|(_, bytes)| bytes).sum();
         let taken = match taking {
             0 => Some(Vec::new()),
@@ -636,6 +645,73 @@ pub(crate) fn fold_and_checkpoint(paths: &RunPaths) -> RunState {
     Projected::open(paths).into_state()
 }
 
+/// The fold of a run **proved ended**, with its
+/// checkpoint written covering every record — the trailing ones sharing the
+/// journal's last timestamp included, which [`fold_and_checkpoint`] holds back.
+///
+/// The hold-back exists for a run still recording: its next arrival is stamped at
+/// or after the open instant and may sort in front of a record there. A run whose
+/// driver is proved gone, and whose every recorded process is over, has no next
+/// arrival but an adoption, which is stamped later. So covering the final records
+/// costs nothing a reader relies on, and it is what lets `onepipeline host` read an
+/// ended run's final stop and running set off this document without opening the
+/// journal. Should a record arrive that sorts in front of the marker anyway, the
+/// existing [`Coverage::sorts_in_front_of`] check discards the document and the
+/// next reader refolds — the answer every run had before checkpoints existed.
+///
+/// The document keeps its shape, version and seal, so a reader at an older pin
+/// verifies it as it verifies any other, finds nothing past the marker, and —
+/// writing only when the marker moves — leaves it as it is.
+pub(crate) fn fold_ended_and_checkpoint(paths: &RunPaths) -> RunState {
+    let mut projected = Projected::open(paths);
+    let rest = journal::finished_records_after(&paths.journal(), projected.coverage.bytes);
+    if !rest.is_empty() {
+        projected.take_with(paths, &rest, OpenInstant::Covered);
+    }
+    projected.into_state()
+}
+
+/// An ended run's folded state off its checkpoint alone, where that covers
+/// exactly the journal a **current** `summary.json` stamps — `journal_len` bytes
+/// and `event_count` records — so the journal is not opened.
+///
+/// **The seal is not re-taken here, and that is an accepted trust assumption.**
+/// Re-taking it reads every covered byte, which is the cost this exists to remove.
+/// What stands in for it is the summary's stamp: a current summary (its journal
+/// length and modification time match the journal's) proves the journal has not
+/// moved since that summary was written. It proves nothing about this document:
+/// **an edit to the checkpoint's state that keeps its run, its version and its
+/// coverage counts is not detected on this path.** The assumption holds only
+/// here: a checkpoint whose counts differ from the current summary's is refused,
+/// and the caller then folds through [`fold_ended_and_checkpoint`], which verifies the seal or
+/// refolds the journal, as every cold read does.
+// llmlint: ignore-block[boundary_inputs_validated] the seal is chained over the covered
+// journal bytes before the state, so no part of it can be checked without reading every one
+// of them, which is the cost this exists to remove. The document is still refused at another
+// version, as another run's, or as anything but this build's shape (`readable`); the manager
+// accepted the trust assumption the doc comment above states, under its conditions.
+pub(crate) fn covering_whole(
+    paths: &RunPaths,
+    journal_len: u64,
+    event_count: u64,
+) -> Option<RunState> {
+    readable(paths)
+        .filter(|checkpoint| {
+            checkpoint.coverage.bytes == journal_len && checkpoint.coverage.records == event_count
+        })
+        .map(|checkpoint| checkpoint.state)
+}
+// llmlint: ignore-end[boundary_inputs_validated]
+
+/// Whether a fold may cover the records sharing the journal's last timestamp.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OpenInstant {
+    /// Held back, for a run that may still record.
+    HeldBack,
+    /// Covered, for a run proved ended. See [`fold_ended_and_checkpoint`].
+    Covered,
+}
+
 /// The checkpoint document, where the run root holds one **this build can read as
 /// this run's**.
 ///
@@ -691,8 +767,11 @@ fn length_of(journal: &std::path::Path) -> u64 {
 /// reason: the next arrival is stamped at or after that instant, so leaving it
 /// uncovered is what lets an ordinary one sort in front of something without
 /// making the marker unusable.
-fn extent(coverage: &Coverage, grown: &[(Option<Envelope>, u64)]) -> usize {
-    let cap = before_the_open_instant(grown);
+fn extent(coverage: &Coverage, grown: &[(Option<Envelope>, u64)], open: OpenInstant) -> usize {
+    let cap = match open {
+        OpenInstant::HeldBack => before_the_open_instant(grown),
+        OpenInstant::Covered => grown.len(),
+    };
     // One more than the boundaries there are, so a span ending at the last of
     // them closes inside the array rather than off the end of it.
     let mut ruled_out = vec![0i64; cap + 2];
@@ -787,6 +866,7 @@ mod tests {
     use crate::journal::{Journal, PipelineKind};
     use crate::ledger::LaunchRecord;
     use crate::plan::{Goal, Node, Plan, PLAN_SCHEMA_VERSION};
+    use crate::projection::StopState;
     use serde_json::{json, Value};
     use std::path::{Path, PathBuf};
 
@@ -1008,6 +1088,116 @@ mod tests {
     fn folding(paths: &RunPaths) -> (Value, u64) {
         let projected = Projected::open(paths);
         (folded_as(&projected), projected.took())
+    }
+
+    /// A run stopped after dispatching `build`, through the real writer: the
+    /// `run-stopped` is the store's last record, as on every registry-less run
+    /// a long-ended engine left behind.
+    fn a_stopped_run(root: &Path, run: &str) -> RunPaths {
+        let paths = a_recorded_run(root, run);
+        an_instant_later();
+        Journal::open(&paths)
+            .emit(
+                PipelineKind::RunStopped,
+                crate::journal::labels(run, None),
+                crate::journal::payload(&[
+                    ("owner", json!("[mine]")),
+                    ("forced", json!(false)),
+                    (crate::journal::STOP_TEARDOWN, json!("signalled")),
+                ]),
+            )
+            .expect("appended");
+        paths
+    }
+
+    fn journal_len(paths: &RunPaths) -> u64 {
+        std::fs::metadata(paths.journal()).expect("a journal").len()
+    }
+
+    /// An ended run's checkpoint covers its final stop, so a reader can take
+    /// the stop and the running set off it without opening the journal; and a
+    /// reader that holds the open instant back — every older build — reads it,
+    /// agrees, and leaves it byte for byte as it was.
+    #[test]
+    fn an_ended_runs_checkpoint_covers_its_final_records_and_a_hold_back_reader_leaves_it() {
+        let root = scratch("ended-covers-all");
+        let paths = a_stopped_run(&root, "r-ended");
+        let len = journal_len(&paths);
+        let records = crate::ledger::read_records(&paths.journal()).len() as u64;
+
+        // The reader every build runs today holds the stop back.
+        let _ = fold_and_checkpoint(&paths);
+        let held = document(&paths);
+        assert!(held["coverage"]["bytes"].as_u64() < Some(len));
+        assert_eq!(held["state"]["stop"], json!("not-stopped"));
+        assert!(covering_whole(&paths, len, records).is_none());
+
+        let ended = folded_as(&fold_ended_and_checkpoint(&paths));
+        let covered = document(&paths);
+        assert_eq!(covered["coverage"]["bytes"].as_u64(), Some(len));
+        assert_eq!(covered["state"]["stop"], json!("workers-signalled"));
+        let whole = covering_whole(&paths, len, records).expect("the whole journal is covered");
+        assert_eq!(whole.stop, StopState::WorkersSignalled);
+        assert_eq!(folded_as(&whole), ended);
+        assert_eq!(ended, without_a_checkpoint(&paths));
+
+        let written = std::fs::read(paths.checkpoint()).expect("the document");
+        let (reread, took) = folding(&paths);
+        assert_eq!(
+            took, 0,
+            "a hold-back reader folded records the marker covers"
+        );
+        assert_eq!(reread, ended);
+        assert_eq!(
+            std::fs::read(paths.checkpoint()).expect("the document"),
+            written,
+            "a hold-back reader rewrote a checkpoint covering the whole journal"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// What a later append does to a checkpoint covering an ended run's
+    /// final records. An adoption is stamped after them and folds onto the
+    /// document, clearing the stop; a record stamped at the covered instant on a
+    /// stream sorting in front of the marker's discards the document and the whole
+    /// store is folded — the same answer either way.
+    #[test]
+    fn a_record_appended_past_an_extended_checkpoint_folds_to_the_whole_store() {
+        let root = scratch("ended-then-appended");
+        let paths = a_stopped_run(&root, "r-appended");
+        let _ = fold_ended_and_checkpoint(&paths);
+        let len = journal_len(&paths);
+        an_instant_later();
+        Journal::open(&paths)
+            .emit(
+                PipelineKind::DriverAdopted,
+                crate::journal::labels(&paths.run, None),
+                crate::journal::payload(&[("adoption", json!(1)), ("pid", json!(0))]),
+            )
+            .expect("appended");
+        let (adopted, took) = folding(&paths);
+        assert_eq!(
+            took, 1,
+            "the adoption was not folded onto the covered state"
+        );
+        assert_eq!(adopted["stop"], json!("not-stopped"));
+        assert_eq!(adopted, without_a_checkpoint(&paths));
+        // What a summary current for the grown journal asks for is not what the
+        // document covers, so an ended run's verdict is not read off it.
+        assert!(len < journal_len(&paths));
+        assert!(covering_whole(&paths, journal_len(&paths), 4).is_none());
+
+        // Covered again, then a record at the covered instant that sorts in front.
+        let _ = fold_ended_and_checkpoint(&paths);
+        let last = crate::ledger::read_records(&paths.journal())
+            .last()
+            .and_then(|record| serde_json::from_str::<Value>(&record.text).ok())
+            .and_then(|record| record["ts"].as_str().map(str::to_owned))
+            .expect("a stamped record");
+        relayed(&paths, "!-sorts-first", 0, &last, "build");
+        let resumed = folded_as(&fold_and_checkpoint(&paths));
+        assert_eq!(resumed, without_a_checkpoint(&paths));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The point of the document: the state is the state a full fold produces.

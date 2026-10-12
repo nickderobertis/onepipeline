@@ -20,6 +20,11 @@
 //! while the bus carried the layout; onemessagebus#126 moved the layout here, and
 //! the proof came with it.
 //!
+//! The release before `onepipeline host` extended an ended run's checkpoint is
+//! held here too, for the same reason it is not in the offline tier: reading a
+//! checkpoint that build extended, through that release's own verbs, means
+//! fetching the release — see `extended_checkpoint.rs`.
+//!
 //! **Its own binary and its own CI job**, for the reason `smoke` has both: it
 //! reaches a package registry, which the offline tier never does. `just test`,
 //! `just test-quick` and so `just check` run `not binary(release_channel)`, and
@@ -52,6 +57,8 @@ mod harness;
 
 #[path = "../e2e/recorded_support.rs"]
 mod recorded_support;
+
+mod extended_checkpoint;
 
 /// The pinned wheel's `onepipeline`, resolved once through `uv tool run` and
 /// refused unless it reports [`RELEASE`].

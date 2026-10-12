@@ -1,0 +1,259 @@
+{
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0,
+      "description": "Always [`HOST_READING_SCHEMA_VERSION`]."
+    },
+    "host": {
+      "type": "string",
+      "description": "This host's name, as the text form's header prints it."
+    },
+    "root": {
+      "type": "string",
+      "description": "The runs root that was read."
+    },
+    "root_error": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Why the runs root itself could not be read; `null` when it was read."
+    },
+    "free_space": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/FreeSpace"
+      },
+      "description": "One per `free space:` line the text form prints."
+    },
+    "dispatches": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/DispatchRow"
+      },
+      "description": "One per dispatch row the text form prints, in the same order."
+    },
+    "gone": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Gone"
+      },
+      "description": "Every dispatch the view proved gone and so left out of `dispatches`."
+    },
+    "skipped": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SkippedRoot"
+      },
+      "description": "One per run root the view refused. The runs root itself is never here."
+    }
+  },
+  "required": [
+    "schema_version",
+    "host",
+    "root",
+    "root_error",
+    "free_space",
+    "dispatches",
+    "gone",
+    "skipped"
+  ],
+  "description": "`onepipeline host --json`: every live dispatch on this host, as one document.\n\nThe text form is this document rendered \u2014 by\n[`render_host`](crate::verbs::render_host) \u2014 so the two cannot disagree.\n`schemas/host-reading.schema.json` is generated from this type.",
+  "title": "HostReading",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "FreeSpace": {
+      "type": "object",
+      "properties": {
+        "roots": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FreeSpaceRoot"
+          },
+          "description": "The roots this filesystem holds, in the order first named."
+        },
+        "free_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "description": "Bytes an unprivileged writer may still use, or `null` when unread."
+        },
+        "total_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "description": "The filesystem's size, or `null` when unread."
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Why it could not be read; non-null exactly when both byte counts are `null`."
+        }
+      },
+      "required": [
+        "roots",
+        "free_bytes",
+        "total_bytes",
+        "error"
+      ],
+      "description": "One `free space:` line, as data: the document `onepipeline host --json`\ncarries, and what [`render_host`](crate::verbs::render_host)\nprints on its `free space:` lines."
+    },
+    "FreeSpaceRoot": {
+      "type": "object",
+      "properties": {
+        "role": {
+          "$ref": "#/$defs/Role",
+          "description": "Which root."
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The root, or `null` for a workspaces root the linked `onevcs` could not resolve."
+        },
+        "measured_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The nearest existing ancestor it was measured at, when the root itself is absent."
+        }
+      },
+      "required": [
+        "role",
+        "path",
+        "measured_at"
+      ],
+      "description": "One root a [`FreeSpace`] line names."
+    },
+    "Role": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "runs-root",
+          "description": "The runs root."
+        },
+        {
+          "type": "string",
+          "const": "workspaces",
+          "description": "The linked `onevcs`'s lifecycle workspaces."
+        }
+      ],
+      "description": "Which root a line names."
+    },
+    "DispatchRow": {
+      "type": "object",
+      "properties": {
+        "run": {
+          "type": "string",
+          "description": "The run."
+        },
+        "node": {
+          "type": "string",
+          "description": "The node."
+        },
+        "launcher": {
+          "type": "string",
+          "description": "Who launched the run."
+        },
+        "age_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "description": "How long ago the node was dispatched, or `null` when no dispatch time is recorded."
+        },
+        "proof": {
+          "$ref": "#/$defs/ProofWord",
+          "description": "Whether this host proved the dispatch's process is still the one recorded."
+        },
+        "unproven": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Why it could not, non-null exactly when `proof` is `unproven`."
+        }
+      },
+      "required": [
+        "run",
+        "node",
+        "launcher",
+        "age_ms",
+        "proof",
+        "unproven"
+      ],
+      "description": "One dispatch row."
+    },
+    "ProofWord": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "held",
+          "description": "The registry entry's pid and start token hold."
+        },
+        {
+          "type": "string",
+          "const": "unproven",
+          "description": "This host cannot decide."
+        }
+      ],
+      "description": "What a row's proof established."
+    },
+    "Gone": {
+      "type": "object",
+      "properties": {
+        "run": {
+          "type": "string",
+          "description": "The run."
+        },
+        "node": {
+          "type": "string",
+          "description": "The node."
+        },
+        "reason": {
+          "type": "string",
+          "description": "What proved it gone."
+        }
+      },
+      "required": [
+        "run",
+        "node",
+        "reason"
+      ],
+      "description": "A dispatch proved gone."
+    },
+    "SkippedRoot": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "The run root."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Why."
+        }
+      },
+      "required": [
+        "path",
+        "reason"
+      ],
+      "description": "A run root the view refused."
+    }
+  }
+}

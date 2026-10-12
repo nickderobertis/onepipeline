@@ -384,6 +384,51 @@ fn host_reports_the_live_dispatches_under_the_root() {
     );
 }
 
+/// What `verbs::host` hands an embedder beside the reading: `survey.root` is the root read,
+/// `survey.views` is empty — the view opens no run whole — and `survey.skipped` names every
+/// run root it refused with the reading's own reason, so a consumer of that field (as
+/// onepipeline-ui's store is) reads the same refusals the binary prints.
+#[test]
+fn host_hands_back_every_refused_root_in_its_survey() {
+    let fixture = Fixture::new("host-survey");
+    let _env = fixture.enter();
+    std::fs::create_dir_all(fixture.root.join("left-behind"))
+        .expect("a root with no launch record");
+
+    let host = verbs::host(&fixture.root);
+    assert_eq!(host.survey.root, fixture.root);
+    assert!(
+        host.survey.views.is_empty(),
+        "the host view opened a run whole"
+    );
+    let refused: Vec<(PathBuf, String)> = host
+        .survey
+        .skipped
+        .iter()
+        .map(|skipped| (skipped.path.clone(), skipped.reason.clone()))
+        .collect();
+    let read: Vec<(PathBuf, String)> = host
+        .reading
+        .skipped
+        .iter()
+        .map(|skipped| (skipped.path.clone(), skipped.reason.clone()))
+        .collect();
+    assert_eq!(refused, read);
+    assert_eq!(
+        refused
+            .iter()
+            .map(|(path, _)| path.clone())
+            .collect::<Vec<_>>(),
+        [fixture.root.join("left-behind")]
+    );
+    same_view(
+        "host",
+        &fixture.binary(&["host"]),
+        &verbs::render_host(&host),
+        EXIT_SUCCESS,
+    );
+}
+
 #[test]
 fn goals_lists_every_run_grouped_and_details_one() {
     let fixture = Fixture::new("goals");

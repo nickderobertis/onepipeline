@@ -700,7 +700,7 @@ pub enum Command {
     /// the replacement's new head once it republishes. The replacement's
     /// publication adopts the change request already open from that branch, so
     /// reviewers see the same draft move rather than a second one appear. See
-    /// `docs/contract-divergences.md` entry 118.
+    /// `docs/contract-divergences.md` entry 119.
     Rework {
         /// The node to rework: a lifecycle node settled `done` whose change is
         /// unlanded and whose branch is on the record.
