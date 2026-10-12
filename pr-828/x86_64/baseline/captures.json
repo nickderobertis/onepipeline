@@ -4,7 +4,7 @@
     {
       "name": "help",
       "toggles": {},
-      "hash": "b064ef58c44c2e0d8a5d2c80ad4b990b24a4bd2bfc800fee18739d7acdb9c58d",
+      "hash": "e358e9ec2458622cfc5885c7b7fe6b0a548ff88e2b3dff4fadb8d10942338016",
       "image": "help.svg"
     },
     {
@@ -16,7 +16,7 @@
     {
       "name": "results",
       "toggles": {},
-      "hash": "79769dd4b94a69829df47b4a2e795830b48331f5b378a68cf3285b6b54f07cc0",
+      "hash": "b176eb6a3c438e444eea585474a7382b125f256d6b69884017b3e928e16f769d",
       "image": "results.svg"
     },
     {
