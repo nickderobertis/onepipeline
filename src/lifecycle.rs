@@ -1840,7 +1840,7 @@ fn review_draft_detail(token: &onevcs::SessionToken) -> String {
 }
 
 /// The sentence a node carries when `onevcs` lifted its draft before any required
-/// check had run on it, and said so.
+/// check had run on it, with nothing on its head still running, and said so.
 const LIFTED_EARLY: &str = "the required checks did not start on the draft, so it was lifted \
                             before its checks were green";
 

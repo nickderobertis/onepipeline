@@ -39,6 +39,11 @@ const NEVER_SETTLES: &str = "lint in_progress - required";
 /// short enough that the lift happens inside the watch's two-second bound.
 const SHORT_GRACE: &str = "0.2";
 
+/// How long the work on a held draft's head runs, in seconds, from the host's first
+/// answer about it: five of [`SHORT_GRACE`]'s windows, so it is still running well
+/// past the window, and half the watch's two-second bound, so it ends inside it.
+const RUNS_PAST_GRACE: &str = "1";
+
 /// Give the world's identity a rules file: `publication`, `approvals`, and a
 /// `drafts:` mapping where one is given.
 pub(crate) fn rules(world: &World, publication: &str, approvals: &str, drafts: Option<&str>) {
@@ -486,8 +491,10 @@ fn a_worker_s_draft_on_an_auto_merging_repository_is_lifted_and_merged() {
 }
 
 /// A repository whose checks skip drafts: none of the required checks runs on the
-/// draft, so `onevcs` lifts it before they are green so that they can run, and
-/// warns — and the node's detail says so in one sentence.
+/// draft and nothing on its head is still running — every check completed, and the
+/// host's workflow-runs and check-suites reads name nothing in progress — so `onevcs`
+/// lifts it before they are green so that they can run, and warns — and the node's
+/// detail says so in one sentence.
 #[test]
 fn a_draft_lifted_before_its_checks_ran_says_so_on_the_node() {
     let world =
@@ -626,4 +633,126 @@ fn a_skipped_required_check_is_named_and_never_shown_as_passed() {
         "{}",
         monitor.stdout
     );
+}
+
+/// Where in the run's journal the first event of `kind` matching `which` sits.
+fn position_of(world: &World, run: &str, kind: &str, which: impl Fn(&Value) -> bool) -> usize {
+    world
+        .journal(run)
+        .iter()
+        .position(|event| event["kind"] == kind && which(event))
+        .unwrap_or_else(|| panic!("no {kind} was recorded\n{}", why(world, run)))
+}
+
+/// Assert the draft was lifted once, by the green lift and never the early one, and
+/// only after its required `lint` was reported passed on it.
+fn lifted_once_green(world: &World, run: &str) {
+    let node = node_of(world, run, "service");
+    assert_eq!(node["status"], "done", "{node}\n{}", why(world, run));
+    assert_eq!(node["outcome"], "change-open", "{node}");
+    assert!(
+        world.events_of(run, "draft-lifted-early").is_empty(),
+        "{}",
+        why(world, run)
+    );
+    assert_eq!(
+        world.events_of(run, "draft-lifted").len(),
+        1,
+        "{}",
+        why(world, run)
+    );
+    assert_eq!(gh_pr(world, "ready").len(), 1, "{:?}", gh_calls(world));
+    let green = position_of(world, run, "change-check", |event| {
+        event["payload"]["name"] == "lint" && event["payload"]["state"] == "passed"
+    });
+    let lifted = position_of(world, run, "draft-lifted", |_| true);
+    assert!(
+        green < lifted,
+        "lifted before lint passed\n{}",
+        why(world, run)
+    );
+    let detail = world
+        .events_of(run, "node-settled")
+        .into_iter()
+        .find_map(|event| event["payload"]["detail"].as_str().map(str::to_owned));
+    assert!(
+        detail
+            .as_deref()
+            .is_none_or(|detail| !detail.contains("did not start on the draft")),
+        "{detail:?}"
+    );
+    assert_eq!(host_holds(world, 1), "open");
+}
+
+/// A required check gated by `needs:` on a job still running is absent from the draft
+/// the way a check a draft-skipping workflow never runs is — but something on the head
+/// is still in progress, so the draft is **not** lifted early. It stays a draft past
+/// the grace window until the aggregate reports green, and is lifted once, then; its
+/// workflow has no `ready_for_review` trigger, so the lift starts no run.
+#[test]
+fn a_needs_gated_draft_is_held_while_a_check_on_its_head_runs_and_lifted_once_green() {
+    let world =
+        World::new("draft-needs").with_env("ONEVCS_DRAFT_CHECKS_GRACE_SECONDS", SHORT_GRACE);
+    world.repository("change-open", &[]);
+    world.script("service.work", "the worker wrote this\n");
+    world.script("gh.no-ready-trigger", "");
+    world.script("gh.draft.finishes-after", RUNS_PAST_GRACE);
+    // `lint` is the aggregate: absent until the advisory `build` it needs has finished.
+    world.script("gh.checks.draft", "build in_progress - advisory");
+    world.script(
+        "gh.checks",
+        "build completed success advisory\nlint completed success required",
+    );
+
+    let run = "needs";
+    settled_run(&world, run, vec![lifecycle("service", &[])], &[]).settled();
+
+    // The draft reported `build` still running while `lint` was absent.
+    let running = position_of(&world, run, "change-check", |event| {
+        event["payload"]["name"] == "build" && event["payload"]["status"] == "in_progress"
+    });
+    let lifted = position_of(&world, run, "draft-lifted", |_| true);
+    assert!(running < lifted, "{}", why(&world, run));
+    lifted_once_green(&world, run);
+}
+
+/// The other half: every check on the draft's head has completed and its required
+/// check is still absent, while a workflow run on that head is `in_progress` — the
+/// gap between an aggregate's prerequisites finishing and its own check appearing.
+/// The host's workflow-runs read says so, and the draft is held until that run
+/// completes and the required check reports green. An installed app's empty `queued`
+/// suite, which never completes, holds nothing.
+#[test]
+fn a_draft_whose_head_has_a_workflow_run_in_progress_is_held_until_it_is_green() {
+    let world = World::new("draft-busy").with_env("ONEVCS_DRAFT_CHECKS_GRACE_SECONDS", SHORT_GRACE);
+    world.repository("change-open", &[]);
+    world.script("service.work", "the worker wrote this\n");
+    world.script("gh.no-ready-trigger", "");
+    world.script("gh.draft.finishes-after", RUNS_PAST_GRACE);
+    world.script("gh.checks.draft", "build completed success advisory");
+    world.script("gh.runs.draft", "CI in_progress -");
+    world.script("gh.suites.draft", "Some App queued - 0");
+    world.script(
+        "gh.checks",
+        "build completed success advisory\nlint completed success required",
+    );
+
+    let run = "busy";
+    settled_run(&world, run, vec![lifecycle("service", &[])], &[]).settled();
+
+    lifted_once_green(&world, run);
+    // The host was asked what is running on the head, both reads.
+    let asked = |read: &str| {
+        gh_calls(&world)
+            .iter()
+            .filter(|call| call.first().map(String::as_str) == Some("api"))
+            .filter(|call| call.get(1).is_some_and(|path| path.contains(read)))
+            .count()
+    };
+    assert!(
+        asked("/actions/runs?head_sha=") >= 1,
+        "{:?}",
+        gh_calls(&world)
+    );
+    assert!(asked("/check-suites?") >= 1, "{:?}", gh_calls(&world));
 }

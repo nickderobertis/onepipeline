@@ -678,6 +678,15 @@ resolver = "2"
 # 0.48.x; `onevcs-testing` 0.16.0 requires exactly `=0.48.0`, so the pair moves as
 # one.
 #
+# `onevcs` 0.48.1 is the floor because it **keeps a draft while work on its head is
+# still running**: an early lift also needs every check on the pushed head complete,
+# required or not, and `RemoteHost::head_activity` naming nothing in progress there,
+# so a required check gated by `needs:` holds the draft until it is green rather than
+# being lifted mid-run. `crates/testfakes/src/bin/fake-gh.rs` answers the two reads
+# GitHub's implementation makes, and `tests/e2e/draft_lifecycle.rs` drives both
+# halves. `onevcs-testing` 0.17.0 requires exactly `=0.48.1`, so the pair moves as
+# one.
+#
 # `oneagentgraph` 0.5.4 is the floor because it relays a turn's `message` and
 # `reasoning` items as `turn-activity` under their own kind — the agent's words,
 # with no tool name — which `src/views.rs` and `src/projection.rs` render as what
@@ -721,7 +730,7 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 oneagentgraph = "0.5.6"
-onevcs = "0.48.0"
+onevcs = "0.48.1"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is
@@ -931,7 +940,7 @@ oneharness-core = "0.24.1"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.16.0"
+onevcs-testing = "0.17.0"
 # The store, linked: `src/taskgraph.rs` says how the engine calls it. `-plugin-api` is
 # named for the values the store answers with, and `-local-md` for the plugin
 # `crates/testfakes` hosts in process.
