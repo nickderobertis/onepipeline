@@ -2994,6 +2994,7 @@ mod tests {
                 kind,
                 reason: "the publication said no".into(),
                 retained: None,
+                armed: None,
             })
         };
         assert_eq!(failed(onevcs::FailureKind::Gate), "publication-failed");
@@ -3109,6 +3110,7 @@ mod tests {
                 kind: onevcs::FailureKind::PushRejected,
                 reason: "the merge path refused the publishing push".into(),
                 retained: None,
+                armed: None,
             }),
             None
         );

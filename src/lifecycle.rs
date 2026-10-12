@@ -1070,6 +1070,7 @@ fn publish(
                 kind,
                 reason,
                 retained,
+                ..
             } = &published.outcome
             {
                 // The push reached the remote and the reads behind it are spent.
