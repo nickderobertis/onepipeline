@@ -5306,6 +5306,20 @@ fn a_check_that_goes_red_after_the_arm_sends_the_worker_back_onto_the_same_branc
         reason.contains("its merge armed") && reason.contains("read 2 times"),
         "the re-dispatch does not say the change had been armed: {reason}"
     );
+    // The second publication meets the red check on a change already lifted and
+    // never arms it, so what the final settlement says of the arm is carried from
+    // the first attempt rather than read off the last.
+    let change = world.events_of(&run, "merge-armed")[0]["payload"]["url"]
+        .as_str()
+        .expect("onevcs names the change it armed")
+        .to_string();
+    let detail = settled_detail(&world, &run);
+    assert!(
+        detail.contains(&change)
+            && detail.contains("its merge armed")
+            && detail.contains("read 2 times"),
+        "the settlement does not name the armed change {change} and its two reads: {detail}"
+    );
 
     let branch = node["branch"].as_str().expect("the node names its branch");
     assert!(

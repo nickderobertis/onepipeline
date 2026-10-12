@@ -255,7 +255,23 @@ fn execute_placed(
             placed,
         ) {
             Attempt::Settled(settlement) => return engine::Ending::Settled(*settlement),
-            Attempt::Preserving(preserved) => preserved,
+            Attempt::Preserving(mut preserved) => {
+                // An attempt that armed nothing carries the latest one before it
+                // that did, so the settlement a spent budget writes on it still
+                // says the change had been armed — a red check on the change the
+                // re-dispatch republished is not where the arm is read.
+                if preserved.armed.is_none() {
+                    preserved.armed_before = last_preserved.as_ref().and_then(|last| {
+                        last.armed
+                            .as_ref()
+                            .map(|sentence| {
+                                format!("Attempt {}: {sentence}", attempt.get().saturating_sub(1))
+                            })
+                            .or_else(|| last.armed_before.clone())
+                    });
+                }
+                preserved
+            }
             // The identity admitted no session, so the node goes back to the
             // queue at no cost — on any attempt. A first attempt has nothing
             // behind it. A later one has the branch the attempt before
@@ -1456,13 +1472,15 @@ fn publish(
                 // a red check back to the worker, a bound spent as the
                 // `checks-unsettled` it is — and says beside `onevcs`'s own
                 // sentence that it was armed and how long it was read.
-                let reason = match &publication.armed {
-                    Some(change) => {
-                        format!("{reason}. {}", armed_detail(change, publication.reads))
-                    }
+                let armed = publication
+                    .armed
+                    .as_ref()
+                    .map(|change| armed_detail(change, publication.reads));
+                let reason = match &armed {
+                    Some(sentence) => format!("{reason}. {sentence}"),
                     None => reason.clone(),
                 };
-                return failed_publication(
+                let mut failed = failed_publication(
                     &node.id,
                     token,
                     branch.or_else(|| Some(published.branch.clone())),
@@ -1471,6 +1489,10 @@ fn publish(
                     retained.as_ref(),
                     body_aside.clone(),
                 );
+                if let Attempt::Preserving(preserved) = &mut failed {
+                    preserved.armed = armed;
+                }
+                return failed;
             }
             // A push into a review draft with its checks unread answers only a
             // publication that deferred them, and this engine never sets
@@ -1614,6 +1636,8 @@ fn publish(
                 body_aside: body_aside.clone(),
                 tip: crate::vcs::session_tip(token),
                 handed: None,
+                armed: None,
+                armed_before: None,
             })),
             // llmlint: ignore[changed_behavior_has_e2e] a session that opened with a merge
             // in progress is one continuing an existing branch, and the dispatch that opened
@@ -2099,6 +2123,15 @@ struct Preserved {
     /// The merge this attempt's session opened with, when it opened with one and
     /// the attempt's dispatch was handed it to conclude.
     handed: Option<onevcs::OpenConflict>,
+    /// What this attempt's own publication says of a change whose merge a read
+    /// left armed — [`armed_detail`]'s sentence — when one did. It is already part
+    /// of `reason`; this is the copy a later attempt carries.
+    armed: Option<String>,
+    /// The latest **earlier** attempt's armed sentence, numbered, when this attempt
+    /// itself armed nothing — filled by the retry loop, which is what knows the
+    /// attempts before this one — so a settlement written on this attempt still
+    /// says the change had been armed and how many reads that took.
+    armed_before: Option<String>,
 }
 
 /// The dispatches of one node that were handed its branch's conflict with the
@@ -2234,6 +2267,9 @@ fn failed_publication(
                 // Filled by `attempt_once`, which is what knows what its
                 // dispatch was handed.
                 handed: None,
+                // Filled by `publish` and the retry loop respectively.
+                armed: None,
+                armed_before: None,
             }))
         }
         // The host refused, not the work: no edit to the tree installs the tool
@@ -2340,7 +2376,7 @@ fn republished_the_same_commit(
         branch: Some(preserved.branch.clone()),
         head: Some(head.to_owned()),
         detail: Some(compose(
-            &format!("onevcs: {}. {roll_up}", preserved.reason),
+            &format!("onevcs: {}. {roll_up}", reason_with_arm(preserved)),
             preserved.body_aside.as_deref(),
         )),
         ..Settlement::plain(
@@ -2348,6 +2384,15 @@ fn republished_the_same_commit(
             NodeStatus::Failed,
             Some(crate::vcs::Failure::RESIDUAL),
         )
+    }
+}
+
+/// The last attempt's reason, followed by what an earlier attempt said of an
+/// armed merge where this one armed nothing.
+fn reason_with_arm(preserved: &Preserved) -> String {
+    match &preserved.armed_before {
+        Some(before) => format!("{}. {before}", preserved.reason),
+        None => preserved.reason.clone(),
     }
 }
 
@@ -2380,7 +2425,7 @@ fn stopped_retrying(
     Settlement {
         branch: Some(preserved.branch.clone()),
         detail: Some(compose(
-            &format!("onevcs: {}. {roll_up}", preserved.reason),
+            &format!("onevcs: {}. {roll_up}", reason_with_arm(preserved)),
             preserved.body_aside.as_deref(),
         )),
         // **No step** is recorded as completed, and that is the same rule the
@@ -3417,6 +3462,8 @@ mod tests {
             body_aside: None,
             tip: crate::vcs::SessionTip::Unknown,
             handed: None,
+            armed: None,
+            armed_before: None,
         };
         let two = std::num::NonZeroU32::new(2).expect("two");
         let three = std::num::NonZeroU32::new(3).expect("three");
@@ -3508,6 +3555,8 @@ mod tests {
             body_aside: None,
             tip: crate::vcs::SessionTip::Unknown,
             handed: None,
+            armed: None,
+            armed_before: None,
         };
         let two = std::num::NonZeroU32::new(2).expect("two");
         let three = std::num::NonZeroU32::new(3).expect("three");
@@ -3994,6 +4043,8 @@ mod tests {
                 base_commit: "b".repeat(40),
                 branch_tip: "t".repeat(40),
             }),
+            armed: None,
+            armed_before: None,
         };
         let mut conflicted = Conflicted::default();
         let never = conflicted.unconverged(&node, &ended(crate::vcs::Preserving::SyncConflict));
