@@ -41,9 +41,10 @@ budgets:
       Claude Code's stdin, after one priming call. Read from the full-workload journey's
       validated telemetry; this command times nothing. The user's design target, judged on
       this repository's CI runner.
-      Measured against onevcs 0.47.0, whose scoped launcher-filtered decision read (onevcs
-      #356, first released in 0.45.0) reads only the sessions the launcher label selects, so
-      the decision no longer reads every stream on the host.
+      Recorded on onevcs 0.47.0, the release this branch links, on 2026-10-11 on a shared
+      20-core dispatch host at load1 42: 169.7 ms, the owed scenario's maximum. On onevcs
+      0.46.0 the same journey recorded 110.5 ms. Both carry the scoped launcher-filtered
+      decision read (onevcs #356, first released in 0.45.0).
   - id: stop-guard-unpublished-latency-cold
     measure: reported
     command: [node, scripts/stop-guard-unpublished-budget.mjs, --cold]
@@ -54,9 +55,10 @@ budgets:
       Cold native Stop verdict: the same ten calls per scenario with every proof and
       index cache cleared before each, the slowest scenario's maximum. Read from the
       journey's telemetry. The user's design target for a cold cache.
-      Measured against onevcs 0.47.0, whose scoped launcher-filtered decision read (onevcs
-      #356, first released in 0.45.0) reads only the sessions the launcher label selects, so
-      the decision no longer reads every stream on the host.
+      Recorded on onevcs 0.47.0, the release this branch links, on 2026-10-11 on a shared
+      20-core dispatch host at load1 42: 555.3 ms, the none scenario's maximum, over this
+      threshold on that host. On onevcs 0.46.0 the same journey recorded 299.1 ms. Both carry
+      the scoped launcher-filtered decision read (onevcs #356, first released in 0.45.0).
   - id: stop-guard-unpublished-latency-10x
     measure: reported
     command: [node, scripts/stop-guard-unpublished-budget.mjs, --scale, '10']
@@ -68,9 +70,10 @@ budgets:
       scenario's maximum of ten calls after one priming call. Read from the journey's
       telemetry. A temporary relaxation from the manager's 0.5 s design bound, by the
       user's ruling of 2026-10-11 to land now; a later gap-closing run owns the remaining
-      10x warm cost. Measured against onevcs 0.47.0, whose scoped launcher-filtered decision
-      read (onevcs #356, first released in 0.45.0) reads only the sessions the launcher label
-      selects, so the decision no longer reads every stream on the host.
+      10x warm cost. Recorded on onevcs 0.47.0, the release this branch links, on 2026-10-11
+      on a shared 20-core dispatch host at load1 66: 724.2 ms, the none scenario's maximum. On
+      onevcs 0.46.0 the same journey recorded 1,209.2 ms (owed, load1 31). Both carry the
+      scoped launcher-filtered decision read (onevcs #356, first released in 0.45.0).
   - id: stop-guard-unpublished-journey-time
     measure: reported
     command: [node, scripts/stop-guard-unpublished-budget.mjs, --journey-time]
