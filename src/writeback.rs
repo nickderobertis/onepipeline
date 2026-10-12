@@ -7411,6 +7411,10 @@ mod tests {
             "spent": {"requests": 3, "budgets": []},
         }))
         .expect("the store's own report reads");
+        // A failed outcome requires the source task to change during both copy
+        // reads. Write-back copies an immutable local shadow, so no real settlement
+        // can produce it. This store-report assertion covers the compatibility arm
+        // without substituting a mutable source for the layer under test in an e2e.
         assert_eq!(
             super::actions(&report),
             ProjectionActions {
