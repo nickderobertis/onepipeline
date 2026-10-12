@@ -2293,7 +2293,7 @@ fn the_stacked_settlement_is_what_the_divergence_record_names() {
     );
 }
 
-/// The rework surface entry 117 proposes is this build's own: its two ops
+/// The rework surface entry 118 proposes is this build's own: its two ops
 /// round-trip through the public command type and are granted to the planner
 /// alone, its four kinds are kinds this build emits whose records the registered
 /// documents admit — and refuse with an unknown word in a closed field — and its
@@ -2301,12 +2301,12 @@ fn the_stacked_settlement_is_what_the_divergence_record_names() {
 #[test]
 fn the_rework_surface_is_what_the_divergence_record_names() {
     use onepipeline::payload::{registry, schema_of};
-    let block = divergence_block("117.");
+    let block = divergence_block("118.");
 
     let fixtures: Vec<Value> =
-        serde_json::from_value(block["ops"].clone()).expect("entry 117 names its ops");
+        serde_json::from_value(block["ops"].clone()).expect("entry 118 names its ops");
     let monitor_may: BTreeSet<String> = serde_json::from_value(block["monitor_may_issue"].clone())
-        .expect("entry 117 says which of them the monitor may issue");
+        .expect("entry 118 says which of them the monitor may issue");
     assert!(monitor_may.is_empty(), "{block}");
     let named: Vec<&str> = fixtures
         .iter()
@@ -2353,7 +2353,7 @@ fn the_rework_surface_is_what_the_divergence_record_names() {
     }
 
     let kinds: Vec<String> =
-        serde_json::from_value(block["event_kinds"].clone()).expect("entry 117 names its kinds");
+        serde_json::from_value(block["event_kinds"].clone()).expect("entry 118 names its kinds");
     let registry = registry();
     for kind in &kinds {
         let emitted = PipelineKind::from_wire(&EventKind(kind.clone()))
@@ -2362,13 +2362,13 @@ fn the_rework_surface_is_what_the_divergence_record_names() {
         let record = block["records"][kind.as_str()].clone();
         registry
             .check(&schema_of(emitted), &record)
-            .unwrap_or_else(|why| panic!("entry 117's {kind} is refused: {why}"));
+            .unwrap_or_else(|why| panic!("entry 118's {kind} is refused: {why}"));
     }
     let retitled = schema_of(PipelineKind::ChangeRetitled);
     let mut record = block["records"]["change-retitled"].clone();
     for by in block["retitled_by"]
         .as_array()
-        .expect("entry 117 names who retitles")
+        .expect("entry 118 names who retitles")
     {
         record["by"] = by.clone();
         registry
@@ -2381,7 +2381,7 @@ fn the_rework_surface_is_what_the_divergence_record_names() {
     let mut record = block["records"]["node-restack-started"].clone();
     for cause in block["restack_causes"]
         .as_array()
-        .expect("entry 117 names the causes")
+        .expect("entry 118 names the causes")
     {
         record["cause"] = cause.clone();
         registry
@@ -6525,7 +6525,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
         .collect();
     // The kinds the contract does not list are exactly the ones the divergence
     // record proposes, and no others: a kind neither document names fails here.
-    let proposed: BTreeSet<String> = ["40.", "47.", "55.", "65.", "70.", "92.", "117."]
+    let proposed: BTreeSet<String> = ["40.", "47.", "55.", "65.", "70.", "92.", "118."]
         .into_iter()
         .flat_map(|entry| {
             serde_json::from_value::<Vec<String>>(divergence_block(entry)["event_kinds"].clone())
@@ -7612,6 +7612,12 @@ const RULINGS: &[(&str, &str)] = &[
     (
         "116.",
         "every write-back write a store whose configuration opts into the boundary makes",
+    ),
+    // engine-links-onevcs: a timed-out check wait `onevcs` left armed is re-read, not
+    // re-dispatched.
+    (
+        "117.",
+        "An **armed** `checks-unsettled` is recovered the same way",
     ),
 ];
 

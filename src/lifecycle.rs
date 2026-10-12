@@ -271,7 +271,23 @@ fn execute_placed(
             attempt, placed,
         ) {
             Attempt::Settled(settlement) => return engine::Ending::Settled(*settlement),
-            Attempt::Preserving(preserved) => preserved,
+            Attempt::Preserving(mut preserved) => {
+                // An attempt that armed nothing carries the latest one before it
+                // that did, so the settlement a spent budget writes on it still
+                // says the change had been armed — a red check on the change the
+                // re-dispatch republished is not where the arm is read.
+                if preserved.armed.is_none() {
+                    preserved.armed_before = last_preserved.as_ref().and_then(|last| {
+                        last.armed
+                            .as_ref()
+                            .map(|sentence| {
+                                format!("Attempt {}: {sentence}", attempt.get().saturating_sub(1))
+                            })
+                            .or_else(|| last.armed_before.clone())
+                    });
+                }
+                preserved
+            }
             // The identity admitted no session, so the node goes back to the
             // queue at no cost — on any attempt. A first attempt has nothing
             // behind it. A later one has the branch the attempt before
@@ -1768,6 +1784,7 @@ fn publish(
                 kind,
                 reason,
                 retained,
+                ..
             } = &published.outcome
             {
                 // The push reached the remote and the reads behind it are spent.
@@ -1794,15 +1811,40 @@ fn publish(
                         body_aside.clone(),
                     );
                 }
-                return failed_publication(
+                // A change whose merge a read left armed and that did not land
+                // in the reads after it routes exactly as its word always has —
+                // a red check back to the worker, a bound spent as the
+                // `checks-unsettled` it is — and says beside `onevcs`'s own
+                // sentence that it was armed and how long it was read.
+                let armed = publication
+                    .armed
+                    .as_ref()
+                    .map(|change| armed_detail(change, publication.reads));
+                let reason = match &armed {
+                    Some(sentence) => format!("{reason}. {sentence}"),
+                    None => reason.clone(),
+                };
+                let mut failed = failed_publication(
                     &node.id,
                     token,
                     branch.or_else(|| Some(published.branch.clone())),
                     *kind,
-                    reason,
+                    &reason,
                     retained.as_ref(),
                     body_aside.clone(),
                 );
+                if let Attempt::Preserving(preserved) = &mut failed {
+                    preserved.armed = armed;
+                }
+                return failed;
+            }
+            // A push into a review draft with its checks unread answers only a
+            // publication that deferred them, and this engine never sets
+            // `defer_checks`: receiving it means `onevcs` and this engine disagree
+            // about the request. Settled as the residual rather than `done`, so no
+            // dependent proceeds on a change whose checks nobody read.
+            if let Some(detail) = unchecked_detail(&published.outcome) {
+                return publication_failed(detail);
             }
             let labels =
                 engine::dispatch_labels(&paths.run, &node.id, None, node.persona.as_deref());
@@ -1859,7 +1901,14 @@ fn publish(
             // and required checks that were skipped rather than passed.
             let lifted_early = crate::vcs::lifted_early_in(token).then(|| LIFTED_EARLY.to_owned());
             let skipped = skipped_detail(&crate::vcs::skipped_required_in(token));
+            // A change whose merge an elapsed wait left armed and a later read
+            // then saw land says so, and how many reads that took.
+            let armed = publication
+                .armed
+                .as_ref()
+                .map(|change| armed_detail(change, publication.reads));
             let detail: Vec<String> = [
+                armed,
                 drafted,
                 kept_for_review,
                 finished,
@@ -1931,6 +1980,8 @@ fn publish(
                 body_aside: body_aside.clone(),
                 tip: crate::vcs::session_tip(token),
                 handed: None,
+                armed: None,
+                armed_before: None,
             })),
             // llmlint: ignore[changed_behavior_has_e2e] a session that opened with a merge
             // in progress is one continuing an existing branch, and the dispatch that opened
@@ -2026,6 +2077,9 @@ fn drafted_status(
         ) => NodeStatus::CompleteDraft,
         (onevcs::PublishOutcome::ChangeDraft(_), _) => NodeStatus::Done,
         (onevcs::PublishOutcome::ChangeReviewDraft(_), _) => NodeStatus::Done,
+        // Settled before it is asked — see `unchecked_detail` — and never `done` if
+        // that ever changes: nobody read its checks.
+        (onevcs::PublishOutcome::ChangeReviewDraftUnchecked(_), _) => NodeStatus::Failed,
         (
             onevcs::PublishOutcome::Merged(_)
             | onevcs::PublishOutcome::ChangeOpen(_)
@@ -2035,6 +2089,21 @@ fn drafted_status(
             _,
         ) => NodeStatus::Done,
     }
+}
+
+/// The residual's detail for a publication that answered a push into a review draft
+/// with its checks unread, which only a `defer_checks` publication answers and this
+/// engine never makes one: the outcome and its change request, named. `None` for
+/// every other outcome, which settles as its own word says.
+fn unchecked_detail(outcome: &onevcs::PublishOutcome) -> Option<String> {
+    let onevcs::PublishOutcome::ChangeReviewDraftUnchecked(url) = outcome else {
+        return None;
+    };
+    Some(format!(
+        "onevcs answered `ChangeReviewDraftUnchecked` for {url} — pushed into a draft kept for \
+         its user's review without its checks being read — to a publication that did not defer \
+         its checks, so nothing read them and the node is not settled done"
+    ))
 }
 
 /// The sentence a node settled `change-review-draft` carries: its checks are
@@ -2110,6 +2179,9 @@ fn finished_detail(
         (true, onevcs::PublishOutcome::ChangeReviewDraft(_)) => {
             ", and the publication kept it as a draft for its user's review"
         }
+        (true, onevcs::PublishOutcome::ChangeReviewDraftUnchecked(_)) => {
+            ", and the publication pushed into it without reading its checks"
+        }
         (true, onevcs::PublishOutcome::Merged(_)) => {
             ", and the publication lifted it out of its draft and merged it"
         }
@@ -2132,6 +2204,21 @@ struct Published {
     /// on every path but the re-read, which is every publication that answered
     /// the first time it was asked.
     reads: std::num::NonZeroU32,
+    /// The change request a read left `checks-unsettled` with its merge
+    /// **armed**, if one did, so the reads after it watched that change rather
+    /// than the agent being sent back to it.
+    armed: Option<onevcs::Url>,
+}
+
+/// The sentence a node carries when a read found its change's merge armed: which
+/// change, that it was armed, and how many reads of the merge path the
+/// publication took.
+fn armed_detail(change: &onevcs::Url, reads: std::num::NonZeroU32) -> String {
+    format!(
+        "the wait for the checks of {change} elapsed with none of them red and its merge armed, \
+         so the merge path was read {reads} time{} rather than the worker being sent back",
+        if reads.get() == 1 { "" } else { "s" }
+    )
 }
 
 /// Publish, and where the push reached the remote with the merge path unread,
@@ -2146,6 +2233,12 @@ struct Published {
 /// read of the host rather than a second push. Nothing here asks a host anything
 /// itself: a second route to a change request's state would be host knowledge
 /// regrown in the composition layer.
+///
+/// A publication that ended `checks-unsettled` with its change's merge **armed**
+/// is re-read the same way: nothing is red, the host lands the change once its
+/// required checks pass, and publishing the same session again is `onevcs`'s own
+/// guidance for watching it. A worker sent back to it would spend a dispatch on a
+/// change that is on its way to landing.
 ///
 /// Bounded by [`engine::merge_path_reads`]. Whatever a read answers is what the
 /// node settles on, and the routing that follows is the one that word has always
@@ -2173,12 +2266,21 @@ fn publish_rereading_the_merge_path(
     let mut backoff = engine::merge_path_backoff();
     let mut reads = std::num::NonZeroU32::MIN;
     let mut answered = publish();
-    while reads < budget && still_unread(&answered) && waited(backoff, cancel) {
+    let mut armed = left_armed(&answered);
+    while reads < budget
+        && (still_unread(&answered) || left_armed(&answered).is_some())
+        && waited(backoff, cancel)
+    {
         backoff = engine::doubled(backoff);
         reads = reads.saturating_add(1);
         answered = publish();
+        armed = left_armed(&answered).or(armed);
     }
-    Published { answered, reads }
+    Published {
+        answered,
+        reads,
+        armed,
+    }
 }
 
 /// Wait out one backoff, answering `false` if the run was stopped instead.
@@ -2223,6 +2325,27 @@ fn still_unread(
         onevcs::PublishOutcome::Failed { kind, .. }
             if crate::vcs::failure_of(*kind) == crate::vcs::Failure::Unread
     )
+}
+
+/// The change a publication left `checks-unsettled` with its merge armed, if it
+/// did — the wait elapsed with no required check red, and the host lands the
+/// change once they pass. An unarmed `checks-unsettled` is not one: nothing is
+/// carrying that change any further, so it routes as it always has.
+fn left_armed(
+    answered: &std::result::Result<onevcs::Publication, crate::vcs::PublishRefused>,
+) -> Option<onevcs::Url> {
+    match answered {
+        Ok(onevcs::Publication {
+            outcome:
+                onevcs::PublishOutcome::Failed {
+                    kind: onevcs::FailureKind::ChecksUnsettled,
+                    armed: Some(armed),
+                    ..
+                },
+            ..
+        }) => Some(armed.change.clone()),
+        _ => None,
+    }
 }
 
 /// The settlement of a node whose publication its own cancellation stopped.
@@ -2346,6 +2469,15 @@ struct Preserved {
     /// The merge this attempt's session opened with, when it opened with one and
     /// the attempt's dispatch was handed it to conclude.
     handed: Option<onevcs::OpenConflict>,
+    /// What this attempt's own publication says of a change whose merge a read
+    /// left armed — [`armed_detail`]'s sentence — when one did. It is already part
+    /// of `reason`; this is the copy a later attempt carries.
+    armed: Option<String>,
+    /// The latest **earlier** attempt's armed sentence, numbered, when this attempt
+    /// itself armed nothing — filled by the retry loop, which is what knows the
+    /// attempts before this one — so a settlement written on this attempt still
+    /// says the change had been armed and how many reads that took.
+    armed_before: Option<String>,
 }
 
 /// The dispatches of one node that were handed its branch's conflict with the
@@ -2481,6 +2613,9 @@ fn failed_publication(
                 // Filled by `attempt_once`, which is what knows what its
                 // dispatch was handed.
                 handed: None,
+                // Filled by `publish` and the retry loop respectively.
+                armed: None,
+                armed_before: None,
             }))
         }
         // The host refused, not the work: no edit to the tree installs the tool
@@ -2587,7 +2722,7 @@ fn republished_the_same_commit(
         branch: Some(preserved.branch.clone()),
         head: Some(head.to_owned()),
         detail: Some(compose(
-            &format!("onevcs: {}. {roll_up}", preserved.reason),
+            &format!("onevcs: {}. {roll_up}", reason_with_arm(preserved)),
             preserved.body_aside.as_deref(),
         )),
         ..Settlement::plain(
@@ -2595,6 +2730,15 @@ fn republished_the_same_commit(
             NodeStatus::Failed,
             Some(crate::vcs::Failure::RESIDUAL),
         )
+    }
+}
+
+/// The last attempt's reason, followed by what an earlier attempt said of an
+/// armed merge where this one armed nothing.
+fn reason_with_arm(preserved: &Preserved) -> String {
+    match &preserved.armed_before {
+        Some(before) => format!("{}. {before}", preserved.reason),
+        None => preserved.reason.clone(),
     }
 }
 
@@ -2627,7 +2771,7 @@ fn stopped_retrying(
     Settlement {
         branch: Some(preserved.branch.clone()),
         detail: Some(compose(
-            &format!("onevcs: {}. {roll_up}", preserved.reason),
+            &format!("onevcs: {}. {roll_up}", reason_with_arm(preserved)),
             preserved.body_aside.as_deref(),
         )),
         // **No step** is recorded as completed, and that is the same rule the
@@ -2924,7 +3068,7 @@ fn title_check_of(check: Option<&serde_json::Value>) -> std::result::Result<Titl
             // llmlint: ignore[changed_behavior_has_e2e] a `title_check` the wire type refuses
             // for its shape rather than its verdict — an extra field, a `keeps` naming a
             // title, a `replaced` naming none — is held by `the_title_check_and_the_net_diff_
-            // cap_are_entry_117s`; the journey drives the verdict and the subject a drafter
+            // cap_are_entry_118s`; the journey drives the verdict and the subject a drafter
             // answers wrongly, which settle the same way through this function.
             _ => format!("the drafter's `title_check` is not one this build reads: {error}"),
         }
@@ -3769,6 +3913,31 @@ mod tests {
             drafted_status(&onevcs::PublishOutcome::ChangeOpen(url()), None),
             NodeStatus::Done
         );
+        // A review draft nobody read the checks of is never done: this engine
+        // never defers its checks, so the answer is a disagreement, not work.
+        assert_eq!(
+            drafted_status(
+                &onevcs::PublishOutcome::ChangeReviewDraftUnchecked(url()),
+                None
+            ),
+            NodeStatus::Failed
+        );
+        // Every outcome this engine's publications answer settles as its own word
+        // says; only the unchecked review draft is turned back before it settles.
+        for settles in [
+            onevcs::PublishOutcome::ChangeOpen(url()),
+            onevcs::PublishOutcome::ChangeReviewDraft(url()),
+            onevcs::PublishOutcome::NothingToPublish,
+        ] {
+            assert_eq!(unchecked_detail(&settles), None, "{settles:?}");
+        }
+        let said = unchecked_detail(&onevcs::PublishOutcome::ChangeReviewDraftUnchecked(url()))
+            .expect("an unchecked review draft is turned back before it settles");
+        assert!(
+            said.contains("ChangeReviewDraftUnchecked")
+                && said.contains("https://github.com/owner/service/pull/7"),
+            "the residual does not name the outcome and its change request: {said}"
+        );
     }
 
     /// What the closeout says about a draft the session held is what the
@@ -3892,6 +4061,8 @@ mod tests {
             body_aside: None,
             tip: crate::vcs::SessionTip::Unknown,
             handed: None,
+            armed: None,
+            armed_before: None,
         };
         let two = std::num::NonZeroU32::new(2).expect("two");
         let three = std::num::NonZeroU32::new(3).expect("three");
@@ -3983,6 +4154,8 @@ mod tests {
             body_aside: None,
             tip: crate::vcs::SessionTip::Unknown,
             handed: None,
+            armed: None,
+            armed_before: None,
         };
         let two = std::num::NonZeroU32::new(2).expect("two");
         let three = std::num::NonZeroU32::new(3).expect("three");
@@ -4471,6 +4644,8 @@ mod tests {
                 base_commit: "b".repeat(40),
                 branch_tip: "t".repeat(40),
             }),
+            armed: None,
+            armed_before: None,
         };
         let mut conflicted = Conflicted::default();
         let never = conflicted.unconverged(&node, &ended(crate::vcs::Preserving::SyncConflict));
@@ -4749,18 +4924,18 @@ mod tests {
         assert_eq!(steps.len(), 1);
     }
 
-    /// The `title_check` verdicts and the net diff's cap entry 117 states are the
+    /// The `title_check` verdicts and the net diff's cap entry 118 states are the
     /// ones a rework's publication reads and shows.
     #[test]
-    fn the_title_check_and_the_net_diff_cap_are_entry_117s() {
+    fn the_title_check_and_the_net_diff_cap_are_entry_118s() {
         let record = include_str!("../docs/contract-divergences.md");
         let block: serde_json::Value = record
             .split("\n## ")
-            .find(|entry| entry.starts_with("117."))
+            .find(|entry| entry.starts_with("118."))
             .and_then(|entry| entry.split("```json").nth(1))
             .and_then(|rest| rest.split("```").next())
-            .map(|block| serde_json::from_str(block).expect("entry 117's block is JSON"))
-            .expect("the record carries entry 117's block");
+            .map(|block| serde_json::from_str(block).expect("entry 118's block is JSON"))
+            .expect("the record carries entry 118's block");
         assert_eq!(
             block["net_diff_cap_bytes"],
             serde_json::json!(crate::vcs::NET_DIFF_CAP)

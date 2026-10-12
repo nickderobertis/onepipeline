@@ -5689,15 +5689,15 @@ mod tests {
     /// the code from parting: a word or a key the document does not name is one
     /// nobody proposed.
     #[test]
-    fn the_rework_record_is_the_shape_entry_117_documents() {
+    fn the_rework_record_is_the_shape_entry_118_documents() {
         let record = include_str!("../docs/contract-divergences.md");
         let block: Value = record
             .split("\n## ")
-            .find(|entry| entry.starts_with("117."))
+            .find(|entry| entry.starts_with("118."))
             .and_then(|entry| entry.split("```json").nth(1))
             .and_then(|rest| rest.split("```").next())
-            .map(|block| serde_json::from_str(block).expect("entry 117's block is JSON"))
-            .expect("the record carries entry 117's block");
+            .map(|block| serde_json::from_str(block).expect("entry 118's block is JSON"))
+            .expect("the record carries entry 118's block");
         let op = &block["ops"][0];
         let mut state = RunState::default();
         state.reworks.insert(
@@ -5753,7 +5753,7 @@ mod tests {
                 "docs/contract-divergences.md does not name the task field `{field}`"
             );
         }
-        // The key a rework's replacement carries what it answers under — entry 117's.
+        // The key a rework's replacement carries what it answers under — entry 118's.
         assert!(
             divergence.contains(&format!("`{}`", crate::taskgraph::REWORK_KEY)),
             "docs/contract-divergences.md does not name the rework key"

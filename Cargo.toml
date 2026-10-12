@@ -671,6 +671,18 @@ resolver = "2"
 # one. 0.47.0 is not taken here: it changes the publication request and outcome that
 # node `op-readjust` adopts.
 #
+# `onevcs` 0.48.0 is the floor because a `change-auto` or `change-direct`
+# publication whose check wait elapses with no required check red now ends
+# `checks-unsettled` carrying `armed: Some(ArmedMerge)` — the draft lifted and the
+# host's auto-merge armed — and `src/lifecycle.rs` reads that change again rather
+# than re-dispatching its worker, settling `done` on the landing once the host
+# merges it. `tests/e2e/lifecycle.rs`'s
+# `an_armed_change_is_read_again_rather_than_redispatched_and_settles_on_its_landing`
+# drives it. It also carries 0.46/0.47's `PublishRequest.defer_checks` and `adopt`,
+# which this engine leaves unset. A **requirement**, because `^0.46` admits no
+# 0.48.x; `onevcs-testing` 0.16.0 requires exactly `=0.48.0`, so the pair moves as
+# one.
+#
 # `oneagentgraph` 0.5.4 is the floor because it relays a turn's `message` and
 # `reasoning` items as `turn-activity` under their own kind — the agent's words,
 # with no tool name — which `src/views.rs` and `src/projection.rs` render as what
@@ -714,7 +726,7 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 oneagentgraph = "0.5.6"
-onevcs = "0.46.0"
+onevcs = "0.48.0"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is
@@ -924,7 +936,7 @@ oneharness-core = "0.24.1"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.14.0"
+onevcs-testing = "0.16.0"
 # The store, linked: `src/taskgraph.rs` says how the engine calls it. `-plugin-api` is
 # named for the values the store answers with, and `-local-md` for the plugin
 # `crates/testfakes` hosts in process.
@@ -957,7 +969,7 @@ tokio = "1"
 
 [package]
 name = "onepipeline"
-version = "0.68.0"
+version = "0.68.1"
 edition = "2021"
 rust-version.workspace = true
 description = "Execute a task DAG over oneagentgraph and onevcs, merging their event streams into one."
