@@ -40,7 +40,24 @@ pub enum De {
     RejectTags,
     MergeAsOrdinary,
     NonFiniteAsString,
+    NoSchema,
+    StrictNoSchema,
+    LegacyOctal,
 }
+
+/// Every read configuration the option matrix tries.
+pub const ALL_DE: [De; 10] = [
+    De::Default,
+    De::StrictBooleans,
+    De::NoSchema,
+    De::StrictNoSchema,
+    De::LegacyOctal,
+    De::NonFiniteAsString,
+    De::RejectTags,
+    De::MergeAsOrdinary,
+    De::LastWins,
+    De::NoSnippet,
+];
 
 impl De {
     fn options(self) -> serde_saphyr::Options {
@@ -53,6 +70,12 @@ impl De {
             De::RejectTags => o.reject_unsupported_tags = true,
             De::MergeAsOrdinary => o.merge_keys = serde_saphyr::MergeKeyPolicy::AsOrdinary,
             De::NonFiniteAsString => o.reject_non_finite_typeless_float = false,
+            De::NoSchema => o.no_schema = true,
+            De::StrictNoSchema => {
+                o.strict_booleans = true;
+                o.no_schema = true;
+            }
+            De::LegacyOctal => o.legacy_octal_numbers = true,
         }
         o
     }
@@ -478,14 +501,85 @@ fn ser_variants() -> Vec<(&'static str, serde_saphyr::SerializerOptions)> {
     o.folded_wrap_chars = usize::MAX;
     o.compact_list_indent = false;
     v.push(("folded_wrap_chars=MAX,compact_list_indent=false", o));
+    let mut o = d();
+    o.quote_all = true;
+    v.push(("quote_all", o));
+    let mut o = d();
+    o.folded_wrap_chars = usize::MAX;
+    v.push((NOFOLD_STRIP, o));
+    let mut o = d();
+    o.folded_wrap_chars = usize::MAX;
+    o.yaml_12 = true;
+    v.push((NOFOLD12_STRIP, o));
     v
+}
+
+pub const NOFOLD_STRIP: &str = "folded_wrap_chars=MAX + code strips blank-line indentation in literal blocks";
+pub const NOFOLD12_STRIP: &str =
+    "folded_wrap_chars=MAX,yaml_12 (header stripped) + code strips blank-line indentation in literal blocks";
+
+/// The code alternative for the blank-line difference: inside a literal block scalar, a line
+/// holding only spaces, no more of them than the block's indentation, is an empty line of the
+/// block (YAML 1.2 §8.1.1.2), so writing it as `""` reads back the same string. A
+/// whitespace-only line with *more* spaces than the indentation carries content (the spaces
+/// after the indentation are part of the string) and is left exactly as it is.
+pub fn strip_blank_block_lines(text: &str) -> String {
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    let indent_of = |l: &str| l.len() - l.trim_start_matches(' ').len();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        out.push_str(line);
+        i += 1;
+        let body = line.trim_end_matches('\n').trim_end();
+        let header = body.rsplit_once(": ").map(|(_, h)| h).or_else(|| body.trim_start().strip_prefix("- ")).unwrap_or(body.trim_start());
+        let is_literal = header.starts_with('|')
+            && header[1..].chars().all(|c| c == '-' || c == '+' || c.is_ascii_digit())
+            && !body.trim_start().starts_with('"')
+            && !body.trim_start().starts_with('\'');
+        if !is_literal {
+            continue;
+        }
+        let parent = indent_of(line);
+        // The block's indentation: an explicit indicator, else its first non-blank line's.
+        let explicit = header[1..].chars().find(|c| c.is_ascii_digit()).map(|c| parent + c.to_digit(10).unwrap() as usize);
+        let block = explicit.or_else(|| {
+            lines[i..]
+                .iter()
+                .find(|l| !l.trim().is_empty())
+                .map(|l| indent_of(l))
+                .filter(|n| *n > parent)
+        });
+        let Some(block) = block else { continue };
+        while i < lines.len() {
+            let l = lines[i];
+            let content = l.trim_end_matches('\n');
+            let blank = content.chars().all(|c| c == ' ');
+            if !blank && indent_of(l) < block {
+                break;
+            }
+            if blank && content.len() <= block {
+                out.push_str(&l[content.len()..]);
+            } else {
+                out.push_str(l);
+            }
+            i += 1;
+        }
+    }
+    out
 }
 
 /// One emission under one variant, with the code change the variant's label names.
 pub fn emit<T: Serialize>(value: &T, label: &str, opts: serde_saphyr::SerializerOptions) -> String {
     let out = serde_saphyr::to_string_with_options(value, opts).unwrap();
-    if label == NOFOLD12 {
+    let out = if label == NOFOLD12 || label == NOFOLD12_STRIP {
         out.strip_prefix("%YAML 1.2\n---\n").map(str::to_owned).unwrap_or(out)
+    } else {
+        out
+    };
+    if label == NOFOLD_STRIP || label == NOFOLD12_STRIP {
+        strip_blank_block_lines(&out)
     } else {
         out
     }
@@ -493,7 +587,7 @@ pub fn emit<T: Serialize>(value: &T, label: &str, opts: serde_saphyr::Serializer
 
 /// The variants whose every difference is listed (the others are counted only).
 fn listed(label: &str) -> bool {
-    matches!(label, "default") || label == NOFOLD || label == NOFOLD12
+    matches!(label, "default") || label == NOFOLD || label == NOFOLD12 || label == NOFOLD_STRIP || label == NOFOLD12_STRIP
 }
 
 pub fn writeback_emission(c: &Corpus, scratch: &Path, r: &mut Report) {
@@ -583,15 +677,19 @@ fn local_md(stores: BTreeMap<String, Vec<(String, Json, String)>>, scratch: &Pat
     let mut projects = 0;
     for (run, docs) in &stores {
         let mut sources = Vec::new();
-        for (who, emit) in [
+        for (_who, emit) in [
             ("today", Box::new(|v: &Json| serde_norway::to_string(v).unwrap()) as Box<dyn Fn(&Json) -> String>),
             ("saphyr default", Box::new(|v: &Json| serde_saphyr::to_string(v).unwrap())),
             (NOFOLD12, Box::new(|v: &Json| {
                 let (label, opts) = ser_variants().into_iter().find(|(l, _)| *l == NOFOLD12).unwrap();
                 emit(v, label, opts)
             })),
+            (NOFOLD12_STRIP, Box::new(|v: &Json| {
+                let (label, opts) = ser_variants().into_iter().find(|(l, _)| *l == NOFOLD12_STRIP).unwrap();
+                emit(v, label, opts)
+            })),
         ] {
-            let root = scratch.join(who.split(' ').next().unwrap().replace(['=', ',', '('], "_")).join(run);
+            let root = scratch.join(format!("store{}", sources.len())).join(run);
             for sub in ["projects", "tasks", "documents"] {
                 std::fs::create_dir_all(root.join(sub)).unwrap();
             }
@@ -623,7 +721,7 @@ fn local_md(stores: BTreeMap<String, Vec<(String, Json, String)>>, scratch: &Pat
             s.compared += 1;
             if rel.starts_with("tasks/") { tasks += 1 } else { projects += 1 }
             let x = read(0);
-            for (i, who) in [(1, "saphyr default"), (2, NOFOLD12)] {
+            for (i, who) in [(1, "saphyr default"), (2, NOFOLD12), (3, NOFOLD12_STRIP)] {
                 let y = read(i);
                 if x != y {
                     s.differ(format!("[{who}] local-md read differs\nbefore: {x:?}\nafter:  {y:?}"), &name);
@@ -649,7 +747,7 @@ fn local_md(stores: BTreeMap<String, Vec<(String, Json, String)>>, scratch: &Pat
                     let after_read = rt.block_on(src.get_task(&tid)).map(|t| norm(serde_json::to_value(t).unwrap(), root)).map_err(|e| e.to_string());
                     edits.push((st, md, line_diff(&pre, &post), after_read));
                 }
-                for (i, who) in [(1, "saphyr default"), (2, NOFOLD12)] {
+                for (i, who) in [(1, "saphyr default"), (2, NOFOLD12), (3, NOFOLD12_STRIP)] {
                     if edits[0] != edits[i] {
                         s.differ(
                             format!(
@@ -1012,6 +1110,13 @@ pub fn probes(r: &mut Report) {
         ("empty map", json!({})), ("empty list", json!([])), ("nested empties", json!({"a": {}, "b": []})),
         ("list of maps", json!([{"a": 1, "b": 2}, {"c": 3}])), ("list of lists", json!([[1, 2], [3]])),
         ("map in list in map", json!({"k": [{"x": [1]}]})), ("key needing quotes", json!({"a: b": 1, "on": 2, "": 3})),
+        // Whitespace the blank-line postprocess must preserve.
+        ("spaces-only line inside", json!("a\n   \nb\n")), ("two blank lines inside", json!("a\n\n\nb\n")),
+        ("leading-space first line", json!("  lead\n\nx\n")), ("trailing space-only line", json!("x\n \n")),
+        ("tab-only line inside", json!("tab\n\t\nend\n")), ("trailing spaces on a line", json!("a  \n\nb\n")),
+        ("blank line, no final newline", json!("a\n\nb")), ("only newlines", json!("\n\n")),
+        ("nested multi-line in list", json!([{"body": "## What\n\nx\n\n## Why\ny"}, "p\n\nq"])),
+        ("multi-line key-like content", json!("k: |\n\n  v\n")),
     ];
     for (name, v) in values {
         s.compared += 1;
@@ -1021,6 +1126,10 @@ pub fn probes(r: &mut Report) {
             let after = emit(&doc, label, opts);
             if before != after {
                 s.differ(format!("{name} [{label}]\nbefore: {before:?}\nafter:  {after:?}"), "probe");
+            }
+            let strict = saphyr::<Json>(&after, De::StrictBooleans).map(|x| x.to_string());
+            if strict != Ok(doc.to_string()) {
+                s.differ(format!("{name} [{label}] does not round-trip through a strict_booleans reader: wrote {after:?}; reads {strict:?}"), "probe");
             }
             let back_s = saphyr::<Json>(&after, De::Default).map(|x| x.to_string());
             let back_n = norway::<Json>(&after).map(|x| x.to_string());
@@ -1035,4 +1144,83 @@ pub fn probes(r: &mut Report) {
             s.notes.push(format!("{name}: today's own output does not round-trip through today: {before:?}"));
         }
     }
+}
+
+
+/// Every read configuration against today, for each scalar and key difference the probes
+/// found, so a claim that no option reproduces today rests on a measurement.
+pub fn option_matrix(r: &mut Report) {
+    let s = r.section("option matrix: each probe difference under every measured serde-saphyr read option");
+    #[derive(Debug, PartialEq, Deserialize)]
+    struct S {
+        v: String,
+    }
+    #[derive(Debug, PartialEq, Deserialize)]
+    struct U {
+        v: u32,
+    }
+    #[derive(Debug, PartialEq, Deserialize)]
+    struct B {
+        v: bool,
+    }
+    type Probe = (&'static str, String, fn(&str) -> Result<String, String>, fn(&str, De) -> Result<String, String>);
+    fn nj(t: &str) -> Result<String, String> { norway::<Json>(t).map(|v| v.to_string()) }
+    fn sj(t: &str, d: De) -> Result<String, String> { saphyr::<Json>(t, d).map(|v| v.to_string()) }
+    fn ns(t: &str) -> Result<String, String> { norway::<S>(t).map(|v| format!("{v:?}")) }
+    fn ss(t: &str, d: De) -> Result<String, String> { saphyr::<S>(t, d).map(|v| format!("{v:?}")) }
+    fn nu(t: &str) -> Result<String, String> { norway::<U>(t).map(|v| format!("{v:?}")) }
+    fn su(t: &str, d: De) -> Result<String, String> { saphyr::<U>(t, d).map(|v| format!("{v:?}")) }
+    fn nb(t: &str) -> Result<String, String> { norway::<B>(t).map(|v| format!("{v:?}")) }
+    fn sb(t: &str, d: De) -> Result<String, String> { saphyr::<B>(t, d).map(|v| format!("{v:?}")) }
+    let mut probes: Vec<Probe> = Vec::new();
+    for sp in ["yes", "no", "on", "off", "y", "n", "017", "1_000", "0x1F", ".inf", ".nan", "18446744073709551616",
+               "!custom x", "2026-10-12", "12:30", "1e3"] {
+        probes.push(("Value", format!("v: {sp}\n"), nj, sj));
+    }
+    for text in ["~: a\n", "title: a\ntitle: b\n", "base: &b {x: 1}\nchild:\n  <<: *b\n  y: 2\n"] {
+        probes.push(("Value", text.to_owned(), nj, sj));
+    }
+    for sp in ["", "~", "null", "1", "1.0", "yes", "017", "2026-10-12"] {
+        probes.push(("String field", format!("v: {sp}\n"), ns, ss));
+    }
+    probes.push(("u32 field", "v: \"5\"\n".to_owned(), nu, su));
+    probes.push(("u32 field", "v: 017\n".to_owned(), nu, su));
+    for sp in ["yes", "on", "True"] {
+        probes.push(("bool field", format!("v: {sp}\n"), nb, sb));
+    }
+    for (into, text, before, after) in probes {
+        s.compared += 1;
+        let b = before(&text);
+        let mut same = Vec::new();
+        let mut other = Vec::new();
+        for de in ALL_DE {
+            let a = after(&text, de);
+            // A refusal reproduces a refusal (wording is the error findings' subject).
+            let reproduces = match (&b, &a) {
+                (Ok(x), Ok(y)) => x == y,
+                (Err(_), Err(_)) => true,
+                _ => false,
+            };
+            if reproduces {
+                same.push(format!("{de:?}"));
+            } else {
+                other.push(format!("{de:?} -> {}", match &a {
+                    Ok(v) => v.clone(),
+                    Err(e) => format!("refused: {}", e.lines().next().unwrap_or("")),
+                }));
+            }
+        }
+        if !other.is_empty() {
+            s.differ(
+                format!(
+                    "{text:?} into {into}: today {}\nreproduced by: {}\nnot reproduced by:\n  {}",
+                    match &b { Ok(v) => v.clone(), Err(e) => format!("refused: {e}") },
+                    if same.is_empty() { "(none of the measured options)".to_owned() } else { same.join(", ") },
+                    other.join("\n  ")
+                ),
+                "probe",
+            );
+        }
+    }
+    s.notes.push(format!("options measured: {:?}", ALL_DE));
 }

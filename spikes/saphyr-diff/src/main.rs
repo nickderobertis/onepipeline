@@ -46,6 +46,7 @@ fn main() {
     kinds::ci_workflows(&corpus, &mut report);
     kinds::malformed(&mut report);
     kinds::probes(&mut report);
+    kinds::option_matrix(&mut report);
     kinds::timing(&corpus);
     report.print();
     let _ = std::fs::remove_dir_all(&scratch);
