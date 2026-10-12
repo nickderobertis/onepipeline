@@ -284,29 +284,36 @@ fn a_note_is_queued(queue: &Path) -> bool {
     queued
 }
 
-/// Release the held **judge** turn once the note is really in its conversation's
-/// hands.
+/// Release the held turn once the note is really in its conversation's hands.
 ///
-/// The judge's counterpart of [`release_when_the_note_is_queued`], waiting on the
-/// member's own note spool rather than on a pause after the run's queue: a note
-/// reaches a live judge only if it is in the conversation's inbox before the held
-/// turn returns, and the queue says nothing about when the reconciler gets to it.
-/// A runner slow enough that it had not when a fixed pause ran out let the held
-/// judge finish first, and the note reached the worker instead.
+/// [`release_when_the_note_is_queued`]'s counterpart for a journey whose claim is
+/// *which party* the note reached, and it waits on the member's own note spool
+/// rather than on a pause after the run's queue. A note reaches a live judge only
+/// if it is in the conversation's inbox when the held decision returns — onejudge
+/// looks for notes then, and not before — and the queue says nothing about when
+/// the reconciler gets to it: between the two lie the driver's claim of the
+/// envelope, its delivery thread, and the spool's courier in the member's process.
+/// The `cross (windows-latest)` leg once took longer than the fixed two seconds
+/// the queue's gate allowed for all of that, so the judge was released first and
+/// the note reached the worker's next turn — the ordering
+/// `a_note_that_reaches_the_conversation_after_the_judge_decided_reaches_the_worker`
+/// drives on purpose.
 ///
-/// The spool's courier renames an offer to `<id>.taken.json` as it moves it into
-/// the member's inbox, which is the last hand-over anything outside the process
-/// can see; the relay from there into the conversation is one in-process hop on a
-/// 50 ms poll, which the short pause covers. The re-taken decision itself cannot
-/// be waited for: the conversation takes the note when the held turn returns, so
-/// it is recorded only after this releases it.
+/// The courier renames an offer to `<id>.taken.json` as it takes it, and that is
+/// the last hand-over anything outside the member's process can see. What is left
+/// is in-process — the courier reads the offer and queues it on the member's
+/// inbox, whose condition variable wakes the relay, which hands it to the
+/// conversation — with no clock or other process in it, which is what the short
+/// pause covers. The disposition itself cannot be waited for: a note to a held
+/// turn is answered only once this releases it.
 ///
 /// A spool that never shows the note taken still releases the turn, so the run
 /// ends, and then fails the journey naming the wait rather than leaving it to an
 /// assertion about who the note reached.
-fn release_the_judge_once_it_has_the_note(world: &World) -> std::thread::JoinHandle<()> {
+fn release_once_the_note_is_taken(world: &World, gates: &[&str]) -> std::thread::JoinHandle<()> {
     let root = world.root.clone();
     let fakes = world.fakes.clone();
+    let gates: Vec<String> = gates.iter().map(|gate| (*gate).to_string()).collect();
     std::thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(120);
         let mut taken = a_note_was_taken(&root);
@@ -317,7 +324,9 @@ fn release_the_judge_once_it_has_the_note(world: &World) -> std::thread::JoinHan
         if taken {
             std::thread::sleep(Duration::from_millis(500));
         }
-        release(&fakes, "judge.go");
+        for gate in &gates {
+            release(&fakes, gate);
+        }
         assert!(
             taken,
             "no member's note spool under {} showed a note taken within 120 seconds",
@@ -3009,17 +3018,10 @@ fn two_notes_in_one_envelope_are_each_recorded_on_the_turn_that_opened_on_them()
     world.until("the turn carrying the first note to open", |world| {
         worked(world).len() >= 2
     });
-    // The second note is offered once the first is acknowledged, which is the
-    // moment that turn opened — but the offer is the reconciler's own step, and
-    // on a loaded host it can land after any fixed pause, between turns, where
-    // it answers `queued`. So wait for it in the member's spool (the first is
-    // answered by now, so the one unanswered note is the second), then give the
-    // conversation the same short pause the release above gives a queued note
-    // before the turn it is bound for ends.
-    world.until(
-        "the second note to wait in the conversation's inbox",
-        |world| awaiting_an_answer(world) == 1,
-    );
+    // The second note is offered the moment the first is acknowledged, which is
+    // the moment that turn opened; the offer is the reconciler's own step, with
+    // nothing durable to watch for, so it is given the same short pause the
+    // release above gives a queued note before the turn it is bound for ends.
     std::thread::sleep(Duration::from_secs(2));
     release(&world.fakes, "turn.go");
     release(&world.fakes, "turn.settle");
@@ -3665,7 +3667,7 @@ fn a_note_reaching_the_live_judge_re_takes_its_decision_and_rides_it_to_the_work
     world.script("judge.asks-again-times", "2");
     held_judge(&world, run, vec![agent("build", &[])]);
 
-    let releasing = release_the_judge_once_it_has_the_note(&world);
+    let releasing = release_once_the_note_is_taken(&world, &["judge.go"]);
     let replied = world.run_with_stdin_on(
         world.agentgraph_cmd(&["reply", run]),
         &envelope(note_op("build", "supervisor", NOTE, None)),
@@ -3723,6 +3725,81 @@ fn a_note_reaching_the_live_judge_re_takes_its_decision_and_rides_it_to_the_work
     );
 }
 
+/// A note to the supervisor that reaches the conversation only once the judge's
+/// held decision has been taken reaches the **worker** instead — the ordering the
+/// `cross (windows-latest)` leg hit, driven on purpose.
+///
+/// That leg recorded exactly this note-delivered record for the journey above:
+/// `reached: worker`, `routed_to: [worker, supervisor]`. Its gate released the
+/// held judge a fixed two seconds after the note was queued, and the runner had
+/// not offered it by then; the judge's decision was taken without it, the worker's
+/// next turn opened, and the note — correctly, by onejudge's contract — reached
+/// the party that was live. So the defect was the journey's gate, not the
+/// routing, and this pins the routing it depends on: release the judge with no
+/// note anywhere, hold the worker turn its decision opens, and only then send the
+/// note. The journey above now releases its judge only once the member's spool
+/// shows the note taken ([`release_once_the_note_is_taken`]), which no reconciler
+/// however slow can overtake.
+#[test]
+fn a_note_that_reaches_the_conversation_after_the_judge_decided_reaches_the_worker() {
+    let world = World::new("note-late");
+    let run = "late";
+    world.script(
+        "judge.asks-again",
+        "Run the check again and report what it said.",
+    );
+    world.script("judge.asks-again-times", "2");
+    held_judge(&world, run, vec![agent("build", &[])]);
+
+    // The judge decides with nothing in the conversation's inbox, and the worker
+    // turn its decision opens is held, so the note arrives while that one is live.
+    world.script("turn.hold", "hold");
+    release(&world.fakes, "judge.go");
+    world.until(
+        "the worker's turn after the judge's decision to open",
+        |world| worked(world).len() >= 2,
+    );
+
+    let releasing = release_once_the_note_is_taken(&world, &["turn.go", "turn.settle"]);
+    let replied = world.run_with_stdin_on(
+        world.agentgraph_cmd(&["reply", run]),
+        &envelope(note_op("build", "supervisor", NOTE, None)),
+    );
+    releasing.join().expect("the releasing thread finishes");
+    replied.exited(0).out_has("\"state\":\"applied\"");
+
+    world.until("the run to settle", |world| {
+        !world.events_of(run, "node-settled").is_empty()
+    });
+
+    let operation = recorded(&world, run);
+    assert_eq!(operation["addressee"], json!("supervisor"), "{operation}");
+    assert_eq!(
+        operation["reached"],
+        json!("worker"),
+        "a note offered after the judge's decision reached a party that was not live: \
+         {operation}"
+    );
+    assert_eq!(
+        operation["routed_to"],
+        json!(["worker", "supervisor"]),
+        "{operation}"
+    );
+    // The decision it was addressed to was taken without it, and not re-taken: the
+    // judge first reads it on the decision after the worker's reopened turn, as a
+    // note routed on to it rather than one it was live for.
+    let judge = judged(&world);
+    assert!(
+        !judge[0].contains(NOTE),
+        "the judge's held decision was taken with a note that arrived after it:\n{}",
+        judge[0]
+    );
+    assert!(
+        judge[1].contains("delivered to YOU, the supervisor") && judge[1].contains(NOTE),
+        "the note was not routed on to the judge's next decision:\n{judge:#?}"
+    );
+}
+
 /// A note reaching a live judge whose re-taken decision is completion: the work
 /// was passed with the note in hand, and the run records exactly that.
 ///
@@ -3737,7 +3814,7 @@ fn a_note_the_judge_passed_the_work_with_is_recorded_as_judged_with() {
     let run = "passed";
     held_judge(&world, run, vec![agent("build", &[])]);
 
-    let releasing = release_the_judge_once_it_has_the_note(&world);
+    let releasing = release_once_the_note_is_taken(&world, &["judge.go"]);
     let replied = world.run_with_stdin_on(
         world.agentgraph_cmd(&["reply", run]),
         &envelope(note_op("build", "both", NOTE, None)),
