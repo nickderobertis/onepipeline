@@ -102,6 +102,14 @@ pub use crate::ledger::RunPaths;
 /// consumer cannot name is a field it cannot read.
 pub use crate::summary::{Listing, NodeLanding, NodePreserved, RunSummary, SUMMARY_SCHEMA_VERSION};
 
+/// The reading `onepipeline host` renders and `host --json` prints —
+/// [`crate::verbs::Host::reading`] — with every type a field of it names, so a
+/// consumer can name each one it reads.
+pub use crate::freespace::{FreeSpace, FreeSpaceRoot, Role as FreeSpaceRole};
+pub use crate::hostview::{
+    DispatchRow, Gone, HostReading, ProofWord, SkippedRoot, HOST_READING_SCHEMA_VERSION,
+};
+
 /// The plan a run was launched with, read off its own `plan.json`.
 ///
 /// The one loader over [`RunPaths::plan`]: `start` writes that document once and
@@ -1374,6 +1382,12 @@ pub struct Survey {
     /// scope of every claim made from it.
     pub root: PathBuf,
     /// The runs that read, oldest id first.
+    ///
+    /// From `onepipeline host` ([`crate::verbs::host`]) this is **empty**: that view
+    /// opens no run whole — a run its derived documents decide is not opened at
+    /// all, and a live one is folded from its checkpoint without its events being
+    /// read into memory — so its answer is [`crate::verbs::Host::reading`].
+    /// [`skipped`](Self::skipped) still names every run root it refused.
     pub views: Vec<RunView>,
     /// The run roots that did not, each with the reason it was refused.
     pub skipped: Vec<Skipped>,
@@ -1449,7 +1463,7 @@ const MAX_NAMED_SKIPS: usize = 3;
 /// line each is what buried the answer, because a third of the roots on a host
 /// can be unreadable and the live verdict is what a reader opened the view
 /// for.
-fn skipped_lines(skipped: &[Skipped]) -> String {
+pub(crate) fn skipped_lines(skipped: &[Skipped]) -> String {
     if skipped.is_empty() {
         return String::new();
     }
@@ -3522,7 +3536,7 @@ fn working(activity: &crate::projection::NodeActivity) -> String {
 /// answer this host does not have, and collapsing it into either is how a
 /// registry row outlives the process it describes.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Proof {
+pub(crate) enum Proof {
     /// The dispatch's own registry entry names a live pid, and that pid started
     /// when the entry says it did.
     ///
@@ -3553,7 +3567,7 @@ enum Proof {
 // this crate is, for the reason `src/error.rs`'s file-level suppression states. The value
 // is not this reader's to check either: it comes back from `ledger::dispatches_of`, which
 // is the boundary that refuses an entry nothing may be acted on.
-enum Registry {
+pub(crate) enum Registry {
     /// What the registry holds, by the node each entry names.
     Read(BTreeMap<String, Vec<ledger::DispatchRecord>>),
     /// The registry could not be read, and this is why.
@@ -3566,8 +3580,21 @@ enum Registry {
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
 impl Registry {
+    /// Whether any entry names a process that may still be its dispatch: one
+    /// whose pid and start token hold, or a live pid this host cannot decide.
+    /// Only an entry proved stale is not.
+    pub(crate) fn has_live_entry(&self) -> bool {
+        match self {
+            Self::Unreadable(_) => false,
+            Self::Read(by_node) => by_node
+                .values()
+                .flatten()
+                .any(|record| !matches!(proof_of(record), Proof::Stale(_))),
+        }
+    }
+
     /// Read one run's registry, keeping the refusal where there is one.
-    fn of(paths: &RunPaths) -> Self {
+    pub(crate) fn of(paths: &RunPaths) -> Self {
         match ledger::dispatches_of(paths) {
             Ok(records) => {
                 let mut by_node: BTreeMap<String, Vec<ledger::DispatchRecord>> = BTreeMap::new();
@@ -3587,7 +3614,7 @@ impl Registry {
     /// attempt's record behind until the process it named is collected — so a
     /// stale entry beside a live one says the older attempt ended, never that the
     /// node has nothing running.
-    fn proves(&self, node: &str) -> Proof {
+    pub(crate) fn proves(&self, node: &str) -> Proof {
         let by_node = match self {
             Self::Unreadable(why) => {
                 return Proof::Unproven(format!(
@@ -3628,7 +3655,7 @@ impl Registry {
 /// Its pid says which process, and its start token says the pid is still that
 /// process — a pid alone is what a two-day-old entry has, and a reused one
 /// answers a liveness probe as alive.
-fn proof_of(record: &ledger::DispatchRecord) -> Proof {
+pub(crate) fn proof_of(record: &ledger::DispatchRecord) -> Proof {
     if record.host != sys::hostname() {
         return Proof::Unproven(format!(
             "its dispatch runs on {}, and a pid means nothing across machines",
@@ -3647,11 +3674,19 @@ fn proof_of(record: &ledger::DispatchRecord) -> Proof {
             record.pid
         )),
         // llmlint: ignore-end[changed_behavior_has_e2e]
-        Some(token) if token.matches(&record.started) => Proof::Held,
-        Some(_) => Proof::Stale(format!(
-            "pid {} is a different process from the one its dispatch was recorded in",
-            record.pid
-        )),
+        Some(token) => match token.reads(&record.started) {
+            sys::TokenReading::Same => Proof::Held,
+            #[cfg(target_os = "linux")]
+            sys::TokenReading::Inexact => Proof::Unproven(format!(
+                "its entry records pid {}'s start in the older `ps` spelling, which this host's \
+                 clock can shift, and it no longer reads the same",
+                record.pid
+            )),
+            sys::TokenReading::Different => Proof::Stale(format!(
+                "pid {} is a different process from the one its dispatch was recorded in",
+                record.pid
+            )),
+        },
     }
 }
 
