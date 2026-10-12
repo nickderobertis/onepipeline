@@ -58,6 +58,10 @@ pub struct Launch {
     /// The note deliveries the loop has handed off and not yet recorded, which
     /// a re-dispatch waits for before it reads the notes it is composed with.
     pub(crate) notes_in_flight: engine::DeliveriesInFlight,
+    /// What the publication boundary tells and gives this node's dispatches: the run's
+    /// term scope, which every check its closeout asks derives its terms from, and in a
+    /// mixed plan its side of the boundary.
+    pub(crate) boundary: crate::boundary::Dispatching,
 }
 
 /// Run one lifecycle node to settlement, re-dispatching it while its
@@ -596,6 +600,43 @@ fn attempt_once(
     // that follows them belongs to none.
     let whose = engine::dispatch_labels(run, &node.id, None, node.persona.as_deref());
     let mut branch: Option<String> = node.branch.clone();
+    // An export's consumer starts from the export: one neutral commit on the public
+    // base, made the first time it is asked for and answered from the run's record
+    // every time after. Its session continues that branch, so nothing here ever falls
+    // back to the default base, and a refused export refuses the node before any
+    // dispatch, in the export's own neutral words.
+    if let (Some(pinned), Some(export)) = (&branch, launch.boundary.export()) {
+        let held = crate::boundary::pinned_to_its_export(paths, export, pinned);
+        if !matches!(held, Ok(true)) {
+            return Attempt::settled(Settlement {
+                detail: Some(held.err().unwrap_or_else(|| {
+                    "an export's consumer is pinned to a branch that is not its export, and its \
+                     session starts from its export or not at all"
+                        .to_owned()
+                })),
+                ..Settlement::plain(
+                    &node.id,
+                    NodeStatus::Failed,
+                    Some(engine::INFRASTRUCTURE_FAILURE),
+                )
+            });
+        }
+    }
+    if let (None, Some(export)) = (&branch, launch.boundary.export()) {
+        match crate::boundary::ensure_export(paths, export, &launch.boundary.term_scope) {
+            Ok(exported) => branch = Some(exported),
+            Err(why) => {
+                return Attempt::settled(Settlement {
+                    detail: Some(why),
+                    ..Settlement::plain(
+                        &node.id,
+                        NodeStatus::Failed,
+                        Some(engine::INFRASTRUCTURE_FAILURE),
+                    )
+                })
+            }
+        }
+    }
     // The steps the preserved branch already carries, plus the ones this attempt
     // adds. Carried forward whole, because the branch a later attempt preserves
     // is the same branch: a step skipped on one attempt is still on it.
@@ -694,6 +735,13 @@ fn attempt_once(
             // where the template has to name it. One that cannot is settled before
             // any session opens: nothing has run, so there is no work to lose, and
             // the branch is never cut under some other name.
+            // A public node of a mixed plan, and an export producer, cut a neutral name
+            // in place of the plan-derived one: what names the plan or its nodes is
+            // exactly what neither may carry.
+            None if launch.boundary.branch_name().is_some() => SessionRequest {
+                branch_name: launch.boundary.branch_name().map(str::to_owned),
+                ..request.clone()
+            },
             None => {
                 match crate::vcs::opening_for(request.clone(), node, launch.branch_naming.as_ref())
                 {
@@ -773,7 +821,7 @@ fn attempt_once(
         }
         let build = |attempt| DispatchRequest {
             graph: graph.clone(),
-            task: task.clone(),
+            task: crate::boundary::with_section(task.clone(), launch.boundary.section()),
             labels: engine::dispatch_labels(
                 run,
                 &node.id,
@@ -861,6 +909,7 @@ fn attempt_once(
             tx,
             &whose,
             vcs_filter,
+            &launch.boundary.term_scope,
         );
     }
 
@@ -1101,7 +1150,12 @@ fn with_stack(task: String, stack: Option<&crate::stack::Stack>) -> String {
 /// this very block is not written again. A host that refused the read or the
 /// write leaves the description as it was and says so on the driver's output: the
 /// publication is what the node settles on, and it has already been made.
-fn write_stack_block(node: &Node, token: &onevcs::SessionToken, stack: &crate::stack::Stack) {
+fn write_stack_block(
+    node: &Node,
+    token: &onevcs::SessionToken,
+    stack: &crate::stack::Stack,
+    term_scope: &onevcs::TermScope,
+) {
     // llmlint: ignore-block[changed_behavior_has_e2e] neither arm has a journey that reaches
     // it alone. A node with a stack parent is on a repository whose changes stay open, and
     // every publication of one that answered opened or adopted a change request, so `None`
@@ -1124,7 +1178,7 @@ fn write_stack_block(node: &Node, token: &onevcs::SessionToken, stack: &crate::s
     if described == change.body {
         return;
     }
-    if let Err(error) = crate::vcs::describe_change(token, None, &described) {
+    if let Err(error) = crate::vcs::describe_change(token, None, &described, term_scope) {
         eprintln!(
             "onepipeline: node '{}': the Stack block was not written onto {}: {error}",
             node.id, change.url
@@ -1359,6 +1413,7 @@ fn preserve(
     tx: &Sender<Message>,
     whose: &Labels,
     filter: Option<&EventFilter>,
+    term_scope: &onevcs::TermScope,
 ) -> Attempt {
     let Opened {
         worktree,
@@ -1394,7 +1449,7 @@ fn preserve(
         (Some(why), _, _) => Err(format!(
             "the session would not close ({why}), so nothing was pushed from it"
         )),
-        (None, Some(branch), Some(repo)) => crate::vcs::preserve_branch(repo, branch),
+        (None, Some(branch), Some(repo)) => crate::vcs::preserve_branch(repo, branch, term_scope),
         // llmlint: ignore[changed_behavior_has_e2e] every session `onevcs` opens names
         // its branch and every lifecycle node names its `repo`, so no invocation reaches
         // a kept branch with neither; it settles as the infrastructure failure it would
@@ -1624,17 +1679,19 @@ fn publish(
         _ => None,
     };
     let (described, undescribed) = match rewritten {
-        Some((change, written)) => match crate::vcs::describe_change(token, title, written) {
-            Ok(_) => (body.is_some(), None),
-            Err(error) => {
-                let why = format!(
-                    "the drafted description was not written onto {}: {error}",
-                    change.url
-                );
-                eprintln!("onepipeline: node '{}': {why}", node.id);
-                (false, Some(why))
+        Some((change, written)) => {
+            match crate::vcs::describe_change(token, title, written, &launch.boundary.term_scope) {
+                Ok(_) => (body.is_some(), None),
+                Err(error) => {
+                    let why = format!(
+                        "the drafted description was not written onto {}: {error}",
+                        change.url
+                    );
+                    eprintln!("onepipeline: node '{}': {why}", node.id);
+                    (false, Some(why))
+                }
             }
-        },
+        }
         None => (false, None),
     };
     if let (Some(titled), Some(change)) = (titled, &held) {
@@ -1683,14 +1740,20 @@ fn publish(
     } else {
         body.as_deref()
     };
-    let publication =
-        publish_rereading_the_merge_path(node, token, opening_body, draft.as_ref(), cancel);
+    let publication = publish_rereading_the_merge_path(
+        node,
+        token,
+        opening_body,
+        draft.as_ref(),
+        cancel,
+        &launch.boundary.term_scope,
+    );
     // The Stack block, written by the engine itself onto every change request a
     // publication of a stacked node leaves — failed ones included, since the
     // change request outlives the attempt and a re-dispatch publishes onto it.
     if publication.answered.is_ok() {
         if let Some(stack) = stack {
-            write_stack_block(node, token, stack);
+            write_stack_block(node, token, stack, &launch.boundary.term_scope);
         }
     }
     match publication.answered {
@@ -2093,6 +2156,7 @@ fn publish_rereading_the_merge_path(
     body: Option<&str>,
     draft: Option<&onevcs::DraftReason>,
     cancel: &crate::executor::CancellationToken,
+    term_scope: &onevcs::TermScope,
 ) -> Published {
     let publish = || {
         crate::vcs::publish(
@@ -2102,6 +2166,7 @@ fn publish_rereading_the_merge_path(
             body,
             draft,
             cancel,
+            term_scope,
         )
     };
     let budget = engine::merge_path_reads();
@@ -2859,7 +2924,7 @@ fn title_check_of(check: Option<&serde_json::Value>) -> std::result::Result<Titl
             // llmlint: ignore[changed_behavior_has_e2e] a `title_check` the wire type refuses
             // for its shape rather than its verdict — an extra field, a `keeps` naming a
             // title, a `replaced` naming none — is held by `the_title_check_and_the_net_diff_
-            // cap_are_entry_116s`; the journey drives the verdict and the subject a drafter
+            // cap_are_entry_117s`; the journey drives the verdict and the subject a drafter
             // answers wrongly, which settle the same way through this function.
             _ => format!("the drafter's `title_check` is not one this build reads: {error}"),
         }
@@ -3170,7 +3235,24 @@ fn drafted(
         executor,
         DispatchRequest {
             graph: oneagentgraph::config::ConfigRef(graph.to_owned()),
-            task: drafting_task(node, &paths.run, held, stack, reworked),
+            // A public node of a mixed plan's drafter is handed nothing of the run beyond
+            // the node itself: its run is named by the variable its environment carries
+            // rather than spelled out, and it reads the same boundary section its worker
+            // did, since what it drafts is public.
+            task: if launch.boundary.is_public() {
+                crate::boundary::with_section(
+                    drafting_task(
+                        node,
+                        &format!("${}", crate::agentgraph::RUN_ID_ENV),
+                        held,
+                        stack,
+                        reworked,
+                    ),
+                    launch.boundary.section(),
+                )
+            } else {
+                drafting_task(node, &paths.run, held, stack, reworked)
+            },
             labels: engine::dispatch_labels(&paths.run, &node.id, None, Some(PR_AUTHOR_PERSONA)),
             // None of the node's own: the drafting dispatch is not the node's work,
             // and a turn budget written for that work would be spent twice — once on
@@ -4667,18 +4749,18 @@ mod tests {
         assert_eq!(steps.len(), 1);
     }
 
-    /// The `title_check` verdicts and the net diff's cap entry 116 states are the
+    /// The `title_check` verdicts and the net diff's cap entry 117 states are the
     /// ones a rework's publication reads and shows.
     #[test]
-    fn the_title_check_and_the_net_diff_cap_are_entry_116s() {
+    fn the_title_check_and_the_net_diff_cap_are_entry_117s() {
         let record = include_str!("../docs/contract-divergences.md");
         let block: serde_json::Value = record
             .split("\n## ")
-            .find(|entry| entry.starts_with("116."))
+            .find(|entry| entry.starts_with("117."))
             .and_then(|entry| entry.split("```json").nth(1))
             .and_then(|rest| rest.split("```").next())
-            .map(|block| serde_json::from_str(block).expect("entry 116's block is JSON"))
-            .expect("the record carries entry 116's block");
+            .map(|block| serde_json::from_str(block).expect("entry 117's block is JSON"))
+            .expect("the record carries entry 117's block");
         assert_eq!(
             block["net_diff_cap_bytes"],
             serde_json::json!(crate::vcs::NET_DIFF_CAP)

@@ -1218,6 +1218,7 @@ mod tests {
             name: Some("demo".into()),
             concurrency: 4,
             tasks: build.graph.iter().cloned().collect(),
+            export_edges: Vec::new(),
         };
         let mut journal = Journal::open(&paths);
         for (kind, fields) in [

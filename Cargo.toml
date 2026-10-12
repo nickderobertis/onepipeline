@@ -3,7 +3,7 @@
 # the programs this stack spawns: `oneagentgraph`, and the `gh` behind `onevcs`.
 # Members are listed explicitly so a new one joins the graph deliberately rather
 # than by changing what `--workspace` means.
-# llmlint: ignore[new_command_or_client_gets_its_own_project] `shutdown` and `supersessions` are verbs of the existing `onepipeline` CLI, not new binaries.
+# llmlint: ignore[new_command_or_client_gets_its_own_project] `shutdown`, `supersessions` and `boundary` are verbs of the existing `onepipeline` CLI, not new binaries.
 members = [".", "crates/testfakes"]
 resolver = "2"
 
@@ -660,13 +660,16 @@ resolver = "2"
 # admits no 0.45.x; `onevcs-testing` 0.13.7 requires exactly `=0.45.0`, so the
 # pair moves as one.
 #
-# `onevcs` 0.46.0 is the floor because it carries `review_comments` — a change
-# request's review threads, each with the line it sits on and whether it is
-# outdated — which is how `tests/e2e/rework.rs` holds that a restack leaves an
+# `onevcs` 0.46.0 is the floor because it is the release the boundary work this crate
+# composes was pinned against (`src/boundary.rs`: the term matcher, `TermScope`,
+# `PublicWriteInput` and `export`), and `tests/e2e/publication_boundary.rs` drives
+# that surface against the linked release; and because it carries `review_comments`
+# — a change request's review threads, each with the line it sits on and whether it
+# is outdated — which is how `tests/e2e/rework.rs` holds that a restack leaves an
 # open review thread on its line. A **requirement**, because `^0.45` admits no
-# 0.46.x; `onevcs-testing` 0.14.0 requires exactly `=0.46.0`, so the pair moves
-# as one. 0.47.0 is not taken here: it changes the publication request and
-# outcome that node `op-readjust` adopts.
+# 0.46.x; `onevcs-testing` 0.14.0 requires exactly `=0.46.0`, so the pair moves as
+# one. 0.47.0 is not taken here: it changes the publication request and outcome that
+# node `op-readjust` adopts.
 #
 # `oneagentgraph` 0.5.4 is the floor because it relays a turn's `message` and
 # `reasoning` items as `turn-activity` under their own kind — the agent's words,
@@ -1106,6 +1109,10 @@ onetaskgraph-plugin-api = { workspace = true }
 # its deadline (divergence entry 71). Already in the graph through the store's network
 # plugins, so it adds nothing to what this build resolves.
 tokio = { workspace = true, features = ["rt", "time"] }
+# The store's `WritePolicy` is an async trait declared through this macro, and the
+# engine implements it over the linked `onevcs` (`src/boundary.rs`). Already in the
+# graph through the store itself, so it adds nothing to what this build resolves.
+async-trait = "0.1"
 
 # Process liveness is the one host fact this crate cannot get from `std` on the
 # MSRV floor, and every `DRIVER DEAD` / `PARKED` verdict rests on it. Both are

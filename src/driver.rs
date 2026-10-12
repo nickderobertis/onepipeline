@@ -94,6 +94,28 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
     match cli.command {
         Verb::Start(args) => start(&args),
         Verb::Plan(crate::cli::PlanCommand::Check(args)) => crate::plancheck::check(&args),
+        Verb::Boundary(crate::cli::BoundaryCommand::Guidance(args)) => {
+            println!("{}", crate::boundary::render_guidance(args.json)?);
+            Ok(EXIT_SUCCESS)
+        }
+        Verb::Boundary(crate::cli::BoundaryCommand::ValidateEnvelope(args)) => {
+            let paths = resolve(&args.run)?;
+            if args.fingerprint {
+                println!("{}", crate::boundary::fingerprint(&paths)?);
+                return Ok(EXIT_SUCCESS);
+            }
+            let mut stdin = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut stdin).map_err(|error| {
+                Error::Invalid(format!(
+                    "the envelope could not be read from stdin: {error}"
+                ))
+            })?;
+            let judged = crate::boundary::validate_envelope(&paths, &stdin)?;
+            if let Some(reason) = judged.reason() {
+                eprintln!("{reason}");
+            }
+            Ok(judged.exit_code())
+        }
         Verb::Template(command) => {
             println!("{}", template(command)?);
             Ok(EXIT_SUCCESS)
@@ -3302,6 +3324,12 @@ pub(crate) fn submit_envelope(
     let view = RunView::open(paths)?;
     let channel = ChannelState::of_run(paths, &view.launch);
     channel.declares(&envelope.author)?;
+    // The publication boundary, before anything is queued, applied or journalled: an
+    // envelope arriving here never met a bus validator, so it meets the same rule.
+    crate::boundary::guard(
+        &view.state,
+        &serde_json::to_value(envelope).map_err(|error| Error::Invalid(error.to_string()))?,
+    )?;
 
     // A correlation names the question a verdict answers, so an envelope with no
     // verdict half has nothing to bind to it — and silently dropping the flag
@@ -3506,7 +3534,7 @@ pub(crate) fn submit_envelope(
                         paths,
                         &mut graph,
                         &frontier,
-                        &view.state.sessions,
+                        &view.state,
                         envelope.author.clone(),
                         command,
                     ) {
@@ -3852,13 +3880,18 @@ fn validate_here(
     paths: &RunPaths,
     graph: &mut crate::graph::Graph,
     frontier: &Frontier,
-    sessions: &std::collections::BTreeMap<String, crate::vcs::DispatchSession>,
+    state: &crate::projection::RunState,
     author: Author,
     command: &Command,
 ) -> Result<engine::Staged> {
     let operations = edits::compile(graph, frontier, author, command)?;
     if let Command::Retitle { id, .. } = command {
-        return Ok(engine::staged_retitle(operations, sessions.get(id)));
+        let scope = crate::boundary::of_run(&crate::boundary::plan_now(state)).term_scope();
+        return Ok(engine::staged_retitle(
+            operations,
+            state.sessions.get(id),
+            scope,
+        ));
     }
     let Command::Note {
         id,
@@ -3929,6 +3962,7 @@ mod tests {
                 task: Some("## What\ndo it".into()),
                 ..Node::default()
             }],
+            export_edges: Vec::new(),
         }
     }
 

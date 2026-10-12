@@ -393,6 +393,34 @@ pub struct Plan {
     pub concurrency: u32,
     /// The nodes, in no particular order; `deps` is what orders them.
     pub tasks: Vec<Node>,
+    /// The plan's **export edges**: the only way work of a private node reaches a
+    /// public one. Each names a dependency edge the graph already draws, from a
+    /// private `publish: "preserve"` producer to the public node that consumes its
+    /// neutral export. Empty — every plan written before this field existed — is a
+    /// plan where no private node feeds a public one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub export_edges: Vec<ExportEdge>,
+}
+
+/// One export edge: a private producer's one generic directory, carried into a public
+/// consumer's repository as a single neutral commit its session starts from.
+///
+/// The ids are node ids of this plan's own graph — never a task record's — and the
+/// edge must be a dependency the consumer already states. Both directories are
+/// normalized relative paths: no root, no `.` or `..`, no empty segment, no `.git`, and
+/// no backslash.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExportEdge {
+    /// The private producer's node id.
+    pub from: String,
+    /// The public consumer's node id.
+    pub to: String,
+    /// The one directory of the producer's preserved branch the export carries, which
+    /// is the only path that branch may change.
+    pub source_directory: String,
+    /// Where that directory's contents land in the consumer's repository.
+    pub target_directory: String,
 }
 
 /// The default when a plan states no `concurrency`.
@@ -1514,6 +1542,19 @@ pub struct Node {
     /// states none inherits the one the node it supersedes carried.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_record: Option<TaskRecord>,
+    /// Whether the node's work is public or private, as its task — and the project it
+    /// was read out of — classify it: the stricter of the two, filled from the store's
+    /// own `classification` and never from metadata. Omitted when public, the default,
+    /// so a plan written before the field existed round-trips unchanged.
+    ///
+    /// A node's **clearance** is the stricter of this and the effective visibility of
+    /// every repository it names, so a public classification never downgrades a node
+    /// whose repository is private.
+    #[serde(
+        default,
+        skip_serializing_if = "onetaskgraph_plugin_api::Classification::is_public"
+    )]
+    pub classification: onetaskgraph_plugin_api::Classification,
 }
 
 /// The human-facing fields of the onetaskgraph task a node was read out of.
@@ -1541,6 +1582,12 @@ pub struct TaskRecord {
     /// refused where the record is read, by the store's own name type.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<onetaskgraph_plugin_api::SourceName>,
+    /// Every repository the task names, where it names more than the one a node's
+    /// `repo` carries. A node's work lands in its `repo` alone; the rest are what the
+    /// task concerns, and a private one among them makes the node private and puts it
+    /// in the run's term scope.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repositories: Vec<String>,
 }
 
 /// Whether a repository is one person's or a team's — the vocabulary a schema-3

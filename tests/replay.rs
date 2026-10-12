@@ -58,6 +58,7 @@ fn plan() -> Plan {
         goal: None,
         name: Some("replay".into()),
         concurrency: 4,
+        export_edges: Vec::new(),
         tasks: vec![Node {
             id: "slow".into(),
             persona: Some("engineer".into()),

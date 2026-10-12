@@ -526,7 +526,13 @@ pub struct Frontier {
     /// The effective run-wide node overrides, where a journal edit replaced them.
     pub run_node_sets: Option<Vec<String>>,
     /// Graph validation inputs supplied together by the driver.
+    ///
+    /// Present only where a caller holds the launch record, which is also where the
+    /// repository publication boundary is judged: it asks `onevcs` about every
+    /// repository the graph names, which a judgement off the ledger alone does not.
     pub graph_validation: Option<GraphValidation>,
+    /// The plan's export edges as they stand, each end following its retries.
+    pub export_edges: Vec<crate::plan::ExportEdge>,
     /// Where an operator has already stated each node's work landed.
     ///
     /// Carried because a `settle` at the outcome a node already holds is a
@@ -738,8 +744,28 @@ pub fn compile(
             name: None,
             concurrency: candidate.concurrency,
             tasks: Vec::new(),
+            export_edges: edges_after(command, &frontier.export_edges),
         });
-        graph::validate_edited(&plan).map_err(|e| Error::Refused(e.to_string()))?;
+        // And the publication boundary, by the same rules a plan is loaded under — asked
+        // first where the graph's own rules refuse the edit too, since a graph refusal
+        // names the nodes it concerns and the boundary's is the neutral one.
+        let boundary = || {
+            if frontier.graph_validation.is_none() {
+                return Ok(());
+            }
+            crate::boundary::check(
+                &plan,
+                crate::boundary::Stage::Edit,
+                &mut crate::boundary::Onevcs::default(),
+            )
+            .map(|_| ())
+            .map_err(|refusal| Error::Refused(refusal.message))
+        };
+        if let Err(error) = graph::validate_edited(&plan) {
+            boundary()?;
+            return Err(Error::Refused(error.to_string()));
+        }
+        boundary()?;
     }
     if let Some(context) = &frontier.graph_validation {
         let run_sets = match command {
@@ -1166,6 +1192,7 @@ impl EnvelopeReview {
             name: None,
             concurrency: edited.concurrency,
             tasks: Vec::new(),
+            export_edges: Vec::new(),
         });
         let under_review = EnvelopeUnderReview {
             goal: source.goal.as_ref().map(|goal| goal.text.as_str()),
@@ -1717,6 +1744,21 @@ fn compile_drop(
     Ok(operations)
 }
 
+/// The export edges after `command`: a `retry` re-points every edge naming the node it
+/// supersedes at its replacement, as it re-points that node's dependents.
+fn edges_after(
+    command: &Command,
+    edges: &[crate::plan::ExportEdge],
+) -> Vec<crate::plan::ExportEdge> {
+    match command {
+        Command::Retry { id, node } => crate::boundary::edges_now(
+            edges,
+            &std::iter::once((id.clone(), node.id.clone())).collect(),
+        ),
+        _ => edges.to_vec(),
+    }
+}
+
 fn compile_retry(
     graph: &mut Graph,
     frontier: &Frontier,
@@ -1745,10 +1787,17 @@ fn compile_retry(
     }
     // Before anything is inherited, so what is refused is what the edit stated.
     refuse_stated_task_record("retry", replacement)?;
-    let replacement = pin_retry_branch(inherit_preserved_branch(
-        validate_retry_pin(replacement)?,
-        &target,
-    ));
+    // An export's consumer is never pinned to the branch it was working on: its session
+    // starts from the export the run recorded, which a replacement is handed the same way.
+    let consumes_an_export = frontier.export_edges.iter().any(|edge| edge.to == id);
+    let replacement = if consumes_an_export {
+        validate_retry_pin(replacement)?
+    } else {
+        pin_retry_branch(inherit_preserved_branch(
+            validate_retry_pin(replacement)?,
+            &target,
+        ))
+    };
     graph::validate_node(&replacement).map_err(|e| refuse(e.to_string()))?;
     refuse_breaking_c6b(&replacement)?;
 
@@ -1777,6 +1826,8 @@ fn compile_retry(
     if replacement.task_record.is_none() {
         replacement.task_record.clone_from(&target.task_record);
     }
+    // A replacement is the same work, so it is never less private than what it replaces.
+    replacement.classification = replacement.classification.strictest(target.classification);
 
     let direct = graph.dependents_of(id);
     let mut reset: BTreeSet<String> = direct.iter().cloned().collect();
@@ -2045,8 +2096,10 @@ fn compile_requeue(
     }
     // The amended node is validated as the node it produces, so a malformed pin
     // is refused at submission rather than at the next dispatch.
-    let amended: Node = serde_json::from_value(merged)
+    let mut amended: Node = serde_json::from_value(merged)
         .map_err(|e| refuse(format!("requeue: amended node '{id}' is invalid: {e}")))?;
+    // An amendment states what a node is to do, never that it is less private than it was.
+    amended.classification = amended.classification.strictest(node.classification);
     graph::validate_node(&amended).map_err(|e| refuse(e.to_string()))?;
     // What the requeue states, and only that: a node left as it was launched is
     // the run's graph, which was held to C6b where it was loaded.
@@ -2922,7 +2975,9 @@ pub fn apply(graph: &mut Graph, operation: &Operation) {
                     object.insert(key.clone(), value.clone());
                 }
             }
-            if let Ok(amended) = serde_json::from_value::<Node>(merged) {
+            if let Ok(mut amended) = serde_json::from_value::<Node>(merged) {
+                // As the requeue compiled it: never less private than the node it amends.
+                amended.classification = amended.classification.strictest(existing.classification);
                 graph.insert(amended);
             }
         }
@@ -3105,6 +3160,7 @@ mod tests {
             name: None,
             concurrency: 4,
             tasks: nodes,
+            export_edges: Vec::new(),
         })
     }
 
@@ -5181,6 +5237,7 @@ mod tests {
             name: Some("cover".into()),
             concurrency: 4,
             tasks: vec![agent("build", &[])],
+            export_edges: Vec::new(),
         };
         let mut graph = Graph::from_plan(&launched_with);
         let commands = vec![
@@ -5737,6 +5794,7 @@ mod tests {
             key: Some("ENG-7".into()),
             title: "Build it".into(),
             source: None,
+            repositories: Vec::new(),
         };
         let mut read = agent("build", &[]);
         read.task_record = Some(record.clone());
@@ -5766,6 +5824,7 @@ mod tests {
             key: Some("ENG-999".into()),
             title: "Not this task".into(),
             source: None,
+            repositories: Vec::new(),
         };
         let claiming = |id: &str| {
             let mut node = agent(id, &[]);
@@ -6360,26 +6419,26 @@ mod tests {
         assert!(why.contains("the reason cannot be blank"), "{why}");
     }
 
-    /// Entry 116's block, read out of the divergence record.
-    fn entry_116() -> serde_json::Value {
+    /// Entry 117's block, read out of the divergence record.
+    fn entry_117() -> serde_json::Value {
         let record = include_str!("../docs/contract-divergences.md");
         let entry = record
             .split("\n## ")
-            .find(|entry| entry.starts_with("116."))
-            .expect("the record carries entry 116");
+            .find(|entry| entry.starts_with("117."))
+            .expect("the record carries entry 117");
         let block = entry
             .split("```json")
             .nth(1)
             .and_then(|rest| rest.split("```").next())
-            .expect("entry 116 carries a json block");
-        serde_json::from_str(block).expect("entry 116's block is JSON")
+            .expect("entry 117 carries a json block");
+        serde_json::from_str(block).expect("entry 117's block is JSON")
     }
 
-    /// The operations entry 116 proposes are kinds the enum serializes, and the
+    /// The operations entry 117 proposes are kinds the enum serializes, and the
     /// replacement a rework names by default is the shape it states.
     #[test]
-    fn the_rework_operations_and_default_replacement_are_entry_116s() {
-        let block = entry_116();
+    fn the_rework_operations_and_default_replacement_are_entry_117s() {
+        let block = entry_117();
         let kinds: Vec<String> =
             serde_json::from_value(block["operation_kinds"].clone()).expect("a list");
         let known = every_operation_kind();

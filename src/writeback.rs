@@ -298,6 +298,12 @@ struct Snapshot {
     project_metadata: BTreeMap<String, Value>,
     /// Whether a node the run has not started is written as claimed or released.
     claim: Claim,
+    /// The run's term scope: the private repositories its plan names, which every
+    /// public boundary check a write of this snapshot asks derives its terms from.
+    // llmlint: ignore[invalid_states_unrepresentable] the shape the store takes a scope in —
+    // `Engine::with_term_scope(Option<Vec<String>>)` — of identities `onevcs` checks where it
+    // derives terms from them; `boundary::Identity` says why no newtype here could hold more.
+    term_scope: Vec<String>,
 }
 
 /// What a node the run has not started says about the work it names.
@@ -642,20 +648,36 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         // llmlint: ignore[changed_behavior_has_e2e] unreachable from a write-back: only `project graph` raises these, and a write-back reads and copies but never draws a graph; `writeback::tests` holds each word.
         EngineError::GraphGroupNotText { .. } => decided("graph-group"),
         EngineError::DependencyCycle { .. } => decided("dependency-cycle"),
-        // llmlint: ignore-block[changed_behavior_has_e2e] reached only when the `onetaskgraph.yaml` opts into the store's public boundary, which no journey configures; `writeback::tests::every_engine_failure_is_named_as_the_store_names_it` holds each word to `onetaskgraph_core::Failure::from`.
+        // The public boundary's refusals, in the store's own words for each: every one of
+        // them is decided before the write's first mutation, so none is worth asking again.
         EngineError::NotPrivateDestination { .. } => decided("not-private-destination"),
+        // llmlint: ignore-block[changed_behavior_has_e2e] a source declared private whose
+        // backend answers, at the write, that it is not — or cannot answer — is a hosted
+        // backend's own visibility read (GitHub Projects, Linear); `local-md`, the backend
+        // every offline journey writes through, answers from its declaration alone.
         EngineError::DestinationNotPrivate { .. } => decided("destination-not-private"),
+        EngineError::VisibilityUnreadable { error, .. } => {
+            ("visibility-unreadable".to_owned(), Some(error))
+        }
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         EngineError::BoundaryRefused { .. } => decided("boundary-refused"),
         EngineError::BoundaryUnavailable { .. } => decided("boundary-unavailable"),
+        // llmlint: ignore-block[changed_behavior_has_e2e] unreachable from a write-back, and
+        // named here because the match is exhaustive: the store raises these for a write that
+        // *states* a reference or files an item, and a write-back's copy withholds a private
+        // reference rather than stating it
+        // (`publication_boundary::a_ticket_of_a_private_source_is_never_named_on_a_plan_store_that_is_not_private`),
+        // its targeted updates never restate one, and every item it writes is filed under
+        // the one project the run was launched from, which it read before the run began.
+        // A source declared private whose backend says otherwise, or cannot say, is a hosted
+        // backend's answer (GitHub Projects, Linear), which no offline journey reaches; the
+        // words are the store's own kinds, which `writeback::tests` hold.
         EngineError::PrivateReference { .. } | EngineError::PrivateItemReference { .. } => {
             decided("private-reference")
         }
         EngineError::ReferenceUnclassified { .. } => decided("reference-unclassified"),
         EngineError::ProjectUnclassified { .. } => decided("project-unclassified"),
         EngineError::PrivateMemberOfPublicProject { .. } => decided("private-member"),
-        EngineError::VisibilityUnreadable { error, .. } => {
-            ("visibility-unreadable".to_owned(), Some(error))
-        }
         // llmlint: ignore-end[changed_behavior_has_e2e]
         EngineError::DestinationUnavailable { error, .. }
         | EngineError::SourceRefused { error, .. }
@@ -1009,10 +1031,16 @@ fn snapshot_of(
                 if let Some(name) = &plan.name {
                     metadata.insert("onepipeline.name".into(), json!(name));
                 }
+                // As launched: each end names its lineage's root, which is the id the
+                // store's own item for that lineage carries whatever retried it.
+                if !plan.export_edges.is_empty() {
+                    metadata.insert("onepipeline.export_edges".into(), json!(plan.export_edges));
+                }
                 metadata
             })
             .unwrap_or_default(),
         claim,
+        term_scope: crate::boundary::of_run(&crate::boundary::plan_now(state)).scope,
     })
 }
 
@@ -1698,6 +1726,10 @@ struct Attempt {
     cancelled: std::cell::Cell<bool>,
     calls: std::cell::RefCell<BTreeMap<StoreCall, u64>>,
     written: std::cell::RefCell<BTreeMap<UpdatedField, u64>>,
+    /// The term scope this attempt's store checks its writes over.
+    // llmlint: ignore[invalid_states_unrepresentable] the snapshot's own scope, kept to tell
+    // whether a retained store still checks over it; the reason is at `Snapshot::term_scope`.
+    term_scope: Vec<String>,
 }
 
 impl Attempt {
@@ -1741,15 +1773,27 @@ impl Attempt {
                 Classified::of_config(&error),
             )
         })?;
+        // A store whose configuration opted into the public boundary has its writes
+        // checked by the linked `onevcs` rather than by the commands it names — the same
+        // check, answered in process — over the run's own term scope.
+        let engine = if built.engine.boundary_active() {
+            built
+                .engine
+                .with_write_policy(std::sync::Arc::new(crate::boundary::WritePolicy))
+                .with_term_scope(Some(snapshot.term_scope.clone()))
+        } else {
+            built.engine
+        };
         Ok(Self {
             runtime: crate::taskgraph::runtime()
                 .map_err(|error| format!("the store cannot be called: {error}"))?,
-            engine: built.engine,
+            engine,
             config: built.config,
             flags,
             cancelled: std::cell::Cell::new(false),
             calls: std::cell::RefCell::default(),
             written: std::cell::RefCell::default(),
+            term_scope: snapshot.term_scope.clone(),
         })
     }
 
@@ -1911,8 +1955,10 @@ fn project(
             .collect::<BTreeSet<_>>(),
     );
     let checked = if let Some(attempt) = retained.as_ref() {
-        validated_within(store, &attempt.flags)
-            .map(|loaded| loaded.map(|config| config == attempt.config))
+        validated_within(store, &attempt.flags).map(|loaded| {
+            loaded
+                .map(|config| config == attempt.config && attempt.term_scope == snapshot.term_scope)
+        })
     } else {
         Ok(Ok(true))
     };
@@ -3380,7 +3426,17 @@ fn task_document(
     // What the node was read out of rather than anything it says: the destination task's
     // own id, key and title are that task's, and a relaunch of a project this run projected
     // onto refuses `onepipeline.task_record` as a key no plan may state.
-    wire.remove("task_record");
+    let record_repositories = wire
+        .remove("task_record")
+        .and_then(|record| {
+            record
+                .get("repositories")
+                .and_then(Value::as_array)
+                .cloned()
+        })
+        .unwrap_or_default();
+    // The store's own field, as `delivers` is: a private node is a private task.
+    let classification = wire.remove("classification");
     let mut metadata = Map::new();
     metadata.insert(ID_KEY.into(), json!(root));
     metadata.insert(NODE_KEY.into(), json!(head));
@@ -3479,8 +3535,13 @@ fn task_document(
     front.insert("labels".into(), json!([]));
     front.insert("depends_on".into(), json!(local_deps));
     front.insert("metadata".into(), Value::Object(metadata));
+    if let Some(classification) = classification {
+        front.insert("classification".into(), classification);
+    }
     if let Some(repo) = repo {
-        if repo.starts_with("github.com/") {
+        if !record_repositories.is_empty() && repo.starts_with("github.com/") {
+            front.insert("repositories".into(), Value::Array(record_repositories));
+        } else if repo.starts_with("github.com/") {
             front.insert("repositories".into(), json!([repo]));
         } else if let Some(Value::Object(metadata)) = front.get_mut("metadata") {
             metadata.insert("onepipeline.repo".into(), json!(repo));
@@ -5353,6 +5414,7 @@ mod tests {
             name: Some("stop-mid-wait".into()),
             concurrency: 1,
             tasks: vec![serde_json::from_value(json!({"id": "node"})).expect("a node")],
+            export_edges: Vec::new(),
         };
         let state = RunState {
             graph: crate::graph::Graph::from_plan(&plan),
@@ -5627,15 +5689,15 @@ mod tests {
     /// the code from parting: a word or a key the document does not name is one
     /// nobody proposed.
     #[test]
-    fn the_rework_record_is_the_shape_entry_116_documents() {
+    fn the_rework_record_is_the_shape_entry_117_documents() {
         let record = include_str!("../docs/contract-divergences.md");
         let block: Value = record
             .split("\n## ")
-            .find(|entry| entry.starts_with("116."))
+            .find(|entry| entry.starts_with("117."))
             .and_then(|entry| entry.split("```json").nth(1))
             .and_then(|rest| rest.split("```").next())
-            .map(|block| serde_json::from_str(block).expect("entry 116's block is JSON"))
-            .expect("the record carries entry 116's block");
+            .map(|block| serde_json::from_str(block).expect("entry 117's block is JSON"))
+            .expect("the record carries entry 117's block");
         let op = &block["ops"][0];
         let mut state = RunState::default();
         state.reworks.insert(
@@ -5691,7 +5753,7 @@ mod tests {
                 "docs/contract-divergences.md does not name the task field `{field}`"
             );
         }
-        // The key a rework's replacement carries what it answers under — entry 116's.
+        // The key a rework's replacement carries what it answers under — entry 117's.
         assert!(
             divergence.contains(&format!("`{}`", crate::taskgraph::REWORK_KEY)),
             "docs/contract-divergences.md does not name the rework key"
@@ -5952,6 +6014,7 @@ mod tests {
                         json!(4),
                     )]),
                     claim: Claim::Held,
+                    term_scope: Vec::new(),
                 },
                 // Only `build`. A node the plan has just added has no destination
                 // task at all, and holding both kinds in one fixture is what makes an edge
@@ -6743,6 +6806,7 @@ mod tests {
             key: None,
             title: "Build".to_owned(),
             source: None,
+            repositories: Vec::new(),
         });
         let empty = Baseline {
             path: known.dir.join(crate::cli::WRITEBACK_LANDED_FILE),
@@ -7046,6 +7110,7 @@ mod tests {
             key: None,
             title: node.to_owned(),
             source: None,
+            repositories: Vec::new(),
         });
     }
 
