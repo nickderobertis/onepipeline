@@ -36,7 +36,7 @@ const OTHER: &str = "another-manager";
 /// The session a stop hook's environment carries: never the one asked about.
 const INHERITED: &str = "the-managers-session";
 
-/// The listing's exit statuses, as entry 117 states them.
+/// The listing's exit statuses, as entry 118 states them.
 const NOTHING_COUNTED: i32 = 0;
 const COUNTED: i32 = 7;
 const UNANSWERED: i32 = 1;
@@ -1903,7 +1903,7 @@ fn a_printed_landing_command_runs_this_hosts_drafter() {
     }
 }
 
-/// The synopsis entry 117 and `docs/stop-guard.md` state is the verb's own.
+/// The synopsis entry 118 and `docs/stop-guard.md` state is the verb's own.
 #[test]
 fn the_documented_synopsis_is_the_verbs_own() {
     let world = World::new("unpub-synopsis");
@@ -1927,7 +1927,7 @@ fn the_documented_synopsis_is_the_verbs_own() {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/contract-divergences.md"),
     )
     .expect("the register");
-    let entry = register.split("\n## 117.").nth(1).expect("entry 117");
+    let entry = register.split("\n## 118.").nth(1).expect("entry 118");
     let proposed: String = entry
         .split("**Proposal")
         .nth(1)

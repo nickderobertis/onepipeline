@@ -7503,6 +7503,12 @@ const RULINGS: &[(&str, &str)] = &[
         "116.",
         "every write-back write a store whose configuration opts into the boundary makes",
     ),
+    // engine-links-onevcs: a timed-out check wait `onevcs` left armed is re-read, not
+    // re-dispatched.
+    (
+        "117.",
+        "An **armed** `checks-unsettled` is recovered the same way",
+    ),
 ];
 
 /// A plan spanning sources, as the contract's block states it: the store's own two member

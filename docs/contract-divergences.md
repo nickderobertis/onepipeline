@@ -6,19 +6,19 @@ code takes the nearest thing that does exist, and the divergence is recorded
 here as a proposal for the planner who owns the contract. Nothing on this list is
 resolved unilaterally.
 
-Entries **1–9, 23–32, 34, 74, 75, 77, 78, 79, 81, 82, 83, 89, 91, 94, 96, 97, 99, 100, 102, 106 and 107** have since been **ruled on by the planner who
+Entries **1–9, 23–32, 34, 74, 75, 77, 78, 79, 81, 82, 83, 89, 91, 94, 96, 97, 99, 100, 102, 106, 107 and 117** have since been **ruled on by the planner who
 owns the contract**, and `docs/contract.md` was amended to carry each ruling. They stay
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22, 33, 35–40, 46–73, 76, 80, 84–88, 92, 93, 95, 98, 111, 113, 114, 115 and 117 are open**, except **52**, which entry 60
+Entries **10–22, 33, 35–40, 46–73, 76, 80, 84–88, 92, 93, 95, 98, 111, 113, 114, 115 and 118 are open**, except **52**, which entry 60
 supersedes: that proposal added a second manager-note op beside `context`, and 60
 collapses the two into one, so the shape lives in 60 and 52 keeps only the
 history that produced it. Each open entry states what the code does today and the
 proposal it is waiting on. Most are questions for a *producer* rather than for
 this crate, because `oneagentgraph` and `onevcs` are independent tools that expose
 general integration hooks only and nothing in them may know about this one; the
-rest — 36 to 40, 46 to 73, 80, 84 to 88, 92, 93, 95, 98, 111, 113, 114, 115 and 117 — are for the planner who owns the contract, and
+rest — 36 to 40, 46 to 73, 80, 84 to 88, 92, 93, 95, 98, 111, 113, 114, 115 and 118 — are for the planner who owns the contract, and
 name the sentence in it they would change. Entry 40 is for both: its plan-schema and event-kind
 halves are the contract owner's, and the two things it could not compile are
 `onevcs`'s. Entry 76 is for `onemessagebus` and for a node of this crate's own. An
@@ -7030,7 +7030,7 @@ the SDK call, and `agents::tests` holds the merge rule and the reader against th
 to the Views line beside `unwatched`, as a verb whose contract is one verdict
 object and exit `0` always.** `--wake-budget` is entry 98's, and so is the
 `warn` it answers for a run whose watch it cannot judge. The three
-`--unpublished` flags are entry 117's.
+`--unpublished` flags are entry 118's.
 
 <!-- llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] a register entry states
 the surface it proposes so the planner who owns `docs/contract.md` can rule on it — that is
@@ -9683,7 +9683,52 @@ publication, export, store writes and the validator; the store's own command pol
 beside the engine's linked one; the validator over the bus, directly, queued and
 replayed; and every public surface of a mixed run.
 
-## 117. Whether a manager session owes a preserved branch was decided by a consumer's Python over a spawned `onevcs` — OPEN
+## 117. A timed-out check wait whose merge `onevcs` left armed sent the worker back — RESOLVED
+
+**Ruling: the plan node `engine-links-onevcs`, linking `onevcs` 0.48.0, has the
+engine re-read an armed `checks-unsettled` rather than re-dispatch it, and
+`docs/contract.md`'s publication-retry paragraph states it.** From 0.48.0 a
+`change-auto` or `change-direct` publication whose check wait elapses with no
+required check red lifts the draft, arms the host's own merge, and ends
+`PublishOutcome::Failed { kind: ChecksUnsettled, armed: Some(ArmedMerge { change,
+head }), .. }`. Before this, the engine routed every `checks-unsettled` alike: the
+worker was sent back onto a branch whose change request was green or still
+running, spent a dispatch, and the node settled `failed` while its work went on to
+merge — holding every dependent and every release waiting on it.
+
+**What the engine does.** `publish_rereading_the_merge_path` in `src/lifecycle.rs`
+re-reads an armed `checks-unsettled` exactly as it re-reads `pushed-unverified`:
+the same session published again, bounded by `ONEPIPELINE_MERGE_PATH_READS` with
+its backoff. `merged` settles the node `done` with its landing; `checks-failed`
+is re-dispatched onto the same branch; an armed `checks-unsettled` left when the
+reads are spent takes today's `checks-unsettled` route. The settlement detail and
+any re-dispatch's reason name the armed change and how many reads it took, and a
+settlement written on a later attempt that armed nothing still carries the earlier
+attempt's. An
+unarmed `checks-unsettled` is unchanged. The engine passes `onevcs` nothing new for
+it: both rules keys resolve inside `onevcs` from the identity.
+
+**What else the link carried.** 0.46.0 and 0.47.0's `PublishRequest.defer_checks`
+and `adopt` are left unset, so `PublishOutcome::ChangeReviewDraftUnchecked` — a
+push into a review draft with its checks unread — answers no publication this
+engine makes. Receiving it would mean `onevcs` and the engine disagree about the
+request, so it settles the node `failed` as the residual `publication-failed`,
+naming the outcome and its change request, and never `done`: nobody read its
+checks. Adopting `defer_checks`, and any outcome word for it, is left to a later
+change.
+
+**Where it is held.** `tests/e2e/lifecycle.rs` drives the compiled binary over a
+real origin with GitHub at `onevcs`'s `ONEVCS_GH` seam:
+`an_armed_change_is_read_again_rather_than_redispatched_and_settles_on_its_landing`,
+`a_direct_change_left_armed_takes_the_same_reading_and_settles_on_its_landing`,
+`a_check_that_goes_red_after_the_arm_sends_the_worker_back_onto_the_same_branch`,
+`an_armed_change_republished_unchanged_still_says_it_was_armed`,
+`an_armed_change_the_host_never_lands_spends_its_reads_and_is_redispatched` and
+`an_unarmed_unsettled_change_is_redispatched_as_before`. The residual for an
+unchecked review draft is held by `vcs::tests` and `lifecycle::tests`, since no
+publication this engine makes can produce it.
+
+## 118. Whether a manager session owes a preserved branch was decided by a consumer's Python over a spawned `onevcs` — OPEN
 
 **Proposal (for the planner who owns the contract): add `onepipeline unpublished
 [--session <ID> | --host | --token <S-TOKEN>...] [--format text|json] [--disk]

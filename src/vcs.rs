@@ -241,8 +241,10 @@ pub fn publish(
             body: body.map(str::to_owned),
             draft: draft.cloned(),
             term_scope: term_scope.clone(),
-            adopt: None,
+            // Every publication here reads its checks: deferring them is for a
+            // caller that reads the verdict later, which nothing in this engine does.
             defer_checks: false,
+            adopt: None,
         },
         &NodeCancellation(cancel),
     )
@@ -401,11 +403,11 @@ pub fn outcome_of(outcome: &PublishOutcome) -> &'static str {
         PublishOutcome::ChangeDraft(_) => DRAFTED,
         // Green and done, but not yet lifted: see [`REVIEW_DRAFTED`].
         PublishOutcome::ChangeReviewDraft(_) => REVIEW_DRAFTED,
-        // Pushed into a review draft with its checks unread, which only a
-        // `defer_checks` publication ends in and no request here sets. Read as the
-        // draft it is rather than as `change-review-draft`, which says the checks
-        // came back green.
-        PublishOutcome::ChangeReviewDraftUnchecked(_) => DRAFTED,
+        // A push into a review draft with its checks unread answers only a
+        // `defer_checks` publication, which this engine never makes, so receiving
+        // it is a disagreement with `onevcs` about the request: the residual, and
+        // never a word that reads as finished work.
+        PublishOutcome::ChangeReviewDraftUnchecked(_) => Failure::RESIDUAL,
         PublishOutcome::Queued(_) => "queued",
         PublishOutcome::NothingToPublish => "no-changes",
         PublishOutcome::Failed { kind, .. } => failure_of(*kind).outcome(),
@@ -670,9 +672,11 @@ pub fn landing_of(outcome: &PublishOutcome) -> Option<crate::graph::Landing> {
         PublishOutcome::ChangeOpen(_)
         | PublishOutcome::ChangeDraft(_)
         | PublishOutcome::ChangeReviewDraft(_)
-        | PublishOutcome::ChangeReviewDraftUnchecked(_)
         | PublishOutcome::Queued(_) => Some(Landing::Unlanded),
-        PublishOutcome::NothingToPublish | PublishOutcome::Failed { .. } => None,
+        // Settled as the residual, as `Failed` is: see [`outcome_of`].
+        PublishOutcome::NothingToPublish
+        | PublishOutcome::ChangeReviewDraftUnchecked(_)
+        | PublishOutcome::Failed { .. } => None,
     }
 }
 
@@ -3001,10 +3005,16 @@ mod tests {
             "change-review-draft"
         );
         assert_eq!(REVIEW_DRAFTED, "change-review-draft");
-        // Pushed into a review draft with its checks unread says nothing green.
+        // A push into a review draft with its checks unread answers a request this
+        // engine never makes, so it is the residual and claims no landing: nothing
+        // read its checks, and no word that reads as finished work may say so.
         assert_eq!(
             outcome_of(&PublishOutcome::ChangeReviewDraftUnchecked(url.clone())),
-            DRAFTED
+            Failure::RESIDUAL
+        );
+        assert_eq!(
+            landing_of(&PublishOutcome::ChangeReviewDraftUnchecked(url.clone())),
+            None
         );
         assert_eq!(outcome_of(&PublishOutcome::Queued(url)), "queued");
         assert_eq!(outcome_of(&PublishOutcome::NothingToPublish), "no-changes");
@@ -3113,10 +3123,6 @@ mod tests {
         // on its base: nothing merged it.
         assert_eq!(
             landing_of(&PublishOutcome::ChangeReviewDraft(url.clone())),
-            Some(Landing::Unlanded)
-        );
-        assert_eq!(
-            landing_of(&PublishOutcome::ChangeReviewDraftUnchecked(url.clone())),
             Some(Landing::Unlanded)
         );
         assert_eq!(

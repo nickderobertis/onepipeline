@@ -675,10 +675,15 @@ resolver = "2"
 # - A publication probes a hosted repository's visibility with one `gh api
 #   repos/{owner}/{name}` unless a rule declares it, so a journey that scripts a
 #   host outage by a count of `gh` calls declares that visibility instead.
-# - `PublishRequest`'s `adopt` and `defer_checks` stay unset here; the
-#   `ChangeReviewDraftUnchecked` only a deferred publication ends in reads as
-#   `change-draft` in `src/vcs.rs`; and `PublishOutcome::Failed`'s optional
-#   `armed` is read past, the failure settling by its kind.
+# - A `change-auto` or `change-direct` publication whose check wait elapses with
+#   no required check red ends `checks-unsettled` carrying `armed:
+#   Some(ArmedMerge)` — the draft lifted and the host's auto-merge armed — and
+#   `src/lifecycle.rs` reads that change again rather than re-dispatching its
+#   worker, settling `done` on the landing once the host merges it.
+#   `tests/e2e/lifecycle.rs`'s
+#   `an_armed_change_is_read_again_rather_than_redispatched_and_settles_on_its_landing`
+#   drives it.
+# - `PublishRequest`'s `adopt` and `defer_checks` stay unset here.
 # A **requirement**, because `^0.46` admits none of these; `onevcs-testing` 0.16.0
 # requires exactly `=0.48.0` and carries the full-size recovery fixture
 # `tests/stop_verdict/` builds, so the pair moves as one.
@@ -969,7 +974,7 @@ tokio = "1"
 
 [package]
 name = "onepipeline"
-version = "0.68.0"
+version = "0.68.1"
 edition = "2021"
 rust-version.workspace = true
 description = "Execute a task DAG over oneagentgraph and onevcs, merging their event streams into one."

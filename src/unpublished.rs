@@ -2,7 +2,7 @@
 //! branch, decided in process over the linked `onevcs`.
 //!
 //! What the verb promises — its targets, its JSON document, the acknowledgement
-//! file and the exit statuses — is entry 117 of `docs/contract-divergences.md`,
+//! file and the exit statuses — is entry 118 of `docs/contract-divergences.md`,
 //! and is not restated here. What belongs beside the code is the one rule every
 //! ending is built on: **`unanswered` is never `none`.** A read that failed, a row
 //! that could not be read whole, and a label filter that did not filter each leave
@@ -36,10 +36,10 @@ pub const EXIT_UNANSWERED: i32 = 1;
 ///
 /// `unpublished`'s own answer, and a code above `3` belongs to one verb's
 /// protocol, as entries 58 and 68 rule: `watch` spells `7` for a run that moved,
-/// and no caller of one verb meets the other's. Entry 117 records the sharing.
+/// and no caller of one verb meets the other's. Entry 118 records the sharing.
 // llmlint: ignore[cli_output_contract] `7` is shared with `watch`'s run-changed return
 // in the global table, and the per-verb reading entries 58 and 68 already rule on is
-// what makes that one code space per verb; entry 117 records it as a proposal.
+// what makes that one code space per verb; entry 118 records it as a proposal.
 pub const EXIT_COUNTED: i32 = 7;
 
 /// The acknowledgement file's version: ai-orchestrator's version-1 format,
@@ -63,7 +63,7 @@ const DRAFTED_VERBS: [(&str, &str); 2] = [
 const STAMP_LEN: usize = "2026-01-01T00:00:00Z".len();
 
 // llmlint: ignore-block[invalid_states_unrepresentable] these are the JSON document and the
-// version-1 acknowledgement file entry 117 fixes field by field, which ai-orchestrator's
+// version-1 acknowledgement file entry 118 fixes field by field, which ai-orchestrator's
 // adoption parses by name: strings for sessions, tokens, tips, reasons and stamps, and
 // `in_flight`, `counted` and `acknowledgement` as three fields. A newtype or a folded enum
 // would move that wire. What is enforced is each value's one boundary: `unpublished` and
@@ -452,7 +452,7 @@ fn decided(
     // llmlint: ignore-block[changed_behavior_has_e2e] onevcs's typed rows carry the
     // identity of a validated registry and a branch read off a ref it enumerated, so no
     // journey over the real library can hand this an empty one. The arm stays because the
-    // rule entry 117 states — a row not read whole is unanswered, never none — must hold
+    // rule entry 118 states — a row not read whole is unanswered, never none — must hold
     // whatever a later onevcs release answers with.
     for row in &recoverable {
         if row.identity.is_empty() || row.branch.branch.is_empty() {
@@ -1514,25 +1514,25 @@ mod tests {
         );
     }
 
-    /// Entry 117 of the divergence record, which states this verb's contract.
+    /// Entry 118 of the divergence record, which states this verb's contract.
     fn entry_block() -> serde_json::Value {
         let record = std::fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/contract-divergences.md"),
         )
         .expect("the divergence record ships");
         let entry = record
-            .split_once("\n## 117.")
-            .expect("this verb is recorded under entry 117")
+            .split_once("\n## 118.")
+            .expect("this verb is recorded under entry 118")
             .1;
         let entry = entry.split_once("\n## ").map_or(entry, |(head, _)| head);
         let block = entry
             .split_once("```json")
-            .expect("entry 117 carries a json block")
+            .expect("entry 118 carries a json block")
             .1
             .split_once("```")
             .expect("the block is fenced")
             .0;
-        serde_json::from_str(block).expect("entry 117's block is JSON")
+        serde_json::from_str(block).expect("entry 118's block is JSON")
     }
 
     fn keys(value: &serde_json::Value) -> Vec<String> {
@@ -1546,11 +1546,11 @@ mod tests {
 
     fn named(block: &serde_json::Value, field: &str) -> Vec<String> {
         serde_json::from_value(block[field].clone())
-            .unwrap_or_else(|_| panic!("entry 117 names {field}"))
+            .unwrap_or_else(|_| panic!("entry 118 names {field}"))
     }
 
     /// The document, the row, the disk reading and the acknowledgement file are
-    /// exactly what entry 117 and `docs/stop-guard.md` state, in their order, and
+    /// exactly what entry 118 and `docs/stop-guard.md` state, in their order, and
     /// the file round-trips.
     #[test]
     fn the_documented_shapes_are_the_ones_this_build_writes() {
