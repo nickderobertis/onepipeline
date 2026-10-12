@@ -18,6 +18,15 @@ use onepipeline::filter::{LaunchConfig, LAUNCH_CONFIG_SCHEMA_VERSIONS_READ};
 use onepipeline::maintenance::MaintenanceConfig;
 use onepipeline::rules::ExecutorRules;
 
+/// A per-run directory for fixture files the real loaders read: under the dispatch's
+/// scratch directory when there is one, else the system temp dir.
+fn scratch_dir(name: &str) -> std::path::PathBuf {
+    std::env::var_os("ONEPIPELINE_NODE_SCRATCH_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join(format!("saphyr-diff-{name}-{}", std::process::id()))
+}
+
 // ---------------------------------------------------------------------------------------
 // Parsers.
 
@@ -281,7 +290,7 @@ pub fn launch_configs(c: &Corpus, r: &mut Report) {
     ] {
         docs.push(Doc { name: name.into(), text: text.into() });
     }
-    let dir = std::env::temp_dir().join(format!("saphyr-diff-launch-{}", std::process::id()));
+    let dir = scratch_dir("launch");
     std::fs::create_dir_all(&dir).unwrap();
     for (i, doc) in docs.iter().enumerate() {
         s.compared += 1;
@@ -756,7 +765,7 @@ pub fn malformed(r: &mut Report) {
         ("rules: wrong type", "executors: 3\nrules: []\n", "invalid type", n::<ExecutorRules>, t::<ExecutorRules>, p::<ExecutorRules>),
         ("templates: wrong role variant", "onepipeline_templates: 1\ntemplates:\n  x:\n    role: tusk\n    description: d\n", "unknown variant `tusk`", n::<RegistrationFile>, t::<RegistrationFile>, p::<RegistrationFile>),
     ];
-    let dir = std::env::temp_dir().join(format!("saphyr-diff-malformed-{}", std::process::id()));
+    let dir = scratch_dir("malformed");
     std::fs::create_dir_all(&dir).unwrap();
     for (i, (name, text, needle, before, after, pathed)) in cases.into_iter().enumerate() {
         s.compared += 1;
