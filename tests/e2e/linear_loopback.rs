@@ -52,6 +52,9 @@ pub enum Operation {
     ProjectRelations,
     /// `issueUpdate`: one issue written.
     IssueUpdate,
+    /// `projectUpdate`: the project's content written — where Linear keeps a project's
+    /// metadata, the driver claim among it.
+    ProjectUpdate,
     /// Anything else, which this endpoint refuses by name.
     Unknown,
 }
@@ -63,6 +66,8 @@ impl Operation {
             Self::Resolution
         } else if query.starts_with("mutation") && query.contains("issueUpdate(") {
             Self::IssueUpdate
+        } else if query.starts_with("mutation") && query.contains("projectUpdate(") {
+            Self::ProjectUpdate
         } else if query.starts_with("mutation") {
             Self::Unknown
         } else if query.contains("issues(") {
@@ -330,6 +335,7 @@ impl Linear {
                     | Operation::Project
                     | Operation::ProjectRelations
                     | Operation::IssueUpdate
+                    | Operation::ProjectUpdate
             ) && !variables["id"]
                 .as_str()
                 .is_some_and(|id| !id.trim().is_empty())
@@ -387,7 +393,8 @@ impl Linear {
             | Operation::IssueRelations
             | Operation::Project
             | Operation::ProjectRelations
-            | Operation::IssueUpdate => variables["id"].as_str().expect("validated request ID"),
+            | Operation::IssueUpdate
+            | Operation::ProjectUpdate => variables["id"].as_str().expect("validated request ID"),
             _ => "",
         };
         let data = match operation {
@@ -440,6 +447,16 @@ impl Linear {
                     Ok(issue) => json!({"issueUpdate": {"success": true, "issue": issue}}),
                     Err(why) => return refusal(&why),
                 }
+            }
+            Operation::ProjectUpdate => {
+                let Some(content) = variables["input"]["content"].as_str() else {
+                    return refusal("a projectUpdate carries the project's `content`");
+                };
+                if id != PROJECT {
+                    return refusal(&format!("no project {id}"));
+                }
+                world.project_content = content.to_owned();
+                json!({"projectUpdate": {"success": true, "project": {"id": PROJECT}}})
             }
             Operation::Unknown => return refusal(&format!("the loopback answers no {query}")),
         };
