@@ -1134,11 +1134,10 @@ fn dispatches(
     if open.is_empty() {
         return BTreeMap::new();
     }
-    /// What a node's `session-opened` said: the base it opened against, which has passed
-    /// `vcs::usable`, and the record's own timestamp — named apart so neither is taken for
-    /// the other, and written onto the store as `StoredDispatch`'s strings.
+    /// What a node's `session-opened` said: the base it opened against, and when.
     struct Opened {
-        base: String,
+        base: crate::vcs::BranchName,
+        // llmlint: ignore[invalid_states_unrepresentable] the journal record's own `ts`, which onemessagebus's `Envelope` declares as a `String` holding an RFC 3339 instant, copied onto the store verbatim as `StoredDispatch::opened_at`; this crate has no timestamp type to parse it into and back out of, and every other `ts` it reads stays a string.
         at: String,
     }
     let mut opened: BTreeMap<String, Opened> = BTreeMap::new();
@@ -1158,7 +1157,7 @@ fn dispatches(
             .payload
             .get("base")
             .and_then(Value::as_str)
-            .and_then(crate::vcs::usable)
+            .and_then(crate::vcs::BranchName::checked)
         {
             opened.insert(
                 node,
@@ -1174,7 +1173,7 @@ fn dispatches(
             let Opened { base, at } = opened.remove(&node)?;
             let dispatch = crate::continuation::StoredDispatch {
                 branch: session.branch().as_str().to_owned(),
-                base,
+                base: base.as_str().to_owned(),
                 opened_at: at,
             };
             Some((node, dispatch))
