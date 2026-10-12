@@ -9621,7 +9621,9 @@ the same session published again, bounded by `ONEPIPELINE_MERGE_PATH_READS` with
 its backoff. `merged` settles the node `done` with its landing; `checks-failed`
 is re-dispatched onto the same branch; an armed `checks-unsettled` left when the
 reads are spent takes today's `checks-unsettled` route. The settlement detail and
-any re-dispatch's reason name the armed change and how many reads it took. An
+any re-dispatch's reason name the armed change and how many reads it took, and a
+settlement written on a later attempt that armed nothing still carries the earlier
+attempt's. An
 unarmed `checks-unsettled` is unchanged. The engine passes `onevcs` nothing new for
 it: both rules keys resolve inside `onevcs` from the identity.
 
@@ -9639,6 +9641,7 @@ real origin with GitHub at `onevcs`'s `ONEVCS_GH` seam:
 `an_armed_change_is_read_again_rather_than_redispatched_and_settles_on_its_landing`,
 `a_direct_change_left_armed_takes_the_same_reading_and_settles_on_its_landing`,
 `a_check_that_goes_red_after_the_arm_sends_the_worker_back_onto_the_same_branch`,
+`an_armed_change_republished_unchanged_still_says_it_was_armed`,
 `an_armed_change_the_host_never_lands_spends_its_reads_and_is_redispatched` and
 `an_unarmed_unsettled_change_is_redispatched_as_before`. The residual for an
 unchecked review draft is held by `vcs::tests` and `lifecycle::tests`, since no
