@@ -9993,6 +9993,8 @@ the drafter's `replaced` verdict, projected onto the store and kept by a later r
 `a_title_nothing_verified_is_left_unverified_until_a_retitle_sets_one` and
 `a_rework_with_no_body_drafter_configured_leaves_its_title_unverified` every
 unverified case, the `retitle` that clears one and each `retitle` refusal;
+`a_retitle_reaching_a_driven_run_is_applied_by_its_driver` a `retitle` a live
+driver stages and applies;
 `a_rework_of_a_settled_run_makes_it_live_and_its_hook_fires_again_at_the_new_ending`;
 and `only_the_planner_may_rework_or_retitle`. Each `rework` and `retitle` refusal has a
 unit test in `src/edits.rs`, and `src/maintenance.rs`'s

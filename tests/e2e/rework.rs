@@ -761,6 +761,95 @@ fn a_restack_starts_before_its_reworked_parent_s_checks_have_settled() {
     assert_eq!(settled(&world, run, "b")["outcome"], "change-review-draft");
 }
 
+/// A `retitle` reaching a run while its driver is live is staged by that driver
+/// and applied through the host as it is to a run nothing is driving: `c` is
+/// retitled while `a`'s rework waits on its checks.
+#[test]
+fn a_retitle_reaching_a_driven_run_is_applied_by_its_driver() {
+    let world = team_world("retitle-driven").with_env("ONEVCS_CHECKS_TIMEOUT_SECONDS", "120");
+    world.script("a.work", "a's change\n");
+    world.script("c.work", "c's change\n");
+    world.script("a-rework-1.work", "a's change, as the review asked\n");
+    world.script("a-rework-1.work-file", "a");
+    world.script("pr-author.title-check", KEEPS);
+    let run = "retitle-driven";
+    let drafter = world.pr_author_graph();
+    launched(
+        &world,
+        run,
+        vec![lifecycle("a", &[]), lifecycle("c", &[])],
+        2,
+        &["--pr-author-graph", &drafter],
+    );
+    let a_branch = text(&settled(&world, run, "a")["branch"], "a's branch").to_owned();
+    let c_branch = text(&settled(&world, run, "c")["branch"], "c's branch").to_owned();
+    let a_number = change_from(&world, &a_branch)["number"].clone();
+    world.script(
+        &format!("gh.checks.{a_number}"),
+        "lint in_progress - required",
+    );
+
+    reply(
+        &world,
+        run,
+        json!([rework("a", "say what the review asked in a.md")]),
+    )
+    .exited(0);
+    let mut driving = world.cmd(&["adopt", run]);
+    driving
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let driver = driving.spawn().expect("the adopting driver starts");
+    world.until("the rework to push", |world| {
+        world
+            .events_of(run, "push")
+            .iter()
+            .any(|event| event["labels"]["node"] == "a-rework-1")
+    });
+    // The driver is live: the rework is waiting on its checks, and has not settled.
+    assert!(!world
+        .events_of(run, "node-settled")
+        .iter()
+        .any(|event| event["labels"]["node"] == "a-rework-1"));
+
+    reply(
+        &world,
+        run,
+        json!([{"op": "retitle", "id": "c", "title": "fix(c): say what c does",
+                "reason": "the reviewer read the title as wrong"}]),
+    )
+    .exited(0);
+    world.until("the driver to retitle c", |world| {
+        !retitled(world, run, "c").is_empty()
+    });
+    assert_eq!(
+        retitled(&world, run, "c"),
+        [
+            json!({"node": "c", "from": "feat: ship c", "to": "fix(c): say what c does", "by": "retitle"})
+        ]
+    );
+    assert_eq!(
+        change_from(&world, &c_branch)["title"],
+        "fix(c): say what c does"
+    );
+
+    world.script(
+        &format!("gh.checks.{a_number}"),
+        crate::draft_lifecycle::GREEN,
+    );
+    let ended = driver.wait_with_output().expect("the driver ends");
+    assert!(ended.status.success(), "{ended:?}");
+    assert_eq!(
+        settled(&world, run, "a-rework-1")["outcome"],
+        "change-review-draft"
+    );
+    assert_eq!(
+        change_from(&world, &c_branch)["title"],
+        "fix(c): say what c does"
+    );
+    assert_eq!(change_from(&world, &a_branch)["title"], "feat: ship a");
+}
+
 /// The title a node of the cache journey opened under.
 const CACHE_TITLE: &str = "feat(cache): add a read-through cache to the plan reader";
 
@@ -927,6 +1016,10 @@ fn the_op_s_title_outranks_the_drafter_s_and_a_keeps_leaves_the_title_alone() {
         );
         world.script(&format!("{id}-rework-1.work-file"), id);
     }
+    // `z`'s rework writes a file its branch never carried, and the fake worker
+    // commits nothing: the drafter reads the worktree before the publication
+    // commits it, so the new file is untracked when the net diff is taken.
+    world.script("z-rework-1.work-file", "z-retry");
     world.script(
         "pr-author.title-check",
         r#"{"verdict": "replaced", "title": "feat(x): what the drafter would say"}"#,
@@ -987,6 +1080,14 @@ fn the_op_s_title_outranks_the_drafter_s_and_a_keeps_leaves_the_title_alone() {
     );
     reply(&world, run, json!([rework("z", "say it the same way")])).exited(0);
     adopt(&world, run).exited(0);
+    let drafting = tasks_of(&world, run, "z-rework-1", "pr-author");
+    assert_eq!(drafting.len(), 1, "{drafting:#?}");
+    let net = section(&drafting[0], "## Net diff", "## Title check");
+    assert!(
+        net.contains("new file mode") && net.contains("+++ b/z-retry.md"),
+        "the untracked file is missing from the net diff: {net}"
+    );
+    assert!(net.contains("\n+z's change, reworked\n"), "{net}");
     assert_eq!(change_from(&world, &branch("z"))["title"], "feat: ship z");
     assert!(
         retitled(&world, run, "z-rework-1").is_empty(),
