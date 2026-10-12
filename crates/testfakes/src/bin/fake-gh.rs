@@ -115,6 +115,9 @@ fn main() -> ExitCode {
         args.get(1).map(String::as_str),
     ) {
         (Some("api"), Some("user")) => user(&args),
+        (Some("api"), Some(path)) if path.starts_with("repos/") && path.split('/').count() == 3 => {
+            repository(&args, &dir, path)
+        }
         (Some("api"), Some(path)) if path.starts_with("repos/") => protection(&args, &dir, path),
         (Some("pr"), Some("create")) => create(&args, &dir),
         (Some("pr"), Some("list")) => list(&args, &dir),
@@ -314,6 +317,64 @@ fn protection(args: &[String], dir: &Path, path: &str) -> ExitCode {
             ExitCode::from(1)
         }
         _ => fake::refuse(&format!("unknown gh api path '{path}'")),
+    }
+}
+
+/// `gh api repos/R`: the repository itself, which `onevcs` 0.44.0 on asks for its
+/// visibility at every write that could reach a public destination.
+///
+/// `private` unless a journey scripts `gh.visibility`: a private destination is one
+/// the public boundary screens nothing for, which is what every journey here wrote
+/// before there was a boundary to ask.
+fn repository(args: &[String], dir: &Path, path: &str) -> ExitCode {
+    if args.len() != 2 {
+        return fake::refuse(&format!("gh api {path} takes no flags here: {args:?}"));
+    }
+    if path.split('/').any(str::is_empty) {
+        return fake::refuse(&format!("gh api path '{path}' has an empty segment"));
+    }
+    let visibility = match read_if_present(&dir.join("gh.visibility")) {
+        None => Visibility::Private,
+        Some(word) => Visibility::of(word.trim()).unwrap_or_else(|| {
+            fake::fail(&format!(
+                "gh.visibility holds {word:?}, which is not public, private or internal"
+            ))
+        }),
+    };
+    println!(
+        "{}",
+        serde_json::json!({
+            "visibility": visibility.word(),
+            "private": visibility != Visibility::Public,
+        })
+    );
+    ExitCode::SUCCESS
+}
+
+/// A repository's visibility, in GitHub's three words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Visibility {
+    Public,
+    Private,
+    Internal,
+}
+
+impl Visibility {
+    fn of(word: &str) -> Option<Self> {
+        match word {
+            "public" => Some(Self::Public),
+            "private" => Some(Self::Private),
+            "internal" => Some(Self::Internal),
+            _ => None,
+        }
+    }
+
+    fn word(self) -> &'static str {
+        match self {
+            Self::Public => "public",
+            Self::Private => "private",
+            Self::Internal => "internal",
+        }
     }
 }
 

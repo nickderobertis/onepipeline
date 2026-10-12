@@ -1025,6 +1025,24 @@
               "type": "string"
             },
             "description": "The steps the branch carries."
+          },
+          "base": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The branch the node's change request is based on: the root, a stack\nparent's branch, or the stack base merging its stack parents."
+          },
+          "stack": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/SettledStack"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The unlanded same-repository changes the node was drafted on top of,\npresent exactly when it had any."
           }
         },
         "required": [
@@ -1108,6 +1126,54 @@
               }
             ],
             "description": "Whether a published change reached its base."
+          },
+          "SettledStack": {
+            "type": "object",
+            "properties": {
+              "parents": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/StackParent"
+                },
+                "description": "Each stack parent, in the node's declared dependency order: at least one.",
+                "minItems": 1
+              },
+              "stack_base": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The stack base the node was placed on, `null` where it had one stack\nparent and was placed on that parent's branch.",
+                "default": null
+              }
+            },
+            "required": [
+              "parents"
+            ],
+            "description": "The stack a lifecycle node was drafted on: the stack parents its branch was\nplaced on, and the stack base merging them when there were several."
+          },
+          "StackParent": {
+            "type": "object",
+            "properties": {
+              "node": {
+                "type": "string",
+                "description": "The parent node."
+              },
+              "branch": {
+                "type": "string",
+                "description": "Its branch, which the node was placed on or which the stack base merges."
+              },
+              "head": {
+                "type": "string",
+                "description": "The commit that branch stood at when the node was placed on it."
+              }
+            },
+            "required": [
+              "node",
+              "branch",
+              "head"
+            ],
+            "description": "One stack parent of a settled node."
           }
         }
       }

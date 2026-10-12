@@ -162,7 +162,7 @@
     "onepipeline-note-journeys",
     "onepipeline-e2e",
     "onepipeline-contract",
-    "onepipeline-smoke",
+    "onepipeline-real-smoke",
     "onepipeline-release-compat",
     "onepipeline-stop-verdict"
   ]

@@ -1808,6 +1808,14 @@ fn a_named_term_scope_reaches_the_landing_it_fronts() {
         for scope in [Some(UNREGISTERED), None] {
             let world = World::new(&format!("oob-term-scope-{verb}-{}", scope.is_some()));
             let repository = world.repository("change-open", &[]);
+            // Declared public, as the operator states it: a landing on a private
+            // destination crosses no boundary, so no scope would be asked of it.
+            std::fs::write(
+                world.onevcs_home().join("rules.yml"),
+                "version: 4\nrules:\n  - match: {owner: owner, name: service}\n    \
+                 visibility: public\ndefault:\n  publication: change-open\n  approvals: none\n",
+            )
+            .expect("the rules file is written");
             if verb == "publish-branch" {
                 branch_with_work(&world, &repository);
             } else {

@@ -348,7 +348,7 @@ _crate-coverage:
       || { echo "coverage fell below 95% — cover the lines the table above counts as missed" >&2; exit 1; }
 
 # The test-tier projects' own targets (`onepipeline-e2e`, `onepipeline-contract`,
-# `onepipeline-note-journeys`, `onepipeline-smoke`, `onepipeline-release-compat`),
+# `onepipeline-note-journeys`, `onepipeline-real-smoke`, `onepipeline-release-compat`),
 # each scoped to the one test binary it owns. They are not the crate's targets
 # narrowed for show: a project that declared the uniform set and ran nothing of
 # its own would drop out of every repo-wide verb while appearing to be covered by
@@ -460,17 +460,18 @@ rerun-failed-coverage log archive:
 #
 # It needs `gh` and a credential (`gh auth login`, or GH_TOKEN). With neither it
 # fails and names what is missing; it never skips and never falls back to a fake.
-# Set ONEPIPELINE_SMOKE_REPO to publish somewhere other than the default scratch
-# repository. `--no-capture`, because its whole value is the evidence it prints,
-# and streamed through Nx for the same reason. It runs the `onepipeline-smoke`
+# It also needs ONEPIPELINE_SMOKE_REPO, the scratch repository it publishes to as
+# owner/name (CI maps the secret of that name); unset, it fails naming the key.
+# `--no-capture`, because its whole value is the evidence it prints,
+# and streamed through Nx for the same reason. It runs the `onepipeline-real-smoke`
 # project's uncached `smoke` target, which no `check` reaches.
 # Real everything: onevcs, git, and the GitHub API, over one whole lifecycle.
 smoke-real:
-    @ONEPIPELINE_NX_SHOW_OUTPUT=1 bash scripts/nx.sh run onepipeline-smoke:smoke --outputStyle=stream-without-prefixes
+    @ONEPIPELINE_NX_SHOW_OUTPUT=1 bash scripts/nx.sh run onepipeline-real-smoke:smoke --outputStyle=stream-without-prefixes
 
 # The `smoke` target's body. Arguments are passed through to nextest, so the
 # target's wiring can be shown without the credential: `just nx run
-# onepipeline-smoke:smoke --no-run` builds the binary and runs nothing.
+# onepipeline-real-smoke:smoke --no-run` builds the binary and runs nothing.
 _smoke-run *args:
     @cargo nextest run --locked -E 'binary(smoke)' --no-capture --status-level all "$@"
 

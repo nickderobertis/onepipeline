@@ -495,6 +495,12 @@ pub struct Settlement {
     pub remote: Option<onevcs::Preservation>,
     /// The declared steps this attempt finished, for a continuation to skip.
     pub completed_steps: Vec<String>,
+    /// The branch a lifecycle node's change request is based on, once its
+    /// session resolved one.
+    pub base: Option<String>,
+    /// The stack a lifecycle node was drafted on, where it had stack parents.
+    /// Boxed, because only a stacked node's settlement carries one.
+    pub(crate) stack: Option<Box<crate::payload::SettledStack>>,
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
@@ -514,6 +520,8 @@ impl Settlement {
             head: None,
             remote: None,
             completed_steps: Vec::new(),
+            base: None,
+            stack: None,
         }
     }
 }
@@ -3924,6 +3932,11 @@ fn validate_envelope(
             .and_then(|()| channel.allows_completion(author.clone(), None))
             .and_then(|()| channel.allows(author.clone(), command))
             .and_then(|()| {
+                // The publication boundary, for a command this loop takes up — queued, or
+                // claimed by a driver that died — exactly as for one submitted directly.
+                crate::boundary::guard(&staged_state, &serde_json::json!({ "commands": [command] }))
+            })
+            .and_then(|()| {
                 validate_command(
                     paths,
                     &staged_state,
@@ -5319,6 +5332,17 @@ struct PlacementShape {
     base: Option<String>,
 }
 
+/// Whether two `repo` spellings name one repository, as `onevcs` resolves each.
+///
+/// The read [`crate::graph::stacking_bases`] makes of a preserve edge, made of a
+/// landing node's dependency: a spelling `onevcs` cannot resolve names no
+/// repository this run can place anything on, so it is answered `false` and the
+/// dependency only orders the node.
+fn same_identity(mine: &str, other: &str) -> bool {
+    let identity = |repo: &str| onevcs::release_targets(repo).map(|repository| repository.identity);
+    matches!((identity(mine), identity(other)), (Ok(mine), Ok(other)) if mine == other)
+}
+
 struct StackingPlacement {
     shape: BTreeMap<String, PlacementShape>,
     bases: std::result::Result<BTreeMap<String, String>, String>,
@@ -5459,6 +5483,7 @@ fn start_ready(
         .collect();
 
     let mut settled_here = false;
+    let mut boundary: Option<(crate::plan::Plan, crate::boundary::Resolved)> = None;
     for mut node in actionable {
         if node.kind != NodeKind::Human && in_flight.len() >= concurrency {
             break;
@@ -5509,6 +5534,71 @@ fn start_ready(
                     continue;
                 }
             }
+        }
+
+        // What the publication boundary tells and gives this dispatch: the run's term
+        // scope always, and in a mixed plan its side of the boundary, a neutral branch
+        // name and, for an export's consumer, the export its session starts from. Read
+        // once a pass and only on a pass that starts something: the graph is resolved
+        // again only where its shape changed since the last dispatch asked.
+        let (now, resolved) = boundary.get_or_insert_with(|| {
+            let now = crate::boundary::plan_now(state);
+            let resolved = crate::boundary::of_run(&now);
+            (now, resolved)
+        });
+        let dispatching = match crate::boundary::dispatching(
+            resolved,
+            now,
+            &node,
+            &state.branches,
+            &state.heads,
+            &state.superseded,
+        ) {
+            Ok(dispatching) => dispatching,
+            Err(detail) => {
+                settle(
+                    paths,
+                    journal,
+                    &Settlement {
+                        detail: Some(detail),
+                        ..failed(&node.id, INFRASTRUCTURE_FAILURE)
+                    },
+                )?;
+                settled_here = true;
+                continue;
+            }
+        };
+
+        // A landing node depending on unlanded work of its own repository is
+        // placed on that work: one parent's branch, or the stack base merging
+        // several. Decided from the landings this run has recorded, so it asks
+        // no host; a node with no stack parents is placed as it always was.
+        let plan_name = state
+            .plan
+            .as_ref()
+            .and_then(|plan| plan.name.clone())
+            .unwrap_or_else(|| paths.run.clone());
+        let stack =
+            match crate::stack::placement(state, statuses, &node, &plan_name, &same_identity) {
+                Ok(stack) => stack,
+                // llmlint: ignore-block[changed_behavior_has_e2e] reached only by the two refusals
+                // `stack::placement` makes, each of a record this build never writes — its own
+                // suppression says which — so a journey would prove a hand-edited journal.
+                Err(detail) => {
+                    settle(
+                        paths,
+                        journal,
+                        &Settlement {
+                            detail: Some(detail),
+                            ..failed(&node.id, INFRASTRUCTURE_FAILURE)
+                        },
+                    )?;
+                    settled_here = true;
+                    continue;
+                } // llmlint: ignore-end[changed_behavior_has_e2e]
+            };
+        if let Some(stack) = &stack {
+            node.base_branch = Some(stack.base().to_owned());
         }
 
         // A lifecycle node is asked for only where its identity has room for
@@ -5643,10 +5733,12 @@ fn start_ready(
             launch,
             &node,
             &references,
+            stack,
             cancel.clone(),
             tx.clone(),
             resume,
             notes_in_flight,
+            dispatching,
         )?;
         let now = Instant::now();
         in_flight.insert(
@@ -5780,10 +5872,12 @@ fn spawn(
     launch: &LaunchRecord,
     node: &Node,
     references: &[crate::plan::CrossRepoReference],
+    stack: Option<crate::stack::Stack>,
     cancel: CancellationToken,
     tx: Sender<Message>,
     resume: Option<Box<crate::lifecycle::Continuation>>,
     notes_in_flight: &DeliveriesInFlight,
+    boundary: crate::boundary::Dispatching,
 ) -> Result<()> {
     // The labels a `node_label` rule selects on. An executor is chosen once per
     // node, before its steps run, so a node's own labels are what exists here.
@@ -5822,6 +5916,7 @@ fn spawn(
             .as_ref()
             .and_then(|_| crate::branchname::Naming::of_run(&paths, launch)),
         notes_in_flight: notes_in_flight.clone(),
+        boundary,
     };
     std::thread::Builder::new()
         .name(format!("dispatch-{}", node.id))
@@ -5835,6 +5930,7 @@ fn spawn(
                     &launched,
                     &node,
                     &references,
+                    stack.as_ref(),
                     &cancel,
                     &tx,
                     &ended,
@@ -5847,6 +5943,7 @@ fn spawn(
                     &launched.node_graph,
                     &node,
                     &references,
+                    launched.boundary.section(),
                     &cancel,
                     &tx,
                     &ended,
@@ -5891,6 +5988,7 @@ fn execute_direct(
     default_graph: &str,
     node: &Node,
     references: &[crate::plan::CrossRepoReference],
+    boundary: Option<&str>,
     cancel: &CancellationToken,
     tx: &Sender<Message>,
     ended: &EndedDispatches,
@@ -5921,7 +6019,7 @@ fn execute_direct(
     }; // llmlint: ignore-end[changed_behavior_has_e2e]
     let request = |attempt| DispatchRequest {
         graph: graph.clone(),
-        task: node.rendered_task_with(references),
+        task: crate::boundary::with_section(node.rendered_task_with(references), boundary),
         labels: dispatch_labels(run, &node.id, None, node.persona.as_deref()),
         controls,
         workspace: WorkspaceSpec::Path(project_dir()),
@@ -7857,6 +7955,12 @@ fn settle(paths: &RunPaths, journal: &mut Journal, settlement: &Settlement) -> R
     }
     if !settlement.completed_steps.is_empty() {
         payload.insert("completed_steps".into(), json!(settlement.completed_steps));
+    }
+    if let Some(base) = &settlement.base {
+        payload.insert(journal::SETTLED_BASE.into(), json!(base));
+    }
+    if let Some(stack) = &settlement.stack {
+        payload.insert(journal::SETTLED_STACK.into(), json!(stack));
     }
     journal.emit(
         journal::PipelineKind::NodeSettled,
@@ -10264,6 +10368,7 @@ mod tests {
             "graphs/node-scope.yaml",
             &node,
             &[],
+            None,
             &CancellationToken::new(),
             &tx,
             &EndedDispatches::none(),
@@ -10287,6 +10392,7 @@ mod tests {
             name: Some("demo".into()),
             concurrency: 4,
             tasks: nodes,
+            export_edges: Vec::new(),
         };
         RunState {
             graph: Graph::from_plan(&plan),

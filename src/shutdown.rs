@@ -1147,11 +1147,15 @@ fn preserve_every_branch(view: &RunView, now: Option<&RunView>) -> Vec<BranchPre
             offered.push(pair);
         }
     }
+    // Each push is a check run on the run's behalf, so it derives its terms from the
+    // private repositories the run's plan names, as every other one does.
+    let term_scope =
+        crate::boundary::of_run(&crate::boundary::plan_now(&latest.state)).term_scope();
     for (repo, branch) in offered {
         let request = onevcs::PreserveRequest {
             repo: repo.clone(),
             branch: branch.clone(),
-            term_scope: onevcs::TermScope::Registry,
+            term_scope: term_scope.clone(),
         };
         preserved.push(match onevcs::preserve(&request) {
             Ok(done) => BranchPreserved {

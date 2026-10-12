@@ -179,6 +179,14 @@ pub enum Command {
     /// Registered task templates: list them, state one resolved, check one.
     #[command(subcommand)]
     Template(TemplateCommand),
+    // llmlint: ignore[new_command_or_client_gets_its_own_project] a verb group of this one
+    // binary rather than a new command or client: it reads the boundary rules the loader
+    // and the reconciler already hold a plan to, through the same private module, and
+    // ships in the same artifact on the same three registries.
+    /// The repository publication boundary: the guidance for crossing it, and the
+    /// validator a message bus runs.
+    #[command(subcommand)]
+    Boundary(BoundaryCommand),
     /// Attach a fresh driver to a run whose ledger is intact.
     Adopt(AdoptArgs),
     /// Inspect the channel command group.
@@ -278,6 +286,42 @@ pub enum PlanCommand {
     /// Run the engine's own plan loader, and every registered check, over one
     /// project.
     Check(PlanCheckArgs),
+}
+
+/// What the repository publication boundary may be asked.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+#[command(rename_all = "kebab-case")]
+pub enum BoundaryCommand {
+    /// Print the engine-owned guidance for carrying private work into a public node:
+    /// generalize, preserve, export, consume. It is the advice every boundary refusal
+    /// carries, written once.
+    Guidance(BoundaryGuidanceArgs),
+    /// Judge one message bus envelope, read from stdin, against a run's boundary: exit 0
+    /// to pass it, 1 to refuse it with a neutral reason on stderr, and 2 where the check
+    /// cannot decide, which a bus never sends. The `command` validator a bus
+    /// configuration names.
+    ValidateEnvelope(ValidateEnvelopeArgs),
+}
+
+/// `onepipeline boundary validate-envelope`.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct ValidateEnvelopeArgs {
+    /// The run whose plan the envelope is judged against.
+    #[arg(long)]
+    pub run: String,
+    /// Print the digest a bus pass cache keys a pass by — the run's term scope, its
+    /// nodes' clearances and the terms each scoped repository contributes — instead of
+    /// judging anything.
+    #[arg(long)]
+    pub fingerprint: bool,
+}
+
+/// `onepipeline boundary guidance`.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct BoundaryGuidanceArgs {
+    /// Print the typed guidance as one JSON object rather than as prose.
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// What the registered task templates may be asked. None of these writes to a store.
@@ -1210,7 +1254,7 @@ pub struct StopGuardArgs {
 ///
 /// The listing — one target of three — or, with `--acknowledge`, the record that
 /// the session has seen and deliberately left one branch. What it promises is
-/// entry 115 of `docs/contract-divergences.md`.
+/// entry 117 of `docs/contract-divergences.md`.
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 pub struct UnpublishedArgs {
     /// The manager session: list the branches of every session its runs opened,

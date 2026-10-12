@@ -2002,8 +2002,8 @@ fn an_arrival_note_with_no_live_turn_to_reach_is_owed_to_the_next_dispatch() {
 /// ledger**.
 ///
 /// It is out-of-repository whatever repository it lands in: the branch belongs to
-/// another run, so the stacked-branch machinery this crate has cannot reach it
-/// and a git pin is the only thing a worker can hold.
+/// another run, so the stack placement this crate makes from its own run's
+/// settlements cannot reach it and a git pin is the only thing a worker can hold.
 #[test]
 fn a_cross_dag_dependency_is_pinned_against_git_and_named_from_the_upstreams_ledger() {
     let world = watching("adoption-crossdag");
@@ -3060,9 +3060,9 @@ fn a_published_node_readied_in_the_pass_its_dependency_is_found_landed_is_held_f
         .with_env("ONEPIPELINE_MERGE_PATH_BACKOFF_SECONDS", "1");
     world.write_graphs();
     let (engine_repo, _consumer) = two_repositories(&world);
-    // The engine's visibility is declared, so the publication's write boundary
-    // takes the rule's word and asks the host nothing: the two reads the outage
-    // refuses stay the closeout's and the publication's own.
+    // Both repositories declared private, as the operator states it, so no host read
+    // asks a repository's visibility: the outage below counts the reads this journey is
+    // about.
     std::fs::write(
         world.onevcs_home().join("rules.yml"),
         "version: 4\n\
@@ -3071,14 +3071,17 @@ fn a_published_node_readied_in_the_pass_its_dependency_is_found_landed_is_held_f
          \x20   publication: change-auto\n\
          \x20   approvals: none\n\
          \x20   visibility: private\n\
+         \x20 - match: {owner: owner}\n\
+         \x20   visibility: private\n\
          default:\n\
          \x20 publication: local-direct\n\
          \x20 approvals: none\n",
     )
     .expect("the rules file is written");
-    // The closeout's read and the publication's own are refused; every read
-    // after them meets a host that answers.
-    world.script("gh.outage", "2");
+    // The closeout's read, the visibility probe the publication's public boundary
+    // asks before it pushes, and the publication's own read are refused; every
+    // read after them meets a host that answers.
+    world.script("gh.outage", "3");
     let (script, answer) = world.probe_in(&engine_repo, ENGINE);
     world.releases(&automated(&script));
     releases_at(&answer, "0.1.0");
@@ -4826,9 +4829,13 @@ fn a_settled_landing_is_what_the_release_is_correlated_through(name: &str, spell
     // dependency's work is out.
     let mut landed = engine();
     landed["id"] = json!("landed");
+    // No edge from `broken` to `landed`: a dependent of `landed`'s unlanded change
+    // is placed on its branch (`docs/contract-divergences.md` entry 115), and then
+    // the commit this journey states as the landing would be on `broken`'s branch
+    // too — a commit two pieces of work answer to, which `onevcs` refuses to
+    // resolve. `broken` keeps a branch of its own, and the journey waits for both.
     let mut broken = engine();
     broken["id"] = json!("broken");
-    broken["deps"] = json!(["landed"]);
     let mut consumer = consumer(Some("published"));
     consumer["deps"] = json!(["broken"]);
     world.script("broken.fail", "1");
@@ -4839,9 +4846,13 @@ fn a_settled_landing_is_what_the_release_is_correlated_through(name: &str, spell
         vec![landed, broken, consumer, agent("hold", &[])],
     );
 
-    world.until("the broken node to settle", |world| {
-        settled_status(world, &run, "broken") == Some("failed".to_owned())
-    });
+    world.until(
+        "the broken node to fail and the landed one to settle",
+        |world| {
+            settled_status(world, &run, "broken") == Some("failed".to_owned())
+                && settled_status(world, &run, "landed") == Some("done".to_owned())
+        },
+    );
     assert!(
         !dispatched(&world, &run, "consumer"),
         "a node whose dependency failed was dispatched"
@@ -6216,9 +6227,10 @@ fn a_cross_dag_dependency_settled_from_evidence_is_correlated_through_its_landin
     // record goes wrong.
     let mut landed = engine();
     landed["id"] = json!("landed");
+    // No edge from `broken` to `landed`, for the reason the single-run journey
+    // gives: `broken` keeps a branch of its own.
     let mut broken = engine();
     broken["id"] = json!("broken");
-    broken["deps"] = json!(["landed"]);
     world.script("broken.fail", "1");
     // A node held open, so the upstream run is still being driven when the
     // settle reaches it — the ordinary path, where the loop applies a queued
@@ -6229,8 +6241,9 @@ fn a_cross_dag_dependency_settled_from_evidence_is_correlated_through_its_landin
         "adoption-settled-upstream",
         vec![landed, broken, agent("hold", &[])],
     );
-    world.until("the upstream node to settle", |world| {
+    world.until("the upstream nodes to settle", |world| {
         settled_status(world, &upstream, "broken") == Some("failed".to_owned())
+            && settled_status(world, &upstream, "landed") == Some("done".to_owned())
     });
     let branch = branch_of(&world, &upstream, "landed");
     bring_the_branch_here(&world, &engine_repo.checkout, &branch);
@@ -6373,8 +6386,8 @@ fn consumer_wait_count(world: &World, run: &str) -> usize {
 /// record in the channel's surfaces log, rewritten in place at the same length,
 /// which is the record the interval is counted from. Called while the wait is
 /// unread and nothing else is being queued, which is the state an unchanged
-/// hold holds the channel in.
-fn backdate_newest_wait(world: &World, run: &str, seconds: u64) {
+/// hold holds the channel in. Returns the backdated stamp, in epoch milliseconds.
+fn backdate_newest_wait(world: &World, run: &str, seconds: u64) -> u64 {
     let log = world.run_file(run, "channel/surfaces.jsonl");
     let text = std::fs::read_to_string(&log).expect("the surfaces log reads");
     let lines: Vec<&str> = text.lines().collect();
@@ -6410,6 +6423,7 @@ fn backdate_newest_wait(world: &World, run: &str, seconds: u64) {
     let whole = log.with_extension("backdated");
     std::fs::write(&whole, rewritten).expect("the backdated log is written");
     std::fs::rename(&whole, &log).expect("the backdated log replaces the log");
+    backdated
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 
@@ -6523,24 +6537,34 @@ fn an_unchanged_release_wait_is_queued_again_only_once_read_and_a_changed_one_at
     // at the ceiling, a wait backdated five seconds short of the interval is
     // queued again after those five seconds and not before — which is the
     // interval, measured. At the ceiling, doubling would have asked 16384.
+    // "Not before" is read off the stamp the run records the next wait at,
+    // rather than off a wall-clock window after the read: the read is a
+    // subprocess, and on a slow runner it alone can outlast the five seconds.
     let mut every: u64 = 8;
     let mut measured = Vec::new();
     for _ in 0..13 {
         let before = consumer_wait_count(&world, &run);
         let precise = every >= 8_192;
-        backdate_newest_wait(&world, &run, if precise { every - 5 } else { every + 60 });
+        let backdated =
+            backdate_newest_wait(&world, &run, if precise { every - 5 } else { every + 60 });
         read_waits(&world, &run);
-        if precise {
-            std::thread::sleep(std::time::Duration::from_secs(2));
-            assert_eq!(
-                consumer_wait_count(&world, &run),
-                before,
-                "a wait was queued again before its {every}-second interval had passed"
-            );
-        }
+        let mut next = 0;
         world.until(
             &format!("the wait after a {every}-second interval"),
-            |world| consumer_wait_count(world, &run) > before,
+            |world| {
+                consumer_waits(world, &run).is_some_and(|waits| match waits.get(before) {
+                    Some(&(stamp, _)) => {
+                        next = stamp;
+                        true
+                    }
+                    None => false,
+                })
+            },
+        );
+        assert!(
+            next.saturating_sub(backdated) >= every * 1_000,
+            "a wait was queued again {}ms after the one before it, inside its {every}-second interval",
+            next.saturating_sub(backdated)
         );
         measured.push(every);
         every = (every * 2).min(CEILING_SECONDS);

@@ -38,7 +38,7 @@ use onevcs::registry::Identity;
 use onevcs::rules::Approvals;
 use onevcs::{
     Check, CheckState, EventStream, Lifecycle, MergePolicy, Providers, PublishOutcome,
-    PublishRequest, SessionRequest, Vcs,
+    PublishRequest, SessionRequest, TermScope, Vcs,
 };
 use onevcs_testing::{HostState, MemoryHost, MemoryVcs, VcsState};
 
@@ -131,7 +131,7 @@ fn every_operation_this_crate_performs_is_served_by_the_provider_seam() {
             // Not a draft: this publication is the ordinary one, and section 5
             // below is where a reason is carried.
             draft: None,
-            term_scope: onevcs::TermScope::Registry,
+            term_scope: TermScope::default(),
             adopt: None,
             defer_checks: false,
         },
@@ -233,7 +233,7 @@ fn every_operation_this_crate_performs_is_served_by_the_provider_seam() {
             title: Some("feat: adopt early".parse().expect("a usable subject")),
             body: None,
             draft: Some(reason.clone()),
-            term_scope: onevcs::TermScope::Registry,
+            term_scope: TermScope::default(),
             adopt: None,
             defer_checks: false,
         },
@@ -273,7 +273,7 @@ fn every_operation_this_crate_performs_is_served_by_the_provider_seam() {
             title: Some("feat: adopt early".parse().expect("a usable subject")),
             body: None,
             draft: None,
-            term_scope: onevcs::TermScope::Registry,
+            term_scope: TermScope::default(),
             adopt: None,
             defer_checks: false,
         },
@@ -373,7 +373,7 @@ fn published_through_the_lifecycle(
             title: Some("feat: land it".parse().expect("a usable subject")),
             body: None,
             draft: None,
-            term_scope: onevcs::TermScope::Registry,
+            term_scope: TermScope::default(),
             adopt: None,
             defer_checks: false,
         },

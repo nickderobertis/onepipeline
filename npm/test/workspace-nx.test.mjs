@@ -117,7 +117,7 @@ const UNIFORM_EXEMPT = ["onepipeline-visual-docs"];
 
 const uniform = projects.filter((declared) => !UNIFORM_EXEMPT.includes(declared.name));
 
-// The live and network tiers (`tier:live`: `onepipeline-smoke` reaches GitHub,
+// The live and network tiers (`tier:live`: `onepipeline-real-smoke` reaches GitHub,
 // `onepipeline-release-compat` PyPI) declare every uniform target but `test`.
 // Their journey is a target of its own, uncached and reached by no `check`, so
 // `just test` and `just check` stay offline and credential-free; a `test` that
@@ -125,7 +125,7 @@ const uniform = projects.filter((declared) => !UNIFORM_EXEMPT.includes(declared.
 // covered while proving nothing.
 const LIVE = projects.filter((declared) => declared.tags?.includes("tier:live"));
 const LIVE_TARGETS = {
-  "onepipeline-smoke": "smoke",
+  "onepipeline-real-smoke": "smoke",
   "onepipeline-release-compat": "release-compat",
 };
 const declaresUniform = (declared, target) =>

@@ -72,6 +72,7 @@ pub mod vocabulary;
 // reaches them through [`run`](crate::run).
 mod agentgraph;
 mod ask;
+mod boundary;
 mod changes;
 mod checkpoint;
 mod concurrency;
@@ -101,6 +102,7 @@ mod refusal;
 mod release;
 mod rendercost;
 mod shutdown;
+mod stack;
 mod stopguard;
 mod summary;
 mod supersession;

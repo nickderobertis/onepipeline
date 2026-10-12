@@ -218,6 +218,7 @@ pub fn publish(
     body: Option<&str>,
     draft: Option<&DraftReason>,
     cancel: &crate::executor::CancellationToken,
+    term_scope: &onevcs::TermScope,
 ) -> std::result::Result<Publication, PublishRefused> {
     let title = title
         .map(|title| title.parse::<Subject>().map_err(sibling))
@@ -239,7 +240,7 @@ pub fn publish(
             title,
             body: body.map(str::to_owned),
             draft: draft.cloned(),
-            term_scope: onevcs::TermScope::Registry,
+            term_scope: term_scope.clone(),
             adopt: None,
             defer_checks: false,
         },
@@ -332,6 +333,7 @@ pub fn describe_change(
     token: &SessionToken,
     title: Option<&str>,
     body: &str,
+    term_scope: &onevcs::TermScope,
 ) -> Result<onevcs::SessionChange> {
     let title = title
         .map(|title| title.parse::<Subject>().map_err(sibling))
@@ -342,10 +344,26 @@ pub fn describe_change(
         &onevcs::ChangeDescription {
             title,
             body: body.to_owned(),
-            term_scope: onevcs::TermScope::Registry,
+            term_scope: term_scope.clone(),
         },
     )
     .map_err(refusal)
+}
+
+/// Assemble, advance or confirm a node's stack base, as `onevcs stack-base` does.
+///
+/// The sibling's own answer, conflict included: a merge that stopped is left in
+/// progress in the session [`onevcs::StackBaseOutcome::Conflicted`] names, for
+/// the node's worker to conclude, and the same request made again then merges
+/// what is left and pushes.
+///
+/// # Errors
+///
+/// The sibling's own refusal: a parent or root the origin does not have, a name
+/// outside the stack-base namespace, a push the origin or the public boundary
+/// turned down.
+pub fn assemble_stack_base(request: &onevcs::StackBaseRequest) -> Result<onevcs::StackBase> {
+    onevcs::assemble_stack_base(&providers(), request).map_err(refusal)
 }
 
 /// The word a node whose change request is held open as a **draft** settles on.
@@ -960,11 +978,15 @@ pub fn working_session(token: &SessionToken) -> Option<Session> {
 /// one; the answer is the sibling's [`onevcs::Preserved`] or its own refusal in
 /// its own words. Nothing about which outcome is wanted is decided here — that
 /// the identity has no origin is as much an answer as a push.
-pub fn preserve_branch(repo: &str, branch: &str) -> std::result::Result<onevcs::Preserved, String> {
+pub fn preserve_branch(
+    repo: &str,
+    branch: &str,
+    term_scope: &onevcs::TermScope,
+) -> std::result::Result<onevcs::Preserved, String> {
     onevcs::preserve(&onevcs::PreserveRequest {
         repo: repo.to_owned(),
         branch: branch.to_owned(),
-        term_scope: onevcs::TermScope::Registry,
+        term_scope: term_scope.clone(),
     })
     .map_err(|refusal| refusal.to_string())
 }

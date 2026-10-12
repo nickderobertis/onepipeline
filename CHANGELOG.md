@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.68.0](https://github.com/nickderobertis/onepipeline/compare/v0.67.0...v0.68.0) - 2026-10-12
+
+### Added
+
+- enforce clearances and export-only public dependencies ([#852](https://github.com/nickderobertis/onepipeline/pull/852))
+
+## [0.67.0](https://github.com/nickderobertis/onepipeline/compare/v0.66.0...v0.67.0) - 2026-10-11
+
+### Added
+
+- *(stack)* [**breaking**] stack a landing node on its unlanded same-repository parents ([#853](https://github.com/nickderobertis/onepipeline/pull/853))
+
 ## [0.66.0](https://github.com/nickderobertis/onepipeline/compare/v0.65.0...v0.66.0) - 2026-10-11
 
 ### Added

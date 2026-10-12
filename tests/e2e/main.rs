@@ -195,6 +195,11 @@ mod plan_check;
 // lifecycle` and `mod draft_lifecycle` above do.
 mod publish_preserve;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the reason is at the
+// head of `tests/e2e/publication_boundary.rs` and is not restated here; it belongs to this
+// binary for the reason `mod publish_preserve` above does.
+mod publication_boundary;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod real_vcs;
 mod recorded_channel;
 mod recorded_support;
@@ -227,6 +232,7 @@ mod shipped;
 // narrowest edge they can honestly sit behind is the crate itself, which is this target's.
 // The block form because a line-scoped directive reaches only the line right below it.
 mod shutdown;
+mod stacked_drafts;
 // And `stop-guard`, under the same block: it is a verb of
 // this binary over `src/stopguard.rs` and `src/unwatched.rs`, and it answers off the run
 // store every launch writes, so any change under `src/` can move what it decides: the crate

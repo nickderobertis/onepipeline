@@ -1720,6 +1720,12 @@ fn every_reserved_metadata_key_the_contract_names_is_a_field_of_this_schema() {
         name: Some("named".into()),
         concurrency: 2,
         tasks: Vec::new(),
+        export_edges: vec![onepipeline::plan::ExportEdge {
+            from: "producer".into(),
+            to: "consumer".into(),
+            source_directory: "examples/generic".into(),
+            target_directory: "examples".into(),
+        }],
     })
     .expect("a plan serialises");
     // Every optional field set, so the serialized shape names all of them: an
@@ -1765,7 +1771,12 @@ fn every_reserved_metadata_key_the_contract_names_is_a_field_of_this_schema() {
             key: Some("ENG-1".into()),
             title: "feat: x".into(),
             source: None,
+            repositories: vec![
+                "github.com/owner/name".into(),
+                "github.com/owner/other".into(),
+            ],
         }),
+        classification: onetaskgraph_plugin_api::Classification::Private,
     })
     .expect("a node serialises");
     let fields: BTreeSet<String> = plan
@@ -1813,12 +1824,18 @@ fn every_reserved_metadata_key_the_contract_names_is_a_field_of_this_schema() {
     // of the plan.
     assert!(
         CONTRACT.contains(
-            "The plan-level fields — `schema_version`, `goal`, `name`, `concurrency` — are \
-             reserved metadata keys `onepipeline.<field>` on the **project**"
+            "The plan-level fields — `schema_version`, `goal`, `name`, `concurrency`, \
+             `export_edges` — are reserved metadata keys `onepipeline.<field>` on the **project**"
         ),
         "the contract no longer states which fields the project carries"
     );
-    for field in ["schema_version", "goal", "name", "concurrency"] {
+    for field in [
+        "schema_version",
+        "goal",
+        "name",
+        "concurrency",
+        "export_edges",
+    ] {
         assert!(
             plan.as_object().expect("a mapping").contains_key(field),
             "the contract reserves `{field}` on the project, which is not a plan field"
@@ -2218,6 +2235,60 @@ fn divergence_block(number: &str) -> Value {
         .and_then(|rest| rest.split("```").next())
         .unwrap_or_else(|| panic!("entry {number} carries the json block this test drives"));
     serde_json::from_str(block).unwrap_or_else(|e| panic!("entry {number}'s block is JSON: {e}"))
+}
+
+/// The stacked settlement entry 115 proposes is what this build registers for
+/// `node-settled`: the record its block writes — `base`, `head`, and a `stack` of
+/// parents with a stack base — is admitted by the published document, a stack parent
+/// missing its head or a stack whose parents are not a list is refused at its own
+/// pointer, and a settlement carrying none of the three keys still reads.
+#[test]
+fn the_stacked_settlement_is_what_the_divergence_record_names() {
+    use onepipeline::event::PipelineKind;
+    use onepipeline::payload::{registry, schema_of};
+    let block = divergence_block("115.");
+    let id = schema_of(PipelineKind::NodeSettled);
+    let registry = registry();
+    let settlement = block["settlement"].clone();
+    registry
+        .check(&id, &settlement)
+        .unwrap_or_else(|why| panic!("entry 115's settlement is refused: {why}"));
+    assert_eq!(
+        settlement["base"], settlement["stack"]["stack_base"],
+        "the entry's node is placed on its stack base"
+    );
+    let mut headless = settlement.clone();
+    headless["stack"]["parents"][0]
+        .as_object_mut()
+        .expect("a parent")
+        .remove("head");
+    assert!(
+        registry.check(&id, &headless).is_err(),
+        "a stack parent with no head was admitted"
+    );
+    let mut flat = settlement.clone();
+    flat["stack"]["parents"] = Value::String("me/a".into());
+    assert!(
+        registry.check(&id, &flat).is_err(),
+        "a stack with no parent list was admitted"
+    );
+    let mut parentless = settlement.clone();
+    parentless["stack"]["parents"] = serde_json::json!([]);
+    assert!(
+        registry.check(&id, &parentless).is_err(),
+        "a stack with no parents was admitted"
+    );
+    let mut earlier = settlement.as_object().expect("a settlement").clone();
+    for key in ["base", "head", "stack"] {
+        earlier.remove(key);
+    }
+    registry
+        .check(&id, &Value::Object(earlier))
+        .expect("a settlement written before the three keys still reads");
+    assert_eq!(
+        block["block_markers"],
+        serde_json::json!(["<!-- onepipeline:stack -->", "<!-- /onepipeline:stack -->"])
+    );
 }
 
 /// The release-adoption surface this build carries **beyond** the contract is
@@ -7426,6 +7497,12 @@ const RULINGS: &[(&str, &str)] = &[
         "112.",
         "several select the candidate whose stacking chain contains every other candidate",
     ),
+    // The repository publication boundary: the manager's rulings on what this build
+    // decided beyond the approved interface, stated by the contract's own paragraph.
+    (
+        "116.",
+        "every write-back write a store whose configuration opts into the boundary makes",
+    ),
 ];
 
 /// A plan spanning sources, as the contract's block states it: the store's own two member
@@ -10111,4 +10188,75 @@ fn preserve_stacking_prose_is_the_contract_at_every_documented_surface() {
             "{name} drifted from the approved contract"
         );
     }
+}
+
+/// The publication boundary's block is the plan schema's own: its plan parses through
+/// the public types into the export edges, the classification and the record's
+/// repositories it shows, and writes back as it reads; its context is the shape a mixed
+/// dispatch carries; and its guidance steps are the ones the binary prints.
+#[test]
+fn the_publication_boundary_block_is_the_schema_and_the_guidance_the_binary_prints() {
+    let block: Value = serde_json::from_str(&fenced_block_naming("json", "boundary_plan"))
+        .expect("the boundary block is JSON");
+    let plan: Plan = serde_json::from_value(block["boundary_plan"].clone())
+        .expect("the boundary plan is a plan of this schema");
+    assert_eq!(plan.export_edges.len(), 1);
+    let edge = &plan.export_edges[0];
+    assert_eq!(
+        (
+            edge.from.as_str(),
+            edge.to.as_str(),
+            edge.source_directory.as_str(),
+            edge.target_directory.as_str()
+        ),
+        ("generalize", "examples", "examples/generic", "examples")
+    );
+    let producer = plan
+        .tasks
+        .iter()
+        .find(|node| node.id == "generalize")
+        .expect("the producer");
+    assert_eq!(
+        producer.classification,
+        onetaskgraph_plugin_api::Classification::Private
+    );
+    assert_eq!(
+        producer
+            .task_record
+            .as_ref()
+            .map(|record| record.repositories.len()),
+        Some(2)
+    );
+    assert_eq!(
+        serde_json::to_value(&plan).expect("a plan serializes"),
+        block["boundary_plan"],
+        "the boundary plan does not round-trip as the contract writes it"
+    );
+    let context = &block["boundary_context"]["boundary"];
+    assert_eq!(context["mixed"], json!(true));
+    assert!(["public", "private"].contains(&context["clearance"].as_str().unwrap_or_default()));
+
+    let printed = std::process::Command::new(env!("CARGO_BIN_EXE_onepipeline"))
+        .args(["boundary", "guidance", "--json"])
+        .output()
+        .expect("the binary runs");
+    assert!(printed.status.success());
+    let guidance: Value = serde_json::from_slice(&printed.stdout).expect("one JSON object");
+    let steps: Vec<Value> = guidance["steps"]
+        .as_array()
+        .expect("steps")
+        .iter()
+        .map(|step| step["step"].clone())
+        .collect();
+    assert_eq!(Value::Array(steps), block["boundary_guidance_steps"]);
+    assert_contract_names(
+        "the publication boundary",
+        &[
+            "onepipeline.export_edges",
+            "onepipeline boundary validate-envelope --run RUN",
+            "onepipeline boundary guidance [--json]",
+            "## Repository boundary",
+            "<host prefix>public/<opaque id>/task-<ordinal>",
+        ],
+    );
 }
