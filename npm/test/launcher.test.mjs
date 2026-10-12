@@ -8,7 +8,7 @@
 // `published-smoke.yml` cover that against the real npm.
 
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { after, before, describe, it } from "node:test";
@@ -105,25 +105,26 @@ describe("the npm distribution", () => {
 
     // The real binary the package will carry. Debug rather than release: this
     // proves the packaging, and a release build would cost the gate minutes.
-    run("cargo", ["build", "--locked", "--quiet"]);
 
     work = mkdtempSync(join(tmpdir(), "onepipeline-npm-"));
     dist = join(work, "dist");
-    platformDir = run("node", [
-      "scripts/npm-build.mjs",
-      "platform",
+    run(process.platform === "win32" ? "python" : "python3", [
+      "scripts/build-staged-release.py",
       "--target",
       hostTarget(),
-      "--binary",
-      join("target", "debug", "onepipeline"),
+      "--profile",
+      "dev",
       "--out",
       dist,
-    ]).trim();
+    ]);
+    const record = JSON.parse(readFileSync(join(dist, `${hostTarget()}.json`), "utf8"));
+    platformDir = join(dist, "npm", `onepipeline-cli-${process.platform}-${process.arch}`);
+    platformTgz = record.npm;
     launcherDir = run("node", ["scripts/npm-build.mjs", "launcher", "--out", dist]).trim();
 
     const tarballs = join(work, "tgz");
     mkdirSync(tarballs);
-    platformTgz = pack(platformDir, tarballs);
+
     launcherTgz = pack(launcherDir, tarballs);
   });
 
@@ -141,6 +142,31 @@ describe("the npm distribution", () => {
     assert.equal(platform.version, version);
     assert.deepEqual(platform.os, [process.platform]);
     assert.deepEqual(platform.cpu, [process.arch]);
+  });
+
+  it("reuses the wheel payload byte for byte in the archive and npm tarball", () => {
+    const result = run(process.platform === "win32" ? "python" : "python3", [
+      "scripts/build-staged-release.py",
+      "--verify",
+      join(dist, `${hostTarget()}.json`),
+    ]);
+    assert.match(result, /verified binary reuse/);
+  });
+
+  it("refuses a staged record whose payload hash disagrees with the real packages", () => {
+    const record = JSON.parse(readFileSync(join(dist, `${hostTarget()}.json`), "utf8"));
+    record.binary_sha256 = "0".repeat(64);
+    const bad = join(work, "invalid-record.json");
+    writeFileSync(bad, JSON.stringify(record));
+    assert.throws(
+      () =>
+        run(
+          process.platform === "win32" ? "python" : "python3",
+          ["scripts/build-staged-release.py", "--verify", bad],
+          { stdio: ["ignore", "pipe", "pipe"] },
+        ),
+      /payload hash mismatch/,
+    );
   });
 
   it("puts a working `onepipeline` on PATH", () => {

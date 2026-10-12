@@ -4,6 +4,12 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      diagnostic:
+        description: Run the sequential Mac proofs manually
+        type: boolean
+        default: false
 
 # Least privilege: most jobs only need to read the repo.
 permissions:
@@ -36,6 +42,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       crate: ${{ steps.affected.outputs.crate }}
+      macos: ${{ steps.macos.outputs.required }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -50,6 +57,16 @@ jobs:
         env:
           ONEPIPELINE_NX_BASE_SHA: ${{ github.event_name == 'push' && github.event.before || '' }}
         run: echo "crate=$(bash scripts/nx-affected.sh --affects onepipeline)" >> "$GITHUB_OUTPUT"
+
+      - name: Classify Mac coverage
+        id: macos
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          classification=$(node .github/macos-policy.mjs classify --event "$GITHUB_EVENT_PATH" --base "$BASE" --head "$HEAD")
+          echo "$classification"
+          echo "required=$(node -e 'console.log(JSON.parse(process.argv[1]).macosRequired)' "$classification")" >> "$GITHUB_OUTPUT"
 
   # The gate on a clean checkout: bootstrap from scratch, then the deterministic
   # gate (format, clippy, tests incl. the contract and binary e2e with the
@@ -75,6 +92,10 @@ jobs:
           tool: just,nextest,cargo-llvm-cov
       # Also provisions `strace`, which the Linux-only e2e journeys refuse
       # without (`_ensure-strace` in the justfile).
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
       - name: Bootstrap
         run: just bootstrap
       # Tees its output for the re-run step below, under `shell: bash` for
@@ -185,7 +206,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest]
+        os: [windows-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 130
     env:
@@ -202,6 +223,10 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just,nextest
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
       - name: Bootstrap
         run: just bootstrap
       # Teed for the re-run step below; `shell: bash` above is pipefail, so the
@@ -397,7 +422,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -450,7 +475,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -586,3 +611,226 @@ jobs:
             exit 1
           fi
           just lint-llm-diff origin/main
+
+
+  macos:
+    name: Mac PR proofs
+    needs: changes
+    if: needs.changes.outputs.macos == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 180
+    env:
+      NEXTEST_PROFILE: ci
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,nextest
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+      - name: Bootstrap
+        run: just bootstrap
+      # Teed for the re-run step below; `shell: bash` above is pipefail, so the
+      # tee cannot turn a failed leg green. The archive is the test build, kept
+      # for that step to re-run without compiling.
+      - name: Quality gate (cross-platform legs)
+        id: gate
+        if: needs.changes.outputs.crate == 'true'
+        timeout-minutes: 120
+        run: ONEPIPELINE_TEST_ARCHIVE="$RUNNER_TEMP/tests.tar.zst" just check-cross 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
+      - name: What was still running when it stopped
+        if: failure() || cancelled()
+        continue-on-error: true
+        run: ps -ef
+      # After the process table, so the snapshot above is of the leg as it
+      # stopped rather than of these re-runs. This step says why any tests went
+      # unrun, then whether each failed test fails again on the build the step
+      # above archived, re-run from that archive so nothing can be compiled. It
+      # cannot change the verdict: that step has already failed the job, and
+      # `continue-on-error` keeps this one's exit out of it. 25 minutes is
+      # `just rerun-failed`'s bound, and the justfile says why.
+      - name: Does each failed test fail again on this build
+        if: failure() && steps.gate.outcome == 'failure'
+        continue-on-error: true
+        timeout-minutes: 25
+        run: just rerun-failed "$RUNNER_TEMP/quality-gate.log" "$RUNNER_TEMP/tests.tar.zst"
+      # On a PR the change is not on the registry yet, so `--path .` is the only
+      # way to install *this* revision.
+      - name: Install (this revision)
+        run: cargo install --path . --locked
+      - name: Smoke-test the installed binary
+        run: bash scripts/smoke-published.sh --label "cargo install on $RUNNER_OS/$RUNNER_ARCH"
+
+      - name: Install (the command the README gives users)
+        run: |
+          documented=$(grep -m1 '^cargo install --git ' README.md || true)
+          if [[ -z $documented ]]; then
+            echo "README.md's Install section no longer gives a 'cargo install --git' one-liner, so there is nothing for this job to prove — restore it or drop this job" >&2
+            exit 1
+          fi
+          # README.md is committed, but it is still file-derived input: accept
+          # only a plain argv of unambiguous characters, then run it as an argv.
+          # Nothing in that file is ever handed to the shell to interpret.
+          if [[ $documented =~ [^A-Za-z0-9._:/@=+[:space:]-] ]]; then
+            echo "README.md's install one-liner carries characters this job will not run: $documented" >&2
+            exit 1
+          fi
+          read -r -a argv <<<"$documented"
+          echo "running README.md's command: ${argv[*]}"
+          "${argv[@]}"
+      - name: Smoke-test the installed binary
+        run: |
+          # `origin/HEAD` is the remote's default branch — the same revision the
+          # `--git` install with no revision above just resolved — so this is
+          # that binary's own copy of the assertions rather than the branch's.
+          git fetch --depth=1 origin HEAD
+          git show FETCH_HEAD:scripts/smoke-published.sh >"$RUNNER_TEMP/smoke-published.sh"
+          bash "$RUNNER_TEMP/smoke-published.sh" --label "cargo install --git on $RUNNER_OS/$RUNNER_ARCH"
+
+  cross-macos:
+    name: cross (macos-latest)
+    needs: [changes, macos]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Report the Mac proof or authorized omission
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          MACOS_RESULT: ${{ needs.macos.result }}
+          MACOS_REQUIRED: ${{ needs.changes.outputs.macos }}
+          CRATE_AFFECTED: ${{ needs.changes.outputs.crate }}
+          PROOF: cross
+        run: node .github/macos-policy.mjs carrier
+
+  install-macos:
+    name: install (macos-latest)
+    needs: [changes, macos]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Report the Mac proof or authorized omission
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          MACOS_RESULT: ${{ needs.macos.result }}
+          MACOS_REQUIRED: ${{ needs.changes.outputs.macos }}
+          CRATE_AFFECTED: ${{ needs.changes.outputs.crate }}
+          PROOF: install
+        run: node .github/macos-policy.mjs carrier
+
+  install-documented-macos:
+    name: install-documented (macos-latest)
+    needs: [changes, macos]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Report the Mac proof or authorized omission
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          MACOS_RESULT: ${{ needs.macos.result }}
+          MACOS_REQUIRED: ${{ needs.changes.outputs.macos }}
+          CRATE_AFFECTED: ${{ needs.changes.outputs.crate }}
+          PROOF: install-documented
+        run: node .github/macos-policy.mjs carrier
+
+
+  macos-diagnostic:
+    name: Manual Mac diagnostic
+    if: github.event_name == 'workflow_dispatch' && inputs.diagnostic
+    runs-on: macos-latest
+    timeout-minutes: 180
+    env:
+      NEXTEST_PROFILE: ci
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,nextest
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+      - name: Bootstrap
+        run: just bootstrap
+      # Teed for the re-run step below; `shell: bash` above is pipefail, so the
+      # tee cannot turn a failed leg green. The archive is the test build, kept
+      # for that step to re-run without compiling.
+      - name: Quality gate (cross-platform legs)
+        id: gate
+        timeout-minutes: 120
+        run: ONEPIPELINE_TEST_ARCHIVE="$RUNNER_TEMP/tests.tar.zst" just check-cross 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
+      - name: What was still running when it stopped
+        if: failure() || cancelled()
+        continue-on-error: true
+        run: ps -ef
+      # After the process table, so the snapshot above is of the leg as it
+      # stopped rather than of these re-runs. This step says why any tests went
+      # unrun, then whether each failed test fails again on the build the step
+      # above archived, re-run from that archive so nothing can be compiled. It
+      # cannot change the verdict: that step has already failed the job, and
+      # `continue-on-error` keeps this one's exit out of it. 25 minutes is
+      # `just rerun-failed`'s bound, and the justfile says why.
+      - name: Does each failed test fail again on this build
+        if: failure() && steps.gate.outcome == 'failure'
+        continue-on-error: true
+        timeout-minutes: 25
+        run: just rerun-failed "$RUNNER_TEMP/quality-gate.log" "$RUNNER_TEMP/tests.tar.zst"
+      # On a PR the change is not on the registry yet, so `--path .` is the only
+      # way to install *this* revision.
+      - name: Install (this revision)
+        run: cargo install --path . --locked
+      - name: Smoke-test the installed binary
+        run: bash scripts/smoke-published.sh --label "cargo install on $RUNNER_OS/$RUNNER_ARCH"
+
+      - name: Install (the command the README gives users)
+        run: |
+          documented=$(grep -m1 '^cargo install --git ' README.md || true)
+          if [[ -z $documented ]]; then
+            echo "README.md's Install section no longer gives a 'cargo install --git' one-liner, so there is nothing for this job to prove — restore it or drop this job" >&2
+            exit 1
+          fi
+          # README.md is committed, but it is still file-derived input: accept
+          # only a plain argv of unambiguous characters, then run it as an argv.
+          # Nothing in that file is ever handed to the shell to interpret.
+          if [[ $documented =~ [^A-Za-z0-9._:/@=+[:space:]-] ]]; then
+            echo "README.md's install one-liner carries characters this job will not run: $documented" >&2
+            exit 1
+          fi
+          read -r -a argv <<<"$documented"
+          echo "running README.md's command: ${argv[*]}"
+          "${argv[@]}"
+      - name: Smoke-test the installed binary
+        run: |
+          # `origin/HEAD` is the remote's default branch — the same revision the
+          # `--git` install with no revision above just resolved — so this is
+          # that binary's own copy of the assertions rather than the branch's.
+          git fetch --depth=1 origin HEAD
+          git show FETCH_HEAD:scripts/smoke-published.sh >"$RUNNER_TEMP/smoke-published.sh"
+          bash "$RUNNER_TEMP/smoke-published.sh" --label "cargo install --git on $RUNNER_OS/$RUNNER_ARCH"

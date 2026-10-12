@@ -1,0 +1,26 @@
+schema_version: 1
+budgets:
+  # llmlint: ignore[budgets_track_product_owner_outcomes] The brief explicitly requests jobs/run and Mac-spending runs/change bounds; the manager approved separate budgets for these scheduling constraints.
+  - id: onepipeline-macos-jobs-per-run
+    measure: reported
+    command: [bash, -c, "cd .. && exec node .github/macos-budget.mjs --metric jobs-per-run --telemetry .github/.telemetry/macos-policy.json"]
+    unit: jobs
+    direction: max
+    threshold: 1
+    description: >-
+      Maximum Mac runner job instances in a resolved workflow run, including matrices and
+      reusable calls, across the single-push lifecycle and opted-in manual diagnostic.
+      inner_measure_reason: one run can occupy several shared Mac slots even when the
+      lifecycle run count stays within its bound. Telemetry only; no host label.
+  # llmlint: ignore[budgets_track_product_owner_outcomes] The brief explicitly requests jobs/run and Mac-spending runs/change bounds; the manager approved separate budgets for these scheduling constraints.
+  - id: onepipeline-macos-runs-per-change
+    measure: reported
+    command: [bash, -c, "cd .. && exec node .github/macos-budget.mjs --metric runs-per-change --telemetry .github/.telemetry/macos-policy.json"]
+    unit: runs
+    direction: max
+    threshold: 2
+    description: >-
+      Maximum distinct Mac-spending workflow runs over one ordinary PR push, its base merge,
+      optional semantic release PR and merge, release build and downstream smoke triggers.
+      Twelve event classes, three diff classes, same-repository/fork ownership and all publish
+      combinations. Explicit manual diagnostics excluded. Telemetry only; no host label.

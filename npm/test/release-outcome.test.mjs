@@ -475,7 +475,10 @@ describe("the release outcome record", () => {
     const workflow = readFileSync(join(REPO_ROOT, ".github", "workflows", "release.yml"), "utf8");
     const start = workflow.indexOf("\n  outcome:\n");
     assert.notEqual(start, -1, "no `outcome` job in release.yml");
-    const passed = [...workflow.slice(start).matchAll(/--target (\S+) /g)].map((m) => m[1]);
+    const rest = workflow.slice(start + 1);
+    const nextJob = rest.slice(1).search(/\n {2}[a-z][a-z0-9-]*:\n/);
+    const body = nextJob === -1 ? rest : rest.slice(0, nextJob + 1);
+    const passed = [...body.matchAll(/--target (\S+) /g)].map((m) => m[1]);
     assert.deepEqual(
       [...passed].sort(),
       [...declared].sort(),

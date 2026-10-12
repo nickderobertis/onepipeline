@@ -19,7 +19,7 @@ name: Release
 #   * linked-engines — record the sibling-engine versions this release links in
 #                     its own notes, ungated so a red gate still says what it
 #                     would have shipped.
-#   * upload        — build each target on a native runner and attach the archive
+#   * upload        — build non-Darwin targets on native runners and attach the archive
 #                     + sha256 checksum to the Release.
 #   * publish-crate — idempotent crates.io publish; self-activates the day
 #                     CARGO_REGISTRY_TOKEN is set.
@@ -31,8 +31,11 @@ name: Release
 #                     is switched off.
 #   * publish-pypi  — upload those wheels to onepipeline-cli with the
 #                     PYPI_TOKEN secret, gated on the PYPI_PUBLISH repo variable.
-#   * verify-pypi   — pip-install the exact version just published on every OS a
-#                     user installs it on, then run scripts/smoke-published.sh.
+#   * darwin        — build both Darwin targets sequentially, reusing each final wheel
+#                     binary in its archive and npm package; install and smoke both
+#                     architectures before any artifact publishes.
+#   * verify-pypi   — pip-install the exact version just published on Linux/Windows,
+#                     then run scripts/smoke-published.sh.
 #   * build-npm     — wrap the same prebuilt binary in per-platform npm packages
 #                     via scripts/npm-build.mjs. Unconditional, same rationale as
 #                     the wheels.
@@ -143,6 +146,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just,nextest,cargo-llvm-cov
+      - uses: astral-sh/setup-uv@v6
       - run: just bootstrap
       - run: just check
   # llmlint: ignore-end[no_second_broader_sweep_over_an_already_gated_commit]
@@ -185,7 +189,7 @@ jobs:
 
   upload:
     name: upload (${{ matrix.target }})
-    needs: test
+    needs: [test, darwin]
     permissions:
       contents: write
     strategy:
@@ -197,10 +201,6 @@ jobs:
             os: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
-          - target: x86_64-apple-darwin
-            os: macos-latest
-          - target: aarch64-apple-darwin
-            os: macos-latest
           - target: x86_64-pc-windows-msvc
             os: windows-latest
     runs-on: ${{ matrix.os }}
@@ -230,7 +230,7 @@ jobs:
   # versa. Kept out of release-plz (publish = false there) so versioning/tagging
   # stays decoupled from the registry push.
   publish-crate:
-    needs: [guard, test]
+    needs: [guard, test, darwin]
     if: ${{ needs.guard.outputs.publish == 'true' }}
     runs-on: ubuntu-latest
     permissions:
@@ -315,10 +315,6 @@ jobs:
             os: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
-          - target: x86_64-apple-darwin
-            os: macos-latest
-          - target: aarch64-apple-darwin
-            os: macos-latest
           - target: x86_64-pc-windows-msvc
             os: windows-latest
     runs-on: ${{ matrix.os }}
@@ -352,7 +348,7 @@ jobs:
   # not Trusted Publishing: this project publishes with repo secrets, so no OIDC
   # identity is registered on PyPI and `id-token: write` would buy nothing.
   publish-pypi:
-    needs: build-wheels
+    needs: [build-wheels, darwin]
     if: ${{ vars.PYPI_PUBLISH == 'true' }}
     runs-on: ubuntu-latest
     steps:
@@ -387,10 +383,9 @@ jobs:
   # goes to scripts/smoke-published.sh — the same script ci.yml runs against the
   # build under test, so what a release asserts cannot drift from what ships.
   #
-  # Four legs for five targets: `pip install` resolves a *different wheel* per
-  # platform AND architecture. `macos-latest` is arm64; `macos-15-intel` is the
-  # leg that installs the x86_64 Darwin wheel. The one target with no leg is
-  # aarch64 Linux, which the matrices above still build.
+  # Darwin installs run against staged products in `darwin` before publication.
+  # These Linux/Windows legs retain the registry propagation checks; aarch64
+  # Linux is still built by its native manylinux leg.
   verify-pypi:
     name: verify-pypi (${{ matrix.os }})
     needs: publish-pypi
@@ -400,7 +395,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, macos-15-intel, windows-latest]
+        os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -459,10 +454,6 @@ jobs:
             os: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
-          - target: x86_64-apple-darwin
-            os: macos-latest
-          - target: aarch64-apple-darwin
-            os: macos-latest
           - target: x86_64-pc-windows-msvc
             os: windows-latest
     runs-on: ${{ matrix.os }}
@@ -500,7 +491,7 @@ jobs:
   # `registry-url` makes setup-node write an .npmrc that authenticates with
   # NODE_AUTH_TOKEN, so `npm publish` is token-authenticated.
   publish-npm:
-    needs: build-npm
+    needs: [build-npm, darwin]
     permissions:
       contents: read
     if: ${{ vars.NPM_PUBLISH == 'true' }}
@@ -570,10 +561,6 @@ jobs:
             package: onepipeline-cli-linux-x64
           - os: ubuntu-24.04-arm
             package: onepipeline-cli-linux-arm64
-          - os: macos-latest
-            package: onepipeline-cli-darwin-arm64
-          - os: macos-15-intel
-            package: onepipeline-cli-darwin-x64
           - os: windows-latest
             package: onepipeline-cli-win32-x64
     runs-on: ${{ matrix.os }}
@@ -610,6 +597,7 @@ jobs:
           PACKAGE: ${{ matrix.package }}
         run: |
           root="$(npm root -g)"
+          # shellcheck disable=SC2016 # Template interpolation belongs to Node, not the shell.
           node -e '
             const { existsSync } = require("node:fs");
             const { join } = require("node:path");
@@ -697,3 +685,80 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release upload "$GITHUB_REF_NAME" "$RUNNER_TEMP/release-outcome.json" --clobber
+
+  darwin:
+    name: Build and install both Darwin products
+    needs: test
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - name: Install packager and both Rust targets
+        run: |
+          just nx run onepipeline-npm:bootstrap
+          uv tool dir --bin >> "$GITHUB_PATH"
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          softwareupdate --install-rosetta --agree-to-license
+      - name: Install x86_64 runtimes for real Rosetta installs
+        run: |
+          curl -fsSL https://nodejs.org/dist/v22.22.0/node-v22.22.0-darwin-x64.tar.gz | tar -xz -C "$RUNNER_TEMP"
+          echo "X64_NODE=$RUNNER_TEMP/node-v22.22.0-darwin-x64/bin/node" >> "$GITHUB_ENV"
+          curl -fsSL https://www.python.org/ftp/python/3.12.10/python-3.12.10-macos11.pkg -o "$RUNNER_TEMP/python-universal.pkg"
+          sudo installer -pkg "$RUNNER_TEMP/python-universal.pkg" -target /
+          universal=/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12
+          lipo -archs "$universal" | grep -q x86_64
+          # shellcheck disable=SC2016 # The wrapper must forward its own argv at runtime.
+          printf '#!/bin/sh\nexec arch -x86_64 "%s" "$@"\n' "$universal" > "$RUNNER_TEMP/python-x64"
+          chmod +x "$RUNNER_TEMP/python-x64"
+      - name: Build, pack, install and smoke both targets before publication
+        env:
+          RUSTFLAGS: "-D warnings"
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          python3 scripts/build-staged-release.py --target aarch64-apple-darwin --out staged-release --install --tag "$TAG"
+          python3 scripts/build-staged-release.py --target x86_64-apple-darwin --out staged-release --install --tag "$TAG" --python "$RUNNER_TEMP/python-x64" --node "$X64_NODE"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-darwin
+          path: staged-release/wheels/**/*.whl
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-darwin
+          path: staged-release/npm-artifacts/**/*.tgz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: archives-darwin
+          path: staged-release/archives/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: payload-hashes-darwin
+          path: staged-release/*.json
+
+  upload-darwin:
+    needs: darwin
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: archives-darwin
+          path: archives
+      - name: Attach prebuilt archives and checksums
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$TAG" archives/* --clobber

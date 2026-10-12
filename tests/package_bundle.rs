@@ -65,3 +65,92 @@ fn the_packaged_crate_carries_the_committed_events_bundle() {
         "the packaged base is not the one the library embeds"
     );
 }
+
+#[test]
+fn release_packaging_retains_every_target_and_installs_darwin_before_publication() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let text = std::fs::read_to_string(root.join(".github/workflows/release.yml")).unwrap();
+    let release: serde_norway::Value = serde_norway::from_str(&text).unwrap();
+    let jobs = &release["jobs"];
+    let darwin = &jobs["darwin"];
+    assert_eq!(darwin["runs-on"].as_str(), Some("macos-latest"));
+    assert!(darwin.get("strategy").is_none());
+    let runs: Vec<&str> = darwin["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .filter_map(|s| s["run"].as_str())
+        .collect();
+    let builds: Vec<&str> = runs
+        .iter()
+        .flat_map(|s| s.lines())
+        .filter(|s| s.contains("scripts/build-staged-release.py --target"))
+        .collect();
+    let darwin_targets: Vec<&str> = builds
+        .iter()
+        .map(|s| {
+            assert!(
+                s.contains("--install"),
+                "Darwin must be installed before publication"
+            );
+            s.split("--target ")
+                .nth(1)
+                .unwrap()
+                .split_whitespace()
+                .next()
+                .unwrap()
+        })
+        .collect();
+    assert!(runs.iter().any(|s| s.contains("--install-rosetta")));
+    assert!(builds.iter().any(|s| s.contains("--node \"$X64_NODE\"")));
+    let script = std::fs::read_to_string(root.join("scripts/npm-build.mjs")).unwrap();
+    let mut declared: Vec<&str> = script
+        .lines()
+        .filter_map(|line| {
+            let (target, _) = line.trim().strip_prefix('"')?.split_once("\": {")?;
+            target.contains('-').then_some(target)
+        })
+        .collect();
+    declared.sort_unstable();
+    for job in ["upload", "build-wheels", "build-npm"] {
+        let mut targets: Vec<&str> = jobs[job]["strategy"]["matrix"]["include"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .map(|leg| leg["target"].as_str().unwrap())
+            .collect();
+        targets.extend(darwin_targets.iter().copied());
+        targets.sort_unstable();
+        assert_eq!(targets, declared, "{job} omitted a released platform");
+    }
+    for (publisher, builder) in [
+        ("publish-pypi", "build-wheels"),
+        ("publish-npm", "build-npm"),
+    ] {
+        let needs: Vec<&str> = jobs[publisher]["needs"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(needs, [builder, "darwin"]);
+        assert_eq!(jobs[publisher]["runs-on"].as_str(), Some("ubuntu-latest"));
+    }
+    assert_eq!(jobs["upload-darwin"]["needs"].as_str(), Some("darwin"));
+    assert_eq!(
+        jobs["upload-darwin"]["runs-on"].as_str(),
+        Some("ubuntu-latest")
+    );
+    for artifact in [
+        "wheels-darwin",
+        "npm-darwin",
+        "archives-darwin",
+        "payload-hashes-darwin",
+    ] {
+        assert!(darwin["steps"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .any(|step| step["with"]["name"].as_str() == Some(artifact)));
+    }
+}

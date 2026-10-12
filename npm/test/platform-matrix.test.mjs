@@ -74,6 +74,16 @@ function workflowVerifyPackages(workflow) {
   return [...body.matchAll(/^\s*- os: \S+\n\s*package: (\S+)$/gm)].map((m) => m[1]);
 }
 
+function stagedDarwinTargets(workflow) {
+  const body = workflow.slice(workflow.indexOf("\n  darwin:\n"));
+  assert.ok(body.includes("--install"), "Darwin products are locally installed before publication");
+  return [
+    ...body.matchAll(
+      /scripts\/build-staged-release.py --target (\S+) --out staged-release --install/g,
+    ),
+  ].map((m) => m[1]);
+}
+
 describe("the platform matrix", () => {
   const buildScript = read("scripts", "npm-build.mjs");
   const launcher = read("npm", "onepipeline-cli", "bin", "onepipeline.js");
@@ -90,7 +100,7 @@ describe("the platform matrix", () => {
     assert.ok(triples.length >= 1, "npm-build.mjs declares no targets");
     for (const job of ["upload", "build-wheels", "build-npm"]) {
       assert.deepEqual(
-        workflowTargets(workflow, job).sort(),
+        [...workflowTargets(workflow, job), ...stagedDarwinTargets(workflow)].sort(),
         [...triples].sort(),
         `release.yml's \`${job}\` matrix and npm-build.mjs's TARGETS disagree`,
       );
@@ -125,7 +135,14 @@ describe("the platform matrix", () => {
 
   it("verifies an install on every platform the launcher declares a package for", () => {
     const declared = Object.keys(manifest.optionalDependencies).sort();
-    const verified = workflowVerifyPackages(workflow);
+    const verified = [
+      ...workflowVerifyPackages(workflow),
+      ...stagedDarwinTargets(workflow).map((target) => {
+        const index = triples.indexOf(target);
+        assert.ok(index >= 0);
+        return `onepipeline-cli-${facts[index].platform}-${facts[index].arch}`;
+      }),
+    ];
     assert.deepEqual(
       [...verified].sort(),
       declared,

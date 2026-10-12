@@ -1,0 +1,48 @@
+{
+  "name": "github-workflows",
+  "$schema": "../node_modules/nx/schemas/project-schema.json",
+  "projectType": "library",
+  "tags": ["scope:tooling", "lang:js"],
+  "targets": {
+    "bootstrap": {
+      "command": "npm ci --prefix .github --ignore-scripts",
+      "cache": false
+    },
+    "test": {
+      "command": "node --test .github/tests/*.test.mjs",
+      "cache": false,
+      "inputs": [
+        "{projectRoot}/**/*",
+        "{workspaceRoot}/screencomp.toml",
+        "{workspaceRoot}/scripts/build-staged-release.py",
+        "{workspaceRoot}/scripts/npm-build.mjs",
+        "{workspaceRoot}/release-targets.toml",
+        "{workspaceRoot}/Cargo.toml",
+        "{workspaceRoot}/npm/onepipeline-cli/package.json",
+        "sharedGlobals"
+      ],
+      "outputs": ["{projectRoot}/.telemetry/macos-policy.json"]
+    },
+    "lint": {
+      "command": "node node_modules/@biomejs/biome/bin/biome lint .github"
+    },
+    "typecheck": {
+      "command": "node --check .github/macos-policy.mjs && node --check .github/workflow-graph.mjs && node --check .github/macos-budget.mjs"
+    },
+    "budgets": {
+      "command": "bash .github/check-budgets.sh",
+      "dependsOn": ["test"],
+      "cache": false
+    },
+    "check": {
+      "executor": "nx:noop",
+      "dependsOn": ["format-check", "lint", "typecheck", "budgets"]
+    },
+    "format-check": {
+      "command": "node node_modules/@biomejs/biome/bin/biome format .github"
+    },
+    "format": {
+      "command": "node node_modules/@biomejs/biome/bin/biome format --write .github"
+    }
+  }
+}

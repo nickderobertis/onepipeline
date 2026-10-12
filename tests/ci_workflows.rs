@@ -249,6 +249,15 @@ fn every_required_context_is_reported_on_every_pull_request() {
             .unwrap_or_else(|| panic!("no job reports `{context}` on a pull request"));
         let jobs = &all[file]["jobs"];
         let job = &jobs[key.as_str()];
+        if key.ends_with("-macos") {
+            assert_eq!(condition(job).as_deref(), Some("always()"));
+            assert_eq!(needs(job), ["changes", "macos"]);
+            assert_eq!(job["runs-on"].as_str(), Some("ubuntu-latest"));
+            assert!(job["steps"].as_sequence().unwrap().iter().any(|step| {
+                step["run"].as_str() == Some("node .github/macos-policy.mjs carrier")
+            }));
+            continue;
+        }
         if let Some(condition) = condition(job) {
             assert!(
                 ALLOWED_CONDITIONS.contains(&condition.as_str()),
@@ -355,6 +364,7 @@ fn no_required_job_waits_on_an_advisory_one() {
                     let upstream_names = rendered(&upstream, &parsed["jobs"][upstream.as_str()]);
                     assert!(
                         upstream == "changes"
+                            || (key.ends_with("-macos") && upstream == "macos")
                             || upstream_names.iter().any(|name| REQUIRED.contains(&name.as_str())),
                         "{file}'s required `{key}` waits on `{upstream}`, which is not itself required"
                     );
@@ -747,4 +757,29 @@ fn a_hard_coded_scratch_repository_is_recognised() {
     );
     assert!(scratch_slugs("owner/name with a name ending in -smoke").is_empty());
     assert!(scratch_slugs("tests/smoke/main.rs and actions/checkout@v4").is_empty());
+}
+
+#[test]
+fn the_classified_pr_lane_preserves_the_three_former_mac_proofs() {
+    let ci = workflow("ci.yml");
+    let lane = &ci["jobs"]["macos"];
+    assert_eq!(lane["runs-on"].as_str(), Some("macos-latest"));
+    assert_eq!(
+        condition(lane).as_deref(),
+        Some("needs.changes.outputs.macos == 'true'")
+    );
+    let text = serde_norway::to_string(lane).unwrap();
+    for proof in [
+        "just check-cross",
+        "cargo install --path . --locked",
+        "documented=$(grep",
+        "git show FETCH_HEAD:scripts/smoke-published.sh",
+    ] {
+        assert!(text.contains(proof), "Mac lane omitted {proof}");
+    }
+    for key in ["cross", "install", "install-documented"] {
+        assert!(!serde_norway::to_string(&ci["jobs"][key])
+            .unwrap()
+            .contains("macos-latest"));
+    }
 }

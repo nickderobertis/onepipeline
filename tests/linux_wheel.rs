@@ -241,6 +241,15 @@ fn release_maturin_version() -> String {
         pins.iter().all(|pin| *pin == pins[0]),
         "release.yml pins one maturin version, found {pins:?}"
     );
+    let npm: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(repo_root().join("npm/project.json")).unwrap())
+            .unwrap();
+    let bootstrap = npm["targets"]["bootstrap"]["command"].as_str().unwrap();
+    assert_eq!(
+        bootstrap,
+        format!("uv tool install maturin=={}", pins[0]),
+        "the staged packager and release wheel packager must use the same version"
+    );
     pins[0].to_string()
 }
 
