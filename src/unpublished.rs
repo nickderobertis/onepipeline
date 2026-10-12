@@ -501,7 +501,7 @@ fn standing(
     match &row.tip {
         Some(tip) if *tip == entry.tip => Some(entry.clone()),
         Some(_) => None,
-        // llmlint: ignore[changed_behavior_has_e2e] onevcs answers a `null` tip only for a
+        // llmlint: ignore-block[changed_behavior_has_e2e] onevcs answers a `null` tip only for a
         // ref it enumerated and then could not read, which no journey over real git can
         // stage without the row itself disappearing; the arm is entry 115's rule that a
         // row with no tip has no standing acknowledgement and counts.
@@ -512,6 +512,7 @@ fn standing(
                 row.branch.branch, row.identity
             ));
             None
+            // llmlint: ignore-end[changed_behavior_has_e2e]
         }
     }
 }
@@ -595,7 +596,7 @@ fn run_root(row: &Recoverable, unresolved: &mut Vec<String>) -> Option<PathBuf> 
         (Some(held), _) => Some(held.worktree.clone()),
         (None, Some(token)) => match onevcs::Providers::real().vcs.session(token) {
             Ok(record) => Some(record.session.worktree),
-            // llmlint: ignore[changed_behavior_has_e2e] onevcs names a row's session only
+            // llmlint: ignore-block[changed_behavior_has_e2e] onevcs names a row's session only
             // off a record it just read, so the record vanishing between the two reads is a
             // race no journey can stage deterministically; it is said rather than dropped.
             Err(error) => {
@@ -605,6 +606,7 @@ fn run_root(row: &Recoverable, unresolved: &mut Vec<String>) -> Option<PathBuf> 
                     row.branch.branch, row.identity, token.0
                 ));
                 None
+                // llmlint: ignore-end[changed_behavior_has_e2e]
             }
         },
         (None, None) => None,
@@ -615,7 +617,7 @@ fn run_root(row: &Recoverable, unresolved: &mut Vec<String>) -> Option<PathBuf> 
             .file_name()
             .and_then(|name| name.to_str())
             .is_some_and(|name| name.starts_with("s-"));
-    // llmlint: ignore[changed_behavior_has_e2e] every session a journey can open places its
+    // llmlint: ignore-block[changed_behavior_has_e2e] every session a journey can open places its
     // worktree at `<…>/<s-token>/worktree`; a pooled slot's layout is the one that is not,
     // and placing one needs a pool configuration this verb's journeys do not exercise.
     if !shaped {
@@ -628,6 +630,7 @@ fn run_root(row: &Recoverable, unresolved: &mut Vec<String>) -> Option<PathBuf> 
         ));
         return None;
     }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
     Some(parent.to_path_buf())
 }
 
@@ -755,7 +758,7 @@ fn file_bytes(meta: &std::fs::Metadata) -> u64 {
     meta.blocks().saturating_mul(512)
 }
 
-// llmlint: ignore[changed_behavior_has_e2e] Windows reports no allocated block count through
+// llmlint: ignore-block[changed_behavior_has_e2e] Windows reports no allocated block count through
 // std, so the apparent length stands in; the Unix arm is what the `--disk` journey drives.
 /// A file's bytes as this platform can count them: its apparent length, where std
 /// reports no allocated block count.
@@ -763,6 +766,7 @@ fn file_bytes(meta: &std::fs::Metadata) -> u64 {
 fn file_bytes(meta: &std::fs::Metadata) -> u64 {
     meta.len()
 }
+// llmlint: ignore-end[changed_behavior_has_e2e]
 
 /// What is wrong with `reason` as a recorded reason, or nothing.
 ///
@@ -1045,7 +1049,7 @@ pub fn acknowledge(request: &AcknowledgeRequest, graph: Option<PathBuf>) -> Resu
             )));
         }
     };
-    // llmlint: ignore[changed_behavior_has_e2e] onevcs answers a `null` tip only for a ref
+    // llmlint: ignore-block[changed_behavior_has_e2e] onevcs answers a `null` tip only for a ref
     // it enumerated and then could not read, and a present one is a validated full object
     // name, so no journey over real git can stage this without the row itself
     // disappearing; the refusal keeps an acknowledgement from being keyed on nothing.
@@ -1055,6 +1059,7 @@ pub fn acknowledge(request: &AcknowledgeRequest, graph: Option<PathBuf>) -> Resu
             row.branch.branch, row.identity
         ))
     })?;
+    // llmlint: ignore-end[changed_behavior_has_e2e]
     let file = acknowledgement_file(&request.acknowledgements, &request.session);
     let mut kept = match read_file(&file) {
         Ok(entries) => {
@@ -1137,7 +1142,7 @@ fn write_file(path: &Path, document: &AcknowledgementFile) -> Result<()> {
     let mut text = serde_json::to_string_pretty(document)
         .map_err(|error| Error::Invalid(error.to_string()))?;
     text.push('\n');
-    // llmlint: ignore[changed_behavior_has_e2e] a rename inside a directory the write just
+    // llmlint: ignore-block[changed_behavior_has_e2e] a rename inside a directory the write just
     // succeeded in fails only onto a target that is a directory, which the read before it
     // already refuses, so no journey reaches the rename failing after the write; the arm
     // removes the temporary file whichever step failed.
@@ -1147,6 +1152,7 @@ fn write_file(path: &Path, document: &AcknowledgementFile) -> Result<()> {
         let _ = std::fs::remove_file(&pending);
         return Err(failed(error));
     }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
     Ok(())
 }
 
