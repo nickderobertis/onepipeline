@@ -1466,10 +1466,35 @@ fn review_read(args: &[String], dir: &Path) -> ExitCode {
             "gh api graphql was given {unknown}, a cursor or field this host never issued"
         ));
     }
+    // The document is `onevcs`'s own and private to it, so it is not restated here:
+    // what is held is that it is one operation, balanced, declaring every variable
+    // this host reads with the type it reads it as, and selecting the pull request
+    // by that number and the thread fields answered below.
     let query = field("query").unwrap_or_default();
+    let declared = [
+        "$owner: String!",
+        "$name: String!",
+        "$number: Int!",
+        "$threads: Boolean!",
+        "$conversation: Boolean!",
+        "$reviews: Boolean!",
+        "$inThread: Boolean!",
+        "$thread: ID!",
+    ];
+    let balanced = |open: char, close: char| {
+        query.chars().try_fold(0_usize, |depth, c| match c {
+            c if c == open => Some(depth + 1),
+            c if c == close => depth.checked_sub(1),
+            _ => Some(depth),
+        }) == Some(0)
+    };
     if !(query.starts_with("query(")
-        && query.contains("reviewThreads")
-        && query.contains("isOutdated"))
+        && balanced('{', '}')
+        && balanced('(', ')')
+        && declared.iter().all(|variable| query.contains(variable))
+        && query.contains("pullRequest(number: $number)")
+        && query.contains("reviewThreads(")
+        && query.contains("isOutdated path line"))
     {
         return fake::refuse("gh api graphql answers onevcs's review read and nothing else");
     }
@@ -1496,9 +1521,15 @@ fn review_read(args: &[String], dir: &Path) -> ExitCode {
         field("name").unwrap_or_default()
     );
     // A number that is not a pull request's is refused, as GitHub refuses a
-    // variable that is not its `Int!`, rather than read as one it does not hold.
+    // variable that is not its `Int!` — a signed 32-bit integer — rather than read
+    // as one it does not hold.
     let given = field("number").unwrap_or_default();
-    let Ok(number) = given.parse::<NonZeroU64>() else {
+    let Some(number) = given
+        .parse::<i32>()
+        .ok()
+        .and_then(|number| u64::try_from(number).ok())
+        .and_then(NonZeroU64::new)
+    else {
         return fake::refuse(&format!(
             "gh api graphql was given number={given:?}, not a pull request's number"
         ));
