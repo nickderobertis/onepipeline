@@ -1439,7 +1439,6 @@ fn a_drafter_that_reuses_its_workers_pid_is_read_as_itself() {
 #[test]
 fn a_bodyless_drafter_that_reuses_its_workers_pid_is_read_as_itself() {
     let world = team_world("rework-reused-pid-bodyless");
-    world.script("oneagentgraph.pid", "4242");
     world.script("a.work", "a's change\n");
     world.script("a-rework-1.work", "a's change, reworked\n");
     world.script("a-rework-1.work-file", "a");
@@ -1456,6 +1455,9 @@ fn a_bodyless_drafter_that_reuses_its_workers_pid_is_read_as_itself() {
     let body = change_from(&world, &branch)["body"].clone();
     assert_eq!(body, crate::stacked_drafts::DRAFTED);
 
+    // Pin only the rework: the original publication must succeed before the
+    // body-less answer exercises reuse of the rework worker's pid.
+    world.script("oneagentgraph.pid", "4242");
     world.script("pr-author.bodyless", "1");
     left_unverified(
         &world,
