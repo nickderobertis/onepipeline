@@ -283,6 +283,43 @@ fn a_note_is_queued(queue: &Path) -> bool {
     queued
 }
 
+/// Release the held **judge** turn once a supervisor decision carrying the note
+/// has really been asked for.
+///
+/// The judge's counterpart of [`release_when_the_note_is_queued`], without its
+/// pause: a note reaching a live judge re-takes the decision, and the double
+/// records that decision's prompt before it holds on the same gate — so the gate
+/// opens on the re-take itself rather than on a reconciler pass a clock guessed
+/// at. A slow runner that had not yet offered the note when a fixed pause ran out
+/// let the held judge finish first, and the note reached the worker instead.
+fn release_the_judge_once_it_has_the_note(world: &World) -> std::thread::JoinHandle<()> {
+    let invocations = world.fakes.join("invocations.jsonl");
+    let fakes = world.fakes.clone();
+    std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while Instant::now() < deadline && !a_judge_was_handed_the_note(&invocations) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        release(&fakes, "judge.go");
+    })
+}
+
+/// Whether the doubles have recorded a supervisor prompt carrying [`NOTE`].
+///
+/// A ledger that does not exist yet is the state this waits out, and so is a last
+/// line still being appended; the journey's own assertions read the ledger whole
+/// once the run has settled.
+fn a_judge_was_handed_the_note(invocations: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(invocations) else {
+        return false;
+    };
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|call| call["tool"] == "oneharness-config")
+        .filter_map(|call| call["args"][0].as_str().map(str::to_string))
+        .any(|prompt| prompt.contains(SUPERVISOR_OPENING) && prompt.contains(NOTE))
+}
+
 fn release(fakes: &Path, name: &str) {
     std::fs::write(fakes.join(name), "go").expect("the rendezvous is released");
 }
@@ -3591,7 +3628,7 @@ fn a_note_reaching_the_live_judge_re_takes_its_decision_and_rides_it_to_the_work
     world.script("judge.asks-again-times", "2");
     held_judge(&world, run, vec![agent("build", &[])]);
 
-    let releasing = release_when_the_note_is_queued(&world, run, &["judge.go"]);
+    let releasing = release_the_judge_once_it_has_the_note(&world);
     let replied = world.run_with_stdin_on(
         world.agentgraph_cmd(&["reply", run]),
         &envelope(note_op("build", "supervisor", NOTE, None)),
@@ -3663,7 +3700,7 @@ fn a_note_the_judge_passed_the_work_with_is_recorded_as_judged_with() {
     let run = "passed";
     held_judge(&world, run, vec![agent("build", &[])]);
 
-    let releasing = release_when_the_note_is_queued(&world, run, &["judge.go"]);
+    let releasing = release_the_judge_once_it_has_the_note(&world);
     let replied = world.run_with_stdin_on(
         world.agentgraph_cmd(&["reply", run]),
         &envelope(note_op("build", "both", NOTE, None)),
