@@ -4108,6 +4108,7 @@ fn journal_loss_line(view: &RunView) -> String {
 /// lineage its store held `done`, and every `node-dispatched` — so a run launched before
 /// continuation existed has none, and says nothing.
 struct FromTheStore {
+    // llmlint: ignore[invalid_states_unrepresentable] a node id and a run id, each the plain `String` the run's own records carry them as — the key is the `node-settled` label every view of `RunView` keys by, and the value is the run the claim named, which `continuation::claim_of` refused unless a line could carry it before the launch journaled it.
     continued: BTreeMap<String, Option<String>>,
     dispatched: usize,
 }

@@ -325,10 +325,16 @@ pub(crate) fn refuse_fresh_over_unlanded(project: &str, read: &Read) -> Result<(
 /// What a launch continues from its project's store.
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct Continuation {
+    // llmlint: ignore-block[invalid_states_unrepresentable] a node id is the plain `String` the
+    // plan's own `Node::id` is, which every map of `RunState` keys by and `graph::validate`
+    // checked before any of these is read; each is copied from that plan, and a node-id newtype
+    // on these two fields alone would disagree with all of them and convert at every use. The
+    // halves read off the store are the typed ones: `Continued` and `BranchName`.
     /// Each node continued `done`, in plan order, with the settlement it journals.
     pub(crate) settled: Vec<(String, Continued)>,
     /// Each node pinned to the branch it left, in plan order.
     pub(crate) pinned: Vec<(String, crate::vcs::BranchName)>,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
 /// A `node-settled` a launch journals for a node its store held `done`: the stored settlement

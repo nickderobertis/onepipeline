@@ -292,7 +292,7 @@ struct Snapshot {
     claim: Claim,
     /// Each node whose dispatch has a session open and has not settled, with the
     /// `onepipeline.dispatch` its item carries: the branch, the base and when it opened.
-    dispatches: BTreeMap<String, Value>,
+    dispatches: BTreeMap<String, crate::continuation::StoredDispatch>,
     /// What this projection does with the project's `onepipeline.driver` claim.
     driver: DriverWrite,
     /// The run's term scope: the private repositories its plan names, which every
@@ -1125,7 +1125,10 @@ fn snapshot_of(
 ///
 /// A session that named no base, or a record carrying no time, is left out rather than
 /// written half: a host that pins the node needs the branch and the base together.
-fn dispatches(paths: &RunPaths, state: &RunState) -> BTreeMap<String, Value> {
+fn dispatches(
+    paths: &RunPaths,
+    state: &RunState,
+) -> BTreeMap<String, crate::continuation::StoredDispatch> {
     let open = state.sessions_in_flight();
     if open.is_empty() {
         return BTreeMap::new();
@@ -1160,7 +1163,7 @@ fn dispatches(paths: &RunPaths, state: &RunState) -> BTreeMap<String, Value> {
                 base,
                 opened_at,
             };
-            Some((node, serde_json::to_value(dispatch).ok()?))
+            Some((node, dispatch))
         })
         .collect()
 }
@@ -3671,8 +3674,12 @@ fn task_document(
     }
     // Written while the head's session is open and gone once it settles, so a host holding
     // none of this run's state pins the node to the branch it was working on.
-    if let Some(dispatch) = snapshot.dispatches.get(id) {
-        metadata.insert(crate::taskgraph::DISPATCH_KEY.into(), dispatch.clone());
+    if let Some(dispatch) = snapshot
+        .dispatches
+        .get(id)
+        .and_then(|dispatch| serde_json::to_value(dispatch).ok())
+    {
+        metadata.insert(crate::taskgraph::DISPATCH_KEY.into(), dispatch);
     }
     // What closed the node, beside the word that says it closed. Each is
     // written only where the run *observed* one, so a node with no change of
