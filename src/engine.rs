@@ -9193,6 +9193,7 @@ mod tests {
                 kind: *kind,
                 reason: String::new(),
                 retained: None,
+                armed: None,
             })
         }))
         .collect();

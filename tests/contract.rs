@@ -7503,6 +7503,12 @@ const RULINGS: &[(&str, &str)] = &[
         "116.",
         "every write-back write a store whose configuration opts into the boundary makes",
     ),
+    // engine-links-onevcs: a timed-out check wait `onevcs` left armed is re-read, not
+    // re-dispatched.
+    (
+        "117.",
+        "An **armed** `checks-unsettled` is recovered the same way",
+    ),
 ];
 
 /// A plan spanning sources, as the contract's block states it: the store's own two member
@@ -9927,21 +9933,21 @@ fn the_host_reading_is_the_committed_schema_with_the_version_1_keys() {
         assert!(words("Role").contains(word), "Role lacks {word}");
     }
 
-    // And `docs/contract-divergences.md` entry 117, which proposes the reading,
+    // And `docs/contract-divergences.md` entry 118, which proposes the reading,
     // names exactly these keys and the proof's two words: a key the type gains or
     // loses and the proposal does not fails here.
     let record = std::fs::read_to_string(repo_root().join("docs/contract-divergences.md"))
         .expect("the divergences record");
     let entry = record
-        .split("\n## 117. ")
+        .split("\n## 118. ")
         .nth(1)
         .and_then(|entry| entry.split("\n## ").next())
-        .expect("entry 117 proposes the host reading");
+        .expect("entry 118 proposes the host reading");
     let bullet = entry
         .split("\n- `onepipeline host --json` prints")
         .nth(1)
         .and_then(|bullet| bullet.split("\n- ").next())
-        .expect("entry 117 lists the reading's keys");
+        .expect("entry 118 lists the reading's keys");
     let named: BTreeSet<String> = bullet
         .split('`')
         .skip(1)
@@ -9966,7 +9972,7 @@ fn the_host_reading_is_the_committed_schema_with_the_version_1_keys() {
     }
     assert_eq!(
         named, stated,
-        "docs/contract-divergences.md entry 117 names other keys than the reading has"
+        "docs/contract-divergences.md entry 118 names other keys than the reading has"
     );
 }
 

@@ -343,15 +343,19 @@ pub(crate) const DONE_WHEN_RETIRED: &str =
 /// meaning because the thing it asked for is now **observed** rather than
 /// declared — a `change-auto` publication watches the host's own required checks
 /// to their conclusion, and which of them failed is what settles the node
-/// `checks-failed` or `checks-unsettled`. A flag saying "use CI as the
+/// `checks-failed` or `checks-unsettled` — or, where the bound elapsed with nothing
+/// red and `onevcs` armed the host's merge, re-reads it until the host lands it.
+/// A flag saying "use CI as the
 /// verification" beside a policy that already does would be a second way to ask
 /// for one behaviour, and the one nothing honoured.
 pub(crate) const VERIFY_VIA_CI_RETIRED: &str =
     "`verify_via_ci` is no longer a plan field, and nothing ever read it. The \
      host's own required checks are the merge-path verification of a node whose \
      `merge_policy` is `change-auto`, which watches them to their conclusion; a \
-     check that concludes red settles the node `checks-failed` and a bound that \
-     elapses with one still pending settles it `checks-unsettled`";
+     check that concludes red settles the node `checks-failed`, a bound that \
+     elapses with one still pending settles it `checks-unsettled`, and one that \
+     elapses with nothing red and the host's merge armed is read again until the \
+     host lands the change";
 
 /// The retired fields, each with the refusal a document still carrying it earns.
 ///
