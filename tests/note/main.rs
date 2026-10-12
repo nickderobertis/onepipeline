@@ -292,10 +292,8 @@ fn a_note_is_queued(queue: &Path) -> bool {
 /// if it is in the conversation's inbox when the held decision returns — onejudge
 /// looks for notes then, and not before — and the queue says nothing about when
 /// the reconciler gets to it: between the two lie the driver's claim of the
-/// envelope, its delivery thread, and the spool's courier in the member's process.
-/// The `cross (windows-latest)` leg once took longer than the fixed two seconds
-/// the queue's gate allowed for all of that, so the judge was released first and
-/// the note reached the worker's next turn — the ordering
+/// envelope, its delivery thread, and the spool's courier in the member's process,
+/// and a turn released before they finish reaches a different party — the ordering
 /// `a_note_that_reaches_the_conversation_after_the_judge_decided_reaches_the_worker`
 /// drives on purpose.
 ///
@@ -3726,20 +3724,15 @@ fn a_note_reaching_the_live_judge_re_takes_its_decision_and_rides_it_to_the_work
 }
 
 /// A note to the supervisor that reaches the conversation only once the judge's
-/// held decision has been taken reaches the **worker** instead — the ordering the
-/// `cross (windows-latest)` leg hit, driven on purpose.
+/// held decision has been taken reaches the **worker**, whose turn that decision
+/// opened, and is routed on to the judge's next decision rather than re-taking the
+/// one it missed.
 ///
-/// That leg recorded exactly this note-delivered record for the journey above:
-/// `reached: worker`, `routed_to: [worker, supervisor]`. Its gate released the
-/// held judge a fixed two seconds after the note was queued, and the runner had
-/// not offered it by then; the judge's decision was taken without it, the worker's
-/// next turn opened, and the note — correctly, by onejudge's contract — reached
-/// the party that was live. So the defect was the journey's gate, not the
-/// routing, and this pins the routing it depends on: release the judge with no
-/// note anywhere, hold the worker turn its decision opens, and only then send the
-/// note. The journey above now releases its judge only once the member's spool
-/// shows the note taken ([`release_once_the_note_is_taken`]), which no reconciler
-/// however slow can overtake.
+/// This is the routing a release that overtakes the reconciler produces — a
+/// note-delivered record of `reached: worker`, `routed_to: [worker, supervisor]` —
+/// and so what [`release_once_the_note_is_taken`] keeps the live-judge journeys
+/// from reaching: the judge decides with nothing in the inbox, the worker turn its
+/// decision opens is held, and only then is the note sent.
 #[test]
 fn a_note_that_reaches_the_conversation_after_the_judge_decided_reaches_the_worker() {
     let world = World::new("note-late");

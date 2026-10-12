@@ -620,10 +620,10 @@ fn supersede(
     paths: &RunPaths,
     journal: &mut Journal,
     writeback: Option<&crate::writeback::Writeback>,
-    by: crate::payload::DriverClaim,
+    by: &crate::payload::DriverClaim,
 ) -> Result<()> {
     if let Some(writeback) = writeback {
-        writeback.retire();
+        writeback.retire(by);
     }
     let message = format!(
         "driver-superseded: run '{}' on host '{}' claimed this project at {}, so this driver \
@@ -634,7 +634,7 @@ fn supersede(
     journal.emit(
         journal::PipelineKind::DriverSuperseded,
         journal::labels(&paths.run, None),
-        journal::object(&crate::payload::DriverSuperseded { by })?,
+        journal::object(&crate::payload::DriverSuperseded { by: by.clone() })?,
     )?;
     eprintln!("onepipeline: run '{}': {message}", paths.run);
     raise(
@@ -1314,7 +1314,9 @@ fn converge(
     // interval. Never before each dispatch or publication on its own.
     let mut claims = crate::continuation::ClaimWatch::of_run(paths, launch);
     let claimed_at = sys::now_rfc3339();
-    let mut superseded = false;
+    // The claim that took the project over from this driver, once one has: from then on it
+    // dispatches and publishes nothing more, and ends once what it had in flight settles.
+    let mut superseded_by: Option<crate::payload::DriverClaim> = None;
     let mut publications: Vec<PublicationDue> = Vec::new();
     let channel = ChannelState::of_run(paths, launch);
     let rules = executor_rules()?;
@@ -1555,7 +1557,7 @@ fn converge(
         // The claim at launch and adoption, before this driver claims anything itself; and on
         // the idle interval, for a driver with nothing to dispatch or publish.
         let mut read_this_pass = false;
-        if !superseded {
+        if superseded_by.is_none() {
             if let Some(watch) = claims.as_mut() {
                 // A launch's own read of the claim — the one that let it launch — covers its
                 // first pass; an adoption reads it again before claiming anything.
@@ -1564,15 +1566,15 @@ fn converge(
                 } else if !claimed || watch.idle_check_due() || !publications.is_empty() {
                     read_this_pass = true;
                     if let Some(by) = watch.check() {
-                        supersede(paths, journal, writeback.as_ref(), by)?;
-                        superseded = true;
+                        supersede(paths, journal, writeback.as_ref(), &by)?;
+                        superseded_by = Some(by);
                     }
                 }
             }
         }
         // Every publication waiting is answered by this pass's one reading.
         for due in publications.drain(..) {
-            let _ = due.answer.send(if superseded {
+            let _ = due.answer.send(if superseded_by.is_some() {
                 PublicationVerdict::Withhold
             } else {
                 PublicationVerdict::Publish
@@ -1580,7 +1582,7 @@ fn converge(
         }
         if !claimed {
             claimed = true;
-            if let Some(writeback) = writeback.as_ref().filter(|_| !superseded) {
+            if let Some(writeback) = writeback.as_ref().filter(|_| superseded_by.is_none()) {
                 if let Some(watch) = &claims {
                     writeback.hold(&watch.mine(&launch.session, &claimed_at));
                 }
@@ -1593,7 +1595,7 @@ fn converge(
         // The pass reads the claim once, at the first dispatch it is about to make, where it
         // has not already read it: one read covering every dispatch it makes.
         let mut found: Option<crate::payload::DriverClaim> = None;
-        let started_here = if superseded {
+        let started_here = if superseded_by.is_some() {
             false
         } else {
             let mut admit = || {
@@ -1623,8 +1625,8 @@ fn converge(
             )?
         };
         if let Some(by) = found {
-            supersede(paths, journal, writeback.as_ref(), by)?;
-            superseded = true;
+            supersede(paths, journal, writeback.as_ref(), &by)?;
+            superseded_by = Some(by);
         }
         if started_here {
             derived = None;
@@ -1666,7 +1668,7 @@ fn converge(
         // A superseded driver ends once what it had in flight has settled: what is left of
         // the project is the run that took it over's to drive.
         if in_flight.is_empty()
-            && (superseded || watching_merge_paths.is_empty() && deliveries.idle())
+            && (superseded_by.is_some() || watching_merge_paths.is_empty() && deliveries.idle())
         {
             // Nothing is running and nothing became ready, so no further
             // message can arrive: the graph is as converged as it will get.
@@ -1680,7 +1682,10 @@ fn converge(
             // arrive through the channel — which is the other way this loop is
             // over, and it leaves the same way: not before this driver has taken
             // the queue's last claim.
-            if superseded || graph::is_terminal(&statuses) || !any_node_can_still_move(&statuses) {
+            if superseded_by.is_some()
+                || graph::is_terminal(&statuses)
+                || !any_node_can_still_move(&statuses)
+            {
                 match close_out_and_drain(
                     paths,
                     journal,
@@ -1745,7 +1750,7 @@ fn converge(
             // The pace at which an idle driver next asks the schedule.
             maintenance.next_due(),
             // And when it next reads who claims its project.
-            claims.as_ref().filter(|_| !superseded).map_or(
+            claims.as_ref().filter(|_| superseded_by.is_none()).map_or(
                 Duration::MAX,
                 crate::continuation::ClaimWatch::until_idle_check,
             ),
