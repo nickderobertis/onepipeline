@@ -4146,18 +4146,15 @@ impl FromTheStore {
     }
 
     /// The run's line: launched here from the store, how many nodes it continued and from
-    /// which run, and how many it dispatched.
+    /// which run, and how many it dispatched. A launch names the one claim it read on every
+    /// node it continues, so its continued nodes name one run or none.
     fn line(&self) -> String {
-        let runs: BTreeSet<&str> = self
+        let from = self
             .continued
             .values()
-            .filter_map(|run| run.as_deref())
-            .collect();
-        let from = match runs.into_iter().collect::<Vec<_>>().as_slice() {
-            [] => String::new(),
-            [run] => format!(" from run '{run}'"),
-            several => format!(" from runs {}", several.join(", ")),
-        };
+            .find_map(|run| run.as_deref())
+            .map(|run| format!(" from run '{run}'"))
+            .unwrap_or_default();
         format!(
             "  launched on this host from the store: {} continued{from}, {} dispatched\n",
             counted(self.continued.len(), "node"),

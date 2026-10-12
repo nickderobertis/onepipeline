@@ -234,6 +234,10 @@ fn a_cold_host_continues_a_drafted_stack_from_the_store_and_dispatches_none_of_i
     let cold = world.on_host("host-b");
     let launched = launch(&cold, run, &project, &[]);
     launched.exited(0);
+    // The launch says what it took from the store, and pins nothing it did not.
+    launched.err_has(&format!(
+        "onepipeline: launch '{run}' continues 3 settled nodes from the store\n"
+    ));
 
     assert_eq!(
         dispatched(&cold, run),
@@ -414,7 +418,9 @@ fn the_pinned_node_continues_its_branch_and_its_draft(
     world.script("gh.checks.2", GREEN);
     std::fs::remove_dir_all(&world.runs).expect("the runs root is removed");
     let cold = world.on_host("host-b");
-    launch(&cold, run, project, &[]).exited(0);
+    launch(&cold, run, project, &[]).exited(0).err_has(&format!(
+        "onepipeline: launch '{run}' continues 1 settled node from the store"
+    ));
     assert_eq!(dispatched(&cold, run), vec!["b".to_owned()]);
     assert_eq!(
         sessions_opened(&cold, run),
@@ -1594,7 +1600,12 @@ fn a_dispatchs_branch_wins_over_a_settlements_and_an_authored_branch_over_both()
     world.script("gh.checks.2", GREEN);
     std::fs::remove_dir_all(&world.runs).expect("the runs root is removed");
     let cold = world.on_host("host-b");
-    launch(&cold, run, &project, &[]).exited(0);
+    launch(&cold, run, &project, &[])
+        .exited(0)
+        .err_has(&format!(
+            "onepipeline: launch '{run}' continues 1 settled node from the store and pins 1 node \
+         to the branch it left: 'b' on me/precedence/b-again\n"
+        ));
     assert_eq!(
         sessions_opened(&cold, run),
         vec!["me/precedence/b-again".to_owned()],
@@ -1626,7 +1637,12 @@ fn a_dispatchs_branch_wins_over_a_settlements_and_an_authored_branch_over_both()
     );
     let again = format!("{run}-2");
     let colder = world.on_host("host-c");
-    launch(&colder, run, &project, &[]).exited(0);
+    // The plan's own branch is the plan's, so the launch names no pin of its own.
+    launch(&colder, run, &project, &[])
+        .exited(0)
+        .err_has(&format!(
+            "onepipeline: launch '{run}' continues 1 settled node from the store\n"
+        ));
     assert_eq!(
         sessions_opened(&colder, run),
         vec!["me/precedence/authored".to_owned()],
