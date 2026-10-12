@@ -400,6 +400,16 @@ pub fn graphs(c: &Corpus, r: &mut Report) {
                     }
                 }
                 emitted(s, &doc.name, &g, "write (to_string, tests/e2e/channel.rs)");
+                let before = serde_norway::to_string(&g).unwrap();
+                for (label, opts) in ser_variants().into_iter().filter(|(l, _)| listed(l)) {
+                    let after = emit(&g, label, opts);
+                    if after != before {
+                        s.differ(format!("write [{label}]: bytes differ\n{}", line_diff(&before, &after)), &doc.name);
+                    }
+                    if saphyr::<GraphConfig>(&after, De::StrictBooleans).as_ref() != Ok(&g) {
+                        s.differ(format!("write [{label}]: does not re-read to the same GraphConfig"), &doc.name);
+                    }
+                }
             }
         }
     }

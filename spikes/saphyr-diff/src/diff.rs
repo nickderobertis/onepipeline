@@ -54,8 +54,12 @@ impl Report {
 }
 
 impl Section {
+    /// Record one difference seen in `doc`; a document is listed once per difference.
     pub fn differ(&mut self, what: String, doc: &str) {
-        self.differences.entry(what).or_default().push(doc.to_owned());
+        let docs = self.differences.entry(what).or_default();
+        if !docs.iter().any(|d| d == doc) {
+            docs.push(doc.to_owned());
+        }
     }
 }
 
