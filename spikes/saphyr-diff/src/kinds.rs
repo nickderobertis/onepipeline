@@ -28,6 +28,9 @@ pub enum De {
     StrictBooleans,
     NoSnippet,
     LastWins,
+    RejectTags,
+    MergeAsOrdinary,
+    NonFiniteAsString,
 }
 
 impl De {
@@ -38,6 +41,9 @@ impl De {
             De::StrictBooleans => o.strict_booleans = true,
             De::NoSnippet => o.with_snippet = false,
             De::LastWins => o.duplicate_keys = serde_saphyr::DuplicateKeyPolicy::LastWins,
+            De::RejectTags => o.reject_unsupported_tags = true,
+            De::MergeAsOrdinary => o.merge_keys = serde_saphyr::MergeKeyPolicy::AsOrdinary,
+            De::NonFiniteAsString => o.reject_non_finite_typeless_float = false,
         }
         o
     }
@@ -888,7 +894,10 @@ pub fn probes(r: &mut Report) {
         let text = format!("v: {sp}\n");
         s.compared += 1;
         let b = norway::<Json>(&text);
-        for de in [De::Default, De::StrictBooleans] {
+        for de in [De::Default, De::StrictBooleans, De::RejectTags, De::NonFiniteAsString] {
+            if de == De::RejectTags && !sp.starts_with('!') || de == De::NonFiniteAsString && !sp.starts_with('.') {
+                continue;
+            }
             let a = saphyr::<Json>(&text, de);
             if b.as_ref().map(Json::to_string) != a.as_ref().map(Json::to_string) {
                 s.differ(format!("`v: {sp}` [{de:?}]: before {b:?} after {a:?}"), "probe");
@@ -916,8 +925,8 @@ pub fn probes(r: &mut Report) {
     ] {
         s.compared += 1;
         let b = norway::<Json>(text);
-        for de in [De::Default, De::LastWins] {
-            if de == De::LastWins && name != "duplicate key" {
+        for de in [De::Default, De::LastWins, De::MergeAsOrdinary] {
+            if de == De::LastWins && name != "duplicate key" || de == De::MergeAsOrdinary && name != "merge key" {
                 continue;
             }
             let a = saphyr::<Json>(text, de);
