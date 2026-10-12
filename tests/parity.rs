@@ -1424,6 +1424,29 @@ fn unpublished_lists_decides_refuses_and_acknowledges_as_the_sdk_does() {
         })),
         Err(onepipeline::Error::Invalid(_))
     ));
+    // Nor can a session carrying NUL, which no argv can: it names nobody, so both
+    // the listing and the acknowledgement refuse it, the latter before it writes.
+    assert!(matches!(
+        verbs::unpublished(&request(verbs::UnpublishedTarget::Session {
+            session: format!("{SESSION}\0")
+        })),
+        Err(onepipeline::Error::Invalid(_))
+    ));
+    let nul = scratch.join("acknowledged-nul");
+    assert!(matches!(
+        verbs::acknowledge_unpublished(
+            &verbs::AcknowledgeRequest {
+                branch: "work/parity".to_owned(),
+                reason: "kept for parity".to_owned(),
+                repo: None,
+                session: format!("{SESSION}\0"),
+                acknowledgements: nul.clone(),
+            },
+            None,
+        ),
+        Err(onepipeline::Error::Invalid(_))
+    ));
+    assert!(!nul.exists(), "a refused acknowledgement wrote nothing");
     refused(
         "unpublished, unknown token",
         &binary(&["unpublished", "--token", "s-000000000000"]),
