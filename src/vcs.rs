@@ -3336,6 +3336,10 @@ mod tests {
             Some("https://example.invalid/pull/7")
         );
         assert_eq!(
+            change_url(&PublishOutcome::ChangeReviewDraftUnchecked(url.clone())).as_deref(),
+            Some("https://example.invalid/pull/7")
+        );
+        assert_eq!(
             change_url(&PublishOutcome::Queued(url)).as_deref(),
             Some("https://example.invalid/pull/7")
         );

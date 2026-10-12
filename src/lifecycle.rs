@@ -3198,7 +3198,7 @@ fn title_check_of(check: Option<&serde_json::Value>) -> std::result::Result<Titl
             // llmlint: ignore[changed_behavior_has_e2e] a `title_check` the wire type refuses
             // for its shape rather than its verdict — an extra field, a `keeps` naming a
             // title, a `replaced` naming none — is held by `the_title_check_and_the_net_diff_
-            // cap_are_entry_120s`; the journey drives the verdict and the subject a drafter
+            // cap_are_entry_121s`; the journey drives the verdict and the subject a drafter
             // answers wrongly, which settle the same way through this function.
             _ => format!("the drafter's `title_check` is not one this build reads: {error}"),
         }
@@ -5054,18 +5054,18 @@ mod tests {
         assert_eq!(steps.len(), 1);
     }
 
-    /// The `title_check` verdicts and the net diff's cap entry 120 states are the
+    /// The `title_check` verdicts and the net diff's cap entry 121 states are the
     /// ones a rework's publication reads and shows.
     #[test]
-    fn the_title_check_and_the_net_diff_cap_are_entry_120s() {
+    fn the_title_check_and_the_net_diff_cap_are_entry_121s() {
         let record = include_str!("../docs/contract-divergences.md");
         let block: serde_json::Value = record
             .split("\n## ")
-            .find(|entry| entry.starts_with("120."))
+            .find(|entry| entry.starts_with("121."))
             .and_then(|entry| entry.split("```json").nth(1))
             .and_then(|rest| rest.split("```").next())
-            .map(|block| serde_json::from_str(block).expect("entry 120's block is JSON"))
-            .expect("the record carries entry 120's block");
+            .map(|block| serde_json::from_str(block).expect("entry 121's block is JSON"))
+            .expect("the record carries entry 121's block");
         assert_eq!(
             block["net_diff_cap_bytes"],
             serde_json::json!(crate::vcs::NET_DIFF_CAP)

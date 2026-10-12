@@ -72,7 +72,7 @@ fn held(world: &World, name: &str) -> String {
 /// `onepipeline reply`: a run this engine drives is owed to its session until it
 /// is closed rather than until it settles (entry 98), so a settled run that
 /// nobody closed is not the excluded run the journeys below are about.
-fn settled_and_closed(world: &World, name: &str) -> String {
+pub(crate) fn settled_and_closed(world: &World, name: &str) -> String {
     let path = world.plan(name, &plan_of(name, vec![agent("build", &[])]));
     world.run(&["start", &path, "--attach"]).settled();
     world.until("the run to settle", |world| {

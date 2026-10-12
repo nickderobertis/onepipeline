@@ -979,7 +979,7 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), EVENTS_BUNDLE_VERSION);
     assert_eq!(
-        divergence_block("120.")["bundle_versions"]["events"],
+        divergence_block("121.")["bundle_versions"]["events"],
         EVENTS_BUNDLE_VERSION,
         "the rework bundle version must be the manager's recorded ruling"
     );
@@ -1189,7 +1189,7 @@ fn the_contract_states_the_planner_channel_documents_path_version_and_source() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), DOCUMENT_VERSION);
     assert_eq!(
-        divergence_block("120.")["bundle_versions"]["planner_channel"],
+        divergence_block("121.")["bundle_versions"]["planner_channel"],
         DOCUMENT_VERSION,
         "the rework bundle version must be the manager's recorded ruling"
     );
@@ -2298,7 +2298,7 @@ fn the_stacked_settlement_is_what_the_divergence_record_names() {
     );
 }
 
-/// The rework surface entry 120 proposes is this build's own: its two ops
+/// The rework surface entry 121 proposes is this build's own: its two ops
 /// round-trip through the public command type and are granted to the planner
 /// alone, its four kinds are kinds this build emits whose records the registered
 /// documents admit — and refuse with an unknown word in a closed field — and its
@@ -2306,12 +2306,12 @@ fn the_stacked_settlement_is_what_the_divergence_record_names() {
 #[test]
 fn the_rework_surface_is_what_the_divergence_record_names() {
     use onepipeline::payload::{registry, schema_of};
-    let block = divergence_block("120.");
+    let block = divergence_block("121.");
 
     let fixtures: Vec<Value> =
-        serde_json::from_value(block["ops"].clone()).expect("entry 120 names its ops");
+        serde_json::from_value(block["ops"].clone()).expect("entry 121 names its ops");
     let monitor_may: BTreeSet<String> = serde_json::from_value(block["monitor_may_issue"].clone())
-        .expect("entry 120 says which of them the monitor may issue");
+        .expect("entry 121 says which of them the monitor may issue");
     assert!(monitor_may.is_empty(), "{block}");
     let named: Vec<&str> = fixtures
         .iter()
@@ -2358,7 +2358,7 @@ fn the_rework_surface_is_what_the_divergence_record_names() {
     }
 
     let kinds: Vec<String> =
-        serde_json::from_value(block["event_kinds"].clone()).expect("entry 120 names its kinds");
+        serde_json::from_value(block["event_kinds"].clone()).expect("entry 121 names its kinds");
     let registry = registry();
     for kind in &kinds {
         let emitted = PipelineKind::from_wire(&EventKind(kind.clone()))
@@ -2367,13 +2367,13 @@ fn the_rework_surface_is_what_the_divergence_record_names() {
         let record = block["records"][kind.as_str()].clone();
         registry
             .check(&schema_of(emitted), &record)
-            .unwrap_or_else(|why| panic!("entry 120's {kind} is refused: {why}"));
+            .unwrap_or_else(|why| panic!("entry 121's {kind} is refused: {why}"));
     }
     let retitled = schema_of(PipelineKind::ChangeRetitled);
     let mut record = block["records"]["change-retitled"].clone();
     for by in block["retitled_by"]
         .as_array()
-        .expect("entry 120 names who retitles")
+        .expect("entry 121 names who retitles")
     {
         record["by"] = by.clone();
         registry
@@ -2386,7 +2386,7 @@ fn the_rework_surface_is_what_the_divergence_record_names() {
     let mut record = block["records"]["node-restack-started"].clone();
     for cause in block["restack_causes"]
         .as_array()
-        .expect("entry 120 names the causes")
+        .expect("entry 121 names the causes")
     {
         record["cause"] = cause.clone();
         registry
@@ -6614,7 +6614,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
         .collect();
     // The kinds the contract does not list are exactly the ones the divergence
     // record proposes, and no others: a kind neither document names fails here.
-    let proposed: BTreeSet<String> = ["40.", "47.", "55.", "65.", "70.", "92.", "119.", "120."]
+    let proposed: BTreeSet<String> = ["40.", "47.", "55.", "65.", "70.", "92.", "119.", "121."]
         .into_iter()
         .flat_map(|entry| {
             serde_json::from_value::<Vec<String>>(divergence_block(entry)["event_kinds"].clone())
@@ -9160,9 +9160,10 @@ fn the_contract_names_every_post_launch_verb_the_sdk_publishes_and_no_other() {
     use onepipeline::channel::SurfaceKind;
     use onepipeline::filter::EventFilter;
     use onepipeline::verbs::{
-        Adopt, Adopted, ChannelQueue, Goals, Grouping, Host, Monitored, Next, Receipt, Results,
-        Retained, Shutdown, ShutdownRequest, Status, StopRequest, Stopped, Surfaced, Transcript,
-        Unwatched, WatchFrame, WatchLines, WatchOutcome, WatchRequest,
+        AcknowledgeRequest, Adopt, Adopted, ChannelQueue, Goals, Grouping, Host, Monitored, Next,
+        Receipt, Results, Retained, Shutdown, ShutdownRequest, Status, StopRequest, Stopped,
+        Surfaced, Transcript, Unpublished, UnpublishedAcknowledged, UnpublishedRequest, Unwatched,
+        WatchFrame, WatchLines, WatchOutcome, WatchRequest,
     };
     use onepipeline::views::{DriverLiveness, Projects};
     use onepipeline::Result;
@@ -9199,6 +9200,11 @@ fn the_contract_names_every_post_launch_verb_the_sdk_publishes_and_no_other() {
     let _: fn(&WatchFrame<'_>) -> Result<WatchLines> = verbs::render_watch_frame;
     let _: fn(&Path, &str) -> Result<Unwatched> = verbs::unwatched;
     let _: fn(&Unwatched) -> String = verbs::render_unwatched;
+    let _: fn(&UnpublishedRequest) -> Result<Unpublished> = verbs::unpublished;
+    let _: fn(&Unpublished) -> String = verbs::render_unpublished;
+    let _: fn(&AcknowledgeRequest, Option<PathBuf>) -> Result<UnpublishedAcknowledged> =
+        verbs::acknowledge_unpublished;
+    let _: fn(&UnpublishedAcknowledged) -> String = verbs::render_unpublished_acknowledged;
     let _: fn(&RunPaths, Option<&Correlation>, &str) -> Result<Receipt> = verbs::reply;
     let _: fn(&Receipt) -> Result<String> = verbs::render_receipt;
     let _: fn(&RunPaths, &str) -> Result<Receipt> = verbs::attest;
