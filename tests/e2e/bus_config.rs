@@ -140,11 +140,12 @@ fn a_bus_config_is_read_at_the_launch_and_kept_in_the_launch_record() {
     )
     .expect("the launch config is written");
     let launch_config = launch_config.to_string_lossy().into_owned();
+    // The project's first run is still driving it, so launching it again is a takeover.
     launched(
         &world,
         &path,
         "busrecorded-2",
-        &["--launch-config", &launch_config],
+        &["--launch-config", &launch_config, "--take-over"],
     );
 
     for run in ["busrecorded", "busrecorded-2"] {
@@ -620,7 +621,8 @@ fn a_validator_a_bus_config_names_refuses_a_reply_in_its_own_words_and_queues_it
     std::fs::remove_file(world.fakes.join("bus-validator.unjudged"))
         .expect("the missing verdict is lifted");
 
-    launched(&world, &path, "busvalidated-2", &[]);
+    // The project's first run is still driving it, so launching it again is a takeover.
+    launched(&world, &path, "busvalidated-2", &["--take-over"]);
     world
         .run_with_stdin(&["reply", "busvalidated-2"], verdict)
         .exited(0);

@@ -499,16 +499,23 @@ fn the_comparable_plan_spends_what_the_committed_record_says() {
         Some(lookups as u64),
         "a page of tasks was read outside every attempt's copy"
     );
+    // The closeout carries no item — every node has been projected as it settled — and
+    // releases the run's driver claim: one read of the project, which finds the claim still
+    // this run's, and one write of it (`docs/contract-divergences.md` entry 119). Before the
+    // claim existed this was the attempt left with nothing to carry.
+    let closeout = recorded.last().expect("the closeout was recorded");
+    assert_eq!(closeout["items"], json!([]), "{closeout}");
+    assert_eq!(
+        closeout["calls"],
+        json!({"project-show": 1, "project-metadata-set": 1}),
+        "{closeout}"
+    );
     // An attempt with nothing left to carry asks the store nothing, not even to end a command,
     // and its line names no items, no calls and no report.
     let idle: Vec<&Value> = recorded
         .iter()
         .filter(|record| record["calls"] == json!({}))
         .collect();
-    assert!(
-        !idle.is_empty(),
-        "no attempt was left with nothing to carry"
-    );
     for record in &idle {
         assert_eq!(record["items"], json!([]), "{record}");
         assert_eq!(record["outcome"], "projected", "{record}");
@@ -526,16 +533,20 @@ fn the_comparable_plan_spends_what_the_committed_record_says() {
             "an attempt read the project's page of tasks: {record}"
         );
         // A copy is made only to create the `add`ed node, and naming only it; the project is
-        // read only by that attempt, for its copy; and every other write is a targeted update
-        // whose fields the store says it wrote.
+        // read only by that attempt, for its copy, and by the two that release the run's
+        // driver claim — the stop's and the closeout's — each reading it once and writing the
+        // claim beside it; and every other write is a targeted update whose fields the store
+        // says it wrote.
         let calls = &record["calls"];
         if calls.get("project-copy").is_some() {
             assert_eq!(record["items"], json!(["f"]), "{record}");
             assert_eq!(calls["project-copy"], 1, "{record}");
         }
+        let releases = calls.get("project-show") == Some(&json!(1))
+            && calls.get("project-metadata-set") == Some(&json!(1));
         assert!(
-            calls.get("project-show").is_none() || calls.get("project-copy").is_some(),
-            "an attempt that created nothing read the project: {record}"
+            calls.get("project-show").is_none() || calls.get("project-copy").is_some() || releases,
+            "an attempt that created nothing and released no claim read the project: {record}"
         );
         assert_eq!(
             calls.get("task-update").is_some(),
