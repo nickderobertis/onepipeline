@@ -5177,7 +5177,8 @@ fn armed_world(name: &str, allows_auto_merge: bool) -> (World, crate::harness::R
     (world, repo)
 }
 
-/// The detail the node settled with.
+/// The first settlement's detail: each armed journey runs one node, and a
+/// re-dispatched one settles once, after its last attempt.
 fn settled_detail(world: &World, run: &str) -> String {
     world.events_of(run, "node-settled")[0]["payload"]["detail"]
         .as_str()
@@ -5280,6 +5281,69 @@ fn a_check_that_goes_red_after_the_arm_sends_the_worker_back_onto_the_same_branc
     assert!(
         repo.has_branch(&world, branch),
         "the branch both attempts were made on was not handed back"
+    );
+}
+
+/// An armed change the host never lands is read the whole budget and no further:
+/// once the reads are spent it takes the `checks-unsettled` route it always had,
+/// sending the worker back onto the same branch, and both the re-dispatch and the
+/// final settlement say it was armed and how many reads it took.
+///
+/// Each read of an armed change ends in one `merge-armed` record from `onevcs`, so
+/// two attempts at three reads each is exactly six — a read past the budget, or an
+/// attempt that never re-read, would move that count.
+#[test]
+fn an_armed_change_the_host_never_lands_spends_its_reads_and_is_redispatched() {
+    let (world, repo) = armed_world("lifecycle-armedspent", true);
+    let world = world.with_env("ONEPIPELINE_MERGE_PATH_READS", "3");
+    world.script("service.work-anew", "the worker wrote this\n");
+    world.script("gh.checks", PENDING);
+    let run = settle(&world, "armedspent", vec![lifecycle("service", &[])]);
+
+    let node = world.run_json(&run, "result.json")["nodes"][0].clone();
+    assert_eq!(node["status"], "failed", "{node}\n{}", why(&world, &run));
+    assert_eq!(node["outcome"], "checks-unsettled", "{node}");
+    assert_eq!(node["landing"], json!(null), "{node}");
+    assert_eq!(
+        world.events_of(&run, "merge-armed").len(),
+        6,
+        "two attempts did not each read the armed change exactly three times\n{}",
+        why(&world, &run)
+    );
+
+    let dispatched = dispatches_of(&world, &run, "service");
+    assert_eq!(
+        dispatched.len(),
+        2,
+        "an armed change whose reads were spent was not re-dispatched\n{}",
+        why(&world, &run)
+    );
+    let reason = dispatched[1]["payload"]["reason"]
+        .as_str()
+        .expect("the re-dispatch says what the last attempt ended with");
+    assert!(
+        reason.starts_with("checks-unsettled:")
+            && reason.contains("its merge armed")
+            && reason.contains("read 3 times"),
+        "the re-dispatch does not say the change was armed and read three times: {reason}"
+    );
+    let detail = settled_detail(&world, &run);
+    assert!(
+        detail.contains("its merge armed") && detail.contains("read 3 times"),
+        "the settlement does not say the change was armed and read three times: {detail}"
+    );
+
+    let branch = node["branch"].as_str().expect("the node names its branch");
+    assert!(
+        session_branches(&world, &run)
+            .iter()
+            .all(|opened| opened == branch),
+        "the attempts did not share one branch: {:?}",
+        session_branches(&world, &run)
+    );
+    assert!(
+        repo.has_branch(&world, branch),
+        "the branch the armed change is on was not handed back"
     );
 }
 

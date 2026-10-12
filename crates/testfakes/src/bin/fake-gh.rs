@@ -1409,7 +1409,8 @@ fn merge(args: &[String], dir: &Path) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Land a change request, now.
+/// Shared by the merge `gh.merged` lands at once and the armed one
+/// [`land_armed`] lands later, so both answer `mergedAt` the same way.
 fn merge_now(dir: &Path, id: &str) {
     record(dir, id, Change::Merged);
     // When it merged, which is now: what `pr view --json mergedAt` answers.
