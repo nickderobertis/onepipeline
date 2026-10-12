@@ -668,8 +668,7 @@ resolver = "2"
 # is outdated — which is how `tests/e2e/rework.rs` holds that a restack leaves an
 # open review thread on its line. A **requirement**, because `^0.45` admits no
 # 0.46.x; `onevcs-testing` 0.14.0 requires exactly `=0.46.0`, so the pair moves as
-# one. 0.47.0 is not taken here: it changes the publication request and outcome that
-# node `op-readjust` adopts.
+# one.
 #
 # `onevcs` 0.48.0 is the floor because a `change-auto` or `change-direct`
 # publication whose check wait elapses with no required check red now ends
