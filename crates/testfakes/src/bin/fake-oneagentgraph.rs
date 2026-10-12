@@ -2375,10 +2375,11 @@ fn graph_run() -> String {
 /// consumer keys what it keeps of a stream — a retained report among it — by
 /// the stream and its `seq`, so a later dispatch reusing an earlier one's pid
 /// would be read as that one's records.
-// llmlint: ignore[changed_behavior_has_e2e] no test can make the OS hand a process an
-// earlier one's pid, which is the only condition this guards; the regression it closes
-// is `rework::a_title_nothing_verified_is_left_unverified_until_a_retitle_sets_one`
-// failing on `cross (windows-latest)`, where pids are reused, and that journey is the gate.
+///
+/// `oneagentgraph.pid` is the pid a journey has every dispatch of this double
+/// stream under, as Windows hands one freed pid to the next process: the one
+/// way a host whose pids only climb can be shown a dispatch that reuses an
+/// earlier one's.
 fn stream() -> String {
     static STARTED: std::sync::OnceLock<u128> = std::sync::OnceLock::new();
     let started = STARTED.get_or_init(|| {
@@ -2386,7 +2387,13 @@ fn stream() -> String {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |since| since.as_millis())
     });
-    format!("fake-oneagentgraph-{started}-{}", std::process::id())
+    let pid = match fake::node_script(&fake::script_dir(), "oneagentgraph", "pid") {
+        None => std::process::id(),
+        Some(pid) => pid.parse().unwrap_or_else(|error| {
+            fake::fail(&format!("oneagentgraph.pid is not a pid: {error}"))
+        }),
+    };
+    format!("fake-oneagentgraph-{started}-{pid}")
 }
 
 /// Emit the turn's envelopes, as the sibling would: the tool summary from
@@ -2553,7 +2560,7 @@ fn emit(
         publish_oneharness_session(&labels, node, offset, invocation);
     }
     let judged = scripted_decisions(dir, key);
-    let report = report_of(task, scripted_verdicts(dir, key), &judged);
+    let report = report_of(task, node, scripted_verdicts(dir, key), &judged);
     envelope(
         4,
         oneagentgraph::event::EventKind::TurnCompleted,
@@ -3115,6 +3122,7 @@ fn publish_oneharness_session(
 /// a member no panel judged.
 fn report_of(
     task: &str,
+    node: &str,
     verdicts: Vec<serde_json::Value>,
     judged: &[oneagentgraph::event::JudgeDecided],
 ) -> serde_json::Value {
@@ -3144,13 +3152,20 @@ fn report_of(
         // body — a JSON value written verbatim, so a journey states a `keeps`, a
         // `replaced` naming a subject, or a verdict no reader accepts — and nothing
         // where it is not scripted, which is every drafter written before the field.
+        // `<node>.pr-author.title-check` is the one node's drafter's, ahead of it, so
+        // drafters answering differently can be dispatched at once.
         let checked = |mut answered: serde_json::Value| {
-            if let Some(check) = fake::node_script(&fake::script_dir(), "pr-author", "title-check")
-            {
-                let check: serde_json::Value =
-                    serde_json::from_str(&check).unwrap_or_else(|error| {
-                        fake::fail(&format!("pr-author.title-check is not JSON: {error}"))
-                    });
+            let dir = fake::script_dir();
+            let own = format!("{node}.pr-author");
+            let scripted = fake::node_script(&dir, &own, "title-check")
+                .map(|check| (format!("{own}.title-check"), check))
+                .or_else(|| {
+                    fake::node_script(&dir, "pr-author", "title-check")
+                        .map(|check| ("pr-author.title-check".to_owned(), check))
+                });
+            if let Some((name, check)) = scripted {
+                let check: serde_json::Value = serde_json::from_str(&check)
+                    .unwrap_or_else(|error| fake::fail(&format!("{name} is not JSON: {error}")));
                 answered["structured"]["title_check"] = check;
             }
             answered
