@@ -34,6 +34,19 @@
 //! repository lets a change be **armed** to merge itself, and `gh.lands-armed`,
 //! holding a count, is the host landing an armed change at that many reads of it
 //! after it was armed — its required checks passing while nobody was publishing.
+//!
+//! And one on the draft's: `gh.draft.finishes-after`, holding seconds, is the work
+//! on a draft's head finishing that long after the host was first asked about the
+//! draft. Until then the draft reports `gh.checks.draft`, and its workflow runs and
+//! check suites `gh.runs.draft` and `gh.suites.draft`; from then on it reports
+//! `gh.checks` as a ready change would, and those runs and suites completed. Each
+//! check rollup starts a poll: its check-name and activity reads reuse that phase
+//! until the next rollup, so a timer expiring between reads cannot mix phases. What
+//! the runs and suites are for is `onevcs`'s question whether anything on a head is
+//! still running before it lifts a draft early, which it asks of exactly those two
+//! reads. `gh.no-ready-trigger` is the workflow that does not run on
+//! `ready_for_review`, so a lift starts no run: a ready change reports the draft's
+//! own runs rather than a later one.
 
 use onepipeline_testfakes as fake;
 use std::num::NonZeroU64;
@@ -122,6 +135,16 @@ fn main() -> ExitCode {
         (Some("api"), Some("user")) => user(&args),
         (Some("api"), Some(path)) if path.starts_with("repos/") && path.split('/').count() == 3 => {
             repository(&args, &dir, path)
+        }
+        (Some("api"), Some(path))
+            if path.starts_with("repos/") && path.contains("/actions/runs?") =>
+        {
+            workflow_runs(&args, &dir, path)
+        }
+        (Some("api"), Some(path))
+            if path.starts_with("repos/") && path.contains("/check-suites?") =>
+        {
+            check_suites(&args, &dir, path)
         }
         (Some("api"), Some(path)) if path.starts_with("repos/") => protection(&args, &dir, path),
         (Some("pr"), Some("create")) => create(&args, &dir),
@@ -965,6 +988,18 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
     land_armed(dir, &id);
     let state = state_of_opened(dir, &opened);
     let merged = state == Change::Merged;
+    let phase = if draft_running(dir, &id, state) {
+        DraftPhase::Running
+    } else {
+        DraftPhase::Finished
+    };
+    let path = draft_phase_path(dir, &id);
+    let phase = serde_json::to_string(&phase).unwrap_or_else(|error| {
+        fake::fail(&format!("the draft phase does not serialize: {error}"))
+    });
+    if let Err(error) = std::fs::write(&path, phase) {
+        fake::fail(&format!("cannot write {}: {error}", path.display()));
+    }
     let reported = scripted_checks(dir, &id, state);
     let head = head_of(dir, &opened);
     println!(
@@ -991,7 +1026,7 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
             // repository whose only bar is the `command:` gate its rules name.
             "statusCheckRollup": reported
                 .iter()
-                .map(|check| check.rollup_entry(state))
+                .map(|check| check.rollup_entry(reran_on_lift(dir, state)))
                 .collect::<Vec<_>>(),
         })
     );
@@ -1164,17 +1199,17 @@ impl Check {
     /// which is what the real rollup does and what `onevcs` reads as "the host
     /// cannot know yet".
     ///
-    /// A check that has started carries `startedAt`, and the run a draft reported is
-    /// a different run from the one a ready change reports: a workflow re-runs on
-    /// `ready_for_review`, and `onevcs` 0.36.0 tells a run attached after a lift from
-    /// the draft's by that start alone.
-    fn rollup_entry(&self, change: Change) -> serde_json::Value {
+    /// A check that has started carries `startedAt`. Where `rerun` is set, the run a
+    /// ready change reports is a different run from the draft's: a workflow that runs
+    /// on `ready_for_review` re-runs on a lift, and `onevcs` 0.36.0 tells a run
+    /// attached after a lift from the draft's by that start alone.
+    fn rollup_entry(&self, rerun: bool) -> serde_json::Value {
         let mut entry = serde_json::json!({"name": self.name, "status": self.state.status()});
         if self.state != State::Queued {
-            entry["startedAt"] = serde_json::json!(if change == Change::Draft {
-                DRAFT_RUN_STARTED
-            } else {
+            entry["startedAt"] = serde_json::json!(if rerun {
                 READY_RUN_STARTED
+            } else {
+                DRAFT_RUN_STARTED
             });
         }
         if let State::Settled(conclusion) = self.state {
@@ -1197,12 +1232,13 @@ const READY_RUN_STARTED: &str = "2026-01-01T00:05:00Z";
 /// this host to answer differently about each. `gh.checks.draft`, where scripted,
 /// is what the host reports **while the change is a draft**, over both: the
 /// repository whose workflows skip a draft, whose checks run only once it is
-/// lifted.
+/// lifted — or, where `gh.draft.finishes-after` is scripted, only until the work on
+/// the draft's head finishes ([`draft_running`]).
 ///
 /// A line this program cannot read is **fatal**, not skipped: a journey scripting
 /// a check this host quietly dropped would assert against a rollup nobody wrote.
 fn scripted_checks(dir: &Path, id: &str, change: Change) -> Vec<Check> {
-    let text = (change == Change::Draft)
+    let text = reported_draft_running(dir, id, change)
         .then(|| fake::node_script(dir, "gh", "checks.draft"))
         .flatten()
         .or_else(|| fake::node_script(dir, "gh", &format!("checks.{}", fake::segment(id))))
@@ -1216,6 +1252,358 @@ fn scripted_checks(dir: &Path, id: &str, change: Change) -> Vec<Check> {
         .map(|line| Check::parse(line).unwrap_or_else(|why| fake::fail(&why)))
         .collect()
 }
+
+/// Whether a ready change reports a later run than its draft did: the workflow
+/// re-runs on `ready_for_review`, unless `gh.no-ready-trigger` says it has no such
+/// trigger and a lift starts nothing.
+fn reran_on_lift(dir: &Path, change: Change) -> bool {
+    change != Change::Draft && !dir.join("gh.no-ready-trigger").exists()
+}
+
+/// Whether change request `id` is a draft whose head is still being worked on, which
+/// is when it reports the `.draft` scripts.
+///
+/// Without `gh.draft.finishes-after` that is the whole of its time as a draft. With
+/// it, the work finishes that many seconds after this host was first asked about the
+/// draft — the moment written down at that first ask, because nothing carries a clock
+/// between two invocations of a program that exits. A script that is not a number of
+/// seconds is fatal, for [`unreachable`]'s reason.
+fn draft_running(dir: &Path, id: &str, change: Change) -> bool {
+    if change != Change::Draft {
+        return false;
+    }
+    let Some(after) = fake::node_script(dir, "gh", "draft.finishes-after") else {
+        return true;
+    };
+    let after: f64 = after
+        .parse()
+        .ok()
+        .filter(|after: &f64| after.is_finite() && *after >= 0.0)
+        .unwrap_or_else(|| {
+            fake::fail(&format!(
+                "gh.draft.finishes-after holds {after:?}, which is not a number of seconds"
+            ))
+        });
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_else(|error| fake::fail(&format!("the clock is before the epoch: {error}")))
+        .as_millis();
+    let path = dir
+        .join("gh")
+        .join(format!("{}.first-asked", fake::segment(id)));
+    let first = match read_if_present(&path) {
+        Some(first) => first.trim().parse::<u128>().unwrap_or_else(|_| {
+            fake::fail(&format!("{} holds {first:?}, not a moment", path.display()))
+        }),
+        None => {
+            if let Err(error) = std::fs::write(&path, now.to_string()) {
+                fake::fail(&format!("cannot write {}: {error}", path.display()));
+            }
+            now
+        }
+    };
+    (now.saturating_sub(first) as f64) < after * 1000.0
+}
+
+/// The last rollup's phase, persisted between the host's separate reads.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum DraftPhase {
+    Running,
+    Finished,
+}
+
+/// Where the last rollup's phase is held across this host's subprocess reads.
+fn draft_phase_path(dir: &Path, id: &str) -> PathBuf {
+    dir.join("gh")
+        .join(format!("{}.checks-phase", fake::segment(id)))
+}
+
+/// Reuse the last rollup's phase until another rollup reports the required check.
+/// Reads before any rollup fall back to the scripted clock, and a ready change
+/// finishes immediately regardless of what the last draft rollup reported.
+fn reported_draft_running(dir: &Path, id: &str, change: Change) -> bool {
+    if change != Change::Draft {
+        return false;
+    }
+    let path = draft_phase_path(dir, id);
+    let Some(phase) = read_if_present(&path) else {
+        return draft_running(dir, id, change);
+    };
+    match serde_json::from_str::<DraftPhase>(&phase).unwrap_or_else(|error| {
+        fake::fail(&format!(
+            "{} holds an invalid phase: {error}",
+            path.display()
+        ))
+    }) {
+        DraftPhase::Running => true,
+        DraftPhase::Finished => false,
+    }
+}
+
+/// Which of the two activity reads a scripted record answers, which decides the
+/// script it is read from and the fields its lines carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    /// A workflow run: `gh.runs.draft`, `NAME STATUS CONCLUSION`.
+    Run,
+    /// A check suite: `gh.suites.draft`, `APP STATUS CONCLUSION RUNS`.
+    Suite,
+}
+
+impl Kind {
+    fn script(self) -> &'static str {
+        match self {
+            Self::Run => "runs.draft",
+            Self::Suite => "suites.draft",
+        }
+    }
+}
+
+/// What a scripted record is beyond its name and state — and a suite alone has a
+/// count of check runs, so a run cannot carry one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Record {
+    Run,
+    /// GitHub's `latest_check_runs_count`.
+    Suite {
+        runs: u64,
+    },
+}
+
+/// One scripted workflow run or check suite on a draft's head.
+///
+/// Taken from the end of the line, as a [`Check`] is, so a name may carry spaces.
+struct Activity {
+    name: String,
+    state: State,
+    record: Record,
+}
+
+impl Activity {
+    /// Every line of the script `kind` reads. Fatal on a line it cannot read, for
+    /// [`scripted_checks`]'s reason.
+    fn scripted(dir: &Path, kind: Kind) -> Vec<Self> {
+        let Some(text) = fake::node_script(dir, "gh", kind.script()) else {
+            return Vec::new();
+        };
+        text.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(|line| Self::parse(kind, line).unwrap_or_else(|why| fake::fail(&why)))
+            .collect()
+    }
+
+    fn parse(kind: Kind, line: &str) -> Result<Self, String> {
+        let (shape, tail) = match kind {
+            Kind::Run => ("NAME STATUS CONCLUSION", 2),
+            Kind::Suite => ("APP STATUS CONCLUSION RUNS", 3),
+        };
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() <= tail {
+            return Err(format!(
+                "a scripted gh.{} line is `{shape}`, and {line:?} is not",
+                kind.script()
+            ));
+        }
+        let (words, tail) = fields.split_at(fields.len() - tail);
+        let name = words.join(" ");
+        let state = State::parse(tail[0], tail[1]).map_err(|why| format!("{name:?}: {why}"))?;
+        let record = match kind {
+            Kind::Run => Record::Run,
+            Kind::Suite => Record::Suite {
+                runs: tail[2]
+                    .parse()
+                    .map_err(|_| format!("suite {name:?} counts {:?} check runs", tail[2]))?,
+            },
+        };
+        Ok(Self {
+            name,
+            state,
+            record,
+        })
+    }
+
+    /// Where this record stands once the work on the head has finished: completed,
+    /// green — except a suite with no check runs, which GitHub leaves as it was for
+    /// ever, because nothing in it ever runs.
+    fn finished(self) -> Self {
+        if self.record == (Record::Suite { runs: 0 }) {
+            return self;
+        }
+        Self {
+            state: State::Settled(Conclusion::Success),
+            ..self
+        }
+    }
+
+    /// GitHub's `status` and `conclusion` pair, the second `null` until it completes.
+    fn status(&self) -> (&'static str, serde_json::Value) {
+        let conclusion = match self.state {
+            State::Settled(conclusion) => serde_json::json!(conclusion.wire()),
+            State::Queued | State::Running => serde_json::Value::Null,
+        };
+        (self.state.status(), conclusion)
+    }
+}
+
+/// The change request whose head an activity read asks about, and the commit, or
+/// the refusal that the path is not one GitHub answers.
+///
+/// `base` is the path before its query, and `query` must be exactly what `onevcs`
+/// asks — `per_page` always, and `head_sha` where the commit travels in the query.
+/// The change is the newest this host opened in that repository whose head is that
+/// commit; none is GitHub answering about a commit nothing runs on.
+fn activity_of(
+    dir: &Path,
+    path: &str,
+    shape: fn(&[&str], &str) -> Option<(String, String)>,
+) -> Result<(Sha, Option<Opened>), ExitCode> {
+    let (base, query) = path.split_once('?').unwrap_or((path, ""));
+    let segments: Vec<&str> = base.split('/').collect();
+    if segments.iter().any(|segment| segment.is_empty()) {
+        return Err(fake::refuse(&format!(
+            "gh api path '{path}' has an empty segment"
+        )));
+    }
+    let Some((repo, sha)) = shape(&segments, query) else {
+        return Err(fake::refuse(&format!("unknown gh api path '{path}'")));
+    };
+    let Some(sha) = Sha::parse(&sha).filter(|parsed| parsed.as_str() == sha) else {
+        return Err(fake::refuse(&format!(
+            "gh api path '{path}' names no commit"
+        )));
+    };
+    let opened = opened_changes(dir)
+        .into_iter()
+        .filter(|change| change.repo == repo)
+        .rfind(|change| head_of(dir, change).as_str() == sha.as_str());
+    Ok((sha, opened))
+}
+
+/// The scripted `kind` records on the change's head: as scripted while its draft is
+/// still being worked on, [`Activity::finished`] after, and none on a commit no change
+/// request this host opened stands at.
+fn activity(dir: &Path, opened: Option<&Opened>, kind: Kind) -> Vec<Activity> {
+    let Some(opened) = opened else {
+        return Vec::new();
+    };
+    let id = opened.number.to_string();
+    let running = reported_draft_running(dir, &id, state_of_opened(dir, opened));
+    Activity::scripted(dir, kind)
+        .into_iter()
+        .map(|record| if running { record } else { record.finished() })
+        .collect()
+}
+
+/// `gh api repos/O/R/actions/runs?head_sha=SHA&per_page=N`
+///
+/// The workflow runs on one commit, in GitHub's shape: `total_count` beside every
+/// `workflow_runs` entry, each carrying its own `head_sha`, `status`, and a
+/// `conclusion` that is `null` until it completes. `onevcs` 0.48.1 asks it before it
+/// lifts a draft whose checks show nothing still running, and holds the draft while
+/// a run on its head is not `completed`. Unscripted, it is the commit no workflow ran
+/// on.
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the query and the answer
+// are `onevcs::GitHub::head_activity`'s, which declares neither as data. Its gate is
+// `tests/e2e/draft_lifecycle.rs`: the real linked `onevcs` reads this answer, refuses
+// one short of `total_count` or the list, and treats a refused read as no answer and
+// lifts the draft early, so a query or shape that drifts fails the journeys that hold
+// a draft on it rather than a double nobody checks.
+fn workflow_runs(args: &[String], dir: &Path, path: &str) -> ExitCode {
+    if args.len() != 2 {
+        return fake::refuse(&format!("gh api {path} takes no flags here: {args:?}"));
+    }
+    let shape = |segments: &[&str], query: &str| match segments {
+        ["repos", owner, name, "actions", "runs"] => {
+            let sha = query
+                .strip_prefix("head_sha=")?
+                .strip_suffix(PER_PAGE)?
+                .strip_suffix('&')?;
+            Some((format!("{owner}/{name}"), sha.to_owned()))
+        }
+        _ => None,
+    };
+    let (sha, opened) = match activity_of(dir, path, shape) {
+        Ok(found) => found,
+        Err(refusal) => return refusal,
+    };
+    let runs: Vec<serde_json::Value> = activity(dir, opened.as_ref(), Kind::Run)
+        .iter()
+        .enumerate()
+        .map(|(index, run)| {
+            let (status, conclusion) = run.status();
+            serde_json::json!({
+                "id": 100 + index,
+                "name": run.name,
+                "head_sha": sha.as_str(),
+                "event": "pull_request",
+                "status": status,
+                "conclusion": conclusion,
+            })
+        })
+        .collect();
+    println!(
+        "{}",
+        serde_json::json!({"total_count": runs.len(), "workflow_runs": runs})
+    );
+    ExitCode::SUCCESS
+}
+
+/// `gh api repos/O/R/commits/SHA/check-suites?per_page=N`
+///
+/// The check suites on one commit, in GitHub's shape: `total_count` beside every
+/// `check_suites` entry, each with its `head_sha`, `status`, `conclusion`, the `app`
+/// it belongs to, and `latest_check_runs_count` — which `onevcs` reads to set aside
+/// the empty `queued` suite an installed app leaves on every commit. Unscripted, it is
+/// the commit no app has a suite on.
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the same gate as
+// `workflow_runs` above, over the second read `head_activity` makes.
+fn check_suites(args: &[String], dir: &Path, path: &str) -> ExitCode {
+    if args.len() != 2 {
+        return fake::refuse(&format!("gh api {path} takes no flags here: {args:?}"));
+    }
+    let shape = |segments: &[&str], query: &str| match segments {
+        ["repos", owner, name, "commits", sha, "check-suites"] if query == PER_PAGE => {
+            Some((format!("{owner}/{name}"), (*sha).to_owned()))
+        }
+        _ => None,
+    };
+    let (sha, opened) = match activity_of(dir, path, shape) {
+        Ok(found) => found,
+        Err(refusal) => return refusal,
+    };
+    let suites: Vec<serde_json::Value> = activity(dir, opened.as_ref(), Kind::Suite)
+        .iter()
+        .enumerate()
+        .map(|(index, suite)| {
+            let (status, conclusion) = suite.status();
+            let runs = match suite.record {
+                Record::Suite { runs } => runs,
+                Record::Run => fake::fail("a workflow run was read from the suites script"),
+            };
+            serde_json::json!({
+                "id": 200 + index,
+                "head_sha": sha.as_str(),
+                "status": status,
+                "conclusion": conclusion,
+                "latest_check_runs_count": runs,
+                "app": {"name": suite.name},
+            })
+        })
+        .collect();
+    println!(
+        "{}",
+        serde_json::json!({"total_count": suites.len(), "check_suites": suites})
+    );
+    ExitCode::SUCCESS
+}
+
+/// The page size `onevcs` asks both activity reads for, which ends either query.
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the same gate as
+// `workflow_runs` above: `onevcs` keeps its page size private, and a query that no
+// longer ends this way is refused here and fails the journeys holding a draft.
+const PER_PAGE: &str = "per_page=100";
 
 /// `gh pr checks ID --repo R [--required] --json …`
 ///
