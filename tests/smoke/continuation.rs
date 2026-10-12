@@ -1,4 +1,4 @@
-//! The live half of `docs/contract-divergences.md` entry 117: a project continued from its
+//! The live half of `docs/contract-divergences.md` entry 118: a project continued from its
 //! plan store by a host holding none of the run's state, and the best-effort claim on who
 //! drives it, against the real GitHub on the repository side.
 //!
@@ -35,7 +35,7 @@ use crate::{authenticated_user, git, git_credentials, run_stamp, scratch_repo};
 /// `repo` the plan's lifecycle nodes name: a cold host has a clone of its own.
 const ALIAS: &str = "continue-smoke";
 
-/// The idle claim check every driver here runs under, shortened through entry 117's test
+/// The idle claim check every driver here runs under, shortened through entry 118's test
 /// seam so a driver with nothing to dispatch notices a takeover inside the journey.
 const IDLE_CHECK_SECONDS: &str = "5";
 

@@ -2977,7 +2977,7 @@ fn a_terminal_writeback_outage_expires_without_holding_run_settlement() {
 }
 
 /// A project a run settled launches again from another runs root over the same store,
-/// reading past every key the run projected — and, since entry 117, **continues** what it
+/// reading past every key the run projected — and, since entry 118, **continues** what it
 /// settled rather than running it again: the node is journalled `continued` from the store
 /// and nothing is dispatched.
 #[test]
@@ -3024,7 +3024,7 @@ fn a_settled_project_launches_again_continuing_what_it_projected() {
 
 /// A project a run retried a node of launches again, reading the lineage head's
 /// definition under the root's id — its dependents' edges included — and continuing the
-/// head's settlement under that same id, by the ruling entry 117 records.
+/// head's settlement under that same id, by the ruling entry 118 records.
 ///
 /// The one item a lineage has carries `onepipeline.node` and `onepipeline.supersedes`
 /// beside its settlement — and where the plan's own store is the destination, so does the

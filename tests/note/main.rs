@@ -3009,10 +3009,17 @@ fn two_notes_in_one_envelope_are_each_recorded_on_the_turn_that_opened_on_them()
     world.until("the turn carrying the first note to open", |world| {
         worked(world).len() >= 2
     });
-    // The second note is offered the moment the first is acknowledged, which is
-    // the moment that turn opened; the offer is the reconciler's own step, with
-    // nothing durable to watch for, so it is given the same short pause the
-    // release above gives a queued note before the turn it is bound for ends.
+    // The second note is offered once the first is acknowledged, which is the
+    // moment that turn opened — but the offer is the reconciler's own step, and
+    // on a loaded host it can land after any fixed pause, between turns, where
+    // it answers `queued`. So wait for it in the member's spool (the first is
+    // answered by now, so the one unanswered note is the second), then give the
+    // conversation the same short pause the release above gives a queued note
+    // before the turn it is bound for ends.
+    world.until(
+        "the second note to wait in the conversation's inbox",
+        |world| awaiting_an_answer(world) == 1,
+    );
     std::thread::sleep(Duration::from_secs(2));
     release(&world.fakes, "turn.go");
     release(&world.fakes, "turn.settle");

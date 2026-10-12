@@ -2291,7 +2291,7 @@ fn the_stacked_settlement_is_what_the_divergence_record_names() {
     );
 }
 
-/// Entry 117's continuation is this build's own: its two kinds are spelled by
+/// Entry 118's continuation is this build's own: its two kinds are spelled by
 /// `PipelineKind`, the settlement it journals with `continued` and the claim both kinds
 /// carry are admitted by the registered documents — and a claim missing a key it always
 /// carries is refused — its two flags are `start`'s, and `ProjectDriven` refuses with the
@@ -2300,9 +2300,9 @@ fn the_stacked_settlement_is_what_the_divergence_record_names() {
 fn the_continuation_is_what_the_divergence_record_names() {
     use onepipeline::event::PipelineKind;
     use onepipeline::payload::{registry, schema_of};
-    let block = divergence_block("117.");
+    let block = divergence_block("118.");
     let kinds: Vec<String> =
-        serde_json::from_value(block["event_kinds"].clone()).expect("entry 117 names its kinds");
+        serde_json::from_value(block["event_kinds"].clone()).expect("entry 118 names its kinds");
     assert_eq!(
         kinds,
         [
@@ -2314,7 +2314,7 @@ fn the_continuation_is_what_the_divergence_record_names() {
     let registry = registry();
     registry
         .check(&schema_of(PipelineKind::NodeSettled), &block["settlement"])
-        .unwrap_or_else(|why| panic!("entry 117's settlement is refused: {why}"));
+        .unwrap_or_else(|why| panic!("entry 118's settlement is refused: {why}"));
     let mut unsourced = block["settlement"].clone();
     unsourced["continued"]
         .as_object_mut()
@@ -2334,7 +2334,7 @@ fn the_continuation_is_what_the_divergence_record_names() {
         let id = schema_of(kind);
         registry
             .check(&id, &serde_json::json!({ key: claim }))
-            .unwrap_or_else(|why| panic!("entry 117's claim is refused as {kind}: {why}"));
+            .unwrap_or_else(|why| panic!("entry 118's claim is refused as {kind}: {why}"));
         let mut pidless = claim.clone();
         pidless.as_object_mut().expect("a claim").remove("pid");
         assert!(
@@ -2355,7 +2355,7 @@ fn the_continuation_is_what_the_divergence_record_names() {
         .collect();
     for flag in block["start_flags"]
         .as_array()
-        .expect("entry 117 names its flags")
+        .expect("entry 118 names its flags")
     {
         let flag = flag.as_str().expect("a flag");
         assert!(flags.contains(flag), "`start` takes no {flag}");
@@ -6499,7 +6499,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
         .collect();
     // The kinds the contract does not list are exactly the ones the divergence
     // record proposes, and no others: a kind neither document names fails here.
-    let proposed: BTreeSet<String> = ["40.", "47.", "55.", "65.", "70.", "92.", "117."]
+    let proposed: BTreeSet<String> = ["40.", "47.", "55.", "65.", "70.", "92.", "118."]
         .into_iter()
         .flat_map(|entry| {
             serde_json::from_value::<Vec<String>>(divergence_block(entry)["event_kinds"].clone())
@@ -7586,6 +7586,12 @@ const RULINGS: &[(&str, &str)] = &[
     (
         "116.",
         "every write-back write a store whose configuration opts into the boundary makes",
+    ),
+    // engine-links-onevcs: a timed-out check wait `onevcs` left armed is re-read, not
+    // re-dispatched.
+    (
+        "117.",
+        "An **armed** `checks-unsettled` is recovered the same way",
     ),
 ];
 
