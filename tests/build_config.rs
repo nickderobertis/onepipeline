@@ -5,8 +5,7 @@
 //! this clone rather than about the workspace: `build.target-dir` puts a crate
 //! outside the workspace into the same `<clone>/target` the members use, so one
 //! clone never compiles its dependency graph into two trees, and
-//! `profile.dev.debug = 1` keeps line tables and nothing more on every dev and
-//! test build. Neither can be read off the manifest — a `Cargo.toml` profile
+//! `profile.dev.debug = 0` keeps debuginfo off every dev and test build. Neither can be read off the manifest — a `Cargo.toml` profile
 //! reaches only its own workspace — and neither is proven by the file parsing,
 //! because cargo merges config files from the working directory *upward* and
 //! resolves each `target-dir` against its own file's location, which is exactly
@@ -186,8 +185,8 @@ fn the_config_file_carries_the_contracts_two_keys_and_nothing_else() {
     assert_eq!(keys(&config["profile"]["dev"], "profile.dev"), ["debug"]);
     assert_eq!(
         config["profile"]["dev"]["debug"].as_integer(),
-        Some(1),
-        "profile.dev.debug is the integer 1"
+        Some(0),
+        "profile.dev.debug is the integer 0"
     );
 }
 
@@ -241,7 +240,7 @@ fn a_second_checkout_carrying_its_own_copy_of_the_file_builds_into_its_own_root(
 }
 
 #[test]
-fn dev_and_test_builds_carry_line_tables_only_and_release_carries_no_debuginfo() {
+fn dev_test_and_release_builds_carry_no_debuginfo() {
     let probe = probe_crate("debuginfo");
     let deps = repo_root().join("target/debug/deps");
 
@@ -249,9 +248,11 @@ fn dev_and_test_builds_carry_line_tables_only_and_release_carries_no_debuginfo()
         &cargo(&probe, ["build", "-v", "--offline"]),
         "--crate-type lib",
     );
+    // Cargo's own dev default is `debug = 2`, which it hands rustc as
+    // `-C debuginfo=2`; at `debug = 0` it names no level and strips instead.
     assert!(
-        dev.contains("-C debuginfo=1"),
-        "a dev build carries line tables only: {dev}"
+        !dev.contains("-C debuginfo=") && dev.contains("-C strip=debuginfo"),
+        "a dev build carries no debuginfo: {dev}"
     );
     assert_eq!(
         out_dir(&dev),
@@ -264,8 +265,8 @@ fn dev_and_test_builds_carry_line_tables_only_and_release_carries_no_debuginfo()
         "--test",
     );
     assert!(
-        test.contains("-C debuginfo=1"),
-        "the test profile inherits dev's line tables: {test}"
+        !test.contains("-C debuginfo=") && test.contains("-C strip=debuginfo"),
+        "the test profile inherits dev's lack of debuginfo: {test}"
     );
 
     let release = rustc_invocation(
