@@ -666,7 +666,8 @@ resolver = "2"
 # that surface against the linked release. A **requirement**, because `^0.45` admits no
 # 0.46.x; `onevcs-testing` 0.14.0 requires exactly `=0.46.0`, so the pair moves as one.
 #
-# `onevcs` 0.48.0 is the floor. What this crate relies on from it:
+# `onevcs` 0.48.1 is the floor, the release the stop-verdict plan's onevcs nodes
+# name; 0.48.0 brought what this crate relies on from it:
 # - `recoverable_matching` reads only the sessions a launcher-labelled
 #   `Selection` names (onevcs #356, first in 0.45.0) rather than every stream on
 #   the host, at `Detail::Decision` and with its proofs reused across calls:
@@ -685,8 +686,8 @@ resolver = "2"
 #   drives it.
 # - `PublishRequest`'s `adopt` and `defer_checks` stay unset here.
 # A **requirement**, because `^0.46` admits no 0.48.x, the first release carrying the
-# armed `checks-unsettled` ending above; `onevcs-testing` 0.16.0
-# requires exactly `=0.48.0` and carries the full-size recovery fixture
+# armed `checks-unsettled` ending above; `onevcs-testing` 0.17.0
+# requires exactly `=0.48.1` and carries the full-size recovery fixture
 # `tests/stop_verdict/` builds, so the pair moves as one.
 #
 # `oneagentgraph` 0.5.4 is the floor because it relays a turn's `message` and
@@ -732,7 +733,7 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 oneagentgraph = "0.5.6"
-onevcs = "0.48.0"
+onevcs = "0.48.1"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is
@@ -942,7 +943,7 @@ oneharness-core = "0.24.1"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.16.0"
+onevcs-testing = "0.17.0"
 # The store, linked: `src/taskgraph.rs` says how the engine calls it. `-plugin-api` is
 # named for the values the store answers with, and `-local-md` for the plugin
 # `crates/testfakes` hosts in process.
