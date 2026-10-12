@@ -443,7 +443,15 @@ fn traced(
     let mut opened = BTreeMap::new();
     let mut refused = BTreeSet::new();
     for line in trace.lines() {
-        let body = line.split_once(' ').map_or(line, |(_, rest)| rest);
+        // The thread's id is padded to five columns (`%-5u`), so a pid under 10000 is
+        // followed by more than one space; a line with no id is not a call this reads,
+        // and skipping it would read as a call never made.
+        let (thread, body) = line.split_once(' ').unwrap_or_default();
+        assert!(
+            !thread.is_empty() && thread.bytes().all(|byte| byte.is_ascii_digit()),
+            "a traced line names no thread: {line}"
+        );
+        let body = body.trim_start();
         let result = body
             .rsplit_once("= ")
             .map_or("", |(_, result)| result.trim());

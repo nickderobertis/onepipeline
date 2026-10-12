@@ -28,11 +28,15 @@ function runOf(path, dir = "/") {
   return basename(dirname(full));
 }
 
-// `-f` follows every thread and child; a call one thread was in when another's
-// was written is split into an `<unfinished ...>` line and a `<... resumed>` one,
-// each starting with the thread's id, and is joined back here before it is read.
-const UNFINISHED = /^(\d+) (.*) <unfinished \.\.\.>$/;
-const RESUMED = /^(\d+) <\.\.\. (\w+) resumed>(.*)$/;
+// `-f` with `-o` starts every line with the thread's id, left-aligned and padded to
+// five columns (`%-5u`), so a pid under 10000 is followed by more than one space: a
+// fresh runner's pids are that short.
+const LEADER = /^(\d+) +(.*)$/;
+// A call one thread was in when another's was written is split into an
+// `<unfinished ...>` line and a `<... resumed>` one, and is joined back here before
+// it is read.
+const UNFINISHED = /^(.*) <unfinished \.\.\.>$/;
+const RESUMED = /^<\.\.\. (\w+) resumed>(.*)$/;
 // A finished call's result: a count, or -1 and its errno name.
 const RESULT = /\) += (-?\d+)(?:<[^>]*>)?(?: E[A-Z0-9]+ \([^)]*\))?$/;
 
@@ -87,20 +91,24 @@ export function journalOpens(command, args, into, options = {}) {
   const pending = new Map();
   for (const raw of trace.split("\n")) {
     if (raw === "") continue;
-    let line = raw;
-    const unfinished = raw.match(UNFINISHED);
+    // A line this cannot attribute to a thread is a trace in a shape it does not
+    // read, and skipping it would read as a call never made.
+    const leader = raw.match(LEADER);
+    if (!leader) throw new Error(`a traced line names no thread: ${raw}`);
+    const [, thread] = leader;
+    let body = leader[2];
+    const unfinished = body.match(UNFINISHED);
     if (unfinished) {
-      pending.set(unfinished[1], unfinished[2]);
+      pending.set(thread, unfinished[1]);
       continue;
     }
-    const resumed = raw.match(RESUMED);
+    const resumed = body.match(RESUMED);
     if (resumed) {
-      const head = pending.get(resumed[1]);
-      pending.delete(resumed[1]);
+      const head = pending.get(thread);
+      pending.delete(thread);
       if (head === undefined) throw new Error(`a call resumed that never began: ${raw}`);
-      line = `${resumed[1]} ${head}${resumed[3]}`;
+      body = `${head}${resumed[2]}`;
     }
-    const body = line.slice(line.indexOf(" ") + 1);
     const isOpen = body.startsWith("openat(");
     const isRead = body.startsWith("read(") || body.startsWith("pread64(");
     if (!isOpen && !isRead) continue;

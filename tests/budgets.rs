@@ -923,6 +923,13 @@ fn the_host_view_measurement_counts_the_journals_a_traced_read_opened() {
             Some(format!("{open} <unfinished ...>\n")),
             "a traced call on a journal never finished",
         ),
+        (
+            "threadless",
+            Some(format!(
+                "{open}) = 3\nopenat(AT_FDCWD</r>, \"other.txt\", O_RDONLY) = 4\n"
+            )),
+            "a traced line names no thread",
+        ),
     ] {
         let fixture = match trace {
             Some(trace) => {
@@ -944,6 +951,38 @@ fn the_host_view_measurement_counts_the_journals_a_traced_read_opened() {
             "{name}: {answered}"
         );
     }
+
+    // `strace` pads a thread's id to five columns (`%-5u`), so on a host whose pids are short —
+    // a fresh CI runner's — a line reads `812   openat(`. Written as `strace -f -o` writes
+    // it for pids 812 and 9041, one call split across them, it is still the live run's read.
+    let short = dir.join("short-pids.trace");
+    std::fs::write(
+        &short,
+        "812   openat(AT_FDCWD</r>, \"/r/live-0/events.jsonl\", O_RDONLY|O_CLOEXEC <unfinished ...>\n\
+         9041  openat(AT_FDCWD</r>, \"/r/other.txt\", O_RDONLY|O_CLOEXEC) = 4</r/other.txt>\n\
+         812   <... openat resumed>) = 3</r/live-0/events.jsonl>\n\
+         812   read(3</r/live-0/events.jsonl>, \"a live record\\n\", 8192) = 14\n\
+         812   read(3</r/live-0/events.jsonl>, \"\", 8192) = 0\n",
+    )
+    .expect("a trace");
+    let padded = traced_opens(
+        &dir,
+        "true",
+        &[
+            ("PATH", path.clone()),
+            ("FAKE_TRACE", short.display().to_string()),
+        ],
+    );
+    assert_eq!(
+        padded["steady"],
+        serde_json::json!({"ended_journal_bytes_opened": 0, "runs_opened": ["live-0"]}),
+        "{padded}"
+    );
+    assert_eq!(
+        padded["opened"],
+        serde_json::json!({"live-0": live_bytes}),
+        "{padded}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
