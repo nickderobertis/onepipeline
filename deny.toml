@@ -9,7 +9,14 @@ all-features = true
 
 [advisories]
 yanked = "deny"
-ignore = []
+ignore = [
+    # `unsafe-libyaml` is unmaintained (informational, no vulnerability). It reaches
+    # this crate only through `serde_yaml_ng`, which `onejudge` and `onevcs` — both
+    # engines this crate links — depend on, and no release of either has left it:
+    # the advisory names no patched version. The way out is a sibling release that
+    # moves to a maintained YAML parser, after which this entry goes.
+    { id = "RUSTSEC-2024-0449", reason = "unmaintained, transitive via onejudge and onevcs's serde_yaml_ng; no patched version" },
+]
 
 [licenses]
 # Permissive licenses compatible with this MIT-licensed crate. Adding a
