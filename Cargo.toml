@@ -684,7 +684,8 @@ resolver = "2"
 #   `an_armed_change_is_read_again_rather_than_redispatched_and_settles_on_its_landing`
 #   drives it.
 # - `PublishRequest`'s `adopt` and `defer_checks` stay unset here.
-# A **requirement**, because `^0.46` admits none of these; `onevcs-testing` 0.16.0
+# A **requirement**, because `^0.46` admits no 0.48.x, the first release carrying the
+# armed `checks-unsettled` ending above; `onevcs-testing` 0.16.0
 # requires exactly `=0.48.0` and carries the full-size recovery fixture
 # `tests/stop_verdict/` builds, so the pair moves as one.
 #
