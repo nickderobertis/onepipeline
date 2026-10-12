@@ -34,6 +34,7 @@
 #[path = "../e2e/harness.rs"]
 mod harness;
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -326,48 +327,70 @@ fn release_once_the_note_is_taken(world: &World, gates: &[&str]) -> std::thread:
     let fakes = world.fakes.clone();
     let gates: Vec<String> = gates.iter().map(|gate| (*gate).to_string()).collect();
     std::thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(120);
-        let mut taken = a_note_was_taken(&root);
-        while !taken && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(50));
-            taken = a_note_was_taken(&root);
-        }
-        if taken {
-            std::thread::sleep(Duration::from_millis(500));
+        let taken = until_a_note_is_taken(&root, &BTreeSet::new());
+        if taken.is_some() {
+            std::thread::sleep(IN_PROCESS_MARGIN);
         }
         for gate in &gates {
             release(&fakes, gate);
         }
         assert!(
-            taken,
+            taken.is_some(),
             "no member's note spool under {} showed a note taken within 120 seconds",
             root.display()
         );
     })
 }
 
-/// Whether any member's note spool under `dir` holds a note its courier took.
+/// The margin [`release_once_the_note_is_taken`] gives the in-process hand-over
+/// between the courier's rename and the conversation's inbox, as its doc says.
+const IN_PROCESS_MARGIN: Duration = Duration::from_millis(500);
+
+/// The id of a note some member's spool under `root` holds taken and not yet
+/// answered, other than any of `besides` — waited for, up to two minutes, and
+/// `None` past that.
+fn until_a_note_is_taken(root: &Path, besides: &BTreeSet<String>) -> Option<String> {
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        if let Some(id) = notes_taken(root)
+            .into_iter()
+            .find(|id| !besides.contains(id))
+        {
+            return Some(id);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// The id of each note a member's spool under `dir` holds taken and not yet
+/// answered.
 ///
 /// Read off the spool's own file names — an offer becomes `<id>.taken.json` when
-/// taken and gains `<id>.answer.json` when answered — under each directory named
-/// [`NOTES_DIR`], which is where a two-party member binds it. Repositories are
-/// not descended into: no member's scratch lives inside one's history.
-fn a_note_was_taken(dir: &Path) -> bool {
+/// its courier takes it and gains `<id>.answer.json` when answered — under each
+/// directory named [`NOTES_DIR`], which is where a two-party member binds it.
+/// Repositories are not descended into: no member's scratch lives inside one's
+/// history.
+fn notes_taken(dir: &Path) -> BTreeSet<String> {
+    let mut taken = BTreeSet::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
-        return false;
+        return taken;
     };
     let spool = dir.file_name().is_some_and(|name| name == NOTES_DIR);
-    entries.flatten().any(|entry| {
-        let path = entry.path();
+    for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if spool && (name.ends_with(".taken.json") || name.ends_with(".answer.json")) {
-            return true;
+        if let Some(id) = name.strip_suffix(".taken.json").filter(|_| spool) {
+            if !dir.join(format!("{id}.answer.json")).exists() {
+                taken.insert(id.to_string());
+            }
+        } else if name != ".git" && entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            taken.extend(notes_taken(&entry.path()));
         }
-        name != ".git"
-            && entry.file_type().is_ok_and(|kind| kind.is_dir())
-            && a_note_was_taken(&path)
-    })
+    }
+    taken
 }
 
 fn release(fakes: &Path, name: &str) {
@@ -2999,7 +3022,6 @@ fn two_notes_in_one_envelope_are_each_recorded_on_the_turn_that_opened_on_them()
     // And while it blocks, the run's writer relays nothing: the turn carrying
     // the first note is waited for at the harness the double records, never in
     // the journal, which cannot show it until the reply returns.
-    let releasing = release_when_the_note_is_queued(&world, run, &["turn.go", "turn.settle"]);
     let mut reply = world.agentgraph_cmd(&["reply", run]);
     let body = json!({"version": 2, "commands": [
         note_op("build", "worker", first, None),
@@ -3022,18 +3044,26 @@ fn two_notes_in_one_envelope_are_each_recorded_on_the_turn_that_opened_on_them()
             .expect("the envelope is written");
         child.wait_with_output().expect("the binary runs")
     });
-    releasing.join().expect("the releasing thread finishes");
+    // Each note is offered while a held worker turn is live, and that turn is
+    // released only once the member's spool shows the note taken, with the margin
+    // `release_once_the_note_is_taken` gives the in-process rest of the hand-over.
+    let first_taken = until_a_note_is_taken(&world.root, &BTreeSet::new())
+        .expect("the first note was taken by the member's courier");
+    std::thread::sleep(IN_PROCESS_MARGIN);
+    release(&world.fakes, "turn.go");
+    release(&world.fakes, "turn.settle");
     // The first note's turn is open and held; release it so the second note is
     // acknowledged into the turn after it — promptly, because the seam waits a
     // bounded time for that acknowledgement and answers `carried` past it.
     world.until("the turn carrying the first note to open", |world| {
         worked(world).len() >= 2
     });
-    // The second note is offered the moment the first is acknowledged, which is
-    // the moment that turn opened; the offer is the reconciler's own step, with
-    // nothing durable to watch for, so it is given the same short pause the
-    // release above gives a queued note before the turn it is bound for ends.
-    std::thread::sleep(Duration::from_secs(2));
+    // The second note is offered once the first is acknowledged; the first's own
+    // spool files may still be there, so it is the taken note that is not the
+    // first's.
+    until_a_note_is_taken(&world.root, &BTreeSet::from([first_taken]))
+        .expect("the second note was taken by the member's courier");
+    std::thread::sleep(IN_PROCESS_MARGIN);
     release(&world.fakes, "turn.go");
     release(&world.fakes, "turn.settle");
     let output = replied.join().expect("the reply thread finishes");
@@ -3762,7 +3792,7 @@ fn a_note_that_reaches_the_conversation_after_the_judge_decided_reaches_the_work
     // This release is the one the gate refuses: no spool shows a note taken.
     world.script("turn.hold", "hold");
     assert!(
-        !a_note_was_taken(&world.root),
+        notes_taken(&world.root).is_empty(),
         "a note was taken before any was sent, so this release is not the ordering it means"
     );
     release(&world.fakes, "judge.go");

@@ -608,14 +608,17 @@ fn idle_claim_check() -> Duration {
     idle_claim_check_of(std::env::var(IDLE_CLAIM_CHECK_ENV).ok().as_deref())
 }
 
-/// The interval the seam's value names: a positive whole number of seconds, and the shipped
-/// interval for anything else — unset, blank, zero or not a number — so a seam set wrong
-/// never turns the check off.
+/// The interval the seam's value names: a positive whole number of seconds no longer than the
+/// shipped interval, and the shipped interval for anything else — unset, blank, zero, not a
+/// number, or longer — so a seam set wrong never turns the check off or stretches it past ten
+/// minutes.
 // llmlint: ignore[changed_behavior_has_e2e] what a fallback here produces is the shipped ten-minute interval, which a journey could only observe by idling a driver for ten minutes; the journeys that set the seam drive the parsed value end to end (`an_idle_superseded_driver_notices_within_one_idle_check_and_publishes_nothing`), and this module's `an_idle_driver_reads_its_claim_at_least_every_ten_minutes` holds every value that falls back.
 fn idle_claim_check_of(seam: Option<&str>) -> Duration {
     seam.and_then(|seconds| seconds.trim().parse::<u64>().ok())
         .filter(|seconds| *seconds > 0)
-        .map_or(IDLE_CLAIM_CHECK, Duration::from_secs)
+        .map(Duration::from_secs)
+        .filter(|interval| *interval <= IDLE_CLAIM_CHECK)
+        .unwrap_or(IDLE_CLAIM_CHECK)
 }
 
 #[cfg(test)]
@@ -632,7 +635,16 @@ mod tests {
         assert!(IDLE_CLAIM_CHECK <= Duration::from_secs(600));
         assert_eq!(IDLE_CLAIM_CHECK, Duration::from_secs(600));
         assert_eq!(idle_claim_check_of(Some(" 5 ")), Duration::from_secs(5));
-        for unusable in [None, Some(""), Some("0"), Some("-5"), Some("soon")] {
+        assert_eq!(idle_claim_check_of(Some("600")), IDLE_CLAIM_CHECK);
+        for unusable in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("-5"),
+            Some("soon"),
+            Some("601"),
+            Some("1200"),
+        ] {
             assert_eq!(
                 idle_claim_check_of(unusable),
                 IDLE_CLAIM_CHECK,
