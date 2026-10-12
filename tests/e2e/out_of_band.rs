@@ -383,7 +383,7 @@ const BOUNDS: [&str; 5] = [
 /// validation is `onevcs`'s own — this crate calls the verbs' library forms, which
 /// check these bounds before their push — so nothing here restates it.
 #[test]
-fn an_unusable_bound_is_refused_before_a_landing_pushes_or_touches_the_host() {
+fn an_unusable_bound_is_refused_before_a_landing_pushes_or_writes_to_the_host() {
     for (verb, onevcs_verb) in [
         ("publish-branch", "publish-branch"),
         ("repo-recover", "recover"),

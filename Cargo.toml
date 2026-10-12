@@ -652,41 +652,26 @@ resolver = "2"
 # admits no 0.43.x; `onevcs-testing` 0.13.4 requires exactly `=0.43.1`, so the pair
 # moves as one.
 #
-# `onevcs` 0.45.0 is the floor because its `recoverable_matching` reads only the
-# sessions a launcher-labelled `Selection` names (onevcs #356) rather than every
-# stream on the host, at `Detail::Decision` and with its proofs reused across
-# calls: `src/unpublished.rs` decides whether a manager session owes a preserved
-# branch through that read in process, inside the Stop hook's budget. Its write
-# requests carry a `term_scope`, which `src/vcs.rs` and `src/shutdown.rs` set to
-# `TermScope::Registry`, the scope every earlier release derived its terms from,
-# and `src/land.rs` takes from the parsed onevcs arguments it already passes
-# through. A **requirement**, because `^0.43` admits no 0.45.x; `onevcs-testing`
-# 0.13.7 requires exactly `=0.45.0` and carries the full-size recovery fixture
+# `onevcs` 0.48.0 is the floor, at the release the stop-verdict plan's onevcs
+# nodes published last. What this crate relies on from it:
+# - `recoverable_matching` reads only the sessions a launcher-labelled
+#   `Selection` names (onevcs #356, first in 0.45.0) rather than every stream on
+#   the host, at `Detail::Decision` and with its proofs reused across calls:
+#   `src/unpublished.rs` decides whether a manager session owes a preserved
+#   branch through that read in process, inside the Stop hook's budget.
+# - Write requests carry a `term_scope`, which `src/vcs.rs` and `src/shutdown.rs`
+#   set to `TermScope::Registry` and `src/land.rs` takes from the parsed onevcs
+#   arguments it already passes through.
+# - A publication probes a hosted repository's visibility with one `gh api
+#   repos/{owner}/{name}` unless a rule declares it, so a journey that scripts a
+#   host outage by a count of `gh` calls declares that visibility instead.
+# - `PublishRequest`'s `adopt` and `defer_checks` stay unset here; the
+#   `ChangeReviewDraftUnchecked` only a deferred publication ends in reads as
+#   `change-draft` in `src/vcs.rs`; and `PublishOutcome::Failed`'s optional
+#   `armed` is read past, the failure settling by its kind.
+# A **requirement**, because `^0.43` admits none of these; `onevcs-testing` 0.16.0
+# requires exactly `=0.48.0` and carries the full-size recovery fixture
 # `tests/stop_verdict/` builds, so the pair moves as one.
-#
-# `onevcs` 0.46.0 is the floor at the newest release, as every floor here is
-# written; nothing here calls the review-comment verbs it adds. Its publication
-# probes a hosted repository's visibility with one `gh api repos/{owner}/{name}`
-# unless a rule declares it, so a journey that scripts a host outage by a count of
-# `gh` calls declares that visibility rather than spending the count on the probe.
-# A **requirement**, because `^0.45` admits no 0.46.x; `onevcs-testing`
-# 0.14.0 requires exactly `=0.46.0`, so the pair moves as one.
-#
-# `onevcs` 0.47.0 is the floor at the release the stop-verdict plan's onevcs
-# nodes published, which carries #356's scoped decision read unchanged. Its
-# `PublishRequest` gains `adopt` and `defer_checks`, which every request here
-# leaves unset, and the `ChangeReviewDraftUnchecked` only such a deferred
-# publication ends in reads as `change-draft` in `src/vcs.rs`, since it says
-# nothing about the checks `change-review-draft` says came back green. A
-# **requirement**, because `^0.46` admits no 0.47.x; `onevcs-testing` 0.15.0
-# requires exactly `=0.47.0`, so the pair moves as one.
-#
-# `onevcs` 0.48.0 is the floor at the release the stop-verdict plan's onevcs
-# nodes published last. Its `PublishOutcome::Failed` gains an optional `armed`,
-# the host merge a `checks-unsettled` wait left armed; this crate settles that
-# failure by its kind as before, and `src/lifecycle.rs` reads past the field. A
-# **requirement**, because `^0.47` admits no 0.48.x; `onevcs-testing` 0.16.0
-# requires exactly `=0.48.0`, so the pair moves as one.
 #
 # `oneagentgraph` 0.5.4 is the floor because it relays a turn's `message` and
 # `reasoning` items as `turn-activity` under their own kind — the agent's words,
