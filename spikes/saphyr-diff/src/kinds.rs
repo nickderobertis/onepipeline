@@ -767,6 +767,27 @@ fn local_md(stores: BTreeMap<String, Vec<(String, Json, String)>>, scratch: &Pat
     s.notes.push(format!("{} stores, {tasks} tasks and {projects} projects read and edited", stores.len()));
 }
 
+/// `src/boundary.rs` reads this host's onevcs branches file (read only here) into
+/// `onevcs::branches::BranchesFile`; not in the task's list, but a production read.
+pub fn branches_file(r: &mut Report) {
+    let s = r.section("onevcs branches file (boundary.rs, BranchesFile)");
+    let mut docs = Vec::new();
+    if let Some(path) = onevcs::branches::default_path().ok().filter(|p| p.is_file()) {
+        docs.extend(std::fs::read_to_string(&path).ok().map(|text| Doc { name: format!("host:{}", path.display()), text }));
+    }
+    for (name, text) in [
+        ("fixture: prefix left blank", "version: 1\nprefix:\n"),
+        ("fixture: prefix absent", "version: 1\n"),
+        ("fixture: unknown key", "version: 1\nprefx: nick/\n"),
+    ] {
+        docs.push(Doc { name: name.into(), text: text.into() });
+    }
+    for doc in &docs {
+        s.compared += 1;
+        let _: Option<onevcs::branches::BranchesFile> = typed(s, doc, "read", De::Default);
+    }
+}
+
 pub fn ci_workflows(c: &Corpus, r: &mut Report) {
     let s = r.section("tests/ci_workflows.rs (workflow walks, `on:` key, scalar())");
     for doc in &c.workflows {

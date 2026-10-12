@@ -43,6 +43,7 @@ fn main() {
     kinds::front_matter(&corpus, &mut report);
     kinds::contract_blocks(&corpus, &mut report);
     kinds::writeback_emission(&corpus, &scratch, &mut report);
+    kinds::branches_file(&mut report);
     kinds::ci_workflows(&corpus, &mut report);
     kinds::malformed(&mut report);
     kinds::probes(&mut report);
