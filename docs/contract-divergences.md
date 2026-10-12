@@ -9590,7 +9590,7 @@ the telemetry `tests/stop_verdict/` writes and judged on the merge-path CI runne
 Warm and cold are the design targets; the 10x bound is a temporary relaxation from
 its 0.5 s design target, by the user's ruling of 2026-10-11 to land now, and a
 later gap-closing run owns the remaining 10x warm cost. Each is measured against
-onevcs 0.47.0, whose decision read reads only the sessions the launcher label
+onevcs 0.48.0, whose decision read reads only the sessions the launcher label
 selects (onevcs #356, first released in 0.45.0).
 
 ```json
