@@ -304,7 +304,7 @@ fn a_runs_first_projection_carries_its_claim_by_member_and_a_later_transition_th
     assert_eq!(first["whole_because"], Value::Null, "{first}");
     assert_eq!(first["outcome"], "projected", "{first}");
     // And one project write: the run's driver claim, which the first projection writes
-    // (`docs/contract-divergences.md` entry 116).
+    // (`docs/contract-divergences.md` entry 117).
     assert_eq!(
         first["calls"],
         json!({"task-update": 2, "project-metadata-set": 1}),
@@ -918,7 +918,7 @@ fn an_adoption_whose_every_read_matches_reads_each_item_once_and_copies_nothing(
     assert_eq!(first["outcome"], "projected", "{first}");
     assert_eq!(first["items"], json!([]), "{first}");
     // And the adoption's own claim, which its first projection writes in place of the
-    // stopped driver's (entry 116).
+    // stopped driver's (entry 117).
     assert_eq!(
         first["calls"],
         json!({"task-show": 2, "project-metadata-set": 1}),

@@ -1720,6 +1720,12 @@ fn every_reserved_metadata_key_the_contract_names_is_a_field_of_this_schema() {
         name: Some("named".into()),
         concurrency: 2,
         tasks: Vec::new(),
+        export_edges: vec![onepipeline::plan::ExportEdge {
+            from: "producer".into(),
+            to: "consumer".into(),
+            source_directory: "examples/generic".into(),
+            target_directory: "examples".into(),
+        }],
     })
     .expect("a plan serialises");
     // Every optional field set, so the serialized shape names all of them: an
@@ -1765,7 +1771,12 @@ fn every_reserved_metadata_key_the_contract_names_is_a_field_of_this_schema() {
             key: Some("ENG-1".into()),
             title: "feat: x".into(),
             source: None,
+            repositories: vec![
+                "github.com/owner/name".into(),
+                "github.com/owner/other".into(),
+            ],
         }),
+        classification: onetaskgraph_plugin_api::Classification::Private,
     })
     .expect("a node serialises");
     let fields: BTreeSet<String> = plan
@@ -1813,12 +1824,18 @@ fn every_reserved_metadata_key_the_contract_names_is_a_field_of_this_schema() {
     // of the plan.
     assert!(
         CONTRACT.contains(
-            "The plan-level fields — `schema_version`, `goal`, `name`, `concurrency` — are \
-             reserved metadata keys `onepipeline.<field>` on the **project**"
+            "The plan-level fields — `schema_version`, `goal`, `name`, `concurrency`, \
+             `export_edges` — are reserved metadata keys `onepipeline.<field>` on the **project**"
         ),
         "the contract no longer states which fields the project carries"
     );
-    for field in ["schema_version", "goal", "name", "concurrency"] {
+    for field in [
+        "schema_version",
+        "goal",
+        "name",
+        "concurrency",
+        "export_edges",
+    ] {
         assert!(
             plan.as_object().expect("a mapping").contains_key(field),
             "the contract reserves `{field}` on the project, which is not a plan field"
@@ -2274,7 +2291,7 @@ fn the_stacked_settlement_is_what_the_divergence_record_names() {
     );
 }
 
-/// Entry 116's continuation is this build's own: its two kinds are spelled by
+/// Entry 117's continuation is this build's own: its two kinds are spelled by
 /// `PipelineKind`, the settlement it journals with `continued` and the claim both kinds
 /// carry are admitted by the registered documents — and a claim missing a key it always
 /// carries is refused — its two flags are `start`'s, and `ProjectDriven` refuses with the
@@ -2283,9 +2300,9 @@ fn the_stacked_settlement_is_what_the_divergence_record_names() {
 fn the_continuation_is_what_the_divergence_record_names() {
     use onepipeline::event::PipelineKind;
     use onepipeline::payload::{registry, schema_of};
-    let block = divergence_block("116.");
+    let block = divergence_block("117.");
     let kinds: Vec<String> =
-        serde_json::from_value(block["event_kinds"].clone()).expect("entry 116 names its kinds");
+        serde_json::from_value(block["event_kinds"].clone()).expect("entry 117 names its kinds");
     assert_eq!(
         kinds,
         [
@@ -2297,7 +2314,7 @@ fn the_continuation_is_what_the_divergence_record_names() {
     let registry = registry();
     registry
         .check(&schema_of(PipelineKind::NodeSettled), &block["settlement"])
-        .unwrap_or_else(|why| panic!("entry 116's settlement is refused: {why}"));
+        .unwrap_or_else(|why| panic!("entry 117's settlement is refused: {why}"));
     let mut unsourced = block["settlement"].clone();
     unsourced["continued"]
         .as_object_mut()
@@ -2317,7 +2334,7 @@ fn the_continuation_is_what_the_divergence_record_names() {
         let id = schema_of(kind);
         registry
             .check(&id, &serde_json::json!({ key: claim }))
-            .unwrap_or_else(|why| panic!("entry 116's claim is refused as {kind}: {why}"));
+            .unwrap_or_else(|why| panic!("entry 117's claim is refused as {kind}: {why}"));
         let mut pidless = claim.clone();
         pidless.as_object_mut().expect("a claim").remove("pid");
         assert!(
@@ -2338,7 +2355,7 @@ fn the_continuation_is_what_the_divergence_record_names() {
         .collect();
     for flag in block["start_flags"]
         .as_array()
-        .expect("entry 116 names its flags")
+        .expect("entry 117 names its flags")
     {
         let flag = flag.as_str().expect("a flag");
         assert!(flags.contains(flag), "`start` takes no {flag}");
@@ -6482,7 +6499,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
         .collect();
     // The kinds the contract does not list are exactly the ones the divergence
     // record proposes, and no others: a kind neither document names fails here.
-    let proposed: BTreeSet<String> = ["40.", "47.", "55.", "65.", "70.", "92.", "116."]
+    let proposed: BTreeSet<String> = ["40.", "47.", "55.", "65.", "70.", "92.", "117."]
         .into_iter()
         .flat_map(|entry| {
             serde_json::from_value::<Vec<String>>(divergence_block(entry)["event_kinds"].clone())
@@ -7563,6 +7580,12 @@ const RULINGS: &[(&str, &str)] = &[
     (
         "112.",
         "several select the candidate whose stacking chain contains every other candidate",
+    ),
+    // The repository publication boundary: the manager's rulings on what this build
+    // decided beyond the approved interface, stated by the contract's own paragraph.
+    (
+        "116.",
+        "every write-back write a store whose configuration opts into the boundary makes",
     ),
 ];
 
@@ -10243,4 +10266,75 @@ fn preserve_stacking_prose_is_the_contract_at_every_documented_surface() {
             "{name} drifted from the approved contract"
         );
     }
+}
+
+/// The publication boundary's block is the plan schema's own: its plan parses through
+/// the public types into the export edges, the classification and the record's
+/// repositories it shows, and writes back as it reads; its context is the shape a mixed
+/// dispatch carries; and its guidance steps are the ones the binary prints.
+#[test]
+fn the_publication_boundary_block_is_the_schema_and_the_guidance_the_binary_prints() {
+    let block: Value = serde_json::from_str(&fenced_block_naming("json", "boundary_plan"))
+        .expect("the boundary block is JSON");
+    let plan: Plan = serde_json::from_value(block["boundary_plan"].clone())
+        .expect("the boundary plan is a plan of this schema");
+    assert_eq!(plan.export_edges.len(), 1);
+    let edge = &plan.export_edges[0];
+    assert_eq!(
+        (
+            edge.from.as_str(),
+            edge.to.as_str(),
+            edge.source_directory.as_str(),
+            edge.target_directory.as_str()
+        ),
+        ("generalize", "examples", "examples/generic", "examples")
+    );
+    let producer = plan
+        .tasks
+        .iter()
+        .find(|node| node.id == "generalize")
+        .expect("the producer");
+    assert_eq!(
+        producer.classification,
+        onetaskgraph_plugin_api::Classification::Private
+    );
+    assert_eq!(
+        producer
+            .task_record
+            .as_ref()
+            .map(|record| record.repositories.len()),
+        Some(2)
+    );
+    assert_eq!(
+        serde_json::to_value(&plan).expect("a plan serializes"),
+        block["boundary_plan"],
+        "the boundary plan does not round-trip as the contract writes it"
+    );
+    let context = &block["boundary_context"]["boundary"];
+    assert_eq!(context["mixed"], json!(true));
+    assert!(["public", "private"].contains(&context["clearance"].as_str().unwrap_or_default()));
+
+    let printed = std::process::Command::new(env!("CARGO_BIN_EXE_onepipeline"))
+        .args(["boundary", "guidance", "--json"])
+        .output()
+        .expect("the binary runs");
+    assert!(printed.status.success());
+    let guidance: Value = serde_json::from_slice(&printed.stdout).expect("one JSON object");
+    let steps: Vec<Value> = guidance["steps"]
+        .as_array()
+        .expect("steps")
+        .iter()
+        .map(|step| step["step"].clone())
+        .collect();
+    assert_eq!(Value::Array(steps), block["boundary_guidance_steps"]);
+    assert_contract_names(
+        "the publication boundary",
+        &[
+            "onepipeline.export_edges",
+            "onepipeline boundary validate-envelope --run RUN",
+            "onepipeline boundary guidance [--json]",
+            "## Repository boundary",
+            "<host prefix>public/<opaque id>/task-<ordinal>",
+        ],
+    );
 }

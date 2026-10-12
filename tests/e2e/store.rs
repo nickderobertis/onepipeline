@@ -2977,7 +2977,7 @@ fn a_terminal_writeback_outage_expires_without_holding_run_settlement() {
 }
 
 /// A project a run settled launches again from another runs root over the same store,
-/// reading past every key the run projected — and, since entry 116, **continues** what it
+/// reading past every key the run projected — and, since entry 117, **continues** what it
 /// settled rather than running it again: the node is journalled `continued` from the store
 /// and nothing is dispatched.
 #[test]
@@ -3024,7 +3024,7 @@ fn a_settled_project_launches_again_continuing_what_it_projected() {
 
 /// A project a run retried a node of launches again, reading the lineage head's
 /// definition under the root's id — its dependents' edges included — and continuing the
-/// head's settlement under that same id, by the ruling entry 116 records.
+/// head's settlement under that same id, by the ruling entry 117 records.
 ///
 /// The one item a lineage has carries `onepipeline.node` and `onepipeline.supersedes`
 /// beside its settlement — and where the plan's own store is the destination, so does the
@@ -3378,19 +3378,35 @@ fn a_project_reads_as_the_plan_document_of_the_same_content() {
             Some("audit") => "001-audit",
             other => panic!("an unexpected node {other:?}"),
         };
-        assert_eq!(
-            record,
-            json!({
-                "id": format!("mapping-board/{file}"),
-                "title": node["title"].as_str().unwrap_or_default(),
-            }),
-            "{node}"
-        );
+        let mut expected = json!({
+            "id": format!("mapping-board/{file}"),
+            "title": node["title"].as_str().unwrap_or_default(),
+        });
+        // Every repository a task names beyond its `repo` is on its record, where the
+        // publication boundary reads it: the work lands in the first alone.
+        if file == "000-publish" {
+            expected["repositories"] =
+                json!(["github.com/owner/service", "github.com/owner/ignored"]);
+        }
+        assert_eq!(record, expected, "{node}");
     }
     assert_eq!(
         by_id(&read),
         by_id(&document),
         "the project read as a different plan than the document of the same content"
+    );
+    // And what the run projected back onto the task — the lineage it names — leaves every
+    // repository the task named where the store keeps them.
+    assert!(
+        world.store_tasks(&project).iter().any(|task| {
+            let task = task.to_string();
+            task.contains("\"onepipeline.id\":\"publish\"")
+                && task.contains("\"onepipeline.node\":\"publish\"")
+                && task.contains("github.com/owner/service")
+                && task.contains("github.com/owner/ignored")
+        }),
+        "the write-back lost a repository the task named: {:?}",
+        world.store_tasks(&project)
     );
 }
 

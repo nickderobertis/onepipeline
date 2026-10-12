@@ -1053,7 +1053,7 @@
                 "type": "null"
               }
             ],
-            "description": "Where a settlement this run did not reach itself came from: present exactly on\nthe settlement a launch read back from its project's store and continued,\nrather than dispatched. Entry 116 of `docs/contract-divergences.md`."
+            "description": "Where a settlement this run did not reach itself came from: present exactly on\nthe settlement a launch read back from its project's store and continued,\nrather than dispatched. Entry 117 of `docs/contract-divergences.md`."
           }
         },
         "required": [

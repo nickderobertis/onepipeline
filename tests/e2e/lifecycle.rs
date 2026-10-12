@@ -1481,12 +1481,11 @@ fn a_title_the_sibling_will_not_commit_under_is_refused_before_any_dispatch() {
 /// no gate — a merge path that refuses is `push-rejected` and preserving. What
 /// still reaches the terminal side is a request the sibling will not take at all.
 ///
-/// From `onevcs` 0.44.0 the first thing to refuse it is the public boundary, ahead
-/// of the `NotImplemented` seam: the identity's visibility cannot be asked of a
-/// host this build has no implementation for, so the boundary cannot be screened
-/// and refuses as unavailable. That is the same kind of answer — one no attempt
-/// changes — and it is held to the same two properties: said in `onevcs`'s words,
-/// and asked once.
+/// From `onevcs` 0.44.0 a publication is screened by the public boundary first, but
+/// under the run's own term scope rather than every registered identity, so the
+/// boundary does not refuse this one and it still meets the `NotImplemented` seam.
+/// Either is the same kind of answer — one no attempt changes — and it is held to
+/// the same two properties: said in `onevcs`'s words, and asked once.
 #[test]
 fn a_publication_onevcs_refuses_outright_settles_the_residual_and_is_not_retried() {
     let world = World::new("lifecycle-residual");
@@ -1519,7 +1518,7 @@ fn a_publication_onevcs_refuses_outright_settles_the_residual_and_is_not_retried
         .expect("the settlement says why")
         .to_string();
     assert!(
-        detail.contains("onevcs:") && detail.contains("the public boundary check is unavailable"),
+        detail.contains("onevcs:") && detail.contains("not implemented"),
         "the settlement does not say what onevcs refused: {detail}"
     );
 

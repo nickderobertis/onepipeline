@@ -62,6 +62,10 @@ pub struct Launch {
     /// launched from a store, whose project a driver claims, and none an older record names
     /// no project for.
     pub(crate) publication_gated: bool,
+    /// What the publication boundary tells and gives this node's dispatches: the run's
+    /// term scope, which every check its closeout asks derives its terms from, and in a
+    /// mixed plan its side of the boundary.
+    pub(crate) boundary: crate::boundary::Dispatching,
 }
 
 /// Run one lifecycle node to settlement, re-dispatching it while its
@@ -587,6 +591,43 @@ fn attempt_once(
     // that follows them belongs to none.
     let whose = engine::dispatch_labels(run, &node.id, None, node.persona.as_deref());
     let mut branch: Option<String> = node.branch.clone();
+    // An export's consumer starts from the export: one neutral commit on the public
+    // base, made the first time it is asked for and answered from the run's record
+    // every time after. Its session continues that branch, so nothing here ever falls
+    // back to the default base, and a refused export refuses the node before any
+    // dispatch, in the export's own neutral words.
+    if let (Some(pinned), Some(export)) = (&branch, launch.boundary.export()) {
+        let held = crate::boundary::pinned_to_its_export(paths, export, pinned);
+        if !matches!(held, Ok(true)) {
+            return Attempt::settled(Settlement {
+                detail: Some(held.err().unwrap_or_else(|| {
+                    "an export's consumer is pinned to a branch that is not its export, and its \
+                     session starts from its export or not at all"
+                        .to_owned()
+                })),
+                ..Settlement::plain(
+                    &node.id,
+                    NodeStatus::Failed,
+                    Some(engine::INFRASTRUCTURE_FAILURE),
+                )
+            });
+        }
+    }
+    if let (None, Some(export)) = (&branch, launch.boundary.export()) {
+        match crate::boundary::ensure_export(paths, export, &launch.boundary.term_scope) {
+            Ok(exported) => branch = Some(exported),
+            Err(why) => {
+                return Attempt::settled(Settlement {
+                    detail: Some(why),
+                    ..Settlement::plain(
+                        &node.id,
+                        NodeStatus::Failed,
+                        Some(engine::INFRASTRUCTURE_FAILURE),
+                    )
+                })
+            }
+        }
+    }
     // The steps the preserved branch already carries, plus the ones this attempt
     // adds. Carried forward whole, because the branch a later attempt preserves
     // is the same branch: a step skipped on one attempt is still on it.
@@ -647,6 +688,13 @@ fn attempt_once(
             // where the template has to name it. One that cannot is settled before
             // any session opens: nothing has run, so there is no work to lose, and
             // the branch is never cut under some other name.
+            // A public node of a mixed plan, and an export producer, cut a neutral name
+            // in place of the plan-derived one: what names the plan or its nodes is
+            // exactly what neither may carry.
+            None if launch.boundary.branch_name().is_some() => SessionRequest {
+                branch_name: launch.boundary.branch_name().map(str::to_owned),
+                ..request.clone()
+            },
             None => {
                 match crate::vcs::opening_for(request.clone(), node, launch.branch_naming.as_ref())
                 {
@@ -725,7 +773,7 @@ fn attempt_once(
         }
         let build = |attempt| DispatchRequest {
             graph: graph.clone(),
-            task: task.clone(),
+            task: crate::boundary::with_section(task.clone(), launch.boundary.section()),
             labels: engine::dispatch_labels(
                 run,
                 &node.id,
@@ -812,6 +860,7 @@ fn attempt_once(
             tx,
             &whose,
             vcs_filter,
+            &launch.boundary.term_scope,
         );
     }
 
@@ -832,6 +881,7 @@ fn attempt_once(
             tx,
             &whose,
             vcs_filter,
+            &launch.boundary.term_scope,
         );
     }
     let mut attempted = publish(
@@ -893,7 +943,12 @@ fn with_stack(task: String, stack: Option<&crate::stack::Stack>) -> String {
 /// this very block is not written again. A host that refused the read or the
 /// write leaves the description as it was and says so on the driver's output: the
 /// publication is what the node settles on, and it has already been made.
-fn write_stack_block(node: &Node, token: &onevcs::SessionToken, stack: &crate::stack::Stack) {
+fn write_stack_block(
+    node: &Node,
+    token: &onevcs::SessionToken,
+    stack: &crate::stack::Stack,
+    term_scope: &onevcs::TermScope,
+) {
     // llmlint: ignore-block[changed_behavior_has_e2e] neither arm has a journey that reaches
     // it alone. A node with a stack parent is on a repository whose changes stay open, and
     // every publication of one that answered opened or adopted a change request, so `None`
@@ -916,7 +971,7 @@ fn write_stack_block(node: &Node, token: &onevcs::SessionToken, stack: &crate::s
     if described == change.body {
         return;
     }
-    if let Err(error) = crate::vcs::describe_change(token, None, &described) {
+    if let Err(error) = crate::vcs::describe_change(token, None, &described, term_scope) {
         eprintln!(
             "onepipeline: node '{}': the Stack block was not written onto {}: {error}",
             node.id, change.url
@@ -1151,6 +1206,7 @@ fn preserve(
     tx: &Sender<Message>,
     whose: &Labels,
     filter: Option<&EventFilter>,
+    term_scope: &onevcs::TermScope,
 ) -> Attempt {
     let Opened {
         worktree,
@@ -1175,7 +1231,16 @@ fn preserve(
     // close below adds a commit only where the tree still held something, and
     // says which when it does.
     let committed = worktree.and_then(crate::vcs::worktree_head);
-    let answered = close_and_keep(node, token, branch.as_deref(), stream, tx, whose, filter);
+    let answered = close_and_keep(
+        node,
+        token,
+        branch.as_deref(),
+        stream,
+        tx,
+        whose,
+        filter,
+        term_scope,
+    );
     match answered {
         Ok(preserved) => {
             let remote = crate::vcs::preservation_word(preserved.outcome);
@@ -1234,6 +1299,14 @@ fn preserve(
 ///
 /// A refused close is asked again for the relay's grace, and only a closed session's branch is
 /// pushed — see [`preserve`] for why.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the session to close (its node, token and branch), the stream and relay context \
+              its events are read through (the follower, the sender, the labels and the \
+              filter), and the run's term scope the push is checked under are each what \
+              `preserve` and `withhold` already hold apart; bundling them would only move the \
+              same list one indirection away"
+)]
 fn close_and_keep(
     node: &Node,
     token: &onevcs::SessionToken,
@@ -1242,6 +1315,7 @@ fn close_and_keep(
     tx: &Sender<Message>,
     whose: &Labels,
     filter: Option<&EventFilter>,
+    term_scope: &onevcs::TermScope,
 ) -> std::result::Result<onevcs::Preserved, String> {
     let followed_through = stream.map(crate::vcs::Follower::finish).unwrap_or_default();
     let mut refused = close(Some(token));
@@ -1254,7 +1328,7 @@ fn close_and_keep(
         (Some(why), _, _) => Err(format!(
             "the session would not close ({why}), so nothing was pushed from it"
         )),
-        (None, Some(branch), Some(repo)) => crate::vcs::preserve_branch(repo, branch),
+        (None, Some(branch), Some(repo)) => crate::vcs::preserve_branch(repo, branch, term_scope),
         // llmlint: ignore[changed_behavior_has_e2e] every session `onevcs` opens names
         // its branch and every lifecycle node names its `repo`, so no invocation reaches
         // a kept branch with neither; it settles as the infrastructure failure it would
@@ -1279,6 +1353,7 @@ fn withhold(
     tx: &Sender<Message>,
     whose: &Labels,
     filter: Option<&EventFilter>,
+    term_scope: &onevcs::TermScope,
 ) -> Attempt {
     let Opened {
         worktree,
@@ -1288,7 +1363,16 @@ fn withhold(
     } = opened;
     let branch = branch.or_else(|| crate::vcs::working_session(token).map(|open| open.branch));
     let committed = worktree.and_then(crate::vcs::worktree_head);
-    let answered = close_and_keep(node, token, branch.as_deref(), stream, tx, whose, filter);
+    let answered = close_and_keep(
+        node,
+        token,
+        branch.as_deref(),
+        stream,
+        tx,
+        whose,
+        filter,
+        term_scope,
+    );
     let name = branch.as_deref().unwrap_or("the session's branch");
     let (detail, head, remote) = match answered {
         Ok(preserved) => (
@@ -1446,7 +1530,12 @@ fn publish(
     // reason it is not on the change request.
     let (described, undescribed) = match (&held, &body) {
         (Some(change), Some(body)) => {
-            match crate::vcs::describe_change(token, node.title.as_deref(), body) {
+            match crate::vcs::describe_change(
+                token,
+                node.title.as_deref(),
+                body,
+                &launch.boundary.term_scope,
+            ) {
                 Ok(_) => (true, None),
                 Err(error) => {
                     let why = format!(
@@ -1503,14 +1592,20 @@ fn publish(
     } else {
         body.as_deref()
     };
-    let publication =
-        publish_rereading_the_merge_path(node, token, opening_body, draft.as_ref(), cancel);
+    let publication = publish_rereading_the_merge_path(
+        node,
+        token,
+        opening_body,
+        draft.as_ref(),
+        cancel,
+        &launch.boundary.term_scope,
+    );
     // The Stack block, written by the engine itself onto every change request a
     // publication of a stacked node leaves — failed ones included, since the
     // change request outlives the attempt and a re-dispatch publishes onto it.
     if publication.answered.is_ok() {
         if let Some(stack) = stack {
-            write_stack_block(node, token, stack);
+            write_stack_block(node, token, stack, &launch.boundary.term_scope);
         }
     }
     match publication.answered {
@@ -1913,6 +2008,7 @@ fn publish_rereading_the_merge_path(
     body: Option<&str>,
     draft: Option<&onevcs::DraftReason>,
     cancel: &crate::executor::CancellationToken,
+    term_scope: &onevcs::TermScope,
 ) -> Published {
     let publish = || {
         crate::vcs::publish(
@@ -1922,6 +2018,7 @@ fn publish_rereading_the_merge_path(
             body,
             draft,
             cancel,
+            term_scope,
         )
     };
     let budget = engine::merge_path_reads();
@@ -2756,7 +2853,23 @@ fn drafted(
         executor,
         DispatchRequest {
             graph: oneagentgraph::config::ConfigRef(graph.to_owned()),
-            task: drafting_task(node, &paths.run, held, stack),
+            // A public node of a mixed plan's drafter is handed nothing of the run beyond
+            // the node itself: its run is named by the variable its environment carries
+            // rather than spelled out, and it reads the same boundary section its worker
+            // did, since what it drafts is public.
+            task: if launch.boundary.is_public() {
+                crate::boundary::with_section(
+                    drafting_task(
+                        node,
+                        &format!("${}", crate::agentgraph::RUN_ID_ENV),
+                        held,
+                        stack,
+                    ),
+                    launch.boundary.section(),
+                )
+            } else {
+                drafting_task(node, &paths.run, held, stack)
+            },
             labels: engine::dispatch_labels(&paths.run, &node.id, None, Some(PR_AUTHOR_PERSONA)),
             // None of the node's own: the drafting dispatch is not the node's work,
             // and a turn budget written for that work would be spent twice — once on

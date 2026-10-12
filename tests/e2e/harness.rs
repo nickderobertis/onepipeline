@@ -1507,14 +1507,18 @@ impl World {
         );
         git(self, &checkout, &["push", "-u", "origin", "main"]);
 
-        // Version 3, which is the shape with no `gate:` in it at all: what
-        // verifies a change is the repository's own merge path, so the rules file
-        // says only how the change is published and whether it needs approving.
+        // Version 4: no `gate:` in it at all — what verifies a change is the
+        // repository's own merge path, so the rules file says how the change is
+        // published and whether it needs approving — and every repository of this
+        // world's one owner declared private, as an operator states it. The host's
+        // own answer is a GitHub read the `gh` stand-in cannot give, and an unanswered
+        // one leaves a repository `unknown`: screened for private terms at every
+        // publication, the repository's own name among them.
         std::fs::write(
             home.join("rules.yml"),
             format!(
-                "version: 3\nrules: []\ndefault:\n  publication: {publication}\n  approvals: \
-                 none\n"
+                "version: 4\nrules:\n  - match: {{owner: owner}}\n    visibility: private\n\
+                 default:\n  publication: {publication}\n  approvals: none\n"
             ),
         )
         .expect("the rules file is written");
@@ -2686,10 +2690,14 @@ impl World {
         if let Some(delivers) = node.get("delivers") {
             front.push(("delivers", delivers.clone()));
         }
+        // And so is who may read it.
+        if let Some(classification) = node.get("classification") {
+            front.push(("classification", classification.clone()));
+        }
         for (key, value) in node {
             if matches!(
                 key.as_str(),
-                "id" | "title" | "task" | "deps" | "repo" | "delivers"
+                "id" | "title" | "task" | "deps" | "repo" | "delivers" | "classification"
             ) {
                 continue;
             }

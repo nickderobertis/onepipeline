@@ -249,7 +249,13 @@ pub fn count(dir: &Path, what: &str) -> usize {
     let nth = so_far
         .checked_add(1)
         .unwrap_or_else(|| fail(&format!("counter {} is exhausted", path.display())));
-    if let Err(error) = std::fs::write(&path, nth.to_string()) {
+    // Written beside the counter and renamed over it: `fs::write` truncates
+    // before it writes, so a double counting concurrently — a panel's judges
+    // run at once — could read the counter empty in between and fail its turn.
+    let staged = dir.join(format!("{what}.calls.{}", std::process::id()));
+    let written =
+        std::fs::write(&staged, nth.to_string()).and_then(|()| std::fs::rename(&staged, &path));
+    if let Err(error) = written {
         fail(&format!("cannot count into {}: {error}", path.display()));
     }
     nth
