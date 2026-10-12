@@ -3,7 +3,7 @@
 //! A host holding none of a run's local state — its runs root gone, a fresh `onevcs`
 //! state root — launches a project again and carries it on from what the plans store
 //! holds: each lineage's `onepipeline.settlement`, a node's open `onepipeline.dispatch`,
-//! and the project's `onepipeline.driver`. Entry 118 of `docs/contract-divergences.md`.
+//! and the project's `onepipeline.driver`. Entry 119 of `docs/contract-divergences.md`.
 //!
 //! Each journey drives the compiled binary over a real `local-md` store, the real linked
 //! `onevcs` over a real origin on disk, and GitHub at `onevcs`'s own `ONEVCS_GH` seam —
@@ -1238,7 +1238,7 @@ fn a_superseded_driver_publishes_nothing_after_the_check_but_finishes_a_publicat
 }
 
 /// A driver with nothing to dispatch or publish notices a takeover within one idle check —
-/// shortened here through the test seam entry 118 names — records it, and ends once its
+/// shortened here through the test seam entry 119 names — records it, and ends once its
 /// dispatch in flight has settled unpublished; the host that took over continues that node
 /// on its branch, and the shared host is asked for one change request for it.
 #[test]

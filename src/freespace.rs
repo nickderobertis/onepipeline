@@ -40,66 +40,190 @@ const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 /// answer a reading of the resource whose exhaustion stops everything may not
 /// give.
 pub(crate) fn lines(runs_root: &Path) -> String {
-    let mut asked: Vec<(&str, PathBuf)> = vec![(RUNS_ROOT, runs_root.to_path_buf())];
-    match workspaces_root() {
-        Ok(root) => asked.push((WORKSPACES, root)),
-        Err(why) => {
-            return format!(
-                "{}{INDENT}{LEAD} could not be read for the lifecycle workspaces, because the \
-                 linked onevcs could not resolve its state root: {}, so what is free there is \
-                 unknown\n",
-                lines_of(&asked),
-                crate::views::one_line(&why)
-            )
-        }
-    }
-    lines_of(&asked)
+    render(&readings(runs_root))
 }
 
-/// One line per distinct filesystem among `asked`, in the order first named.
-fn lines_of(asked: &[(&str, PathBuf)]) -> String {
-    let mut lines: Vec<String> = Vec::new();
-    // Which line each filesystem already has, keyed on what tells two apart
+/// One `free space:` line, as data: the document `onepipeline host --json`
+/// carries, and what [`render_host`](crate::verbs::render_host)
+/// prints on its `free space:` lines.
+// llmlint: ignore-block[invalid_states_unrepresentable] the byte counts and the error, and a
+// root's role, path and ancestor, are separate nullable keys because version 1 of the
+// `host --json` reading the plan fixed states them so, and these types are what its schema is
+// generated from, so their shape is the document's. Only `readings` and `readings_of` build
+// them, each from one `Filesystem::holding` answer, so a line both read and refused, or a
+// runs root with no path, is not one this crate makes.
+#[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
+pub struct FreeSpace {
+    /// The roots this filesystem holds, in the order first named.
+    pub roots: Vec<FreeSpaceRoot>,
+    /// Bytes an unprivileged writer may still use, or `null` when unread.
+    pub free_bytes: Option<u64>,
+    /// The filesystem's size, or `null` when unread.
+    pub total_bytes: Option<u64>,
+    /// Why it could not be read; non-null exactly when both byte counts are `null`.
+    pub error: Option<String>,
+}
+
+/// One root a [`FreeSpace`] line names.
+#[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
+pub struct FreeSpaceRoot {
+    /// Which root.
+    pub role: Role,
+    /// The root, or `null` for a workspaces root the linked `onevcs` could not resolve.
+    pub path: Option<PathBuf>,
+    /// The nearest existing ancestor it was measured at, when the root itself is absent.
+    pub measured_at: Option<PathBuf>,
+}
+// llmlint: ignore-end[invalid_states_unrepresentable]
+
+/// Which root a line names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum Role {
+    /// The runs root.
+    RunsRoot,
+    /// The linked `onevcs`'s lifecycle workspaces.
+    Workspaces,
+}
+
+impl Role {
+    fn label(self) -> &'static str {
+        match self {
+            Self::RunsRoot => RUNS_ROOT,
+            Self::Workspaces => WORKSPACES,
+        }
+    }
+}
+
+/// One reading per distinct filesystem among the runs root and the workspaces root.
+pub(crate) fn readings(runs_root: &Path) -> Vec<FreeSpace> {
+    let mut asked: Vec<(Role, PathBuf)> = vec![(Role::RunsRoot, runs_root.to_path_buf())];
+    let unresolved = match workspaces_root() {
+        Ok(root) => {
+            asked.push((Role::Workspaces, root));
+            None
+        }
+        Err(why) => Some(why),
+    };
+    let mut out = readings_of(&asked);
+    if let Some(why) = unresolved {
+        out.push(FreeSpace {
+            roots: vec![FreeSpaceRoot {
+                role: Role::Workspaces,
+                path: None,
+                measured_at: None,
+            }],
+            free_bytes: None,
+            total_bytes: None,
+            error: Some(why),
+        });
+    }
+    out
+}
+
+/// One reading per distinct filesystem among `asked`, in the order first named.
+fn readings_of(asked: &[(Role, PathBuf)]) -> Vec<FreeSpace> {
+    let mut out: Vec<FreeSpace> = Vec::new();
+    // Which reading each filesystem already has, keyed on what tells two apart
     // rather than on the path: the runs root and the workspaces are on one
     // device on the host this was written for and need not be on another.
     let mut at: Vec<(Identity, usize)> = Vec::new();
-    for (label, path) in asked {
-        let named = format!(
-            "{label} {}",
-            crate::views::one_line(&path.display().to_string())
-        );
+    for (role, path) in asked {
         match Filesystem::holding(path) {
-            Err(why) => lines.push(format!(
-                "{INDENT}{LEAD} could not be read for {named}: {}, so what is free there is \
-                 unknown\n",
-                crate::views::one_line(&why)
-            )),
+            Err(why) => out.push(FreeSpace {
+                roots: vec![FreeSpaceRoot {
+                    role: *role,
+                    path: Some(path.clone()),
+                    measured_at: None,
+                }],
+                free_bytes: None,
+                total_bytes: None,
+                error: Some(why),
+            }),
             Ok(filesystem) => {
-                let named = match &filesystem.measured_at {
-                    Some(ancestor) => format!(
-                        "{named} (measured at {}, the nearest directory that exists)",
-                        crate::views::one_line(&ancestor.display().to_string())
-                    ),
-                    None => named,
+                let root = FreeSpaceRoot {
+                    role: *role,
+                    path: Some(path.clone()),
+                    measured_at: filesystem.measured_at.clone(),
                 };
                 if let Some((_, index)) = at
                     .iter()
                     .find(|(identity, _)| *identity == filesystem.identity)
                 {
-                    let line = &mut lines[*index];
-                    line.truncate(line.len().saturating_sub(1));
-                    line.push_str(&format!(" and {named}\n"));
+                    out[*index].roots.push(root);
                     continue;
                 }
-                at.push((filesystem.identity.clone(), lines.len()));
-                lines.push(format!(
-                    "{INDENT}{LEAD} {} on the filesystem holding {named}\n",
-                    filesystem.reading()
-                ));
+                at.push((filesystem.identity.clone(), out.len()));
+                out.push(FreeSpace {
+                    roots: vec![root],
+                    free_bytes: Some(filesystem.free),
+                    total_bytes: Some(filesystem.total),
+                    error: None,
+                });
             }
         }
     }
-    lines.concat()
+    out
+}
+
+/// The lines for `asked`, by label — what the tests below hold the rendering to.
+#[cfg(test)]
+fn lines_of(asked: &[(&str, PathBuf)]) -> String {
+    let asked: Vec<(Role, PathBuf)> = asked
+        .iter()
+        .map(|(label, path)| {
+            let role = if *label == RUNS_ROOT {
+                Role::RunsRoot
+            } else {
+                Role::Workspaces
+            };
+            (role, path.clone())
+        })
+        .collect();
+    render(&readings_of(&asked))
+}
+
+/// The `free space:` lines, each with its terminator.
+pub(crate) fn render(readings: &[FreeSpace]) -> String {
+    let mut out = String::new();
+    for reading in readings {
+        let roots: Vec<String> = reading.roots.iter().map(named).collect();
+        let line = match (&reading.error, reading.free_bytes.zip(reading.total_bytes)) {
+            // The workspaces root the linked sibling could not resolve has no path to name.
+            (Some(why), _) if reading.roots.iter().all(|root| root.path.is_none()) => format!(
+                "could not be read for the lifecycle workspaces, because the linked onevcs could \
+                 not resolve its state root: {}, so what is free there is unknown",
+                crate::views::one_line(why)
+            ),
+            (Some(why), _) => format!(
+                "could not be read for {}: {}, so what is free there is unknown",
+                roots.join(" and "),
+                crate::views::one_line(why)
+            ),
+            (None, Some((free, total))) => format!(
+                "{} on the filesystem holding {}",
+                share(free, total),
+                roots.join(" and ")
+            ),
+            (None, None) => continue,
+        };
+        out.push_str(&format!("{INDENT}{LEAD} {line}\n"));
+    }
+    out
+}
+
+fn named(root: &FreeSpaceRoot) -> String {
+    let path = root.path.as_ref().map_or_else(String::new, |path| {
+        crate::views::one_line(&path.display().to_string())
+    });
+    let named = format!("{} {path}", root.role.label());
+    match &root.measured_at {
+        Some(ancestor) => format!(
+            "{named} (measured at {}, the nearest directory that exists)",
+            crate::views::one_line(&ancestor.display().to_string())
+        ),
+        None => named,
+    }
 }
 
 /// One filesystem, as measured for one root.
@@ -157,24 +281,32 @@ impl Filesystem {
             }
         }
     }
+}
 
+#[cfg(test)]
+impl Filesystem {
     /// `41.2 GiB of 196.9 GiB (21% free)`.
     fn reading(&self) -> String {
-        // Integer arithmetic for the share, so a host at 197G/197G reads `0%`
-        // rather than rounding up to something that is not full.
-        let share = if self.total == 0 {
-            0
-        } else {
-            u128::from(self.free) * 100 / u128::from(self.total)
-        };
-        format!(
-            "{:.1} GiB of {:.1} GiB ({share}% free)",
-            // Precision is a rendering: the lines are read by a person and a
-            // byte count carries nothing a tenth of a gibibyte does not.
-            self.free as f64 / GIB,
-            self.total as f64 / GIB
-        )
+        share(self.free, self.total)
     }
+}
+
+/// `41.2 GiB of 196.9 GiB (21% free)`.
+fn share(free: u64, total: u64) -> String {
+    // Integer arithmetic for the share, so a host at 197G/197G reads `0%`
+    // rather than rounding up to something that is not full.
+    let share = if total == 0 {
+        0
+    } else {
+        u128::from(free) * 100 / u128::from(total)
+    };
+    format!(
+        "{:.1} GiB of {:.1} GiB ({share}% free)",
+        // Precision is a rendering: the lines are read by a person and a
+        // byte count carries nothing a tenth of a gibibyte does not.
+        free as f64 / GIB,
+        total as f64 / GIB
+    )
 }
 
 /// What tells one filesystem from another on this host.

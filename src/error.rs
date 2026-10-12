@@ -85,7 +85,7 @@ pub enum Error {
     ///
     /// The claim is the project's `onepipeline.driver` metadata, and it is **best
     /// effort**: the store offers no conditional write, so two launches on two hosts at
-    /// the same moment are not prevented. `docs/contract-divergences.md` entry 118 says
+    /// the same moment are not prevented. `docs/contract-divergences.md` entry 119 says
     /// what it does and does not hold.
     #[error("{}", project_driven(run, host, claimed_at))]
     ProjectDriven {

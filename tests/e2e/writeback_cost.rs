@@ -501,7 +501,7 @@ fn the_comparable_plan_spends_what_the_committed_record_says() {
     );
     // The closeout carries no item — every node has been projected as it settled — and
     // releases the run's driver claim: one read of the project, which finds the claim still
-    // this run's, and one write of it (`docs/contract-divergences.md` entry 118). Before the
+    // this run's, and one write of it (`docs/contract-divergences.md` entry 119). Before the
     // claim existed this was the attempt left with nothing to carry.
     let closeout = recorded.last().expect("the closeout was recorded");
     assert_eq!(closeout["items"], json!([]), "{closeout}");

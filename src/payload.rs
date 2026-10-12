@@ -545,7 +545,7 @@ pub(crate) struct NodeSettled {
     pub(crate) stack: Option<SettledStack>,
     /// Where a settlement this run did not reach itself came from: present exactly on
     /// the settlement a launch read back from its project's store and continued,
-    /// rather than dispatched. Entry 118 of `docs/contract-divergences.md`.
+    /// rather than dispatched. Entry 119 of `docs/contract-divergences.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) continued: Option<Continued>,
 }

@@ -104,11 +104,11 @@ pub(crate) const LANDING_EVIDENCE_KEY: &str = "onepipeline.landing_evidence";
 /// Projection-only metadata naming the branch, base and opening time of a node's dispatch
 /// whose session is open and which has not settled yet: written when the session opens and
 /// removed when the node settles, so a host holding none of the run's state can pin an
-/// in-flight node to its branch. Entry 118 of `docs/contract-divergences.md` names it.
+/// in-flight node to its branch. Entry 119 of `docs/contract-divergences.md` names it.
 pub(crate) const DISPATCH_KEY: &str = "onepipeline.dispatch";
 
 /// Projection-only **project** metadata naming the driver that claims the project: its run,
-/// host, launching session, pid and when it claimed. Best effort and not atomic — entry 118
+/// host, launching session, pid and when it claimed. Best effort and not atomic — entry 119
 /// of `docs/contract-divergences.md` says what it does and does not prevent. A release
 /// writes it `null`, because the store has no removal of a project key, and every reader
 /// reads `null` exactly as it reads the key absent.
@@ -121,7 +121,7 @@ pub(crate) const DRIVER_KEY: &str = "onepipeline.driver";
 /// settlement: what it launches is the lineage head's definition under the root's id,
 /// which is what the item says. Reading them as node fields refused the relaunch of every
 /// project a run had written to, naming `node` as a field nobody authored — and, until
-/// entry 118, every project a published node had closed on, naming `landing`.
+/// entry 119, every project a published node had closed on, naming `landing`.
 const PROJECTION_ONLY: &[&str] = &[
     SETTLEMENT_KEY,
     NODE_KEY,

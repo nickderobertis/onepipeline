@@ -2291,7 +2291,7 @@ fn the_stacked_settlement_is_what_the_divergence_record_names() {
     );
 }
 
-/// Entry 118's continuation is this build's own: its two kinds are spelled by
+/// Entry 119's continuation is this build's own: its two kinds are spelled by
 /// `PipelineKind`, the settlement it journals with `continued` and the claim both kinds
 /// carry are admitted by the registered documents — and a claim missing a key it always
 /// carries is refused — its two flags are `start`'s, and `ProjectDriven` refuses with the
@@ -2300,9 +2300,9 @@ fn the_stacked_settlement_is_what_the_divergence_record_names() {
 fn the_continuation_is_what_the_divergence_record_names() {
     use onepipeline::event::PipelineKind;
     use onepipeline::payload::{registry, schema_of};
-    let block = divergence_block("118.");
+    let block = divergence_block("119.");
     let kinds: Vec<String> =
-        serde_json::from_value(block["event_kinds"].clone()).expect("entry 118 names its kinds");
+        serde_json::from_value(block["event_kinds"].clone()).expect("entry 119 names its kinds");
     assert_eq!(
         kinds,
         [
@@ -2314,7 +2314,7 @@ fn the_continuation_is_what_the_divergence_record_names() {
     let registry = registry();
     registry
         .check(&schema_of(PipelineKind::NodeSettled), &block["settlement"])
-        .unwrap_or_else(|why| panic!("entry 118's settlement is refused: {why}"));
+        .unwrap_or_else(|why| panic!("entry 119's settlement is refused: {why}"));
     let mut unsourced = block["settlement"].clone();
     unsourced["continued"]
         .as_object_mut()
@@ -2334,7 +2334,7 @@ fn the_continuation_is_what_the_divergence_record_names() {
         let id = schema_of(kind);
         registry
             .check(&id, &serde_json::json!({ key: claim }))
-            .unwrap_or_else(|why| panic!("entry 118's claim is refused as {kind}: {why}"));
+            .unwrap_or_else(|why| panic!("entry 119's claim is refused as {kind}: {why}"));
         let mut pidless = claim.clone();
         pidless.as_object_mut().expect("a claim").remove("pid");
         assert!(
@@ -2355,7 +2355,7 @@ fn the_continuation_is_what_the_divergence_record_names() {
         .collect();
     for flag in block["start_flags"]
         .as_array()
-        .expect("entry 118 names its flags")
+        .expect("entry 119 names its flags")
     {
         let flag = flag.as_str().expect("a flag");
         assert!(flags.contains(flag), "`start` takes no {flag}");
@@ -6499,7 +6499,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
         .collect();
     // The kinds the contract does not list are exactly the ones the divergence
     // record proposes, and no others: a kind neither document names fails here.
-    let proposed: BTreeSet<String> = ["40.", "47.", "55.", "65.", "70.", "92.", "118."]
+    let proposed: BTreeSet<String> = ["40.", "47.", "55.", "65.", "70.", "92.", "119."]
         .into_iter()
         .flat_map(|entry| {
             serde_json::from_value::<Vec<String>>(divergence_block(entry)["event_kinds"].clone())
@@ -9946,6 +9946,118 @@ fn the_supervision_flags_are_what_divergence_95_and_the_readme_name() {
             "entry 95 does not state exit `{code}`"
         );
     }
+}
+
+/// The reading `host --json` prints is the
+/// document `schemas/host-reading.schema.json` states, generated from
+/// `views::HostReading` and held to it exactly as the run reading is — and its
+/// keys are the version-1 keys the plan's contract lists, every one required.
+#[test]
+fn the_host_reading_is_the_committed_schema_with_the_version_1_keys() {
+    use onepipeline::views::{HostReading, HOST_READING_SCHEMA_VERSION};
+
+    let generated = schemars::generate::SchemaSettings::draft2020_12()
+        .for_serialize()
+        .into_generator()
+        .into_root_schema_for::<HostReading>()
+        .to_value();
+    let committed: Value = serde_json::from_str(
+        &std::fs::read_to_string(repo_root().join("schemas/host-reading.schema.json"))
+            .expect("schemas/host-reading.schema.json ships"),
+    )
+    .expect("the committed schema is JSON");
+    assert_eq!(
+        committed,
+        generated,
+        "schemas/host-reading.schema.json is not the schema of views::HostReading; if the \
+         document changed deliberately, regenerate it from the type:\n{}",
+        serde_json::to_string_pretty(&generated).expect("a schema renders")
+    );
+    assert_eq!(HOST_READING_SCHEMA_VERSION, 1);
+    let keys = |schema: &Value| -> BTreeSet<String> {
+        serde_json::from_value(schema["required"].clone()).expect("the schema states its keys")
+    };
+    let defs = &generated["$defs"];
+    for (schema, expected) in [
+        (
+            &generated,
+            &[
+                "schema_version",
+                "host",
+                "root",
+                "root_error",
+                "free_space",
+                "dispatches",
+                "gone",
+                "skipped",
+            ][..],
+        ),
+        (
+            &defs["FreeSpace"],
+            &["roots", "free_bytes", "total_bytes", "error"][..],
+        ),
+        (&defs["FreeSpaceRoot"], &["role", "path", "measured_at"][..]),
+        (
+            &defs["DispatchRow"],
+            &["run", "node", "launcher", "age_ms", "proof", "unproven"][..],
+        ),
+        (&defs["Gone"], &["run", "node", "reason"][..]),
+        (&defs["SkippedRoot"], &["path", "reason"][..]),
+    ] {
+        assert_eq!(
+            keys(schema),
+            expected.iter().map(|k| (*k).to_owned()).collect()
+        );
+    }
+    let words = |def: &str| generated["$defs"][def].to_string();
+    for word in ["\"held\"", "\"unproven\""] {
+        assert!(words("ProofWord").contains(word), "ProofWord lacks {word}");
+    }
+    for word in ["\"runs-root\"", "\"workspaces\""] {
+        assert!(words("Role").contains(word), "Role lacks {word}");
+    }
+
+    // And `docs/contract-divergences.md` entry 118, which proposes the reading,
+    // names exactly these keys and the proof's two words: a key the type gains or
+    // loses and the proposal does not fails here.
+    let record = std::fs::read_to_string(repo_root().join("docs/contract-divergences.md"))
+        .expect("the divergences record");
+    let entry = record
+        .split("\n## 118. ")
+        .nth(1)
+        .and_then(|entry| entry.split("\n## ").next())
+        .expect("entry 118 proposes the host reading");
+    let bullet = entry
+        .split("\n- `onepipeline host --json` prints")
+        .nth(1)
+        .and_then(|bullet| bullet.split("\n- ").next())
+        .expect("entry 118 lists the reading's keys");
+    let named: BTreeSet<String> = bullet
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .filter(|token| {
+            token
+                .chars()
+                .all(|character| character.is_ascii_lowercase() || character == '_')
+        })
+        .map(str::to_owned)
+        .collect();
+    let mut stated: BTreeSet<String> = ["held", "unproven"].map(str::to_owned).into();
+    for schema in [
+        &generated,
+        &defs["FreeSpace"],
+        &defs["FreeSpaceRoot"],
+        &defs["DispatchRow"],
+        &defs["Gone"],
+        &defs["SkippedRoot"],
+    ] {
+        stated.extend(keys(schema));
+    }
+    assert_eq!(
+        named, stated,
+        "docs/contract-divergences.md entry 118 names other keys than the reading has"
+    );
 }
 
 /// The run reading `status <RUN> --json` prints is the document

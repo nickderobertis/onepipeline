@@ -16,7 +16,7 @@
 //! The claim is **not atomic**: the store offers no conditional write, so it is a record
 //! two launches can both read empty. What it holds is narrower — a launch that finds
 //! another run's claim is refused unless told `--take-over`, and a driver that finds its
-//! claim replaced stops at its next check — and `docs/contract-divergences.md` entry 118
+//! claim replaced stops at its next check — and `docs/contract-divergences.md` entry 119
 //! says exactly what it does not.
 
 use std::collections::BTreeMap;
@@ -38,7 +38,7 @@ pub(crate) const IDLE_CLAIM_CHECK: Duration = Duration::from_secs(600);
 /// The **test seam** shortening [`IDLE_CLAIM_CHECK`], in whole seconds.
 ///
 /// Read only so a journey can show an idle driver noticing a takeover without waiting
-/// ten minutes; entry 118 names it as a seam, and nothing an operator configures sets it.
+/// ten minutes; entry 119 names it as a seam, and nothing an operator configures sets it.
 pub(crate) const IDLE_CLAIM_CHECK_ENV: &str = "ONEPIPELINE_IDLE_CLAIM_CHECK_SECONDS";
 
 /// The longest one read of the claim may take before the driver goes on without its answer:
@@ -96,7 +96,7 @@ pub(crate) fn claim_of(
 #[serde(deny_unknown_fields)]
 pub(crate) struct StoredDispatch {
     // llmlint: ignore-block[invalid_states_unrepresentable] a store document's fields, as entry
-    // 118 spells them: a branch, a base and an RFC 3339 instant are strings on the store, as on
+    // 119 spells them: a branch, a base and an RFC 3339 instant are strings on the store, as on
     // every settlement beside them, and `dispatch_of` refuses one that is not each.
     /// The branch the session works on.
     pub(crate) branch: String,
@@ -739,22 +739,22 @@ mod tests {
         );
     }
 
-    /// Entry 118's block is what this build does: its keys are the ones this build reads and
+    /// Entry 119's block is what this build does: its keys are the ones this build reads and
     /// writes, its dispatch and claim read as the boundary reads them, its surface and seam
     /// are the ones the engine raises and reads, and its interval is the constant.
     #[test]
-    fn entry_118s_block_is_this_builds_continuation() {
+    fn entry_119s_block_is_this_builds_continuation() {
         let record = include_str!("../docs/contract-divergences.md");
         let entry = record
             .split("\n## ")
-            .find(|entry| entry.starts_with("118."))
-            .expect("the divergence record carries entry 118");
+            .find(|entry| entry.starts_with("119."))
+            .expect("the divergence record carries entry 119");
         let block: Value = serde_json::from_str(
             entry
                 .split("```json")
                 .nth(1)
                 .and_then(|rest| rest.split("```").next())
-                .expect("entry 118 carries a json block"),
+                .expect("entry 119 carries a json block"),
         )
         .expect("the block is JSON");
         assert_eq!(
