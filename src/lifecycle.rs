@@ -1477,8 +1477,8 @@ fn publish(
             // `defer_checks`: receiving it means `onevcs` and this engine disagree
             // about the request. Settled as the residual rather than `done`, so no
             // dependent proceeds on a change whose checks nobody read.
-            if let onevcs::PublishOutcome::ChangeReviewDraftUnchecked(url) = &published.outcome {
-                return publication_failed(unchecked_detail(url));
+            if let Some(detail) = unchecked_detail(&published.outcome) {
+                return publication_failed(detail);
             }
             let labels =
                 engine::dispatch_labels(&paths.run, &node.id, None, node.persona.as_deref());
@@ -1725,13 +1725,17 @@ fn drafted_status(
 
 /// The residual's detail for a publication that answered a push into a review draft
 /// with its checks unread, which only a `defer_checks` publication answers and this
-/// engine never makes one: the outcome and its change request, named.
-fn unchecked_detail(url: &onevcs::Url) -> String {
-    format!(
+/// engine never makes one: the outcome and its change request, named. `None` for
+/// every other outcome, which settles as its own word says.
+fn unchecked_detail(outcome: &onevcs::PublishOutcome) -> Option<String> {
+    let onevcs::PublishOutcome::ChangeReviewDraftUnchecked(url) = outcome else {
+        return None;
+    };
+    Some(format!(
         "onevcs answered `ChangeReviewDraftUnchecked` for {url} — pushed into a draft kept for \
          its user's review without its checks being read — to a publication that did not defer \
          its checks, so nothing read them and the node is not settled done"
-    )
+    ))
 }
 
 /// The sentence a node settled `change-review-draft` carries: its checks are
@@ -3274,7 +3278,17 @@ mod tests {
             ),
             NodeStatus::Failed
         );
-        let said = unchecked_detail(&url());
+        // Every outcome this engine's publications answer settles as its own word
+        // says; only the unchecked review draft is turned back before it settles.
+        for settles in [
+            onevcs::PublishOutcome::ChangeOpen(url()),
+            onevcs::PublishOutcome::ChangeReviewDraft(url()),
+            onevcs::PublishOutcome::NothingToPublish,
+        ] {
+            assert_eq!(unchecked_detail(&settles), None, "{settles:?}");
+        }
+        let said = unchecked_detail(&onevcs::PublishOutcome::ChangeReviewDraftUnchecked(url()))
+            .expect("an unchecked review draft is turned back before it settles");
         assert!(
             said.contains("ChangeReviewDraftUnchecked")
                 && said.contains("https://github.com/owner/service/pull/7"),
