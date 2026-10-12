@@ -725,6 +725,9 @@ pub struct World {
     /// `scripted-source` rather than straight through `local-md`. See
     /// [`World::through_scripted_source`].
     pub scripted: bool,
+    /// The `onevcs` state root this world's commands carry, where it is not the
+    /// world's own: a host [`on_host`](World::on_host) made has one of its own.
+    pub home: Option<PathBuf>,
 }
 
 impl World {
@@ -760,6 +763,7 @@ impl World {
             session: format!("session-{name}"),
             environment: Vec::new(),
             scripted: false,
+            home: None,
         };
         for dir in [&world.runs, &world.fakes, &world.project] {
             std::fs::create_dir_all(dir).expect("a scratch directory");
@@ -778,7 +782,57 @@ impl World {
             session: session.to_string(),
             environment: self.environment.clone(),
             scripted: self.scripted,
+            home: self.home.clone(),
         }
+    }
+
+    /// The same project seen from **another host**: the same plans store, the same origin
+    /// and the same stand-in GitHub, and none of this host's own state — an empty runs root,
+    /// a fresh `onevcs` state root holding only a clone of the origin registered under the
+    /// same alias and this host's rules, its own launching session, and `HOSTNAME` set to
+    /// `host`, which is the name the binary records as the host it drives on.
+    ///
+    /// What a cold host is: everything it can know about the project is what the store says,
+    /// and everything it publishes goes through the one host every other host publishes
+    /// through. It shares this world's scratch root and removes only its own directory under
+    /// it when it is dropped, so the world it was made from is whole until that one goes.
+    pub fn on_host(&self, host: &str) -> Self {
+        LIVE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let at = self.root.join("hosts").join(host);
+        let home = at.join("onevcs-home");
+        let runs = at.join("runs");
+        for dir in [&home, &runs] {
+            std::fs::create_dir_all(dir).expect("a scratch directory");
+        }
+        let mut environment = self.environment.clone();
+        environment.push(("HOSTNAME".to_owned(), host.to_owned()));
+        let world = Self {
+            root: self.root.clone(),
+            runs,
+            fakes: self.fakes.clone(),
+            project: self.project.clone(),
+            session: format!("{}-on-{host}", self.session),
+            environment,
+            scripted: self.scripted,
+            home: Some(home.clone()),
+        };
+        let rules = self.onevcs_home().join("rules.yml");
+        if rules.is_file() {
+            std::fs::copy(&rules, home.join("rules.yml")).expect("the host's rules are copied");
+        }
+        let origin = self.root.join("origin.git");
+        if origin.is_dir() {
+            git(
+                &world,
+                &at,
+                &["clone", &origin.to_string_lossy(), "service"],
+            );
+            world.register(
+                &at.join("service"),
+                Some("https://github.com/owner/service.git"),
+            );
+        }
+        world
     }
 
     /// The same world, with one more environment variable on every command it
@@ -887,7 +941,17 @@ impl World {
             .env_remove(onepipeline::agents::HISTORY_ENV)
             .env_remove(onepipeline::agents::HISTORY_DIR_ENV)
             .env_remove(onepipeline::agents::POINTER_FILE_ENV)
-            .env_remove(onepipeline::agents::LABELS_ENV)
+            .env_remove(onepipeline::agents::LABELS_ENV);
+        // And nothing of the operator's own `onetaskgraph` environment layer: a
+        // `ONETASKGRAPH_SOURCES__…` in the shell that ran the suite would add the
+        // operator's sources to this world's store — or, half-declared, refuse its
+        // configuration outright — so a world reads only the sources it sets below.
+        for (name, _) in std::env::vars_os() {
+            if name.to_string_lossy().starts_with("ONETASKGRAPH_") {
+                command.env_remove(name);
+            }
+        }
+        command
             .env("ONETASKGRAPH_DEFAULT_SOURCES", STORE_SOURCE)
             .envs(self.plans_source())
             .env(
@@ -1388,7 +1452,9 @@ impl World {
     /// Per world, so a journey's registry, sessions, streams, and locks are its
     /// own and never the operator's `~/.onevcs`.
     pub fn onevcs_home(&self) -> PathBuf {
-        self.root.join("onevcs-home")
+        self.home
+            .clone()
+            .unwrap_or_else(|| self.root.join("onevcs-home"))
     }
 
     /// A repository this world's lifecycle nodes publish from.
@@ -2145,7 +2211,12 @@ impl World {
         std::fs::create_dir_all(&dir).expect("a directory for the graph configs");
         std::fs::write(
             dir.join("body.schema.json"),
-            r#"{"type":"object","properties":{"body":{"type":"string"}},
+            r#"{"type":"object","properties":{
+                 "body":{"type":"string"},
+                 "title_check":{"type":"object","properties":{
+                   "verdict":{"type":"string","enum":["keeps","replaced"]},
+                   "title":{"type":"string"}},
+                   "required":["verdict"],"additionalProperties":false}},
                "required":["body"],"additionalProperties":false}"#,
         )
         .expect("the drafted body's schema is written");
@@ -2497,6 +2568,15 @@ impl World {
             panic!("{missing}");
         }
         format!("{STORE_SOURCE}:{identifier}")
+    }
+
+    /// One more node of the project `name` this world authored, written as the task a
+    /// planner adds on the board after a run: `file` is its name in the store, and each
+    /// dependency names a node already there by its id, through `named` — that node's own
+    /// file name.
+    pub fn add_task(&self, name: &str, file: &str, node: &Value, named: &[(&str, &str)]) {
+        let named: BTreeMap<&str, &str> = named.iter().copied().collect();
+        self.task(&self.store(), &project_id(name), node, file, &named);
     }
 
     /// The project a run must never touch, and the reason every store fixture
@@ -3745,7 +3825,13 @@ impl World {
 impl Drop for World {
     fn drop(&mut self) {
         self.stop_the_runs_it_can();
-        let _ = std::fs::remove_dir_all(&self.root);
+        // A host [`on_host`](World::on_host) made removes only what is its own: the world it
+        // was made from still has runs to stop and a root to remove.
+        let removed = match &self.home {
+            Some(home) => home.parent().unwrap_or(&self.root),
+            None => &self.root,
+        };
+        let _ = std::fs::remove_dir_all(removed);
         // The links this process made, released with the last world that could
         // still have spawned through them, so a suite leaves nothing in the
         // target directory. Best-effort: Windows refuses to unlink a running

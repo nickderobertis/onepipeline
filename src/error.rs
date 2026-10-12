@@ -79,6 +79,23 @@ pub enum Error {
         /// What it said.
         message: String,
     },
+    /// The project a launch names is claimed by another driver: a run on another host,
+    /// or a run of this host whose driver is live or gone. `start --take-over` passes the
+    /// claim. Exits [`EXIT_REFUSED`].
+    ///
+    /// The claim is the project's `onepipeline.driver` metadata, and it is **best
+    /// effort**: the store offers no conditional write, so two launches on two hosts at
+    /// the same moment are not prevented. `docs/contract-divergences.md` entry 119 says
+    /// what it does and does not hold.
+    #[error("{}", project_driven(run, host, claimed_at))]
+    ProjectDriven {
+        /// The run the claim names.
+        run: String,
+        /// The host that run is driven on.
+        host: String,
+        /// When its driver claimed the project, RFC 3339.
+        claimed_at: String,
+    },
     /// The ledger could not be read or written. Exits [`EXIT_REFUSED`].
     #[error("{path}: {source}")]
     Ledger {
@@ -98,6 +115,28 @@ impl Error {
             Self::NothingDriving { .. } => EXIT_NOTHING_DRIVING,
             _ => EXIT_REFUSED,
         }
+    }
+}
+
+/// What a launch refused for a claimed project is told: who claims it, and the two ways
+/// on — `--take-over` always, and `adopt` where the claim is this host's own run, which is
+/// the run to carry on rather than to start beside.
+fn project_driven(run: &str, host: &str, claimed_at: &str) -> String {
+    let said = format!(
+        "project driven elsewhere refused: run '{run}' on host '{host}' has claimed this \
+         project since {claimed_at}"
+    );
+    if host == crate::sys::hostname() {
+        format!(
+            "{said}, and that is this host: carry it on with `onepipeline adopt {run}` once \
+             nothing drives it, or launch again with `--take-over` to drive the project from \
+             a new run"
+        )
+    } else {
+        format!(
+            "{said}; launch again with `--take-over` to drive the project from here, and its \
+             driver stops at its next claim check"
+        )
     }
 }
 
@@ -251,6 +290,40 @@ mod tests {
         let rendered = error.to_string();
         assert!(rendered.contains("demo"), "{rendered}");
         assert!(rendered.contains("claude-code"), "{rendered}");
+    }
+
+    #[test]
+    fn a_claimed_project_names_its_driver_and_the_ways_on() {
+        let elsewhere = Error::ProjectDriven {
+            run: "ship".into(),
+            host: format!("not-{}", crate::sys::hostname()),
+            claimed_at: "2026-10-11T00:00:00Z".into(),
+        };
+        assert_eq!(elsewhere.exit_code(), EXIT_REFUSED);
+        let said = elsewhere.to_string();
+        assert!(
+            said.starts_with("project driven elsewhere refused:"),
+            "{said}"
+        );
+        assert!(
+            said.contains("'ship'") && said.contains("--take-over"),
+            "{said}"
+        );
+        assert!(!said.contains("adopt"), "{said}");
+        let here = Error::ProjectDriven {
+            run: "ship".into(),
+            host: crate::sys::hostname(),
+            claimed_at: "2026-10-11T00:00:00Z".into(),
+        }
+        .to_string();
+        assert!(
+            here.starts_with("project driven elsewhere refused:"),
+            "{here}"
+        );
+        assert!(
+            here.contains("`onepipeline adopt ship`") && here.contains("--take-over"),
+            "{here}"
+        );
     }
 
     #[test]

@@ -973,6 +973,25 @@ fn start(args: &StartArgs) -> Result<i32> {
     // from this one read, so its first projection reads nothing the launch has just read.
     let read = store.read_plan(&project).map_err(Error::from)?;
     graph::validate(&read.plan)?;
+    // Who drives the project, off that same read: a read that failed has already refused
+    // the launch above, so a claim is never defaulted to none.
+    // A claim that is not one refuses the launch, unless the launch takes the project over:
+    // otherwise a project whose claim a stranger mangled could never be launched again.
+    let claim = match crate::continuation::claim_of(project.as_str(), &read.project_metadata) {
+        Ok(claim) => claim,
+        Err(refused) if args.take_over => {
+            eprintln!("onepipeline: --take-over passes a claim that is not one: {refused}");
+            None
+        }
+        Err(refused) => return Err(refused),
+    };
+    // What the project's last driver left on it, which a launch continues rather than runs
+    // again — unless it is told `--fresh`.
+    let continuation = if args.fresh {
+        crate::continuation::Continuation::default()
+    } else {
+        crate::continuation::continuation_of(&read, claim.as_ref())?
+    };
     let launch_dir = launch_dir()?;
     // The launch config is read once, here, and both halves of what it declares
     // are taken off that one strict reading: a second, later read would be a
@@ -1153,6 +1172,14 @@ fn start(args: &StartArgs) -> Result<i32> {
     };
     crate::templates::check_plan(&templates, &read, &launch_dir)?;
     let mut plan = read.plan.clone();
+    // A node that left a branch is pinned to it, as an adoption pins an abandoned dispatch:
+    // its next dispatch continues that branch, and its publication adopts the change request
+    // already open from it rather than opening a second.
+    for (id, branch) in &continuation.pinned {
+        if let Some(node) = plan.tasks.iter_mut().find(|node| &node.id == id) {
+            node.branch = Some(branch.as_str().to_owned());
+        }
+    }
 
     // The write-back's per-item budget, by the same three rungs. Every rung is *read*
     // rather than merely present: zero is no budget at all, and each rung refuses it by
@@ -1209,6 +1236,14 @@ fn start(args: &StartArgs) -> Result<i32> {
     // sessions for it before a source refuses the filter it was handed.
     let filters = declared_filters(declared.filters, args)?;
 
+    // The project's own state last, once everything this invocation states has been read and
+    // checked, and still before anything is minted: any claim refuses a launch that does not
+    // take the project over, and `--fresh` is refused while running afresh would open a
+    // second change request beside one nothing has landed.
+    crate::continuation::admit(claim.as_ref(), args.take_over)?;
+    if args.fresh {
+        crate::continuation::refuse_fresh_over_unlanded(project.as_str(), &read)?;
+    }
     let root = ledger::runs_root();
     let run = mint_run_id(&plan, project.native(), &root);
     let holdings = concurrency::holders(&plan)?;
@@ -1461,6 +1496,46 @@ fn start(args: &StartArgs) -> Result<i32> {
             (journal::OWED_UNTIL_CLOSED, json!(true)),
         ]),
     )?;
+    // The claim this launch passed, before anything this run does: the run it names stops
+    // at its next check, and this driver's own check reads past it until its first
+    // projection replaces it.
+    if let Some(previous) = claim.filter(|_| args.take_over) {
+        open.emit(
+            journal::PipelineKind::DriverTakenOver,
+            journal::labels(&run, None),
+            journal::object(&crate::payload::DriverTakenOver { previous })?,
+        )?;
+    }
+    // Each lineage the store holds `done`, settled before the loop's first pass reads the
+    // graph: the fold restores its branch, change request, base, head, landing and stack,
+    // which is what placement and a restack read, and nothing is dispatched for it.
+    for (node, settlement) in &continuation.settled {
+        open.emit(
+            journal::PipelineKind::NodeSettled,
+            journal::labels(&run, Some(node)),
+            settlement.payload(),
+        )?;
+    }
+    if !continuation.settled.is_empty() || !continuation.pinned.is_empty() {
+        eprintln!(
+            "onepipeline: launch '{run}' continues {} from the store{}",
+            plural(continuation.settled.len(), "settled node"),
+            if continuation.pinned.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " and pins {} to the branch it left: {}",
+                    plural(continuation.pinned.len(), "node"),
+                    continuation
+                        .pinned
+                        .iter()
+                        .map(|(node, branch)| format!("'{node}' on {}", branch.as_str()))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }
+        );
+    }
 
     if args.detach {
         // Before the driver exists, and only on this path: a detaching launcher
@@ -1514,6 +1589,13 @@ fn start(args: &StartArgs) -> Result<i32> {
         },
     )?;
     Ok(settlement.exit_code())
+}
+
+fn plural(count: usize, what: &str) -> String {
+    match count {
+        1 => format!("1 {what}"),
+        _ => format!("{count} {what}s"),
+    }
 }
 
 /// Launch the run's observer graph, when it was launched with one.

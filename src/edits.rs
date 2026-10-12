@@ -6419,26 +6419,26 @@ mod tests {
         assert!(why.contains("the reason cannot be blank"), "{why}");
     }
 
-    /// Entry 119's block, read out of the divergence record.
-    fn entry_119() -> serde_json::Value {
+    /// Entry 120's block, read out of the divergence record.
+    fn entry_120() -> serde_json::Value {
         let record = include_str!("../docs/contract-divergences.md");
         let entry = record
             .split("\n## ")
-            .find(|entry| entry.starts_with("119."))
-            .expect("the record carries entry 119");
+            .find(|entry| entry.starts_with("120."))
+            .expect("the record carries entry 120");
         let block = entry
             .split("```json")
             .nth(1)
             .and_then(|rest| rest.split("```").next())
-            .expect("entry 119 carries a json block");
-        serde_json::from_str(block).expect("entry 119's block is JSON")
+            .expect("entry 120 carries a json block");
+        serde_json::from_str(block).expect("entry 120's block is JSON")
     }
 
-    /// The operations entry 119 proposes are kinds the enum serializes, and the
+    /// The operations entry 120 proposes are kinds the enum serializes, and the
     /// replacement a rework names by default is the shape it states.
     #[test]
-    fn the_rework_operations_and_default_replacement_are_entry_119s() {
-        let block = entry_119();
+    fn the_rework_operations_and_default_replacement_are_entry_120s() {
+        let block = entry_120();
         let kinds: Vec<String> =
             serde_json::from_value(block["operation_kinds"].clone()).expect("a list");
         let known = every_operation_kind();

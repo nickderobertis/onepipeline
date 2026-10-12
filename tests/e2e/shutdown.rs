@@ -417,6 +417,14 @@ fn a_shut_down_run_is_adoptable_and_resumes_its_node_on_its_own_branch() {
     let (run, project) = launched_from(&world, "adoptable", vec![lifecycle("service", &[])]);
     until_in_flight(&world, &run, &["service"]);
     let branch = session_branch(&world, &run, "service");
+    // The board as the running driver leaves it, its node's open dispatch included — what
+    // the shutdown must then leave exactly as it is.
+    world.until("the in-flight dispatch to reach the board", |world| {
+        world
+            .store_tasks(&project)
+            .iter()
+            .any(|task| task["item"]["metadata"]["onepipeline.dispatch"]["branch"] == json!(branch))
+    });
     let tasks_before = world.store_tasks(&project);
 
     let shutdown = world.run(&["shutdown", &run, "--grace", "1"]);

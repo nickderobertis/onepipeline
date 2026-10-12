@@ -978,6 +978,11 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
     let bundle =
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), EVENTS_BUNDLE_VERSION);
+    assert_eq!(
+        divergence_block("120.")["bundle_versions"]["events"],
+        EVENTS_BUNDLE_VERSION,
+        "the rework bundle version must be the manager's recorded ruling"
+    );
     let carried: Vec<String> = bundle
         .schemas()
         .iter()
@@ -1022,7 +1027,7 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
     let named = backticked_in(passage);
     for word in [
         EVENTS_BUNDLE_PATH,
-        EVENTS_BUNDLE_VERSION,
+        "1.1.0",
         "SchemaBundle",
         "onepipeline::vocabulary",
         "PIPELINE_KINDS",
@@ -1168,12 +1173,7 @@ fn the_contract_states_the_planner_channel_documents_path_version_and_source() {
         .map(|(passage, _)| passage)
         .expect("the contract states the published layout document");
     let named = backticked_in(passage);
-    for word in [
-        DOCUMENT_PATH,
-        DOCUMENT_VERSION,
-        "LayoutDocument",
-        "SchemaBundle",
-    ] {
+    for word in [DOCUMENT_PATH, "1.1.0", "LayoutDocument", "SchemaBundle"] {
         assert!(
             named.contains(word),
             "the layout-document paragraph does not name `{word}`: {passage}"
@@ -1188,6 +1188,11 @@ fn the_contract_states_the_planner_channel_documents_path_version_and_source() {
     let bundle =
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), DOCUMENT_VERSION);
+    assert_eq!(
+        divergence_block("120.")["bundle_versions"]["planner_channel"],
+        DOCUMENT_VERSION,
+        "the rework bundle version must be the manager's recorded ruling"
+    );
     assert_eq!(bundle.layouts(), [document()]);
 }
 
@@ -2293,7 +2298,7 @@ fn the_stacked_settlement_is_what_the_divergence_record_names() {
     );
 }
 
-/// The rework surface entry 119 proposes is this build's own: its two ops
+/// The rework surface entry 120 proposes is this build's own: its two ops
 /// round-trip through the public command type and are granted to the planner
 /// alone, its four kinds are kinds this build emits whose records the registered
 /// documents admit — and refuse with an unknown word in a closed field — and its
@@ -2301,12 +2306,12 @@ fn the_stacked_settlement_is_what_the_divergence_record_names() {
 #[test]
 fn the_rework_surface_is_what_the_divergence_record_names() {
     use onepipeline::payload::{registry, schema_of};
-    let block = divergence_block("119.");
+    let block = divergence_block("120.");
 
     let fixtures: Vec<Value> =
-        serde_json::from_value(block["ops"].clone()).expect("entry 119 names its ops");
+        serde_json::from_value(block["ops"].clone()).expect("entry 120 names its ops");
     let monitor_may: BTreeSet<String> = serde_json::from_value(block["monitor_may_issue"].clone())
-        .expect("entry 119 says which of them the monitor may issue");
+        .expect("entry 120 says which of them the monitor may issue");
     assert!(monitor_may.is_empty(), "{block}");
     let named: Vec<&str> = fixtures
         .iter()
@@ -2353,7 +2358,7 @@ fn the_rework_surface_is_what_the_divergence_record_names() {
     }
 
     let kinds: Vec<String> =
-        serde_json::from_value(block["event_kinds"].clone()).expect("entry 119 names its kinds");
+        serde_json::from_value(block["event_kinds"].clone()).expect("entry 120 names its kinds");
     let registry = registry();
     for kind in &kinds {
         let emitted = PipelineKind::from_wire(&EventKind(kind.clone()))
@@ -2362,13 +2367,13 @@ fn the_rework_surface_is_what_the_divergence_record_names() {
         let record = block["records"][kind.as_str()].clone();
         registry
             .check(&schema_of(emitted), &record)
-            .unwrap_or_else(|why| panic!("entry 119's {kind} is refused: {why}"));
+            .unwrap_or_else(|why| panic!("entry 120's {kind} is refused: {why}"));
     }
     let retitled = schema_of(PipelineKind::ChangeRetitled);
     let mut record = block["records"]["change-retitled"].clone();
     for by in block["retitled_by"]
         .as_array()
-        .expect("entry 119 names who retitles")
+        .expect("entry 120 names who retitles")
     {
         record["by"] = by.clone();
         registry
@@ -2381,7 +2386,7 @@ fn the_rework_surface_is_what_the_divergence_record_names() {
     let mut record = block["records"]["node-restack-started"].clone();
     for cause in block["restack_causes"]
         .as_array()
-        .expect("entry 119 names the causes")
+        .expect("entry 120 names the causes")
     {
         record["cause"] = cause.clone();
         registry
@@ -2399,6 +2404,90 @@ fn the_rework_surface_is_what_the_divergence_record_names() {
 
     assert_eq!(block["surface_kind"], SurfaceKind::TITLE_UNVERIFIED);
     assert_eq!(block["rework_metadata_key"], "onepipeline.rework");
+}
+
+/// Entry 119's continuation is this build's own: its two kinds are spelled by
+/// `PipelineKind`, the settlement it journals with `continued` and the claim both kinds
+/// carry are admitted by the registered documents — and a claim missing a key it always
+/// carries is refused — its two flags are `start`'s, and `ProjectDriven` refuses with the
+/// prefix it names, at exit 2.
+#[test]
+fn the_continuation_is_what_the_divergence_record_names() {
+    use onepipeline::event::PipelineKind;
+    use onepipeline::payload::{registry, schema_of};
+    let block = divergence_block("119.");
+    let kinds: Vec<String> =
+        serde_json::from_value(block["event_kinds"].clone()).expect("entry 119 names its kinds");
+    assert_eq!(
+        kinds,
+        [
+            PipelineKind::DriverTakenOver,
+            PipelineKind::DriverSuperseded
+        ]
+        .map(|kind| kind.as_str().to_owned())
+    );
+    let registry = registry();
+    registry
+        .check(&schema_of(PipelineKind::NodeSettled), &block["settlement"])
+        .unwrap_or_else(|why| panic!("entry 119's settlement is refused: {why}"));
+    let mut unsourced = block["settlement"].clone();
+    unsourced["continued"]
+        .as_object_mut()
+        .expect("a continuation")
+        .remove("source");
+    assert!(
+        registry
+            .check(&schema_of(PipelineKind::NodeSettled), &unsourced)
+            .is_err(),
+        "a continuation naming no source was admitted"
+    );
+    let claim = block["driver"].clone();
+    for (kind, key) in [
+        (PipelineKind::DriverTakenOver, "previous"),
+        (PipelineKind::DriverSuperseded, "by"),
+    ] {
+        let id = schema_of(kind);
+        registry
+            .check(&id, &serde_json::json!({ key: claim }))
+            .unwrap_or_else(|why| panic!("entry 119's claim is refused as {kind}: {why}"));
+        let mut pidless = claim.clone();
+        pidless.as_object_mut().expect("a claim").remove("pid");
+        assert!(
+            registry
+                .check(&id, &serde_json::json!({ key: pidless }))
+                .is_err(),
+            "a {kind} claim with no pid was admitted"
+        );
+    }
+    let start = Cli::command();
+    let start = start
+        .find_subcommand("start")
+        .expect("`start` is a verb of the binary");
+    let flags: BTreeSet<String> = start
+        .get_arguments()
+        .filter_map(|argument| argument.get_long())
+        .map(|flag| format!("--{flag}"))
+        .collect();
+    for flag in block["start_flags"]
+        .as_array()
+        .expect("entry 119 names its flags")
+    {
+        let flag = flag.as_str().expect("a flag");
+        assert!(flags.contains(flag), "`start` takes no {flag}");
+    }
+    let refused = onepipeline::error::Error::ProjectDriven {
+        run: claim["run"].as_str().expect("a run").to_owned(),
+        host: claim["host"].as_str().expect("a host").to_owned(),
+        claimed_at: claim["claimed_at"].as_str().expect("a time").to_owned(),
+    };
+    assert_eq!(refused.exit_code(), EXIT_REFUSED);
+    assert!(
+        refused
+            .to_string()
+            .starts_with(block["refusal_prefix"].as_str().expect("a prefix")),
+        "{refused}"
+    );
+    assert_eq!(block["idle_claim_check_seconds"], serde_json::json!(600));
 }
 
 /// The release-adoption surface this build carries **beyond** the contract is
@@ -6516,7 +6605,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // undocumented wire; a kind the contract lists and the enum does not carry is
     // a promise nothing keeps. `PIPELINE_KINDS` is what `Journal::emit` accepts,
     // so this is the emitted set and not a second copy of it.
-    assert_eq!(PIPELINE_KINDS.len(), 43, "the closed set changed size");
+    assert_eq!(PIPELINE_KINDS.len(), 45, "the closed set changed size");
     let listed: BTreeSet<String> = backticked()
         .into_iter()
         .filter(|token| {
@@ -6525,7 +6614,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
         .collect();
     // The kinds the contract does not list are exactly the ones the divergence
     // record proposes, and no others: a kind neither document names fails here.
-    let proposed: BTreeSet<String> = ["40.", "47.", "55.", "65.", "70.", "92.", "119."]
+    let proposed: BTreeSet<String> = ["40.", "47.", "55.", "65.", "70.", "92.", "119.", "120."]
         .into_iter()
         .flat_map(|entry| {
             serde_json::from_value::<Vec<String>>(divergence_block(entry)["event_kinds"].clone())

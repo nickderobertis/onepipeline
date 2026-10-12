@@ -327,6 +327,22 @@ pub enum PipelineKind {
     /// an agent was dispatched to conclude a conflict, and the publication's
     /// `outcome`. The node's ordinary `node-settled` follows.
     NodeRestacked,
+    /// A launch passed another driver's claim on its project with `--take-over`.
+    ///
+    /// Written by `start --take-over` beside its `run-started`, only where the
+    /// project's `onepipeline.driver` named a claim; carries that claim whole as
+    /// `previous` — its `run`, `host`, `session`, `pid` and `claimed_at`. The run it
+    /// names stops at its own next claim check. Entry 119 of
+    /// `docs/contract-divergences.md` records it.
+    DriverTakenOver,
+    /// A driver found its project claimed by another run, and stopped.
+    ///
+    /// Written by the driver that read the claim, once, at the check that found
+    /// it — at launch or adoption, at the start of a pass that would dispatch or
+    /// publish, or on its idle check — carrying the claim it found as `by`. After
+    /// it the driver dispatches and publishes nothing, and ends once its
+    /// dispatches in flight have settled unpublished. Entry 119 records it.
+    DriverSuperseded,
 }
 
 impl PipelineKind {
@@ -376,6 +392,8 @@ impl PipelineKind {
             Self::TitleUnverified => "title-unverified",
             Self::NodeRestackStarted => "node-restack-started",
             Self::NodeRestacked => "node-restacked",
+            Self::DriverTakenOver => "driver-taken-over",
+            Self::DriverSuperseded => "driver-superseded",
         }
     }
 
@@ -448,6 +466,8 @@ pub const PIPELINE_KINDS: &[PipelineKind] = &[
     PipelineKind::TitleUnverified,
     PipelineKind::NodeRestackStarted,
     PipelineKind::NodeRestacked,
+    PipelineKind::DriverTakenOver,
+    PipelineKind::DriverSuperseded,
 ];
 
 /// The id of a stored artifact.

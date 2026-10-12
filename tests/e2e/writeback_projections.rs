@@ -303,10 +303,13 @@ fn a_runs_first_projection_carries_its_claim_by_member_and_a_later_transition_th
     assert_eq!(first["scope"], "members", "{first}");
     assert_eq!(first["whole_because"], Value::Null, "{first}");
     assert_eq!(first["outcome"], "projected", "{first}");
+    // And one project write: the run's driver claim, which the first projection writes
+    // (`docs/contract-divergences.md` entry 119).
     assert_eq!(
         first["calls"],
-        json!({"task-update": 2}),
-        "the first projection was other than one targeted update per item it carried: {first}"
+        json!({"task-update": 2, "project-metadata-set": 1}),
+        "the first projection was other than one targeted update per item it carried and the \
+         claim: {first}"
     );
     // The claim is the word, and the head each item names; the untitled nodes are titled by id.
     assert_eq!(
@@ -914,10 +917,12 @@ fn an_adoption_whose_every_read_matches_reads_each_item_once_and_copies_nothing(
     let first = records(&world, run)[mark].clone();
     assert_eq!(first["outcome"], "projected", "{first}");
     assert_eq!(first["items"], json!([]), "{first}");
+    // And the adoption's own claim, which its first projection writes in place of the
+    // stopped driver's (entry 119).
     assert_eq!(
         first["calls"],
-        json!({"task-show": 2}),
-        "the adopted driver did more than read each item once: {first}"
+        json!({"task-show": 2, "project-metadata-set": 1}),
+        "the adopted driver did more than read each item once and claim the project: {first}"
     );
     assert_eq!(first["actions"], Value::Null, "{first}");
     let recorded = landed(&world, run);
@@ -1832,10 +1837,10 @@ fn an_adoption_of_a_run_an_older_build_started_reads_the_furthest_along_item_by_
         );
         if cold {
             // Each lineage read once, by its own id, then one targeted update of each item the
-            // reads found — no project read and no copy.
+            // reads found and the adoption's claim — no project read and no copy.
             assert_eq!(
                 first["calls"],
-                json!({"task-show": 2, "task-update": 2}),
+                json!({"task-show": 2, "task-update": 2, "project-metadata-set": 1}),
                 "{first}"
             );
         }

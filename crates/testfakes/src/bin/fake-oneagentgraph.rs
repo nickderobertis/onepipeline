@@ -2560,7 +2560,7 @@ fn emit(
         publish_oneharness_session(&labels, node, offset, invocation);
     }
     let judged = scripted_decisions(dir, key);
-    let report = report_of(task, node, scripted_verdicts(dir, key), &judged);
+    let report = report_of(args, task, node, scripted_verdicts(dir, key), &judged);
     envelope(
         4,
         oneagentgraph::event::EventKind::TurnCompleted,
@@ -3103,6 +3103,41 @@ fn publish_oneharness_session(
     }));
 }
 
+/// Read the drafting graph's declared schema through the producer's own types
+/// and validator, so a test answer cannot claim to conform to a different shape.
+fn drafting_schema(args: &[String]) -> oneharness_core::domain::structured::Schema {
+    let graph = std::path::Path::new(&args[1]);
+    let read = |path: &std::path::Path| {
+        std::fs::read_to_string(path)
+            .unwrap_or_else(|error| fake::fail(&format!("cannot read {}: {error}", path.display())))
+    };
+    let configured: oneagentgraph::config::GraphConfig = serde_norway::from_str(&read(graph))
+        .unwrap_or_else(|error| fake::fail(&format!("the drafting graph is invalid: {error}")));
+    let harness = configured
+        .members
+        .values()
+        .find_map(|member| match member {
+            oneagentgraph::config::Member::Oneharness(member) => Some(&member.oneharness_config.0),
+            oneagentgraph::config::Member::Onejudge(_) => None,
+        })
+        .unwrap_or_else(|| fake::fail("the drafting graph has no single-sided member"));
+    let config_path = graph
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join(harness);
+    let config = oneharness_core::domain::config::parse(&read(&config_path))
+        .unwrap_or_else(|error| fake::fail(&format!("the drafting config is invalid: {error}")));
+    let schema = config
+        .schema_file
+        .unwrap_or_else(|| fake::fail("the drafting config declares no schema_file"));
+    let path = config_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join(schema);
+    oneharness_core::domain::structured::Schema::compile(&read(&path))
+        .unwrap_or_else(|error| fake::fail(&format!("the drafting schema is invalid: {error}")))
+}
+
 /// The report a settled member stores.
 ///
 /// Two-party, because the shipped node-scope graph's `worker` is a two-party
@@ -3121,6 +3156,7 @@ fn publish_oneharness_session(
 /// report under the key and shape onejudge's own `Report` writes — nothing for
 /// a member no panel judged.
 fn report_of(
+    args: &[String],
     task: &str,
     node: &str,
     verdicts: Vec<serde_json::Value>,
@@ -3168,6 +3204,11 @@ fn report_of(
                     .unwrap_or_else(|error| fake::fail(&format!("{name} is not JSON: {error}")));
                 answered["structured"]["title_check"] = check;
             }
+            // The producer's flag is the configured schema's answer, including
+            // the new title check, rather than a promise fabricated by the double.
+            answered["schema_valid"] = serde_json::json!(drafting_schema(args)
+                .validate(&answered["structured"])
+                .is_ok());
             answered
         };
         let results = match &answer {

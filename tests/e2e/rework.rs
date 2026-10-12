@@ -260,6 +260,18 @@ fn a_draft_in_review_is_reworked_on_its_own_branch_and_change_request() {
     results.out_has(&format!(
         "restacked onto a-rework-1's branch {a_branch} at {new_head}, without an agent turn"
     ));
+
+    // The projected rework and its lineage survive a launch on a cold host:
+    // the store's settlement is continued, with no new worker or change request.
+    let cold = world.on_host("rework-cold");
+    cold.run_from(&cold.project, &["start", &project, "--attach"])
+        .exited(0);
+    assert!(cold.events_of(run, "node-dispatched").is_empty());
+    let continued = settled(&cold, run, "a");
+    assert_eq!(continued["continued"]["source"], "store", "{continued}");
+    assert_eq!(continued["branch"], replacement["branch"], "{continued}");
+    assert_eq!(continued["head"], replacement["head"], "{continued}");
+    assert_eq!(opened_from(&world, &a_branch), 1);
 }
 
 /// The `title_check` a drafter answers when the title still says what the change
@@ -1230,7 +1242,7 @@ fn a_title_nothing_verified_is_left_unverified_until_a_retitle_sets_one() {
     let cases = [
         ("a", "the drafting dispatch"),
         ("b", "carried no `title_check`"),
-        ("c", "neither `keeps` nor `replaced`"),
+        ("c", "nothing the schema it was validated against accepted"),
         ("d", "which the title rule refuses"),
         ("e", "the plan states the body"),
     ];
@@ -1961,4 +1973,142 @@ fn a_restack_its_checks_refuse_is_asked_of_the_draft_s_worker_again() {
     assert_eq!(tasks_of(&world, run, "b", "pr-author").len(), 2);
     assert_eq!(opened_from(&world, &b_branch), 1);
     assert!(held_as_draft(&world, &b_number));
+}
+
+/// A rework cleared for publication before a takeover may finish its push, but
+/// the superseded driver must not begin the descendant restack that push owes.
+#[test]
+fn a_takeover_before_a_reworks_push_prevents_its_driver_from_starting_a_restack() {
+    let world = World::new("rework-takeover").with_env("ONEVCS_BRANCH_PREFIX", "me/");
+    let go = world.fakes.join("push.go");
+    let held = crate::harness::held_publication(&world, &go);
+    world.repository("change-open", &held.argv());
+    crate::draft_lifecycle::rules(&world, "change-open", "required", None);
+    world.script("gh.checks", crate::draft_lifecycle::GREEN);
+    world.script("a.work", "a's change\n");
+    world.script("b.work", "b's change\n");
+    world.script("a-rework-1.work", "a's change, reworked\n");
+    world.script("a-rework-1.work-file", "a");
+    held.release();
+    let run = "takeover";
+    let project = launched(
+        &world,
+        run,
+        vec![lifecycle("a", &[]), lifecycle("b", &["a"])],
+        2,
+        &[],
+    );
+    let a_branch = text(&settled(&world, run, "a")["branch"], "a's branch").to_owned();
+    let old_head = head_of(&world, &a_branch);
+    for marker in [go.clone(), go.with_extension("go.holding")] {
+        std::fs::remove_file(marker).expect("the initial publication released its gate");
+    }
+    reply(&world, run, json!([rework("a", "rework it")])).exited(0);
+    world.run(&["adopt", run, "--detach"]).exited(0);
+    world.until("the rework's cleared publication to be held", |_| {
+        held.holding()
+    });
+    // The successor owns the project before the first driver's accepted push
+    // makes b's restack due. Hold its worker so it cannot push a competing head.
+    let successor = world.on_host("takeover-host");
+    let worker = successor.rendezvous("a");
+    successor
+        .run_from(
+            &successor.project,
+            &["start", &project, "--detach", "--take-over"],
+        )
+        .exited(0);
+    let theirs = worker.arrived();
+    held.release();
+    world.until("the superseded driver to end", |world| {
+        !world.events_of(run, "driver-superseded").is_empty()
+            && world.run_file(run, "result.json").is_file()
+    });
+    assert_ne!(
+        head_of(&world, &a_branch),
+        old_head,
+        "the already cleared push did not finish"
+    );
+    assert!(
+        world.events_of(run, "node-restack-started").is_empty(),
+        "a superseded driver began a restack: {:#?}",
+        world.journal(run)
+    );
+    successor.run(&["stop", run]).exited(0);
+    assert_eq!(successor.events_of(run, "run-stopped").len(), 1);
+    drop(theirs);
+    assert_eq!(opened_from(&world, &a_branch), 1);
+}
+
+/// The real graph and harness validate the drafter's title check before this
+/// engine consumes it: a valid replacement retitles the draft, and an unknown
+/// verdict is refused by the producer without holding the rework's publication.
+#[test]
+fn a_rework_title_check_is_validated_by_the_real_producer() {
+    let world = team_world("rework-real-title-check");
+    world.write_graphs();
+    world.script("harness.work", "the original change");
+    world.script("harness.body", "## What\nThe original change.");
+    let drafter = world.pr_author_graph();
+    let run = "real-title-check";
+    let project = world.plan(run, &plan_of(run, vec![lifecycle("a", &[])]));
+    world
+        .run_on_agentgraph(&["start", &project, "--attach", "--pr-author-graph", &drafter])
+        .exited(0);
+    let branch = text(&settled(&world, run, "a")["branch"], "a's branch").to_owned();
+    world.script("harness.work", "the change after review");
+    world.script(
+        "harness.title-check",
+        r#"{"verdict":"replaced","title":"fix(a): answer the review"}"#,
+    );
+    reply(&world, run, json!([rework("a", "answer the review")])).exited(0);
+    world.run_on_agentgraph(&["adopt", run]).exited(0);
+    assert_eq!(
+        change_from(&world, &branch)["title"],
+        "fix(a): answer the review"
+    );
+    assert_eq!(retitled(&world, run, "a-rework-1")[0]["by"], "drafter");
+    assert!(unverified(&world, run, "a-rework-1").is_empty());
+    let reports: Vec<Value> = std::fs::read_dir(world.run_file(run, "reports"))
+        .expect("the real producer's reports were retained")
+        .filter_map(Result::ok)
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .filter_map(|text| serde_json::from_str(&text).ok())
+        .collect();
+    assert!(
+        reports.iter().any(
+            |report| report["results"].as_array().is_some_and(|results| {
+                results.iter().any(|result| {
+                    result["schema_valid"] == true
+                        && result["structured"]["title_check"]["title"]
+                            == "fix(a): answer the review"
+                })
+            })
+        ),
+        "no real producer validated the title check: {reports:#?}"
+    );
+
+    world.script("harness.work", "another change after review");
+    world.script("harness.title-check", r#"{"verdict":"maybe"}"#);
+    reply(
+        &world,
+        run,
+        json!([rework("a-rework-1", "review it again")]),
+    )
+    .exited(0);
+    world.run_on_agentgraph(&["adopt", run]).exited(0);
+    assert_eq!(
+        settled(&world, run, "a-rework-2")["outcome"],
+        "change-review-draft"
+    );
+    assert_eq!(
+        change_from(&world, &branch)["title"],
+        "fix(a): answer the review"
+    );
+    assert_eq!(unverified(&world, run, "a-rework-2").len(), 1);
+    assert_eq!(opened_from(&world, &branch), 1);
+    assert!(held_as_draft(
+        &world,
+        &change_from(&world, &branch)["number"]
+    ));
 }

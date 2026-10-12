@@ -311,6 +311,14 @@ fn turn(args: &[String], dir: &std::path::Path) -> ExitCode {
     if !observing {
         if let Some(body) = fake::node_script(dir, "harness", "work") {
             let path = cwd.join(WORK_FILE);
+            // `harness.work-per-task` adds the line the task opens its `## What` with, so
+            // each node of a plan writes something its parent's branch does not already
+            // carry: one body for every turn leaves a node stacked on another with nothing
+            // to publish.
+            let body = match fake::node_script(dir, "harness", "work-per-task") {
+                Some(_) => format!("{body}\n{}", what_the_task_says(&prompt)),
+                None => body,
+            };
             if let Err(error) = std::fs::write(&path, format!("{body}\n")) {
                 return fake::refuse(&format!("cannot write {}: {error}", path.display()));
             }
@@ -660,5 +668,22 @@ fn structured(prompt: &str, dir: &std::path::Path) -> serde_json::Value {
             prompt.lines().next().unwrap_or_default()
         )
     });
-    serde_json::json!({"body": body})
+    let mut answer = serde_json::json!({"body": body});
+    if let Some(check) = fake::node_script(dir, "harness", "title-check") {
+        answer["title_check"] = serde_json::from_str(&check).unwrap_or_else(|error| {
+            fake::fail(&format!("harness.title-check is not JSON: {error}"))
+        });
+    }
+    answer
+}
+
+/// The line after a task's `## What` heading in `prompt`, or nothing where it has none.
+fn what_the_task_says(prompt: &str) -> String {
+    prompt
+        .lines()
+        .skip_while(|line| line.trim() != "## What")
+        .nth(1)
+        .unwrap_or_default()
+        .trim()
+        .to_owned()
 }

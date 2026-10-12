@@ -58,6 +58,10 @@ pub struct Launch {
     /// The note deliveries the loop has handed off and not yet recorded, which
     /// a re-dispatch waits for before it reads the notes it is composed with.
     pub(crate) notes_in_flight: engine::DeliveriesInFlight,
+    /// Whether a publication waits for the loop's claim check before it is made: every run
+    /// launched from a store, whose project a driver claims, and none an older record names
+    /// no project for.
+    pub(crate) publication_gated: bool,
     /// What the publication boundary tells and gives this node's dispatches: the run's
     /// term scope, which every check its closeout asks derives its terms from, and in a
     /// mixed plan its side of the boundary.
@@ -937,6 +941,26 @@ fn attempt_once(
         Course::Rework(rework) => Closeout::Reworked(rework),
         Course::Restack | Course::Work => Closeout::Drafted,
     };
+    // The publication is one of the things the run's claim is read for: the loop's next pass
+    // reads it once for all it starts, and a run that has taken the project over leaves this
+    // node's work kept on its branch, unpublished.
+    if launch.publication_gated && !engine::publication_cleared(tx, &node.id) {
+        return withhold(
+            node,
+            Opened {
+                worktree: worktree.as_deref(),
+                base: base.as_deref(),
+                began,
+                token: &token,
+                branch,
+            },
+            stream,
+            tx,
+            &whose,
+            vcs_filter,
+            &launch.boundary.term_scope,
+        );
+    }
     let mut attempted = publish(
         executor,
         paths,
@@ -1454,25 +1478,16 @@ fn preserve(
     // close below adds a commit only where the tree still held something, and
     // says which when it does.
     let committed = worktree.and_then(crate::vcs::worktree_head);
-    let followed_through = stream.map(crate::vcs::Follower::finish).unwrap_or_default();
-    let mut refused = close(Some(token));
-    let deadline = Instant::now() + TERMINATOR_GRACE;
-    while refused.is_some() && Instant::now() < deadline {
-        std::thread::sleep(TERMINATOR_POLL);
-        refused = close(Some(token));
-    }
-    let answered = match (&refused, &branch, node.repo.as_deref()) {
-        (Some(why), _, _) => Err(format!(
-            "the session would not close ({why}), so nothing was pushed from it"
-        )),
-        (None, Some(branch), Some(repo)) => crate::vcs::preserve_branch(repo, branch, term_scope),
-        // llmlint: ignore[changed_behavior_has_e2e] every session `onevcs` opens names
-        // its branch and every lifecycle node names its `repo`, so no invocation reaches
-        // a kept branch with neither; it settles as the infrastructure failure it would
-        // be rather than behind an unwrap.
-        (None, _, _) => Err("the session named no branch to preserve".to_owned()),
-    };
-    relay_session_events(tx, Some(token), whose, followed_through, filter, refused);
+    let answered = close_and_keep(
+        node,
+        token,
+        branch.as_deref(),
+        stream,
+        tx,
+        whose,
+        filter,
+        term_scope,
+    );
     match answered {
         Ok(preserved) => {
             let remote = crate::vcs::preservation_word(preserved.outcome);
@@ -1523,6 +1538,121 @@ fn preserve(
             })
         }
     }
+}
+
+/// Close a lifecycle node's session and put its branch on the identity's origin, then read
+/// the session's stream through: what [`preserve`] keeps a branch by, and what [`withhold`]
+/// leaves one by for the run that took the project over.
+///
+/// A refused close is asked again for the relay's grace, and only a closed session's branch is
+/// pushed — see [`preserve`] for why.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the session to close (its node, token and branch), the stream and relay context \
+              its events are read through (the follower, the sender, the labels and the \
+              filter), and the run's term scope the push is checked under are each what \
+              `preserve` and `withhold` already hold apart; bundling them would only move the \
+              same list one indirection away"
+)]
+fn close_and_keep(
+    node: &Node,
+    token: &onevcs::SessionToken,
+    branch: Option<&str>,
+    stream: Option<crate::vcs::Follower>,
+    tx: &Sender<Message>,
+    whose: &Labels,
+    filter: Option<&EventFilter>,
+    term_scope: &onevcs::TermScope,
+) -> std::result::Result<onevcs::Preserved, String> {
+    let followed_through = stream.map(crate::vcs::Follower::finish).unwrap_or_default();
+    let mut refused = close(Some(token));
+    let deadline = Instant::now() + TERMINATOR_GRACE;
+    while refused.is_some() && Instant::now() < deadline {
+        std::thread::sleep(TERMINATOR_POLL);
+        refused = close(Some(token));
+    }
+    let answered = match (&refused, branch, node.repo.as_deref()) {
+        (Some(why), _, _) => Err(format!(
+            "the session would not close ({why}), so nothing was pushed from it"
+        )),
+        (None, Some(branch), Some(repo)) => crate::vcs::preserve_branch(repo, branch, term_scope),
+        // llmlint: ignore[changed_behavior_has_e2e] every session `onevcs` opens names
+        // its branch and every lifecycle node names its `repo`, so no invocation reaches
+        // a kept branch with neither; it settles as the infrastructure failure it would
+        // be rather than behind an unwrap.
+        (None, _, _) => Err("the session named no branch to preserve".to_owned()),
+    };
+    relay_session_events(tx, Some(token), whose, followed_through, filter, refused);
+    answered
+}
+
+/// Settle a node whose publication the run's claim check withheld: another run took the
+/// project over, so nothing is drafted or published, the branch is put on the origin for that
+/// run to continue, and the node settles `cancelled` saying where its work is.
+///
+/// `cancelled` rather than `failed`: nothing about the work was refused, and a launch reading
+/// the settlement back pins the node to the branch it names, as it pins any dispatch that left
+/// one.
+fn withhold(
+    node: &Node,
+    opened: Opened<'_>,
+    stream: Option<crate::vcs::Follower>,
+    tx: &Sender<Message>,
+    whose: &Labels,
+    filter: Option<&EventFilter>,
+    term_scope: &onevcs::TermScope,
+) -> Attempt {
+    let Opened {
+        worktree,
+        token,
+        branch,
+        ..
+    } = opened;
+    let branch = branch.or_else(|| crate::vcs::working_session(token).map(|open| open.branch));
+    let committed = worktree.and_then(crate::vcs::worktree_head);
+    let answered = close_and_keep(
+        node,
+        token,
+        branch.as_deref(),
+        stream,
+        tx,
+        whose,
+        filter,
+        term_scope,
+    );
+    let name = branch.as_deref().unwrap_or("the session's branch");
+    let (detail, head, remote) = match answered {
+        Ok(preserved) => (
+            format!(
+                "not published: another run took the project over before this node published, \
+                 so its work is kept on {} ({}) for that run to continue",
+                preserved.branch,
+                crate::vcs::preservation_word(preserved.outcome)
+            ),
+            preserved
+                .commit
+                .as_deref()
+                .and_then(crate::vcs::usable)
+                .or(committed),
+            Some(preserved.outcome),
+        ),
+        Err(why) => (
+            format!(
+                "not published: another run took the project over before this node published; \
+                 onevcs could not put {name} on the origin ({why}), so the work stays on the \
+                 local branch {name}"
+            ),
+            committed,
+            None,
+        ),
+    };
+    Attempt::settled(Settlement {
+        detail: Some(crate::views::one_line(&detail)),
+        head,
+        branch,
+        remote,
+        ..Settlement::plain(&node.id, NodeStatus::Cancelled, None)
+    })
 }
 
 /// Draft the change request's body, write it onto the change request the
@@ -3068,7 +3198,7 @@ fn title_check_of(check: Option<&serde_json::Value>) -> std::result::Result<Titl
             // llmlint: ignore[changed_behavior_has_e2e] a `title_check` the wire type refuses
             // for its shape rather than its verdict — an extra field, a `keeps` naming a
             // title, a `replaced` naming none — is held by `the_title_check_and_the_net_diff_
-            // cap_are_entry_119s`; the journey drives the verdict and the subject a drafter
+            // cap_are_entry_120s`; the journey drives the verdict and the subject a drafter
             // answers wrongly, which settle the same way through this function.
             _ => format!("the drafter's `title_check` is not one this build reads: {error}"),
         }
@@ -4924,18 +5054,18 @@ mod tests {
         assert_eq!(steps.len(), 1);
     }
 
-    /// The `title_check` verdicts and the net diff's cap entry 119 states are the
+    /// The `title_check` verdicts and the net diff's cap entry 120 states are the
     /// ones a rework's publication reads and shows.
     #[test]
-    fn the_title_check_and_the_net_diff_cap_are_entry_119s() {
+    fn the_title_check_and_the_net_diff_cap_are_entry_120s() {
         let record = include_str!("../docs/contract-divergences.md");
         let block: serde_json::Value = record
             .split("\n## ")
-            .find(|entry| entry.starts_with("119."))
+            .find(|entry| entry.starts_with("120."))
             .and_then(|entry| entry.split("```json").nth(1))
             .and_then(|rest| rest.split("```").next())
-            .map(|block| serde_json::from_str(block).expect("entry 119's block is JSON"))
-            .expect("the record carries entry 119's block");
+            .map(|block| serde_json::from_str(block).expect("entry 120's block is JSON"))
+            .expect("the record carries entry 120's block");
         assert_eq!(
             block["net_diff_cap_bytes"],
             serde_json::json!(crate::vcs::NET_DIFF_CAP)
