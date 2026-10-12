@@ -725,7 +725,7 @@ mod tests {
     /// writes, its dispatch and claim read as the boundary reads them, its surface and seam
     /// are the ones the engine raises and reads, and its interval is the constant.
     #[test]
-    fn entry_116s_block_is_this_builds_continuation() {
+    fn entry_117s_block_is_this_builds_continuation() {
         let record = include_str!("../docs/contract-divergences.md");
         let entry = record
             .split("\n## ")
