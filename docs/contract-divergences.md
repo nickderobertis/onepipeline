@@ -9813,7 +9813,9 @@ then published with drafting. Merge only: never a rebase, a squash or a force-pu
 so each draft's diff against its base stays its own. `node-restack-started`
 `{node, onto: [{branch, head}], cause: rework | restack}` is journalled when it
 starts and `node-restacked` `{node, head, agent_dispatched, outcome}` when it
-publishes, followed by the node's ordinary `node-settled`; a restack its publication
+ends, its `outcome` the node's settlement (`failed`, with the branch unmoved, when the
+draft's worker could not conclude the merge), followed by the node's ordinary
+`node-settled`; a restack its publication
 refused follows the retry-on-the-same-branch rules, and a spent conflict budget
 raises the `session-conflict` finding. A driver adopting a run whose restack its
 predecessor died in reads that node `done` again and restacks it afresh. A lifecycle
