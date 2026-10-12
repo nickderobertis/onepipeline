@@ -6,7 +6,7 @@
 # Its own workflow and its own job, so that nothing in `ci.yml` — the required
 # set — depends on it, and its check name is not one branch protection requires:
 # on every other pull request the job is skipped. The live and network tiers
-# (`onepipeline-smoke`, `onepipeline-release-compat`) are not in it; they declare
+# (`onepipeline-real-smoke`, `onepipeline-release-compat`) are not in it; they declare
 # no `check` that reaches their journeys and run as `ci.yml`'s `smoke` and
 # `release-compat` jobs.
 

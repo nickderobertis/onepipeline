@@ -627,3 +627,112 @@ fn the_sweep_reaches_every_project_but_the_live_tiers_journeys() {
         );
     }
 }
+
+/// The key naming the scratch repository the credentialled smoke publishes to.
+const SMOKE_REPO_KEY: &str = "ONEPIPELINE_SMOKE_REPO";
+
+/// Every string a value carries, nested or not, so a check of "nothing here
+/// names a repository" reads `run:`, `env:` and `with:` alike.
+fn strings(value: &Value, into: &mut Vec<String>) {
+    match value {
+        Value::String(s) => into.push(s.clone()),
+        Value::Sequence(items) => items.iter().for_each(|item| strings(item, into)),
+        Value::Mapping(map) => map.iter().for_each(|(key, item)| {
+            strings(key, into);
+            strings(item, into);
+        }),
+        Value::Tagged(tagged) => strings(&tagged.value, into),
+        _ => {}
+    }
+}
+
+/// An `owner/name` whose name ends in the smoke's scratch suffix: the shape a
+/// hard-coded scratch repository takes in a workflow.
+fn scratch_slugs(text: &str) -> Vec<String> {
+    text.split(|c: char| !(c.is_ascii_alphanumeric() || "/-_.".contains(c)))
+        .filter(|token| {
+            let mut parts = token.split('/');
+            matches!(
+                (parts.next(), parts.next(), parts.next()),
+                (Some(owner), Some(name), None) if !owner.is_empty() && name.ends_with("-smoke")
+            )
+        })
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The smoke's scratch repository is configuration: the step that runs the
+/// journey maps the Actions secret of the key's name into its environment
+/// under that same name, every other mention of the key anywhere in the
+/// workflows is that same mapping, and no step in any workflow spells a
+/// scratch repository's identity itself.
+#[test]
+fn the_smoke_step_reads_its_scratch_repository_from_the_secret_of_the_same_name() {
+    let secret = format!("${{{{ secrets.{SMOKE_REPO_KEY} }}}}");
+    let ci = workflow("ci.yml");
+    let steps = ci["jobs"]["smoke"]["steps"]
+        .as_sequence()
+        .expect("ci.yml's smoke job has steps");
+    let runs: Vec<&Value> = steps
+        .iter()
+        .filter(|step| {
+            step.get("run")
+                .and_then(Value::as_str)
+                .is_some_and(|run| run.contains("just smoke-real"))
+        })
+        .collect();
+    let [run] = runs[..] else {
+        panic!("ci.yml's smoke job runs `just smoke-real` in exactly one step: {runs:?}")
+    };
+    assert_eq!(
+        run.get("env")
+            .and_then(|env| env.get(SMOKE_REPO_KEY))
+            .map(scalar),
+        Some(secret.clone()),
+        "the step running `just smoke-real` maps the {SMOKE_REPO_KEY} secret into its \
+         environment as {SMOKE_REPO_KEY}: {run:?}"
+    );
+
+    for (file, parsed) in workflows() {
+        let mut env_blocks = vec![parsed.get("env")];
+        for (_, job) in parsed["jobs"].as_mapping().into_iter().flatten() {
+            env_blocks.push(job.get("env"));
+            for step in job
+                .get("steps")
+                .and_then(Value::as_sequence)
+                .into_iter()
+                .flatten()
+            {
+                env_blocks.push(step.get("env"));
+            }
+        }
+        for env in env_blocks.into_iter().flatten() {
+            if let Some(value) = env.get(SMOKE_REPO_KEY) {
+                assert_eq!(
+                    scalar(value),
+                    secret,
+                    "{file} sets {SMOKE_REPO_KEY} to something other than its secret"
+                );
+            }
+        }
+        let mut said = Vec::new();
+        strings(&parsed, &mut said);
+        let named: Vec<String> = said.iter().flat_map(|s| scratch_slugs(s)).collect();
+        assert!(
+            named.is_empty(),
+            "{file} hard-codes a scratch repository identity rather than reading \
+             {SMOKE_REPO_KEY}: {named:?}"
+        );
+    }
+}
+
+/// The detector the test above relies on finds what it is for, and only that.
+#[test]
+fn a_hard_coded_scratch_repository_is_recognised() {
+    assert_eq!(
+        scratch_slugs("ONEPIPELINE_SMOKE_REPO=hiddenco/quietharbor-smoke just smoke-real"),
+        ["hiddenco/quietharbor-smoke"]
+    );
+    assert!(scratch_slugs("owner/name with a name ending in -smoke").is_empty());
+    assert!(scratch_slugs("tests/smoke/main.rs and actions/checkout@v4").is_empty());
+}

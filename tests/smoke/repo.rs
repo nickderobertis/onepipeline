@@ -1,13 +1,69 @@
 //! The scratch repository, and the `gh` calls that reach it.
 //!
-//! Its own file rather than a stretch of `main.rs` so that the one thing here an
-//! offline journey can prove — the sentence `ensure_repo` writes as the
-//! repository's description — is reachable through `#[path]` without the
-//! credentialled lifecycle journey coming along: `tests/smoke_repo.rs` includes
-//! this file and puts a `gh` stand-in on `PATH`, the way the note binary includes
-//! `tests/e2e/harness.rs`. Nothing here is substituted in the smoke itself.
+//! Its own file rather than a stretch of `main.rs` so that what an offline
+//! journey can prove here — which repository the configuration names, and the
+//! sentence `ensure_repo` writes as the repository's description — is reachable
+//! through `#[path]` without the credentialled lifecycle journey coming along:
+//! `tests/smoke_repo.rs` includes this file and puts a `gh` stand-in on `PATH`,
+//! the way the note binary includes `tests/e2e/harness.rs`. Nothing here is
+//! substituted in the smoke itself.
 
 use std::process::Command;
+
+/// The variable that names the scratch repository, as `owner/name`.
+///
+/// Configuration and never a default: the repository is the operator's, so its
+/// name lives where they keep it — this variable locally, and the Actions secret
+/// of the same name in CI's `smoke` job — and in no tracked file.
+pub const SMOKE_REPO_ENV: &str = "ONEPIPELINE_SMOKE_REPO";
+
+/// What a repository's name has to end with for this journey to touch it.
+///
+/// The whole guard, and deliberately a crude one: this journey pushes branches,
+/// opens pull requests, and merges them, and the cost of pointing it at a
+/// repository somebody works in is not recoverable. A name nobody would give a
+/// repository they cared about is a rule a misconfiguration cannot slip past,
+/// where "is it the one I meant?" is a judgement a program cannot make.
+pub const SCRATCH_SUFFIX: &str = "-smoke";
+
+/// The scratch repository, or a refusal naming why this is not one.
+///
+/// Asserted **before the first mutating call**: creating the repository is
+/// already a mutation, so the check cannot live any later than this. Unset is a
+/// refusal naming the variable, never a skip: a smoke that passes without
+/// having been told where to publish proves nothing.
+pub fn scratch_repo() -> String {
+    let slug = std::env::var(SMOKE_REPO_ENV)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| {
+            panic!(
+                "{SMOKE_REPO_ENV} is not set: the real-everything smoke publishes only to the \
+                 scratch repository it names, as owner/name with a name ending in \
+                 {SCRATCH_SUFFIX:?}. Set it locally, or set the Actions secret of the same name \
+                 for CI's `smoke` job. This journey never skips and never guesses a repository."
+            )
+        });
+    let parts: Vec<&str> = slug.split('/').collect();
+    let [owner, name] = parts[..] else {
+        panic!(
+            "{SMOKE_REPO_ENV}={slug:?} does not name one repository as owner/name, and this \
+             journey pushes branches and merges pull requests — it will not guess"
+        )
+    };
+    assert!(
+        !owner.is_empty() && !name.is_empty(),
+        "{SMOKE_REPO_ENV}={slug:?} names an empty owner or repository"
+    );
+    assert!(
+        name.ends_with(SCRATCH_SUFFIX),
+        "{SMOKE_REPO_ENV}={slug:?} is not a scratch repository: this journey pushes branches, \
+         opens pull requests, and merges them, so it runs only against a repository whose name \
+         ends in {SCRATCH_SUFFIX:?}. Point it at one."
+    );
+    slug
+}
 
 /// Run `gh`, or say what is missing rather than pretending it is not needed.
 pub fn gh(args: &[&str]) -> String {
