@@ -1359,7 +1359,16 @@ fn all_landing_spellings_are_refused_but_preserve_edges_load() {
             .exited(REFUSED)
             .err_has("node 'landing' depends on 'H'");
     }
-    assert!(world.invocations().is_empty());
+    // Nothing was dispatched. Loading a plan asks the host each repository's
+    // visibility, so the `gh` stand-in is asked; no agent ever is.
+    assert!(
+        world
+            .invocations()
+            .iter()
+            .all(|invocation| invocation["tool"] == "gh"),
+        "a plan refused at load dispatched something: {:?}",
+        world.invocations()
+    );
 }
 
 #[test]
@@ -1525,6 +1534,16 @@ fn changed_repository_identities_fail_the_dependent_before_dispatch() {
     let world = World::new("stacked-repo-changed");
     world.repository("local-direct", &[]);
     let other = world.extra_repository("other");
+    // Both repositories are private, as the operator states it: a preservation into
+    // one is then no public write, so re-registering `other` below — which leaves its
+    // first identity with no checkout to derive terms from — is answered by the
+    // identity rule this journey is about rather than by the publication boundary.
+    std::fs::write(
+        world.onevcs_home().join("rules.yml"),
+        "version: 4\nrules:\n  - match: {owner: owner}\n    visibility: private\n\
+         default:\n  publication: local-direct\n  approvals: none\n",
+    )
+    .expect("the rules file is written");
     world.script("H.work", "harness\n");
     world.script("H.wait", "hold");
     let mut a = kept("A", &["H"]);

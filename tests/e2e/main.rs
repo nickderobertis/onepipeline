@@ -195,6 +195,11 @@ mod plan_check;
 // lifecycle` and `mod draft_lifecycle` above do.
 mod publish_preserve;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the reason is at the
+// head of `tests/e2e/publication_boundary.rs` and is not restated here; it belongs to this
+// binary for the reason `mod publish_preserve` above does.
+mod publication_boundary;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod real_vcs;
 mod recorded_channel;
 mod recorded_support;

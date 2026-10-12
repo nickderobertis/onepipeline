@@ -364,6 +364,7 @@ impl Graph {
             name: source.name.clone(),
             concurrency: self.concurrency,
             tasks: self.iter().cloned().collect(),
+            export_edges: source.export_edges.clone(),
         }
     }
 
@@ -769,6 +770,10 @@ pub(crate) fn check_edited(plan: &Plan) -> std::result::Result<(), Refusal> {
         }
     }
 
+    // The export edges' own shape, before any dependency rule reads them: a refusal
+    // about an edge that names nothing is about the edge.
+    crate::boundary::check_edges(plan)?;
+
     // Landing work cannot depend on kept work. Every plan and live edit crosses
     // this boundary; preserve dependents are checked for unambiguous placement below.
     let preserved: BTreeSet<&str> = plan
@@ -814,7 +819,12 @@ pub(crate) fn check_edited(plan: &Plan) -> std::result::Result<(), Refusal> {
                 )
                 .field("deps"));
             }
-            if preserved.contains(dep.as_str()) && node.publish != crate::plan::Publish::Preserve {
+            // An export edge is the one way a landing node builds on a preserved one: what
+            // it consumes is the export, never the preserved branch.
+            if preserved.contains(dep.as_str())
+                && node.publish != crate::plan::Publish::Preserve
+                && !crate::boundary::is_export(plan, dep, &node.id)
+            {
                 return Err(Refusal::about(
                     &node.id,
                     crate::plan::depends_on_preserved(&node.id, dep),
@@ -1838,6 +1848,7 @@ mod tests {
                 persona: Some("engineer".into()),
                 ..Node::default()
             }],
+            export_edges: Vec::new(),
         };
         assert!(validate(&plan).is_err(), "a blank node id was accepted");
     }
@@ -1913,6 +1924,7 @@ mod tests {
             name: Some("test".into()),
             concurrency: 4,
             tasks,
+            export_edges: Vec::new(),
         }
     }
 
