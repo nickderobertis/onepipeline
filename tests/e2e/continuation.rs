@@ -1841,3 +1841,74 @@ fn a_closeout_over_a_cleared_or_mangled_claim_writes_no_claim_of_its_own() {
         "the claim was touched"
     );
 }
+
+/// An adoption reads the claim before it claims anything: a run adopted on this host after
+/// another host took its project over supersedes at once — it projects nothing onto the
+/// store, dispatches nothing, journals `driver-superseded` naming the successor's claim, and
+/// lets go with that claim on the store as it was.
+#[test]
+fn an_adoption_after_a_takeover_supersedes_before_it_projects_or_dispatches() {
+    let world = World::new("adopt-superseded");
+    world.script("work.wait", "hold");
+    let project = launch_detached(
+        &world,
+        "adopted",
+        vec![agent("work", &[]), agent("after", &["work"])],
+    );
+    let claim = until_claimed_by(&world, &project, "adopted");
+    // Its driver ended and its claim kept, so the run is adoptable.
+    let shutdown = world.run(&["shutdown", "adopted", "--grace", "1"]);
+    assert!([0, 2].contains(&shutdown.code), "{}", shutdown.stderr);
+    assert_eq!(stored_claim(&world, &project), claim);
+
+    let successor = world.on_host("host-b");
+    successor
+        .run_from(
+            &successor.project,
+            &["start", &project, "--detach", "--take-over"],
+        )
+        .exited(0);
+    world.until("the successor's claim to reach the store", |world| {
+        stored_claim(world, &project)["host"] == "host-b"
+    });
+    let claimed = stored_claim(&world, &project);
+
+    let projections = || {
+        std::fs::read_to_string(world.run_file("adopted", "writeback-projections.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .count()
+    };
+    let projected = projections();
+    let dispatched = world.events_of("adopted", "node-dispatched").len();
+    let exited = world.events_of("adopted", "driver-exited").len();
+    world.run(&["adopt", "adopted", "--detach"]).exited(0);
+    world.until("the adopting driver to let go", |world| {
+        world.events_of("adopted", "driver-exited").len() > exited
+    });
+
+    let superseded = world.events_of("adopted", "driver-superseded");
+    assert_eq!(superseded.len(), 1, "{superseded:?}");
+    assert_eq!(superseded[0]["payload"]["by"], claimed);
+    assert_eq!(
+        world.events_of("adopted", "node-dispatched").len(),
+        dispatched,
+        "the superseded adoption dispatched"
+    );
+    assert_eq!(
+        projections(),
+        projected,
+        "the superseded adoption projected onto the store"
+    );
+    assert_eq!(
+        stored_claim(&world, &project),
+        claimed,
+        "the superseded adoption moved the successor's claim"
+    );
+
+    world.release("work.go");
+    successor.until("the successor to settle", |successor| {
+        successor.run_file("adopted", "result.json").is_file()
+    });
+    drop(successor);
+}

@@ -9817,8 +9817,9 @@ a fresh `ONEVCS_HOME` and a `HOSTNAME` of its own:
   and `fresh_is_refused_while_a_node_holds_a_change_request_nothing_has_landed`;
 - the claim: `the_claim_is_held_while_a_run_drives_and_released_at_closeout_and_at_stop`,
   `a_claim_of_this_hosts_own_run_refuses_a_launch_naming_adopt_live_or_gone`,
-  `a_launch_whose_store_cannot_be_read_is_refused_rather_than_read_as_unclaimed` and
-  `a_successors_claim_survives_the_closeout_and_the_stop_of_the_run_it_took_over`;
+  `a_launch_whose_store_cannot_be_read_is_refused_rather_than_read_as_unclaimed`,
+  `a_successors_claim_survives_the_closeout_and_the_stop_of_the_run_it_took_over` and
+  `an_adoption_after_a_takeover_supersedes_before_it_projects_or_dispatches`;
 - supersession: `a_superseded_driver_reads_the_claim_at_the_pass_that_would_dispatch_and_dispatches_nothing`,
   `a_pass_that_dispatches_three_nodes_reads_the_claim_once` (the store's own count of
   project reads), `a_superseded_driver_publishes_nothing_after_the_check_but_finishes_a_publication_under_way`,
