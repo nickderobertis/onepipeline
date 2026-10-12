@@ -38,6 +38,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use oneagentgraph::event::{Origin, TurnMessage, TurnStarted};
+use oneagentgraph::note::NOTES_DIR;
 use onemessagebus::{Config, Layouts, LocalTransport, Transport, TransportKinds};
 use onepipeline::channel::layout::{PlannerChannel, COMMANDS, PLANNER_CHANNEL, REPLIES};
 use onepipeline::channel::Command;
@@ -283,41 +284,70 @@ fn a_note_is_queued(queue: &Path) -> bool {
     queued
 }
 
-/// Release the held **judge** turn once a supervisor decision carrying the note
-/// has really been asked for.
+/// Release the held **judge** turn once the note is really in its conversation's
+/// hands.
 ///
-/// The judge's counterpart of [`release_when_the_note_is_queued`], without its
-/// pause: a note reaching a live judge re-takes the decision, and the double
-/// records that decision's prompt before it holds on the same gate — so the gate
-/// opens on the re-take itself rather than on a reconciler pass a clock guessed
-/// at. A slow runner that had not yet offered the note when a fixed pause ran out
-/// let the held judge finish first, and the note reached the worker instead.
+/// The judge's counterpart of [`release_when_the_note_is_queued`], waiting on the
+/// member's own note spool rather than on a pause after the run's queue: a note
+/// reaches a live judge only if it is in the conversation's inbox before the held
+/// turn returns, and the queue says nothing about when the reconciler gets to it.
+/// A runner slow enough that it had not when a fixed pause ran out let the held
+/// judge finish first, and the note reached the worker instead.
+///
+/// The spool's courier renames an offer to `<id>.taken.json` as it moves it into
+/// the member's inbox, which is the last hand-over anything outside the process
+/// can see; the relay from there into the conversation is one in-process hop on a
+/// 50 ms poll, which the short pause covers. The re-taken decision itself cannot
+/// be waited for: the conversation takes the note when the held turn returns, so
+/// it is recorded only after this releases it.
+///
+/// A spool that never shows the note taken still releases the turn, so the run
+/// ends, and then fails the journey naming the wait rather than leaving it to an
+/// assertion about who the note reached.
 fn release_the_judge_once_it_has_the_note(world: &World) -> std::thread::JoinHandle<()> {
-    let invocations = world.fakes.join("invocations.jsonl");
+    let root = world.root.clone();
     let fakes = world.fakes.clone();
     std::thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(120);
-        while Instant::now() < deadline && !a_judge_was_handed_the_note(&invocations) {
-            std::thread::sleep(Duration::from_millis(20));
+        let mut taken = a_note_was_taken(&root);
+        while !taken && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+            taken = a_note_was_taken(&root);
+        }
+        if taken {
+            std::thread::sleep(Duration::from_millis(500));
         }
         release(&fakes, "judge.go");
+        assert!(
+            taken,
+            "no member's note spool under {} showed a note taken within 120 seconds",
+            root.display()
+        );
     })
 }
 
-/// Whether the doubles have recorded a supervisor prompt carrying [`NOTE`].
+/// Whether any member's note spool under `dir` holds a note its courier took.
 ///
-/// A ledger that does not exist yet is the state this waits out, and so is a last
-/// line still being appended; the journey's own assertions read the ledger whole
-/// once the run has settled.
-fn a_judge_was_handed_the_note(invocations: &Path) -> bool {
-    let Ok(text) = std::fs::read_to_string(invocations) else {
+/// Read off the spool's own file names — an offer becomes `<id>.taken.json` when
+/// taken and gains `<id>.answer.json` when answered — under each directory named
+/// [`NOTES_DIR`], which is where a two-party member binds it. Repositories are
+/// not descended into: no member's scratch lives inside one's history.
+fn a_note_was_taken(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
         return false;
     };
-    text.lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter(|call| call["tool"] == "oneharness-config")
-        .filter_map(|call| call["args"][0].as_str().map(str::to_string))
-        .any(|prompt| prompt.contains(SUPERVISOR_OPENING) && prompt.contains(NOTE))
+    let spool = dir.file_name().is_some_and(|name| name == NOTES_DIR);
+    entries.flatten().any(|entry| {
+        let path = entry.path();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if spool && (name.ends_with(".taken.json") || name.ends_with(".answer.json")) {
+            return true;
+        }
+        name != ".git"
+            && entry.file_type().is_ok_and(|kind| kind.is_dir())
+            && a_note_was_taken(&path)
+    })
 }
 
 fn release(fakes: &Path, name: &str) {
