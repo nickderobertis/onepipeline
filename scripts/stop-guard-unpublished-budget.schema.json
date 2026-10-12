@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Stop-verdict budget record",
+  "x-version": 1,
+  "x-record": "stop-guard-unpublished.json",
+  "x-invocation": "stop-guard-unpublished-invocation.json",
+  "x-binary": "stop-guard-unpublished-onepipeline",
+  "x-scenarios": ["none", "owed", "unreadable"],
+  "x-workloads": {
+    "1": [20, 371, 41, 2308],
+    "10": [200, 3714, 414, 23085]
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "build", "load_workers", "workloads", "preparation_ms", "total_ms", "load1"],
+  "properties": {
+    "version": {"type": "integer"},
+    "build": {"$ref": "#/$defs/Build"},
+    "load_workers": {"type": "integer"},
+    "workloads": {"type": "array", "items": {"$ref": "#/$defs/Workload"}},
+    "preparation_ms": {"type": "integer"},
+    "total_ms": {"type": "integer"},
+    "load1": {"type": "number"}
+  },
+  "$defs": {
+    "Build": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run_id", "binary", "binary_sha256", "profile", "source_sha256"],
+      "properties": {
+        "run_id": {"type": "string"},
+        "binary": {"type": "string"},
+        "binary_sha256": {"type": "string"},
+        "profile": {"type": "string"},
+        "source_sha256": {"type": "string"}
+      }
+    },
+    "Sample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["calls_us", "median_us", "max_us", "load1"],
+      "properties": {
+        "calls_us": {"type": "array", "items": {"type": "integer"}},
+        "median_us": {"type": "integer"},
+        "max_us": {"type": "integer"},
+        "load1": {"type": "number"}
+      }
+    },
+    "Scenario": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scenario", "verdict_sha256", "warm", "cold", "warm_git", "cold_git"],
+      "properties": {
+        "scenario": {"type": "string"},
+        "verdict_sha256": {"type": "string"},
+        "warm": {"$ref": "#/$defs/Sample"},
+        "cold": {"anyOf": [{"$ref": "#/$defs/Sample"}, {"type": "null"}]},
+        "warm_git": {"type": "integer"},
+        "cold_git": {"anyOf": [{"type": "integer"}, {"type": "null"}]}
+      }
+    },
+    "Workload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scale", "shape", "class_counts", "own_runs", "scenarios"],
+      "properties": {
+        "scale": {"type": "integer"},
+        "shape": {"type": "array", "items": {"type": "integer"}},
+        "class_counts": {"type": "object", "additionalProperties": {"type": "integer"}},
+        "own_runs": {"type": "integer"},
+        "scenarios": {"type": "array", "items": {"$ref": "#/$defs/Scenario"}}
+      }
+    }
+  }
+}
