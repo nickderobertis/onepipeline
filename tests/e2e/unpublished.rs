@@ -1579,12 +1579,17 @@ fn the_two_halves_run_concurrently() {
     let (world, _repository) = host("unpub-concurrent");
     worked(&world, "work/owed", MANAGER, "o.txt", "o\n", "feat: o");
     let guard = guard_world(&world);
-    let launch = world.runs.join("slowrun").join("launch.json");
+    // A real run, settled and closed so no driver is left to read its launch record
+    // before the guard does: the `unwatched` half reads that record, made slow by
+    // serving its own bytes late.
+    let slow = crate::unwatched::settled_and_closed(&world, "slowrun");
+    let launch = world.runs.join(&slow).join("launch.json");
+    let recorded = std::fs::read_to_string(&launch).expect("the run's launch record");
     let acknowledgements = acknowledgement_file(&world, MANAGER);
     let empty = r#"{"version":1,"acknowledged":[]}"#.to_owned();
     let timed = |unwatched: bool, unpublished: bool| {
         let writers: Vec<_> = [
-            unwatched.then(|| slow_file(&launch, "{}".to_owned(), DELAY)),
+            unwatched.then(|| slow_file(&launch, recorded.clone(), DELAY)),
             unpublished.then(|| slow_file(&acknowledgements, empty.clone(), DELAY)),
         ]
         .into_iter()
@@ -1608,6 +1613,7 @@ fn the_two_halves_run_concurrently() {
             writer.join().expect("the writer finished");
         }
         let _ = std::fs::remove_file(&launch);
+        std::fs::write(&launch, &recorded).expect("the launch record is restored");
         let _ = std::fs::remove_file(&acknowledgements);
         took
     };
