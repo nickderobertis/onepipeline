@@ -666,17 +666,28 @@ resolver = "2"
 # that surface against the linked release. A **requirement**, because `^0.45` admits no
 # 0.46.x; `onevcs-testing` 0.14.0 requires exactly `=0.46.0`, so the pair moves as one.
 #
-# `onevcs` 0.48.0 is the floor because a `change-auto` or `change-direct`
-# publication whose check wait elapses with no required check red now ends
-# `checks-unsettled` carrying `armed: Some(ArmedMerge)` — the draft lifted and the
-# host's auto-merge armed — and `src/lifecycle.rs` reads that change again rather
-# than re-dispatching its worker, settling `done` on the landing once the host
-# merges it. `tests/e2e/lifecycle.rs`'s
-# `an_armed_change_is_read_again_rather_than_redispatched_and_settles_on_its_landing`
-# drives it. It also carries 0.46/0.47's `PublishRequest.defer_checks` and `adopt`,
-# which this engine leaves unset. A **requirement**, because `^0.46` admits no
-# 0.48.x; `onevcs-testing` 0.16.0 requires exactly `=0.48.0`, so the pair moves as
-# one.
+# `onevcs` 0.48.1 is the floor; 0.48.0 brought what this crate relies on:
+# - `recoverable_matching` reads only the sessions a launcher-labelled
+#   `Selection` names (onevcs #356, first in 0.45.0) rather than every stream on
+#   the host, at `Detail::Decision` and with its proofs reused across calls:
+#   `src/unpublished.rs` decides whether a manager session owes a preserved
+#   branch through that read in process, inside the Stop hook's budget.
+# - A publication probes a hosted repository's visibility with one `gh api
+#   repos/{owner}/{name}` unless a rule declares it, so a journey that scripts a
+#   host outage by a count of `gh` calls declares that visibility instead.
+# - A `change-auto` or `change-direct` publication whose check wait elapses with
+#   no required check red ends `checks-unsettled` carrying `armed:
+#   Some(ArmedMerge)` — the draft lifted and the host's auto-merge armed — and
+#   `src/lifecycle.rs` reads that change again rather than re-dispatching its
+#   worker, settling `done` on the landing once the host merges it.
+#   `tests/e2e/lifecycle.rs`'s
+#   `an_armed_change_is_read_again_rather_than_redispatched_and_settles_on_its_landing`
+#   drives it.
+# - `PublishRequest`'s `adopt` and `defer_checks` stay unset here.
+# A **requirement**, because `^0.46` admits no 0.48.x, the first release carrying the
+# armed `checks-unsettled` ending above; `onevcs-testing` 0.17.0
+# requires exactly `=0.48.1` and carries the full-size recovery fixture
+# `tests/stop_verdict/` builds, so the pair moves as one.
 #
 # `onevcs` 0.49.0 is the floor because retirement proves a branch merged only
 # from its own repository's change request, reported merged at a head carrying
@@ -1226,6 +1237,18 @@ path = "tests/smoke/main.rs"
 [[test]]
 name = "release_channel"
 path = "tests/release_channel/main.rs"
+
+# llmlint: ignore[new_command_or_client_gets_its_own_project] a budget-journey test binary of
+# the existing `onepipeline` binary, not a command or client: `unpublished` is a verb of that
+# binary beside `unwatched` and `stop-guard`, suppressed with them in `src/cli.rs`.
+# The stop-verdict budget journeys: both full host-shaped workloads, built once per
+# gate, timing the release binary's native Stop hook and writing the telemetry the
+# read-only budget commands validate. Their own binary and their own Nx project
+# (`tests/stop_verdict/project.json`), so an ordinary e2e edit never rebuilds them
+# and `just stop-verdict-journeys` regenerates the records alone.
+[[test]]
+name = "stop_verdict"
+path = "tests/stop_verdict/main.rs"
 
 # A CLI binary: optimize for a small, fast-starting artifact.
 [profile.release]

@@ -1499,6 +1499,21 @@ fn a_publication_onevcs_refuses_outright_settles_the_residual_and_is_not_retried
         &repo.checkout,
         Some("https://git.example.invalid/owner/service.git"),
     );
+    // Its visibility is declared, so the publication's write boundary takes the
+    // rule's word: no host answers a probe there, and an unanswered probe would
+    // screen the write and refuse it at the boundary check, before the seam this
+    // journey is about is ever reached.
+    std::fs::write(
+        world.onevcs_home().join("rules.yml"),
+        "version: 4\n\
+         rules:\n\
+         \x20 - match: {host: git.example.invalid, owner: owner, name: service}\n\
+         \x20   visibility: private\n\
+         default:\n\
+         \x20 publication: change-open\n\
+         \x20 approvals: none\n",
+    )
+    .expect("the rules file is written");
     world.script("service.work", "the worker wrote this\n");
     let run = settle(&world, "residual", vec![lifecycle("service", &[])]);
 
@@ -2447,6 +2462,22 @@ fn a_cancelled_run_reads_no_merge_path_once_its_push_has_landed() {
     let go = world.fakes.join("push.go");
     let held = held_merge_path(&world, &go);
     let repo = world.repository("change-auto", &held.argv());
+    // The service's visibility is declared, so the publication's write boundary
+    // takes the rule's word and asks the host nothing: the one read left to
+    // count is the closeout's.
+    std::fs::write(
+        world.onevcs_home().join("rules.yml"),
+        "version: 4\n\
+         rules:\n\
+         \x20 - match: {host: github.com, owner: owner, name: service}\n\
+         \x20   publication: change-auto\n\
+         \x20   approvals: none\n\
+         \x20   visibility: private\n\
+         default:\n\
+         \x20 publication: change-auto\n\
+         \x20 approvals: none\n",
+    )
+    .expect("the rules file is written");
     world.script("service.work", "the worker wrote this\n");
     // The host never comes back, so every read this loop is allowed would fail.
     world.script("gh.outage", "");
@@ -3008,6 +3039,20 @@ fn work_that_reached_the_origin_holds_its_dependents_until_the_verdict_is_decida
         // And a second apart, which is this run's asking interval afterwards.
         .with_env("ONEPIPELINE_MERGE_PATH_BACKOFF_SECONDS", "1");
     let repo = world.repository("change-auto", &[]);
+    // The service's visibility is declared, so the publication's write boundary
+    // takes the rule's word and asks the host nothing: the outage below is spent
+    // on the reads it is scripted for, not on a visibility probe.
+    std::fs::write(
+        world.onevcs_home().join("rules.yml"),
+        "version: 4\n\
+         rules:\n\
+         \x20 - match: {host: github.com, owner: owner, name: service}\n\
+         \x20   visibility: private\n\
+         default:\n\
+         \x20 publication: change-auto\n\
+         \x20 approvals: none\n",
+    )
+    .expect("the rules file is written");
     world.script("publish.work", "the worker wrote this\n");
     world.script("announce.work", "and this announces it\n");
     // The host is out for exactly one call, which is the read behind the push
@@ -3138,6 +3183,20 @@ fn a_verdict_that_never_says_landed_leaves_the_dependents_held_and_settles() {
         .with_env("ONEPIPELINE_MERGE_PATH_READS", "1")
         .with_env("ONEPIPELINE_MERGE_PATH_BACKOFF_SECONDS", "1");
     world.repository("change-auto", &[]);
+    // The service's visibility is declared, so the publication's write boundary
+    // takes the rule's word and asks the host nothing: the outage below is spent
+    // on the reads it is scripted for, not on a visibility probe.
+    std::fs::write(
+        world.onevcs_home().join("rules.yml"),
+        "version: 4\n\
+         rules:\n\
+         \x20 - match: {host: github.com, owner: owner, name: service}\n\
+         \x20   visibility: private\n\
+         default:\n\
+         \x20 publication: change-auto\n\
+         \x20 approvals: none\n",
+    )
+    .expect("the rules file is written");
     world.script("publish.work", "the worker wrote this\n");
     world.script("announce.work", "and this announces it\n");
     // Out for one call, which is the read behind this node's push. Nothing lands
@@ -8496,6 +8555,25 @@ fn a_pooled_identity_holds_the_second_node_until_the_first_hands_its_slot_back()
     let other = world.extra_repository("other");
     let unread = world.extra_repository("unread");
     pool_one_slot_no_overflow(&world);
+    // Each repository's visibility is declared, so a publication's write boundary
+    // takes the rule's word rather than probing the fake host, which answers no
+    // visibility: an unanswered probe screens the write, and the `unread` node's
+    // commit message names its own repository, a term of a private one.
+    std::fs::write(
+        world.onevcs_home().join("rules.yml"),
+        "version: 4\n\
+         rules:\n\
+         \x20 - match: {host: github.com, owner: owner, name: service}\n\
+         \x20   visibility: private\n\
+         \x20 - match: {host: github.com, owner: owner, name: other}\n\
+         \x20   visibility: private\n\
+         \x20 - match: {host: github.com, owner: owner, name: unread}\n\
+         \x20   visibility: private\n\
+         default:\n\
+         \x20 publication: local-direct\n\
+         \x20 approvals: none\n",
+    )
+    .expect("the rules file is written");
     // The identity directory exists once a session has been placed under it, so
     // one is opened and closed in this process to find it — and then a file is
     // put where the survey expects a directory.

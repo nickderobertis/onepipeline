@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "files": [
+    "Cargo.toml",
+    "Cargo.lock",
+    "rust-toolchain.toml",
+    ".cargo/config.toml",
+    ".config/nextest.toml",
+    "nx.json",
+    "package.json",
+    "package-lock.json",
+    "justfile",
+    "clippy.toml",
+    "rustfmt.toml"
+  ],
+  "directories": [
+    "src",
+    "crates",
+    "schemas",
+    "tests/golden",
+    "tests/recorded/registry",
+    "tests/recorded/run-root/onemessagebus-repair-2",
+    "tests/stop_verdict"
+  ],
+  "prefixes": [
+    {
+      "directory": "scripts",
+      "prefix": "stop-guard-unpublished-"
+    }
+  ]
+}

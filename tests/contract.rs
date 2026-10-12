@@ -9045,9 +9045,10 @@ fn the_contract_names_every_post_launch_verb_the_sdk_publishes_and_no_other() {
     use onepipeline::channel::SurfaceKind;
     use onepipeline::filter::EventFilter;
     use onepipeline::verbs::{
-        Adopt, Adopted, ChannelQueue, Goals, Grouping, Host, Monitored, Next, Receipt, Results,
-        Retained, Shutdown, ShutdownRequest, Status, StopRequest, Stopped, Surfaced, Transcript,
-        Unwatched, WatchFrame, WatchLines, WatchOutcome, WatchRequest,
+        AcknowledgeRequest, Adopt, Adopted, ChannelQueue, Goals, Grouping, Host, Monitored, Next,
+        Receipt, Results, Retained, Shutdown, ShutdownRequest, Status, StopRequest, Stopped,
+        Surfaced, Transcript, Unpublished, UnpublishedAcknowledged, UnpublishedRequest, Unwatched,
+        WatchFrame, WatchLines, WatchOutcome, WatchRequest,
     };
     use onepipeline::views::{DriverLiveness, Projects};
     use onepipeline::Result;
@@ -9084,6 +9085,11 @@ fn the_contract_names_every_post_launch_verb_the_sdk_publishes_and_no_other() {
     let _: fn(&WatchFrame<'_>) -> Result<WatchLines> = verbs::render_watch_frame;
     let _: fn(&Path, &str) -> Result<Unwatched> = verbs::unwatched;
     let _: fn(&Unwatched) -> String = verbs::render_unwatched;
+    let _: fn(&UnpublishedRequest) -> Result<Unpublished> = verbs::unpublished;
+    let _: fn(&Unpublished) -> String = verbs::render_unpublished;
+    let _: fn(&AcknowledgeRequest, Option<PathBuf>) -> Result<UnpublishedAcknowledged> =
+        verbs::acknowledge_unpublished;
+    let _: fn(&UnpublishedAcknowledged) -> String = verbs::render_unpublished_acknowledged;
     let _: fn(&RunPaths, Option<&Correlation>, &str) -> Result<Receipt> = verbs::reply;
     let _: fn(&Receipt) -> Result<String> = verbs::render_receipt;
     let _: fn(&RunPaths, &str) -> Result<Receipt> = verbs::attest;
