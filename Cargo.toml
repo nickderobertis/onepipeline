@@ -660,6 +660,14 @@ resolver = "2"
 # admits no 0.45.x; `onevcs-testing` 0.13.7 requires exactly `=0.45.0`, so the
 # pair moves as one.
 #
+# `onevcs` 0.46.0 is the floor because it carries `review_comments` — a change
+# request's review threads, each with the line it sits on and whether it is
+# outdated — which is how `tests/e2e/rework.rs` holds that a restack leaves an
+# open review thread on its line. A **requirement**, because `^0.45` admits no
+# 0.46.x; `onevcs-testing` 0.14.0 requires exactly `=0.46.0`, so the pair moves
+# as one. 0.47.0 is not taken here: it changes the publication request and
+# outcome that node `op-readjust` adopts.
+#
 # `oneagentgraph` 0.5.4 is the floor because it relays a turn's `message` and
 # `reasoning` items as `turn-activity` under their own kind — the agent's words,
 # with no tool name — which `src/views.rs` and `src/projection.rs` render as what
@@ -703,7 +711,7 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 oneagentgraph = "0.5.6"
-onevcs = "0.45.0"
+onevcs = "0.46.0"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is
@@ -913,7 +921,7 @@ oneharness-core = "0.24.1"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.13.7"
+onevcs-testing = "0.14.0"
 # The store, linked: `src/taskgraph.rs` says how the engine calls it. `-plugin-api` is
 # named for the values the store answers with, and `-local-md` for the plugin
 # `crates/testfakes` hosts in process.

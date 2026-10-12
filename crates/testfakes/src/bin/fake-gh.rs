@@ -115,6 +115,7 @@ fn main() -> ExitCode {
         args.get(1).map(String::as_str),
     ) {
         (Some("api"), Some("user")) => user(&args),
+        (Some("api"), Some("graphql")) => review_read(&args, &dir),
         (Some("api"), Some(path)) if path.starts_with("repos/") && path.split('/').count() == 3 => {
             repository(&args, &dir, path)
         }
@@ -1380,4 +1381,264 @@ fn merge(args: &[String], dir: &Path) -> ExitCode {
 /// states rather than among them, which are one file per change request opened.
 fn merged_at(dir: &Path, id: &str) -> PathBuf {
     dir.join("gh-merged-at").join(fake::segment(id))
+}
+
+/// One review thread a journey left on a change request, as `gh.review-threads.<N>`
+/// holds it, one JSON object a line: the line of `path` it was left on, and the two
+/// commits the change request's diff was between when it was — its base's tip and
+/// its head's.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Seeded {
+    path: String,
+    line: u32,
+    base: String,
+    head: String,
+    body: String,
+}
+
+/// When every comment this host reports was written. One moment, because nothing a
+/// journey asks of a read here turns on when.
+const WRITTEN_AT: &str = "2026-01-01T00:00:00Z";
+
+/// `gh api graphql -f query=… -f owner=O -f name=N -F number=… …`
+///
+/// The one query `onevcs`'s review read makes: every review thread, conversation
+/// comment and review of a change request, a page at a time. This host answers it
+/// in one page, so a cursor it is handed is one it never issued and is refused, as
+/// is any query that is not that read. The threads are the ones a journey seeded,
+/// and where each one sits is computed the way GitHub decides it: a thread is
+/// **outdated** once the diff hunk it was left in is no longer the hunk the change
+/// request shows at that line, and an outdated thread is on no line.
+fn review_read(args: &[String], dir: &Path) -> ExitCode {
+    let mut fields = std::collections::BTreeMap::new();
+    for pair in args[2..].chunks(2) {
+        let [kind, field] = pair else {
+            return fake::refuse(&format!("gh api graphql was given {pair:?} with no field"));
+        };
+        let Some((key, value)) = field.split_once('=') else {
+            return fake::refuse(&format!(
+                "gh api graphql was given {field:?}, not key=value"
+            ));
+        };
+        let typed = matches!(
+            key,
+            "number" | "threads" | "conversation" | "reviews" | "inThread"
+        );
+        let expected = if typed { "-F" } else { "-f" };
+        if kind != expected {
+            return fake::refuse(&format!(
+                "gh api graphql was given {key} with {kind}; onevcs passes it with {expected}"
+            ));
+        }
+        if fields.insert(key.to_owned(), value.to_owned()).is_some() {
+            return fake::refuse(&format!("gh api graphql was given {key} twice"));
+        }
+    }
+    let field = |key: &str| fields.get(key).map(String::as_str);
+    let required = [
+        "query",
+        "owner",
+        "name",
+        "number",
+        "threads",
+        "conversation",
+        "reviews",
+        "inThread",
+        "thread",
+    ];
+    if let Some(missing) = required.iter().find(|key| field(key).is_none()) {
+        return fake::refuse(&format!("gh api graphql requires {missing}"));
+    }
+    if let Some(unknown) = fields.keys().find(|key| !required.contains(&key.as_str())) {
+        return fake::refuse(&format!(
+            "gh api graphql was given {unknown}, a cursor or field this host never issued"
+        ));
+    }
+    let query = field("query").unwrap_or_default();
+    if !(query.starts_with("query(")
+        && query.contains("reviewThreads")
+        && query.contains("isOutdated"))
+    {
+        return fake::refuse("gh api graphql answers onevcs's review read and nothing else");
+    }
+    if field("inThread") != Some("false") {
+        return fake::refuse(
+            "gh api graphql was asked for a thread's next page this host never issued",
+        );
+    }
+    let wanted = |key: &str| match field(key) {
+        Some("true") => Ok(true),
+        Some("false") => Ok(false),
+        other => Err(fake::refuse(&format!(
+            "gh api graphql was given {key}={other:?}, not a boolean"
+        ))),
+    };
+    let (threads, conversation, reviews) =
+        match (wanted("threads"), wanted("conversation"), wanted("reviews")) {
+            (Ok(threads), Ok(conversation), Ok(reviews)) => (threads, conversation, reviews),
+            (Err(refusal), _, _) | (_, Err(refusal), _) | (_, _, Err(refusal)) => return refusal,
+        };
+    let repo = format!(
+        "{}/{}",
+        field("owner").unwrap_or_default(),
+        field("name").unwrap_or_default()
+    );
+    let Some(opened) = field("number")
+        .and_then(|number| number.parse::<NonZeroU64>().ok())
+        .and_then(|number| {
+            opened_changes(dir)
+                .into_iter()
+                .find(|opened| opened.number == number && opened.repo == repo)
+        })
+    else {
+        // What GitHub answers for a pull request it does not hold: data, and none.
+        println!(
+            "{}",
+            serde_json::json!({"data": {"rateLimit": {"cost": 1}, "repository": {"pullRequest": null}}})
+        );
+        return ExitCode::SUCCESS;
+    };
+    let url = url_of(&opened);
+    let page = |nodes: Vec<serde_json::Value>| serde_json::json!({"pageInfo": {"hasNextPage": false, "endCursor": null}, "nodes": nodes});
+    let mut pull = serde_json::json!({ "url": url });
+    if threads {
+        pull["reviewThreads"] = page(seeded_threads(dir, &opened, &url));
+    }
+    if conversation {
+        pull["comments"] = page(Vec::new());
+    }
+    if reviews {
+        pull["reviews"] = page(Vec::new());
+    }
+    println!(
+        "{}",
+        serde_json::json!({"data": {"rateLimit": {"cost": 1}, "repository": {"pullRequest": pull}}})
+    );
+    ExitCode::SUCCESS
+}
+
+/// Every thread a journey seeded on `opened`, as GitHub reports one now.
+fn seeded_threads(dir: &Path, opened: &Opened, url: &str) -> Vec<serde_json::Value> {
+    let Some(script) = fake::node_script(dir, "gh", &format!("review-threads.{}", opened.number))
+    else {
+        return Vec::new();
+    };
+    let (Some(origin), Some(base), Some(head)) = (
+        origin_of(dir, &opened.repo),
+        Branch::parse(&opened.base),
+        Branch::parse(&opened.head),
+    ) else {
+        fake::fail(&format!(
+            "change request {} has threads seeded on it and no origin this host can read",
+            opened.number
+        ));
+    };
+    script
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .enumerate()
+        .map(|(index, line)| {
+            let seeded: Seeded = serde_json::from_str(line).unwrap_or_else(|error| {
+                fake::fail(&format!(
+                    "gh.review-threads.{} holds {line:?}: {error}",
+                    opened.number
+                ))
+            });
+            let commit = |sha: &str| {
+                Sha::parse(sha).unwrap_or_else(|| {
+                    fake::fail(&format!(
+                        "a seeded thread names {sha:?}, which is not an object id"
+                    ))
+                })
+            };
+            let left_in = hunk_at(
+                &origin,
+                commit(&seeded.base).as_str(),
+                commit(&seeded.head).as_str(),
+                &seeded.path,
+                seeded.line,
+            )
+            .unwrap_or_else(|| {
+                fake::fail(&format!(
+                    "a thread was seeded on {}:{}, which the change request's diff did not show",
+                    seeded.path, seeded.line
+                ))
+            });
+            let shown = hunk_at(
+                &origin,
+                &base.as_ref_name(),
+                &head.as_ref_name(),
+                &seeded.path,
+                seeded.line,
+            );
+            let outdated = shown.as_deref() != Some(left_in.as_str());
+            serde_json::json!({
+                "id": format!("PRRT_{}_{index}", opened.number),
+                "isResolved": false,
+                "isOutdated": outdated,
+                "path": seeded.path,
+                "line": if outdated { None } else { Some(seeded.line) },
+                "comments": {
+                    "pageInfo": {"hasNextPage": false, "endCursor": null},
+                    "nodes": [{
+                        "id": format!("PRRC_{}_{index}", opened.number),
+                        "databaseId": index + 1,
+                        "author": {"login": WHO},
+                        "body": seeded.body,
+                        "url": format!("{url}#discussion_r{}", index + 1),
+                        "createdAt": WRITTEN_AT,
+                        "updatedAt": WRITTEN_AT,
+                        "lastEditedAt": null,
+                        "replyTo": null,
+                    }],
+                },
+            })
+        })
+        .collect()
+}
+
+/// The hunk of the diff from `base` to `head` — from their merge base, as a change
+/// request's diff is — that shows `line` of `path` on its new side, or nothing when
+/// no hunk does.
+fn hunk_at(origin: &Path, base: &str, head: &str, path: &str, line: u32) -> Option<String> {
+    let answer = std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(origin)
+        .args(["diff", "--no-color", "--no-ext-diff"])
+        .arg(format!("{base}...{head}"))
+        .args(["--", path])
+        .output()
+        .unwrap_or_else(|error| fake::fail(&format!("git diff could not run: {error}")));
+    if !answer.status.success() {
+        fake::fail(&format!(
+            "git diff {base}...{head} failed: {}",
+            String::from_utf8_lossy(&answer.stderr)
+        ));
+    }
+    let diff = String::from_utf8_lossy(&answer.stdout).into_owned();
+    let mut hunks: Vec<String> = Vec::new();
+    for text in diff.lines() {
+        if text.starts_with("@@ ") {
+            hunks.push(String::new());
+        }
+        if let Some(hunk) = hunks.last_mut() {
+            hunk.push_str(text);
+            hunk.push('\n');
+        }
+    }
+    hunks.into_iter().find(|hunk| {
+        // `@@ -a,b +c,d @@`: the new side starts at `c` and spans `d` lines, one
+        // where `d` is left out.
+        let new_side = hunk
+            .split_whitespace()
+            .nth(2)
+            .and_then(|range| range.strip_prefix('+'));
+        let (start, span) = match new_side.map(|range| range.split_once(',')) {
+            Some(Some((start, span))) => (start.parse::<u32>().ok(), span.parse::<u32>().ok()),
+            Some(None) => (new_side.and_then(|start| start.parse().ok()), Some(1)),
+            None => (None, None),
+        };
+        matches!((start, span), (Some(start), Some(span)) if start <= line && line < start + span)
+    })
 }

@@ -18,7 +18,7 @@
 // request's state, title and description can be read offline. `harness.rs` carries the same
 // suppression and the full rationale.
 
-use crate::harness::{git, lifecycle, plan_of, World};
+use crate::harness::{double, git, lifecycle, plan_of, World};
 use crate::stacked_drafts::{
     change_from, changed_against, held_as_draft, service, settled, tasks_of, team_world, text,
 };
@@ -292,24 +292,45 @@ fn non_merges(world: &World, from: &str, to: &str) -> Vec<String> {
     .collect()
 }
 
-/// The hunk a review thread on `path`'s first line sits in, in the change request
-/// from `head` into `base`: GitHub marks a thread outdated when the diff hunk it was
-/// left on changes, so a thread is still on its line exactly when this is unchanged.
-fn thread_hunk(world: &World, base: &str, head: &str, path: &str) -> String {
-    let diff = git(
-        world,
-        &service(world).origin,
-        &[
-            "diff",
-            "--no-color",
-            &format!("{base}...{head}"),
-            "--",
-            path,
-        ],
+/// Leave a review thread on `line` of `path` in `change` — a change request as the
+/// host recorded it — on the diff it shows now: its base's tip and its head's.
+fn seed_thread(world: &World, change: &Value, path: &str, line: u32) {
+    let thread = json!({
+        "path": path,
+        "line": line,
+        "base": head_of(world, text(&change["base"], "a base")),
+        "head": head_of(world, text(&change["head"], "a head")),
+        "body": "say what this line is for",
+    });
+    world.script(
+        &format!("gh.review-threads.{}", change["number"]),
+        &format!("{thread}\n"),
     );
-    diff.split_once("\n@@")
-        .map(|(_, hunk)| format!("@@{hunk}"))
-        .unwrap_or_else(|| panic!("{path} has no hunk in {base}...{head}:\n{diff}"))
+}
+
+/// Every review thread comment on `change`, as `onevcs`'s own review read answers
+/// it through the host: where each thread sits, and whether it is outdated.
+fn review_threads(world: &World, change: &Value) -> Vec<Value> {
+    let url = format!(
+        "https://github.com/{}/pull/{}",
+        text(&change["repo"], "a repository"),
+        change["number"]
+    );
+    let read = world
+        .cmd_on(&double("review-read"), &[&url])
+        .output()
+        .expect("review-read runs");
+    assert!(
+        read.status.success(),
+        "the review read of {url} failed: {}",
+        String::from_utf8_lossy(&read.stderr)
+    );
+    let comments: Vec<Value> =
+        serde_json::from_slice(&read.stdout).expect("the review read answers JSON");
+    comments
+        .into_iter()
+        .filter(|comment| comment["kind"]["type"] == "review-thread")
+        .collect()
 }
 
 /// The position of the first event of `kind` labelled `node` in the run's journal.
@@ -371,7 +392,18 @@ fn a_rework_restacks_every_draft_stacked_on_it_by_merges_alone() {
         .map(|id| (id, change_from(&world, &branch(id))["base"].clone()))
         .collect();
     // A review thread on `b`'s first line, as its change request shows it now.
-    let thread = thread_hunk(&world, &branch("a"), &branch("b"), "b.md");
+    seed_thread(&world, &change_from(&world, &branch("b")), "b.md", 1);
+    let on_line = |threads: Vec<Value>| {
+        assert_eq!(threads.len(), 1, "{threads:#?}");
+        let kind = &threads[0]["kind"];
+        assert_eq!(kind["path"], "b.md", "{kind}");
+        assert_eq!(kind["line"], 1, "the thread on b is on no line: {kind}");
+        assert_eq!(
+            kind["outdated"], false,
+            "the thread on b was outdated: {kind}"
+        );
+    };
+    on_line(review_threads(&world, &change_from(&world, &branch("b"))));
     // Every push the origin takes from here on has to fast-forward.
     git(
         &world,
@@ -509,12 +541,9 @@ fn a_rework_restacks_every_draft_stacked_on_it_by_merges_alone() {
             "{push}"
         );
     }
-    // The review thread on `b` is still on its line, in an unchanged hunk.
-    assert_eq!(
-        thread_hunk(&world, &branch("a"), &branch("b"), "b.md"),
-        thread,
-        "the thread on b was outdated"
-    );
+    // The review thread on `b` is still on its line and not outdated, as the host
+    // reports it through `onevcs`'s review read.
+    on_line(review_threads(&world, &change_from(&world, &branch("b"))));
 }
 
 /// A rework that conflicts with the draft above it: `b`'s own worker is dispatched
