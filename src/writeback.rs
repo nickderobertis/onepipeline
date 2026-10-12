@@ -292,6 +292,7 @@ struct Snapshot {
     claim: Claim,
     /// Each node whose dispatch has a session open and has not settled, with the
     /// `onepipeline.dispatch` its item carries: the branch, the base and when it opened.
+    // llmlint: ignore[invalid_states_unrepresentable] a node id is the plain `String` every neighbouring map of this struct keys by — `settlements`, `stated_landings`, `superseded` — taken from `RunState::sessions_in_flight`, whose nodes the graph validated; the value is the typed half, the `StoredDispatch` boundary type a launch reads back.
     dispatches: BTreeMap<String, crate::continuation::StoredDispatch>,
     /// What this projection does with the project's `onepipeline.driver` claim.
     driver: DriverWrite,
@@ -1133,7 +1134,14 @@ fn dispatches(
     if open.is_empty() {
         return BTreeMap::new();
     }
-    let mut opened: BTreeMap<String, (String, String)> = BTreeMap::new();
+    /// What a node's `session-opened` said: the base it opened against, which has passed
+    /// `vcs::usable`, and the record's own timestamp — named apart so neither is taken for
+    /// the other, and written onto the store as `StoredDispatch`'s strings.
+    struct Opened {
+        base: String,
+        at: String,
+    }
+    let mut opened: BTreeMap<String, Opened> = BTreeMap::new();
     for event in crate::journal::read(&paths.journal()) {
         if event.source != Source::Vcs || !crate::vcs::is_session_opened(&event.kind) {
             continue;
@@ -1152,16 +1160,22 @@ fn dispatches(
             .and_then(Value::as_str)
             .and_then(crate::vcs::usable)
         {
-            opened.insert(node, (base, event.ts.clone()));
+            opened.insert(
+                node,
+                Opened {
+                    base,
+                    at: event.ts.clone(),
+                },
+            );
         }
     }
     open.into_iter()
         .filter_map(|(node, session)| {
-            let (base, opened_at) = opened.remove(&node)?;
+            let Opened { base, at } = opened.remove(&node)?;
             let dispatch = crate::continuation::StoredDispatch {
                 branch: session.branch().as_str().to_owned(),
                 base,
-                opened_at,
+                opened_at: at,
             };
             Some((node, dispatch))
         })
