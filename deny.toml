@@ -9,7 +9,9 @@ all-features = true
 
 [advisories]
 yanked = "deny"
-ignore = []
+ignore = [
+    { id = "RUSTSEC-2024-0449", reason = "unmaintained, not a vulnerability; reached only through serde_yaml_ng in onejudge and onevcs, no safe upgrade exists; remove when both siblings move off it" },
+]
 
 [licenses]
 # Permissive licenses compatible with this MIT-licensed crate. Adding a
