@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.69.0](https://github.com/nickderobertis/onepipeline/compare/v0.68.1...v0.69.0) - 2026-10-12
+
+### Added
+
+- *(start)* [**breaking**] continue a project from its store's settlements and claim it for one driver ([#862](https://github.com/nickderobertis/onepipeline/pull/862))
+- *(host)* [**breaking**] answer from live runs alone, and print the reading as JSON ([#861](https://github.com/nickderobertis/onepipeline/pull/861))
+
+### Performance
+
+- *(build)* drop dev and test debuginfo; ignore RUSTSEC-2024-0449 until the YAML crate is replaced ([#878](https://github.com/nickderobertis/onepipeline/pull/878))
+
 ## [0.68.1](https://github.com/nickderobertis/onepipeline/compare/v0.68.0...v0.68.1) - 2026-10-12
 
 ### Fixed
