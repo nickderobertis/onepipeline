@@ -303,6 +303,7 @@ mod tests {
                 key: key.map(str::to_owned),
                 title: "Build it".into(),
                 source: None,
+                repositories: Vec::new(),
             }),
             ..Node::default()
         }

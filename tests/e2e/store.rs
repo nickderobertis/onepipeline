@@ -3331,19 +3331,35 @@ fn a_project_reads_as_the_plan_document_of_the_same_content() {
             Some("audit") => "001-audit",
             other => panic!("an unexpected node {other:?}"),
         };
-        assert_eq!(
-            record,
-            json!({
-                "id": format!("mapping-board/{file}"),
-                "title": node["title"].as_str().unwrap_or_default(),
-            }),
-            "{node}"
-        );
+        let mut expected = json!({
+            "id": format!("mapping-board/{file}"),
+            "title": node["title"].as_str().unwrap_or_default(),
+        });
+        // Every repository a task names beyond its `repo` is on its record, where the
+        // publication boundary reads it: the work lands in the first alone.
+        if file == "000-publish" {
+            expected["repositories"] =
+                json!(["github.com/owner/service", "github.com/owner/ignored"]);
+        }
+        assert_eq!(record, expected, "{node}");
     }
     assert_eq!(
         by_id(&read),
         by_id(&document),
         "the project read as a different plan than the document of the same content"
+    );
+    // And what the run projected back onto the task — the lineage it names — leaves every
+    // repository the task named where the store keeps them.
+    assert!(
+        world.store_tasks(&project).iter().any(|task| {
+            let task = task.to_string();
+            task.contains("\"onepipeline.id\":\"publish\"")
+                && task.contains("\"onepipeline.node\":\"publish\"")
+                && task.contains("github.com/owner/service")
+                && task.contains("github.com/owner/ignored")
+        }),
+        "the write-back lost a repository the task named: {:?}",
+        world.store_tasks(&project)
     );
 }
 

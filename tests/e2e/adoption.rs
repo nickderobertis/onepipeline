@@ -3060,13 +3060,19 @@ fn a_published_node_readied_in_the_pass_its_dependency_is_found_landed_is_held_f
         .with_env("ONEPIPELINE_MERGE_PATH_BACKOFF_SECONDS", "1");
     world.write_graphs();
     let (engine_repo, _consumer) = two_repositories(&world);
+    // Both repositories declared private, as the operator states it, so no host read
+    // asks a repository's visibility: the outage below counts the reads this journey is
+    // about.
     std::fs::write(
         world.onevcs_home().join("rules.yml"),
-        "version: 3\n\
+        "version: 4\n\
          rules:\n\
          \x20 - match: {host: github.com, owner: owner, name: engine}\n\
          \x20   publication: change-auto\n\
          \x20   approvals: none\n\
+         \x20   visibility: private\n\
+         \x20 - match: {owner: owner}\n\
+         \x20   visibility: private\n\
          default:\n\
          \x20 publication: local-direct\n\
          \x20 approvals: none\n",
@@ -6380,8 +6386,8 @@ fn consumer_wait_count(world: &World, run: &str) -> usize {
 /// record in the channel's surfaces log, rewritten in place at the same length,
 /// which is the record the interval is counted from. Called while the wait is
 /// unread and nothing else is being queued, which is the state an unchanged
-/// hold holds the channel in.
-fn backdate_newest_wait(world: &World, run: &str, seconds: u64) {
+/// hold holds the channel in. Returns the backdated stamp, in epoch milliseconds.
+fn backdate_newest_wait(world: &World, run: &str, seconds: u64) -> u64 {
     let log = world.run_file(run, "channel/surfaces.jsonl");
     let text = std::fs::read_to_string(&log).expect("the surfaces log reads");
     let lines: Vec<&str> = text.lines().collect();
@@ -6417,6 +6423,7 @@ fn backdate_newest_wait(world: &World, run: &str, seconds: u64) {
     let whole = log.with_extension("backdated");
     std::fs::write(&whole, rewritten).expect("the backdated log is written");
     std::fs::rename(&whole, &log).expect("the backdated log replaces the log");
+    backdated
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 
@@ -6530,24 +6537,34 @@ fn an_unchanged_release_wait_is_queued_again_only_once_read_and_a_changed_one_at
     // at the ceiling, a wait backdated five seconds short of the interval is
     // queued again after those five seconds and not before — which is the
     // interval, measured. At the ceiling, doubling would have asked 16384.
+    // "Not before" is read off the stamp the run records the next wait at,
+    // rather than off a wall-clock window after the read: the read is a
+    // subprocess, and on a slow runner it alone can outlast the five seconds.
     let mut every: u64 = 8;
     let mut measured = Vec::new();
     for _ in 0..13 {
         let before = consumer_wait_count(&world, &run);
         let precise = every >= 8_192;
-        backdate_newest_wait(&world, &run, if precise { every - 5 } else { every + 60 });
+        let backdated =
+            backdate_newest_wait(&world, &run, if precise { every - 5 } else { every + 60 });
         read_waits(&world, &run);
-        if precise {
-            std::thread::sleep(std::time::Duration::from_secs(2));
-            assert_eq!(
-                consumer_wait_count(&world, &run),
-                before,
-                "a wait was queued again before its {every}-second interval had passed"
-            );
-        }
+        let mut next = 0;
         world.until(
             &format!("the wait after a {every}-second interval"),
-            |world| consumer_wait_count(world, &run) > before,
+            |world| {
+                consumer_waits(world, &run).is_some_and(|waits| match waits.get(before) {
+                    Some(&(stamp, _)) => {
+                        next = stamp;
+                        true
+                    }
+                    None => false,
+                })
+            },
+        );
+        assert!(
+            next.saturating_sub(backdated) >= every * 1_000,
+            "a wait was queued again {}ms after the one before it, inside its {every}-second interval",
+            next.saturating_sub(backdated)
         );
         measured.push(every);
         every = (every * 2).min(CEILING_SECONDS);

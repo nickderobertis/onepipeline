@@ -3932,6 +3932,11 @@ fn validate_envelope(
             .and_then(|()| channel.allows_completion(author.clone(), None))
             .and_then(|()| channel.allows(author.clone(), command))
             .and_then(|()| {
+                // The publication boundary, for a command this loop takes up — queued, or
+                // claimed by a driver that died — exactly as for one submitted directly.
+                crate::boundary::guard(&staged_state, &serde_json::json!({ "commands": [command] }))
+            })
+            .and_then(|()| {
                 validate_command(
                     paths,
                     &staged_state,
@@ -5478,6 +5483,7 @@ fn start_ready(
         .collect();
 
     let mut settled_here = false;
+    let mut boundary: Option<(crate::plan::Plan, crate::boundary::Resolved)> = None;
     for mut node in actionable {
         if node.kind != NodeKind::Human && in_flight.len() >= concurrency {
             break;
@@ -5529,6 +5535,39 @@ fn start_ready(
                 }
             }
         }
+
+        // What the publication boundary tells and gives this dispatch: the run's term
+        // scope always, and in a mixed plan its side of the boundary, a neutral branch
+        // name and, for an export's consumer, the export its session starts from. Read
+        // once a pass and only on a pass that starts something: the graph is resolved
+        // again only where its shape changed since the last dispatch asked.
+        let (now, resolved) = boundary.get_or_insert_with(|| {
+            let now = crate::boundary::plan_now(state);
+            let resolved = crate::boundary::of_run(&now);
+            (now, resolved)
+        });
+        let dispatching = match crate::boundary::dispatching(
+            resolved,
+            now,
+            &node,
+            &state.branches,
+            &state.heads,
+            &state.superseded,
+        ) {
+            Ok(dispatching) => dispatching,
+            Err(detail) => {
+                settle(
+                    paths,
+                    journal,
+                    &Settlement {
+                        detail: Some(detail),
+                        ..failed(&node.id, INFRASTRUCTURE_FAILURE)
+                    },
+                )?;
+                settled_here = true;
+                continue;
+            }
+        };
 
         // A landing node depending on unlanded work of its own repository is
         // placed on that work: one parent's branch, or the stack base merging
@@ -5699,6 +5738,7 @@ fn start_ready(
             tx.clone(),
             resume,
             notes_in_flight,
+            dispatching,
         )?;
         let now = Instant::now();
         in_flight.insert(
@@ -5837,6 +5877,7 @@ fn spawn(
     tx: Sender<Message>,
     resume: Option<Box<crate::lifecycle::Continuation>>,
     notes_in_flight: &DeliveriesInFlight,
+    boundary: crate::boundary::Dispatching,
 ) -> Result<()> {
     // The labels a `node_label` rule selects on. An executor is chosen once per
     // node, before its steps run, so a node's own labels are what exists here.
@@ -5875,6 +5916,7 @@ fn spawn(
             .as_ref()
             .and_then(|_| crate::branchname::Naming::of_run(&paths, launch)),
         notes_in_flight: notes_in_flight.clone(),
+        boundary,
     };
     std::thread::Builder::new()
         .name(format!("dispatch-{}", node.id))
@@ -5901,6 +5943,7 @@ fn spawn(
                     &launched.node_graph,
                     &node,
                     &references,
+                    launched.boundary.section(),
                     &cancel,
                     &tx,
                     &ended,
@@ -5945,6 +5988,7 @@ fn execute_direct(
     default_graph: &str,
     node: &Node,
     references: &[crate::plan::CrossRepoReference],
+    boundary: Option<&str>,
     cancel: &CancellationToken,
     tx: &Sender<Message>,
     ended: &EndedDispatches,
@@ -5975,7 +6019,7 @@ fn execute_direct(
     }; // llmlint: ignore-end[changed_behavior_has_e2e]
     let request = |attempt| DispatchRequest {
         graph: graph.clone(),
-        task: node.rendered_task_with(references),
+        task: crate::boundary::with_section(node.rendered_task_with(references), boundary),
         labels: dispatch_labels(run, &node.id, None, node.persona.as_deref()),
         controls,
         workspace: WorkspaceSpec::Path(project_dir()),
@@ -10324,6 +10368,7 @@ mod tests {
             "graphs/node-scope.yaml",
             &node,
             &[],
+            None,
             &CancellationToken::new(),
             &tx,
             &EndedDispatches::none(),
@@ -10347,6 +10392,7 @@ mod tests {
             name: Some("demo".into()),
             concurrency: 4,
             tasks: nodes,
+            export_edges: Vec::new(),
         };
         RunState {
             graph: Graph::from_plan(&plan),
