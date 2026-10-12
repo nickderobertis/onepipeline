@@ -1588,6 +1588,11 @@ fn the_two_halves_run_concurrently() {
     let acknowledgements = acknowledgement_file(&world, MANAGER);
     let empty = r#"{"version":1,"acknowledged":[]}"#.to_owned();
     let timed = |unwatched: bool, unpublished: bool| {
+        // llmlint: ignore-block[tests_mirror_real_usage] what this journey must show is
+        // the guard's wall time with each half made measurably slow, and no interface
+        // the guard reads through can be asked to answer late; each FIFO serves the
+        // record's own unchanged bytes after a delay, so the real guard reads the real
+        // record and only the timing of that one read is staged.
         let writers: Vec<_> = [
             unwatched.then(|| slow_file(&launch, recorded.clone(), DELAY)),
             unpublished.then(|| slow_file(&acknowledgements, empty.clone(), DELAY)),
@@ -1595,6 +1600,7 @@ fn the_two_halves_run_concurrently() {
         .into_iter()
         .flatten()
         .collect();
+        // llmlint: ignore-end[tests_mirror_real_usage]
         let started = std::time::Instant::now();
         // Run directly rather than through `World::run`, whose record of the world
         // afterwards would read the FIFO a second time with nobody left to answer.
