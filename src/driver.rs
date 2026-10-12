@@ -271,8 +271,27 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             }
             Ok(EXIT_SUCCESS)
         }
-        Verb::Host => {
-            print!("{}", verbs::render_host(&verbs::host(&ledger::runs_root())));
+        Verb::Host(args) => {
+            let host = verbs::host(&ledger::runs_root());
+            {
+                let _render = crate::hostphases::phase("render");
+                let document = if args.json {
+                    let reading = serde_json::to_string(&host.reading).map_err(|e| {
+                        Error::Invalid(format!("the host's reading could not be rendered: {e}"))
+                    })?;
+                    format!("{reading}\n")
+                } else {
+                    verbs::render_host(&host)
+                };
+                // A reader that closed the pipe early gets the CLI's error exit, not a panic.
+                let mut out = std::io::stdout();
+                out.write_all(document.as_bytes())
+                    .and_then(|()| out.flush())
+                    .map_err(|e| {
+                        Error::Invalid(format!("`host` could not write to standard output: {e}"))
+                    })?;
+            }
+            crate::hostphases::flush();
             Ok(EXIT_SUCCESS)
         }
         Verb::Monitor(args) => {
@@ -3081,6 +3100,17 @@ fn roots_to_stop(paths: &RunPaths, record: &LaunchRecord) -> Result<Aim> {
                     named_by,
                     pid,
                     "this host will not say when it started",
+                );
+                unproven.push(pid);
+            }
+            #[cfg(target_os = "linux")]
+            (Claim::Inexact, _) => {
+                left_alone(
+                    &paths.run,
+                    named_by,
+                    pid,
+                    "its record's start token is in the older `ps` spelling and no longer reads \
+                     the same",
                 );
                 unproven.push(pid);
             }

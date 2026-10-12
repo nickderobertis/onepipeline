@@ -107,6 +107,13 @@ _ensure-strace:
         just _strace-preflight; \
       fi
 
+# The locked Node packages `host-view-budget` reads — the onebudgetspec SDK and
+# its prebuilt checker — installed from `package-lock.json` when they are absent,
+# so a fresh CI runner and a laptop reach them through the same recipe.
+_ensure-node-modules:
+    @[ -e node_modules/.bin/onebudgetspec ] && [ -e node_modules/@onebudgetspec/sdk/package.json ] \
+      || npm ci --silent --no-audit --no-fund
+
 # Asked ahead of the tiers that hold those journeys, so the missing tool is
 # named up front rather than by a panic inside a journey.
 _strace-preflight:
@@ -556,12 +563,29 @@ _crate-deps-check:
 # Offline: the Linear budget journey runs against a loopback endpoint. `check` reaches this recipe
 # through the crate's `budgets` Nx target, after the tier that writes the stacked-spikes record. Its command
 # builds the e2e binary through `test-e2e`, so warnings are denied here as every gate build denies them.
+# A budget labelled `release-binary` is left to `host-view-budget`: it times an installed
+# release build, which the gate does not make.
 # Measure every budget in budgets.yaml against its threshold.
 budgets:
     @[ -x "{{onebudgetspec-root}}/bin/onebudgetspec" ] || [ -x "{{onebudgetspec-root}}/bin/onebudgetspec.exe" ] \
       || { echo "onebudgetspec {{onebudgetspec-version}} is not installed: run 'just bootstrap' (or 'just _ensure-onebudgetspec'), then re-run" >&2; exit 1; }
-    @RUSTFLAGS="-D warnings" "{{onebudgetspec-root}}/bin/onebudgetspec" check budgets.yaml
+    @RUSTFLAGS="-D warnings" "{{onebudgetspec-root}}/bin/onebudgetspec" check budgets.yaml --exclude-label release-binary
 # llmlint: ignore-end[changed_behavior_has_e2e]
+
+# CI's `install` job runs this on the binary its `cargo install --path .` has just built,
+# which is the binary users run, so the budget adds measuring time and no build: the
+# fixture, one cold read and the timed reads (`scripts/host-view-measure.mjs`), then the
+# check, through the prebuilt checker `npm ci` installs with the SDK. Linux only, where the
+# fixture's live dispatches prove their start tokens. One further, untimed read per
+# scaling size runs under `strace`, so the record says which journals each size opened.
+# `built_by` names the step that built the binary, which the record and report carry
+# as its provenance.
+# Measure `host-view-time` against an installed release binary, and check it.
+host-view-budget binary built_by="":
+    @just _ensure-strace
+    @just _ensure-node-modules
+    @ONEPIPELINE_HOST_VIEW_BUILT_BY="$2" node scripts/host-view-measure.mjs "$1"
+    @node_modules/.bin/onebudgetspec check budgets.yaml --id host-view-time
 
 # Both are outside `check` for the reason `deps-check` is: they read the
 # crates.io index, and the deterministic gate stays offline. The split half of

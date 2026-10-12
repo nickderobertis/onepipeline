@@ -11,14 +11,14 @@ owns the contract**, and `docs/contract.md` was amended to carry each ruling. Th
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22, 33, 35–40, 46–73, 76, 80, 84–88, 92, 93, 95, 98, 111, 113, 114, 115 and 118 are open**, except **52**, which entry 60
+Entries **10–22, 33, 35–40, 46–73, 76, 80, 84–88, 92, 93, 95, 98, 111, 113–115, 117 and 119 are open**, except **52**, which entry 60
 supersedes: that proposal added a second manager-note op beside `context`, and 60
 collapses the two into one, so the shape lives in 60 and 52 keeps only the
 history that produced it. Each open entry states what the code does today and the
 proposal it is waiting on. Most are questions for a *producer* rather than for
 this crate, because `oneagentgraph` and `onevcs` are independent tools that expose
 general integration hooks only and nothing in them may know about this one; the
-rest — 36 to 40, 46 to 73, 80, 84 to 88, 92, 93, 95, 98, 111, 113, 114, 115 and 118 — are for the planner who owns the contract, and
+rest — 36 to 40, 46 to 73, 80, 84 to 88, 92, 93, 95, 98, 111, 113 to 115, 117 and 119 — are for the planner who owns the contract, and
 name the sentence in it they would change. Entry 40 is for both: its plan-schema and event-kind
 halves are the contract owner's, and the two things it could not compile are
 `onevcs`'s. Entry 76 is for `onemessagebus` and for a node of this crate's own. An
@@ -7030,7 +7030,7 @@ the SDK call, and `agents::tests` holds the merge rule and the reader against th
 to the Views line beside `unwatched`, as a verb whose contract is one verdict
 object and exit `0` always.** `--wake-budget` is entry 98's, and so is the
 `warn` it answers for a run whose watch it cannot judge. The three
-`--unpublished` flags are entry 118's.
+`--unpublished` flags are entry 119's.
 
 <!-- llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] a register entry states
 the surface it proposes so the planner who owns `docs/contract.md` can rule on it — that is
@@ -9728,7 +9728,73 @@ real origin with GitHub at `onevcs`'s `ONEVCS_GH` seam:
 unchecked review draft is held by `vcs::tests` and `lifecycle::tests`, since no
 publication this engine makes can produce it.
 
-## 118. Whether a manager session owes a preserved branch was decided by a consumer's Python over a spawned `onevcs` — OPEN
+## 118. `onepipeline host` cost every run a root had ever kept, and printed nothing a script reads — OPEN
+
+**Proposal, for the planner who owns the contract, approved by the plan
+`host-view-speed` (node `op-host-view`), whose task states the reading below and
+the manager's rulings on it: `host` gains `--json`, a version-1 reading, and `Host`
+gains the field that reading is.** The sentences this would amend are the Views
+(CLI) line, which names `host` with no flag, and the post-launch verbs paragraph's
+"`host(root) -> Host` and `render_host`". Proposed, for the first: "`host
+[--json]`"; for the second: "`host(root) -> Host` and `render_host` — `Host {
+survey, reading: HostReading }`, where `reading` is what `host --json` prints as one
+JSON line, at the version `schemas/host-reading.schema.json` states, and what
+`render_host` renders, and `survey.views` is empty from this verb while
+`survey.skipped` names every run root it refused". The contract's wording is
+unchanged until it is ruled on.
+
+**What was wrong.** The view opened every run a root held — its whole journal,
+merge-sorted, the checkpoint's seal over the covered bytes, and the fold — before
+it asked which nodes were running, so its cost grew with ended history rather than
+with live work: minutes on a host keeping about 800 runs, for an answer of five live
+dispatches. And a script could read the answer only by parsing text.
+
+**What this build does.**
+
+- `onepipeline host --json` prints one JSON object on one line and exits as the text
+  form does. Its keys, every one always present: `schema_version`, always 1;
+  `host`; `root`; `root_error`; `free_space`, each with `roots` (each `role` — the
+  runs root or the workspaces — `path` and `measured_at`), `free_bytes`,
+  `total_bytes` and `error`; `dispatches`, in the text form's order, each with
+  `run`, `node`, `launcher`, `age_ms`, `proof` — `held` or `unproven` — and
+  `unproven`; `gone`, each with `run`, `node` and `reason`, for stale registry
+  entries and the dispatches of runs proven ended; and `skipped`, each with `path`
+  and `reason` — the runs root itself is `root_error`, never here.
+  `tests/contract.rs` holds this list to the schema.
+- One type is the reading: `views::HostReading`, with `DispatchRow`, `ProofWord`,
+  `Gone`, `SkippedRoot`, `FreeSpace`, `FreeSpaceRoot`, `FreeSpaceRole` and
+  `HOST_READING_SCHEMA_VERSION` published beside it. The text form renders it, so
+  the two forms cannot disagree; `schemas/host-reading.schema.json` is generated
+  from it, and `tests/contract.rs`'s
+  `the_host_reading_is_the_committed_schema_with_the_version_1_keys` holds the two
+  equal and the keys to the list above.
+- Two public source changes, the plan's ruling and no others: `cli::Command::Host`
+  is `Host(HostArgs)`, carrying `--json`, and `verbs::Host` gains the public
+  `reading` field. `verbs::host(root) -> Host`, `verbs::render_host(&Host) ->
+  String` and `Host.survey.skipped` keep their signatures and meaning;
+  `survey.views` is now empty, as its field documents.
+- The view decides each run from the cheapest record that decides it: a current
+  `summary.json` counting nothing running; the registry entries and the launch
+  record's driver proof; a `checkpoint.json` covering the whole journal for a run
+  proved ended. A cold run is folded once; no journal over 1 GiB is opened in any
+  state, and a run that bound leaves undecided is refused into `skipped`, with its
+  reason. A registry-less run whose last `run-stopped` records `teardown:
+  signalled` (or none), with no `driver-adopted` after it, has its recorded-running
+  dispatches counted in `gone` — "its run was stopped … ago and its workers
+  signalled", never that their teardown was watched.
+- One change to what is written: for a run the reader proved ended, `checkpoint.json`
+  — same schema version 11, same seal, no new key and no new file — covers the
+  records sharing the journal's last timestamp, which every writer otherwise holds
+  back, written by atomic rename and only when its marker moves.
+  `tests/release_channel/extended_checkpoint.rs` drives 0.65.0's `status`, `host`
+  and `results` over such a document: each exits 0 and leaves it byte for byte.
+
+`tests/e2e/host_view.rs` drives the compiled binary over generated runs roots for
+every claim above. The `host-view-time` budget in `budgets.yaml` times the release
+binary CI's `install` job builds, over the same generated root
+(`scripts/host-view-measure.mjs`).
+
+## 119. Whether a manager session owes a preserved branch was decided by a consumer's Python over a spawned `onevcs` — OPEN
 
 **Proposal (for the planner who owns the contract): add `onepipeline unpublished
 [--session <ID> | --host | --token <S-TOKEN>...] [--format text|json] [--disk]

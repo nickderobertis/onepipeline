@@ -210,7 +210,7 @@ pub enum Command {
     /// A run's live state: what is driving it, and what is running.
     Status(StatusArgs),
     /// Every live dispatch on this host, with its owner and load contribution.
-    Host,
+    Host(HostArgs),
     /// Stream a run's merged events.
     Monitor(MonitorArgs),
     /// Block until a run needs a supervisor, saying so as it waits.
@@ -1254,7 +1254,7 @@ pub struct StopGuardArgs {
 ///
 /// The listing — one target of three — or, with `--acknowledge`, the record that
 /// the session has seen and deliberately left one branch. What it promises is
-/// entry 118 of `docs/contract-divergences.md`.
+/// entry 119 of `docs/contract-divergences.md`.
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 pub struct UnpublishedArgs {
     /// The manager session: list the branches of every session its runs opened,
@@ -1542,6 +1542,16 @@ pub struct StatusArgs {
     /// or what it is paused on — as one JSON object on one line, rather than lines.
     /// Requires a run.
     #[arg(long, requires = "run")]
+    pub json: bool,
+}
+
+/// `onepipeline host`.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct HostArgs {
+    /// Print the reading — every live dispatch, every one proved gone, the free
+    /// space and the refused run roots — as one JSON object on one line, rather
+    /// than lines. `schemas/host-reading.schema.json` states it.
+    #[arg(long)]
     pub json: bool,
 }
 

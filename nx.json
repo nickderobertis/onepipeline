@@ -49,6 +49,7 @@
       "{workspaceRoot}/tests/golden/**/*",
       "{workspaceRoot}/tests/recorded/**/*",
       "{workspaceRoot}/tests/e2e/adoption.rs",
+      "{workspaceRoot}/tests/e2e/host_view.rs",
       "{workspaceRoot}/tests/smoke/repo.rs",
       "{workspaceRoot}/docs/**/*",
       "{workspaceRoot}/examples/**/*",

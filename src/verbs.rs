@@ -212,20 +212,47 @@ impl Status {
 /// under the root.
 #[derive(Debug)]
 pub struct Host {
-    /// Every run the root holds, folded, and the roots that refused.
+    /// Every run root the view refused. From this verb `views` is empty: no run
+    /// is opened whole any more — see [`Survey::views`].
     pub survey: Survey,
+    /// The reading both forms render: `--json` prints it, and [`render_host`]
+    /// renders it as text.
+    pub reading: views::HostReading,
 }
 
 /// `onepipeline host`.
 pub fn host(root: &Path) -> Host {
+    let reading = crate::hostview::read(root);
+    let mut skipped: Vec<crate::ledger::Skipped> = reading
+        .skipped
+        .iter()
+        .map(|refused| crate::ledger::Skipped {
+            path: refused.path.clone(),
+            reason: refused.reason.clone(),
+        })
+        .collect();
+    if let Some(why) = &reading.root_error {
+        skipped.insert(
+            0,
+            crate::ledger::Skipped {
+                path: root.to_path_buf(),
+                reason: why.clone(),
+            },
+        );
+    }
     Host {
-        survey: Survey::of(root),
+        survey: Survey {
+            root: root.to_path_buf(),
+            views: Vec::new(),
+            skipped,
+        },
+        reading,
     }
 }
 
 /// The text `onepipeline host` prints.
 pub fn render_host(host: &Host) -> String {
-    views::host(&host.survey)
+    crate::hostview::render(&host.reading)
 }
 
 /// `onepipeline goals [RUN]`: what each run is for, and how far it has got.
