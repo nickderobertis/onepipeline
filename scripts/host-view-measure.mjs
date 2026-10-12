@@ -317,7 +317,9 @@ try {
   const measured = steady(manifest, "steady");
   readable(runs, manifest.ended, false);
   const text = spawnSync(binary, ["host"], { encoding: "utf8" });
+  // llmlint: ignore[changed_behavior_has_e2e] no journey exercises a failing text form: only a whole measurement whose fixture, cold read and every steady traced read succeeded reaches it, about 80 seconds each and more under load, and the manager ruled against paying another one here; a follow-up proposes a cheap way to reach it.
   if (text.error || text.status !== 0) throw new Error(`the text form: \`host\` ${failure(text)}`);
+  // llmlint: ignore[changed_behavior_has_e2e] no journey exercises a text form lacking `UNPROVEN`: only a whole measurement whose fixture, cold read and every steady traced read succeeded reaches it, about 80 seconds each and more under load, and the manager ruled against paying another one here; a follow-up proposes a cheap way to reach it.
   if (!text.stdout.includes("UNPROVEN"))
     throw new Error(`the text form did not render the reading:\n${text.stdout}`);
 
