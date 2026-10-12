@@ -1624,10 +1624,16 @@ fn the_two_halves_run_concurrently() {
         "each half was made slow"
     );
     assert!(both >= DELAY, "{both:?}");
+    // Against the slower half rather than against `unwatched + unpublished - base`: the
+    // halves are not equally costly — the decision reads a registry, the `unwatched`
+    // check one empty runs root — so a guard that overlaps them takes the slower one's
+    // time, and the sum's prediction undershoots that by whatever the costlier half
+    // spends past the cheaper one, which a loaded host stretches past `DELAY / 2`.
+    // Summed halves still exceed this bound by `DELAY` less the cheaper half's slack.
     assert!(
-        both < unwatched + unpublished - base - DELAY / 2,
-        "the guard took {both:?}, the sum of its halves rather than the slower one: unwatched \
-         {unwatched:?}, unpublished {unpublished:?}"
+        both < unwatched.max(unpublished) + DELAY / 2,
+        "the guard took {both:?}, the sum of its halves rather than the slower one: base \
+         {base:?}, unwatched {unwatched:?}, unpublished {unpublished:?}"
     );
 }
 
