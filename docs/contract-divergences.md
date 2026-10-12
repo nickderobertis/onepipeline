@@ -9827,11 +9827,12 @@ a fresh `ONEVCS_HOME` and a `HOSTNAME` of its own:
 
 `tests/e2e/store.rs`'s two relaunch journeys now continue what they relaunch, the
 retried one under the root's id. `tests/smoke/continuation.rs` is the live tier's:
-`a_board_project_is_carried_on_by_a_cold_host_that_takes_it_over` drives a project on
-onetaskgraph's live board (`nickderobertis` Projects #1, issues in
-`nickderobertis/onetaskgraph-live-scratch`) and `nickderobertis/onepipeline-smoke`
-through a refusal, a takeover of a live driver, a continuation and two racing launches,
-closing everything it created. `src/taskgraph.rs`'s
+`a_stored_project_is_carried_on_by_a_cold_host_that_takes_it_over` drives a project on
+one local Markdown plan store every host shares, publishing to
+`nickderobertis/onepipeline-smoke`, through a refusal, a takeover of a live driver, a
+continuation and two racing launches, closing every pull request it opened. Which
+plan-store backend a project lives on is onetaskgraph's to test, so the live tier needs no
+store credential: no job passes one and `gh-secrets.json` declares none. `src/taskgraph.rs`'s
 `what_a_run_projected_is_read_past_as_no_plan_field` reads every projected key past,
 `src/writeback.rs`'s `the_driver_claim_differs_only_where_it_would_be_written` holds
 when a projection writes or releases the claim, `src/continuation.rs`'s unit tests hold

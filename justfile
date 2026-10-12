@@ -455,9 +455,8 @@ rerun-failed-coverage log archive:
 # credential-free — and this is the same entry point CI's `smoke` job calls, so
 # there is one definition of the journey rather than two.
 #
-# It needs `gh` and a credential (`gh auth login`, or GH_TOKEN), and the
-# continuation journey also GH_PROJECTS_TOKEN for onetaskgraph's live board. Without
-# either it fails and names what is missing; it never skips and never falls back to a fake.
+# It needs `gh` and a credential (`gh auth login`, or GH_TOKEN). With neither it
+# fails and names what is missing; it never skips and never falls back to a fake.
 # Set ONEPIPELINE_SMOKE_REPO to publish somewhere other than the default scratch
 # repository. `--no-capture`, because its whole value is the evidence it prints,
 # and streamed through Nx for the same reason. It runs the `onepipeline-smoke`

@@ -1,13 +1,13 @@
-//! The live half of `docs/contract-divergences.md` entry 116: a project continued from a
-//! real GitHub Projects board by a host holding none of the run's state, and the best-effort
-//! claim on who drives it, against the real GitHub on both sides.
+//! The live half of `docs/contract-divergences.md` entry 116: a project continued from its
+//! plan store by a host holding none of the run's state, and the best-effort claim on who
+//! drives it, against the real GitHub on the repository side.
 //!
-//! The board is onetaskgraph's own live-lane board — `nickderobertis`'s Projects #1, whose
-//! issues live in `nickderobertis/onetaskgraph-live-scratch` — and the repository the plan's
-//! nodes publish to is the scratch repository the lifecycle smoke uses. Nothing else is
-//! written: the store each host reads is configured here, with this board as its one source,
-//! so no `plans` or `followups` source of the operator's is reachable, and everything the
-//! journey created is closed or deleted when it ends, however it ends.
+//! The store is one local Markdown root every host of the journey shares, as a team shares
+//! one board: which backend a project lives on is onetaskgraph's to test, not this
+//! repository's, so this journey needs no credential beyond the one it publishes with. The
+//! repository the plan's nodes publish to is the scratch repository the lifecycle smoke
+//! uses, and every pull request the journey opened there is closed, with its branch, when
+//! it ends, however it ends.
 //!
 //! What it does not hold anybody to is a verdict GitHub alone decides: the scratch repository
 //! runs no checks, and each node is read for whatever settlement it reached rather than for a
@@ -15,37 +15,21 @@
 //! claim and the adoption of an open change request guarantee.
 
 // llmlint: ignore-file[e2e_not_mocked] nothing on the layer under test is substituted: the
-// compiled binary reads and writes the real GitHub Projects board through the linked
-// `onetaskgraph`, and the real `onevcs` publishes to a real GitHub repository through real
-// `git` and `gh`. The only stand-in is the paid model turn, at oneharness's own documented
-// per-harness override, as `main.rs` states for this whole tier.
+// compiled binary reads and writes its plan store through the linked `onetaskgraph`, and the
+// real `onevcs` publishes to a real GitHub repository through real `git` and `gh`. The only
+// stand-in is the paid model turn, at oneharness's own documented per-harness override, as
+// `main.rs` states for this whole tier.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
-use onetaskgraph_core::{
-    Body, Config, CopyItems, CopyRequest, CopyScope, Engine, Environment, GlobalId, Paging,
-    ProjectSelector, Secrets, TaskCreate, TaskRequest,
-};
-use onetaskgraph_plugin_api::{MetadataKey, SourceName, StatusCategory};
 use serde_json::{json, Value};
 
 use crate::harness::{agent, plan_of, World};
 use crate::repo::{ensure_repo, gh, gh_try, missing};
 use crate::{authenticated_user, git, git_credentials, run_stamp, scratch_repo};
-
-/// The board's owner, number and issue repository: onetaskgraph's live lane, never another.
-const BOARD_OWNER: &str = "nickderobertis";
-const BOARD_NUMBER: u32 = 1;
-const BOARD_REPOSITORY: &str = "nickderobertis/onetaskgraph-live-scratch";
-
-/// The source the board is configured under, for this journey's hosts alone.
-const BOARD: &str = "board";
-
-/// The variable the board's token is read from, as onetaskgraph's lane reads it.
-const TOKEN: &str = "GH_PROJECTS_TOKEN";
 
 /// The alias every host registers its clone of the scratch repository under, and so the
 /// `repo` the plan's lifecycle nodes name: a cold host has a clone of its own.
@@ -58,225 +42,52 @@ const IDLE_CHECK_SECONDS: &str = "5";
 /// How long a step may take against the real services before the journey gives up on it.
 const PATIENCE: Duration = Duration::from_secs(120);
 
-/// The board's token, or a refusal naming it: this tier never skips.
-fn token() -> String {
-    std::env::var(TOKEN)
-        .ok()
-        .filter(|token| !token.trim().is_empty())
-        .unwrap_or_else(|| {
-            panic!(
-                "{}",
-                missing(&format!(
-                    "{TOKEN} is not set, and the continuation journey reads and writes \
-                     onetaskgraph's live board with it"
-                ))
-            )
-        })
+/// Every task of `project` as the shared store holds it.
+fn tasks(world: &World, project: &str) -> Vec<Value> {
+    world.store_tasks(project)
 }
 
-/// The board's source configuration: its owner, number and issue repository, and the
-/// board's own `Status` options — `Todo`, `In Progress`, `Done`, `Cancelled` — mapped onto
-/// the categories a run writes, one per kind, since no two categories of one kind may name
-/// one option: a queued task and a project waiting to start share `Todo`, and a task the run
-/// settles under a word of its own — `failed` — and a cancelled project share `Cancelled`.
-/// A task written `cancelled` — one whose publication a takeover withheld — has no option
-/// here, and its projection is refused rather than mislabelled.
-fn board_source() -> Value {
-    json!({
-        "plugin": "github-projects",
-        "config": {
-            "owner": BOARD_OWNER,
-            "project_number": BOARD_NUMBER,
-            "repository": BOARD_REPOSITORY,
-            "token_env": TOKEN,
-            "status_mapping": {
-                "todo": {"project": "Todo"},
-                "queued": {"task": "Todo"},
-                "in-progress": "In Progress",
-                "done": "Done",
-                "cancelled": {"project": "Cancelled"},
-                "unknown": {"task": "Cancelled"},
-            },
-        },
-    })
+/// The stored task for node `node` of `project`, by its `onepipeline.id`.
+fn task(world: &World, project: &str, node: &str) -> Value {
+    tasks(world, project)
+        .into_iter()
+        .find(|task| task["item"]["metadata"]["onepipeline.id"] == node)
+        .unwrap_or_else(|| panic!("the store holds no task for {node}"))
 }
 
-/// The board and the plans store one world authored the plan in, linked in this process
-/// for the journey's own setup, reads and cleanup — never for anything a host does.
-struct Board {
-    engine: Engine,
-    runtime: tokio::runtime::Runtime,
-}
-
-impl Board {
-    fn over(plans: &Path) -> Self {
-        let config = Config::from_document(json!({
-            "sources": {
-                "plans": {"plugin": "local-md", "config": {"root": plans}},
-                BOARD: board_source(),
-            },
-        }))
-        .unwrap_or_else(|why| panic!("the journey's store configuration is refused: {why}"));
-        let secrets = Secrets::load(Environment::from_os_pairs(std::env::vars_os()))
-            .unwrap_or_else(|why| panic!("the store's secrets cannot be read: {why}"));
-        Self {
-            engine: Engine::build(&config, &secrets),
-            runtime: tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("a runtime"),
-        }
-    }
-
-    /// One logical command: the future, then the end of the command, so the next read is
-    /// answered from the board as it is then rather than from this one's snapshot.
-    fn call<T>(&self, future: impl std::future::Future<Output = T>) -> T {
-        let answered = self.runtime.block_on(future);
-        if let Err(why) = self.runtime.block_on(self.engine.end_command()) {
-            eprintln!("smoke: the board's command did not end cleanly: {why}");
-        }
-        answered
-    }
-
-    /// Copy the plans store's project `local` onto the board with its tasks, and answer the
-    /// board project's qualified id and every item the copy created.
-    fn copy(&self, local: &str) -> (String, Vec<GlobalId>) {
-        let id: GlobalId = local.parse().expect("a qualified project");
-        let request = CopyRequest {
-            items: CopyItems::new(vec![id.clone()]).expect("one item"),
-            scope: CopyScope::Projects { tasks: true },
-            destination: SourceName::new(BOARD).expect("a source name"),
-            match_by: None,
-            recreate: false,
-            create: true,
-            dry_run: false,
-        };
-        let report = self
-            .call(self.engine.copy(&request))
-            .unwrap_or_else(|why| panic!("the board refused the copy: {why}"));
-        let report = serde_json::to_value(&report).expect("a report renders");
-        let mut created = Vec::new();
-        let mut project = None;
-        for item in report["items"]
-            .as_array()
-            .expect("the copy names its items")
-        {
-            let landed = item["destination"]
-                .as_str()
-                .unwrap_or_else(|| panic!("the copy created no counterpart: {item}"));
-            let landed: GlobalId = landed.parse().expect("a qualified destination");
-            if item["source"] == json!(local) {
-                project = Some(landed.to_string());
-            }
-            created.push(landed);
-        }
-        (
-            project.unwrap_or_else(|| panic!("the copy created no project: {report}")),
-            created,
-        )
-    }
-
-    /// Every task of the board project `project`, as the store renders it.
-    fn tasks(&self, project: &str) -> Vec<Value> {
-        let id: GlobalId = project.parse().expect("a qualified project");
-        let request = TaskRequest {
-            sources: Vec::new(),
-            filters: onetaskgraph_core::Filters::default(),
-            priorities: Vec::new(),
-            metadata: Vec::new(),
-            origin: None,
-            project: ProjectSelector::Qualified(id),
-            commented_since: None,
-            include_members: false,
-            paging: Paging {
-                limit: std::num::NonZeroU32::new(100).expect("not zero"),
-                token: None,
-            },
-        };
-        let page = self
-            .call(self.engine.tasks(&request))
-            .unwrap_or_else(|why| panic!("the board's tasks cannot be read: {why}"));
-        page.items
-            .iter()
-            .map(|task| serde_json::to_value(task).expect("a task renders"))
-            .collect()
-    }
-
-    /// The board item for node `node` of `project`, by its `onepipeline.id`.
-    fn task(&self, project: &str, node: &str) -> Value {
-        self.tasks(project)
-            .into_iter()
-            .find(|task| task["item"]["metadata"]["onepipeline.id"] == node)
-            .unwrap_or_else(|| panic!("the board holds no item for {node}"))
-    }
-
-    /// The project's `onepipeline.driver`, `null` where it holds none.
-    ///
-    /// Asked again where the board answered in part — no item, or the item beside a source
-    /// failure — rather than read as holding no claim: a partial answer says nothing about
-    /// the claim, and reading it as `null` reported a driver gone that was still driving.
-    fn claim(&self, project: &str) -> Value {
-        let id: GlobalId = project.parse().expect("a qualified project");
-        let mut said = String::new();
-        for _ in 0..5 {
-            let answer = self
-                .call(self.engine.project(&id))
-                .unwrap_or_else(|why| panic!("the board's project cannot be read: {why}"));
-            if answer.items.len() == 1 && answer.errors.is_empty() {
+/// The project's `onepipeline.driver`, `null` where it holds none.
+///
+/// Asked again where the store answered in part — no item, or the item beside a source
+/// failure — rather than read as holding no claim: a partial answer says nothing about the
+/// claim, and the journey reads it while two drivers are writing the same document.
+fn claim(world: &World, project: &str) -> Value {
+    let mut said = String::new();
+    for _ in 0..5 {
+        match world.store_answers_project(project) {
+            Ok(answer) if answer.items.len() == 1 && answer.errors.is_empty() => {
                 let project = serde_json::to_value(&answer.items).expect("a project renders");
                 return project[0]["item"]["metadata"]
                     .get("onepipeline.driver")
                     .cloned()
                     .unwrap_or(Value::Null);
             }
-            said = format!("{} item(s), errors {:?}", answer.items.len(), answer.errors);
-            std::thread::sleep(Duration::from_secs(1));
-        }
-        panic!("the board answered for its project only in part: {said}");
-    }
-
-    /// File one more node under `project`: the task a planner adds on the board.
-    fn add(&self, project: &str, node: &Value) -> GlobalId {
-        let id: GlobalId = project.parse().expect("a qualified project");
-        let mut metadata = BTreeMap::new();
-        for (key, value) in node.as_object().expect("a node") {
-            if key == "task" || key == "title" || key == "deps" {
-                continue;
+            Ok(answer) => {
+                said = format!("{} item(s), errors {:?}", answer.items.len(), answer.errors);
             }
-            metadata.insert(
-                MetadataKey::new(format!("onepipeline.{key}")).expect("a key"),
-                value.clone(),
-            );
+            Err(why) => said = why,
         }
-        let request = TaskCreate {
-            source: SourceName::new(BOARD).expect("a source name"),
-            project: id.native.clone(),
-            title: node["title"].as_str().unwrap_or("linger").to_owned(),
-            body: Body::plain(node["task"].as_str().expect("a task")),
-            status: Some(StatusCategory::Queued),
-            labels: Vec::new(),
-            repositories: Vec::new(),
-            depends_on: Vec::new(),
-            delivers: Vec::new(),
-            metadata,
-            assets: Vec::new(),
-            classification: Default::default(),
-        };
-        let created = self
-            .call(self.engine.create_task(&request))
-            .unwrap_or_else(|why| panic!("the board refused the new task: {why}"));
-        created.task.id
+        std::thread::sleep(Duration::from_millis(500));
     }
+    panic!("the store answered for its project only in part: {said}");
 }
 
-/// What the journey created, closed or deleted however it ends: every issue on the board
-/// and every pull request — with its branch — on the scratch repository whose title carries
-/// this run's stamp.
+/// What the journey created on GitHub, closed however it ends: every pull request — with its
+/// branch — on the scratch repository whose title carries this run's stamp.
 ///
 /// Found by listing rather than by what the journey recorded as it went, so a journey that
 /// failed before it read back what it made still leaves nothing behind; and declared before
 /// every world, so it drops after them — once each world has stopped the drivers it started,
-/// which would otherwise go on writing to the board after it was cleaned.
+/// which would otherwise go on publishing to the repository after it was cleaned.
 struct Created {
     slug: String,
     stamp: String,
@@ -318,51 +129,6 @@ impl Drop for Created {
                 eprintln!("smoke: could not close pull request {number}: {refusal}");
             }
         }
-        let token = std::env::var(TOKEN).unwrap_or_default();
-        let issues = Command::new("gh")
-            .args([
-                "issue",
-                "list",
-                "--repo",
-                BOARD_REPOSITORY,
-                "--state",
-                "open",
-                "--limit",
-                "100",
-                "--json",
-                "number,title",
-            ])
-            .env("GH_TOKEN", &token)
-            .stdin(std::process::Stdio::null())
-            .output()
-            .ok()
-            .and_then(|listed| serde_json::from_slice::<Vec<Value>>(&listed.stdout).ok())
-            .unwrap_or_default();
-        for issue in issues {
-            if !issue["title"]
-                .as_str()
-                .is_some_and(|title| title.contains(&self.stamp))
-            {
-                continue;
-            }
-            let number = issue["number"].to_string();
-            let closed = Command::new("gh")
-                .args([
-                    "issue",
-                    "close",
-                    &number,
-                    "--repo",
-                    BOARD_REPOSITORY,
-                    "--reason",
-                    "not planned",
-                ])
-                .env("GH_TOKEN", &token)
-                .stdin(std::process::Stdio::null())
-                .output();
-            if !closed.is_ok_and(|closed| closed.status.success()) {
-                eprintln!("smoke: could not close board issue {number}");
-            }
-        }
     }
 }
 
@@ -386,9 +152,9 @@ fn open_pulls(slug: &str, branch: &str) -> Vec<Value> {
 }
 
 /// One host of the journey: a world of its own, with a clone of the scratch repository
-/// registered under [`ALIAS`], the publication rules a team's drafts are kept under, and the
-/// board configured as its store.
-fn host(world: World, slug: &str, store: &Value) -> World {
+/// registered under [`ALIAS`], and the publication rules a team's drafts are kept under. Its
+/// store is the world's own, which every host made from one world shares.
+fn host(world: World, slug: &str) -> World {
     git_credentials(&world);
     let at = world
         .home
@@ -418,11 +184,6 @@ fn host(world: World, slug: &str, store: &Value) -> World {
         format!("github.com/{slug}"),
         "the registered checkout does not resolve to the scratch repository"
     );
-    std::fs::write(
-        world.project.join("onetaskgraph.yaml"),
-        serde_json::to_string_pretty(store).expect("the store renders"),
-    )
-    .expect("the store's configuration is written");
     world
 }
 
@@ -442,9 +203,6 @@ fn onepipeline(world: &World, args: &[&str]) -> Command {
         .current_dir(&world.project)
         .env("GH_TOKEN", gh_token())
         .env("GIT_CONFIG_GLOBAL", git_credentials(world))
-        // The plan read lists a project's tasks from the default sources, and the harness
-        // names its own `plans` there.
-        .env("ONETASKGRAPH_DEFAULT_SOURCES", BOARD)
         .env("ONEPIPELINE_IDLE_CLAIM_CHECK_SECONDS", IDLE_CHECK_SECONDS);
     command
 }
@@ -502,12 +260,6 @@ fn dispatched(world: &World, run: &str) -> Vec<String> {
         .collect()
 }
 
-/// `node`, titled: an issue on the board cannot be untitled.
-fn titled(mut node: Value, title: &str) -> Value {
-    node["title"] = json!(title);
-    node
-}
-
 /// A lifecycle node of the plan, publishing to the scratch repository under [`ALIAS`].
 fn change(id: &str, deps: &[&str], stamp: &str) -> Value {
     json!({
@@ -516,47 +268,24 @@ fn change(id: &str, deps: &[&str], stamp: &str) -> Value {
         "persona": "engineer",
         "title": format!("feat: continue {id} ({stamp})"),
         "task": format!("## What\nContinue {id} for {stamp}.\n\n## Why\nProve a project carries \
-                         on from its board.\n\n## Acceptance criteria\n- {id} is drafted."),
+                         on from its store.\n\n## Acceptance criteria\n- {id} is drafted."),
         "deps": deps,
     })
 }
 
-/// Author `nodes` as a project of `world`'s plans store which a copy writes onto the board's
-/// own options: the project as `todo` and its tasks as `queued`.
-fn author(world: &World, name: &str, nodes: Vec<Value>) -> String {
-    let local = world.plan(name, &plan_of(name, nodes));
-    let file = world
-        .store()
-        .join("projects")
-        .join(format!("{name}-board.md"));
-    let text = std::fs::read_to_string(&file).expect("the authored project");
-    std::fs::write(&file, text.replacen("---\n", "---\nstatus: todo\n", 1))
-        .expect("the project is written as todo");
-    let tasks = world.store().join("tasks").join(format!("{name}-board"));
-    for entry in std::fs::read_dir(&tasks).expect("the authored tasks") {
-        let path = entry.expect("a task").path();
-        let text = std::fs::read_to_string(&path).expect("a task document");
-        let queued = text.replacen("---\n", "---\nstatus: queued\n", 1);
-        std::fs::write(&path, queued).expect("the task is queued");
-    }
-    local
-}
-
-/// A project on the live board, drafted by one host, is refused to a cold host while that
+/// A project on a shared plan store, drafted by one host, is refused to a cold host while that
 /// host's claim stands, taken over by it while the first driver is still live — which stops
-/// at its next claim check — and carried on from the board alone: no node the first host
+/// at its next claim check — and carried on from the store alone: no node the first host
 /// settled `done` is dispatched again, a failed one is continued on its branch, and a node
 /// depending on the stacked one is drafted on that one's branch. Then two hosts launch the
 /// drafted project at the same moment, and every draft is still the one pull request open
 /// from its branch.
 #[test]
-fn a_board_project_is_carried_on_by_a_cold_host_that_takes_it_over() {
+fn a_stored_project_is_carried_on_by_a_cold_host_that_takes_it_over() {
     let slug = scratch_repo();
     authenticated_user();
-    token();
     ensure_repo(&slug);
     let stamp = run_stamp();
-    let store = json!({"sources": {BOARD: board_source()}});
     let _residue = Created {
         slug: slug.clone(),
         stamp: stamp.clone(),
@@ -567,7 +296,6 @@ fn a_board_project_is_carried_on_by_a_cold_host_that_takes_it_over() {
     let first = host(
         World::new("smoke-continue").with_env("HOSTNAME", "smoke-host-a"),
         &slug,
-        &store,
     );
     first.write_graphs();
     assert!(
@@ -575,22 +303,22 @@ fn a_board_project_is_carried_on_by_a_cold_host_that_takes_it_over() {
         "{}",
         missing("this run still carries a stand-in for `gh`, so it would never reach GitHub")
     );
-    first.script("harness.work", &format!("continued from the board {stamp}"));
+    first.script("harness.work", &format!("continued from the store {stamp}"));
     first.script("harness.work-per-task", "");
     let name = format!("continue-{}", stamp.replace(['_', '.'], "-"));
-    let local = author(
-        &first,
+    let project = first.plan(
         &name,
-        vec![
-            change("a", &[], &stamp),
-            change("b", &["a"], &stamp),
-            titled(agent("hold", &["b"]), &format!("hold the stack ({stamp})")),
-            change("c", &["b", "hold"], &stamp),
-        ],
+        &plan_of(
+            &name,
+            vec![
+                change("a", &[], &stamp),
+                change("b", &["a"], &stamp),
+                agent("hold", &["b"]),
+                change("c", &["b", "hold"], &stamp),
+            ],
+        ),
     );
-    let board = Board::over(&first.store());
-    let (project, _) = board.copy(&local);
-    println!("smoke: the plan is on the board as {project}");
+    println!("smoke: the plan is on the shared store as {project}");
 
     // The first host drafts the stack and holds the agent node above it in flight.
     let launched = ran(&mut onepipeline(&first, &["start", &project, "--detach"]));
@@ -619,7 +347,7 @@ fn a_board_project_is_carried_on_by_a_cold_host_that_takes_it_over() {
     until("the stacked node's turn", || {
         early("its stacked node's turn");
         if saw_dispatch.is_none() {
-            saw_dispatch = board.tasks(&project).into_iter().find_map(|task| {
+            saw_dispatch = tasks(&first, &project).into_iter().find_map(|task| {
                 task["item"]["metadata"]
                     .get("onepipeline.dispatch")
                     .cloned()
@@ -645,13 +373,13 @@ fn a_board_project_is_carried_on_by_a_cold_host_that_takes_it_over() {
         },
     );
     println!(
-        "smoke: a dispatch key the board carried while the first host worked: {saw_dispatch:?}"
+        "smoke: a dispatch key the store carried while the first host worked: {saw_dispatch:?}"
     );
     until_or(
-        "the board to hold both settlements",
+        "the store to hold both settlements",
         || {
             ["a", "b"].iter().all(|node| {
-                board.task(&project, node)["item"]["metadata"]
+                task(&first, &project, node)["item"]["metadata"]
                     .get("onepipeline.settlement")
                     .is_some_and(Value::is_object)
             })
@@ -661,24 +389,24 @@ fn a_board_project_is_carried_on_by_a_cold_host_that_takes_it_over() {
     let stored: BTreeMap<String, Value> = ["a", "b"]
         .into_iter()
         .map(|node| {
-            let task = board.task(&project, node);
+            let task = task(&first, &project, node);
             (
                 node.to_owned(),
                 task["item"]["metadata"]["onepipeline.settlement"].clone(),
             )
         })
         .collect();
-    println!("smoke: the board's settlements: {stored:#?}");
+    println!("smoke: the store's settlements: {stored:#?}");
     assert_eq!(
         stored["b"]["stack"]["parents"][0]["branch"], stored["a"]["branch"],
-        "the board's settlement of b names no stack anchor on a: {stored:#?}"
+        "the store's settlement of b names no stack anchor on a: {stored:#?}"
     );
-    let claim = board.claim(&project);
-    assert_eq!(claim["run"], json!(run), "{claim}");
-    assert_eq!(claim["host"], "smoke-host-a", "{claim}");
+    let held = claim(&first, &project);
+    assert_eq!(held["run"], json!(run), "{held}");
+    assert_eq!(held["host"], "smoke-host-a", "{held}");
 
     // A cold host is refused while that claim stands, then takes the project over.
-    let second = host(first.on_host("smoke-host-b"), &slug, &store);
+    let second = host(first.on_host("smoke-host-b"), &slug);
     let refused = ran(&mut onepipeline(&second, &["start", &project, "--attach"]));
     assert_eq!(refused.status.code(), Some(2), "{}", said(&refused));
     let refusal = String::from_utf8_lossy(&refused.stderr);
@@ -693,17 +421,17 @@ fn a_board_project_is_carried_on_by_a_cold_host_that_takes_it_over() {
         &["start", &project, "--detach", "--take-over"],
     ));
     assert!(taken.status.success(), "the takeover: {}", said(&taken));
-    until("the second host's claim to reach the board", || {
-        board.claim(&project)["host"] == "smoke-host-b"
+    until("the second host's claim to reach the store", || {
+        claim(&first, &project)["host"] == "smoke-host-b"
     });
-    let claimed = board.claim(&project);
-    println!("smoke: the board's claim after the takeover: {claimed}");
+    let claimed = claim(&first, &project);
+    println!("smoke: the store's claim after the takeover: {claimed}");
     let since = Instant::now();
     until("the first driver to notice the takeover", || {
         !first.events_of(&run, "driver-superseded").is_empty()
     });
     println!(
-        "smoke: the first driver noticed the takeover {:?} after the claim reached the board",
+        "smoke: the first driver noticed the takeover {:?} after the claim reached the store",
         since.elapsed()
     );
     let journal = first.journal(&run);
@@ -724,7 +452,7 @@ fn a_board_project_is_carried_on_by_a_cold_host_that_takes_it_over() {
         "the superseded driver started work after its check: {after:?}"
     );
     let taken_over = second.events_of(&run, "driver-taken-over");
-    assert_eq!(taken_over[0]["payload"]["previous"], claim);
+    assert_eq!(taken_over[0]["payload"]["previous"], held);
 
     // Let the node above the stack go: the first driver ends, the second carries on.
     first.release("turn.go");
@@ -786,17 +514,19 @@ fn a_board_project_is_carried_on_by_a_cold_host_that_takes_it_over() {
         "c was not placed on b's recorded branch"
     );
     assert_eq!(
-        board.claim(&project),
+        claim(&first, &project),
         Value::Null,
         "the second driver left its claim"
     );
 
     // Two hosts launch the drafted project at the same moment, with one more node to keep
     // each driving long enough to read the claim.
-    board.add(
-        &project,
-        &json!({"id": "linger", "persona": "engineer", "title": format!("linger ({stamp})"),
+    first.add_task(
+        &name,
+        "004-linger",
+        &json!({"id": "linger", "persona": "engineer",
                 "task": "## What\nLinger.\n\n## Why\nKeep a driver driving.\n\n## Acceptance criteria\n- It lingered."}),
+        &[],
     );
     for gate in ["turn.go", "turn.settle"] {
         let _ = std::fs::remove_file(first.fakes.join(gate));
@@ -804,7 +534,7 @@ fn a_board_project_is_carried_on_by_a_cold_host_that_takes_it_over() {
     first.script("turn.hold", "");
     let racing: Vec<World> = ["smoke-host-c", "smoke-host-d"]
         .into_iter()
-        .map(|name| host(first.on_host(name), &slug, &store))
+        .map(|name| host(first.on_host(name), &slug))
         .collect();
     let children: Vec<std::process::Child> = racing
         .iter()
@@ -824,10 +554,10 @@ fn a_board_project_is_carried_on_by_a_cold_host_that_takes_it_over() {
     let watching = Instant::now();
     let mut reading = Value::Null;
     while watching.elapsed() < Duration::from_secs(30) {
-        let now = board.claim(&project);
+        let now = claim(&first, &project);
         if now != reading {
             println!(
-                "smoke: {:?} into the race the board's claim reads {now}",
+                "smoke: {:?} into the race the store's claim reads {now}",
                 watching.elapsed()
             );
             reading = now;
@@ -835,7 +565,7 @@ fn a_board_project_is_carried_on_by_a_cold_host_that_takes_it_over() {
         std::thread::sleep(Duration::from_millis(500));
     }
     let mut left = 0;
-    let claim_then = board.claim(&project);
+    let claim_then = claim(&first, &project);
     for (host, output) in racing.iter().zip(&outputs) {
         let name = host
             .environment
@@ -870,7 +600,7 @@ fn a_board_project_is_carried_on_by_a_cold_host_that_takes_it_over() {
             dispatched(host, &run)
         );
     }
-    println!("smoke: the board's claim once both had checked it: {claim_then}");
+    println!("smoke: the store's claim once both had checked it: {claim_then}");
     for host in &racing {
         println!(
             "smoke: what a racing host recorded:\n{}",
