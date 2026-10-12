@@ -1927,8 +1927,9 @@ fn a_live_dispatch_recorded_with_a_legacy_ps_start_token_is_held() {
 /// cannot be observed, even after earlier sizes were.
 ///
 /// Its tracer is the real `strace`, behind a stand-in on `PATH` that notes every
-/// trace it is asked for and, where `REFUSE_TRACE` names a read, refuses that one as
-/// a host without ptrace would.
+/// trace it is asked for — the measurement's up-front probe of the tracer first, then
+/// each traced read — and, where `REFUSE_TRACE` names a read, refuses that one as a
+/// host without ptrace would.
 #[test]
 fn the_budget_measurement_records_what_each_scaling_read_opened() {
     let world = World::new("host-view-measure");
@@ -2003,11 +2004,12 @@ fn the_budget_measurement_records_what_each_scaling_read_opened() {
     assert_eq!(
         traces(),
         [
+            "tracer.strace",
             "steady-traced.strace",
             "scaling-400-traced.strace",
             "scaling-800-traced.strace"
         ],
-        "one traced read per size"
+        "the tracer's own probe, then one traced read per size"
     );
     let held = read_json(&record);
     assert_eq!(held["steady"]["strip_guard"], "stripped", "{held}");
@@ -2045,7 +2047,11 @@ fn the_budget_measurement_records_what_each_scaling_read_opened() {
     );
     assert_eq!(
         traces(),
-        ["steady-traced.strace", "scaling-400-traced.strace"],
+        [
+            "tracer.strace",
+            "steady-traced.strace",
+            "scaling-400-traced.strace"
+        ],
         "the measurement stopped at the read it could not observe"
     );
     assert!(
