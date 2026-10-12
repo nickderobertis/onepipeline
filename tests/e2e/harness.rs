@@ -879,6 +879,14 @@ impl World {
             // that is the operator's own store unless this points it here. See
             // [`history_store`](World::history_store) and [`STATE_HOME_ENV`].
             .env(STATE_HOME_ENV, self.state_home())
+            // And onepipeline's own state root, on every platform: the stop
+            // guard's memory and `unpublished`'s acknowledgements resolve from
+            // `XDG_STATE_HOME`, Windows included, falling back to the home
+            // directory's `.local/state`. Redirecting only `%LOCALAPPDATA%` there
+            // left both in the runner's own home, where a journey writing an
+            // acknowledgement under [`state_home`](World::state_home) never
+            // reached the binary reading it.
+            .env("XDG_STATE_HOME", self.state_home())
             // And nothing of the operator's own oneharness history settings: a
             // journey inherits only what it sets, so an `ONEHARNESS_HISTORY_DIR`
             // in the shell that ran the suite cannot land a launch's sessions in
@@ -1367,9 +1375,9 @@ impl World {
     }
 
     /// The platform state directory every command in this world resolves —
-    /// [`STATE_HOME_ENV`], per world — so a process that resolves a default
-    /// under it writes here and never under the operator's `~/.local/state` or
-    /// `%LOCALAPPDATA%`.
+    /// [`STATE_HOME_ENV`] and `XDG_STATE_HOME`, per world — so a process that
+    /// resolves a default under it writes here and never under the operator's
+    /// `~/.local/state` or `%LOCALAPPDATA%`.
     pub fn state_home(&self) -> PathBuf {
         self.root.join("xdg-state")
     }
