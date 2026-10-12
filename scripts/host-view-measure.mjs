@@ -66,6 +66,8 @@ if (!binary) {
 
 const NEXT =
   "pass an installed release build of this tree's onepipeline (`cargo install --path .`), on Linux, with `npm ci` done; a read that answered wrongly is a defect of the view, which `just test-e2e 'test(/^host_view::/)'` reproduces against this tree's own build";
+const TRACER_NEXT =
+  "install `strace` on PATH and let this user trace its own children (`kernel.yama.ptrace_scope` 0 or 1), then measure again";
 /** An error carrying the next step its own failure needs, in place of {@link NEXT}. */
 const failed = (message, next) => Object.assign(new Error(message), { next });
 const recordRefused = (error) =>
@@ -236,12 +238,7 @@ function traced(manifest, label) {
   try {
     observed = journalOpens(binary, ["host", "--json"], join(work, `${label}.strace`));
   } catch (error) {
-    throw failed(
-      `${label}: ${error.message}`,
-      error.tracer
-        ? "install `strace` on PATH and let this user trace its own children (`kernel.yama.ptrace_scope` 0 or 1), then measure again"
-        : undefined,
-    );
+    throw failed(`${label}: ${error.message}`, error.tracer ? TRACER_NEXT : undefined);
   }
   holds(manifest, JSON.parse(observed.stdout), `${label} traced read`);
   return steadyOpens(observed, manifest.ended, manifest.live_runs, label);
@@ -271,6 +268,14 @@ try {
     throw recordRefused(error);
   }
   work = mkdtempSync(join(tmpdir(), "host-view-measure-"));
+  // So is whether the tracer runs: tracing this node, which is certain to exist and to
+  // open files, refuses here what the traced reads would refuse after the fixture,
+  // its cold read and every steady read.
+  try {
+    journalOpens(process.execPath, ["-e", ""], join(work, "tracer.strace"));
+  } catch (error) {
+    throw failed(`the tracer: ${error.message}`, error.tracer ? TRACER_NEXT : undefined);
+  }
   runs = join(work, "runs");
   // The read's whole environment: the root, the host name the fixture's records
   // carry, and a state root of its own for the linked `onevcs`.

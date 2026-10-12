@@ -527,46 +527,64 @@ fn the_host_view_measurement_records_nothing_from_a_read_that_failed() {
     let before = std::fs::metadata(&record)
         .and_then(|about| about.modified())
         .ok();
-    // This tree's binary, its reading repeated a dispatch row and a gone entry: a
-    // repeat is a wrong answer, and must not be merged into a right-looking one.
-    let repeating = format!(
-        "{:?} \"$@\" | node -e 'let s = \"\"; process.stdin.on(\"data\", (d) => (s += d)).on(\"end\", () => {{ const r = JSON.parse(s); r.dispatches.push(r.dispatches[0]); r.gone.push(r.gone[0]); console.log(JSON.stringify(r)); }})'",
-        env!("CARGO_BIN_EXE_onepipeline")
+    // A read that recorded its phases and answered with a dispatch row and a gone entry
+    // each twice: a repeat is a wrong answer, and must not be merged into a
+    // right-looking one. The answer is written out rather than this tree's binary's
+    // with rows repeated, since that binary's cold read over the whole fixture is
+    // minutes of a debug build, more under coverage, for a refusal of the answer alone.
+    let repeating = concat!(
+        "echo \"{\\\"marks_unix_ns\\\":{\\\"run\\\":1,\\\"flushed\\\":2},\\\"phases\\\":{},\\\"quantities\\\":{},\\\"read_bytes\\\":0}\" > \"$ONEPIPELINE_HOST_PHASES\"\n",
+        "row='{\"run\":\"live-0\",\"node\":\"work\",\"launcher\":\"x\",\"age_ms\":1,\"proof\":\"held\",\"unproven\":null}'\n",
+        "gone='{\"run\":\"stale-0\",\"node\":\"work\",\"reason\":\"pid gone\"}'\n",
+        "echo \"{\\\"schema_version\\\":1,\\\"host\\\":\\\"host-view-fixture\\\",\\\"root\\\":\\\"$ONEPIPELINE_RUNS_DIR\\\",\\\"root_error\\\":null,\\\"free_space\\\":[],\\\"dispatches\\\":[$row,$row],\\\"gone\\\":[$gone,$gone],\\\"skipped\\\":[]}\"",
     );
+    // Each measurement generates its own fixture before the read it refuses, so all of
+    // them start before any is waited on.
+    let mut measuring = Vec::new();
     for (name, body, says) in [
-        ("failing", "echo refused >&2; exit 3", "exited 3"),
-        ("silent", "echo '{}'", "recorded no phase line"),
+        ("failing", "echo refused >&2; exit 3", &["exited 3"][..]),
+        ("silent", "echo '{}'", &["recorded no phase line"]),
         (
             "hollow",
             "echo '{}' > \"$ONEPIPELINE_HOST_PHASES\"",
-            "lacks its marks, phases, quantities or read bytes",
+            &["lacks its marks, phases, quantities or read bytes"],
         ),
         (
             "malformed",
             "echo 'not json' > \"$ONEPIPELINE_HOST_PHASES\"",
-            "the read's phase line is not JSON",
+            &["the read's phase line is not JSON"],
         ),
         (
             "unmarked",
             "echo '{\"marks_unix_ns\":{\"run\":0,\"flushed\":1},\"phases\":{},\"quantities\":{},\"read_bytes\":0}' > \"$ONEPIPELINE_HOST_PHASES\"",
-            "the read's `run` mark is not a time: 0",
+            &["the read's `run` mark is not a time: 0"],
         ),
-        ("repeating", repeating.as_str(), "repeats; gone entry "),
+        (
+            "repeating",
+            repeating,
+            &["dispatch row live-0/work repeats", "gone entry stale-0/work repeats"],
+        ),
     ] {
         let binary = dir.join(name);
         std::fs::write(&binary, format!("#!/bin/sh\n{body}\n")).expect("a stand-in binary");
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755))
             .expect("executable");
-        let measured = std::process::Command::new("node")
+        let child = std::process::Command::new("node")
             .arg(root().join("scripts/host-view-measure.mjs"))
             .arg(&binary)
-            .output()
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
             .expect("node runs the measurement");
+        measuring.push((name, says, child));
+    }
+    for (name, says, child) in measuring {
+        let measured = child.wait_with_output().expect("the measurement ends");
         let stderr = String::from_utf8_lossy(&measured.stderr);
         assert_eq!(measured.status.code(), Some(1), "{name}: {stderr}");
         assert!(
             stderr.contains("host-view-measure: the cold read")
-                && stderr.contains(says)
+                && says.iter().all(|said| stderr.contains(said))
                 && stderr.contains("next: pass an installed release build"),
             "{name}: {stderr}"
         );
@@ -603,13 +621,23 @@ fn the_host_view_measurement_records_nothing_from_a_read_that_failed() {
         "{stderr}"
     );
 
-    // A live dispatch's process that cannot start says why, from the spawn itself.
+    // A live dispatch's process that cannot start says why, from the spawn itself: its
+    // PATH holds the tracer, which is asked first, and no `sleep`.
     let node = std::process::Command::new("node")
         .args(["-p", "process.execPath"])
         .output()
         .expect("node runs");
     let no_sleep = dir.join("no-sleep");
-    std::fs::create_dir_all(&no_sleep).expect("an empty PATH");
+    std::fs::create_dir_all(&no_sleep).expect("a PATH");
+    let strace = std::process::Command::new("sh")
+        .args(["-c", "command -v strace"])
+        .output()
+        .expect("sh answers");
+    std::os::unix::fs::symlink(
+        String::from_utf8_lossy(&strace.stdout).trim(),
+        no_sleep.join("strace"),
+    )
+    .expect("strace on the PATH");
     let measured = std::process::Command::new(String::from_utf8_lossy(&node.stdout).trim())
         .arg(root().join("scripts/host-view-measure.mjs"))
         .arg(env!("CARGO_BIN_EXE_onepipeline"))
@@ -641,7 +669,8 @@ fn the_host_view_measurement_records_nothing_from_a_read_that_failed() {
         "{stderr}"
     );
 
-    // A tracer that cannot run is named, with what makes it run, not the read's remedy.
+    // A tracer that cannot run is named, with what makes it run, not the read's remedy,
+    // and before the fixture is generated and read.
     let sleep_only = dir.join("sleep-only");
     std::fs::create_dir_all(&sleep_only).expect("a PATH");
     let sleep = std::process::Command::new("sh")
@@ -663,7 +692,7 @@ fn the_host_view_measurement_records_nothing_from_a_read_that_failed() {
     let stderr = String::from_utf8_lossy(&measured.stderr);
     assert_eq!(measured.status.code(), Some(1), "{stderr}");
     assert!(
-        stderr.contains("`strace` could not run")
+        stderr.contains("host-view-measure: the tracer: `strace` could not run")
             && stderr.contains("next: install `strace` on PATH")
             && !dir.join("traced/host-view.json").exists(),
         "{stderr}"
