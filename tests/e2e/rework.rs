@@ -519,6 +519,10 @@ fn a_rework_restacks_every_draft_stacked_on_it_by_merges_alone() {
         journal[started("c")]["payload"]["onto"],
         json!([{"branch": branch("b"), "head": b_new}])
     );
+    // What moved each draft: the rework moved `b` and `e`, and `b`'s own restack `c`.
+    for (id, cause) in [("b", "rework"), ("e", "rework"), ("c", "restack")] {
+        assert_eq!(journal[started(id)]["payload"]["cause"], cause, "{id}");
+    }
     // `e`'s stack base was advanced onto the rework before `e` merged it.
     let stack_base_after = head_of(&world, &stack_base);
     assert_ne!(stack_base_after, stack_base_before);
