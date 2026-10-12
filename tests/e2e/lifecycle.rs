@@ -5154,6 +5154,197 @@ fn a_change_the_host_never_lands_is_redispatched_on_the_branch_it_preserved() {
 }
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] three journeys of a few
+// seconds each against the fake host; they settle through the publication path over the linked
+// `onevcs`, which any change under `src/` can move, as the unsettled journeys above do.
+/// A required check still running when the wait for it elapses, on the draft and
+/// once it is lifted alike.
+const PENDING: &str = "llmlint in_progress - required";
+
+/// The world every armed journey publishes into: a `change-auto` repository whose
+/// host lets a change be armed to merge itself, a check wait of two seconds, and a
+/// merge-path backoff of one, so three reads of an armed change take seconds.
+fn armed_world(name: &str, allows_auto_merge: bool) -> (World, crate::harness::Repository) {
+    let world = World::new(name)
+        .with_env("ONEVCS_CHECKS_TIMEOUT_SECONDS", "2")
+        .with_env("ONEPIPELINE_MERGE_PATH_BACKOFF_SECONDS", "1")
+        .with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "2");
+    let repo = world.repository("change-auto", &[]);
+    world.script(
+        "gh.auto-merge",
+        if allows_auto_merge { "true" } else { "false" },
+    );
+    (world, repo)
+}
+
+/// The detail the node settled with.
+fn settled_detail(world: &World, run: &str) -> String {
+    world.events_of(run, "node-settled")[0]["payload"]["detail"]
+        .as_str()
+        .expect("the settlement says why")
+        .to_string()
+}
+
+/// A `change-auto` change whose check wait elapses with nothing red is left
+/// **armed** by `onevcs`, and the node reads that change again rather than sending
+/// its worker back: once the host lands it, the node settles `done` on the landing.
+///
+/// The host here is one whose checks pass while nobody is publishing — it lands the
+/// armed change at its second read after the arm, which is the first read of the
+/// publication that follows the elapsed one. A node that re-dispatched instead would
+/// have spent a second dispatch on a change already on its way to the base, and
+/// settled on whatever that dispatch's publication made of it.
+#[test]
+fn an_armed_change_is_read_again_rather_than_redispatched_and_settles_on_its_landing() {
+    let (world, _repo) = armed_world("lifecycle-armedlands", true);
+    world.script("service.work", "the worker wrote this\n");
+    world.script("gh.checks", PENDING);
+    world.script("gh.lands-armed", "2");
+    let run = settle(&world, "armedlands", vec![lifecycle("service", &[])]);
+
+    let node = world.run_json(&run, "result.json")["nodes"][0].clone();
+    assert_eq!(node["status"], "done", "{node}\n{}", why(&world, &run));
+    assert_eq!(node["outcome"], "merged", "{node}");
+    assert_eq!(node["landing"], "landed", "{node}");
+    assert_eq!(
+        dispatches_of(&world, &run, "service").len(),
+        1,
+        "an armed change sent its worker back\n{}",
+        why(&world, &run)
+    );
+    // `onevcs` said the merge was armed, on the journal the run merged its stream into.
+    assert!(
+        !world.events_of(&run, "merge-armed").is_empty(),
+        "the publication never armed the merge, so nothing here is about an armed change\n{}",
+        why(&world, &run)
+    );
+    let detail = settled_detail(&world, &run);
+    assert!(
+        detail.contains("its merge armed") && detail.contains("read 2 times"),
+        "the settlement does not say the change was armed and how many reads it took: {detail}"
+    );
+}
+
+/// A required check that goes red **after** the arm ends the next read
+/// `checks-failed`, and that sends the worker back onto the same branch exactly as
+/// a red check always has — carrying, beside the check's own diagnosis, that the
+/// change had been armed.
+///
+/// The host's workflows skip a draft here: the check is still running when the
+/// wait on the draft elapses, and once the draft is lifted to arm it, the check
+/// concludes red.
+#[test]
+fn a_check_that_goes_red_after_the_arm_sends_the_worker_back_onto_the_same_branch() {
+    let (world, repo) = armed_world("lifecycle-armedred", true);
+    world.script("service.work-anew", "the worker wrote this\n");
+    world.script("gh.checks.draft", PENDING);
+    world.script("gh.checks", RED);
+    let run = settle(&world, "armedred", vec![lifecycle("service", &[])]);
+
+    let node = world.run_json(&run, "result.json")["nodes"][0].clone();
+    assert_eq!(node["status"], "failed", "{node}\n{}", why(&world, &run));
+    assert_eq!(node["outcome"], "checks-failed", "{node}");
+    assert!(
+        !world.events_of(&run, "merge-armed").is_empty(),
+        "the publication never armed the merge\n{}",
+        why(&world, &run)
+    );
+
+    let dispatched = dispatches_of(&world, &run, "service");
+    assert_eq!(
+        dispatched.len(),
+        2,
+        "a red check after the arm did not send the worker back\n{}",
+        why(&world, &run)
+    );
+    let reason = dispatched[1]["payload"]["reason"]
+        .as_str()
+        .expect("the re-dispatch says what the last attempt ended with");
+    assert!(
+        reason.starts_with("checks-failed:") && reason.contains("llmlint"),
+        "the re-dispatch does not name the red check it answers: {reason}"
+    );
+    assert!(
+        reason.contains("its merge armed") && reason.contains("read 2 times"),
+        "the re-dispatch does not say the change had been armed: {reason}"
+    );
+
+    let branch = node["branch"].as_str().expect("the node names its branch");
+    assert!(
+        session_branches(&world, &run)
+            .iter()
+            .all(|opened| opened == branch),
+        "the attempts did not share one branch: {:?}",
+        session_branches(&world, &run)
+    );
+    assert!(
+        repo.has_branch(&world, branch),
+        "the branch both attempts were made on was not handed back"
+    );
+}
+
+/// A `checks-unsettled` `onevcs` did **not** arm — here because the repository does
+/// not allow auto-merge — is nothing on its way to the base, so it routes exactly
+/// as it always has: no further read of it, and the worker sent back onto the
+/// branch it preserved.
+#[test]
+fn an_unarmed_unsettled_change_is_redispatched_as_before() {
+    let (world, repo) = armed_world("lifecycle-unarmed", false);
+    world.script("service.work-anew", "the worker wrote this\n");
+    world.script("gh.checks", PENDING);
+    let run = settle(&world, "unarmed", vec![lifecycle("service", &[])]);
+
+    let node = world.run_json(&run, "result.json")["nodes"][0].clone();
+    assert_eq!(node["status"], "failed", "{node}\n{}", why(&world, &run));
+    assert_eq!(node["outcome"], "checks-unsettled", "{node}");
+    assert_eq!(node["landing"], json!(null), "{node}");
+    assert!(
+        world.events_of(&run, "merge-armed").is_empty(),
+        "a repository that does not allow auto-merge had a merge armed\n{}",
+        why(&world, &run)
+    );
+
+    let dispatched = dispatches_of(&world, &run, "service");
+    assert_eq!(
+        dispatched.len(),
+        2,
+        "an unarmed unsettled change was not re-dispatched\n{}",
+        why(&world, &run)
+    );
+    let reason = dispatched[1]["payload"]["reason"]
+        .as_str()
+        .expect("the re-dispatch says what the last attempt ended with");
+    assert!(
+        reason.starts_with("checks-unsettled:") && reason.contains("does not allow auto-merge"),
+        "the re-dispatch does not name the unarmed bound it answers: {reason}"
+    );
+    let detail = settled_detail(&world, &run);
+    assert!(
+        !detail.contains("its merge armed") && !reason.contains("its merge armed"),
+        "an unarmed change was reported as armed: {detail}"
+    );
+    // One publication per attempt: each elapsed wait asked the host once whether it
+    // allows auto-merge, and nothing re-read the merge path of a change nobody was
+    // carrying.
+    let asked = world
+        .invocations()
+        .iter()
+        .filter(|call| {
+            call["tool"] == "gh" && call["args"][0] == "repo" && call["args"][1] == "view"
+        })
+        .count();
+    assert_eq!(
+        asked, 2,
+        "the unarmed change was published {asked} times over two attempts"
+    );
+    let branch = node["branch"].as_str().expect("the node names its branch");
+    assert!(
+        repo.has_branch(&world, branch),
+        "the branch the unsettled change is on was not handed back"
+    );
+}
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
 /// The document a consumer reads carries the landing, at a stated version, and
 /// says nothing where there was nothing to observe.
 ///

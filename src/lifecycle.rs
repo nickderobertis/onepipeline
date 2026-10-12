@@ -1424,6 +1424,7 @@ fn publish(
                 kind,
                 reason,
                 retained,
+                ..
             } = &published.outcome
             {
                 // The push reached the remote and the reads behind it are spent.
@@ -1450,15 +1451,32 @@ fn publish(
                         body_aside.clone(),
                     );
                 }
+                // A change whose merge a read left armed and that did not land
+                // in the reads after it routes exactly as its word always has —
+                // a red check back to the worker, a bound spent as the
+                // `checks-unsettled` it is — and says beside `onevcs`'s own
+                // sentence that it was armed and how long it was read.
+                let reason = match publication.armed {
+                    true => format!("{reason}. {}", armed_detail(publication.reads)),
+                    false => reason.clone(),
+                };
                 return failed_publication(
                     &node.id,
                     token,
                     branch.or_else(|| Some(published.branch.clone())),
                     *kind,
-                    reason,
+                    &reason,
                     retained.as_ref(),
                     body_aside.clone(),
                 );
+            }
+            // A push into a review draft with its checks unread answers only a
+            // publication that deferred them, and this engine never sets
+            // `defer_checks`: receiving it means `onevcs` and this engine disagree
+            // about the request. Settled as the residual rather than `done`, so no
+            // dependent proceeds on a change whose checks nobody read.
+            if let onevcs::PublishOutcome::ChangeReviewDraftUnchecked(url) = &published.outcome {
+                return publication_failed(unchecked_detail(url));
             }
             let labels =
                 engine::dispatch_labels(&paths.run, &node.id, None, node.persona.as_deref());
@@ -1515,7 +1533,11 @@ fn publish(
             // and required checks that were skipped rather than passed.
             let lifted_early = crate::vcs::lifted_early_in(token).then(|| LIFTED_EARLY.to_owned());
             let skipped = skipped_detail(&crate::vcs::skipped_required_in(token));
+            // A change whose merge an elapsed wait left armed and a later read
+            // then saw land says so, and how many reads that took.
+            let armed = publication.armed.then(|| armed_detail(publication.reads));
             let detail: Vec<String> = [
+                armed,
                 drafted,
                 kept_for_review,
                 finished,
@@ -1682,6 +1704,9 @@ fn drafted_status(
         ) => NodeStatus::CompleteDraft,
         (onevcs::PublishOutcome::ChangeDraft(_), _) => NodeStatus::Done,
         (onevcs::PublishOutcome::ChangeReviewDraft(_), _) => NodeStatus::Done,
+        // Settled before it is asked — see `unchecked_detail` — and never `done` if
+        // that ever changes: nobody read its checks.
+        (onevcs::PublishOutcome::ChangeReviewDraftUnchecked(_), _) => NodeStatus::Failed,
         (
             onevcs::PublishOutcome::Merged(_)
             | onevcs::PublishOutcome::ChangeOpen(_)
@@ -1691,6 +1716,17 @@ fn drafted_status(
             _,
         ) => NodeStatus::Done,
     }
+}
+
+/// The residual's detail for a publication that answered a push into a review draft
+/// with its checks unread, which only a `defer_checks` publication answers and this
+/// engine never makes one: the outcome and its change request, named.
+fn unchecked_detail(url: &onevcs::Url) -> String {
+    format!(
+        "onevcs answered `ChangeReviewDraftUnchecked` for {url} — pushed into a draft kept for \
+         its user's review without its checks being read — to a publication that did not defer \
+         its checks, so nothing read them and the node is not settled done"
+    )
 }
 
 /// The sentence a node settled `change-review-draft` carries: its checks are
@@ -1766,6 +1802,9 @@ fn finished_detail(
         (true, onevcs::PublishOutcome::ChangeReviewDraft(_)) => {
             ", and the publication kept it as a draft for its user's review"
         }
+        (true, onevcs::PublishOutcome::ChangeReviewDraftUnchecked(_)) => {
+            ", and the publication pushed into it without reading its checks"
+        }
         (true, onevcs::PublishOutcome::Merged(_)) => {
             ", and the publication lifted it out of its draft and merged it"
         }
@@ -1788,6 +1827,20 @@ struct Published {
     /// on every path but the re-read, which is every publication that answered
     /// the first time it was asked.
     reads: std::num::NonZeroU32,
+    /// Whether a read ended `checks-unsettled` with the change's merge left
+    /// **armed**, so the reads after it watched that change rather than the
+    /// agent being sent back to it.
+    armed: bool,
+}
+
+/// The sentence a node carries when a read found its change's merge armed: that
+/// it was, and how many reads of the merge path the publication took.
+fn armed_detail(reads: std::num::NonZeroU32) -> String {
+    format!(
+        "the wait for its checks elapsed with none of them red and its merge armed, so the \
+         merge path was read {reads} time{} rather than the worker being sent back",
+        if reads.get() == 1 { "" } else { "s" }
+    )
 }
 
 /// Publish, and where the push reached the remote with the merge path unread,
@@ -1802,6 +1855,12 @@ struct Published {
 /// read of the host rather than a second push. Nothing here asks a host anything
 /// itself: a second route to a change request's state would be host knowledge
 /// regrown in the composition layer.
+///
+/// A publication that ended `checks-unsettled` with its change's merge **armed**
+/// is re-read the same way: nothing is red, the host lands the change once its
+/// required checks pass, and publishing the same session again is `onevcs`'s own
+/// guidance for watching it. A worker sent back to it would spend a dispatch on a
+/// change that is on its way to landing.
 ///
 /// Bounded by [`engine::merge_path_reads`]. Whatever a read answers is what the
 /// node settles on, and the routing that follows is the one that word has always
@@ -1827,12 +1886,21 @@ fn publish_rereading_the_merge_path(
     let mut backoff = engine::merge_path_backoff();
     let mut reads = std::num::NonZeroU32::MIN;
     let mut answered = publish();
-    while reads < budget && still_unread(&answered) && waited(backoff, cancel) {
+    let mut armed = left_armed(&answered);
+    while reads < budget
+        && (still_unread(&answered) || left_armed(&answered))
+        && waited(backoff, cancel)
+    {
         backoff = engine::doubled(backoff);
         reads = reads.saturating_add(1);
         answered = publish();
+        armed |= left_armed(&answered);
     }
-    Published { answered, reads }
+    Published {
+        answered,
+        reads,
+        armed,
+    }
 }
 
 /// Wait out one backoff, answering `false` if the run was stopped instead.
@@ -1876,6 +1944,26 @@ fn still_unread(
         &published.outcome,
         onevcs::PublishOutcome::Failed { kind, .. }
             if crate::vcs::failure_of(*kind) == crate::vcs::Failure::Unread
+    )
+}
+
+/// Whether a publication ended `checks-unsettled` with its change's merge left
+/// armed — the wait elapsed with no required check red, and the host lands the
+/// change once they pass. An unarmed `checks-unsettled` is not one: nothing is
+/// carrying that change any further, so it routes as it always has.
+fn left_armed(
+    answered: &std::result::Result<onevcs::Publication, crate::vcs::PublishRefused>,
+) -> bool {
+    matches!(
+        answered,
+        Ok(onevcs::Publication {
+            outcome: onevcs::PublishOutcome::Failed {
+                kind: onevcs::FailureKind::ChecksUnsettled,
+                armed: Some(_),
+                ..
+            },
+            ..
+        })
     )
 }
 
@@ -3169,6 +3257,21 @@ mod tests {
         assert_eq!(
             drafted_status(&onevcs::PublishOutcome::ChangeOpen(url()), None),
             NodeStatus::Done
+        );
+        // A review draft nobody read the checks of is never done: this engine
+        // never defers its checks, so the answer is a disagreement, not work.
+        assert_eq!(
+            drafted_status(
+                &onevcs::PublishOutcome::ChangeReviewDraftUnchecked(url()),
+                None
+            ),
+            NodeStatus::Failed
+        );
+        let said = unchecked_detail(&url());
+        assert!(
+            said.contains("ChangeReviewDraftUnchecked")
+                && said.contains("https://github.com/owner/service/pull/7"),
+            "the residual does not name the outcome and its change request: {said}"
         );
     }
 

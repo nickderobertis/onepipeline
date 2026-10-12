@@ -29,6 +29,11 @@
 //! many invocations are refused and every one after them is answered, which is
 //! what a caller that reads the merge path again has to meet to be worth
 //! anything.
+//!
+//! And one ending on the host's own clock: `gh.auto-merge` says whether the
+//! repository lets a change be **armed** to merge itself, and `gh.lands-armed`,
+//! holding a count, is the host landing an armed change at that many reads of it
+//! after it was armed — its required checks passing while nobody was publishing.
 
 use onepipeline_testfakes as fake;
 use std::num::NonZeroU64;
@@ -126,6 +131,9 @@ fn main() -> ExitCode {
         (Some("pr"), Some("merge")) => merge(&args, &dir),
         (Some("pr"), Some("ready")) => ready(&args, &dir),
         (Some("pr"), Some("edit")) => edit(&args, &dir),
+        (Some("repo"), Some("view")) if dir.join("gh.auto-merge").exists() => {
+            auto_merge(&args, &dir)
+        }
         (Some("run"), Some("view")) => log(&args),
         (Some(one), Some(two)) => fake::refuse(&format!("unknown gh command '{one} {two}'")),
         (Some(one), None) => fake::refuse(&format!("unknown gh command '{one}'")),
@@ -829,6 +837,79 @@ fn state_of_opened(dir: &Path, opened: &Opened) -> Change {
     })
 }
 
+/// `gh repo view R --json autoMergeAllowed`
+///
+/// Answered only where a journey scripts `gh.auto-merge` — `true` or `false` —
+/// and refused as the unknown command it is otherwise, which `onevcs` reads as a
+/// repository that will not say and arms nothing on: every journey written before
+/// this host could arm a merge meets the host it always met.
+fn auto_merge(args: &[String], dir: &Path) -> ExitCode {
+    if let Err(refusal) = shaped(
+        args,
+        "repo view",
+        3,
+        &[("--json", Shape::Exact("autoMergeAllowed"))],
+        &[],
+    ) {
+        return refusal;
+    }
+    let allowed = match fake::node_script(dir, "gh", "auto-merge").as_deref() {
+        Some("true") => true,
+        Some("false") => false,
+        other => fake::fail(&format!("gh.auto-merge holds {other:?}, not true or false")),
+    };
+    println!("{}", serde_json::json!({ "autoMergeAllowed": allowed }));
+    ExitCode::SUCCESS
+}
+
+/// Where this host counts the reads of a change since its merge was armed.
+fn armed_reads(dir: &Path, id: &str) -> PathBuf {
+    dir.join("gh-armed").join(fake::segment(id))
+}
+
+/// Arm a change's merge, where the host has not landed it: what `pr merge --auto`
+/// leaves for [`land_armed`] to read. Arming it again keeps the count it had, as
+/// GitHub keeps an auto-merge already enabled.
+fn arm(dir: &Path, id: &str) {
+    let path = armed_reads(dir, id);
+    if path.exists() {
+        return;
+    }
+    if let Some(parent) = path.parent() {
+        if let Err(error) = std::fs::create_dir_all(parent) {
+            fake::fail(&format!("cannot create {}: {error}", parent.display()));
+        }
+    }
+    if let Err(error) = std::fs::write(&path, "0") {
+        fake::fail(&format!("cannot write {}: {error}", path.display()));
+    }
+}
+
+/// Count one read of an armed change, and land it at the read `gh.lands-armed`
+/// names: the host's own merge, performed once its checks passed, which nothing
+/// asked for after the arm.
+fn land_armed(dir: &Path, id: &str) {
+    let Some(after) = fake::node_script(dir, "gh", "lands-armed") else {
+        return;
+    };
+    let after: u64 = after
+        .parse()
+        .unwrap_or_else(|_| fake::fail(&format!("gh.lands-armed holds {after:?}, not a count")));
+    let path = armed_reads(dir, id);
+    let Some(count) = read_if_present(&path) else {
+        return;
+    };
+    let count = count.trim().parse::<u64>().unwrap_or_else(|_| {
+        fake::fail(&format!("{} holds {count:?}, not a count", path.display()))
+    }) + 1;
+    if let Err(error) = std::fs::write(&path, count.to_string()) {
+        fake::fail(&format!("cannot write {}: {error}", path.display()));
+    }
+    if count >= after && recorded(dir, id) != Some(Change::Merged) {
+        merge_now(dir, id);
+    }
+}
+
 /// `gh pr view ID --repo R --json …`
 fn view(args: &[String], dir: &Path) -> ExitCode {
     let fields = match args
@@ -881,6 +962,7 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
         Err(refusal) => return refusal,
     };
     let id = opened.number.to_string();
+    land_armed(dir, &id);
     let state = state_of_opened(dir, &opened);
     let merged = state == Change::Merged;
     let reported = scripted_checks(dir, &id, state);
@@ -1318,21 +1400,28 @@ fn merge(args: &[String], dir: &Path) -> ExitCode {
         Ok(opened) => opened,
         Err(refusal) => return refusal,
     };
+    let id = opened.number.to_string();
     if dir.join("gh.merged").exists() {
-        let id = opened.number.to_string();
-        record(dir, &id, Change::Merged);
-        // When it merged, which is now: what `pr view --json mergedAt` answers.
-        let at = merged_at(dir, &id);
-        if let Some(parent) = at.parent() {
-            if let Err(error) = std::fs::create_dir_all(parent) {
-                fake::fail(&format!("cannot create {}: {error}", parent.display()));
-            }
-        }
-        if let Err(error) = std::fs::write(&at, fake::now()) {
-            fake::fail(&format!("cannot write {}: {error}", at.display()));
-        }
+        merge_now(dir, &id);
+    } else if auto {
+        arm(dir, &id);
     }
     ExitCode::SUCCESS
+}
+
+/// Land a change request, now.
+fn merge_now(dir: &Path, id: &str) {
+    record(dir, id, Change::Merged);
+    // When it merged, which is now: what `pr view --json mergedAt` answers.
+    let at = merged_at(dir, id);
+    if let Some(parent) = at.parent() {
+        if let Err(error) = std::fs::create_dir_all(parent) {
+            fake::fail(&format!("cannot create {}: {error}", parent.display()));
+        }
+    }
+    if let Err(error) = std::fs::write(&at, fake::now()) {
+        fake::fail(&format!("cannot write {}: {error}", at.display()));
+    }
 }
 
 /// Where this host keeps the moment it merged a change request — beside the

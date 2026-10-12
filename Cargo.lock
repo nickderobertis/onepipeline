@@ -1653,9 +1653,9 @@ dependencies = [
 
 [[package]]
 name = "onevcs"
-version = "0.45.0"
+version = "0.48.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c2a90ef56e76c76f9bf424151e716aa466761e0295e5a7995c12a9bd09fbafb1"
+checksum = "fc49c31391354485e179506b43da91b70cab2e4f57c58b888b99f7bd767500f8"
 dependencies = [
  "aho-corasick",
  "clap",
@@ -1685,9 +1685,9 @@ dependencies = [
 
 [[package]]
 name = "onevcs-testing"
-version = "0.13.7"
+version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c9e518a86066a8fbb82516c86afb27c449485b2d4a6853fd22efb4bdf7045235"
+checksum = "af6b39246666c901a1753c16a8a640054486e636716a9ee1a94b1513fdf893ea"
 dependencies = [
  "onevcs",
  "serde",

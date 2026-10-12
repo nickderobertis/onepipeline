@@ -7480,6 +7480,12 @@ const RULINGS: &[(&str, &str)] = &[
         "112.",
         "several select the candidate whose stacking chain contains every other candidate",
     ),
+    // engine-links-onevcs: a timed-out check wait `onevcs` left armed is re-read, not
+    // re-dispatched.
+    (
+        "116.",
+        "An **armed** `checks-unsettled` is recovered the same way",
+    ),
 ];
 
 /// A plan spanning sources, as the contract's block states it: the store's own two member
