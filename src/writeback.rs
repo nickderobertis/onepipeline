@@ -116,7 +116,10 @@ use crate::graph::{Landing, NodeStatus};
 use crate::ledger::{LaunchRecord, RunPaths};
 use crate::plan::Node;
 use crate::projection::RunState;
-use crate::taskgraph::{QualifiedId, Store, NODE_KEY, SUPERSEDES_KEY};
+use crate::taskgraph::{
+    QualifiedId, Store, CHANGE_URL_KEY, DRIVER_KEY, LANDING_COMMIT_KEY, LANDING_EVIDENCE_KEY,
+    LANDING_KEY, NODE_KEY, SUPERSEDES_KEY,
+};
 
 const SHADOW_SOURCE: &str = "onepipeline-writeback";
 /// The reserved key naming the plan node a destination item is the shadow of: the
@@ -126,22 +129,14 @@ const ID_KEY: &str = "onepipeline.id";
 // key in `taskgraph`, because the plan reader has to skip them exactly as it skips that
 // one; [`tests::every_word_and_key_this_projection_writes_is_named_by_the_divergence`]
 // holds them to entry 80 of `docs/contract-divergences.md`.
-/// The reserved key saying whether the change a node published reached its base.
-///
-/// Named once, and held against the document that records them by
-/// [`tests::every_word_and_key_this_projection_writes_is_named_by_the_divergence`]:
-/// `docs/contract.md` fixes a narrower vocabulary than this projection writes, so
-/// what these three and the words below are reconciled against is
-/// `docs/contract-divergences.md`, where that departure is recorded.
-const LANDING_KEY: &str = "onepipeline.landing";
-/// The reserved key naming the commit a landed change reached its base at.
-const LANDING_COMMIT_KEY: &str = "onepipeline.landing_commit";
-/// The reserved key naming where a person reads the change a node published.
-const CHANGE_URL_KEY: &str = "onepipeline.change_url";
-/// The reserved key naming the evidence tier a landing rests on, where that is not
-/// the run's own observation: an operator's statement, settled from evidence —
-/// see [`StatedLanding::tier`](crate::edits::StatedLanding::tier).
-const LANDING_EVIDENCE_KEY: &str = "onepipeline.landing_evidence";
+// The landing keys — whether the change a node published reached its base, the commit it
+// reached it at, where a person reads the change, and the evidence tier a stated landing rests
+// on (see [`StatedLanding::tier`](crate::edits::StatedLanding::tier)) — live beside the
+// settlement key in `taskgraph` too, for the same reason the lineage keys do: the plan reader
+// skips them. Each is held against the document that records them by
+// [`tests::every_word_and_key_this_projection_writes_is_named_by_the_divergence`]:
+// `docs/contract.md` fixes a narrower vocabulary than this projection writes, so what they and
+// the words below are reconciled against is `docs/contract-divergences.md`.
 /// The shadow task's own top-level field carrying the tickets a node delivers, held against
 /// the same document as the words and keys above.
 const DELIVERS_FIELD: &str = "delivers";
@@ -295,12 +290,36 @@ struct Snapshot {
     project_metadata: BTreeMap<String, Value>,
     /// Whether a node the run has not started is written as claimed or released.
     claim: Claim,
+    /// Each node whose dispatch has a session open and has not settled, with the
+    /// `onepipeline.dispatch` its item carries: the branch, the base and when it opened.
+    // llmlint: ignore[invalid_states_unrepresentable] a node id is the plain `String` every neighbouring map of this struct keys by — `settlements`, `stated_landings`, `superseded` — taken from `RunState::sessions_in_flight`, whose nodes the graph validated; the value is the typed half, the `StoredDispatch` boundary type a launch reads back.
+    dispatches: BTreeMap<String, crate::continuation::StoredDispatch>,
+    /// What this projection does with the project's `onepipeline.driver` claim.
+    driver: DriverWrite,
     /// The run's term scope: the private repositories its plan names, which every
     /// public boundary check a write of this snapshot asks derives its terms from.
     // llmlint: ignore[invalid_states_unrepresentable] the shape the store takes a scope in —
     // `Engine::with_term_scope(Option<Vec<String>>)` — of identities `onevcs` checks where it
     // derives terms from them; `boundary::Identity` says why no newtype here could hold more.
     term_scope: Vec<String>,
+}
+
+/// What one projection does with the project's driver claim.
+///
+/// Not a project key like the plan's own: those are written only where they moved from a
+/// value the store held, and this one is written where the store holds none, and released
+/// only after the store is asked whether it still names this run.
+#[derive(Clone, Debug, PartialEq)]
+enum DriverWrite {
+    /// Write this claim wherever what landed is not it: a driver's every projection.
+    Hold(crate::payload::DriverClaim),
+    /// The run is letting go: where what landed is this run's claim, read the store's, and
+    /// write it `null` if it still names `run` on `host` — or, where it names another run,
+    /// write **nothing** at all, because that run drives the project now.
+    // llmlint: ignore[invalid_states_unrepresentable] the run is `RunPaths::run`'s `String` and the host `sys::hostname`'s or a launch record's, compared only against a claim's own strings; `src/error.rs` records why this crate carries no `RunId` newtype the contract does not name.
+    Release { run: String, host: String },
+    /// Touch no claim: a driver that has none to write.
+    Leave,
 }
 
 /// What a node the run has not started says about the work it names.
@@ -892,6 +911,11 @@ pub struct Writeback {
     pending: Arc<(Mutex<Pending>, Condvar)>,
     /// The copy's per-item budget, which bounds the launch wait as it bounds the copy.
     per_item: NonZeroU64,
+    /// The claim this driver writes on the project, once it has made one.
+    held: Mutex<Option<crate::payload::DriverClaim>>,
+    /// The claim of the run that took the project over, once one has: from then on this
+    /// driver writes nothing more to it, its board being that run's. Set once, never cleared.
+    retired: std::sync::OnceLock<crate::payload::DriverClaim>,
 }
 
 impl Writeback {
@@ -916,7 +940,12 @@ impl Writeback {
             .spawn(move || worker(store, run_dir, per_item, worker_pending))
             .ok()?;
         // llmlint: ignore-end[changed_behavior_has_e2e]
-        let writer = Self { pending, per_item };
+        let writer = Self {
+            pending,
+            per_item,
+            held: Mutex::new(None),
+            retired: std::sync::OnceLock::new(),
+        };
         // The project is retained in each snapshot rather than in the worker so a malformed
         // old launch record disables projection without weakening LaunchRecord's compatibility.
         Some(writer)
@@ -936,9 +965,49 @@ impl Writeback {
         state: &RunState,
         statuses: &BTreeMap<String, NodeStatus>,
     ) {
-        if let Some(snapshot) = snapshot_of(paths, launch, state, statuses, Claim::Held) {
+        if self.is_retired() {
+            return;
+        }
+        let driver = self
+            .held
+            .lock()
+            .ok()
+            .and_then(|held| held.clone())
+            .map_or(DriverWrite::Leave, DriverWrite::Hold);
+        if let Some(snapshot) = snapshot_of(paths, launch, state, statuses, Claim::Held, driver) {
             self.queue(snapshot);
         }
+    }
+
+    /// Write `claim` on the project from this driver's next projection on, wherever what
+    /// landed is not it.
+    pub(crate) fn hold(&self, claim: &crate::payload::DriverClaim) {
+        if let Ok(mut held) = self.held.lock() {
+            *held = Some(claim.clone());
+        }
+    }
+
+    /// Write nothing more to the project: another run has taken it over, and what this
+    /// driver projected after that would be written over that run's own.
+    pub(crate) fn retire(&self, by: &crate::payload::DriverClaim) {
+        let _ = self.retired.set(by.clone());
+        let (lock, ready) = &*self.pending;
+        if let Ok(mut pending) = lock.lock() {
+            pending.latest = None;
+            ready.notify_all();
+        }
+    }
+
+    /// Whether a projection this driver handed the worker has yet to land — taken, and still
+    /// being attempted, or queued behind one: what a closeout that has spent its window asks.
+    pub(crate) fn still_landing(&self) -> bool {
+        let (lock, _) = &*self.pending;
+        lock.lock().is_ok_and(|pending| pending.unlanded())
+    }
+
+    /// Whether another run took the project over, so this driver writes nothing more to it.
+    pub(crate) fn is_retired(&self) -> bool {
+        self.retired.get().is_some()
     }
 
     /// The same, for the snapshot a closeout projects: a node that never started is written
@@ -950,7 +1019,15 @@ impl Writeback {
         state: &RunState,
         statuses: &BTreeMap<String, NodeStatus>,
     ) {
-        if let Some(snapshot) = snapshot_of(paths, launch, state, statuses, Claim::Released) {
+        if self.is_retired() {
+            return;
+        }
+        let driver = DriverWrite::Release {
+            run: paths.run.clone(),
+            host: crate::sys::hostname(),
+        };
+        if let Some(snapshot) = snapshot_of(paths, launch, state, statuses, Claim::Released, driver)
+        {
             self.queue(snapshot);
         }
     }
@@ -994,6 +1071,7 @@ fn snapshot_of(
     state: &RunState,
     statuses: &BTreeMap<String, NodeStatus>,
     claim: Claim,
+    driver: DriverWrite,
 ) -> Option<Snapshot> {
     let Ok(project) = launch.project.parse() else {
         return None;
@@ -1036,8 +1114,71 @@ fn snapshot_of(
             })
             .unwrap_or_default(),
         claim,
+        dispatches: dispatches(paths, state),
+        driver,
         term_scope: crate::boundary::of_run(&crate::boundary::plan_now(state)).scope,
     })
+}
+
+/// Each node whose dispatch has a session open and has not settled, with what its item's
+/// `onepipeline.dispatch` says: the branch the session works on, the base it opened against
+/// and when it opened — off the session's own `session-opened`, the last one for the node.
+///
+/// A session that named no base, or a record carrying no time, is left out rather than
+/// written half: a host that pins the node needs the branch and the base together.
+fn dispatches(
+    paths: &RunPaths,
+    state: &RunState,
+) -> BTreeMap<String, crate::continuation::StoredDispatch> {
+    let open = state.sessions_in_flight();
+    if open.is_empty() {
+        return BTreeMap::new();
+    }
+    /// What a node's `session-opened` said: the base it opened against, and when.
+    struct Opened {
+        base: crate::vcs::BranchName,
+        // llmlint: ignore[invalid_states_unrepresentable] the journal record's own `ts`, which onemessagebus's `Envelope` declares as a `String` holding an RFC 3339 instant, copied onto the store verbatim as `StoredDispatch::opened_at`; this crate has no timestamp type to parse it into and back out of, and every other `ts` it reads stays a string.
+        at: String,
+    }
+    let mut opened: BTreeMap<String, Opened> = BTreeMap::new();
+    for event in crate::journal::read(&paths.journal()) {
+        if event.source != Source::Vcs || !crate::vcs::is_session_opened(&event.kind) {
+            continue;
+        }
+        let Some(node) = event
+            .labels
+            .node
+            .clone()
+            .filter(|node| open.contains_key(node))
+        else {
+            continue;
+        };
+        if let Some(base) = event
+            .payload
+            .get("base")
+            .and_then(Value::as_str)
+            .and_then(crate::vcs::BranchName::checked)
+        {
+            opened.insert(
+                node,
+                Opened {
+                    base,
+                    at: event.ts.clone(),
+                },
+            );
+        }
+    }
+    open.into_iter()
+        .filter_map(|(node, session)| {
+            let Opened { base, at } = opened.remove(&node)?;
+            let dispatch = crate::continuation::StoredDispatch {
+                branch: session.branch().as_str().to_owned(),
+                base: base.as_str().to_owned(),
+                opened_at: at,
+            };
+            Some((node, dispatch))
+        })
+        .collect()
 }
 
 impl Writeback {
@@ -1087,6 +1228,9 @@ impl Writeback {
         state: &RunState,
         statuses: &BTreeMap<String, NodeStatus>,
     ) {
+        if self.is_retired() {
+            return;
+        }
         let deadline = Instant::now() + CLOSEOUT_WAIT;
         self.closing_out_until(deadline, |pending| {
             pending.latest.is_some() && pending.worker == WorkerState::Idle
@@ -1199,7 +1343,12 @@ pub(crate) fn release_stopped(paths: &RunPaths, launch: &LaunchRecord) {
     let store = Store::at(launch_dir(launch));
     let state = crate::checkpoint::Projected::open(paths);
     let statuses = state.statuses();
-    let Some(snapshot) = snapshot_of(paths, launch, &state, &statuses, Claim::Released) else {
+    let driver = DriverWrite::Release {
+        run: paths.run.clone(),
+        host: launch.host.clone(),
+    };
+    let Some(snapshot) = snapshot_of(paths, launch, &state, &statuses, Claim::Released, driver)
+    else {
         return;
     };
     // A rate limit the driver was waiting out binds this process too: the release asks the store
@@ -1636,6 +1785,22 @@ enum Kept {
     Unreadable(String),
 }
 
+/// The driver claim this run last landed on its project, off its landed baseline: `None`
+/// where the baseline cannot be read or holds none.
+pub(crate) fn landed_claim(run_dir: &Path) -> Option<Value> {
+    let text = std::fs::read_to_string(run_dir.join(WRITEBACK_LANDED_FILE)).ok()?;
+    serde_json::from_str::<LandedBaseline>(&text)
+        .ok()?
+        .project_metadata
+        .remove(DRIVER_KEY)
+}
+
+/// Whether the run's store has asked to be left alone for a while yet — or holds a wait this
+/// build cannot read, which may be one — so a read of it would be asked inside the wait.
+pub(crate) fn store_asked_to_wait(run_dir: &Path) -> bool {
+    !matches!(AskedWait::kept(run_dir), Kept::Nothing)
+}
+
 /// How often a driver looks again at a kept wait it could not read, while it asks the store
 /// nothing on it: soon enough that repairing the file puts the board back in step promptly.
 const UNREADABLE_WAIT_RECHECK: Duration = Duration::from_secs(2);
@@ -2064,6 +2229,58 @@ fn carry_the_difference(
     items: &mut Vec<String>,
 ) -> Result<Landed, Failed> {
     let scope = decided.scope;
+    // A run letting go of a project another run has since claimed writes nothing to it: the
+    // board is that run's, and a release written over it would hand back the tickets that
+    // run is working. So the store's claim is read first, once, wherever this run's own is
+    // what last landed — and only then.
+    if let DriverWrite::Release { run, host } = &snapshot.driver {
+        if baseline.holds_claim_of(run, host) {
+            let metadata = destination_project(attempt, snapshot)?.metadata;
+            let stored = metadata.get(DRIVER_KEY).cloned().unwrap_or(Value::Null);
+            // Read as the launch reads it: a claim that is not one is nobody's this run may
+            // release, so it is left as it stands.
+            let read = crate::continuation::claim_of(snapshot.project.as_str(), &metadata);
+            let ours = matches!(&read, Ok(Some(claim)) if claim.names(run, host));
+            if !ours {
+                let successor = !matches!(read, Ok(None));
+                baseline
+                    .landed
+                    .project_metadata
+                    .insert(DRIVER_KEY.into(), stored);
+                baseline.save();
+                if successor {
+                    items.clear();
+                    return Ok(Landed {
+                        actions: None,
+                        spent: None,
+                        delivered: Vec::new(),
+                    });
+                }
+            } else {
+                // Released at once, beside the read that found it still this run's: the
+                // window between the two is the one a successor's claim could fall into, and
+                // a status the store refuses further down must not leave the claim standing.
+                let named = MetadataKey::new(DRIVER_KEY.to_owned())
+                    .map_err(|why| Failed::from(format!("project key '{DRIVER_KEY}': {why}")))?;
+                attempt
+                    .call(
+                        StoreCall::ProjectMetadataSet,
+                        Deadline::Floor,
+                        attempt.engine.set_project_metadata(
+                            &snapshot.project.global(),
+                            &named,
+                            &Value::Null,
+                        ),
+                    )?
+                    .map_err(|error| Failed::engine(PROJECT_METADATA_SET, &error))?;
+                baseline
+                    .landed
+                    .project_metadata
+                    .insert(DRIVER_KEY.into(), Value::Null);
+                baseline.save();
+            }
+        }
+    }
     // Where each lineage's item is and what it says as far as the run knows: the baseline's
     // entry, or — for a lineage it does not hold — one read of the item by its own id.
     let mut held: BTreeMap<String, Held> = decided
@@ -2199,6 +2416,37 @@ fn carry_the_difference(
         baseline.save();
     }
     // llmlint: ignore-end[changed_behavior_has_e2e]
+    // A claim to hold, last, after the work it claims has landed, wherever what landed is not
+    // this driver's claim. A release was made at the attempt's start, beside its read; what
+    // is left of one here is only a baseline that still names this run, written `null`.
+    let claimed = match &snapshot.driver {
+        DriverWrite::Hold(claim) => serde_json::to_value(claim)
+            .ok()
+            .filter(|claim| baseline.landed.project_metadata.get(DRIVER_KEY) != Some(claim)),
+        DriverWrite::Release { run, host } => {
+            baseline.holds_claim_of(run, host).then_some(Value::Null)
+        }
+        DriverWrite::Leave => None,
+    };
+    if let Some(value) = claimed {
+        let named = MetadataKey::new(DRIVER_KEY.to_owned())
+            .map_err(|why| carrying.failed(format!("project key '{DRIVER_KEY}': {why}").into()))?;
+        attempt
+            .call(
+                StoreCall::ProjectMetadataSet,
+                Deadline::Floor,
+                attempt
+                    .engine
+                    .set_project_metadata(&project, &named, &value),
+            )
+            .map_err(|failed| carrying.failed(failed))?
+            .map_err(|error| carrying.failed(Failed::engine(PROJECT_METADATA_SET, &error)))?;
+        baseline
+            .landed
+            .project_metadata
+            .insert(DRIVER_KEY.into(), value);
+        baseline.save();
+    }
     carrying.finish()
 }
 
@@ -2913,7 +3161,31 @@ impl Baseline {
                 .project_metadata
                 .get(key)
                 .is_some_and(|held| held != value)
-        })
+        }) || self.driver_differs(&snapshot.driver)
+    }
+
+    /// Whether the projection's driver claim asks the store anything: a claim to hold that is
+    /// not what landed, or a release of a claim that landed naming this run.
+    fn driver_differs(&self, driver: &DriverWrite) -> bool {
+        match driver {
+            DriverWrite::Hold(claim) => {
+                self.landed.project_metadata.get(DRIVER_KEY)
+                    != serde_json::to_value(claim).ok().as_ref()
+            }
+            DriverWrite::Release { run, host } => self.holds_claim_of(run, host),
+            DriverWrite::Leave => false,
+        }
+    }
+
+    /// Whether what landed of the project's claim names `run` on `host`.
+    fn holds_claim_of(&self, run: &str, host: &str) -> bool {
+        self.landed
+            .project_metadata
+            .get(DRIVER_KEY)
+            .and_then(|claim| {
+                serde_json::from_value::<crate::payload::DriverClaim>(claim.clone()).ok()
+            })
+            .is_some_and(|claim| claim.names(run, host))
     }
 
     /// Rewrite the file atomically. Best effort, like the projection it records: a file that
@@ -3413,6 +3685,15 @@ fn task_document(
     if let Some(settlement) = snapshot.settlements.get(id) {
         metadata.insert(crate::taskgraph::SETTLEMENT_KEY.into(), settlement.clone());
     }
+    // Written while the head's session is open and gone once it settles, so a host holding
+    // none of this run's state pins the node to the branch it was working on.
+    if let Some(dispatch) = snapshot
+        .dispatches
+        .get(id)
+        .and_then(|dispatch| serde_json::to_value(dispatch).ok())
+    {
+        metadata.insert(crate::taskgraph::DISPATCH_KEY.into(), dispatch);
+    }
     // What closed the node, beside the word that says it closed. Each is
     // written only where the run *observed* one, so a node with no change of
     // its own — a direct agent node, a human action, a branch its base
@@ -3657,7 +3938,12 @@ fn settlements(paths: &RunPaths) -> BTreeMap<String, Value> {
             && event.kind.0 == crate::journal::PipelineKind::NodeSettled.as_str()
         {
             if let Some(node) = event.labels.node.as_ref() {
-                found.insert(node.clone(), Value::Object(event.payload));
+                // The settlement as the node reached it: which launch read it back from the
+                // store is this run's record, and the board's settlement is what the next
+                // launch continues — the same fields, whoever carried them.
+                let mut settlement = event.payload;
+                settlement.remove("continued");
+                found.insert(node.clone(), Value::Object(settlement));
             }
         }
     }
@@ -5316,6 +5602,8 @@ mod tests {
         let writeback = Writeback {
             pending: Arc::new((Mutex::new(Pending::default()), Condvar::new())),
             per_item: DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS,
+            held: Mutex::new(None),
+            retired: std::sync::OnceLock::new(),
         };
         writeback.closing_out_until(Instant::now() + super::CLOSEOUT_WAIT, Pending::unlanded);
         assert!(
@@ -5932,6 +6220,8 @@ mod tests {
                         json!(4),
                     )]),
                     claim: Claim::Held,
+                    dispatches: BTreeMap::new(),
+                    driver: super::DriverWrite::Leave,
                     term_scope: Vec::new(),
                 },
                 // Only `build`. A node the plan has just added has no destination
@@ -7557,6 +7847,60 @@ mod tests {
             .project_metadata
             .insert("onepipeline.concurrency".to_owned(), json!(4));
         assert!(super::moved_project_keys(&snapshot, &landed).is_empty());
+    }
+
+    /// The driver claim asks the store something exactly where it would change it: a claim to
+    /// hold that is not what landed, or a release of a claim that landed naming this run — and
+    /// never a release of another run's, or a projection that leaves the claim alone.
+    #[test]
+    fn the_driver_claim_differs_only_where_it_would_be_written() {
+        let snapshot = Fixture::new("driver-claim").snapshot;
+        let mine = json!({"run": "ship", "host": "builder", "session": null, "pid": 7,
+                          "claimed_at": "2026-10-11T00:00:00.000Z"});
+        let mut theirs = mine.clone();
+        theirs["host"] = json!("elsewhere");
+        let mut baseline = super::Baseline {
+            path: std::path::PathBuf::from("unused"),
+            landed: LandedBaseline::empty(&snapshot.project),
+        };
+        let hold = super::DriverWrite::Hold(serde_json::from_value(mine.clone()).expect("a claim"));
+        let release = super::DriverWrite::Release {
+            run: "ship".to_owned(),
+            host: "builder".to_owned(),
+        };
+        assert!(
+            baseline.driver_differs(&hold),
+            "an unheld claim was not written"
+        );
+        assert!(
+            !baseline.driver_differs(&release),
+            "an unheld claim was released"
+        );
+        baseline
+            .landed
+            .project_metadata
+            .insert(super::DRIVER_KEY.to_owned(), mine.clone());
+        assert!(
+            !baseline.driver_differs(&hold),
+            "a landed claim was written again"
+        );
+        assert!(
+            baseline.driver_differs(&release),
+            "this run's claim was not released"
+        );
+        baseline
+            .landed
+            .project_metadata
+            .insert(super::DRIVER_KEY.to_owned(), theirs);
+        assert!(baseline.driver_differs(&hold));
+        assert!(
+            !baseline.driver_differs(&release),
+            "another run's claim was released"
+        );
+        assert!(!baseline.driver_differs(&super::DriverWrite::Leave));
+        let mut unchanged = snapshot.clone();
+        unchanged.driver = super::DriverWrite::Leave;
+        assert!(!baseline.project_differs(&unchanged));
     }
 
     /// A shadow store whose path is not UTF-8 is refused by name before the store is opened,

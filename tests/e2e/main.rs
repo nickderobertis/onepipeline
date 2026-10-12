@@ -67,6 +67,12 @@ mod compatibility;
 mod checkpoint;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod concurrency;
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] a continuation is read by
+// `taskgraph`, journalled by `driver`, gated by `engine` and `lifecycle`, projected by
+// `writeback` and rendered by `views` at once, so the crate is the narrowest edge these
+// journeys can honestly sit behind; same grounds as `mod criteria_rule` below.
+mod continuation;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod criteria;
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] C6b is checked in `plan`,
 // `graph`, `edits` and `driver` at once, so the crate is the narrowest edge these journeys can

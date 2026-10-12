@@ -38,6 +38,7 @@
 #[path = "../e2e/harness.rs"]
 mod harness;
 
+mod continuation;
 mod release_probe;
 mod repo;
 

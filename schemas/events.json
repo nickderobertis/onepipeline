@@ -1043,6 +1043,17 @@
               }
             ],
             "description": "The unlanded same-repository changes the node was drafted on top of,\npresent exactly when it had any."
+          },
+          "continued": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Continued"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Where a settlement this run did not reach itself came from: present exactly on\nthe settlement a launch read back from its project's store and continued,\nrather than dispatched. Entry 119 of `docs/contract-divergences.md`."
           }
         },
         "required": [
@@ -1174,6 +1185,36 @@
               "head"
             ],
             "description": "One stack parent of a settled node."
+          },
+          "Continued": {
+            "type": "object",
+            "properties": {
+              "source": {
+                "$ref": "#/$defs/ContinuedSource",
+                "description": "Where the settlement was read: the project's store."
+              },
+              "run": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The run the project's driver claim named when the launch read it, `null` where\nthe project carried none."
+              }
+            },
+            "required": [
+              "source"
+            ],
+            "description": "A settlement a launch continued from its project's store."
+          },
+          "ContinuedSource": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "store",
+                "description": "The project's own `onepipeline.settlement`, on its store."
+              }
+            ],
+            "description": "Where a continued settlement was read."
           }
         }
       }
@@ -3260,6 +3301,120 @@
             },
             "minItems": 1,
             "description": "The identities a cut-short pass never began: never empty, because a pass that\nreached every identity carries no `cut_short` at all. Built through\n[`Unreached::new`] and read back refusing an empty list, so no value of this\ntype is a cut that left nothing out."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.driver-taken-over@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "previous": {
+            "$ref": "#/$defs/DriverClaim",
+            "description": "The claim the project carried when the launch read it."
+          }
+        },
+        "required": [
+          "previous"
+        ],
+        "description": "`driver-taken-over`: the claim a `start --take-over` passed.",
+        "title": "DriverTakenOver",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "DriverClaim": {
+            "type": "object",
+            "properties": {
+              "run": {
+                "type": "string",
+                "description": "The run that claims the project."
+              },
+              "host": {
+                "type": "string",
+                "description": "The host its driver runs on."
+              },
+              "session": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The session that launched it, `null` where none was named."
+              },
+              "pid": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "description": "Its driver's pid, meaningful on `host`."
+              },
+              "claimed_at": {
+                "type": "string",
+                "description": "When the claim was written, RFC 3339."
+              }
+            },
+            "required": [
+              "run",
+              "host",
+              "pid",
+              "claimed_at"
+            ],
+            "description": "A project's `onepipeline.driver` claim: the run driving it, the host and launching\nsession that run is driven from, its driver's pid, and when it claimed.\n\nThe document a journal record carries, and so no stricter than any other payload here;\nthe store's copy is external input, and `continuation::claim_of` refuses one carrying a\nkey this shape does not name before it is read as one."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.driver-superseded@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "by": {
+            "$ref": "#/$defs/DriverClaim",
+            "description": "The claim the driver read."
+          }
+        },
+        "required": [
+          "by"
+        ],
+        "description": "`driver-superseded`: the claim a driver found naming another run.",
+        "title": "DriverSuperseded",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "DriverClaim": {
+            "type": "object",
+            "properties": {
+              "run": {
+                "type": "string",
+                "description": "The run that claims the project."
+              },
+              "host": {
+                "type": "string",
+                "description": "The host its driver runs on."
+              },
+              "session": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The session that launched it, `null` where none was named."
+              },
+              "pid": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "description": "Its driver's pid, meaningful on `host`."
+              },
+              "claimed_at": {
+                "type": "string",
+                "description": "When the claim was written, RFC 3339."
+              }
+            },
+            "required": [
+              "run",
+              "host",
+              "pid",
+              "claimed_at"
+            ],
+            "description": "A project's `onepipeline.driver` claim: the run driving it, the host and launching\nsession that run is driven from, its driver's pid, and when it claimed.\n\nThe document a journal record carries, and so no stricter than any other payload here;\nthe store's copy is external input, and `continuation::claim_of` refuses one carrying a\nkey this shape does not name before it is read as one."
           }
         }
       }

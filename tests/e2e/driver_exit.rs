@@ -803,8 +803,9 @@ fn an_adopter_answers_the_envelopes_its_dead_driver_claimed_and_never_answered()
 
     // And the note reached the adopter's own dispatch: that dispatch was composed
     // once the note's answer was on the record, so the worker's opening turn
-    // carries it — the one turn of the run that does. That turn opens after the
-    // answers the wait above saw, so it is waited for in turn rather than assumed.
+    // carries it — the one turn of the run that does. The answers above can land
+    // before that turn opens: the adopter's member starts it on its own after the
+    // dispatch, so the journal is read once it has.
     world.until("the adopter's dispatch to open its turn", |world| {
         world.events_of(run, "turn-started").iter().any(|event| {
             event["payload"]["instruction"]

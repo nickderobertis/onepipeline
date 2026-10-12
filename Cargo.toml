@@ -666,8 +666,7 @@ resolver = "2"
 # that surface against the linked release. A **requirement**, because `^0.45` admits no
 # 0.46.x; `onevcs-testing` 0.14.0 requires exactly `=0.46.0`, so the pair moves as one.
 #
-# `onevcs` 0.48.1 is the floor, the release the stop-verdict plan's onevcs nodes
-# name; 0.48.0 brought what this crate relies on from it:
+# `onevcs` 0.48.1 is the floor; 0.48.0 brought what this crate relies on:
 # - `recoverable_matching` reads only the sessions a launcher-labelled
 #   `Selection` names (onevcs #356, first in 0.45.0) rather than every stream on
 #   the host, at `Detail::Decision` and with its proofs reused across calls:

@@ -4,9 +4,6 @@ on:
   push:
     branches: [main]
   pull_request:
-    # The lifecycle lifts a published draft before waiting for required checks.
-    # Re-run on that lift even when the head commit has not changed.
-    types: [opened, synchronize, reopened, ready_for_review]
 
 # Least privilege: most jobs only need to read the repo.
 permissions:
