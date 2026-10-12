@@ -513,9 +513,10 @@ fn the_host_view_measurement_and_journeys_share_one_generator() {
 }
 
 /// The measurement records a read only when the read answered: a binary that fails, one that
-/// exits 0 having recorded no phases, and one whose phase line is empty, not JSON or
-/// stamped with no time each fail the measurement naming what to do next, and none leaves
-/// a record behind; nor does one whose fixture cannot be removed afterwards. Linux only,
+/// exits 0 having recorded no phases, one whose phase line is empty, not JSON or stamped
+/// with no time, one carrying a phase or quantity of the wrong shape, and one repeating a
+/// row each fail the measurement naming what to do next, and none leaves a record
+/// behind; nor does one whose fixture cannot be removed afterwards. Linux only,
 /// as the measurement is: its fixture proves its live dispatches' procfs start tokens.
 #[cfg(target_os = "linux")]
 #[test]
@@ -558,6 +559,16 @@ fn the_host_view_measurement_records_nothing_from_a_read_that_failed() {
             "unmarked",
             "echo '{\"marks_unix_ns\":{\"run\":0,\"flushed\":1},\"phases\":{},\"quantities\":{},\"read_bytes\":0}' > \"$ONEPIPELINE_HOST_PHASES\"",
             &["the read's `run` mark is not a time: 0"],
+        ),
+        (
+            "mistimed",
+            "echo '{\"marks_unix_ns\":{\"run\":1,\"flushed\":2},\"phases\":{\"list\":{\"wall_ms\":\"fast\",\"count\":1}},\"quantities\":{},\"read_bytes\":0}' > \"$ONEPIPELINE_HOST_PHASES\"",
+            &["the read's phase list is not a timing: {\"wall_ms\":\"fast\",\"count\":1}"],
+        ),
+        (
+            "miscounted",
+            "echo '{\"marks_unix_ns\":{\"run\":1,\"flushed\":2},\"phases\":{},\"quantities\":{\"live-journal-bytes\":-1},\"read_bytes\":0}' > \"$ONEPIPELINE_HOST_PHASES\"",
+            &["the read's quantity live-journal-bytes is not a count: -1"],
         ),
         (
             "repeating",

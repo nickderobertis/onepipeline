@@ -156,6 +156,25 @@ function read(args, label) {
       `${label}: the read's phase line lacks its marks, phases, quantities or read bytes: ${text.trim()}`,
     );
   }
+  // Every read's figures are held here, not only those the record keeps: a read
+  // that answered with a phase or quantity this binary cannot write did not answer.
+  const isCount = (value) => Number.isSafeInteger(value) && value >= 0;
+  for (const [name, phase] of Object.entries(line.phases)) {
+    if (
+      !isMap(phase) ||
+      typeof phase.wall_ms !== "number" ||
+      !Number.isFinite(phase.wall_ms) ||
+      phase.wall_ms < 0 ||
+      !isCount(phase.count)
+    )
+      throw new Error(
+        `${label}: the read's phase ${name} is not a timing: ${JSON.stringify(phase)}`,
+      );
+  }
+  for (const [name, amount] of Object.entries(line.quantities)) {
+    if (!isCount(amount))
+      throw new Error(`${label}: the read's quantity ${name} is not a count: ${amount}`);
+  }
   const marks = line.marks_unix_ns;
   const run = mark(marks.run, label, "run");
   const flushed = mark(marks.flushed, label, "flushed");
