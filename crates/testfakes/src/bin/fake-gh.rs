@@ -39,7 +39,9 @@
 //! on a draft's head finishing that long after the host was first asked about the
 //! draft. Until then the draft reports `gh.checks.draft`, and its workflow runs and
 //! check suites `gh.runs.draft` and `gh.suites.draft`; from then on it reports
-//! `gh.checks` as a ready change would, and those runs and suites completed. What
+//! `gh.checks` as a ready change would, and those runs and suites completed. Each
+//! check rollup starts a poll: its check-name and activity reads reuse that phase
+//! until the next rollup, so a timer expiring between reads cannot mix phases. What
 //! the runs and suites are for is `onevcs`'s question whether anything on a head is
 //! still running before it lifts a draft early, which it asks of exactly those two
 //! reads. `gh.no-ready-trigger` is the workflow that does not run on
@@ -986,6 +988,18 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
     land_armed(dir, &id);
     let state = state_of_opened(dir, &opened);
     let merged = state == Change::Merged;
+    let phase = if draft_running(dir, &id, state) {
+        DraftPhase::Running
+    } else {
+        DraftPhase::Finished
+    };
+    let path = draft_phase_path(dir, &id);
+    let phase = serde_json::to_string(&phase).unwrap_or_else(|error| {
+        fake::fail(&format!("the draft phase does not serialize: {error}"))
+    });
+    if let Err(error) = std::fs::write(&path, phase) {
+        fake::fail(&format!("cannot write {}: {error}", path.display()));
+    }
     let reported = scripted_checks(dir, &id, state);
     let head = head_of(dir, &opened);
     println!(
@@ -1224,7 +1238,7 @@ const READY_RUN_STARTED: &str = "2026-01-01T00:05:00Z";
 /// A line this program cannot read is **fatal**, not skipped: a journey scripting
 /// a check this host quietly dropped would assert against a rollup nobody wrote.
 fn scripted_checks(dir: &Path, id: &str, change: Change) -> Vec<Check> {
-    let text = draft_running(dir, id, change)
+    let text = reported_draft_running(dir, id, change)
         .then(|| fake::node_script(dir, "gh", "checks.draft"))
         .flatten()
         .or_else(|| fake::node_script(dir, "gh", &format!("checks.{}", fake::segment(id))))
@@ -1289,6 +1303,42 @@ fn draft_running(dir: &Path, id: &str, change: Change) -> bool {
         }
     };
     (now.saturating_sub(first) as f64) < after * 1000.0
+}
+
+/// The last rollup's phase, persisted between the host's separate reads.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum DraftPhase {
+    Running,
+    Finished,
+}
+
+/// Where the last rollup's phase is held across this host's subprocess reads.
+fn draft_phase_path(dir: &Path, id: &str) -> PathBuf {
+    dir.join("gh")
+        .join(format!("{}.checks-phase", fake::segment(id)))
+}
+
+/// Reuse the last rollup's phase until another rollup reports the required check.
+/// Reads before any rollup fall back to the scripted clock, and a ready change
+/// finishes immediately regardless of what the last draft rollup reported.
+fn reported_draft_running(dir: &Path, id: &str, change: Change) -> bool {
+    if change != Change::Draft {
+        return false;
+    }
+    let path = draft_phase_path(dir, id);
+    let Some(phase) = read_if_present(&path) else {
+        return draft_running(dir, id, change);
+    };
+    match serde_json::from_str::<DraftPhase>(&phase).unwrap_or_else(|error| {
+        fake::fail(&format!(
+            "{} holds an invalid phase: {error}",
+            path.display()
+        ))
+    }) {
+        DraftPhase::Running => true,
+        DraftPhase::Finished => false,
+    }
 }
 
 /// Which of the two activity reads a scripted record answers, which decides the
@@ -1408,7 +1458,7 @@ fn activity_of(
     dir: &Path,
     path: &str,
     shape: fn(&[&str], &str) -> Option<(String, String)>,
-) -> Result<(String, Option<Opened>), ExitCode> {
+) -> Result<(Sha, Option<Opened>), ExitCode> {
     let (base, query) = path.split_once('?').unwrap_or((path, ""));
     let segments: Vec<&str> = base.split('/').collect();
     if segments.iter().any(|segment| segment.is_empty()) {
@@ -1428,7 +1478,7 @@ fn activity_of(
         .into_iter()
         .filter(|change| change.repo == repo)
         .rfind(|change| head_of(dir, change).as_str() == sha.as_str());
-    Ok((sha.0, opened))
+    Ok((sha, opened))
 }
 
 /// The scripted `kind` records on the change's head: as scripted while its draft is
@@ -1439,7 +1489,7 @@ fn activity(dir: &Path, opened: Option<&Opened>, kind: Kind) -> Vec<Activity> {
         return Vec::new();
     };
     let id = opened.number.to_string();
-    let running = draft_running(dir, &id, state_of_opened(dir, opened));
+    let running = reported_draft_running(dir, &id, state_of_opened(dir, opened));
     Activity::scripted(dir, kind)
         .into_iter()
         .map(|record| if running { record } else { record.finished() })
@@ -1486,7 +1536,7 @@ fn workflow_runs(args: &[String], dir: &Path, path: &str) -> ExitCode {
             serde_json::json!({
                 "id": 100 + index,
                 "name": run.name,
-                "head_sha": sha,
+                "head_sha": sha.as_str(),
                 "event": "pull_request",
                 "status": status,
                 "conclusion": conclusion,
@@ -1534,7 +1584,7 @@ fn check_suites(args: &[String], dir: &Path, path: &str) -> ExitCode {
             };
             serde_json::json!({
                 "id": 200 + index,
-                "head_sha": sha,
+                "head_sha": sha.as_str(),
                 "status": status,
                 "conclusion": conclusion,
                 "latest_check_runs_count": runs,

@@ -787,3 +787,155 @@ fn a_draft_whose_head_has_a_check_suite_in_progress_is_held_until_it_is_green() 
         .count();
     assert!(suites >= 1, "{:?}", gh_calls(&world));
 }
+
+/// A poll must not mix absent required checks with activity from the next phase.
+#[test]
+fn a_drafts_activity_finishes_only_after_its_next_check_read() {
+    let world = World::new("draft-poll");
+    world.repository("change-open", &[]);
+    world.script("service.work", "the worker wrote this\n");
+    world.script("gh.checks", GREEN);
+    let mut node = lifecycle("service", &[]);
+    node["draft"] = json!(true);
+    let plan = world.plan("poll", &plan_of("poll", vec![node]));
+    world
+        .run_from(&world.project, &["start", &plan, "--attach"])
+        .exited(0)
+        .settled();
+    assert_eq!(host_holds(&world, 1), "draft");
+
+    world.script("gh.draft.finishes-after", "1000000");
+    world.script("gh.checks.draft", "build completed success advisory");
+    world.script("gh.runs.draft", "CI in_progress -");
+    world.script(
+        "gh.suites.draft",
+        "Some App in_progress - 1\nEmpty App queued - 0",
+    );
+    let invoke = |args: &[&str]| {
+        let output = std::process::Command::new(crate::harness::double("fake-gh"))
+            .args(args)
+            .env("ONEPIPELINE_FAKE_DIR", &world.fakes)
+            .output()
+            .expect("fake-gh starts");
+        assert!(output.status.success(), "{:?}", output);
+        output
+    };
+    let read =
+        |args: &[&str]| serde_json::from_slice::<Value>(&invoke(args).stdout).expect("GitHub JSON");
+    let view = || {
+        read(&[
+            "pr",
+            "view",
+            "1",
+            "--repo",
+            "owner/service",
+            "--json",
+            "number,state,mergeStateStatus,headRefOid,mergeCommit,statusCheckRollup",
+        ])
+    };
+    let before = view();
+    assert_eq!(before["statusCheckRollup"].as_array().unwrap().len(), 1);
+    let head = before["headRefOid"].as_str().unwrap();
+    let runs = format!("repos/owner/service/actions/runs?head_sha={head}&per_page=100");
+    let suites = format!("repos/owner/service/commits/{head}/check-suites?per_page=100");
+
+    // Make the timer expire between the check read and both activity reads.
+    world.script("gh.draft.finishes-after", "0");
+    assert_eq!(
+        read(&["api", &runs])["workflow_runs"][0]["status"],
+        "in_progress"
+    );
+    assert_eq!(
+        read(&["api", &suites])["check_suites"][0]["status"],
+        "in_progress"
+    );
+    let after = view();
+    assert!(after["statusCheckRollup"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|check| check["name"] == "lint" && check["conclusion"] == "success"));
+    assert_eq!(
+        read(&["api", &runs])["workflow_runs"][0]["status"],
+        "completed"
+    );
+    assert_eq!(
+        read(&["api", &suites])["check_suites"][0]["status"],
+        "completed"
+    );
+
+    assert_eq!(
+        read(&["api", &suites])["check_suites"][1]["status"],
+        "queued"
+    );
+    for path in [&runs, &suites] {
+        let other_repo = path.replace("owner/service", "owner/other");
+        let other_head = path.replace(head, "ffffffffffffffffffffffffffffffffffffffff");
+        for unmatched in [other_repo, other_head] {
+            assert_eq!(read(&["api", &unmatched])["total_count"], 0);
+        }
+    }
+
+    // A newer ready request on this same head supersedes the old draft's activity.
+    world.script("gh.draft.finishes-after", "1000000");
+    view();
+    let opened: Value = serde_json::from_str(
+        &std::fs::read_to_string(world.fakes.join("gh/opened.jsonl")).unwrap(),
+    )
+    .unwrap();
+    let branch = opened["head"].as_str().unwrap();
+    invoke(&[
+        "pr",
+        "create",
+        "--repo",
+        "owner/service",
+        "--head",
+        branch,
+        "--base",
+        "main",
+        "--title",
+        "newer request",
+        "--body",
+        "same head",
+    ]);
+    assert_eq!(
+        read(&["api", &runs])["workflow_runs"][0]["status"],
+        "completed"
+    );
+    assert_eq!(
+        read(&["api", &suites])["check_suites"][0]["status"],
+        "completed"
+    );
+
+    // A fresh draft answers activity before any rollup, and cannot shadow the
+    // older ready request in another repository.
+    world.script("gh.head", head);
+    invoke(&[
+        "pr",
+        "create",
+        "--repo",
+        "owner/other",
+        "--head",
+        branch,
+        "--base",
+        "main",
+        "--title",
+        "other repository",
+        "--body",
+        "same head",
+        "--draft",
+    ]);
+    assert_eq!(
+        read(&["api", &runs])["workflow_runs"][0]["status"],
+        "completed"
+    );
+    assert_eq!(
+        read(&["api", &runs.replace("owner/service", "owner/other")])["workflow_runs"][0]["status"],
+        "in_progress"
+    );
+    assert_eq!(
+        read(&["api", &suites.replace("owner/service", "owner/other")])["check_suites"][0]
+            ["status"],
+        "in_progress"
+    );
+}
