@@ -575,6 +575,11 @@ fn shaped(
 
 /// The argv this listing prints to land a row: `publish-branch` and `recover`
 /// through this host's drafter, every other verb as `onevcs` gave it.
+///
+/// onevcs fills `recover_command` with only `publish-branch`, `recover` or
+/// nothing, so no journey over real Git can stage a row carrying any other verb:
+/// the passthrough of `integrate` and `reclaim` is held by this module's unit
+/// test, and the two drafted verbs by the journeys that run the printed command.
 pub(crate) fn land_command(recover: &[String], graph: Option<&Path>) -> Vec<String> {
     let [program, verb, rest @ ..] = recover else {
         return recover.to_vec();
