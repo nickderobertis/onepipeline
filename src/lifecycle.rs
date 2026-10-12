@@ -1456,9 +1456,11 @@ fn publish(
                 // a red check back to the worker, a bound spent as the
                 // `checks-unsettled` it is — and says beside `onevcs`'s own
                 // sentence that it was armed and how long it was read.
-                let reason = match publication.armed {
-                    true => format!("{reason}. {}", armed_detail(publication.reads)),
-                    false => reason.clone(),
+                let reason = match &publication.armed {
+                    Some(change) => {
+                        format!("{reason}. {}", armed_detail(change, publication.reads))
+                    }
+                    None => reason.clone(),
                 };
                 return failed_publication(
                     &node.id,
@@ -1535,7 +1537,10 @@ fn publish(
             let skipped = skipped_detail(&crate::vcs::skipped_required_in(token));
             // A change whose merge an elapsed wait left armed and a later read
             // then saw land says so, and how many reads that took.
-            let armed = publication.armed.then(|| armed_detail(publication.reads));
+            let armed = publication
+                .armed
+                .as_ref()
+                .map(|change| armed_detail(change, publication.reads));
             let detail: Vec<String> = [
                 armed,
                 drafted,
@@ -1827,18 +1832,19 @@ struct Published {
     /// on every path but the re-read, which is every publication that answered
     /// the first time it was asked.
     reads: std::num::NonZeroU32,
-    /// Whether a read ended `checks-unsettled` with the change's merge left
-    /// **armed**, so the reads after it watched that change rather than the
-    /// agent being sent back to it.
-    armed: bool,
+    /// The change request a read left `checks-unsettled` with its merge
+    /// **armed**, if one did, so the reads after it watched that change rather
+    /// than the agent being sent back to it.
+    armed: Option<onevcs::Url>,
 }
 
-/// The sentence a node carries when a read found its change's merge armed: that
-/// it was, and how many reads of the merge path the publication took.
-fn armed_detail(reads: std::num::NonZeroU32) -> String {
+/// The sentence a node carries when a read found its change's merge armed: which
+/// change, that it was armed, and how many reads of the merge path the
+/// publication took.
+fn armed_detail(change: &onevcs::Url, reads: std::num::NonZeroU32) -> String {
     format!(
-        "the wait for its checks elapsed with none of them red and its merge armed, so the \
-         merge path was read {reads} time{} rather than the worker being sent back",
+        "the wait for the checks of {change} elapsed with none of them red and its merge armed, \
+         so the merge path was read {reads} time{} rather than the worker being sent back",
         if reads.get() == 1 { "" } else { "s" }
     )
 }
@@ -1888,13 +1894,13 @@ fn publish_rereading_the_merge_path(
     let mut answered = publish();
     let mut armed = left_armed(&answered);
     while reads < budget
-        && (still_unread(&answered) || left_armed(&answered))
+        && (still_unread(&answered) || left_armed(&answered).is_some())
         && waited(backoff, cancel)
     {
         backoff = engine::doubled(backoff);
         reads = reads.saturating_add(1);
         answered = publish();
-        armed |= left_armed(&answered);
+        armed = left_armed(&answered).or(armed);
     }
     Published {
         answered,
@@ -1947,24 +1953,25 @@ fn still_unread(
     )
 }
 
-/// Whether a publication ended `checks-unsettled` with its change's merge left
-/// armed — the wait elapsed with no required check red, and the host lands the
+/// The change a publication left `checks-unsettled` with its merge armed, if it
+/// did — the wait elapsed with no required check red, and the host lands the
 /// change once they pass. An unarmed `checks-unsettled` is not one: nothing is
 /// carrying that change any further, so it routes as it always has.
 fn left_armed(
     answered: &std::result::Result<onevcs::Publication, crate::vcs::PublishRefused>,
-) -> bool {
-    matches!(
-        answered,
+) -> Option<onevcs::Url> {
+    match answered {
         Ok(onevcs::Publication {
-            outcome: onevcs::PublishOutcome::Failed {
-                kind: onevcs::FailureKind::ChecksUnsettled,
-                armed: Some(_),
-                ..
-            },
+            outcome:
+                onevcs::PublishOutcome::Failed {
+                    kind: onevcs::FailureKind::ChecksUnsettled,
+                    armed: Some(armed),
+                    ..
+                },
             ..
-        })
-    )
+        }) => Some(armed.change.clone()),
+        _ => None,
+    }
 }
 
 /// The settlement of a node whose publication its own cancellation stopped.

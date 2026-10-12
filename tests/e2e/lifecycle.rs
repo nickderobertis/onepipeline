@@ -5154,7 +5154,7 @@ fn a_change_the_host_never_lands_is_redispatched_on_the_branch_it_preserved() {
 }
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] three journeys of a few
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] five journeys of a few
 // seconds each against the fake host; they settle through the publication path over the linked
 // `onevcs`, which any change under `src/` can move, as the unsettled journeys above do.
 /// A required check still running when the wait for it elapses, on the draft and
@@ -5165,11 +5165,20 @@ const PENDING: &str = "llmlint in_progress - required";
 /// host lets a change be armed to merge itself, a check wait of two seconds, and a
 /// merge-path backoff of one, so three reads of an armed change take seconds.
 fn armed_world(name: &str, allows_auto_merge: bool) -> (World, crate::harness::Repository) {
+    armed_world_under(name, "change-auto", allows_auto_merge)
+}
+
+/// [`armed_world`] under the merge policy `publication` names.
+fn armed_world_under(
+    name: &str,
+    publication: &str,
+    allows_auto_merge: bool,
+) -> (World, crate::harness::Repository) {
     let world = World::new(name)
         .with_env("ONEVCS_CHECKS_TIMEOUT_SECONDS", "2")
         .with_env("ONEPIPELINE_MERGE_PATH_BACKOFF_SECONDS", "1")
         .with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "2");
-    let repo = world.repository("change-auto", &[]);
+    let repo = world.repository(publication, &[]);
     world.script(
         "gh.auto-merge",
         if allows_auto_merge { "true" } else { "false" },
@@ -5197,7 +5206,23 @@ fn settled_detail(world: &World, run: &str) -> String {
 /// settled on whatever that dispatch's publication made of it.
 #[test]
 fn an_armed_change_is_read_again_rather_than_redispatched_and_settles_on_its_landing() {
-    let (world, _repo) = armed_world("lifecycle-armedlands", true);
+    lands_once_armed("lifecycle-armedlands", "change-auto");
+}
+
+/// A `change-direct` publication whose check wait elapses with nothing red is left
+/// armed by `onevcs` exactly as a `change-auto` one is, and takes the same reading:
+/// the node reads that change again, never sends its worker back, and settles
+/// `done` on the landing.
+#[test]
+fn a_direct_change_left_armed_takes_the_same_reading_and_settles_on_its_landing() {
+    lands_once_armed("lifecycle-armeddirect", "change-direct");
+}
+
+/// One node published under `publication` into a host whose required check is
+/// still running when the wait elapses and that lands the armed change at the
+/// second read after the arm.
+fn lands_once_armed(name: &str, publication: &str) {
+    let (world, _repo) = armed_world_under(name, publication, true);
     world.script("service.work", "the worker wrote this\n");
     world.script("gh.checks", PENDING);
     world.script("gh.lands-armed", "2");
@@ -5213,16 +5238,28 @@ fn an_armed_change_is_read_again_rather_than_redispatched_and_settles_on_its_lan
         "an armed change sent its worker back\n{}",
         why(&world, &run)
     );
-    // `onevcs` said the merge was armed, on the journal the run merged its stream into.
-    assert!(
-        !world.events_of(&run, "merge-armed").is_empty(),
-        "the publication never armed the merge, so nothing here is about an armed change\n{}",
-        why(&world, &run)
-    );
+    // `onevcs` said the merge was armed, and of which change, on the journal the run
+    // merged its stream into; the node's own settlement there names the same change
+    // and the reads it took.
+    let armed = world.events_of(&run, "merge-armed");
+    let change = armed
+        .first()
+        .and_then(|event| event["payload"]["url"].as_str())
+        .unwrap_or_else(|| {
+            panic!(
+                "the publication never armed the merge, so nothing here is about an armed \
+                 change\n{}",
+                why(&world, &run)
+            )
+        })
+        .to_string();
     let detail = settled_detail(&world, &run);
     assert!(
-        detail.contains("its merge armed") && detail.contains("read 2 times"),
-        "the settlement does not say the change was armed and how many reads it took: {detail}"
+        detail.contains(&change)
+            && detail.contains("its merge armed")
+            && detail.contains("read 2 times"),
+        "the settlement does not name the armed change {change} and how many reads it took: \
+         {detail}"
     );
 }
 
@@ -5327,10 +5364,16 @@ fn an_armed_change_the_host_never_lands_spends_its_reads_and_is_redispatched() {
             && reason.contains("read 3 times"),
         "the re-dispatch does not say the change was armed and read three times: {reason}"
     );
+    let change = world.events_of(&run, "merge-armed")[0]["payload"]["url"]
+        .as_str()
+        .expect("onevcs names the change it armed")
+        .to_string();
     let detail = settled_detail(&world, &run);
     assert!(
-        detail.contains("its merge armed") && detail.contains("read 3 times"),
-        "the settlement does not say the change was armed and read three times: {detail}"
+        detail.contains(&change)
+            && detail.contains("its merge armed")
+            && detail.contains("read 3 times"),
+        "the settlement does not name the armed change {change} and its three reads: {detail}"
     );
 
     let branch = node["branch"].as_str().expect("the node names its branch");
