@@ -9,7 +9,13 @@ all-features = true
 
 [advisories]
 yanked = "deny"
-ignore = []
+ignore = [
+    # Temporary. `unsafe-libyaml` is unmaintained, and it reaches this tree only
+    # through `serde_yaml_ng`, under `onevcs` and `onejudge`; no release of either
+    # has left it, so no update removes it. The planned move to `serde_norway`
+    # (plan `authoring:serde-yaml-replacement`) removes it, and this entry with it.
+    { id = "RUSTSEC-2024-0449", reason = "temporary: unsafe-libyaml is unmaintained and reached only through serde_yaml_ng under onevcs and onejudge; removed by the planned move to serde_norway (plan authoring:serde-yaml-replacement)" },
+]
 
 [licenses]
 # Permissive licenses compatible with this MIT-licensed crate. Adding a
