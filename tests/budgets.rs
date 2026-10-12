@@ -515,8 +515,9 @@ fn the_host_view_measurement_and_journeys_share_one_generator() {
 /// The measurement records a read only when the read answered: a binary that fails, one that
 /// exits 0 having recorded no phases, and one whose phase line is empty, not JSON or
 /// stamped with no time each fail the measurement naming what to do next, and none leaves
-/// a record behind; nor does one whose fixture cannot be removed afterwards.
-#[cfg(unix)]
+/// a record behind; nor does one whose fixture cannot be removed afterwards. Linux only,
+/// as the measurement is: its fixture proves its live dispatches' procfs start tokens.
+#[cfg(target_os = "linux")]
 #[test]
 fn the_host_view_measurement_records_nothing_from_a_read_that_failed() {
     use std::os::unix::fs::PermissionsExt;
