@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Refresh THIS host's committed digest baseline from the capture in
 # `shots/current` — the one place that decides which lane is rewritten and where,
-# so `just screenshots-bless` and the pre-push guard's drift path cannot disagree
-# about it. `$SHOTS_CURRENT` overrides the capture root.
+# used by `just screenshots-bless`. `$SHOTS_CURRENT` overrides the capture root.
 
 # llmlint: ignore-file[changed_behavior_has_e2e] the capture's every step is a
 # third-party tool `just check` does not install (`freeze`, `screencomp`), so a journey
