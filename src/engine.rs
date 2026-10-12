@@ -1572,7 +1572,10 @@ fn converge(
                 }
             }
         }
-        // Every publication waiting is answered by this pass's one reading.
+        // A publication waits on a pass's reading rather than reading the claim itself: the
+        // claim is read once per trigger, never per publication, to hold down what a review
+        // round spends of the store's quota. One that arrived after a takeover but before this
+        // read is still answered `Publish` — the window the ruling accepts.
         for due in publications.drain(..) {
             let _ = due.answer.send(if superseded_by.is_some() {
                 PublicationVerdict::Withhold
