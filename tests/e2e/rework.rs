@@ -993,7 +993,8 @@ fn the_op_s_title_outranks_the_drafter_s_and_a_keeps_leaves_the_title_alone() {
     assert!(world.events_of(run, "title-unverified").is_empty());
 }
 
-/// Rework `id` in `run`, and hold that it was [`held_unverified`].
+/// [`held_unverified`] for a rework that has the run to itself — a launch with
+/// no drafter has one case to show, so nothing is gained by batching it.
 fn left_unverified(world: &World, run: &str, id: &str, title: &str, because: &str) {
     reply(world, run, json!([rework(id, "rework it")])).exited(0);
     adopt(world, run).exited(0);
@@ -1268,11 +1269,13 @@ fn a_title_the_host_will_not_take_is_left_unverified_and_its_retitle_refused() {
 /// A drafter handed the pid its node's worker had — as Windows hands a freed pid
 /// straight to the next process — is read as its own answer rather than as the
 /// worker's: its body is published and its `title_check` read, on the node's first
-/// publication and on its rework's alike.
+/// publication and on its rework's alike. The node's own `title_check` is the one
+/// read, over the one every other drafter answers.
 #[test]
 fn a_drafter_that_reuses_its_workers_pid_is_read_as_itself() {
     let world = team_world("rework-reused-pid");
     world.script("oneagentgraph.pid", "4242");
+    world.script("pr-author.title-check", KEEPS);
     world.script("a.work", "a's change\n");
     world.script("a-rework-1.work", "a's change, reworked\n");
     world.script("a-rework-1.work-file", "a");
