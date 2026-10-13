@@ -194,6 +194,8 @@ pub enum Command {
     Channel(ChannelCommand),
     /// Read the next planner surface.
     Next(TargetArgs),
+    /// Discover review comments on the run’s unlanded drafts.
+    Review(ReviewArgs),
     /// Reply to a surface, with a verdict, graph edits, or both.
     Reply(ReplyArgs),
     /// Raise a surface to the planner.
@@ -244,7 +246,7 @@ pub enum Command {
     RepoRecover(LandArgs),
     // llmlint: ignore-end[new_command_or_client_gets_its_own_project]
     /// Per-node outcomes, with each node's own evidence.
-    Results(RunArgs),
+    Results(ResultsArgs),
     // llmlint: ignore[new_command_or_client_gets_its_own_project] a verb of this one binary
     // rather than a new command or client: it reads the run store the engine owns and records
     // through the `onevcs` library it already links, as the verbs in the block above do.
@@ -1713,5 +1715,25 @@ pub struct TelemetryArgs {
     pub changes: bool,
     /// Print `--changes` as its JSON document.
     #[arg(long, requires = "changes")]
+    pub json: bool,
+}
+
+/// Arguments for an explicit, non-interactive review discovery pass.
+#[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
+pub struct ReviewArgs {
+    /// The recorded run.
+    pub run: String,
+    /// Print the receipt as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Arguments for a run's node outcomes and current review state.
+#[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
+pub struct ResultsArgs {
+    /// The recorded run.
+    pub run: String,
+    /// Print node outcomes and review state as JSON.
+    #[arg(long)]
     pub json: bool,
 }

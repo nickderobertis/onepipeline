@@ -979,7 +979,7 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), EVENTS_BUNDLE_VERSION);
     assert_eq!(
-        divergence_block("121.")["bundle_versions"]["events"],
+        divergence_block("122.")["bundle_versions"]["events"],
         EVENTS_BUNDLE_VERSION,
         "the rework bundle version must be the manager's recorded ruling"
     );
@@ -1189,7 +1189,7 @@ fn the_contract_states_the_planner_channel_documents_path_version_and_source() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), DOCUMENT_VERSION);
     assert_eq!(
-        divergence_block("121.")["bundle_versions"]["planner_channel"],
+        divergence_block("122.")["bundle_versions"]["planner_channel"],
         DOCUMENT_VERSION,
         "the rework bundle version must be the manager's recorded ruling"
     );
@@ -2157,6 +2157,7 @@ fn op_of(command: &Edit) -> &'static str {
         Edit::Finding { .. } => "finding",
         Edit::Rework { .. } => "rework",
         Edit::Retitle { .. } => "retitle",
+        Edit::Review { .. } => "review",
     }
 }
 
@@ -6605,7 +6606,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // undocumented wire; a kind the contract lists and the enum does not carry is
     // a promise nothing keeps. `PIPELINE_KINDS` is what `Journal::emit` accepts,
     // so this is the emitted set and not a second copy of it.
-    assert_eq!(PIPELINE_KINDS.len(), 45, "the closed set changed size");
+    assert_eq!(PIPELINE_KINDS.len(), 46, "the closed set changed size");
     let listed: BTreeSet<String> = backticked()
         .into_iter()
         .filter(|token| {
@@ -6614,13 +6615,15 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
         .collect();
     // The kinds the contract does not list are exactly the ones the divergence
     // record proposes, and no others: a kind neither document names fails here.
-    let proposed: BTreeSet<String> = ["40.", "47.", "55.", "65.", "70.", "92.", "119.", "121."]
-        .into_iter()
-        .flat_map(|entry| {
-            serde_json::from_value::<Vec<String>>(divergence_block(entry)["event_kinds"].clone())
-                .unwrap_or_else(|e| panic!("entry {entry} names the kinds it adds: {e}"))
-        })
-        .collect();
+    let proposed: BTreeSet<String> = [
+        "40.", "47.", "55.", "65.", "70.", "92.", "119.", "121.", "122.",
+    ]
+    .into_iter()
+    .flat_map(|entry| {
+        serde_json::from_value::<Vec<String>>(divergence_block(entry)["event_kinds"].clone())
+            .unwrap_or_else(|e| panic!("entry {entry} names the kinds it adds: {e}"))
+    })
+    .collect();
     let undocumented: BTreeSet<String> = PIPELINE_KINDS
         .iter()
         .map(|kind| kind.as_str().to_string())
@@ -9233,7 +9236,14 @@ fn the_contract_names_every_post_launch_verb_the_sdk_publishes_and_no_other() {
     let _: fn(&RunPaths) -> Result<Plan> = onepipeline::views::plan_of;
 
     let in_source = verb_functions_in_source();
-    let in_contract = verb_functions_in_contract();
+    let mut in_contract = verb_functions_in_contract();
+    let review_verbs: Vec<String> =
+        serde_json::from_value(divergence_block("122.")["sdk_verbs"].clone())
+            .expect("entry 122 names its SDK verbs");
+    in_contract.extend(review_verbs);
+    let _: fn(&RunPaths, &str, std::time::Duration) -> Result<verbs::ReviewReceipt> = verbs::review;
+    let _: fn(&verbs::ReviewReceipt, bool) -> Result<String> = verbs::render_review;
+    let _: fn(&Results) -> Result<String> = verbs::render_results_json;
     assert_eq!(
         in_contract, in_source,
         "the verbs paragraph and src/verbs.rs disagree\n  named and not published: {:?}\n  published and not named: {:?}",
@@ -10576,4 +10586,86 @@ fn the_publication_boundary_block_is_the_schema_and_the_guidance_the_binary_prin
             "<host prefix>public/<opaque id>/task-<ordinal>",
         ],
     );
+}
+
+#[test]
+fn review_discovery_is_the_recorded_contract_and_registered_payload() {
+    use onepipeline::{
+        channel::{Command, SurfaceKind},
+        event::PipelineKind,
+    };
+    let block = divergence_block("122.");
+    assert_eq!(block["verb"], "review");
+    assert_eq!(
+        serde_json::to_value(Command::Review {}).unwrap(),
+        json!({"op": "review"})
+    );
+    assert_eq!(
+        block["surface_kind"],
+        "review-comment".parse::<SurfaceKind>().unwrap().as_str()
+    );
+    assert_eq!(
+        block["record_kind"],
+        PipelineKind::ReviewCommentsRead.as_str()
+    );
+    let registry = onepipeline::payload::registry();
+    let id = onepipeline::payload::schema_of(PipelineKind::ReviewCommentsRead);
+    registry.check(&id, &json!({"node":"reader", "change_url":"https://github.com/owner/service/pull/1", "marker":"opaque", "unchanged":false,"cost":{"graphql_points":1,"rest_requests":0},"comments":[]})).unwrap();
+    assert!(registry.check(&id, &json!({"node":"reader"})).is_err());
+    assert_eq!(block["store_review_keys"], json!([]));
+    assert_eq!(block["results_schema_version"], 1);
+    let golden: Value = serde_json::from_str(
+        &std::fs::read_to_string(repo_root().join(block["results_golden"].as_str().unwrap()))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(golden["schema_version"], block["results_schema_version"]);
+    assert!(serde_json::from_value::<Command>(json!({"op":"review","typo":true})).is_err());
+    // Exhaustive destructuring and the return signature hold both the field
+    // set and widths to the sibling type, even if a future field is omitted at
+    // its default by serde.
+    fn producer_cost(value: onevcs::ReadCost) -> (u32, u32) {
+        let onevcs::ReadCost {
+            graphql_points,
+            rest_requests,
+        } = value;
+        (graphql_points, rest_requests)
+    }
+    let maximum = onevcs::ReadCost {
+        graphql_points: u32::MAX,
+        rest_requests: u32::MAX,
+    };
+    assert_eq!(producer_cost(maximum), (u32::MAX, u32::MAX));
+    let serialized = serde_json::to_value(maximum).unwrap();
+    let producer_fields: BTreeSet<_> = serialized.as_object().unwrap().keys().collect();
+    let schema = &registry.schema(&id).unwrap()["properties"]["cost"];
+    let declared_fields: BTreeSet<_> = schema["properties"].as_object().unwrap().keys().collect();
+    assert_eq!(declared_fields, producer_fields);
+    let required: BTreeSet<String> = serde_json::from_value(schema["required"].clone()).unwrap();
+    assert_eq!(required, producer_fields.into_iter().cloned().collect());
+
+    let mut read = json!({"node":"reader", "change_url":"https://github.com/owner/service/pull/1", "marker":"opaque", "unchanged":false,"cost":serialized,"comments":[]});
+    registry.check(&id, &read).unwrap();
+    read["cost"] = serde_json::to_value(onevcs::ReadCost::default()).unwrap();
+    registry.check(&id, &read).unwrap();
+    for field in ["graphql_points", "rest_requests"] {
+        for invalid in [json!(-1), json!(u64::from(u32::MAX) + 1), json!(1.5)] {
+            read["cost"][field] = invalid;
+            assert!(registry.check(&id, &read).is_err(), "{field}: {read}");
+        }
+        read["cost"][field] = json!(0);
+    }
+    for receipt in [
+        onepipeline::verbs::ReviewReceipt::Performed { error: None },
+        onepipeline::verbs::ReviewReceipt::Requested { request: 4 },
+        onepipeline::verbs::ReviewReceipt::Performed {
+            error: Some("host failed".into()),
+        },
+    ] {
+        let rendered = onepipeline::verbs::render_review(&receipt, true).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&rendered).unwrap(),
+            serde_json::to_value(&receipt).unwrap()
+        );
+    }
 }
