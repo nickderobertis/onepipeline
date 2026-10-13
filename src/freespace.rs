@@ -291,6 +291,11 @@ impl Filesystem {
     }
 }
 
+/// Allocated byte counts use the same one-decimal GiB form in scratch and free-space notices.
+pub(crate) fn gib(bytes: u64) -> String {
+    format!("{:.1} GiB", bytes as f64 / GIB)
+}
+
 /// `41.2 GiB of 196.9 GiB (21% free)`.
 fn share(free: u64, total: u64) -> String {
     // Integer arithmetic for the share, so a host at 197G/197G reads `0%`
@@ -501,9 +506,4 @@ mod tests {
         };
         assert_eq!(empty.reading(), "0.0 GiB of 0.0 GiB (0% free)");
     }
-}
-
-/// Allocated byte counts use the same one-decimal GiB form in scratch and free-space notices.
-pub(crate) fn gib(bytes: u64) -> String {
-    format!("{:.1} GiB", bytes as f64 / GIB)
 }

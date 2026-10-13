@@ -645,144 +645,6 @@
       }
     },
     {
-      "id": "agent.pipeline.scratch-removed@2",
-      "schema": {
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-          "trigger": {
-            "$ref": "#/$defs/ScratchTrigger"
-          },
-          "dirs": {
-            "type": "integer",
-            "format": "uint64",
-            "minimum": 0
-          },
-          "bytes": {
-            "type": "integer",
-            "format": "uint64",
-            "minimum": 0
-          },
-          "failed": {
-            "type": "array",
-            "items": {
-              "$ref": "#/$defs/ScratchFailure"
-            }
-          }
-        },
-        "required": [
-          "trigger",
-          "dirs",
-          "bytes",
-          "failed"
-        ],
-        "description": "The scratch removed at one ending or manager request.",
-        "title": "ScratchRemoved",
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "$defs": {
-          "ScratchTrigger": {
-            "type": "string",
-            "enum": [
-              "success",
-              "discard"
-            ],
-            "description": "Why scratch is removed."
-          },
-          "ScratchFailure": {
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-              "path": {
-                "$ref": "#/$defs/AbsolutePath"
-              },
-              "error": {
-                "$ref": "#/$defs/ScratchError"
-              }
-            },
-            "required": [
-              "path",
-              "error"
-            ],
-            "description": "A directory removal that the filesystem refused."
-          },
-          "AbsolutePath": {
-            "type": "string",
-            "pattern": "^(?:/|[A-Za-z]:[\\\\/]|\\\\\\\\[^\\\\]+\\\\[^\\\\]+)"
-          },
-          "ScratchError": {
-            "type": "string",
-            "minLength": 1
-          }
-        }
-      }
-    },
-    {
-      "id": "agent.pipeline.scratch-retained@2",
-      "schema": {
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-          "ending": {
-            "$ref": "#/$defs/ScratchEnding"
-          },
-          "dirs": {
-            "type": "array",
-            "items": {
-              "$ref": "#/$defs/ScratchDir"
-            }
-          },
-          "total_bytes": {
-            "type": "integer",
-            "format": "uint64",
-            "minimum": 0
-          }
-        },
-        "required": [
-          "ending",
-          "dirs",
-          "total_bytes"
-        ],
-        "description": "Scratch kept for inspection or retry.",
-        "title": "ScratchRetained",
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "$defs": {
-          "ScratchEnding": {
-            "type": "string",
-            "enum": [
-              "failed",
-              "unfinished",
-              "stopped",
-              "paused"
-            ],
-            "description": "A non-success ending or pause."
-          },
-          "ScratchDir": {
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-              "path": {
-                "$ref": "#/$defs/AbsolutePath"
-              },
-              "bytes": {
-                "type": "integer",
-                "format": "uint64",
-                "minimum": 0
-              }
-            },
-            "required": [
-              "path",
-              "bytes"
-            ],
-            "description": "A directory's allocated disk usage at an ending."
-          },
-          "AbsolutePath": {
-            "type": "string",
-            "pattern": "^(?:/|[A-Za-z]:[\\\\/]|\\\\\\\\[^\\\\]+\\\\[^\\\\]+)"
-          }
-        }
-      }
-    },
-    {
       "id": "agent.pipeline.run-started@2",
       "schema": {
         "type": "object",
@@ -3736,6 +3598,144 @@
               "claimed_at"
             ],
             "description": "A project's `onepipeline.driver` claim: the run driving it, the host and launching\nsession that run is driven from, its driver's pid, and when it claimed.\n\nThe document a journal record carries, and so no stricter than any other payload here;\nthe store's copy is external input, and `continuation::claim_of` refuses one carrying a\nkey this shape does not name before it is read as one."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.scratch-removed@2",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "trigger": {
+            "$ref": "#/$defs/ScratchTrigger"
+          },
+          "dirs": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "bytes": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "failed": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/ScratchFailure"
+            }
+          }
+        },
+        "required": [
+          "trigger",
+          "dirs",
+          "bytes",
+          "failed"
+        ],
+        "description": "The scratch removed at one ending or manager request.",
+        "title": "ScratchRemoved",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "ScratchTrigger": {
+            "type": "string",
+            "enum": [
+              "success",
+              "discard"
+            ],
+            "description": "Why scratch is removed."
+          },
+          "ScratchFailure": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "$ref": "#/$defs/AbsolutePath"
+              },
+              "error": {
+                "$ref": "#/$defs/ScratchError"
+              }
+            },
+            "required": [
+              "path",
+              "error"
+            ],
+            "description": "A directory removal that the filesystem refused."
+          },
+          "AbsolutePath": {
+            "type": "string",
+            "pattern": "^(?:/|[A-Za-z]:[\\\\/]|\\\\\\\\[^\\\\]+\\\\[^\\\\]+)"
+          },
+          "ScratchError": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.scratch-retained@2",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "ending": {
+            "$ref": "#/$defs/ScratchEnding"
+          },
+          "dirs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/ScratchDir"
+            }
+          },
+          "total_bytes": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "ending",
+          "dirs",
+          "total_bytes"
+        ],
+        "description": "Scratch kept for inspection or retry.",
+        "title": "ScratchRetained",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "ScratchEnding": {
+            "type": "string",
+            "enum": [
+              "failed",
+              "unfinished",
+              "stopped",
+              "paused"
+            ],
+            "description": "A non-success ending or pause."
+          },
+          "ScratchDir": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "$ref": "#/$defs/AbsolutePath"
+              },
+              "bytes": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "path",
+              "bytes"
+            ],
+            "description": "A directory's allocated disk usage at an ending."
+          },
+          "AbsolutePath": {
+            "type": "string",
+            "pattern": "^(?:/|[A-Za-z]:[\\\\/]|\\\\\\\\[^\\\\]+\\\\[^\\\\]+)"
           }
         }
       }

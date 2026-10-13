@@ -476,6 +476,11 @@ struct HostShutdown {
     branches: Option<BTreeMap<(String, String), crate::payload::PreservedWord>>,
 }
 
+/// Whether this run is still awaiting adoption after a host shutdown.
+pub(crate) fn host_shutdown(view: &RunView) -> bool {
+    HostShutdown::of(view).is_some()
+}
+
 impl HostShutdown {
     /// The shutdown this run is under, or `None` for a run that is not.
     ///
@@ -7689,9 +7694,4 @@ mod tests {
         assert_eq!(EndingKind::Unfinished.word(), "ENDED unfinished");
         assert_eq!(EndingKind::Stopped.word(), "ENDED stopped");
     }
-}
-
-/// Whether this run is still awaiting adoption after a host shutdown.
-pub(crate) fn host_shutdown(view: &RunView) -> bool {
-    HostShutdown::of(view).is_some()
 }
