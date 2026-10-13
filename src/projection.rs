@@ -1528,18 +1528,35 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
                 Value::Object(payload.clone()),
             ) {
                 use crate::payload::ChecksVerdictWord as V;
-                state
-                    .checks_read
-                    .insert(read.node.clone(), read.head.clone());
-                if matches!(
-                    read.verdict,
-                    V::Passed | V::PassedWithSkipped | V::NoneRequired
-                ) && state.outcomes.get(&read.node).map(String::as_str)
-                    == Some(crate::vcs::REVIEW_DRAFTED_UNCHECKED)
-                {
-                    state
-                        .outcomes
-                        .insert(read.node, crate::vcs::REVIEW_DRAFTED.to_owned());
+                let outcome = state.outcomes.get(&read.node).map(String::as_str);
+                match read.verdict {
+                    V::Passed | V::PassedWithSkipped | V::NoneRequired => {
+                        state
+                            .checks_read
+                            .insert(read.node.clone(), read.head.clone());
+                        if outcome == Some(crate::vcs::REVIEW_DRAFTED_UNCHECKED) {
+                            state
+                                .outcomes
+                                .insert(read.node, crate::vcs::REVIEW_DRAFTED.to_owned());
+                        }
+                    }
+                    V::Failed => {
+                        state
+                            .checks_read
+                            .insert(read.node.clone(), read.head.clone());
+                    }
+                    // A head no verdict was reached on yet stays outstanding, and is read
+                    // again: a review draft whose head moved past the one recorded — a
+                    // cold host's — is owed its verdict from here on.
+                    V::Pending => {
+                        if outcome == Some(crate::vcs::REVIEW_DRAFTED)
+                            && state.heads.get(&read.node) != Some(&read.head)
+                        {
+                            state
+                                .outcomes
+                                .insert(read.node, crate::vcs::REVIEW_DRAFTED_UNCHECKED.to_owned());
+                        }
+                    }
                 }
             }
         }

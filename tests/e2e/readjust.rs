@@ -2750,7 +2750,8 @@ fn a_driven_readjust_whose_read_fails_says_so() {
 /// Successive absorptions: in `a ← b ← c ← d`, a person merges `c` into `b`'s branch and
 /// then `b` into `a`'s. Both are absorbed, and `d` — whose dependency `c` sits in `b`'s
 /// draft, which sits in `a`'s — is placed on `a`'s branch, its change request moved there,
-/// with only its own change against it.
+/// with only its own change against it. Once `a` lands, `b` lands with it and `c` with
+/// `b`, and `d` is on the root.
 #[test]
 fn a_draft_above_two_absorptions_is_placed_on_the_last_absorber() {
     let world = team_world("readjust-absorbed-twice");
@@ -2788,4 +2789,85 @@ fn a_draft_above_two_absorptions_is_placed_on_the_last_absorber() {
         ),
         ["d.md"]
     );
+
+    // `a` lands, and everything absorbed into it lands with it, nearest first.
+    merge(&world, &number_of(&world, run, "a"), "squash", "kept");
+    readjusted(&world, run);
+    for (node, via) in [("b", "a"), ("c", "b")] {
+        let landed = record(&world, run, "node-landed", node).expect("landed");
+        assert_eq!(landed["detected_by"], "absorber-landed", "{landed}");
+        assert_eq!(landed["via"], via, "{landed}");
+    }
+    assert!(
+        first(&world, run, "node-landed", "b") < first(&world, run, "node-landed", "c"),
+        "c landed before the node it was merged into"
+    );
+    assert_eq!(settled(&world, run, "d")["base"], "main");
+    assert_eq!(
+        changed_against(
+            &world,
+            &service(&world),
+            "main",
+            &branch_of(&world, run, "d")
+        ),
+        ["d.md"]
+    );
+}
+
+/// A cold host reads a moved head's verdict until it has one: after a rework of `a`, `b`'s
+/// clean restack moved its head without writing the store; a cold host continuing from the
+/// store reads `b`'s head on the origin `pending`, names `b` outstanding, reads it again
+/// on its next trigger, and once it reads green `b` is a review draft with nothing owed.
+#[test]
+fn a_cold_host_reads_a_moved_heads_pending_verdict_again_until_it_is_green() {
+    let world = team_world("readjust-cold-pending");
+    for node in ["a", "b"] {
+        world.script(&format!("{node}.work"), &format!("{node}'s change\n"));
+    }
+    world.script("a-rework-1.work", "a's change, as the review asked\n");
+    world.script("a-rework-1.work-file", "a");
+    let run = "pending";
+    let project = launched(
+        &world,
+        run,
+        vec![lifecycle("a", &[]), lifecycle("b", &["a"])],
+    );
+    reply(&world, run, json!([rework("a")])).exited(0);
+    world.run(&["adopt", run]).exited(0);
+    let b_tip = tip(&world, &branch_of(&world, run, "b"));
+    world.until_store("the rework to reach the store", |world| {
+        world
+            .store_tasks(&project)
+            .iter()
+            .any(|task| task["item"]["metadata"]["onepipeline.rework"]["replaces"] == "a")
+    });
+    assert_ne!(
+        projected_settlement(&world, &project, "b")["head"],
+        b_tip.as_str()
+    );
+    person(&world, &["verdict", &b_tip, "pending:ci"]);
+
+    let cold = world.on_host("readjust-cold-pending-host");
+    cold.run_from(&cold.project, &["start", &project, "--attach"])
+        .exited(0);
+    let read = record(&cold, run, "node-checks-read", "b").expect("b's verdict was read");
+    assert_eq!(read["verdict"], "pending", "{read}");
+    assert_eq!(read["head"], b_tip.as_str(), "{read}");
+    let (code, receipt) = readjust(&cold, run);
+    assert_eq!(code, 0, "{receipt}");
+    assert_eq!(receipt["outstanding"], json!(["b"]), "{receipt}");
+    assert_eq!(
+        cold.events_of(run, "node-checks-read")
+            .iter()
+            .filter(|event| event["labels"]["node"] == "b")
+            .count(),
+        2
+    );
+
+    person(&world, &["verdict", &b_tip, "passed"]);
+    let (_, receipt) = readjust(&cold, run);
+    assert!(receipt.get("outstanding").is_none(), "{receipt}");
+    let read = record(&cold, run, "node-checks-read", "b").expect("read again");
+    assert_eq!(read["verdict"], "passed", "{read}");
+    assert_eq!(outcome_of(&cold, run, "b"), "change-review-draft");
 }

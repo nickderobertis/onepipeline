@@ -589,9 +589,28 @@ fn landed(
             via: None,
         },
     )?;
-    // What was absorbed into it lands with it.
-    for (absorbed, into) in &state.absorbed {
-        if into != node || state.landings.get(absorbed) == Some(&Landing::Landed) {
+    // What was absorbed into it lands with it — through every absorption, nearest first,
+    // each saying the node it was merged into.
+    let mut absorbed: Vec<(&String, &String, usize)> = state
+        .absorbed
+        .iter()
+        .filter_map(|(absorbed, into)| {
+            let mut last = into;
+            let mut depth = 1;
+            let mut seen = BTreeSet::from([absorbed.as_str()]);
+            while let Some(next) = state.absorbed.get(last) {
+                if !seen.insert(last.as_str()) {
+                    return None;
+                }
+                last = next;
+                depth += 1;
+            }
+            (last == node).then_some((absorbed, into, depth))
+        })
+        .collect();
+    absorbed.sort_by_key(|(_, _, depth)| *depth);
+    for (absorbed, into, _) in absorbed {
+        if state.landings.get(absorbed) == Some(&Landing::Landed) {
             continue;
         }
         let Some(url) = lineage_change(state, absorbed) else {
@@ -608,7 +627,7 @@ fn landed(
                 commit: commit.to_owned(),
                 detected_by: LandingDetection::AbsorberLanded,
                 trigger,
-                via: Some(node.to_owned()),
+                via: Some(into.clone()),
             },
         )?;
     }
