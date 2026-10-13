@@ -681,10 +681,18 @@ fn merged_elsewhere(
     )
 }
 
+/// The correlation the question about one merge is raised and answered under: a digest of
+/// the change request and the merge commit, each a correlation's own characters.
 fn elsewhere_correlation(url: &str, commit: &str) -> onemessagebus::Correlation {
-    format!("merged-elsewhere:{url}:{commit}")
+    use sha2::Digest;
+    let digest: String = sha2::Sha256::digest(format!("{url} {commit}").as_bytes())
+        .iter()
+        .take(16)
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("merged-elsewhere:{digest}")
         .parse()
-        .unwrap_or_else(|why| unreachable!("a merged-elsewhere correlation: {why}"))
+        .unwrap_or_else(|why| unreachable!("a digest is a correlation's own characters: {why}"))
 }
 
 /// The nodes held by an unanswered merged-elsewhere question, and every node depending

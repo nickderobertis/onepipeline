@@ -2057,3 +2057,120 @@ fn an_idle_driver_asks_the_host_nothing() {
         refused.stderr
     );
 }
+
+/// Push the origin's `main` to a new branch `name`, as a person preparing another base.
+fn branch_off_main(world: &World, name: &str) {
+    git(
+        world,
+        &service(world).checkout,
+        &["push", "origin", &format!("origin/main:refs/heads/{name}")],
+    );
+}
+
+/// The amendment's grouping: drafts on two explicit roots of one repository are read
+/// in one batched read per root — two reads, each naming its root's two drafts — and
+/// neither is refused.
+#[test]
+fn drafts_on_two_roots_of_one_repository_are_read_in_one_batch_per_root() {
+    let world = team_world("readjust-two-roots");
+    branch_off_main(&world, "release");
+    for node in ["a", "b", "p", "q"] {
+        world.script(&format!("{node}.work"), &format!("{node}'s change\n"));
+    }
+    let mut p = lifecycle("p", &[]);
+    p["base_branch"] = json!("release");
+    let mut q = lifecycle("q", &["p"]);
+    q["base_branch"] = json!("release");
+    let run = "roots";
+    launched(
+        &world,
+        run,
+        vec![lifecycle("a", &[]), lifecycle("b", &["a"]), p, q],
+    );
+    let from = world.invocations().len();
+    readjusted(&world, run);
+    let reads: Vec<Value> = host_calls(&world, from)
+        .into_iter()
+        .filter(|call| is_standings_read(call))
+        .collect();
+    assert_eq!(reads.len(), 2, "{reads:#?}");
+    for read in &reads {
+        let query = query_of(read);
+        assert!(
+            query.contains("c1: pullRequest(") && !query.contains("c2: pullRequest("),
+            "a read did not batch exactly its root's two drafts: {query}"
+        );
+    }
+    assert!(world.events_of(run, "readjust-read-failed").is_empty());
+}
+
+/// The amendment's unknown branch: a draft merged into a branch that is neither the
+/// run's root nor any node's branch is not absorbed, landed or settled — its state is
+/// unchanged — and a blocking question names the node, its change request, the merge
+/// commit and the branch. Neither it nor the draft above it is readjusted while the
+/// question stands, though a landing below moved them.
+#[test]
+fn a_draft_merged_into_an_unknown_branch_raises_a_blocking_question() {
+    let world = team_world("readjust-elsewhere");
+    branch_off_main(&world, "someone-else");
+    for node in ["a", "b", "c"] {
+        world.script(&format!("{node}.work"), &format!("{node}'s change\n"));
+    }
+    let run = "elsewhere";
+    launched(
+        &world,
+        run,
+        vec![
+            lifecycle("a", &[]),
+            lifecycle("b", &["a"]),
+            lifecycle("c", &["b"]),
+        ],
+    );
+    let b_number = number_of(&world, run, "b");
+    let before = settled(&world, run, "b");
+    let c_head = tip(&world, &branch_of(&world, run, "c"));
+    person(
+        &world,
+        &["retarget", SLUG, &b_number.to_string(), "someone-else"],
+    );
+    merge(&world, &b_number, "merge-commit", "kept");
+    merge(&world, &number_of(&world, run, "a"), "squash", "kept");
+    let commit = tip(&world, "someone-else");
+    readjusted(&world, run);
+
+    for kind in [
+        "node-absorbed",
+        "node-landed",
+        "node-readjusted",
+        "change-closed",
+    ] {
+        assert!(record(&world, run, kind, "b").is_none(), "b got a {kind}");
+    }
+    assert_eq!(settled(&world, run, "b"), before);
+    assert!(record(&world, run, "node-readjusted", "c").is_none());
+    assert_eq!(tip(&world, &branch_of(&world, run, "c")), c_head);
+    let asked: Vec<Value> = std::fs::read_to_string(world.run_file(run, "channel/surfaces.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|surface| surface["kind"] == "change-merged-elsewhere")
+        .collect();
+    assert_eq!(asked.len(), 1, "{asked:#?}");
+    assert_eq!(asked[0]["blocking"], true, "{asked:#?}");
+    let message = text(&asked[0]["message"], "the question");
+    for named in [
+        "'b'",
+        "someone-else",
+        commit.as_str(),
+        text(&before["change_url"], "b's change request"),
+    ] {
+        assert!(
+            message.contains(named),
+            "the question does not name {named}: {message}"
+        );
+    }
+    // A second trigger asks nothing again and still moves neither.
+    readjusted(&world, run);
+    assert!(record(&world, run, "node-readjusted", "b").is_none());
+    assert!(record(&world, run, "node-readjusted", "c").is_none());
+}
