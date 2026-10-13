@@ -3,19 +3,25 @@
 # target, after the journey that writes the recording it reads.
 schema_version: 1
 budgets:
+  # Basis: measured, on a 20-core host at load 43-54 on 2026-10-13, over 20 identities
+  # and 25 slots: 4.66 s, 5.50 s and 5.76 s across three workload runs, and about
+  # 3.6 s on a probe run of the same journey. The engine journals the record 8 ms after
+  # the last slot's stamp; nearly all of the sweep is about 130-200 ms per identity
+  # inside `onevcs::pool_maintain` (resolving the declaration, claiming, measuring,
+  # running, stamping), which stretches with host load. Re-based from a 5 s estimate,
+  # whose premise that the sweep was local appends did not hold, on the manager's ruling.
   - id: pool-maintenance-engine-seconds
     measure: reported
     command: [node, pool-maintenance-budget.mjs]
     unit: seconds
     direction: max
-    threshold: 5
+    threshold: 8
     description: >-
       Wall-clock seconds one idle maintenance sweep takes beyond its declared commands'
       own runtime (from the sweep's start, as its `pool-maintenance` record states it, to
       that record being journalled, less the sum of the slots' `duration_ms`), plus the
-      seconds `onepipeline results` takes to render that run. Workload: one sweep over 25
-      real pooled slots across 20 identities, each declaring in its `onevcs.toml` a command
-      that does nothing, then one `results`. Basis: estimate — journalling one record and
-      rendering about 25 slot lines are local file appends and reads, well under a second;
-      5 s holds the engine far below the repositories' own 60 s maintenance. Read from the
-      journey's recording; this command times nothing.
+      seconds `onepipeline results` takes to render that run: what a sweep costs a host
+      on top of the repositories' own maintenance. Workload: one sweep over 25 real pooled
+      slots across 20 identities, each declaring in its `onevcs.toml` a command that does
+      nothing, then one `results`. Read from the journey's recording; this command times
+      nothing.
