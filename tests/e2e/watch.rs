@@ -3787,6 +3787,28 @@ fn every_surface_the_channel_raises_ends_a_default_watch_and_is_counted_while_it
     world.release("build.go");
 }
 
+/// The ordering peer is external input too: malformed and non-loopback
+/// addresses refuse through the real watch command before any socket is opened.
+#[test]
+fn a_watch_refuses_a_malformed_or_non_loopback_ordering_peer() {
+    let world = World::new("watch-ordering-refusal");
+    world.script("build.wait", "hold");
+    let run = running(&world, "watchordering", vec![agent("build", &[])]);
+    for address in ["not-a-socket", "192.0.2.1:8080"] {
+        let output = world
+            .cmd(&["watch", &run, "--timeout", "5"])
+            .env("ONEPIPELINE_TEST_WATCH_DEADLINE_GATE", address)
+            .output()
+            .expect("the real watch starts");
+        assert_eq!(output.status.code(), Some(crate::harness::REFUSED));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("must name a loopback socket"));
+    }
+    world.release("build.go");
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+}
+
 /// A run where no node has dispatched or settled has no progress to date, and
 /// its summary says `null` rather than a number.
 #[test]

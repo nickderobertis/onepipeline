@@ -72,10 +72,11 @@ pub(crate) fn settlement_recorded(paths: &crate::ledger::RunPaths, node: &str) -
         let waits = TIMER_WAITS.load(std::sync::atomic::Ordering::Relaxed)
             - SETTLEMENT_START.load(std::sync::atomic::Ordering::Relaxed);
         let path = paths.dir.join("settlement-timer-waits.txt");
-        std::fs::write(&path, waits.to_string()).map_err(|error| Error::Ledger {
-            path,
-            source: error,
-        })?;
+        crate::ledger::write_atomic(
+            &path,
+            waits.to_string().as_bytes(),
+            crate::ledger::Durability::Projection,
+        )?;
     }
     Ok(())
 }

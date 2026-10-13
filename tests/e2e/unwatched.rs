@@ -1592,6 +1592,10 @@ fn the_fixture_waits_for_a_windows_reader_to_release_a_document() {
     })
     .expect("the replacement lands after the reader closes");
     assert_eq!(attempts, 2, "the sharing refusal was not exercised");
+    assert!(
+        !replacement.exists(),
+        "the successful retry did not perform the real rename"
+    );
     let assembled = assembled_run(&template, &world.runs, "sharing-copy", "another-planner");
     assert_eq!(document(&assembled)["run_id"], "sharing-copy");
     assert_eq!(document(&assembled)["session"], "another-planner");
