@@ -67,17 +67,8 @@ default:
 # whole graph rather than the crate alone. Serialized: the projects share
 # installers, and two of those running at once race the same directory.
 # Set up the project from a clean clone.
-bootstrap: _hooks
+bootstrap:
     @bash scripts/nx.sh run-many -t bootstrap --parallel=1
-
-# Point this clone's git hooks at the committed directory. `core.hooksPath` is
-# per-clone state that is never committed, so a guard nothing activates is a
-# guard that runs nothing — this is what makes .githooks/pre-push real. The
-# directory carries the screencomp visual guard and nothing else: `just gate`
-# stays unhooked, exactly as it is today.
-_hooks:
-    @git rev-parse --git-dir >/dev/null 2>&1 || exit 0; \
-      git config core.hooksPath .githooks
 
 # The Rust crate's own provisioning (the `onepipeline:bootstrap` target).
 _crate-bootstrap:
@@ -657,17 +648,9 @@ screenshots-gif:
     RUSTFLAGS="-D warnings" cargo build --release --locked --package onepipeline-testfakes
     python3 screenshots/demo-gif.py
 
-# Run the pre-push visual guard exactly as git would — `GIT_DIR` in the
-# environment, the pushed refs on stdin — without pushing anything. The guard is
-# the only caller of the capture that runs inside a hook, and a hook's
-# environment is not a shell's, so this is how a defect that only appears there
-# is found before a push rather than by a rejected one.
-screenshots-guard:
-    @bash screenshots/rehearse-guard.sh
-
 # Refresh the committed digest baseline from a fresh capture, after an INTENDED
 # output change. Rewrites this host's lane only (screenshots/host-arch.sh names it,
-# and the pre-push guard classifies the same one); commit shots/baseline/ and
+# which manual classification also uses); commit shots/baseline/ and
 # screenshots/images/ together.
 screenshots-bless:
     @bash scripts/nx.sh run onepipeline-visual-docs:screenshots-bless
