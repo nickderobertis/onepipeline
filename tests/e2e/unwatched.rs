@@ -1525,7 +1525,7 @@ fn assembled_run(template: &RunPaths, root: &std::path::Path, id: &str, session:
         (template.launch(), paths.launch()),
         (template.summary(), paths.summary()),
     ] {
-        let read = std::fs::read_to_string(&from)
+        let read = after_document_handles_close(|| std::fs::read_to_string(&from))
             .unwrap_or_else(|error| panic!("{} cannot be read: {error}", from.display()));
         let mut held: Value = serde_json::from_str(&read).expect("a document");
         held["run_id"] = json!(id);
@@ -1538,6 +1538,73 @@ fn assembled_run(template: &RunPaths, root: &std::path::Path, id: &str, session:
         std::fs::write(&to, held.to_string()).expect("the document");
     }
     paths
+}
+
+/// Windows may refuse an atomic replacement or an open while another handle
+/// is closing. Wait for that filesystem state, under the harness's existing
+/// deadline; unrelated errors still fail at their first attempt.
+fn after_document_handles_close<T>(
+    mut operation: impl FnMut() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    let mut result = None;
+    assert!(
+        waited(|| {
+            match operation() {
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotFound
+                    ) =>
+                {
+                    false
+                }
+                answer => {
+                    result = Some(answer);
+                    true
+                }
+            }
+        }),
+        "the document's open handles never released it"
+    );
+    result.expect("the completed filesystem operation")
+}
+
+/// CreateFileW's FILE_SHARE_DELETE rule is imposed at the filesystem boundary:
+/// a held reader first refuses replacement, then closes before the next attempt.
+/// https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew
+#[test]
+fn the_fixture_waits_for_a_windows_reader_to_release_a_document() {
+    let world = World::new("unwatched-sharing-refusal");
+    world.script("build.wait", "hold");
+    let template = paths_of(&world, &held(&world, "sharingtemplate"));
+    let summary = template.summary();
+    let replacement = summary.with_extension("held.tmp");
+    std::fs::copy(&summary, &replacement).expect("the real document is staged");
+    let mut reader = Some(std::fs::File::open(&summary).expect("the reader holds the document"));
+    let mut attempts = 0;
+    after_document_handles_close(|| {
+        attempts += 1;
+        if reader.is_some() {
+            drop(reader.take());
+            return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        }
+        std::fs::rename(&replacement, &summary)
+    })
+    .expect("the replacement lands after the reader closes");
+    assert_eq!(attempts, 2, "the sharing refusal was not exercised");
+    let assembled = assembled_run(&template, &world.runs, "sharing-copy", "another-planner");
+    assert_eq!(document(&assembled)["run_id"], "sharing-copy");
+    assert_eq!(document(&assembled)["session"], "another-planner");
+    let failed = after_document_handles_close(|| {
+        Err::<(), _>(std::io::Error::from(std::io::ErrorKind::InvalidInput))
+    });
+    assert_eq!(
+        failed
+            .expect_err("a permanent failure must not be retried")
+            .kind(),
+        std::io::ErrorKind::InvalidInput
+    );
+    world.run(&["stop", &template.run, "--force"]).exited(0);
 }
 
 /// Grow one run's journal to `bytes` and stamp its document for the store that
@@ -1625,7 +1692,8 @@ fn the_fixture_is_assembled_beside_a_template_still_replacing_its_documents() {
                 let nth = replaced.load(Ordering::Relaxed);
                 let temporary = summary.with_extension(format!("tmp.{nth}"));
                 std::fs::write(&temporary, &held).expect("the temporary beside the document");
-                std::fs::rename(&temporary, &summary).expect("the document replaced");
+                after_document_handles_close(|| std::fs::rename(&temporary, &summary))
+                    .expect("the document replaced");
                 replaced.store(nth + 1, Ordering::Relaxed);
             }
         })

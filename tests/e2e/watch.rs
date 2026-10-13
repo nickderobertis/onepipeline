@@ -3721,7 +3721,10 @@ fn every_surface_the_channel_raises_ends_a_default_watch_and_is_counted_while_it
     }
 
     // Told to wait for something else, a watch counts all three as they arrive.
-    let watching = armed_watch(
+    let meeting = world.rendezvous("watch-deadline");
+    let address = std::fs::read_to_string(world.fakes.join("watch-deadline.rendezvous"))
+        .expect("the deadline gate address");
+    let watching = armed_watch_with(
         &world,
         &run,
         &[
@@ -3732,10 +3735,13 @@ fn every_surface_the_channel_raises_ends_a_default_watch_and_is_counted_while_it
             "--tick-interval",
             "0",
         ],
+        &[("ONEPIPELINE_TEST_WATCH_DEADLINE_GATE", &address)],
     );
+    let deadline = meeting.arrived();
     for (kind, message) in raised {
         surfaced(&world, &run, kind, message);
     }
+    deadline.release();
     let (code, last, said) = finished(watching);
     assert_eq!(code, WATCH_ELAPSED, "{last}\n{said}");
     assert_eq!(

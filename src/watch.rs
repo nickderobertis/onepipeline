@@ -292,6 +292,13 @@ pub(crate) fn watch(
     // may never be relied upon.
     let _armed = crate::watchers::Armed::arm(paths, request.timeout, &request.until);
     let mut wait = Wait::armed(paths, &view, files, began);
+    // The regression peer queues work while the clock is held, then advances it
+    // to this watch's existing deadline. Its first read remains the baseline.
+    let expired_at_gate = crate::ordering::meet("ONEPIPELINE_TEST_WATCH_DEADLINE_GATE")?;
+    if expired_at_gate {
+        (view, fresh) = read_run(paths, &mut cursor)?;
+        changes.observe(&view);
+    }
 
     let ended = |view: &RunView,
                  (ending, blocking): (Ending, bool),
@@ -345,7 +352,7 @@ pub(crate) fn watch(
             }
         }
         first = false;
-        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        if expired_at_gate || deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             let summary = wait.summary(paths, &view);
             return ended(
                 &view,

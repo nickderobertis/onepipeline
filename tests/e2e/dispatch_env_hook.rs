@@ -645,7 +645,7 @@ fn a_hook_that_fails_times_out_cannot_start_or_prints_a_malformed_document_refus
         // nothing dispatched on any attempt.
         let attempts = world.events_of(run, "node-dispatched").len();
         assert!(attempts > 1, "{run} was not retried: {}", world.dump());
-        if command == hook.as_str() {
+        if command == hook.as_str() && timeout.is_none() {
             assert_eq!(invocations(&world, run).len(), attempts, "{}", world.dump());
         }
         assert!(
@@ -717,6 +717,92 @@ fn a_hook_that_fails_times_out_cannot_start_or_prints_a_malformed_document_refus
 /// a held node's place, each run the hook again before their dispatch — and are
 /// handed what the hook prints then, which is not what the earlier dispatches
 /// were handed.
+/// A timeout ends the actual hook even before it writes its first invocation.
+/// TerminateProcess closes the process's handles; the socket witnesses that
+/// ending without assuming Unix and Windows report the same killed exit code.
+/// https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-terminateprocess
+#[test]
+fn a_compiled_hook_held_before_or_after_output_is_terminated_without_launching_a_worker() {
+    use std::io::{BufRead, BufReader, Read};
+    for startup in [true, false] {
+        let world = hooked_world("hook-timeout-ordering");
+        if startup {
+            world.script("dispatch-env.startup", "hold");
+        }
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("the ordering peer listens");
+        world.script(
+            "dispatch-env.rendezvous",
+            &listener.local_addr().expect("the gate address").to_string(),
+        );
+        let run = "timed-hook";
+        let path = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
+        let command = double("fake-dispatch-env-hook");
+        let driving = world
+            .cmd(&[
+                "start",
+                &path,
+                "--attach",
+                "--dispatch-env-hook",
+                &command.to_string_lossy(),
+                "--dispatch-env-hook-timeout",
+                "1",
+            ])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("the real driver starts");
+        let (mut stream, _) = listener.accept().expect("the held hook arrives");
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(120)))
+            .expect("a socket backstop");
+        let mut announced = String::new();
+        BufReader::new(&stream)
+            .read_line(&mut announced)
+            .expect("the hook announces its pid");
+        assert!(announced.trim().parse::<u32>().is_ok(), "{announced}");
+        let output = driving
+            .wait_with_output()
+            .expect("the timeout settles the run");
+        assert_eq!(
+            output.status.code(),
+            Some(crate::harness::NOTHING_DRIVING),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let ended = stream.read(&mut [0]);
+        assert!(
+            matches!(ended, Ok(0))
+                || ended.as_ref().is_err_and(|error| matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+                )),
+            "the hook retained its socket after termination: {ended:?}"
+        );
+        assert!(
+            !world.fakes.join("dispatch-env.released").exists(),
+            "a held hook returned from its gate"
+        );
+        assert_eq!(world.fakes.join("dispatch-env.entered").exists(), !startup);
+        let settled = settlement(&world, run, "build");
+        assert_eq!(settled["payload"]["status"], "failed", "{settled}");
+        assert_eq!(
+            settled["payload"]["outcome"], "infrastructure-failure",
+            "{settled}"
+        );
+        assert!(
+            settled["payload"]["detail"].as_str().is_some_and(
+                |detail| detail.contains("timeout") && detail.contains("dispatch-env hook")
+            ),
+            "{settled}"
+        );
+        assert!(
+            !world.was_invoked("oneagentgraph", &["--label", "onepipeline.node=build"]),
+            "a timed-out hook launched its worker"
+        );
+    }
+}
+
 #[test]
 fn a_requeued_node_and_a_retrys_replacement_each_run_the_hook_again_before_their_dispatch() {
     let world = hooked_world("dispatch-env-edits");

@@ -1103,3 +1103,36 @@ fn the_host_view_strip_guard_reads_the_binary() {
         String::from_utf8_lossy(&refused.stderr).contains("steady.strip_guard must be stripped")
     );
 }
+
+/// The settlement's original 1000 ms bound remains a reported, gated budget.
+#[test]
+fn the_settlement_latency_budget_uses_the_journeys_journal_stamps() {
+    let loaded = onebudgetspec_core::load(&[root().join("budgets.yaml")], false)
+        .expect("the budget file loads under the pinned checker");
+    let budget = loaded
+        .files()
+        .iter()
+        .flat_map(|file| &file.contents.budgets)
+        .find(|budget| budget.id == "settlement-readability-latency")
+        .expect("the settlement latency remains registered");
+    assert_eq!(budget.measure, Measure::Reported);
+    assert_eq!(budget.unit, "milliseconds");
+    assert_eq!(budget.direction, Direction::Max);
+    assert!((budget.threshold - 1000.0).abs() < f64::EPSILON);
+    assert_eq!(
+        budget.command,
+        ["bash", "scripts/settlement-latency-budget.sh"]
+    );
+    let journey = std::fs::read_to_string(root().join("tests/e2e/loopcost.rs"))
+        .expect("the measurement journey");
+    assert!(journey.contains(
+        "#[test]\nfn the_settlement_readability_latency_is_reported_from_its_journal_stamps()"
+    ));
+    let output = std::process::Command::new("bash")
+        .arg(root().join("scripts/settlement-latency-budget.sh"))
+        .env_remove("ONEBUDGETSPEC_RESULT")
+        .output()
+        .expect("the real measurement command runs");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("ONEBUDGETSPEC_RESULT is not set"));
+}

@@ -4425,7 +4425,9 @@ fn assertions(source: &str) -> Vec<String> {
 /// projections, including a failed settlement followed by recovery.
 #[test]
 fn a_cache_enabled_github_store_reads_and_writes_like_an_uncached_store() {
-    use crate::linear_writeback::{from_the_launch_directory, GitHubEndpoint};
+    use crate::linear_writeback::{
+        from_the_launch_directory, projection_completed_after, projection_records, GitHubEndpoint,
+    };
 
     let journey = |enabled: bool| {
         let world = World::new(&format!("store-github-cache-{enabled}"))
@@ -4445,12 +4447,16 @@ fn a_cache_enabled_github_store_reads_and_writes_like_an_uncached_store() {
         world.until("the launch projection", |_| {
             served.state()["issues"]["anchor"]["status"] == "In Progress"
         });
+        world.until("the launch projection record", |world| {
+            projection_completed_after(world, run, 0, "anchor")
+        });
         let mut costs = Vec::new();
         for (id, status, evidence, projected) in [
             ("work", "failed", "failed cache journey", "Needs Attention"),
             ("work", "done", "recovered cache journey", "Done"),
             ("other", "done", "other cache journey", "Done"),
         ] {
+            let projected_before = projection_records(&world, run).len();
             let before = served.state()["requests"]
                 .as_array()
                 .expect("requests")
@@ -4472,15 +4478,8 @@ fn a_cache_enabled_github_store_reads_and_writes_like_an_uncached_store() {
                         .as_str()
                         .is_some_and(|body| body.contains(evidence))
             });
-            world.until("the projection record", |world| {
-                std::fs::read_to_string(
-                    world.run_file(run, onepipeline::cli::WRITEBACK_PROJECTIONS_FILE),
-                )
-                .is_ok_and(|text| {
-                    text.lines()
-                        .last()
-                        .is_some_and(|line| line.contains("projected"))
-                })
+            world.until("this settlement's projection record", |world| {
+                projection_completed_after(world, run, projected_before, id)
             });
             let state = served.state();
             costs.push(

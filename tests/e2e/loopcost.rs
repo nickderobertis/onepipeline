@@ -542,6 +542,20 @@ fn another_runs_ledger_is_read_on_its_own_interval_and_not_on_the_loops() {
 #[test]
 fn every_answer_the_loop_owes_arrives_inside_a_second() {
     let world = World::new("loopcost-latency");
+    let receiving = world.rendezvous("settlement-received");
+    let queued = world.rendezvous("settlement-queued");
+    let received_address =
+        std::fs::read_to_string(world.fakes.join("settlement-received.rendezvous"))
+            .expect("the receiving gate address");
+    let queued_address = std::fs::read_to_string(world.fakes.join("settlement-queued.rendezvous"))
+        .expect("the queued gate address");
+    let world = world
+        .with_env("ONEPIPELINE_TEST_SETTLEMENT_NODE", "build")
+        .with_env("ONEPIPELINE_TEST_SETTLEMENT_GATE", &received_address)
+        .with_env("ONEPIPELINE_TEST_SETTLEMENT_QUEUED_GATE", &queued_address);
+    // A producer stamp predating receipt forces the old wall-clock assertion
+    // to fail without a sleep. The loop still receives a ready settlement.
+    world.script("build.settlement-clock-stepped", "");
     world.script("build.wait", "hold");
     // A node held open throughout, so the driver is still there to be measured:
     // a graph whose every other node has settled is terminal, and the loop that
@@ -572,14 +586,25 @@ fn every_answer_the_loop_owes_arrives_inside_a_second() {
     // noticing the release and saying so — the double's work, and on a loaded
     // host the larger part of what a clock around it measured.
     world.release("build.go");
+    let received = receiving.arrived();
+    let ready = queued.arrived();
+    // Both the producer record and the final settlement are ready before the
+    // loop continues. Any timer it waits on now is avoidable scheduling work.
+    ready.release();
+    received.release();
     world.until("the settlement to be readable", |world| {
         recorded(world, "prompt", "node-settled", "build")
     });
-    let readable = at(&one(&world, "prompt", "node-settled", "build"))
-        - at(&one(&world, "prompt", "member-settled", "build"));
-    assert!(
-        readable < 1_000,
-        "a settlement took {readable}ms to become readable after its dispatch reported it"
+    world.until("the loop to report its settlement timer waits", |world| {
+        world
+            .run_file("prompt", "settlement-timer-waits.txt")
+            .is_file()
+    });
+    assert_eq!(
+        std::fs::read_to_string(world.run_file("prompt", "settlement-timer-waits.txt"))
+            .expect("the loop's timer count"),
+        "0",
+        "a ready settlement waited on a poll timer"
     );
 
     // A node whose last dependency settles is dispatched.
@@ -635,6 +660,51 @@ fn every_answer_the_loop_owes_arrives_inside_a_second() {
         world.run_file("prompt", "result.json").is_file()
     });
 } // llmlint: ignore-end[e2e_not_mocked]
+
+/// The latency budget uses an unheld journey's own journal stamps. The
+/// deterministic ordering journey above measures waits, not host CPU scheduling.
+#[test]
+fn the_settlement_readability_latency_is_reported_from_its_journal_stamps() {
+    let world = World::new("settlement-latency-budget");
+    world.script("build.wait", "hold");
+    world.script("hold.wait", "hold");
+    let run = "settlement-latency";
+    let path = world.plan(
+        run,
+        &plan_of(run, vec![agent("build", &[]), agent("hold", &[])]),
+    );
+    world.run(&["start", &path, "--detach"]).exited(0);
+    world.until("the build to dispatch", |world| {
+        recorded(world, run, "node-dispatched", "build")
+    });
+    world.release("build.go");
+    world.until("the settlement to be readable", |world| {
+        recorded(world, run, "node-settled", "build")
+    });
+    let producer = one(&world, run, "member-settled", "build");
+    let readable = one(&world, run, "node-settled", "build");
+    let millis = at(&readable)
+        .checked_sub(at(&producer))
+        .expect("the settlement does not precede its producer");
+    if let Some(result) = std::env::var_os("ONEBUDGETSPEC_RESULT") {
+        std::fs::write(
+            result,
+            crate::budget_result::reported(
+                usize::try_from(millis).expect("a latency in milliseconds"),
+                &format!(
+                    "member-settled {} to node-settled {}, from the journey's journal",
+                    producer["ts"], readable["ts"]
+                ),
+            )
+            .to_string(),
+        )
+        .expect("the measured budget result");
+    }
+    world.release("hold.go");
+    world.until("the run to settle", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+}
 
 /// A node whose cross-DAG dependency settles in another run proceeds within a
 /// second of that settlement.
