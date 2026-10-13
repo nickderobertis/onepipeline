@@ -2307,7 +2307,41 @@ fn publish(
             // unfinished and no branch in hand; it settles as the residual it would be.
             None => publication_failed(reason),
         },
+        // The draft this republication names is another branch's by this host's record:
+        // nothing was pushed, and the planner is told rather than the draft published
+        // some other way.
+        Err(crate::vcs::PublishRefused::NotThisDraft { change, reason }) => {
+            let _ = tx.send(Message::Raise(Box::new(not_this_draft_surface(
+                &node.id, &change, &reason,
+            ))));
+            publication_failed(format!(
+                "the republication onto {change} was refused, and nothing was pushed: {reason}"
+            ))
+        }
         Err(crate::vcs::PublishRefused::Refused(error)) => publication_failed(error.to_string()),
+    }
+}
+
+/// The planner's report of a republication refused because the draft it names carries
+/// another branch than the node's.
+fn not_this_draft_surface(node: &str, change: &str, reason: &str) -> crate::channel::Surface {
+    crate::channel::Surface {
+        id: 0,
+        kind: crate::channel::SurfaceKind::FINDING.into(),
+        message: format!(
+            "node '{node}' was to republish onto its review draft {change}, and this host's \
+             newest record says that change request carries another branch, so nothing was \
+             pushed and nothing was published in its place: {}. Say how the node goes on — \
+             a `retry` naming the branch to continue, or a `settle`.",
+            engine::bounded(&crate::views::one_line(reason))
+        ),
+        source: crate::channel::source::RECONCILER.into(),
+        blocking: false,
+        queued_at: crate::sys::now_millis(),
+        abandoned: false,
+        asker: None,
+        workstream: Some(node.to_owned()),
+        correlation: None,
     }
 }
 

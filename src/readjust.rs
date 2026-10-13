@@ -102,24 +102,26 @@ pub(crate) fn lineage_change(state: &RunState, node: &str) -> Option<String> {
     }
 }
 
-/// The root a lineage head's work stands on, read back through its predecessors where
-/// the head itself has not settled yet.
+/// The root a lineage's work stands on: read off the lineage's first node, whose
+/// settlement names the stack it was drafted on, and off the head only where that names
+/// none — a replacement in flight has its session's immediate base on the record, which
+/// is a parent's branch rather than the root for a stacked draft.
 fn root_of(state: &RunState, node: &str) -> Option<String> {
-    let mut at = node.to_owned();
+    let mut first = node.to_owned();
     let mut seen = BTreeSet::new();
-    loop {
-        if let Some(root) = crate::stack::root_of(state, &at, &mut BTreeSet::new()) {
-            return Some(root);
-        }
-        if !seen.insert(at.clone()) {
-            return None;
-        }
-        at = state
+    while seen.insert(first.clone()) {
+        match state
             .superseded
             .iter()
-            .find(|(_, by)| **by == at)
-            .map(|(predecessor, _)| predecessor.clone())?;
+            .find(|(_, by)| **by == first)
+            .map(|(predecessor, _)| predecessor.clone())
+        {
+            Some(predecessor) => first = predecessor,
+            None => break,
+        }
     }
+    crate::stack::root_of(state, &first, &mut BTreeSet::new())
+        .or_else(|| crate::stack::root_of(state, node, &mut BTreeSet::new()))
 }
 
 /// Every draft of the run, in graph order.

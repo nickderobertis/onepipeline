@@ -587,6 +587,8 @@ pub(crate) enum Message {
     ReworkDue(Box<ReworkDue>),
     /// A rework's publication wrote a new title onto its change request.
     ChangeRetitled(Box<crate::payload::ChangeRetitled>),
+    /// A dispatch has something to tell the planner that its settlement does not say.
+    Raise(Box<Surface>),
     /// A rework's publication left its change request's title unverified.
     TitleUnverified(Box<UnverifiedTitle>),
 }
@@ -1752,11 +1754,29 @@ fn converge(
                 unpublished = true;
             }
             for due in reworks_due.drain(..) {
-                let merged = state
+                // Merged anywhere: into the root, or into another node's branch.
+                let landed = state
                     .landed_how
                     .values()
                     .any(|landed| landed.change_url == due.change);
+                let absorbed_into = state
+                    .absorbed
+                    .iter()
+                    .find(|(node, _)| {
+                        crate::readjust::lineage_change(state, node).as_deref()
+                            == Some(due.change.as_str())
+                    })
+                    .map(|(_, into)| into.clone());
+                let merged = landed || absorbed_into.is_some();
                 if merged {
+                    let next = match &absorbed_into {
+                        Some(into) => format!(
+                            "its work now sits in '{into}''s draft; rework '{into}', or build on it \
+                             with an `add` naming what is still to do"
+                        ),
+                        None => "build on the landed work with an `add` naming what is still to do"
+                            .to_owned(),
+                    };
                     crate::readjust::notify(
                         paths,
                         journal,
@@ -1765,8 +1785,7 @@ fn converge(
                         format!(
                             "node '{node}''s change request {change} was merged while its rework \
                              ran, so the rework published nothing and opened no change request; \
-                             its work is kept on its branch. Build on the landed work with an \
-                             `add` naming what is still to do.",
+                             its work is kept on its branch, and {next}.",
                             node = due.node,
                             change = due.change
                         ),
@@ -2367,6 +2386,7 @@ fn converge(
                 // Answered by the next pass's claim check, which this arrival is what wakes.
                 Message::PublicationDue(due) => publications.push(*due),
                 Message::ReworkDue(due) => reworks_due.push(*due),
+                Message::Raise(surface) => raise(paths, journal, *surface)?,
                 Message::Settled(settled) => {
                     let settlement = &settled.settlement;
                     in_flight.remove(&settlement.node);

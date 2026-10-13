@@ -325,6 +325,16 @@ pub(crate) fn republish(
         &NodeCancellation(cancel),
     );
     match answer {
+        // A record naming another branch is the one refusal that must never fall back:
+        // the change request is not this session's, and the planner decides.
+        Err(onevcs::Error::Invalid { reason })
+            if reason.contains("by this host's newest record of it") =>
+        {
+            Err(PublishRefused::NotThisDraft {
+                change: change.to_owned(),
+                reason,
+            })
+        }
         // This refusal proves that nothing was pushed. A different recorded
         // branch is a distinct refusal and must remain a planner-visible failure.
         Err(onevcs::Error::UnrecordedChangeHead { .. }) => {
@@ -362,6 +372,16 @@ pub(crate) enum PublishRefused {
     /// attempt, handed the conflict again, can answer it. Carries the sibling's
     /// own sentence.
     MergeUnfinished(String),
+    /// A deferred republication refused because this host's newest record says the
+    /// review draft carries another branch than the session's: not this session's
+    /// change request, so nothing is pushed and nothing falls back to publishing it.
+    /// Carries the change request and the sibling's own sentence.
+    NotThisDraft {
+        /// The change request the republication named.
+        change: String,
+        /// What the sibling said.
+        reason: String,
+    },
     /// Any other refusal of the call.
     Refused(Error),
 }
@@ -369,7 +389,9 @@ pub(crate) enum PublishRefused {
 impl std::fmt::Display for PublishRefused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::MergeUnfinished(reason) => f.write_str(reason),
+            Self::MergeUnfinished(reason) | Self::NotThisDraft { reason, .. } => {
+                f.write_str(reason)
+            }
             Self::Refused(error) => error.fmt(f),
         }
     }

@@ -2475,3 +2475,128 @@ fn a_conflicted_readjustment_is_concluded_by_the_draft_s_worker_then_retargeted(
     assert_eq!(base, "main");
     assert_eq!(settled(&world, run, "b")["base"], "main");
 }
+
+/// A change request merged into its parent's branch while its own rework runs: the
+/// replacement reads it absorbed before anything is pushed, opens no change request,
+/// settles `failed` with `merged-during-rework` keeping its work on its branch, and the
+/// surface names the absorbing node and `add`.
+#[test]
+fn a_change_absorbed_during_its_own_rework_is_refused_before_the_push() {
+    let world = team_world("readjust-absorbed-during");
+    for node in ["a", "b"] {
+        world.script(&format!("{node}.work"), &format!("{node}'s change\n"));
+    }
+    world.script("b-rework-1.work", "b's change, as the review asked\n");
+    world.script("b-rework-1.work-file", "b");
+    world.script("b-rework-1.wait", "");
+    let run = "absorbed";
+    launched(
+        &world,
+        run,
+        vec![lifecycle("a", &[]), lifecycle("b", &["a"])],
+    );
+    let b_branch = branch_of(&world, run, "b");
+    reply(&world, run, json!([rework("b")])).exited(0);
+    let driver = world
+        .cmd(&["adopt", run])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the adopting driver starts");
+    wait_for_hold(&world, run, "b-rework-1");
+    merge(&world, &number_of(&world, run, "b"), "merge-commit", "kept");
+    std::fs::write(world.fakes.join("b-rework-1.go"), "").expect("the hold is released");
+    let ended = driver.wait_with_output().expect("the driver ends");
+    assert_eq!(ended.status.code(), Some(3), "{ended:?}");
+
+    let absorbed = record(&world, run, "node-absorbed", "b-rework-1").expect("absorbed");
+    assert_eq!(absorbed["into"], "a", "{absorbed}");
+    let replacement = settled(&world, run, "b-rework-1");
+    assert_eq!(replacement["status"], "failed", "{replacement}");
+    assert_eq!(
+        replacement["outcome"], "merged-during-rework",
+        "{replacement}"
+    );
+    assert_eq!(opened_from(&world, &b_branch), 1);
+    let raised = surfaced(&world, run, "merged-during-rework");
+    assert_eq!(raised.len(), 1, "{raised:#?}");
+    let message = text(&raised[0]["message"], "the surface");
+    assert!(
+        message.contains("'a''s draft") && message.contains("`add`"),
+        "{message}"
+    );
+}
+
+/// A republication the host's record says is not this branch's: the host reports `b`'s
+/// change request carrying another branch, which the rework's standings read records.
+/// `b`'s replacement is refused before anything is pushed — no watched publication in
+/// its place, no change request opened, no check read — settles `failed` saying so, and
+/// the planner is told.
+#[test]
+fn a_republication_onto_a_draft_recorded_as_another_branch_s_is_refused_and_surfaced() {
+    let world = team_world("readjust-not-this-draft");
+    for node in ["a", "b"] {
+        world.script(&format!("{node}.work"), &format!("{node}'s change\n"));
+    }
+    world.script("b-rework-1.work", "b's change, as the review asked\n");
+    world.script("b-rework-1.work-file", "b");
+    let run = "mismatch";
+    launched(
+        &world,
+        run,
+        vec![lifecycle("a", &[]), lifecycle("b", &["a"])],
+    );
+    let b_branch = branch_of(&world, run, "b");
+    let b_number = number_of(&world, run, "b");
+    // The host now reports `b`'s change request as carrying a branch that is not `b`'s.
+    let opened = world.fakes.join("gh").join("opened.jsonl");
+    let rewritten: Vec<String> = std::fs::read_to_string(&opened)
+        .expect("the host opened change requests")
+        .lines()
+        .map(|line| {
+            let mut change: Value = serde_json::from_str(line).expect("a change request");
+            if change["number"] == b_number {
+                change["head"] = json!("someone/elses-branch");
+            }
+            change.to_string()
+        })
+        .collect();
+    std::fs::write(&opened, format!("{}\n", rewritten.join("\n"))).expect("written");
+    reply(&world, run, json!([rework("b")])).exited(0);
+    let from = world.invocations().len();
+    world.run(&["adopt", run]);
+
+    let replacement = settled(&world, run, "b-rework-1");
+    assert_eq!(replacement["status"], "failed", "{replacement}");
+    assert!(
+        replacement["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("someone/elses-branch")
+                && detail.contains("nothing was pushed")),
+        "{replacement}"
+    );
+    let watched: Vec<Value> = host_calls(&world, from)
+        .into_iter()
+        .filter(|call| {
+            is_check_read(call) || (call["args"][0] == "pr" && call["args"][1] == "create")
+        })
+        .collect();
+    assert!(
+        watched.is_empty(),
+        "the republication fell back: {watched:#?}"
+    );
+    assert_eq!(
+        opened_from(&world, &b_branch),
+        0,
+        "a change request was opened for b's branch"
+    );
+    let findings: Vec<Value> = surfaced(&world, run, "finding")
+        .into_iter()
+        .filter(|finding| {
+            finding["message"].as_str().is_some_and(|message| {
+                message.contains("'b-rework-1'") && message.contains("another branch")
+            })
+        })
+        .collect();
+    assert_eq!(findings.len(), 1, "{findings:#?}");
+}
