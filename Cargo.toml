@@ -971,11 +971,9 @@ onejudge = "0.19.1"
 # **0.26.0 starts Codex with plugins off**: every `codex exec` and `app-server`
 # launch carries `-c features.plugins=false` unless the resolved config says
 # `plugins = true` (oneharness #1457), so a dispatch stops downloading Codex's
-# remote plugin catalog with no configuration of the host's own. 0.25.0 between
-# them reports each Codex identity's banked rate-limit reset credits in the usage
-# report, and 0.25.1 finds and stops a dispatch's marked processes; nothing here
-# reads either. 0.25.0 and 0.26.0 are **breaking** in their release notes and
-# neither touches an item this crate builds; `crates/testfakes`'s `fake-codex`
+# remote plugin catalog with no configuration of the host's own. The minors since
+# 0.24 are **breaking** in their release notes and none touches an item this
+# crate builds; `crates/testfakes`'s `fake-codex`
 # takes the `-c` override in its argv grammar, and `tests/e2e/dispatch.rs`'s
 # `a_dispatched_codex_turn_starts_with_plugins_off_unless_its_config_opts_in`
 # reads the argv it records under each config. A **requirement** for the same

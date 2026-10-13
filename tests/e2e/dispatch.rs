@@ -4079,6 +4079,10 @@ fn the_codex_double_answers_each_exec_line_oneharness_builds_and_refuses_each_it
             &["exec", "-c", "features.plugins", "--json", "Do build."][..],
             "\"features.plugins\" is not one",
         ),
+        (
+            &["exec", "-c", "=false", "--json", "Do build."][..],
+            "\"=false\" is not one",
+        ),
     ] {
         let refused = sent(argv);
         let said = String::from_utf8_lossy(&refused.stderr).to_string();
