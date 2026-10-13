@@ -1170,3 +1170,313 @@ fn the_store_is_written_only_for_what_its_projection_holds_changed() {
     assert_eq!(e["base"], d_branch.as_str(), "{e}");
     assert!(is_ancestor(&world, &d_now, text(&e["head"], "e's head")));
 }
+
+/// Every remaining draft's record, `status`, `results`, store settlement and Stack block
+/// name the base `bases` gives it.
+fn every_draft_names_its_base(world: &World, run: &str, project: &str, bases: &[(&str, &str)]) {
+    let (status, results) = views(world, run);
+    for (node, base) in bases {
+        let settlement = settled(world, run, node);
+        assert_eq!(settlement["base"], *base, "{node}: {settlement}");
+        let (on, body) = on_host(world, run, node);
+        assert_eq!(on, *base, "{node}");
+        let named = if *base == "main" {
+            "Drafted against `main`, the root".to_owned()
+        } else {
+            format!("Drafted against `{base}`")
+        };
+        assert!(body.contains(&named), "{node}'s Stack block:\n{body}");
+        let against = if *base == "main" {
+            "drafted against the root main".to_owned()
+        } else {
+            format!("branch {base}")
+        };
+        assert!(
+            status
+                .lines()
+                .any(|line| line.starts_with(&format!("  {node}: ")) && line.contains(&against)),
+            "{node} in status:\n{status}"
+        );
+        assert!(
+            results
+                .lines()
+                .any(|line| line.trim_start().starts_with(&format!("{node} "))
+                    && line.contains(&against)),
+            "{node} in results:\n{results}"
+        );
+        let lineage = node.split("-rework-").next().unwrap_or(node);
+        world.until_store(&format!("{node}'s base to reach the store"), |world| {
+            projected_settlement(world, project, lineage)["base"] == *base
+        });
+    }
+}
+
+/// The branch the newest node of `node`'s lineage settled on, and the commit it stands at.
+fn wait_for_hold(world: &World, run: &str, node: &str) {
+    world.until(&format!("{node} to be dispatched and held"), |world| {
+        world
+            .events_of(run, "node-dispatched")
+            .iter()
+            .any(|event| event["labels"]["node"] == node)
+            && world.fakes.join(format!("{node}.wait")).exists()
+    });
+}
+
+/// Case 4(i): after `a` in `a ← b ← c` lands with no trigger run, a `rework` of `b`
+/// places its replacement on the root, publishes onto `b`'s existing change request —
+/// one opened from `b`'s branch across the journey — retargets it to the root, keeps it
+/// a draft with only `b`'s change against it, and restacks `c` onto `b`'s new head.
+#[test]
+fn a_rework_after_a_landing_places_its_replacement_on_the_root() {
+    let world = team_world("readjust-rework-after");
+    for node in ["a", "b", "c"] {
+        world.script(&format!("{node}.work"), &format!("{node}'s change\n"));
+    }
+    world.script("b-rework-1.work", "b's change, as the review asked\n");
+    world.script("b-rework-1.work-file", "b");
+    let run = "after";
+    let project = launched(
+        &world,
+        run,
+        vec![
+            lifecycle("a", &[]),
+            lifecycle("b", &["a"]),
+            lifecycle("c", &["b"]),
+        ],
+    );
+    let b_branch = branch_of(&world, run, "b");
+    merge(&world, &number_of(&world, run, "a"), "squash", "kept");
+    reply(&world, run, json!([rework("b")])).exited(0);
+    world.run(&["adopt", run]).exited(0);
+
+    let replacement = settled(&world, run, "b-rework-1");
+    assert_eq!(replacement["branch"], b_branch.as_str(), "{replacement}");
+    assert_eq!(replacement["base"], "main", "{replacement}");
+    assert_eq!(opened_from(&world, &b_branch), 1);
+    assert_eq!(
+        changed_against(&world, &service(&world), "main", &b_branch),
+        ["b.md"]
+    );
+    let moved = record(&world, run, "node-readjusted", "b-rework-1").expect("readjusted");
+    let trail: Vec<String> = world
+        .journal(run)
+        .iter()
+        .filter(|event| {
+            event["labels"]["node"]
+                .as_str()
+                .is_some_and(|node| node.starts_with('b') || node == "c")
+        })
+        .map(|event| {
+            format!(
+                "{} {} {}",
+                event["labels"]["node"], event["kind"], event["payload"]["base"]
+            )
+        })
+        .collect();
+    assert_eq!(moved["retarget"], "retargeted", "{moved}\n{trail:#?}");
+    assert_eq!(moved["cause"], json!(["a"]), "{moved}");
+    let b_head = tip(&world, &b_branch);
+    assert!(is_ancestor(
+        &world,
+        &b_head,
+        &tip(&world, &branch_of(&world, run, "c"))
+    ));
+    every_draft_names_its_base(
+        &world,
+        run,
+        &project,
+        &[("b-rework-1", "main"), ("c", b_branch.as_str())],
+    );
+}
+
+/// Case 4(ii): `a` lands while `c`'s rework replacement is in flight. A readjustment
+/// made during it moves `b` and leaves `c` alone; once `c`'s replacement settles it is
+/// readjusted onto `b`'s new head.
+#[test]
+fn a_landing_during_a_rework_readjusts_the_rework_once_it_settles() {
+    let world = team_world("readjust-during-rework");
+    for node in ["a", "b", "c"] {
+        world.script(&format!("{node}.work"), &format!("{node}'s change\n"));
+    }
+    world.script("c-rework-1.work", "c's change, as the review asked\n");
+    world.script("c-rework-1.work-file", "c");
+    world.script("c-rework-1.wait", "");
+    let run = "during";
+    let mut plan = plan_of(
+        run,
+        vec![
+            lifecycle("a", &[]),
+            lifecycle("b", &["a"]),
+            lifecycle("c", &["b"]),
+        ],
+    );
+    plan["concurrency"] = json!(2);
+    let project = world.plan(run, &plan);
+    world
+        .run_from(&world.project, &["start", &project, "--attach"])
+        .exited(0);
+    let b_branch = branch_of(&world, run, "b");
+    let c_branch = branch_of(&world, run, "c");
+    reply(&world, run, json!([rework("c")])).exited(0);
+    let driver = world
+        .cmd(&["adopt", run])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the adopting driver starts");
+    wait_for_hold(&world, run, "c-rework-1");
+
+    merge(&world, &number_of(&world, run, "a"), "squash", "kept");
+    readjusted(&world, run);
+    world.until("b to be readjusted", |world| {
+        record(world, run, "node-readjusted", "b").is_some()
+    });
+    assert!(record(&world, run, "node-readjusted", "c-rework-1").is_none());
+    assert!(record(&world, run, "node-restack-started", "c-rework-1").is_none());
+
+    std::fs::write(world.fakes.join("c-rework-1.go"), "").expect("the hold is released");
+    let ended = driver.wait_with_output().expect("the driver ends");
+    assert!(ended.status.success(), "{ended:?}");
+    let readjusted_c =
+        record(&world, run, "node-readjusted", "c-rework-1").expect("c's rework was readjusted");
+    assert_eq!(
+        readjusted_c["to"]["base"],
+        b_branch.as_str(),
+        "{readjusted_c}"
+    );
+    assert!(is_ancestor(
+        &world,
+        &tip(&world, &b_branch),
+        &tip(&world, &c_branch)
+    ));
+    let journal = world.journal(run);
+    let c_settled = journal
+        .iter()
+        .position(|event| {
+            event["kind"] == "node-settled" && event["labels"]["node"] == "c-rework-1"
+        })
+        .expect("c's rework settled");
+    let c_restacked = journal
+        .iter()
+        .position(|event| {
+            event["kind"] == "node-restack-started" && event["labels"]["node"] == "c-rework-1"
+        })
+        .expect("c's rework was restacked");
+    assert!(c_settled < c_restacked);
+    assert_eq!(
+        changed_against(&world, &service(&world), &b_branch, &c_branch),
+        ["c.md"]
+    );
+    every_draft_names_its_base(
+        &world,
+        run,
+        &project,
+        &[("b", "main"), ("c-rework-1", b_branch.as_str())],
+    );
+}
+
+/// Case 4(iii) and the amendment's merged-after-dispatch refusal: `a`'s change request
+/// is merged while `a`'s own rework is in flight. The replacement's republication reads
+/// the standing first, finds it merged, and is refused before anything is pushed onto
+/// the change request: it opens none, settles `failed` with `merged-during-rework`, its
+/// work kept on its branch, and a surface names `add`. `b` above it is readjusted onto
+/// the root.
+#[test]
+fn a_change_merged_during_its_own_rework_is_refused_before_the_push() {
+    let world = team_world("readjust-merged-during");
+    for node in ["a", "b"] {
+        world.script(&format!("{node}.work"), &format!("{node}'s change\n"));
+    }
+    world.script("a-rework-1.work", "a's change, as the review asked\n");
+    world.script("a-rework-1.work-file", "a");
+    world.script("a-rework-1.wait", "");
+    let run = "merged";
+    let project = launched(
+        &world,
+        run,
+        vec![lifecycle("a", &[]), lifecycle("b", &["a"])],
+    );
+    let a_branch = branch_of(&world, run, "a");
+    reply(&world, run, json!([rework("a")])).exited(0);
+    let driver = world
+        .cmd(&["adopt", run])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the adopting driver starts");
+    wait_for_hold(&world, run, "a-rework-1");
+    merge(&world, &number_of(&world, run, "a"), "squash", "kept");
+    let merged_head = tip(&world, &a_branch);
+    let pushes_before = world.events_of(run, "push").len();
+    std::fs::write(world.fakes.join("a-rework-1.go"), "").expect("the hold is released");
+    // The replacement failed, so the run waits on the planner's answer: unattended.
+    let ended = driver.wait_with_output().expect("the driver ends");
+    assert_eq!(ended.status.code(), Some(3), "{ended:?}");
+
+    let replacement = settled(&world, run, "a-rework-1");
+    assert_eq!(replacement["status"], "failed", "{replacement}");
+    assert_eq!(
+        replacement["outcome"], "merged-during-rework",
+        "{replacement}"
+    );
+    assert_eq!(opened_from(&world, &a_branch), 1);
+    // Nothing was published onto the merged change request: the only push since is
+    // the work kept on its branch.
+    let published: Vec<Value> = world
+        .events_of(run, "change-published")
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == "a-rework-1")
+        .collect();
+    assert!(published.is_empty(), "{published:#?}");
+    let kept = text(&replacement["head"], "the kept head");
+    assert!(is_ancestor(&world, &merged_head, kept));
+    assert!(world.events_of(run, "push").len() >= pushes_before);
+    let surfaced: Vec<Value> = world
+        .events_of(run, "planner-surface-queued")
+        .into_iter()
+        .filter(|event| event["payload"]["kind"] == "merged-during-rework")
+        .collect();
+    assert_eq!(surfaced.len(), 1, "{surfaced:#?}");
+    assert!(
+        surfaced[0]["payload"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("'a") && message.contains("`add`")),
+        "{surfaced:#?}"
+    );
+    every_draft_names_its_base(&world, run, &project, &[("b", "main")]);
+}
+
+/// Case 4(iv): a `rework` of a node whose change request was merged since the last
+/// trigger is refused naming `add` — the rework's own readjustment finds it landed first.
+#[test]
+fn a_rework_of_a_node_merged_since_the_last_trigger_is_refused_naming_add() {
+    let world = team_world("readjust-rework-landed");
+    for node in ["a", "b"] {
+        world.script(&format!("{node}.work"), &format!("{node}'s change\n"));
+    }
+    let run = "landed";
+    let project = launched(
+        &world,
+        run,
+        vec![lifecycle("a", &[]), lifecycle("b", &["a"])],
+    );
+    merge(&world, &number_of(&world, run, "a"), "squash", "kept");
+    let refused = reply(&world, run, json!([rework("a")]));
+    world.run(&["adopt", run]).exited(0);
+    let rejected: Vec<Value> = world
+        .events_of(run, "edit-rejected")
+        .into_iter()
+        .chain(world.events_of(run, "command-rejected"))
+        .collect();
+    let said = format!("{}{}{rejected:?}", refused.stdout, refused.stderr);
+    assert!(
+        said.contains("landed") && said.contains("`add`"),
+        "the rework was not refused naming add: {said}"
+    );
+    assert!(record(&world, run, "node-landed", "a").is_some());
+    assert!(world
+        .events_of(run, "node-dispatched")
+        .iter()
+        .all(|event| event["labels"]["node"] != "a-rework-1"));
+    every_draft_names_its_base(&world, run, &project, &[("b", "main")]);
+}

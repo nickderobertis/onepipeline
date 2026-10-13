@@ -469,6 +469,17 @@ fn take_up(
         let Some(recorded) = state.bases.get(node) else {
             continue;
         };
+        // Only a settled draft nothing is moving: one in flight has its session's base
+        // on the record before its change request is moved there.
+        let settled = state
+            .recorded
+            .get(node)
+            .map(|recorded| recorded.clone().status())
+            == Some(crate::graph::NodeStatus::Done)
+            && !state.restacking.contains_key(node);
+        if !settled {
+            continue;
+        }
         let owed = state.readjust_owed.contains_key(node)
             || moved_now
                 .iter()
