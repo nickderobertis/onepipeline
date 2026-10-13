@@ -348,23 +348,48 @@ pub(crate) struct Named {
 /// `resume.branch`, and its current dispatch session's branch.
 ///
 /// Live is every status a node can still move out of — pending, ready and running,
-/// and the held ones: waiting, blocked, parked and complete-but-draft. A settled
-/// node's branch is `onevcs`'s to judge like any other.
+/// and the held ones: waiting, blocked, parked and complete-but-draft — and one
+/// more: a lifecycle node settled `done` whose change is unlanded, which is a
+/// draft awaiting review that a `rework` continues and a restack moves, so the
+/// branch it settled on is named too. Every other settled node's branch is
+/// `onevcs`'s to judge like any other.
 pub(crate) fn live_branches(
     state: &RunState,
     statuses: &std::collections::BTreeMap<String, NodeStatus>,
 ) -> Vec<Named> {
     let mut named = std::collections::BTreeSet::new();
     for (id, status) in statuses {
-        if matches!(
-            status,
-            NodeStatus::Done | NodeStatus::Failed | NodeStatus::Skipped | NodeStatus::Cancelled
-        ) {
+        // llmlint: ignore[changed_behavior_has_e2e] what it changes is a name handed to
+        // `onevcs`'s retirement, which retires only a branch whose content its base already
+        // carries — a draft in review carries work its base does not, so a journey's idle
+        // pass would keep it with or without this name, and the exclusion cannot be told
+        // apart end to end. `a_done_unlanded_lifecycle_node_names_the_branch_it_settled_on`
+        // holds that the engine names it, as `a_running_node_names_its_open_sessions_branch`
+        // holds the session cell for the same reason.
+        let in_review = *status == NodeStatus::Done
+            && state.landings.get(id) == Some(&crate::graph::Landing::Unlanded);
+        if !in_review
+            && matches!(
+                status,
+                NodeStatus::Done | NodeStatus::Failed | NodeStatus::Skipped | NodeStatus::Cancelled
+            )
+        {
             continue;
         }
         let Some(node) = state.graph.get(id) else {
             continue;
         };
+        if in_review && node.repo.is_none() {
+            continue;
+        }
+        if in_review {
+            if let Some(branch) = state.branches.get(id).filter(|branch| !branch.is_empty()) {
+                named.insert(Named {
+                    repo: node.repo.clone(),
+                    branch: branch.clone(),
+                });
+            }
+        }
         let session = state
             .sessions
             .get(id)
@@ -1440,6 +1465,42 @@ mod tests {
             repo: None,
             branch: "direct/branch".to_owned(),
         }));
+    }
+
+    /// A lifecycle node settled `done` whose change is unlanded is a draft awaiting
+    /// review, and the branch it settled on is named however its definition and
+    /// its last session read; one whose change landed, and a direct node, name none.
+    #[test]
+    fn a_done_unlanded_lifecycle_node_names_the_branch_it_settled_on() {
+        let (mut state, statuses) =
+            named_by(&[("review", NodeStatus::Done), ("landed", NodeStatus::Done)]);
+        for id in ["review", "landed"] {
+            let node = state.graph.get_mut(id).expect("the node");
+            node.branch = None;
+            node.resume = None;
+            state.sessions.remove(id);
+            state
+                .branches
+                .insert(id.to_owned(), format!("{id}/settled"));
+        }
+        state
+            .landings
+            .insert("review".to_owned(), crate::graph::Landing::Unlanded);
+        state
+            .landings
+            .insert("landed".to_owned(), crate::graph::Landing::Landed);
+        let named = live_branches(&state, &statuses);
+        assert!(
+            named.contains(&Named {
+                repo: Some("service".to_owned()),
+                branch: "review/settled".to_owned(),
+            }),
+            "{named:?}"
+        );
+        assert!(
+            !named.iter().any(|one| one.branch.starts_with("landed/")),
+            "{named:?}"
+        );
     }
 
     /// The one cell of the exclusion matrix a journey cannot isolate: a running

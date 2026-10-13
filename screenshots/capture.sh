@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# The one entry point three callers share — `just screenshots`, the pre-push
-# guard, and the visual-docs workflow — so none of them can build a different
-# thing from the one it captures. `SCREENSHOTS_NO_BUILD=1` skips the build; it
+# Manual capture and the visual-docs workflow share this entry point so both
+# build the binaries they capture. `SCREENSHOTS_NO_BUILD=1` skips the build; it
 # is held to a value it can have, below, rather than read as present-means-on.
 
 # llmlint: ignore-file[changed_behavior_has_e2e] the capture's every step is a

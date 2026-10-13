@@ -3752,6 +3752,7 @@ pub(crate) fn submit_envelope(
                         paths,
                         &mut graph,
                         &frontier,
+                        &view.state,
                         envelope.author.clone(),
                         command,
                     ) {
@@ -4097,10 +4098,19 @@ fn validate_here(
     paths: &RunPaths,
     graph: &mut crate::graph::Graph,
     frontier: &Frontier,
+    state: &crate::projection::RunState,
     author: Author,
     command: &Command,
 ) -> Result<engine::Staged> {
     let operations = edits::compile(graph, frontier, author, command)?;
+    if let Command::Retitle { id, .. } = command {
+        let scope = crate::boundary::of_run(&crate::boundary::plan_now(state)).term_scope();
+        return Ok(engine::staged_retitle(
+            operations,
+            state.sessions.get(id),
+            scope,
+        ));
+    }
     let Command::Note {
         id,
         addressee,

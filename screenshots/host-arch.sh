@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The one place a lane name is derived from `uname -m`, so the capture, the
-# pre-push guard and `just screenshots-bless` cannot disagree about which
+# manual classification and `just screenshots-bless` cannot disagree about which
 # `shots/baseline/<arch>.json` this host owns. The spellings match
 # `[capture].arches` in screencomp.toml, which is what CI fans out over.
 

@@ -587,7 +587,7 @@ fn drafted_for(
         ))),
     };
     Ok(match drafted {
-        Drafted::Body(body) => Some(body),
+        Drafted::Body(body, _) => Some(body),
         Drafted::Undrafted(ending) => {
             eprintln!(
                 "onepipeline: {} ({}), so {branch} lands with no body",

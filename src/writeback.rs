@@ -287,6 +287,9 @@ struct Snapshot {
     /// The replacement each superseded node was retried under — what a lineage is read off,
     /// and nothing else: never a title, never an id's suffix.
     superseded: BTreeMap<String, String>,
+    /// What each rework's replacement answers, keyed by the replacement: the record
+    /// `onepipeline.rework` carries on its item.
+    reworks: BTreeMap<String, ReworkProjected>,
     project_metadata: BTreeMap<String, Value>,
     /// Whether a node the run has not started is written as claimed or released.
     claim: Claim,
@@ -621,6 +624,17 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         EngineError::UnknownSource { .. } => decided("unknown-source"),
         EngineError::Token { .. } => decided("page-token"),
         EngineError::NoSources => decided("no-sources"),
+        // llmlint: ignore-block[changed_behavior_has_e2e] These store refusals are
+        // unreachable from settlement writes: copies use project members, carry no
+        // comments, set no expected version, and read immutable local shadow tasks.
+        // `every_engine_failure_is_named_as_the_store_names_it` verifies their mapping.
+        EngineError::ExpectOneTask => decided("expect-one-task"),
+        EngineError::NotCached { .. } => decided("not-cached"),
+        EngineError::CommentlessDestination { .. } => decided("no-comments"),
+        EngineError::QueryNotTasks => decided("query-not-tasks"),
+        EngineError::CommentsNotDocuments => decided("comments-not-documents"),
+        EngineError::ChangedWhileCopied { .. } => decided("changed-while-copied"),
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         EngineError::NotWritable { .. }
         | EngineError::CommentsNotWritable { .. }
         | EngineError::StatusNotWritable { .. }
@@ -1088,6 +1102,7 @@ fn snapshot_of(
         stated_landings: state.stated_landings.clone(),
         settlements: settlements(paths),
         superseded: state.superseded.clone(),
+        reworks: reworks_of(state),
         project_metadata: state
             .plan
             .as_ref()
@@ -2590,6 +2605,9 @@ fn create(
         recreate: false,
         create: false,
         dry_run: false,
+        comments: false,
+        no_link: false,
+        expect: None,
     };
     // The one call that is linear in what it carries, so the one whose deadline is.
     let deadline = Deadline::Write {
@@ -3573,6 +3591,41 @@ fn write_shadow(
     Ok(())
 }
 
+/// What `onepipeline.rework` says on a rework's replacement: the node it replaces,
+/// the reason, the instruction and each review comment it answers — the record
+/// the fold kept off the `rework-requested` the reconciler judged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ReworkProjected {
+    // llmlint: ignore-block[invalid_states_unrepresentable] the `rework-requested` operation's
+    // own fields, as `projection::ReworkRecord` folds them: a node id and prose the op's
+    // compile refused blank, carried as the `String`s that record holds them as.
+    replaces: String,
+    reason: String,
+    instruction: String,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
+    comments: Vec<crate::channel::ReworkComment>,
+}
+
+/// The `onepipeline.rework` record of each rework's replacement, keyed by the
+/// replacement.
+fn reworks_of(state: &RunState) -> BTreeMap<String, ReworkProjected> {
+    state
+        .reworks
+        .iter()
+        .map(|(replaces, rework)| {
+            (
+                rework.replacement.clone(),
+                ReworkProjected {
+                    replaces: replaces.clone(),
+                    reason: rework.reason.clone(),
+                    instruction: rework.instruction.clone(),
+                    comments: rework.comments.clone(),
+                },
+            )
+        })
+        .collect()
+}
+
 /// Targeted updates bypass the copy, so they must also replace the shadow's old documents.
 fn refresh_shadow(snapshot: &Snapshot, baseline: &Baseline) -> Result<(), String> {
     let tasks = snapshot
@@ -3675,6 +3728,9 @@ fn task_document(
     metadata.insert(NODE_KEY.into(), json!(head));
     if !superseded.is_empty() {
         metadata.insert(SUPERSEDES_KEY.into(), json!(superseded));
+    }
+    if let Some(rework) = snapshot.reworks.get(head.as_str()) {
+        metadata.insert(crate::taskgraph::REWORK_KEY.into(), json!(rework));
     }
     for (key, value) in wire {
         metadata.insert(format!("onepipeline.{key}"), value);
@@ -3997,13 +4053,16 @@ fn actions(report: &CopyReport) -> ProjectionActions {
             CopyAction::Updated { destination, .. } => Some(destination),
             CopyAction::Created { .. }
             | CopyAction::Unchanged { .. }
-            | CopyAction::Orphaned { .. } => None,
+            | CopyAction::Orphaned { .. }
+            | CopyAction::Failed { .. } => None,
         })
         .collect();
     let mut actions = ProjectionActions::default();
     for item in &report.items {
         let count = match &item.action {
             CopyAction::Orphaned { destination } if rewritten.contains(destination) => continue,
+            // Failed items made no mutation and are not successful projections.
+            CopyAction::Failed { .. } => continue,
             CopyAction::Created { .. } => &mut actions.created,
             CopyAction::Updated { .. } => &mut actions.updated,
             CopyAction::Unchanged { .. } => &mut actions.unchanged,
@@ -5289,6 +5348,17 @@ mod tests {
             },
             EngineError::Token { message: words() },
             EngineError::NoSources,
+            EngineError::ExpectOneTask,
+            EngineError::NotCached {
+                name: "plans".into(),
+            },
+            EngineError::CommentlessDestination {
+                name: "plans".into(),
+                kind: "in-memory".into(),
+            },
+            EngineError::QueryNotTasks,
+            EngineError::CommentsNotDocuments,
+            EngineError::ChangedWhileCopied { item: id() },
             EngineError::NotWritable {
                 name: "plans".into(),
                 kind: "in-memory".into(),
@@ -5929,11 +5999,42 @@ mod tests {
         .collect()
     }
 
-    /// The projection writes a vocabulary wider than the approved contract fixes,
-    /// and four reserved keys beside the settlement it already carried. Both are
-    /// recorded as a divergence, and this is the gate that keeps the record and
-    /// the code from parting: a word or a key the document does not name is one
-    /// nobody proposed.
+    /// The projected rework metadata is the replacement, reason, instruction and
+    /// comments the divergence documents, under its reserved store key.
+    #[test]
+    fn the_rework_record_is_the_shape_entry_121_documents() {
+        let record = include_str!("../docs/contract-divergences.md");
+        let block: Value = record
+            .split("\n## ")
+            .find(|entry| entry.starts_with("121."))
+            .and_then(|entry| entry.split("```json").nth(1))
+            .and_then(|rest| rest.split("```").next())
+            .map(|block| serde_json::from_str(block).expect("entry 121's block is JSON"))
+            .expect("the record carries entry 121's block");
+        let op = &block["ops"][0];
+        let mut state = RunState::default();
+        state.reworks.insert(
+            op["id"].as_str().expect("an id").to_owned(),
+            crate::projection::ReworkRecord {
+                replacement: op["replacement"]
+                    .as_str()
+                    .expect("a replacement")
+                    .to_owned(),
+                reason: op["reason"].as_str().expect("a reason").to_owned(),
+                instruction: op["instruction"]
+                    .as_str()
+                    .expect("an instruction")
+                    .to_owned(),
+                comments: serde_json::from_value(op["comments"].clone()).expect("comments"),
+                title: None,
+            },
+        );
+        let projected = super::reworks_of(&state);
+        let replacement = op["replacement"].as_str().expect("a replacement");
+        assert_eq!(json!(projected[replacement]), block["rework_metadata"]);
+        assert_eq!(block["rework_metadata_key"], crate::taskgraph::REWORK_KEY);
+    }
+
     #[test]
     fn every_word_and_key_this_projection_writes_is_named_by_the_divergence() {
         let divergence = include_str!("../docs/contract-divergences.md");
@@ -5965,6 +6066,11 @@ mod tests {
                 "docs/contract-divergences.md does not name the task field `{field}`"
             );
         }
+        // The key a rework's replacement carries what it answers under — entry 121's.
+        assert!(
+            divergence.contains(&format!("`{}`", crate::taskgraph::REWORK_KEY)),
+            "docs/contract-divergences.md does not name the rework key"
+        );
         // The keys that say which attempt of a lineage an item carries, beside the
         // `onepipeline.id` the contract already names — entry 80's.
         let lineage = [NODE_KEY, SUPERSEDES_KEY];
@@ -6215,6 +6321,7 @@ mod tests {
                     stated_landings: BTreeMap::new(),
                     settlements: BTreeMap::new(),
                     superseded: BTreeMap::new(),
+                    reworks: BTreeMap::new(),
                     project_metadata: BTreeMap::from([(
                         "onepipeline.concurrency".into(),
                         json!(4),
@@ -7377,10 +7484,16 @@ mod tests {
                  "destination": "plans:board/003-design", "via": "created", "link": "recorded"},
                 {"source": "elsewhere:board/gone", "action": "orphaned",
                  "destination": "plans:board/009-gone"},
+                {"source": "elsewhere:board/moving", "action": "failed",
+                 "error": onetaskgraph_core::Failure::from(&onetaskgraph_core::EngineError::ChangedWhileCopied { item: "elsewhere:board/moving".parse().expect("an id") })},
             ],
             "spent": {"requests": 3, "budgets": []},
         }))
         .expect("the store's own report reads");
+        // A failed outcome requires the source task to change during both copy
+        // reads. Write-back copies an immutable local shadow, so no real settlement
+        // can produce it. This store-report assertion covers the compatibility arm
+        // without substituting a mutable source for the layer under test in an e2e.
         assert_eq!(
             super::actions(&report),
             ProjectionActions {

@@ -501,8 +501,19 @@ pub struct Settlement {
     /// The stack a lifecycle node was drafted on, where it had stack parents.
     /// Boxed, because only a stacked node's settlement carries one.
     pub(crate) stack: Option<Box<crate::payload::SettledStack>>,
+    /// What a restack of the node did, on the settlement that ends one: the
+    /// `node-restacked` the loop records ahead of it.
+    pub(crate) restacked: Option<Restacked>,
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
+
+/// What one restack did beyond its publication.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Restacked {
+    /// Whether an agent was dispatched to conclude a conflict — the node's own
+    /// merge, or its stack base's.
+    pub(crate) agent_dispatched: bool,
+}
 
 impl Settlement {
     /// A node that settled without a dispatch.
@@ -522,6 +533,7 @@ impl Settlement {
             completed_steps: Vec::new(),
             base: None,
             stack: None,
+            restacked: None,
         }
     }
 }
@@ -566,6 +578,51 @@ pub(crate) enum Message {
     /// A lifecycle dispatch is ready to publish, and waits for the pass that reads the
     /// project's claim to say whether it may. See [`publication_cleared`].
     PublicationDue(Box<PublicationDue>),
+    /// A rework's publication wrote a new title onto its change request.
+    ChangeRetitled(Box<crate::payload::ChangeRetitled>),
+    /// A rework's publication left its change request's title unverified.
+    TitleUnverified(Box<UnverifiedTitle>),
+}
+
+/// A rework's title nothing verified, on its way to the record and the planner:
+/// the record's own payload, and the change request a person reads it on.
+pub(crate) struct UnverifiedTitle {
+    /// What `title-unverified` records.
+    pub unverified: crate::payload::TitleUnverified,
+    /// Where a person reads the change request it is the title of, as the host
+    /// answered it.
+    pub change_url: onevcs::Url,
+}
+
+/// The non-blocking surface a title nothing verified raises: the node, the
+/// title, the change request, and the `retitle` that sets one.
+///
+/// A report rather than a question: nothing waits on it, and a `retitle` of the
+/// node — or a later publication that retitles it — is what clears the title's
+/// unverified state on the run's record.
+fn title_unverified_surface(title: &UnverifiedTitle) -> Surface {
+    let node = &title.unverified.node;
+    Surface {
+        id: 0,
+        kind: crate::channel::SurfaceKind::TITLE_UNVERIFIED.into(),
+        message: format!(
+            "node '{node}' was reworked and its change request {url} still carries the title \
+             {current:?}, which nothing verified still describes the change: {reason}.\n\
+             Read the change and answer with a `retitle` of '{node}' naming a Conventional \
+             Commit subject — or one restating this title, if it still says what the change \
+             does.",
+            url = title.change_url,
+            current = title.unverified.title,
+            reason = title.unverified.reason,
+        ),
+        source: crate::channel::source::RECONCILER.into(),
+        blocking: false,
+        queued_at: sys::now_millis(),
+        abandoned: false,
+        asker: None,
+        workstream: Some(node.clone()),
+        correlation: None,
+    }
 }
 
 /// One publication waiting on the next pass's claim check.
@@ -1610,7 +1667,7 @@ fn converge(
                 }
                 found.is_none()
             };
-            start_ready(
+            let started = start_ready(
                 paths,
                 journal,
                 state,
@@ -1625,7 +1682,29 @@ fn converge(
                 &mut stacking,
                 &notes_in_flight,
                 &mut admit,
-            )?
+            )?;
+            if started {
+                derived = None;
+            }
+            // Restacks open sessions too: the same claim reading admits both
+            // scheduling paths, even when no ordinary dispatch became ready.
+            let statuses = statuses_of(&mut derived, state);
+            let restacked = start_restacks(
+                paths,
+                journal,
+                state,
+                &statuses,
+                &rules,
+                launch,
+                &tx,
+                &mut in_flight,
+                &paused,
+                &releases,
+                &mut workspaces,
+                &notes_in_flight,
+                &mut admit,
+            )?;
+            started || restacked
         };
         if let Some(by) = found {
             supersede(paths, journal, writeback.as_ref(), &by)?;
@@ -1871,6 +1950,17 @@ fn converge(
                         }
                     }
                     journal.relay(&envelope)?;
+                    // A branch a node of this run pushed is a branch every draft
+                    // stacked on it may now owe a restack against, and that is
+                    // decided from the record — so the record is read again here,
+                    // on the push, rather than waiting for the publication that
+                    // made it to settle.
+                    if envelope.source == crate::event::Source::Vcs
+                        && crate::vcs::is_push(&envelope.kind)
+                    {
+                        state.refresh(paths);
+                        derived = None;
+                    }
                     // Once the turn itself is in the store: a presentation the
                     // stream shows is recorded after the turn that made it, on
                     // the member the notes were addressed to.
@@ -2079,11 +2169,55 @@ fn converge(
                         }
                     }
                 }
+                // Before the node's settlement, which the dispatch thread sends
+                // after these: the title the settlement's publication left is on the
+                // record when the settlement is.
+                Message::ChangeRetitled(retitled) => {
+                    journal.emit(
+                        journal::PipelineKind::ChangeRetitled,
+                        journal::labels(&paths.run, Some(&retitled.node)),
+                        payload_of(&*retitled)?,
+                    )?;
+                    state.refresh(paths);
+                    derived = None;
+                    unpublished = true;
+                }
+                Message::TitleUnverified(title) => {
+                    journal.emit(
+                        journal::PipelineKind::TitleUnverified,
+                        journal::labels(&paths.run, Some(&title.unverified.node)),
+                        payload_of(&title.unverified)?,
+                    )?;
+                    raise(paths, journal, title_unverified_surface(&title))?;
+                    state.refresh(paths);
+                }
                 // Answered by the next pass's claim check, which this arrival is what wakes.
                 Message::PublicationDue(due) => publications.push(*due),
                 Message::Settled(settled) => {
                     let settlement = &settled.settlement;
                     in_flight.remove(&settlement.node);
+                    // A restack says what it did ahead of the node's ordinary
+                    // settlement, which follows it as any settlement does.
+                    // llmlint: ignore[names_match_behavior] `node-restacked` and its `outcome` are the plan's agreed record (entry 121): it ends every restack, a failed one included, and `outcome` says which; renaming it is a contract change, not this site's, and `a_restack_whose_worker_fails_its_merge_settles_the_draft_failed` holds the failed case.
+                    if let Some(restacked) = settlement.restacked {
+                        journal.emit(
+                            journal::PipelineKind::NodeRestacked,
+                            journal::labels(&paths.run, Some(&settlement.node)),
+                            payload_of(&crate::payload::NodeRestacked {
+                                node: settlement.node.clone(),
+                                head: settlement
+                                    .head
+                                    .clone()
+                                    .or_else(|| state.heads.get(&settlement.node).cloned())
+                                    .unwrap_or_default(),
+                                agent_dispatched: restacked.agent_dispatched,
+                                outcome: settlement
+                                    .outcome
+                                    .clone()
+                                    .unwrap_or_else(|| settlement.status.as_str().to_owned()),
+                            })?,
+                        )?;
+                    }
                     settle(paths, journal, settlement)?;
                     // Only now may the dispatch thread let go of the registry
                     // entries its node's dispatches held: the settlement is on
@@ -4043,6 +4177,108 @@ pub(crate) enum Staged {
     /// A manager note with a conversation to be offered to, composed and offered
     /// to nothing yet.
     Note(Box<ValidatedNote>),
+    /// A `retitle` whose title is written onto the node's change request by the
+    /// delivery phase — the other command whose record a write outside the run
+    /// decides, since what it replaced is what the host held.
+    Retitle(Box<ValidatedRetitle>),
+}
+
+/// A `retitle`, judged and not yet written: the one operation it compiled to, and
+/// the session the node's change request is addressed through.
+///
+/// Built only by [`staged_retitle`], from a compile that produced exactly one
+/// `retitled`, so the operation a delivery reads is always that one.
+pub(crate) struct ValidatedRetitle {
+    /// What the compile staged — the title moving on the graph — held as the
+    /// one-element slice later commands of the envelope are validated against.
+    compiled: [edits::Operation; 1],
+    /// The node's last session, where the run's record names one.
+    session: Option<onevcs::SessionToken>,
+    /// The run's term scope, which the description the host takes is checked under.
+    term_scope: onevcs::TermScope,
+}
+
+/// Stage a compiled `retitle` for the delivery phase, addressed through the
+/// session the node's last dispatch opened. A compile that produced anything but
+/// one `retitled` — none of this build's — is staged as compiled, writing nothing.
+pub(crate) fn staged_retitle(
+    compiled: Vec<edits::Operation>,
+    session: Option<&crate::vcs::DispatchSession>,
+    term_scope: onevcs::TermScope,
+) -> Staged {
+    match <[edits::Operation; 1]>::try_from(compiled) {
+        Ok(one @ [edits::Operation::Retitled { .. }]) => {
+            Staged::Retitle(Box::new(ValidatedRetitle {
+                compiled: one,
+                session: session.map(|session| session.token().clone()),
+                term_scope,
+            }))
+        }
+        // llmlint: ignore[changed_behavior_has_e2e] `compile_retitle` returns exactly one
+        // `retitled` or refuses, so no command reaches this arm; it is the type's, written
+        // out so a later compile that changed that stages nothing it cannot deliver.
+        Ok(other) => Staged::Compiled(other.into()),
+        Err(other) => Staged::Compiled(other),
+    }
+}
+
+/// Write a `retitle`'s title onto the node's change request, through
+/// `onevcs`'s `describe_change` with the body the host holds, and answer the
+/// operation naming the title it replaced.
+///
+/// # Errors
+///
+/// The refusal naming why nothing was written: the run's record names no session
+/// for the node, the host holds no open change request from its branch, or the
+/// host would not take the title.
+fn retitle_change(validated: &ValidatedRetitle) -> Result<Vec<edits::Operation>> {
+    let [edits::Operation::Retitled {
+        node, to, reason, ..
+    }] = &validated.compiled
+    else {
+        return Ok(validated.compiled.to_vec());
+    };
+    // llmlint: ignore-block[changed_behavior_has_e2e] the three refusals before the write
+    // need a node whose change request is open on the run's record and whose session is not
+    // — a settlement this build never writes — or a host that drops the change request, or
+    // stops answering, between the run's record of it and this read: the fake host's
+    // outage counts calls from the run's start and its records only grow, so neither can be
+    // timed to this one read. The write's own refusal after them is driven end to end by
+    // `tests/e2e/rework.rs`'s `a_title_nothing_verified_is_left_unverified_until_a_retitle_
+    // sets_one`, through a host refusing the edit, with nothing appended; the residue of a
+    // later command refusing the envelope after this wrote is `deliver_envelope`'s, stated
+    // there for a note.
+    let Some(token) = &validated.session else {
+        return Err(Error::Refused(format!(
+            "retitle: node '{node}' has no session on the run's record to address its change \
+             request through"
+        )));
+    };
+    let held = crate::vcs::session_change(token).map_err(|error| {
+        Error::Refused(format!(
+            "retitle: node '{node}': the host could not say which change request its branch \
+             holds: {error}"
+        ))
+    })?;
+    let Some(change) = held else {
+        return Err(Error::Refused(format!(
+            "retitle: node '{node}' has no open change request on the host to retitle"
+        )));
+    }; // llmlint: ignore-end[changed_behavior_has_e2e]
+    crate::vcs::describe_change(token, Some(to), &change.body, &validated.term_scope).map_err(
+        |error| {
+            Error::Refused(format!(
+                "retitle: node '{node}': {} would not take the title: {error}",
+                change.url
+            ))
+        },
+    )?;
+    Ok(vec![edits::Operation::Retitled {
+        node: node.clone(),
+        from: Some(change.title),
+        to: to.clone(),
+        reason: reason.clone(),
+    }])
 }
 
 impl Staged {
@@ -4058,6 +4294,7 @@ impl Staged {
         match self {
             Self::Compiled(operations) => operations,
             Self::Note(_) => &[],
+            Self::Retitle(retitle) => &retitle.compiled,
         }
     }
 }
@@ -4073,13 +4310,23 @@ impl Staged {
 ///
 /// # Errors
 ///
-/// The conversation's own refusal, for a note that reached nobody. It is the only
-/// error this phase can produce, which is the property the envelope's atomicity
-/// rests on — see [`deliver_envelope`].
+/// The conversation's own refusal, for a note that reached nobody, and the host's,
+/// for a `retitle` it would not write. They are the only errors this phase can
+/// produce, and each is a write outside the run that cannot be taken back once a
+/// later command of the envelope refuses — see [`deliver_envelope`] for that
+/// residue, which a retitle shares with a note.
 pub(crate) fn commits_of(step: Staged) -> Result<Vec<edits::Operation>> {
     match step {
         Staged::Compiled(operations) => Ok(operations),
         Staged::Note(note) => deliver_manager_note(&note),
+        // llmlint: ignore[changed_behavior_has_e2e] the residue — this write taken by the
+        // host and a later command of the same envelope then refused at delivery — needs that
+        // later refusal to come from a conversation or a host answering one call and not the
+        // next within one reply, which neither double can be scripted to do; the write itself
+        // and its own refusal are driven by `tests/e2e/rework.rs`'s `a_title_nothing_verified_
+        // is_left_unverified_until_a_retitle_sets_one`, and the all-or-nothing journalling by
+        // `record_delivered`'s note journeys, the same path.
+        Staged::Retitle(retitle) => retitle_change(&retitle),
     }
 }
 
@@ -4491,7 +4738,7 @@ impl NoteDeliveries {
             .iter()
             .filter_map(|step| match step {
                 Staged::Note(note) => Some(note.node.clone()),
-                Staged::Compiled(_) => None,
+                Staged::Compiled(_) | Staged::Retitle(_) => None,
             })
             .collect();
         if nodes.is_empty() {
@@ -4738,6 +4985,10 @@ fn validate_command(
     };
     let mut candidate = state.graph.clone();
     let operations = edits::compile(&mut candidate, &frontier, author, command)?;
+    if let Command::Retitle { id, .. } = command {
+        let scope = crate::boundary::of_run(&crate::boundary::plan_now(state)).term_scope();
+        return Ok(staged_retitle(operations, state.sessions.get(id), scope));
+    }
     let Command::Note {
         id,
         addressee,
@@ -5922,6 +6173,18 @@ fn start_ready(
         // every node a plan naming neither new field carries — and the dispatch
         // is then composed exactly as it always was.
         let references = releases.references(&node);
+        // A rework's replacement publishes onto the change request its branch
+        // already holds, and checks its title against the change it now makes.
+        let course = match state
+            .reworks
+            .values()
+            .find(|rework| rework.replacement == node.id)
+        {
+            Some(rework) => Coursed::Rework(crate::lifecycle::Reworking {
+                title_stated: rework.title.is_some(),
+            }),
+            None => Coursed::Work,
+        };
         spawn(
             paths,
             rules,
@@ -5929,6 +6192,7 @@ fn start_ready(
             &node,
             &references,
             stack,
+            course,
             cancel.clone(),
             tx.clone(),
             resume,
@@ -5954,6 +6218,144 @@ fn start_ready(
         state.refresh(paths);
     }
     Ok(settled_here)
+}
+
+/// Start the restack every draft owes, bounded by `concurrency` beside the
+/// dispatches already running: see [`crate::stack::restacks_owed`] for which
+/// drafts owe one.
+///
+/// Each is recorded `node-restack-started`, naming the heads it brings the node
+/// onto, before it is spawned, and is in flight as a dispatch is — counted against
+/// the plan's concurrency, refused a `rework` over, and settled through the same
+/// message. Nothing starts once the run's shutdown has begun, nothing a decision
+/// point holds is restacked, and a node whose identity has no room for the
+/// session is left for a later pass.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the reconcile loop's borrowed state, as `start_ready` takes it"
+)]
+fn start_restacks(
+    paths: &RunPaths,
+    journal: &mut Journal,
+    state: &mut Projected,
+    statuses: &BTreeMap<String, NodeStatus>,
+    rules: &ExecutorRules,
+    launch: &LaunchRecord,
+    tx: &Sender<Message>,
+    in_flight: &mut BTreeMap<String, Dispatch>,
+    paused: &BTreeSet<String>,
+    releases: &crate::release::Watch,
+    workspaces: &mut crate::pool::Workspaces,
+    notes_in_flight: &DeliveriesInFlight,
+    admit: &mut dyn FnMut() -> bool,
+) -> Result<bool> {
+    // llmlint: ignore-block[changed_behavior_has_e2e] the three holds a restack shares with
+    // a dispatch — a shutdown begun, a decision point holding the draft, its identity with no
+    // room — are `start_ready`'s own, asked here of the same `shutdown`, `paused` and
+    // `workspaces` values and driven for a dispatch by `tests/e2e/shutdown.rs`, `holds.rs` and
+    // the pool journeys of `lifecycle.rs`. A restack-specific journey would have to land one of
+    // them in the seconds between a parent's push and the pass that reads it, which no hold of
+    // the doubles is placed to do; `restacks_owed` itself, and the concurrency bound beside
+    // these, are driven by every restack journey in `tests/e2e/rework.rs`.
+    if crate::shutdown::begun(paths) {
+        return Ok(false);
+    }
+    let concurrency = state.graph.concurrency as usize;
+    let owed = crate::stack::restacks_owed(state, statuses, &|node| {
+        in_flight.contains_key(node) || paused.contains(node)
+    });
+    let mut started = false;
+    for owed in owed {
+        if in_flight.len() >= concurrency {
+            break;
+        }
+        let Some(mut node) = state.graph.get(&owed.node).cloned() else {
+            continue;
+        };
+        node.branch = Some(owed.branch.clone());
+        node.base_branch = Some(owed.stack.base().to_owned());
+        node.resume = None;
+        // The boundary a restack publishes under is the one its dispatch would: the
+        // run's term scope, and in a mixed plan the node's side of it. Its branch is
+        // pinned above, so no neutral name or export is cut for it here.
+        let now = crate::boundary::plan_now(state);
+        let dispatching = match crate::boundary::dispatching(
+            &crate::boundary::of_run(&now),
+            &now,
+            &node,
+            &state.branches,
+            &state.heads,
+            &state.superseded,
+        ) {
+            Ok(dispatching) => dispatching,
+            // llmlint: ignore[changed_behavior_has_e2e] refused only for an export's
+            // consumer whose producer recorded no kept branch, and a restacked draft
+            // settled `done` from a dispatch that already started from that export.
+            Err(detail) => {
+                settle(
+                    paths,
+                    journal,
+                    &Settlement {
+                        detail: Some(detail),
+                        ..failed(&node.id, INFRASTRUCTURE_FAILURE)
+                    },
+                )?;
+                started = true;
+                continue;
+            }
+        };
+        if let Some(request) = crate::vcs::request_for(&node) {
+            if workspaces.admit(&node.id, &request) == crate::pool::Admission::Held {
+                continue;
+            }
+        } // llmlint: ignore-end[changed_behavior_has_e2e]
+        if !admit() {
+            break;
+        }
+        journal.emit(
+            journal::PipelineKind::NodeRestackStarted,
+            journal::labels(&paths.run, Some(&node.id)),
+            payload_of(&crate::payload::NodeRestackStarted {
+                node: node.id.clone(),
+                onto: owed.onto(),
+                cause: owed.cause,
+            })?,
+        )?;
+        let cancel = CancellationToken::new();
+        let references = releases.references(&node);
+        spawn(
+            paths,
+            rules,
+            launch,
+            &node,
+            &references,
+            Some(owed.stack),
+            Coursed::Restack,
+            cancel.clone(),
+            tx.clone(),
+            None,
+            notes_in_flight,
+            dispatching,
+        )?;
+        let now = Instant::now();
+        in_flight.insert(
+            node.id.clone(),
+            Dispatch {
+                node,
+                cancel,
+                started: now,
+                last_progress: now,
+                reported_quiet: false,
+                control: None,
+                presentations: crate::note::Presentations::default(),
+            },
+        );
+        started = true;
+    }
+    if started {
+        state.refresh(paths);
+    }
+    Ok(started)
 }
 
 /// Whether a node `node` superseded still has a dispatch in flight, which holds the
@@ -6054,6 +6456,14 @@ fn may_hold_a_note(state: &RunState, node: &str) -> bool {
     state.dispatched_at.contains_key(node) || state.pending_context.contains_key(node)
 }
 
+/// What one spawned execution is beyond the node's own task, owned so it can
+/// cross to the dispatch thread: [`crate::lifecycle::Course`]'s three.
+enum Coursed {
+    Work,
+    Rework(crate::lifecycle::Reworking),
+    Restack,
+}
+
 /// Run one node's dispatch on a thread, reporting back to the single writer.
 #[allow(
     clippy::too_many_arguments,
@@ -6068,6 +6478,7 @@ fn spawn(
     node: &Node,
     references: &[crate::plan::CrossRepoReference],
     stack: Option<crate::stack::Stack>,
+    course: Coursed,
     cancel: CancellationToken,
     tx: Sender<Message>,
     resume: Option<Box<crate::lifecycle::Continuation>>,
@@ -6130,6 +6541,11 @@ fn spawn(
                     &node,
                     &references,
                     stack.as_ref(),
+                    match &course {
+                        Coursed::Work => crate::lifecycle::Course::Work,
+                        Coursed::Rework(rework) => crate::lifecycle::Course::Rework(rework),
+                        Coursed::Restack => crate::lifecycle::Course::Restack,
+                    },
                     &cancel,
                     &tx,
                     &ended,
@@ -8100,6 +8516,23 @@ pub(crate) fn record_operation_facts(
                     Some(evidence),
                 ),
             )?,
+            // The title a `retitle` wrote, under the one kind every retitle is
+            // recorded as, whoever decided it.
+            edits::Operation::Retitled {
+                node,
+                from: Some(from),
+                to,
+                ..
+            } => journal.emit(
+                journal::PipelineKind::ChangeRetitled,
+                journal::labels(&paths.run, Some(node)),
+                payload_of(&crate::payload::ChangeRetitled {
+                    node: node.clone(),
+                    from: from.clone(),
+                    to: to.clone(),
+                    by: crate::payload::RetitledBy::Retitle,
+                })?,
+            )?,
             // A note no turn took is owed to the node's next dispatch: the commit
             // just journalled says so, and the bus's carry store is what hands it
             // over when that dispatch is composed.
@@ -8122,6 +8555,26 @@ pub(crate) fn record_operation_facts(
     // left for it to decide, so it stops holding the run on it.
     crate::discharge::answer_removed(paths, operations)?;
     Ok(())
+}
+
+/// A payload this crate declares, as the map a journal record carries.
+///
+/// # Errors
+///
+/// A value that does not serialize, or serializes as something other than an
+/// object, is refused rather than written as a record carrying no payload: the
+/// record's document requires its fields, and an empty payload in their place
+/// would be a record nothing could read back as what it says.
+pub(crate) fn payload_of<T: Serialize>(declared: &T) -> Result<serde_json::Map<String, Value>> {
+    match serde_json::to_value(declared) {
+        Ok(Value::Object(payload)) => Ok(payload),
+        Ok(other) => Err(Error::Invalid(format!(
+            "a journal payload is an object, and this one serialized as {other}"
+        ))),
+        Err(error) => Err(Error::Invalid(format!(
+            "a journal payload did not serialize: {error}"
+        ))),
+    }
 }
 
 /// Record one node's settlement.
@@ -11074,6 +11527,20 @@ mod tests {
                 routed_to: Vec::new(),
                 envelope: None,
             },
+            edits::Operation::ReworkRequested {
+                node: node(),
+                replacement: "later-rework-1".into(),
+                reason: "review asked for it".into(),
+                instruction: "retry instead".into(),
+                comments: vec![],
+                title: None,
+            },
+            edits::Operation::Retitled {
+                node: node(),
+                from: Some("feat: before".into()),
+                to: "fix: after".into(),
+                reason: "the title was unverified".into(),
+            },
         ];
         assert_eq!(
             every.iter().map(edits::Operation::kind).collect::<Vec<_>>(),
@@ -11119,6 +11586,27 @@ mod tests {
             .expect("entry 65 names the field");
         let payload = journal::payload(&[(field, json!(operation_kinds(&every)))]);
         assert_eq!(payload[field], json!(edits::every_operation_kind()));
+    }
+
+    /// A journal payload is an object: a value serializing as anything else is
+    /// refused rather than written as a record with no payload.
+    #[test]
+    fn a_payload_that_is_not_an_object_is_refused_rather_than_written_empty() {
+        let written = payload_of(&crate::payload::TitleUnverified {
+            node: "a".into(),
+            title: "feat: a".into(),
+            reason: "nothing checked it".into(),
+        })
+        .expect("a declared payload is an object");
+        assert_eq!(written["node"], "a");
+        let refused = payload_of(&"a string").expect_err("a string is no payload");
+        assert!(refused.to_string().contains("serialized as"), "{refused}");
+        let unserializable = std::collections::BTreeMap::from([(vec![1u8], 1u8)]);
+        let refused = payload_of(&unserializable).expect_err("a map keyed by bytes is no JSON");
+        assert!(
+            refused.to_string().contains("did not serialize"),
+            "{refused}"
+        );
     }
 
     /// The word each command of a refused envelope is answered with — including

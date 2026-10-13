@@ -9,13 +9,8 @@
 # bytes are pure layout maths and are identical on every CPU. A second lane
 # would be a second CI job proving the same bytes twice.
 #
-# `x86_64` rather than this developer's own arch because that is what the
-# repository's own CI runners are, and because the local pre-push guard
-# classifies **the lane of the host it runs on**: a host whose arch no lane
-# declares has nothing to classify against, so the guard says on every push that
-# it did not evaluate it, rather than guarding nothing silently. That is one of
-# its "could not evaluate" endings and answers to `SCREENCOMP_GUARD_REQUIRE`
-# like the rest — an `arm64` developer adds that lane here and blesses it once.
+# `x86_64` is the CI runner lane. Manual classification uses the host lane;
+# an `arm64` developer adds that lane here and blesses it once.
 arches = ["x86_64"]
 
 [comment]
@@ -29,7 +24,7 @@ embed_limit = 10             # embed images inline when <= N shots differ (0 dis
 # invented for the gallery rather than one the product has.
 
 [guard]
-# Local pre-push guard (.githooks/pre-push): re-capture only when something that
+# Visual scope: re-capture only when something that
 # can change a rendered shot changes. Three kinds of thing can:
 #   - the renderers and the engine, because they decide what a view prints and
 #     in what order the events behind it are written;

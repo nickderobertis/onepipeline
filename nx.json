@@ -58,7 +58,6 @@
       "{workspaceRoot}/scripts/**/*",
       "{workspaceRoot}/screenshots/**/*",
       "{workspaceRoot}/.github/**/*",
-      "{workspaceRoot}/.githooks/**/*",
       "{workspaceRoot}/AGENTS.md",
       "{workspaceRoot}/CODEOWNERS",
       "{workspaceRoot}/biome.json",

@@ -28,18 +28,18 @@ const OPEN: &str = "<!-- onepipeline:stack -->";
 const CLOSE: &str = "<!-- /onepipeline:stack -->";
 
 /// What the fake drafter writes when nothing else is scripted.
-const DRAFTED: &str = "## What\nDrafted from the diff.";
+pub(crate) const DRAFTED: &str = "## What\nDrafted from the diff.";
 
 /// A required check the host reports red.
 const RED: &str = "lint completed failure required";
 
 /// The host's branch prefix every journey here runs under, so a stack base's name
 /// is shown to carry it.
-const PREFIX: &str = "me/";
+pub(crate) const PREFIX: &str = "me/";
 
 /// A world on a team repository — `change-open`, approvals required — whose host
 /// cuts branches under [`PREFIX`] and reports every required check green.
-fn team_world(name: &str) -> World {
+pub(crate) fn team_world(name: &str) -> World {
     let world = World::new(name).with_env("ONEVCS_BRANCH_PREFIX", PREFIX);
     team_repository(&world);
     world.script("gh.checks", GREEN);
@@ -48,7 +48,12 @@ fn team_world(name: &str) -> World {
 
 /// Launch `nodes` attached, one at a time so the host numbers their change requests
 /// in plan order, wait for the run's result, and hand back what the launch printed.
-fn settle(world: &World, name: &str, nodes: Vec<Value>, extra: &[&str]) -> crate::harness::Run {
+pub(crate) fn settle(
+    world: &World,
+    name: &str,
+    nodes: Vec<Value>,
+    extra: &[&str],
+) -> crate::harness::Run {
     let mut plan = plan_of(name, nodes);
     plan["concurrency"] = json!(1);
     let path = world.plan(name, &plan);
@@ -65,7 +70,7 @@ fn settle(world: &World, name: &str, nodes: Vec<Value>, extra: &[&str]) -> crate
 }
 
 /// The newest settlement of `node`'s, as the journal recorded it.
-fn settled(world: &World, run: &str, node: &str) -> Value {
+pub(crate) fn settled(world: &World, run: &str, node: &str) -> Value {
     world
         .events_of(run, "node-settled")
         .into_iter()
@@ -75,14 +80,14 @@ fn settled(world: &World, run: &str, node: &str) -> Value {
         .unwrap_or_else(|| panic!("{node} never settled: {:#?}", world.journal(run)))
 }
 
-fn text<'a>(value: &'a Value, what: &str) -> &'a str {
+pub(crate) fn text<'a>(value: &'a Value, what: &str) -> &'a str {
     value
         .as_str()
         .unwrap_or_else(|| panic!("{what} is not a string: {value}"))
 }
 
 /// The change request the host holds for `branch`.
-fn change_from(world: &World, branch: &str) -> Value {
+pub(crate) fn change_from(world: &World, branch: &str) -> Value {
     world
         .changes_opened()
         .into_iter()
@@ -96,13 +101,18 @@ fn change_from(world: &World, branch: &str) -> Value {
 }
 
 /// Whether the host holds change request `number` as a draft.
-fn held_as_draft(world: &World, number: &Value) -> bool {
+pub(crate) fn held_as_draft(world: &World, number: &Value) -> bool {
     std::fs::read_to_string(world.fakes.join("gh").join(number.to_string()))
         .is_ok_and(|state| state.trim() == "draft")
 }
 
 /// The files `branch` changes against `base`, on the origin.
-fn changed_against(world: &World, repo: &Repository, base: &str, branch: &str) -> Vec<String> {
+pub(crate) fn changed_against(
+    world: &World,
+    repo: &Repository,
+    base: &str,
+    branch: &str,
+) -> Vec<String> {
     git(
         world,
         &repo.origin,
@@ -115,7 +125,7 @@ fn changed_against(world: &World, repo: &Repository, base: &str, branch: &str) -
 
 /// What `branch` holds at `path` on the origin, its trailing newline aside: a
 /// scripted worker writes its body without one.
-fn file_on(world: &World, repo: &Repository, branch: &str, path: &str) -> String {
+pub(crate) fn file_on(world: &World, repo: &Repository, branch: &str, path: &str) -> String {
     git(world, &repo.origin, &["show", &format!("{branch}:{path}")])
         .trim_end()
         .to_owned()
@@ -123,7 +133,7 @@ fn file_on(world: &World, repo: &Repository, branch: &str, path: &str) -> String
 
 /// The task prose each of `node`'s dispatches under `persona` was handed, read off
 /// the turn its worker echoed it in.
-fn tasks_of(world: &World, run: &str, node: &str, persona: &str) -> Vec<String> {
+pub(crate) fn tasks_of(world: &World, run: &str, node: &str, persona: &str) -> Vec<String> {
     world
         .journal(run)
         .iter()
@@ -152,7 +162,7 @@ fn one_block<'a>(description: &'a str, before: &str) -> &'a str {
 }
 
 /// The repository `team_world` registered.
-fn service(world: &World) -> Repository {
+pub(crate) fn service(world: &World) -> Repository {
     Repository {
         origin: world.root.join("origin.git"),
         checkout: world.root.join("service"),

@@ -104,11 +104,11 @@ class Normaliser:
         )
 
     def _identifiers(self, text: str) -> str:
-        # The agent stream id carries the double's pid; the `vcs` streams carry
+        # The agent stream id carries the double's start instant and pid; the `vcs` streams carry
         # the session token `onevcs` mints per publication; a harness session id
         # carries the pid too. Each becomes the nth fixed token of its kind.
         text = re.sub(
-            r"fake-oneagentgraph-\d+",
+            r"fake-oneagentgraph-\d+-\d+",
             lambda m: self._ordinal(
                 "agent", m.group(0), lambda nth: f"oneagentgraph-{nth + 1}"
             ),

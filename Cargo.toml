@@ -663,8 +663,12 @@ resolver = "2"
 # `onevcs` 0.46.0 is the floor because it is the release the boundary work this crate
 # composes was pinned against (`src/boundary.rs`: the term matcher, `TermScope`,
 # `PublicWriteInput` and `export`), and `tests/e2e/publication_boundary.rs` drives
-# that surface against the linked release. A **requirement**, because `^0.45` admits no
-# 0.46.x; `onevcs-testing` 0.14.0 requires exactly `=0.46.0`, so the pair moves as one.
+# that surface against the linked release; and because it carries `review_comments`
+# — a change request's review threads, each with the line it sits on and whether it
+# is outdated — which is how `tests/e2e/rework.rs` holds that a restack leaves an
+# open review thread on its line. A **requirement**, because `^0.45` admits no
+# 0.46.x; `onevcs-testing` 0.14.0 requires exactly `=0.46.0`, so the pair moves as
+# one.
 #
 # `onevcs` 0.48.1 is the floor; 0.48.0 brought what this crate relies on:
 # - `recoverable_matching` reads only the sessions a launcher-labelled
@@ -688,6 +692,15 @@ resolver = "2"
 # armed `checks-unsettled` ending above; `onevcs-testing` 0.17.0
 # requires exactly `=0.48.1` and carries the full-size recovery fixture
 # `tests/stop_verdict/` builds, so the pair moves as one.
+#
+# `onevcs` 0.48.1 is the floor because it **keeps a draft while work on its head is
+# still running**: an early lift also needs every check on the pushed head complete,
+# required or not, and `RemoteHost::head_activity` naming nothing in progress there,
+# so a required check gated by `needs:` holds the draft until it is green rather than
+# being lifted mid-run. `crates/testfakes/src/bin/fake-gh.rs` answers the two reads
+# GitHub's implementation makes, and `tests/e2e/draft_lifecycle.rs` drives both
+# halves. `onevcs-testing` 0.17.0 requires exactly `=0.48.1`, so the pair moves as
+# one.
 #
 # `oneagentgraph` 0.5.4 is the floor because it relays a turn's `message` and
 # `reasoning` items as `turn-activity` under their own kind — the agent's words,
@@ -960,14 +973,13 @@ onevcs-testing = "0.17.0"
 # updates it, source values winning shared keys (onetaskgraph #3567), so re-copying a
 # plan no longer deletes the design approvals recorded on the board's document.
 #
-# **0.4.0 reads a `github-projects` source's `metadata_fields`**, which the host's
-# `followups` source carries (`{field: Host, key: orchestrator.follow-up, path: [host]}`)
-# and an earlier store refuses as an unknown field; `tests/e2e/linear_writeback.rs` reads and
-# settles a plan through such a source. A new minor, so a breaking change to the `Config`
-# `src/taskgraph.rs` exposes. `justfile`'s `onetaskgraph-version` moves with this release.
-onetaskgraph-core = "=0.4.0"
-onetaskgraph-plugin-api = "=0.4.0"
-onetaskgraph-local-md = "=0.4.0"
+# **0.6.0 carries comments across copies and adds per-source caches**. Engine
+# reads remain unpinned, including settlement write-back reads. The plugin API
+# adds public Task and Comment fields and CopyLink, making this a breaking link.
+# `justfile`'s `onetaskgraph-version` moves with this release.
+onetaskgraph-core = "=0.6.0"
+onetaskgraph-plugin-api = "=0.6.0"
+onetaskgraph-local-md = "=0.6.0"
 # Not engines: two crates both members use, pinned once so they build against one version.
 # `just engines-current` reads only the engines its script names.
 sha2 = "0.10"
