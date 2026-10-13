@@ -329,6 +329,14 @@ pub enum PipelineKind {
     /// an agent was dispatched to conclude a conflict, and the publication's
     /// `outcome`. The node's ordinary `node-settled` follows.
     NodeRestacked,
+    /// A readjustment read a draft's change request merged into its root on the host:
+    /// `node`, `change_url`, the root it merged `into`, the `commit` it reached it
+    /// as, and the host's `merged_at` where it gave one. The node's landing is
+    /// `landed` from it on.
+    NodeLanded,
+    /// A draft restacked off a landed parent had its change request moved onto its
+    /// new base after its push: `node`, `change_url`, `from`, `to`, and the `cost`.
+    NodeRetargeted,
     /// A launch passed another driver's claim on its project with `--take-over`.
     ///
     /// Written by `start --take-over` beside its `run-started`, only where the
@@ -395,6 +403,8 @@ impl PipelineKind {
             Self::TitleUnverified => "title-unverified",
             Self::NodeRestackStarted => "node-restack-started",
             Self::NodeRestacked => "node-restacked",
+            Self::NodeLanded => "node-landed",
+            Self::NodeRetargeted => "node-retargeted",
             Self::DriverTakenOver => "driver-taken-over",
             Self::DriverSuperseded => "driver-superseded",
         }
@@ -470,6 +480,8 @@ pub const PIPELINE_KINDS: &[PipelineKind] = &[
     PipelineKind::TitleUnverified,
     PipelineKind::NodeRestackStarted,
     PipelineKind::NodeRestacked,
+    PipelineKind::NodeLanded,
+    PipelineKind::NodeRetargeted,
     PipelineKind::DriverTakenOver,
     PipelineKind::DriverSuperseded,
 ];

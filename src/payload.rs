@@ -1670,6 +1670,9 @@ pub(crate) enum RestackCause {
     Rework,
     /// A stack parent's own restack republished with new commits.
     Restack,
+    /// A stack parent landed on the host, so the draft moves onto its nearest unlanded
+    /// parents or its root.
+    Landed,
 }
 
 /// `node-restack-started`: a draft began being brought onto its stack parents'
@@ -1696,6 +1699,39 @@ pub(crate) struct NodeRestacked {
     pub(crate) agent_dispatched: bool,
     /// The publication's outcome word, as the node's settlement carries it.
     pub(crate) outcome: String,
+}
+
+/// `node-landed`: a readjustment read a draft's change request merged into its root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct NodeLanded {
+    /// The node.
+    pub(crate) node: String,
+    /// Its change request.
+    pub(crate) change_url: String,
+    /// The root it merged into.
+    pub(crate) into: String,
+    /// The commit it reached the root as.
+    pub(crate) commit: String,
+    /// When the host says it merged, as the host spelled it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) merged_at: Option<String>,
+}
+
+/// `node-retargeted`: a restacked draft's change request was moved onto its new base
+/// after its push.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct NodeRetargeted {
+    /// The node.
+    pub(crate) node: String,
+    /// Its change request.
+    pub(crate) change_url: String,
+    /// The base it targeted before.
+    pub(crate) from: String,
+    /// The base it targets now.
+    pub(crate) to: String,
+    /// What the host charged: the retarget's own standings reads and its write.
+    #[schemars(schema_with = "read_cost_schema")]
+    pub(crate) cost: onevcs::ReadCost,
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
@@ -1845,6 +1881,8 @@ payload_messages! {
     TitleUnverified => "title-unverified";
     NodeRestackStarted => "node-restack-started";
     NodeRestacked => "node-restacked";
+    NodeLanded => "node-landed";
+    NodeRetargeted => "node-retargeted";
     DriverTakenOver => "driver-taken-over";
     DriverSuperseded => "driver-superseded";
 }
