@@ -916,8 +916,7 @@ fn discard_refuses_unknown_and_path_like_names_and_live_or_dead_drivers() {
         "live",
         &plan_of("live", vec![agent("build", &[]), agent("later", &[])]),
     );
-    let launched = world.run(&["start", &path, "--detach"]);
-    launched.exited(0);
+    world.run(&["start", &path, "--detach"]).exited(0);
     world.until("the dispatch's scratch", |world| {
         !world.events_of("live", "turn-started").is_empty()
     });
@@ -927,9 +926,7 @@ fn discard_refuses_unknown_and_path_like_names_and_live_or_dead_drivers() {
     }
     for word in ["ACTIVE", "DRIVER DEAD"] {
         if word == "DRIVER DEAD" {
-            crate::harness::end_process(
-                u32::try_from(launched.json()["pid"].as_u64().unwrap()).unwrap(),
-            );
+            crate::harness::end_driver(&world, "live");
         }
         let journal = std::fs::read(world.run_file("live", "events.jsonl")).unwrap();
         world.run(&["scratch", "discard", "live"]).exited(2).err_has(&format!("onepipeline scratch discard: run live is {word}, not ended; its scratch is kept and nothing was deleted"));
