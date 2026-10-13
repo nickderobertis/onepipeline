@@ -170,6 +170,23 @@ fn discovers_all_comment_kinds_once_per_revision_without_starting_work_or_writin
             1,
         ),
     );
+    for id in ["105", "106"] {
+        let mut threaded = comment(
+            id,
+            CommentKind::ReviewThread {
+                thread: "thread-without-line".into(),
+                path: "src/header.rs".into(),
+                line: None,
+                outdated: false,
+                resolved: false,
+            },
+            1,
+        );
+        if id == "106" {
+            threaded.in_reply_to = Some(CommentId("105".into()));
+        }
+        add(&host, 1, threaded);
+    }
     let mut long = comment("103", CommentKind::Conversation, 2);
     long.body.push_str(&" review details λ".repeat(400));
     long.body.push_str(" THE END OF THE COMMENT");
@@ -184,11 +201,13 @@ fn discovers_all_comment_kinds_once_per_revision_without_starting_work_or_writin
     let stored_before = world.store_tasks(&project);
     review(&world, run);
     let found = surfaces(&world, run);
-    assert_eq!(found.len(), 3, "{found:#?}");
+    assert_eq!(found.len(), 5, "{found:#?}");
     for (id, node, location) in [
         ("101", "a", "src/reader.rs:7"),
         ("102", "a", "review summary"),
         ("103", "b", "conversation comment"),
+        ("105", "a", "src/header.rs"),
+        ("106", "a", "src/header.rs"),
     ] {
         let surface = found
             .iter()
@@ -197,6 +216,9 @@ fn discovers_all_comment_kinds_once_per_revision_without_starting_work_or_writin
         assert_eq!(surface["workstream"], node);
         assert_eq!(surface["blocking"], false);
         let message = surface["message"].as_str().unwrap();
+        if id == "105" || id == "106" {
+            assert!(message.contains("at src/header.rs\n"), "{message}");
+        }
         for text in [
             node,
             "https://github.com/owner/service/pull/",
@@ -238,6 +260,18 @@ fn discovers_all_comment_kinds_once_per_revision_without_starting_work_or_writin
             .unwrap()
             .iter()
             .all(|comment| comment.get("body").is_none()));
+        if record["payload"]["node"] == "a" {
+            let child = record["payload"]["comments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|comment| comment["id"] == "106")
+                .unwrap();
+            assert_eq!(child["in_reply_to"], "105");
+            assert_eq!(child["path"], "src/header.rs");
+            assert_eq!(child["thread"], "thread-without-line");
+            assert!(child.get("line").is_none());
+        }
         assert!(std::path::Path::new(record["artifacts"][0]["id"].as_str().unwrap()).is_file());
         let body = std::fs::read(record["artifacts"][0]["id"].as_str().unwrap()).unwrap();
         assert_eq!(record["artifacts"][0]["bytes"], body.len());
@@ -259,7 +293,7 @@ fn discovers_all_comment_kinds_once_per_revision_without_starting_work_or_writin
     assert_eq!(world.store_tasks(&project), stored_before);
     assert_eq!(std::fs::read(&projections).unwrap(), projected_before);
     review(&world, run);
-    assert_eq!(surfaces(&world, run).len(), 3);
+    assert_eq!(surfaces(&world, run).len(), 5);
     host.edit_comment(
         &ChangeId("1".into()),
         &CommentId("101".into()),
@@ -267,9 +301,9 @@ fn discovers_all_comment_kinds_once_per_revision_without_starting_work_or_writin
     )
     .unwrap();
     review(&world, run);
-    assert_eq!(surfaces(&world, run).len(), 4);
+    assert_eq!(surfaces(&world, run).len(), 6);
     review(&world, run);
-    assert_eq!(surfaces(&world, run).len(), 4);
+    assert_eq!(surfaces(&world, run).len(), 6);
     assert_eq!(std::fs::read(&projections).unwrap(), projected_before);
     let next = world.run(&["next", run]);
     assert!(next.stdout.contains("Please fix"));
@@ -1332,4 +1366,107 @@ fn a_continued_rework_refuses_projection_when_its_seeded_baseline_cannot_preserv
             assert_eq!(after[key], original[key], "{scenario}: {key}");
         }
     }
+}
+
+#[test]
+fn an_ungranted_review_command_is_refused_at_submission_and_by_the_live_reader() {
+    use onemessagebus::{LocalTransport, RawQueue};
+    use std::sync::Arc;
+    let world = team_world("review-author-refusal");
+    let config = world.root.join("review-auth.yaml");
+    std::fs::write(&config, "version: 1\ntransport: {kind: local}\nauthors:\n  sentinel:\n    capabilities: [finding]\n").unwrap();
+    world.script("a.work", "draft\n");
+    world.script("b.work", "second draft\n");
+    world.script("b.wait", "");
+    let project = world.plan(
+        "auth",
+        &plan_of("auth", vec![lifecycle("a", &[]), lifecycle("b", &["a"])]),
+    );
+    let mut driver = world
+        .cmd(&[
+            "start",
+            &project,
+            "--attach",
+            "--bus-config",
+            config.to_str().unwrap(),
+        ])
+        .current_dir(&world.project)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(Held)
+        .unwrap();
+    world.until("a settled and b dispatched", |world| {
+        !world.events_of("auth", "node-settled").is_empty()
+            && world.events_of("auth", "node-dispatched").len() == 2
+    });
+    let host = host(&world, "auth", &["a"]);
+    add(&host, 1, comment("1401", CommentKind::Conversation, 1));
+    let commands = world.run_file("auth", "channel/commands.jsonl");
+    let before = std::fs::read(&commands).unwrap_or_default();
+    let submitted = world.run_with_stdin(
+        &["reply", "auth"],
+        &json!({"version":3,"author":"sentinel","commands":[{"op":"review"}]}).to_string(),
+    );
+    let after = std::fs::read(&commands).unwrap_or_default();
+
+    // The durable queue is a second trust boundary. A lower-level transport
+    // writer can append an envelope; the compiled live reader must still judge it.
+    let spec = onepipeline::channel::layout::queues()
+        .into_iter()
+        .find(|spec| spec.name.as_str() == onepipeline::channel::layout::COMMANDS)
+        .unwrap();
+    let queue = RawQueue::open(
+        Arc::new(LocalTransport::open(world.run_file("auth", "channel")).unwrap()),
+        spec,
+        Arc::new(onepipeline::channel::layout::registry()),
+    );
+    let sent = queue
+        .push(json!({"id":0,"author":"sentinel","commands":[{"op":"review"}]}))
+        .unwrap();
+    let id = sent.id.unwrap();
+    let outcome_spec = onepipeline::channel::layout::queues()
+        .into_iter()
+        .find(|spec| spec.name.as_str() == onepipeline::channel::layout::COMMAND_OUTCOMES)
+        .unwrap();
+    let outcomes = RawQueue::open(
+        Arc::new(LocalTransport::open(world.run_file("auth", "channel")).unwrap()),
+        outcome_spec,
+        Arc::new(onepipeline::channel::layout::registry()),
+    );
+    let outcome_of = || {
+        outcomes
+            .log(None)
+            .unwrap()
+            .into_iter()
+            .map(|(record, _)| record)
+            .find(|record| record["id"] == id)
+    };
+    world.until("the reader's refusal", |_| outcome_of().is_some());
+    let outcome = outcome_of().unwrap();
+    let reads = world.events_of("auth", "review-comments-read");
+    let surfaced = surfaces(&world, "auth");
+    let ledger = host.state().unwrap().ledger;
+    let granted = world.run_with_stdin(&["review", "auth", "--json"], "not read");
+    world.script("b.go", "");
+    assert!(driver.wait().unwrap().success());
+    assert_eq!(
+        submitted.code, 2,
+        "{}\n{}",
+        submitted.stdout, submitted.stderr
+    );
+    assert!(submitted
+        .stderr
+        .contains("'review' is not an op the sentinel may issue"));
+    assert_eq!(before, after, "submission appended a refused command");
+    assert_eq!(outcome["applied"], false, "{outcome}");
+    assert!(outcome["reason"]
+        .as_str()
+        .unwrap()
+        .contains("'review' is not an op the sentinel may issue"));
+    assert!(reads.is_empty());
+    assert!(surfaced.is_empty());
+    assert!(ledger.is_empty());
+    assert_eq!(granted.code, 0, "{}", granted.stderr);
+    assert_eq!(surfaces(&world, "auth").len(), 1);
 }

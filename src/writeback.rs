@@ -290,6 +290,7 @@ struct Snapshot {
     /// What each rework's replacement answers, keyed by the replacement: the record
     /// `onepipeline.rework` carries on its item.
     reworks: BTreeMap<String, ReworkProjected>,
+    // llmlint: ignore[invalid_states_unrepresentable] src/AGENTS.md’s interface policy and Snapshot’s adjacent stated_landings/superseded/dispatches suppressions keep graph node keys in the existing String form. These keys are graph-validated ids copied from RunState, and this snapshot joins them to its existing String-keyed graph and lineage maps.
     /// Existing store provenance of continued reworks, preserved until a live rework
     /// supersedes them. A missing baseline refuses projection rather than erasing it.
     continued_metadata: Result<BTreeMap<String, BTreeMap<String, Value>>, String>,
@@ -1083,6 +1084,7 @@ impl Writeback {
 
 /// The two existing metadata values a continued rework keeps byte-for-byte.
 /// Read from the launch's seeded baseline, never from a fresh store query.
+// llmlint: ignore[invalid_states_unrepresentable] src/AGENTS.md’s interface policy and Snapshot’s neighbouring node-map suppressions retain graph-validated node ids as String keys. This private helper only copies those existing keys from RunState into Snapshot’s matching maps; introducing a distinct node-key type here would disagree with the maps this return joins.
 fn continued_metadata(
     paths: &RunPaths,
     launch: &LaunchRecord,

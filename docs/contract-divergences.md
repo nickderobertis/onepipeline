@@ -10478,7 +10478,10 @@ served by `onevcs-testing` through the `fake-gh` GraphQL adapter:
 reads two drafts, every kind, same-login marked replies, edits and unchanged
 passes; it checks the write-back projection file stays byte-identical and a long
 comment stays whole in the surface and artifact while its journal message is
-bounded. `state_comes_from_current_host_replies_and_rework_provenance` holds the
+bounded. It also holds a thread without a line and a reply's non-null parent
+metadata. `an_ungranted_review_command_is_refused_at_submission_and_by_the_live_reader`
+drives both authorization boundaries, including an envelope sent through the
+bus's raw durable queue. `state_comes_from_current_host_replies_and_rework_provenance` holds the
 five states against the version-1 JSON golden and both terminal views.
 `a_mixed_run_reads_only_the_continued_draft_and_the_unlanded_lineage_head` excludes
 landed, superseded and URL-less nodes from both the journal and the host's ledger.
