@@ -150,86 +150,6 @@ pub(crate) fn read(state: &RunState) -> Result<BTreeMap<String, Vec<Comment>>> {
     Ok(found)
 }
 
-/// One repository read shared by every draft's discovery in this pass.
-fn discovery_reads(state: &RunState) -> Vec<(String, String, Result<onevcs::ReviewRead>)> {
-    let mut repositories = BTreeMap::<(String, String), Vec<(String, String)>>::new();
-    let mut identities = BTreeMap::<String, std::result::Result<String, String>>::new();
-    let mut reads = Vec::new();
-    for (node, url) in drafts(state) {
-        let repo = state.graph.get(node).and_then(|node| node.repo.clone());
-        let root = crate::stack::root_of(state, node, &mut BTreeSet::new());
-        match repo.zip(root) {
-            Some((repo, root)) => {
-                let identity = identities.entry(repo.clone()).or_insert_with(|| {
-                    crate::vcs::repository_identity(&repo).map_err(|error| error.to_string())
-                });
-                match identity {
-                    Ok(identity) => repositories
-                        .entry((identity.clone(), root))
-                        .or_default()
-                        .push((node.to_owned(), url)),
-                    Err(error) => reads.push((
-                        node.to_owned(),
-                        url,
-                        Err(Error::Sibling {
-                            tool: "onevcs",
-                            message: error.clone(),
-                        }),
-                    )),
-                }
-            }
-            None => reads.push((
-                node.to_owned(),
-                url,
-                Err(Error::Invalid(format!(
-                    "draft {node} has no recorded repository and root to read its standings"
-                ))),
-            )),
-        }
-    }
-    for ((repo, root), drafts) in repositories {
-        let targets = drafts
-            .iter()
-            .map(|(_, url)| {
-                url.parse()
-                    .map(|change| onevcs::ReviewTarget {
-                        change,
-                        since: None,
-                    })
-                    // llmlint: ignore[changed_behavior_has_e2e] `drafts` takes URLs only through RunState::known_change_url, whose StatedLanding parser has already validated their URL spelling. This residual conversion refusal cannot be reached by a plan or journal; the damaged-record journey exercises a syntactically valid foreign change reference at onevcs's repository boundary instead.
-                    .map_err(|error| Error::Invalid(format!("change URL {url}: {error}")))
-            })
-            .collect::<Result<Vec<_>>>();
-        let answer = targets.and_then(|changes| {
-            crate::vcs::review_standings(&onevcs::ReviewStandingsRequest {
-                repo,
-                root,
-                changes,
-            })
-        });
-        match answer {
-            Ok(answer) => {
-                for ((node, url), read) in drafts.into_iter().zip(answer.reads) {
-                    reads.push((node, url, Ok(read)));
-                }
-            }
-            Err(error) => {
-                for (node, url) in drafts {
-                    reads.push((
-                        node,
-                        url,
-                        Err(Error::Sibling {
-                            tool: "onevcs",
-                            message: error.to_string(),
-                        }),
-                    ));
-                }
-            }
-        }
-    }
-    reads
-}
-
 fn metadata(comment: &ReviewComment) -> crate::payload::ReviewCommentMetadata {
     let (path, line, thread) = match &comment.kind {
         CommentKind::ReviewThread {
@@ -261,7 +181,22 @@ fn location(comment: &ReviewComment) -> String {
     }
 }
 
-pub(crate) fn pass(paths: &RunPaths, state: &RunState, journal: &mut Journal) -> Result<()> {
+/// The pass `onepipeline review`: a readjustment first, whose one batched read per
+/// repository and root carries every draft's review feedback, and then discovery from
+/// those reads.
+pub(crate) fn pass(
+    paths: &RunPaths,
+    projected: &mut crate::checkpoint::Projected,
+    journal: &mut Journal,
+) -> Result<()> {
+    let detection = crate::readjust::run(
+        paths,
+        journal,
+        projected,
+        crate::payload::ReadjustTrigger::Review,
+        true,
+    )?;
+    let state: &RunState = projected;
     let channel = ChannelState::new(paths);
     // Include the queue log: a crash after push and before the journal append must
     // not send the same revision a second time.
@@ -292,13 +227,29 @@ pub(crate) fn pass(paths: &RunPaths, state: &RunState, journal: &mut Journal) ->
             }
         }
     }
-    let mut failures = Vec::new();
-    for (node, url, read) in discovery_reads(state) {
+    // A repository whose drafts could not even be grouped for a read failed with no
+    // draft's read to carry it; every other failure is said per draft below.
+    let mut failures: Vec<String> = detection
+        .failures
+        .iter()
+        .filter(|(repo, _)| {
+            !detection.reviews.iter().any(|(node, _, read)| {
+                read.is_err()
+                    && state.graph.get(node).and_then(|node| node.repo.as_deref())
+                        == Some(repo.as_str())
+            })
+        })
+        .map(|(repo, detail)| format!("{repo}: {detail}"))
+        .collect();
+    for (node, url, read) in detection.reviews {
         let node = node.as_str();
         let read = match read {
             Ok(read) => read,
             Err(error) => {
-                failures.push(format!("{node} ({url}): {error}"));
+                let said = format!("{node} ({url}): {error}");
+                if !failures.contains(&said) {
+                    failures.push(said);
+                }
                 continue;
             }
         };
@@ -367,11 +318,48 @@ pub(crate) fn lines(comments: &BTreeMap<String, Vec<Comment>>) -> String {
     text
 }
 
+/// Which explicit trigger a verb asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Asked {
+    /// `onepipeline review`: a readjustment, then discovery.
+    Review,
+    /// `onepipeline readjust`: the readjustment alone.
+    Readjust,
+}
+
+impl Asked {
+    fn command(self) -> crate::channel::Command {
+        match self {
+            Self::Review => crate::channel::Command::Review {},
+            Self::Readjust => crate::channel::Command::Readjust {},
+        }
+    }
+
+    fn word(self) -> &'static str {
+        match self {
+            Self::Review => "review",
+            Self::Readjust => "readjust",
+        }
+    }
+}
+
+/// What an explicit trigger answered: performed, with a host read's failure and the
+/// drafts whose verdict is still owed, or requested of a driver that has not answered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Answered {
+    Performed {
+        error: Option<String>,
+        outstanding: Vec<String>,
+    },
+    Requested(u64),
+}
+
 pub(crate) fn requested(
     paths: &RunPaths,
     session: &str,
     timeout: std::time::Duration,
-) -> Result<crate::verbs::ReviewReceipt> {
+    asked: Asked,
+) -> Result<Answered> {
     let view = crate::views::RunView::open(paths)?;
     let driven = matches!(
         view.liveness(),
@@ -384,21 +372,17 @@ pub(crate) fn requested(
                 owner: view.launch.owner_label(session),
             });
         }
-        let _lock = crate::ledger::OwnershipLock::acquire(paths, "review")?;
-        let state = crate::checkpoint::fold_and_checkpoint(paths);
-        return match pass(paths, &state, &mut Journal::open(paths)) {
-            Ok(()) => Ok(crate::verbs::ReviewReceipt::Performed { error: None }),
-            Err(Error::Sibling { message, .. }) => Ok(crate::verbs::ReviewReceipt::Performed {
-                error: Some(message),
-            }),
-            Err(error) => Err(error),
-        };
+        let lock = crate::ledger::OwnershipLock::acquire(paths, asked.word())?;
+        return undriven(paths, lock, asked);
     }
     let deadline = || {
         std::time::Instant::now()
             .checked_add(timeout)
             .ok_or_else(|| {
-                Error::Invalid("review reply timeout is too large for this host's clock".to_owned())
+                Error::Invalid(format!(
+                    "{} reply timeout is too large for this host's clock",
+                    asked.word()
+                ))
             })
     };
     deadline()?;
@@ -408,11 +392,11 @@ pub(crate) fn requested(
         paths,
         &channel,
         crate::channel::Author::planner(),
-        &[crate::channel::Command::Review {}],
-        "review",
+        &[asked.command()],
+        asked.word(),
     )? {
         crate::engine::Accepted::Queued(id) => id,
-        crate::engine::Accepted::NothingIsDriving(_lock) => {
+        crate::engine::Accepted::NothingIsDriving(lock) => {
             // The driver may have ended between the liveness read and submission.
             if !view.launch.owned_by(session) {
                 return Err(Error::NotOwned {
@@ -420,29 +404,57 @@ pub(crate) fn requested(
                     owner: view.launch.owner_label(session),
                 });
             }
-            let state = crate::checkpoint::fold_and_checkpoint(paths);
-            return match pass(paths, &state, &mut Journal::open(paths)) {
-                Ok(()) => Ok(crate::verbs::ReviewReceipt::Performed { error: None }),
-                Err(Error::Sibling { message, .. }) => Ok(crate::verbs::ReviewReceipt::Performed {
-                    error: Some(message),
-                }),
-                Err(error) => Err(error),
-            };
+            return undriven(paths, lock, asked);
         }
     };
     let deadline = deadline()?;
     loop {
         if let Some(outcome) = channel.outcome_of(id) {
-            return Ok(crate::verbs::ReviewReceipt::Performed {
-                error: (!outcome.applied)
-                    .then(|| outcome.reason.unwrap_or_else(|| "review failed".to_owned())),
+            return Ok(Answered::Performed {
+                error: (!outcome.applied).then(|| {
+                    outcome
+                        .reason
+                        .unwrap_or_else(|| format!("{} failed", asked.word()))
+                }),
+                outstanding: crate::readjust::outstanding(&crate::checkpoint::fold_and_checkpoint(
+                    paths,
+                )),
             });
         }
         if std::time::Instant::now() >= deadline {
-            return Ok(crate::verbs::ReviewReceipt::Requested { request: id });
+            return Ok(Answered::Requested(id));
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
+}
+
+/// The pass on a run nothing drives, under its lock: the readjustment and discovery
+/// inline, and then — only where the readjustment owes a draft a restack or a retarget —
+/// the run driven until those settle.
+fn undriven(
+    paths: &RunPaths,
+    lock: crate::ledger::OwnershipLock,
+    asked: Asked,
+) -> Result<Answered> {
+    let mut projected = crate::checkpoint::Projected::open(paths);
+    let mut journal = Journal::open(paths);
+    let error = match asked {
+        Asked::Review => match pass(paths, &mut projected, &mut journal) {
+            Ok(()) => None,
+            Err(Error::Sibling { message, .. }) => Some(message),
+            Err(error) => return Err(error),
+        },
+        Asked::Readjust => crate::readjust::run(
+            paths,
+            &mut journal,
+            &mut projected,
+            crate::payload::ReadjustTrigger::Readjust,
+            false,
+        )?
+        .failed(),
+    };
+    let outstanding = crate::readjust::finish_undriven(paths, lock, projected)?;
+    Ok(Answered::Performed { error, outstanding })
 }
 
 /// Test-only crash seam compiled into the debug binary driven by the journeys.

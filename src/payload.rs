@@ -1670,9 +1670,9 @@ pub(crate) enum RestackCause {
     Rework,
     /// A stack parent's own restack republished with new commits.
     Restack,
-    /// A stack parent landed on the host, so the draft moves onto its nearest unlanded
-    /// parents or its root.
-    Landed,
+    /// A node it is connected to landed or was absorbed, so the draft is brought onto
+    /// its placement: its nearest unlanded parents, or the root.
+    Readjust,
 }
 
 /// `node-restack-started`: a draft began being brought onto its stack parents'
@@ -1701,37 +1701,184 @@ pub(crate) struct NodeRestacked {
     pub(crate) outcome: String,
 }
 
-/// `node-landed`: a readjustment read a draft's change request merged into its root.
+/// How a node's landing was found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum LandingDetection {
+    /// A readjustment's standings read reported its change request merged into its root.
+    Readjust,
+    /// The node it was absorbed into landed, carrying its work.
+    AbsorberLanded,
+}
+
+/// The action a readjustment ran first in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ReadjustTrigger {
+    /// The pass `onepipeline review`.
+    Review,
+    /// The verb `onepipeline readjust`.
+    Readjust,
+    /// Applying a `rework`, or the republication that continues one.
+    Rework,
+    /// A restack, or a placement of a lifecycle node at dispatch.
+    Placement,
+    /// A continuing launch or an adoption, before its first dispatch.
+    Continuation,
+}
+
+/// `node-landed`: a draft's change request was found merged into its root.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct NodeLanded {
     /// The node.
     pub(crate) node: String,
     /// Its change request.
     pub(crate) change_url: String,
-    /// The root it merged into.
-    pub(crate) into: String,
-    /// The commit it reached the root as.
+    /// The commit its work reached the root as.
     pub(crate) commit: String,
-    /// When the host says it merged, as the host spelled it.
+    /// How the landing was found.
+    pub(crate) detected_by: LandingDetection,
+    /// The action whose readjustment found it.
+    pub(crate) trigger: ReadjustTrigger,
+    /// The node whose landing carried it, for an absorbed node.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) merged_at: Option<String>,
+    pub(crate) via: Option<String>,
 }
 
-/// `node-retargeted`: a restacked draft's change request was moved onto its new base
-/// after its push.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub(crate) struct NodeRetargeted {
+/// `node-absorbed`: a draft's change request was merged into another node's branch, so
+/// its work reaches the root only with that node's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct NodeAbsorbed {
+    /// The node.
+    pub(crate) node: String,
+    /// The node whose branch it merged into.
+    pub(crate) into: String,
+    /// Its change request.
+    pub(crate) change_url: String,
+    /// The commit the merge made on that branch.
+    pub(crate) commit: String,
+}
+
+/// `change-reopened`: a draft the host closed when its landed parent's branch was
+/// deleted had that branch restored and was reopened.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct ChangeReopened {
     /// The node.
     pub(crate) node: String,
     /// Its change request.
     pub(crate) change_url: String,
-    /// The base it targeted before.
-    pub(crate) from: String,
-    /// The base it targets now.
-    pub(crate) to: String,
-    /// What the host charged: the retarget's own standings reads and its write.
-    #[schemars(schema_with = "read_cost_schema")]
-    pub(crate) cost: onevcs::ReadCost,
+    /// The branch restored on the origin, which its retarget then deletes again.
+    pub(crate) restored_base: String,
+}
+
+/// Where a draft is placed: its base and the stack parents whose branches it stands on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct Placement {
+    /// The branch its change request is based on.
+    pub(crate) base: String,
+    /// Its stack parents, in declared order; empty on the root.
+    pub(crate) stack_parents: Vec<String>,
+}
+
+/// Whether a readjustment moved a draft's change request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum RetargetWord {
+    /// Its base moved on the host.
+    Retargeted,
+    /// The host already targeted the computed base.
+    Unchanged,
+    /// No retarget was asked: its placement did not move.
+    None,
+}
+
+/// Whether a readjusted draft's branch now carries its new base.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ReadjustContent {
+    /// Its base's head was merged into its branch and pushed.
+    Merged,
+    /// Its change request was moved with no merge: a `retry` merges the base.
+    Pending,
+}
+
+/// `node-readjusted`: a draft was brought onto its placement after a node it is
+/// connected to landed or was absorbed. The node's ordinary `node-settled` follows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct NodeReadjusted {
+    /// The node.
+    pub(crate) node: String,
+    /// Where it was placed before.
+    pub(crate) from: Placement,
+    /// Where it is placed now.
+    pub(crate) to: Placement,
+    /// The nodes whose landing or absorption moved it.
+    pub(crate) cause: Vec<String>,
+    /// The commit its branch stands at afterwards.
+    pub(crate) head: String,
+    /// Whether an agent was dispatched to conclude a conflict.
+    pub(crate) agent_dispatched: bool,
+    /// What became of its change request's base.
+    pub(crate) retarget: RetargetWord,
+    /// Whether its branch carries its new base.
+    pub(crate) content: ReadjustContent,
+}
+
+/// `stack-landed-out-of-order`: a draft merged into the root while unlanded ancestors'
+/// work rode along with it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct StackLandedOutOfOrder {
+    /// The node that landed.
+    pub(crate) node: String,
+    /// Each unlanded ancestor whose work reached the root through it.
+    pub(crate) carried: Vec<String>,
+}
+
+/// `change-closed`: a draft's change request was closed without being merged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct ChangeClosed {
+    /// The node.
+    pub(crate) node: String,
+    /// Its change request.
+    pub(crate) change_url: String,
+}
+
+/// A deferred republication's required-checks verdict, as a later read found it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ChecksVerdictWord {
+    /// Something required has not settled.
+    Pending,
+    /// Every required check passed.
+    Passed,
+    /// Every required check passed or was skipped.
+    PassedWithSkipped,
+    /// A required check failed.
+    Failed,
+    /// The base requires nothing.
+    NoneRequired,
+}
+
+/// `node-checks-read`: a later trigger's read of a draft republished without a check
+/// watch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct NodeChecksRead {
+    /// The node.
+    pub(crate) node: String,
+    /// The head the verdict is about.
+    pub(crate) head: String,
+    /// The verdict.
+    pub(crate) verdict: ChecksVerdictWord,
+}
+
+/// `readjust-read-failed`: one repository's standings read failed, and its drafts were
+/// left as they were.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct ReadjustReadFailed {
+    /// The repository, as its drafts name it.
+    pub(crate) repo: String,
+    /// What the host or the sibling said.
+    pub(crate) detail: String,
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
@@ -1882,7 +2029,13 @@ payload_messages! {
     NodeRestackStarted => "node-restack-started";
     NodeRestacked => "node-restacked";
     NodeLanded => "node-landed";
-    NodeRetargeted => "node-retargeted";
+    NodeAbsorbed => "node-absorbed";
+    ChangeReopened => "change-reopened";
+    NodeReadjusted => "node-readjusted";
+    StackLandedOutOfOrder => "stack-landed-out-of-order";
+    ChangeClosed => "change-closed";
+    NodeChecksRead => "node-checks-read";
+    ReadjustReadFailed => "readjust-read-failed";
     DriverTakenOver => "driver-taken-over";
     DriverSuperseded => "driver-superseded";
 }

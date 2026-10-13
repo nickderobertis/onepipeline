@@ -80,6 +80,23 @@ pub(crate) fn review_standings(
     onevcs::review_standings(&providers(), request).map_err(refusal)
 }
 
+/// Where each named change request of one repository stands, in one batched read.
+pub(crate) fn change_standings(
+    request: &onevcs::ChangeStandingsRequest,
+) -> Result<onevcs::ChangeStandings> {
+    onevcs::change_standings(&providers(), request).map_err(refusal)
+}
+
+/// Move a change request onto `base`, writing its description in the same request.
+pub(crate) fn retarget_change(request: &onevcs::RetargetRequest) -> Result<onevcs::Retargeted> {
+    onevcs::retarget_change(&providers(), request).map_err(refusal)
+}
+
+/// Restore a closed draft's deleted base and reopen it.
+pub(crate) fn reopen_change(request: &onevcs::ReopenRequest) -> Result<onevcs::Reopened> {
+    onevcs::reopen_change(&providers(), request).map_err(refusal)
+}
+
 /// Normalize a repository spelling before collecting a batched host read.
 pub(crate) fn repository_identity(repo: &str) -> Result<String> {
     providers()

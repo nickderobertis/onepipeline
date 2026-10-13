@@ -197,6 +197,21 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             }
             Ok(receipt.exit_code())
         }
+        Verb::Readjust(args) => {
+            let timeout = reply_timeout_seconds();
+            let receipt = verbs::readjust(
+                &resolve(&args.run)?,
+                &sys::launching_session(),
+                Duration::from_secs(timeout),
+            )?;
+            let rendered = verbs::render_readjust(&receipt, args.json)?;
+            if !args.json && receipt.exit_code() != EXIT_SUCCESS {
+                eprintln!("{rendered}");
+            } else {
+                println!("{rendered}");
+            }
+            Ok(receipt.exit_code())
+        }
         Verb::Reply(args) => {
             let (target, file) =
                 target_and_file(args.run.as_ref(), args.file.as_ref(), args.flow.as_deref())?;

@@ -210,6 +210,28 @@ pub struct RunState {
     /// empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) titles_unverified: BTreeMap<String, crate::payload::TitleUnverified>,
+    /// Each draft whose change request was merged into another node's branch, and that
+    /// node. Omitted when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) absorbed: BTreeMap<String, String>,
+    /// Each draft whose change request was closed without merging, until it is reopened.
+    /// Omitted when empty.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub(crate) closed_changes: BTreeSet<String>,
+    /// Each draft a readjustment still owes, with the landed or absorbed nodes that made
+    /// it owed. Omitted when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) readjust_owed: BTreeMap<String, BTreeSet<String>>,
+    /// How each node found landed by a readjustment was found. Omitted when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) landed_how: BTreeMap<String, crate::payload::NodeLanded>,
+    /// The last readjustment of each draft. Omitted when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) readjusted: BTreeMap<String, crate::payload::NodeReadjusted>,
+    /// Each reopened draft's restored base, until its retarget deletes it again.
+    /// Omitted when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) reopened: BTreeMap<String, String>,
     /// The branch prefix `onevcs` reported putting in front of the branches it cut
     /// for this run's sessions — `""` once it cut one and reported none — which is
     /// what a stack base is named under. `None` until a session cut a branch.
@@ -905,6 +927,7 @@ impl RunState {
             change_urls: self.change_urls.clone(),
             superseded: self.superseded.clone(),
             restacking: self.restacking.keys().cloned().collect(),
+            absorbed: self.absorbed.clone(),
             export_edges: self
                 .plan
                 .as_ref()
@@ -1415,6 +1438,98 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
                 node.title = Some(retitled.to.clone());
             }
             state.titles_unverified.remove(&retitled.node);
+        }
+        Some(journal::PipelineKind::NodeLanded) => {
+            let Ok(landed) = serde_json::from_value::<crate::payload::NodeLanded>(Value::Object(
+                payload.clone(),
+            )) else {
+                return;
+            };
+            let node = landed.node.clone();
+            state.landings.insert(node.clone(), Landing::Landed);
+            state.closed_changes.remove(&node);
+            state.readjust_owed.remove(&node);
+            for draft in crate::readjust::connected(state, &node) {
+                state
+                    .readjust_owed
+                    .entry(draft)
+                    .or_default()
+                    .insert(node.clone());
+            }
+            state.landed_how.insert(node, landed);
+        }
+        Some(journal::PipelineKind::NodeAbsorbed) => {
+            let Ok(absorbed) = serde_json::from_value::<crate::payload::NodeAbsorbed>(
+                Value::Object(payload.clone()),
+            ) else {
+                return;
+            };
+            state.readjust_owed.remove(&absorbed.node);
+            state
+                .absorbed
+                .insert(absorbed.node.clone(), absorbed.into.clone());
+            for draft in crate::readjust::connected(state, &absorbed.node) {
+                state
+                    .readjust_owed
+                    .entry(draft)
+                    .or_default()
+                    .insert(absorbed.node.clone());
+            }
+        }
+        Some(journal::PipelineKind::ChangeClosed) => {
+            if let Ok(closed) = serde_json::from_value::<crate::payload::ChangeClosed>(
+                Value::Object(payload.clone()),
+            ) {
+                state.closed_changes.insert(closed.node);
+            }
+        }
+        Some(journal::PipelineKind::ChangeReopened) => {
+            if let Ok(reopened) = serde_json::from_value::<crate::payload::ChangeReopened>(
+                Value::Object(payload.clone()),
+            ) {
+                state.closed_changes.remove(&reopened.node);
+                state.reopened.insert(reopened.node, reopened.restored_base);
+            }
+        }
+        Some(journal::PipelineKind::NodeReadjusted) => {
+            if let Ok(readjusted) = serde_json::from_value::<crate::payload::NodeReadjusted>(
+                Value::Object(payload.clone()),
+            ) {
+                state.readjust_owed.remove(&readjusted.node);
+                // A rework's replacement readjusted answers for the node it replaced.
+                let replaced: Vec<String> = state
+                    .superseded
+                    .iter()
+                    .filter(|(_, by)| **by == readjusted.node)
+                    .map(|(predecessor, _)| predecessor.clone())
+                    .collect();
+                for predecessor in replaced {
+                    state.readjust_owed.remove(&predecessor);
+                    state.reopened.remove(&predecessor);
+                }
+                state.reopened.remove(&readjusted.node);
+                state.restacking.remove(&readjusted.node);
+                state.readjusted.insert(readjusted.node.clone(), readjusted);
+            }
+        }
+        // A green verdict read after a deferred republication is the verdict its watch
+        // would have given: the draft is the review draft it reads as from then on.
+        Some(journal::PipelineKind::NodeChecksRead) => {
+            if let Ok(read) = serde_json::from_value::<crate::payload::NodeChecksRead>(
+                Value::Object(payload.clone()),
+            ) {
+                use crate::payload::ChecksVerdictWord as V;
+                if matches!(
+                    read.verdict,
+                    V::Passed | V::PassedWithSkipped | V::NoneRequired
+                ) && state.outcomes.get(&read.node).map(String::as_str)
+                    == Some(crate::vcs::REVIEW_DRAFTED_UNCHECKED)
+                {
+                    state
+                        .outcomes
+                        .insert(read.node, crate::vcs::REVIEW_DRAFTED.to_owned());
+                }
+            }
         }
         Some(journal::PipelineKind::TitleUnverified) => {
             let Ok(unverified) = serde_json::from_value::<crate::payload::TitleUnverified>(

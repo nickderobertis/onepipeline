@@ -2158,6 +2158,7 @@ fn op_of(command: &Edit) -> &'static str {
         Edit::Rework { .. } => "rework",
         Edit::Retitle { .. } => "retitle",
         Edit::Review { .. } => "review",
+        Edit::Readjust { .. } => "readjust",
     }
 }
 
@@ -10662,10 +10663,14 @@ fn review_discovery_is_the_recorded_contract_and_registered_payload() {
         read["cost"][field] = json!(0);
     }
     for receipt in [
-        onepipeline::verbs::ReviewReceipt::Performed { error: None },
+        onepipeline::verbs::ReviewReceipt::Performed {
+            error: None,
+            outstanding: Vec::new(),
+        },
         onepipeline::verbs::ReviewReceipt::Requested { request: 4 },
         onepipeline::verbs::ReviewReceipt::Performed {
             error: Some("host failed".into()),
+            outstanding: vec!["b".into()],
         },
     ] {
         let rendered = onepipeline::verbs::render_review(&receipt, true).unwrap();

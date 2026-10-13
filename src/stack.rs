@@ -293,12 +293,22 @@ pub(crate) fn placement(
     };
     let mut candidates: Vec<&str> = Vec::new();
     for dep in &node.deps {
-        if candidates.contains(&dep.as_str()) {
-            continue;
+        // A dependency absorbed into another node's draft stands on that node's branch.
+        let mut dep = dep.as_str();
+        let mut seen = BTreeSet::new();
+        while let Some(into) = state.absorbed.get(dep) {
+            if !seen.insert(dep.to_owned()) {
+                break;
+            }
+            dep = into.as_str();
         }
         let Some(parent) = state.graph.get(dep) else {
             continue;
         };
+        let dep = parent.id.as_str();
+        if candidates.contains(&dep) {
+            continue;
+        }
         let Some(parent_repo) = parent.repo.as_deref() else {
             continue;
         };

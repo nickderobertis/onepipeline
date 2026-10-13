@@ -64,6 +64,9 @@ pub struct Launch {
     pub(crate) publication_gated: bool,
     /// The change request a republication adopts without watching its checks.
     pub(crate) review_change: Option<String>,
+    /// Where a readjusted draft's change request is moved after its push, with the Stack
+    /// block it then carries.
+    pub(crate) readjusting: Option<Box<crate::readjust::Retarget>>,
     /// What the publication boundary tells and gives this node's dispatches: the run's
     /// term scope, which every check its closeout asks derives its terms from, and in a
     /// mixed plan its side of the boundary.
@@ -946,6 +949,28 @@ fn attempt_once(
     // The publication is one of the things the run's claim is read for: the loop's next pass
     // reads it once for all it starts, and a run that has taken the project over leaves this
     // node's work kept on its branch, unpublished.
+    // A rework's republication asks first whether its change request is still open: one
+    // a person merged after the rework was dispatched is refused before anything is pushed.
+    if let (Course::Rework(_), Some(change)) = (course, launch.review_change.as_deref()) {
+        if engine::merged_during_rework(tx, &node.id, change) {
+            return keep_unpublished(
+                node,
+                Opened {
+                    worktree: worktree.as_deref(),
+                    base: base.as_deref(),
+                    began,
+                    token: &token,
+                    branch,
+                },
+                stream,
+                tx,
+                &whose,
+                vcs_filter,
+                &launch.boundary.term_scope,
+                Unpublished::MergedDuringRework(change),
+            );
+        }
+    }
     if launch.publication_gated && !engine::publication_cleared(tx, &node.id) {
         return withhold(
             node,
@@ -1604,6 +1629,42 @@ fn withhold(
     filter: Option<&EventFilter>,
     term_scope: &onevcs::TermScope,
 ) -> Attempt {
+    keep_unpublished(
+        node,
+        opened,
+        stream,
+        tx,
+        whose,
+        filter,
+        term_scope,
+        Unpublished::TakenOver,
+    )
+}
+
+/// Why a node's work is kept on its branch rather than published.
+#[derive(Debug, Clone, Copy)]
+enum Unpublished<'a> {
+    /// Another run took the project over.
+    TakenOver,
+    /// The node's change request merged while its rework ran.
+    MergedDuringRework(&'a str),
+}
+
+/// Put a node's work on the origin unpublished, and settle it as `why` says.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "`withhold`'s own context, and why the work is kept"
+)]
+fn keep_unpublished(
+    node: &Node,
+    opened: Opened<'_>,
+    stream: Option<crate::vcs::Follower>,
+    tx: &Sender<Message>,
+    whose: &Labels,
+    filter: Option<&EventFilter>,
+    term_scope: &onevcs::TermScope,
+    why: Unpublished<'_>,
+) -> Attempt {
     let Opened {
         worktree,
         token,
@@ -1623,7 +1684,36 @@ fn withhold(
         term_scope,
     );
     let name = branch.as_deref().unwrap_or("the session's branch");
+    let because = match why {
+        Unpublished::TakenOver => {
+            "another run took the project over before this node published".to_owned()
+        }
+        Unpublished::MergedDuringRework(change) => format!(
+            "its change request {change} was merged while this rework ran, so nothing was \
+             published and no change request was opened; build on the landed work with an `add`"
+        ),
+    };
+    let (status, outcome) = match why {
+        Unpublished::TakenOver => (NodeStatus::Cancelled, None),
+        Unpublished::MergedDuringRework(_) => (
+            NodeStatus::Failed,
+            Some(crate::readjust::MERGED_DURING_REWORK_OUTCOME),
+        ),
+    };
     let (detail, head, remote) = match answered {
+        Ok(preserved) if matches!(why, Unpublished::MergedDuringRework(_)) => (
+            format!(
+                "not published: {because}. Its work is kept on {} ({})",
+                preserved.branch,
+                crate::vcs::preservation_word(preserved.outcome)
+            ),
+            preserved
+                .commit
+                .as_deref()
+                .and_then(crate::vcs::usable)
+                .or(committed),
+            Some(preserved.outcome),
+        ),
         Ok(preserved) => (
             format!(
                 "not published: another run took the project over before this node published, \
@@ -1638,11 +1728,10 @@ fn withhold(
                 .or(committed),
             Some(preserved.outcome),
         ),
-        Err(why) => (
+        Err(refused) => (
             format!(
-                "not published: another run took the project over before this node published; \
-                 onevcs could not put {name} on the origin ({why}), so the work stays on the \
-                 local branch {name}"
+                "not published: {because}; onevcs could not put {name} on the origin \
+                 ({refused}), so the work stays on the local branch {name}"
             ),
             committed,
             None,
@@ -1653,7 +1742,7 @@ fn withhold(
         head,
         branch,
         remote,
-        ..Settlement::plain(&node.id, NodeStatus::Cancelled, None)
+        ..Settlement::plain(&node.id, status, outcome)
     })
 }
 
@@ -2038,7 +2127,60 @@ fn publish(
                 .armed
                 .as_ref()
                 .map(|change| armed_detail(change, publication.reads));
+            // A readjusted draft's change request moves onto its new base only now, after
+            // its push, so the host never shows a diff the push has not made its own.
+            let readjusted = launch.readjusting.as_deref().map(|retarget| {
+                crate::readjust::retarget(retarget).map_err(|error| error.to_string())
+            });
+            let retarget_failed = readjusted
+                .as_ref()
+                .and_then(|answer| answer.as_ref().err())
+                .map(|why| format!("its change request was not moved onto its new base: {why}"));
+            // A tree-identical republication of a review draft has nothing for the
+            // publication to push past the merge the restack made, so that merge head is
+            // put on the origin onto the same change request, and its verdict is owed.
+            if let (onevcs::PublishOutcome::NothingToPublish, Some(change), Some(repo)) = (
+                &published.outcome,
+                launch.review_change.as_deref(),
+                node.repo.as_deref(),
+            ) {
+                let preserved = crate::vcs::preserve_branch(
+                    repo,
+                    &published.branch,
+                    &launch.boundary.term_scope,
+                );
+                let pushed = match &preserved {
+                    Ok(preserved) => format!(
+                        "review draft {change} was pushed at its merge head ({}); its check \
+                         verdict is outstanding until the next trigger",
+                        crate::vcs::preservation_word(preserved.outcome)
+                    ),
+                    Err(why) => format!(
+                        "review draft {change} had nothing new to publish and its merge head \
+                         was not put on the origin: {why}"
+                    ),
+                };
+                let detail: Vec<String> = [Some(pushed), retarget_failed]
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                return Attempt::settled(Settlement {
+                    detail: Some(with_aside(detail.join(". "))),
+                    branch: branch.or_else(|| Some(published.branch.clone())),
+                    change_url: Some(change.to_owned()),
+                    outcome: Some(crate::vcs::REVIEW_DRAFTED_UNCHECKED.to_owned()),
+                    landing: Some(crate::graph::Landing::Unlanded),
+                    head: preserved
+                        .ok()
+                        .and_then(|preserved| preserved.commit)
+                        .as_deref()
+                        .and_then(crate::vcs::usable),
+                    readjusted,
+                    ..Settlement::plain(&node.id, NodeStatus::Done, None)
+                });
+            }
             let detail: Vec<String> = [
+                retarget_failed,
                 unchecked_detail(&published.outcome),
                 armed,
                 drafted,
@@ -2074,6 +2216,7 @@ fn publish(
                 // it ran under: an identity that asks the host to merge
                 // immediately still has to be observed doing it.
                 landing: crate::vcs::landing_of(&published.outcome),
+                readjusted,
                 // **Complete, and not `done`.** Every step ran and the branch is
                 // published, so nothing here failed and nothing is left for this
                 // run to ask a worker for; what is left is a release outside it.

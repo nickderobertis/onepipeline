@@ -457,6 +457,9 @@ pub(crate) struct Projected {
     /// construction. Persisting it beside the seal would be one fact twice, with an
     /// edit to either making the pair disagree.
     digested_bytes: u128,
+    /// What this driver's latest readjustment read, kept for the rest of its trigger.
+    /// In memory only: a fresh driver reads again at its first trigger.
+    pub(crate) readjust: crate::readjust::Readjuster,
 }
 
 impl std::ops::Deref for Projected {
@@ -488,6 +491,7 @@ impl Projected {
                 covered: checkpoint.state,
                 coverage: checkpoint.coverage,
                 took: 0,
+                readjust: crate::readjust::Readjuster::default(),
                 digested_bytes,
             },
             None => Self::empty(),
@@ -542,6 +546,7 @@ impl Projected {
             covered: empty,
             coverage: Coverage::default(),
             took: 0,
+            readjust: crate::readjust::Readjuster::default(),
             digested_bytes: NOTHING_DIGESTED,
         }
     }

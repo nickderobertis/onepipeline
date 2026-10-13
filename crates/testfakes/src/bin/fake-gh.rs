@@ -91,8 +91,12 @@ enum Change {
     /// is one. `pr ready` is the only thing that moves it, to
     /// [`Open`](Change::Open).
     Draft,
-    /// The host landed it, at [`MERGE_SHA`].
+    /// The host landed it, at [`MERGE_SHA`] — or, merged by a person, at the commit
+    /// its merge record names.
     Merged,
+    /// A person or the host closed it without merging; `draft` is whether it was a
+    /// draft when it closed, which a reopen restores.
+    Closed { draft: bool },
 }
 
 impl Change {
@@ -102,6 +106,8 @@ impl Change {
             Change::Open => "open",
             Change::Draft => "draft",
             Change::Merged => "merged",
+            Change::Closed { draft: false } => "closed",
+            Change::Closed { draft: true } => "closed-draft",
         }
     }
 
@@ -110,6 +116,8 @@ impl Change {
             "open" => Some(Change::Open),
             "draft" => Some(Change::Draft),
             "merged" => Some(Change::Merged),
+            "closed" => Some(Change::Closed { draft: false }),
+            "closed-draft" => Some(Change::Closed { draft: true }),
             _ => None,
         }
     }
@@ -118,6 +126,11 @@ impl Change {
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let dir = fake::script_dir();
+    // A person's move on the host, which a journey makes and no `gh` invocation is: it
+    // is never recorded on the ledger of what the host was asked.
+    if args.first().map(String::as_str) == Some(PERSON) {
+        return holding_the_records(&dir, || person(&args[1..], &dir));
+    }
     fake::record(&dir, "gh", &args);
 
     // Recorded first, so a journey scripting the outage can still assert this
@@ -133,6 +146,13 @@ fn main() -> ExitCode {
         args.get(1).map(String::as_str),
     ) {
         (Some("api"), Some("user")) => user(&args),
+        (Some("api"), Some(path))
+            if path.starts_with("repos/")
+                && path.contains("/pulls/")
+                && path.split('/').count() == 5 =>
+        {
+            holding_the_records(&dir, || patch_pull(&args, &dir, path))
+        }
         (Some("api"), Some("graphql")) => review_read(&args, &dir),
         (Some("api"), Some(path)) if path.starts_with("repos/") && path.split('/').count() == 3 => {
             repository(&args, &dir, path)
@@ -1088,7 +1108,11 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
             // record rather than from anything this invocation was given.
             "title": opened.title,
             "body": opened.body,
-            "state": if merged { "MERGED" } else { "OPEN" },
+            "state": match state {
+                Change::Merged => "MERGED",
+                Change::Closed { .. } => "CLOSED",
+                Change::Open | Change::Draft => "OPEN",
+            },
             "mergeable": "MERGEABLE",
             "mergeStateStatus": "CLEAN",
             "headRefOid": head.as_str(),
@@ -2301,8 +2325,10 @@ fn standings_read(query: &str, owner: &str, name: &str, dir: &Path) -> ExitCode 
     ));
     let path = if repository_host.is_file() {
         repository_host
-    } else {
+    } else if dir.join("review-host.json").is_file() {
         dir.join("review-host.json")
+    } else {
+        return own_standings(query, owner, name, &changes, dir);
     };
     let host = match onevcs_testing::FileHost::create(path) {
         Ok(host) => host,
@@ -2408,4 +2434,471 @@ fn standings_wire(
     }
     repository["branchProtectionRules"] = page(protections);
     json!({"data": {"rateLimit": {"cost": cost.graphql_points}, "repository": repository}})
+}
+
+/// The hidden first argument that makes an invocation a person's move on the host.
+const PERSON: &str = "__person";
+
+/// What a person's merge left: the branch it merged into, the commit that reached it,
+/// when, and the head it merged — which outlives a deleted head branch.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MergedRecord {
+    into: String,
+    commit: String,
+    merged_at: String,
+    head: String,
+}
+
+fn merged_record_path(dir: &Path, id: &str) -> PathBuf {
+    dir.join("gh-merged")
+        .join(format!("{}.json", fake::segment(id)))
+}
+
+fn merged_record(dir: &Path, id: &str) -> Option<MergedRecord> {
+    let text = read_if_present(&merged_record_path(dir, id))?;
+    Some(serde_json::from_str(&text).unwrap_or_else(|error| {
+        fake::fail(&format!(
+            "the merge record of {id} is not one this host wrote: {error}"
+        ))
+    }))
+}
+
+fn write_file(path: &Path, text: &str) {
+    if let Some(parent) = path.parent() {
+        if let Err(error) = std::fs::create_dir_all(parent) {
+            fake::fail(&format!("cannot create {}: {error}", parent.display()));
+        }
+    }
+    if let Err(error) = std::fs::write(path, text) {
+        fake::fail(&format!("cannot write {}: {error}", path.display()));
+    }
+}
+
+/// Rewrite every record `pr create` wrote, with `change` applied to the one numbered
+/// `number` of `repo`.
+fn rewrite_opened(dir: &Path, repo: &str, number: NonZeroU64, change: impl Fn(&mut Opened)) {
+    let mut found = false;
+    let lines: Vec<String> = opened_changes(dir)
+        .into_iter()
+        .map(|mut opened| {
+            if opened.repo == repo && opened.number == number {
+                change(&mut opened);
+                found = true;
+            }
+            serde_json::to_string(&opened).unwrap_or_else(|error| {
+                fake::fail(&format!("a record does not serialise: {error}"))
+            })
+        })
+        .collect();
+    if !found {
+        fake::fail(&format!("no change request {number} of {repo} was opened"));
+    }
+    let mut text = lines.join("\n");
+    text.push('\n');
+    write_file(&dir.join("gh").join("opened.jsonl"), &text);
+}
+
+/// Whether the origin behind `repo` holds `branch`.
+fn origin_holds(dir: &Path, repo: &str, branch: &str) -> bool {
+    let (Some(origin), Some(branch)) = (origin_of(dir, repo), Branch::parse(branch)) else {
+        return false;
+    };
+    std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(&origin)
+        .args(["rev-parse", "--verify", "--quiet"])
+        .arg(branch.as_ref_name())
+        .output()
+        .is_ok_and(|answer| answer.status.success())
+}
+
+/// The verdict a journey scripted for the required checks on `head`, as
+/// `gh-head-verdict/<head>` holds it — `passed`, `none`, `pending:<names>`,
+/// `failed:<names>` or `skipped:<names>` — and every required check passed otherwise.
+fn head_verdict(dir: &Path, head: &str) -> onevcs::ChecksVerdict {
+    let Some(scripted) = read_if_present(&dir.join("gh-head-verdict").join(fake::segment(head)))
+    else {
+        return onevcs::ChecksVerdict::Passed;
+    };
+    let scripted = scripted.trim();
+    let (word, names) = scripted.split_once(':').unwrap_or((scripted, ""));
+    let names: Vec<String> = names
+        .split(',')
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .collect();
+    match word {
+        "passed" => onevcs::ChecksVerdict::Passed,
+        "none" => onevcs::ChecksVerdict::NoneRequired,
+        "pending" => onevcs::ChecksVerdict::Pending { waiting: names },
+        "failed" => onevcs::ChecksVerdict::Failed { failed: names },
+        "skipped" => onevcs::ChecksVerdict::PassedWithSkipped { skipped: names },
+        other => fake::fail(&format!(
+            "gh-head-verdict holds {other:?}, which is no verdict"
+        )),
+    }
+}
+
+/// Answer an aliased standings read out of this host's own records: every change
+/// request `pr create` opened, as `pr ready`, a person's merge, close or retarget, and
+/// a retarget or reopen through the API left it.
+fn own_standings(
+    query: &str,
+    owner: &str,
+    name: &str,
+    changes: &[onevcs::ChangeId],
+    dir: &Path,
+) -> ExitCode {
+    let repo = format!("{owner}/{name}");
+    let opened = opened_changes(dir);
+    let mut standings = Vec::new();
+    for change in changes {
+        let Some(held) = opened
+            .iter()
+            .find(|held| held.repo == repo && held.number.to_string() == change.0)
+        else {
+            return fake::refuse(&format!("no pull request {} in {repo}", change.0));
+        };
+        let id = change_key(dir, held);
+        let state = state_of_opened(dir, held);
+        let merged = merged_record(dir, &id);
+        let head = merged
+            .as_ref()
+            .map(|merged| merged.head.clone())
+            .unwrap_or_else(|| head_of(dir, held).as_str().to_owned());
+        let url = url_of(held)
+            .parse::<onevcs::Url>()
+            .unwrap_or_else(|error| fake::fail(&format!("this host's own URL: {error}")));
+        standings.push(onevcs::ChangeStanding {
+            url,
+            body: held.body.clone(),
+            base: held.base.clone(),
+            head_branch: held.head.clone(),
+            head: onevcs::Sha(head.clone()),
+            draft: matches!(state, Change::Draft | Change::Closed { draft: true }),
+            state: match state {
+                Change::Open | Change::Draft => onevcs::ChangeState::Open,
+                Change::Closed { .. } => onevcs::ChangeState::Closed {
+                    base_deleted: !origin_holds(dir, &repo, &held.base),
+                },
+                Change::Merged => onevcs::ChangeState::Merged {
+                    into: merged
+                        .as_ref()
+                        .map_or_else(|| held.base.clone(), |merged| merged.into.clone()),
+                    commit: onevcs::Sha(
+                        merged
+                            .as_ref()
+                            .map_or_else(|| MERGE_SHA.to_owned(), |merged| merged.commit.clone()),
+                    ),
+                    landing: false,
+                    merged_at: merged
+                        .as_ref()
+                        .map(|merged| merged.merged_at.clone())
+                        .or_else(|| read_if_present(&merged_at(dir, &id))),
+                },
+            },
+            checks: head_verdict(dir, &head),
+        });
+    }
+    let reads: Vec<onevcs::ReviewRead> = if query.contains("reviewThreads(") {
+        standings
+            .iter()
+            .map(|standing| onevcs::ReviewRead {
+                change_url: standing.url.to_string(),
+                comments: Vec::new(),
+                marker: onevcs::ReadMarker(WRITTEN_AT.to_owned()),
+                unchanged: false,
+                cost: onevcs::ReadCost::default(),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let cost = onevcs::ReadCost {
+        graphql_points: 1,
+        rest_requests: 0,
+    };
+    println!("{}", standings_wire(&standings, &reads, cost));
+    ExitCode::SUCCESS
+}
+
+/// `gh api repos/O/N/pulls/<n> --method PATCH -f base=B [-f body=…]` and
+/// `… --method PATCH -f state=open`: a retarget writing the description with it, and a
+/// reopen — each answered with the pull request as this host now holds it.
+fn patch_pull(args: &[String], dir: &Path, path: &str) -> ExitCode {
+    let segments: Vec<&str> = path.split('/').collect();
+    let repo = format!("{}/{}", segments[1], segments[2]);
+    let Ok(number) = segments[4].parse::<NonZeroU64>() else {
+        return fake::refuse(&format!("{path} names no pull request number"));
+    };
+    if args.get(2).map(String::as_str) != Some("--method")
+        || args.get(3).map(String::as_str) != Some("PATCH")
+    {
+        return fake::refuse("a pull request is written with --method PATCH and nothing else");
+    }
+    let mut fields = std::collections::BTreeMap::new();
+    for pair in args[4..].chunks(2) {
+        let [flag, value] = pair else {
+            return fake::refuse("a PATCH field has no value");
+        };
+        if flag != "-f" {
+            return fake::refuse(&format!("a PATCH takes -f fields, not {flag}"));
+        }
+        let Some((key, value)) = value.split_once('=') else {
+            return fake::refuse(&format!("{value:?} is no key=value field"));
+        };
+        if !["base", "body", "state"].contains(&key) || fields.insert(key, value).is_some() {
+            return fake::refuse(&format!("a PATCH of {key:?} is not one this host takes"));
+        }
+    }
+    let Some(held) = opened_changes(dir)
+        .into_iter()
+        .find(|held| held.repo == repo && held.number == number)
+    else {
+        return fake::refuse(&format!("no pull request {number} in {repo}"));
+    };
+    let id = change_key(dir, &held);
+    let state = state_of_opened(dir, &held);
+    if let Some(open) = fields.get("state") {
+        if *open != "open" || fields.len() != 1 {
+            return fake::refuse("a reopen writes state=open alone");
+        }
+        let Change::Closed { draft } = state else {
+            return fake::refuse(&format!("pull request {number} is not closed"));
+        };
+        record(dir, &id, if draft { Change::Draft } else { Change::Open });
+    } else {
+        if state == Change::Merged || matches!(state, Change::Closed { .. }) {
+            return fake::refuse(&format!("pull request {number} is not open"));
+        }
+        let base = fields.get("base").map(|base| (*base).to_owned());
+        let body = fields.get("body").map(|body| (*body).to_owned());
+        if let Some(base) = &base {
+            if !origin_holds(dir, &repo, base) {
+                return fake::refuse(&format!("{repo} has no branch {base}"));
+            }
+        }
+        rewrite_opened(dir, &repo, number, |opened| {
+            if let Some(base) = &base {
+                opened.base.clone_from(base);
+            }
+            if let Some(body) = &body {
+                opened.body.clone_from(body);
+            }
+        });
+    }
+    let now = opened_changes(dir)
+        .into_iter()
+        .find(|held| held.repo == repo && held.number == number)
+        .unwrap_or_else(|| fake::fail("the record just written is gone"));
+    let state = state_of_opened(dir, &now);
+    println!(
+        "{}",
+        serde_json::json!({
+            "number": now.number,
+            "state": if matches!(state, Change::Closed { .. }) { "closed" } else { "open" },
+            "draft": matches!(state, Change::Draft | Change::Closed { draft: true }),
+            "base": {"ref": now.base},
+            "body": now.body,
+        })
+    );
+    ExitCode::SUCCESS
+}
+
+/// A person's move: `merge <repo> <number> squash|merge-commit kept|deleted-retarget|deleted-close`,
+/// `close <repo> <number>`, `retarget <repo> <number> <base>`, and
+/// `verdict <head> <verdict>`.
+///
+/// A merge is made on the origin itself — a squash commit or a merge commit of the
+/// head onto the base the change request targets now — and recorded as merged at that
+/// commit; a deleted head is deleted from the origin, and every open change request
+/// based on it is retargeted onto the merged one's base or closed, as `how` says.
+fn person(args: &[String], dir: &Path) -> ExitCode {
+    let arg = |at: usize| args.get(at).map(String::as_str).unwrap_or_default();
+    match arg(0) {
+        "merge" => {
+            let repo = arg(1).to_owned();
+            let Ok(number) = arg(2).parse::<NonZeroU64>() else {
+                return fake::refuse("a person's merge names a pull request number");
+            };
+            person_merge(dir, &repo, number, arg(3), arg(4))
+        }
+        "close" | "retarget" => {
+            let repo = arg(1).to_owned();
+            let Ok(number) = arg(2).parse::<NonZeroU64>() else {
+                return fake::refuse("a person's move names a pull request number");
+            };
+            let Some(held) = opened_changes(dir)
+                .into_iter()
+                .find(|held| held.repo == repo && held.number == number)
+            else {
+                return fake::refuse(&format!("no pull request {number} in {repo}"));
+            };
+            if arg(0) == "close" {
+                let id = change_key(dir, &held);
+                let draft = state_of_opened(dir, &held) == Change::Draft;
+                record(dir, &id, Change::Closed { draft });
+            } else {
+                let base = arg(3).to_owned();
+                rewrite_opened(dir, &repo, number, |opened| opened.base.clone_from(&base));
+            }
+            ExitCode::SUCCESS
+        }
+        "verdict" => {
+            write_file(
+                &dir.join("gh-head-verdict").join(fake::segment(arg(1))),
+                arg(2),
+            );
+            ExitCode::SUCCESS
+        }
+        other => fake::refuse(&format!("{other:?} is no person's move")),
+    }
+}
+
+fn git_in(at: &Path, args: &[&str]) -> Result<String, String> {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(at)
+        .env("GIT_AUTHOR_NAME", "A Person")
+        .env("GIT_AUTHOR_EMAIL", "person@example.com")
+        .env("GIT_COMMITTER_NAME", "A Person")
+        .env("GIT_COMMITTER_EMAIL", "person@example.com")
+        .output()
+        .map_err(|error| format!("git {args:?}: {error}"))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    } else {
+        Err(format!(
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
+}
+
+fn person_merge(dir: &Path, repo: &str, number: NonZeroU64, how: &str, after: &str) -> ExitCode {
+    let Some(held) = opened_changes(dir)
+        .into_iter()
+        .find(|held| held.repo == repo && held.number == number)
+    else {
+        return fake::refuse(&format!("no pull request {number} in {repo}"));
+    };
+    let Some(origin) = origin_of(dir, repo) else {
+        return fake::refuse(&format!("no origin is written down for {repo}"));
+    };
+    let id = change_key(dir, &held);
+    if !matches!(state_of_opened(dir, &held), Change::Open | Change::Draft) {
+        return fake::refuse(&format!("pull request {number} is not open"));
+    }
+    let work = dir
+        .join("gh-person")
+        .join(format!("{}-{number}", fake::segment(repo)));
+    let _ = std::fs::remove_dir_all(&work);
+    let merged = (|| -> Result<(String, String), String> {
+        std::fs::create_dir_all(&work).map_err(|error| error.to_string())?;
+        let origin = origin.to_string_lossy().into_owned();
+        git_in(&work, &["clone", "--quiet", &origin, "."])?;
+        let head = git_in(&work, &["rev-parse", &format!("origin/{}", held.head)])?;
+        git_in(
+            &work,
+            &[
+                "checkout",
+                "--quiet",
+                "-B",
+                &held.base,
+                &format!("origin/{}", held.base),
+            ],
+        )?;
+        let message = format!("{} (#{number})", held.title);
+        match how {
+            "squash" => {
+                git_in(
+                    &work,
+                    &[
+                        "merge",
+                        "--squash",
+                        "--quiet",
+                        &format!("origin/{}", held.head),
+                    ],
+                )?;
+                git_in(&work, &["commit", "--quiet", "-m", &message])?;
+            }
+            "merge-commit" => {
+                git_in(
+                    &work,
+                    &[
+                        "merge",
+                        "--no-ff",
+                        "--quiet",
+                        "-m",
+                        &message,
+                        &format!("origin/{}", held.head),
+                    ],
+                )?;
+            }
+            other => return Err(format!("{other:?} is no way to merge")),
+        }
+        let commit = git_in(&work, &["rev-parse", "HEAD"])?;
+        git_in(
+            &work,
+            &[
+                "push",
+                "--quiet",
+                "origin",
+                &format!("HEAD:refs/heads/{}", held.base),
+            ],
+        )?;
+        if after.starts_with("deleted") {
+            git_in(
+                &work,
+                &["push", "--quiet", "origin", "--delete", &held.head],
+            )?;
+        }
+        Ok((commit, head))
+    })();
+    let _ = std::fs::remove_dir_all(&work);
+    let (commit, head) = match merged {
+        Ok(merged) => merged,
+        Err(why) => return fake::refuse(&why),
+    };
+    record(dir, &id, Change::Merged);
+    let record_text = serde_json::to_string(&MergedRecord {
+        into: held.base.clone(),
+        commit,
+        merged_at: fake::now(),
+        head,
+    })
+    .unwrap_or_else(|error| fake::fail(&format!("a merge record does not serialise: {error}")));
+    write_file(&merged_record_path(dir, &id), &record_text);
+    match after {
+        "kept" | "deleted" => {}
+        "deleted-retarget" | "deleted-close" => {
+            for dependant in opened_changes(dir)
+                .into_iter()
+                .filter(|other| other.repo == held.repo && other.base == held.head)
+            {
+                let key = change_key(dir, &dependant);
+                let state = state_of_opened(dir, &dependant);
+                if !matches!(state, Change::Open | Change::Draft) {
+                    continue;
+                }
+                if after == "deleted-close" {
+                    record(
+                        dir,
+                        &key,
+                        Change::Closed {
+                            draft: state == Change::Draft,
+                        },
+                    );
+                } else {
+                    let base = held.base.clone();
+                    rewrite_opened(dir, &held.repo, dependant.number, |opened| {
+                        opened.base.clone_from(&base);
+                    });
+                }
+            }
+        }
+        other => return fake::refuse(&format!("{other:?} is not what becomes of a head")),
+    }
+    ExitCode::SUCCESS
 }

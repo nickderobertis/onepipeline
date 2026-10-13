@@ -225,6 +225,7 @@ pub fn op_of(command: &Command) -> &'static str {
         Command::Requeue { .. } => "requeue",
         Command::Attest { .. } => "attest",
         Command::Review { .. } => "review",
+        Command::Readjust { .. } => "readjust",
         Command::Complete { .. } => "complete",
         Command::Amend { .. } => "amend",
         Command::Note { .. } => "note",
@@ -253,7 +254,7 @@ pub fn target_of(command: &Command) -> Option<String> {
         | Command::Retitle { id, .. } => Some(id.clone()),
         Command::Attest { reference } => Some(reference.clone()),
         Command::Finding { id, .. } => id.clone(),
-        Command::Review { .. } | Command::Complete { .. } => None,
+        Command::Review { .. } | Command::Readjust { .. } | Command::Complete { .. } => None,
     }
 }
 
@@ -344,6 +345,9 @@ pub enum Dependents {
 pub enum Command {
     /// Perform an explicit discovery pass, without changing the graph.
     Review {},
+    /// Readjust the run's drafts onto what has landed, surfacing no comment and
+    /// changing no graph.
+    Readjust {},
     /// Replace one node's ordered graph overrides for its next dispatch.
     #[serde(rename = "set-node-sets")]
     SetNodeSets {
