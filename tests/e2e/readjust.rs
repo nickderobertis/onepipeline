@@ -1013,3 +1013,160 @@ fn deferred_republications_are_read_by_the_next_trigger_green_or_repaired_red() 
     assert_eq!(outcome_of(&world, run, "y"), "change-review-draft");
     assert_eq!(outcome_of(&world, run, "b"), "change-review-draft");
 }
+
+/// Every node id the write-back's landed projections carried since the first `from`
+/// records.
+fn projected_since(world: &World, run: &str, from: usize) -> Vec<String> {
+    crate::linear_writeback::projection_records(world, run)
+        .into_iter()
+        .skip(from)
+        .filter(|record| record["ended"]["state"] != "failed")
+        .flat_map(|record| {
+            record["items"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|item| item.as_str().map(str::to_owned))
+        })
+        .collect()
+}
+
+/// How many projection records the run holds.
+fn projections(world: &World, run: &str) -> usize {
+    crate::linear_writeback::projection_records(world, run).len()
+}
+
+/// Store writes: on a local Markdown store, a rework of `b` in `a ← b ← c ← d` restacks
+/// `c` and `d` with no conflict, and the restacks write no task for either while the
+/// rework writes `b`'s; a readjustment after `a` lands writes `a`, landed, and `b`, on
+/// its new base, and no other task; a cold host continuing from that store places a
+/// node added on `d` on `d`'s branch as it stands on the origin now; and a red verdict
+/// read later writes that node's repair.
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one journey across the triggers whose writes the store is held to"
+)]
+fn the_store_is_written_only_for_what_its_projection_holds_changed() {
+    let world = team_world("readjust-store");
+    for node in ["a", "b", "c"] {
+        world.script(&format!("{node}.work"), &format!("{node}'s change\n"));
+    }
+    world.script("d.work-anew", "d's change");
+    world.script("b-rework-1.work", "b's change, as the review asked\n");
+    world.script("b-rework-1.work-file", "b");
+    let run = "store";
+    let project = launched(
+        &world,
+        run,
+        vec![
+            lifecycle("a", &[]),
+            lifecycle("b", &["a"]),
+            lifecycle("c", &["b"]),
+            lifecycle("d", &["c"]),
+        ],
+    );
+    world.until_store("every settlement to reach the store", |world| {
+        projected_settlement(world, &project, "d")["status"] == "done"
+    });
+
+    // The rework writes b's lineage; its restacks of c and d write nothing.
+    let mark = projections(&world, run);
+    reply(&world, run, json!([rework("b")])).exited(0);
+    world.run(&["adopt", run]).exited(0);
+    for node in ["c", "d"] {
+        assert!(
+            record(&world, run, "node-restacked", node)
+                .is_some_and(|restacked| restacked["agent_dispatched"] == false),
+            "{node} was not restacked by a merge alone"
+        );
+    }
+    world.until_store("the rework to reach the store", |world| {
+        world
+            .store_tasks(&project)
+            .iter()
+            .any(|task| task["item"]["metadata"]["onepipeline.rework"]["replaces"] == "b")
+    });
+    let written = projected_since(&world, run, mark);
+    assert!(
+        written.iter().any(|item| item.starts_with('b')),
+        "the rework wrote no task for b: {written:?}"
+    );
+    for node in ["c", "d"] {
+        assert!(
+            !written.contains(&node.to_owned()),
+            "the restack wrote {node}'s task: {written:?}"
+        );
+    }
+
+    // A readjustment after `a` lands writes `a` and `b`, and nothing else.
+    merge(&world, &number_of(&world, run, "a"), "squash", "kept");
+    let mark = projections(&world, run);
+    readjusted(&world, run);
+    world.until_store("b's new base to reach the store", |world| {
+        world.store_tasks(&project).iter().any(|task| {
+            task["item"]["metadata"]["onepipeline.settlement"]["base"] == "main"
+                && task["item"]["metadata"]["onepipeline.settlement"]["change_url"]
+                    == settled(world, run, "b-rework-1")["change_url"]
+        })
+    });
+    let written = projected_since(&world, run, mark);
+    assert!(written.contains(&"a".to_owned()), "{written:?}");
+    assert!(
+        written.iter().any(|item| item.starts_with('b')),
+        "{written:?}"
+    );
+    for node in ["c", "d"] {
+        assert!(
+            !written.contains(&node.to_owned()),
+            "the readjustment wrote {node}'s task: {written:?}"
+        );
+    }
+    let d_branch = branch_of(&world, run, "d");
+    let d_tip = tip(&world, &d_branch);
+    assert_ne!(
+        projected_settlement(&world, &project, "d")["head"],
+        d_tip.as_str(),
+        "d's restacked head reached the store"
+    );
+
+    // A cold host continuing from the store reads `d`'s verdict for the head its branch
+    // carries on the origin — the store holds neither that head nor its unread verdict —
+    // and the red one it reads is repaired, which writes `d`'s task.
+    person(&world, &["verdict", &d_tip, "failed:lint"]);
+    let cold = world.on_host("readjust-store-cold");
+    let mark = 0;
+    cold.run_from(&cold.project, &["start", &project, "--attach"])
+        .exited(0);
+    let read = record(&cold, run, "node-checks-read", "d").expect("d's verdict was read");
+    assert_eq!(read["head"], d_tip.as_str(), "{read}");
+    assert_eq!(read["verdict"], "failed", "{read}");
+    cold.until_store("d's repair to reach the store", |world| {
+        let head = projected_settlement(world, &project, "d")["head"].clone();
+        head.as_str()
+            .is_some_and(|head| head != d_tip && is_ancestor(world, &d_tip, head))
+    });
+    assert!(
+        projected_since(&cold, run, mark).contains(&"d".to_owned()),
+        "the repair wrote no task for d: {:#?}",
+        crate::linear_writeback::projection_records(&cold, run)
+            .into_iter()
+            .skip(mark)
+            .collect::<Vec<_>>()
+    );
+
+    // A node added on `d` is placed on `d`'s branch as the origin holds it now.
+    let d_now = tip(&world, &d_branch);
+    cold.script("e.work", "e's change\n");
+    reply(
+        &cold,
+        run,
+        json!([{"op": "add", "node": lifecycle("e", &["d"])}]),
+    )
+    .exited(0);
+    cold.run(&["adopt", run]).exited(0);
+    let e = settled(&cold, run, "e");
+    assert_eq!(e["base"], d_branch.as_str(), "{e}");
+    assert!(is_ancestor(&world, &d_now, text(&e["head"], "e's head")));
+}

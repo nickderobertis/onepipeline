@@ -228,6 +228,9 @@ pub struct RunState {
     /// The last readjustment of each draft. Omitted when empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) readjusted: BTreeMap<String, crate::payload::NodeReadjusted>,
+    /// The head each draft's check verdict was last read for. Omitted when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) checks_read: BTreeMap<String, String>,
     /// Each reopened draft's restored base, until its retarget deletes it again.
     /// Omitted when empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -1519,6 +1522,9 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
                 Value::Object(payload.clone()),
             ) {
                 use crate::payload::ChecksVerdictWord as V;
+                state
+                    .checks_read
+                    .insert(read.node.clone(), read.head.clone());
                 if matches!(
                     read.verdict,
                     V::Passed | V::PassedWithSkipped | V::NoneRequired

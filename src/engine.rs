@@ -6921,14 +6921,14 @@ fn repair_red_verdicts(
     notes_in_flight: &DeliveriesInFlight,
     admit: &mut dyn FnMut() -> bool,
 ) -> Result<bool> {
-    let red: Vec<(String, Vec<String>)> = state
+    let red: Vec<(String, crate::readjust::Red)> = state
         .readjust
         .red
         .iter()
-        .map(|(node, failed)| (node.clone(), failed.clone()))
+        .map(|(node, red)| (node.clone(), red.clone()))
         .collect();
     let mut moved = false;
-    for (id, failed) in red {
+    for (id, red) in red {
         if in_flight.contains_key(&id) || paused.contains(&id) {
             continue;
         }
@@ -6939,10 +6939,9 @@ fn repair_red_verdicts(
         if in_flight.len() >= state.graph.concurrency as usize {
             break;
         }
-        let (Some(node), Some(branch), Some(head)) = (
+        let (Some(node), Some(branch)) = (
             state.graph.get(&id).cloned(),
             state.branches.get(&id).cloned(),
-            state.heads.get(&id).cloned(),
         ) else {
             state.readjust.red.remove(&id);
             continue;
@@ -6984,7 +6983,7 @@ fn repair_red_verdicts(
             .map(|stack| stack.base().to_owned())
             .or_else(|| state.bases.get(&id).cloned());
         let continuation =
-            crate::lifecycle::Continuation::red_verdict(&based, &branch, &head, &failed);
+            crate::lifecycle::Continuation::red_verdict(&based, &branch, &red.head, &red.failed);
         journal.emit(
             journal::PipelineKind::NodeDispatched,
             journal::labels(&paths.run, Some(&id)),

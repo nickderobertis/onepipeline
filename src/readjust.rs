@@ -200,8 +200,21 @@ pub(crate) struct Detection {
     pub(crate) failures: Vec<(String, String)>,
     /// Each open draft a person moved off its recorded base, and the base it targets.
     pub(crate) overridden: BTreeMap<String, String>,
-    /// Each draft whose deferred verdict was read red, with the checks that failed.
-    pub(crate) red: BTreeMap<String, Vec<String>>,
+    /// Each draft whose deferred verdict was read red: the head it is about, and the
+    /// checks that failed.
+    pub(crate) red: BTreeMap<String, Red>,
+}
+
+/// A red verdict a trigger read: the head it is about, and the checks that failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Red {
+    // llmlint: ignore-block[invalid_states_unrepresentable] the host's own words, read off the
+    // standing `onevcs` parsed: the head it reports and the check names it says failed.
+    /// The head the checks ran on.
+    pub(crate) head: String,
+    /// The required checks that failed.
+    pub(crate) failed: Vec<String>,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
 impl Detection {
@@ -752,8 +765,11 @@ fn closed(paths: &RunPaths, journal: &mut Journal, draft: &Draft) -> Result<()> 
     )
 }
 
-/// A deferred republication's verdict, read off the same standing, for a draft whose
-/// recorded head the host reports.
+/// A deferred republication's verdict, read off the same standing: for a draft whose
+/// recorded head the host reports and whose verdict the record still owes, and for a
+/// settled review draft whose head on the host moved past the one this host recorded —
+/// the cold host's case, whose store holds neither a clean restack's head nor its unread
+/// verdict — once per head.
 fn verdict(
     paths: &RunPaths,
     journal: &mut Journal,
@@ -763,9 +779,22 @@ fn verdict(
     detection: &mut Detection,
 ) -> Result<()> {
     let node = draft.node.as_str();
-    if state.outcomes.get(node).map(String::as_str) != Some(crate::vcs::REVIEW_DRAFTED_UNCHECKED)
-        || state.heads.get(node) != Some(&standing.head.0)
-    {
+    let outcome = state.outcomes.get(node).map(String::as_str);
+    let recorded = state.heads.get(node);
+    let owed =
+        outcome == Some(crate::vcs::REVIEW_DRAFTED_UNCHECKED) && recorded == Some(&standing.head.0);
+    let moved_past = matches!(
+        outcome,
+        Some(crate::vcs::REVIEW_DRAFTED | crate::vcs::REVIEW_DRAFTED_UNCHECKED)
+    ) && recorded != Some(&standing.head.0)
+        && !state.restacking.contains_key(node)
+        && state
+            .recorded
+            .get(node)
+            .map(|recorded| recorded.clone().status())
+            == Some(crate::graph::NodeStatus::Done)
+        && state.checks_read.get(node) != Some(&standing.head.0);
+    if !owed && !moved_past {
         return Ok(());
     }
     let (word, failed) = match &standing.checks {
@@ -791,7 +820,13 @@ fn verdict(
         },
     )?;
     if let Some(failed) = failed {
-        detection.red.insert(node.to_owned(), failed);
+        detection.red.insert(
+            node.to_owned(),
+            Red {
+                head: standing.head.0.clone(),
+                failed,
+            },
+        );
     }
     Ok(())
 }
@@ -865,8 +900,8 @@ pub(crate) struct Readjuster {
     pub(crate) bodies: BTreeMap<String, String>,
     /// Each draft a person moved off its computed base, and the base it targets.
     pub(crate) overridden: BTreeMap<String, String>,
-    /// Each draft whose deferred verdict was read red, with the checks that failed.
-    pub(crate) red: BTreeMap<String, Vec<String>>,
+    /// Each draft whose deferred verdict was read red, and what it is about.
+    pub(crate) red: BTreeMap<String, Red>,
     /// Each readjustment in flight: where it moves its draft from and to, and why.
     pub(crate) plans: BTreeMap<String, Plan>,
     /// Each draft whose readjustment this driver started since its last read, which
