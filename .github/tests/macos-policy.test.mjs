@@ -32,7 +32,7 @@ writeFileSync(
 );
 writeFileSync(
   join(repo, "Cargo.lock"),
-  'version=4\n[[package]]\nname="onepipeline"\nversion="1.2.3"\n[[package]]\nname="sibling"\nversion="0.1.0"\nsource="registry+https://example.com"\n',
+  'version=4\n[[package]]\nname="onepipeline"\nversion="1.2.3"\n[[package]]\nname="onepipeline"\nversion="0.8.0"\nsource="registry+https://example.com"\n[[package]]\nname="sibling"\nversion="0.1.0"\nsource="registry+https://example.com"\n',
 );
 writeFileSync(join(repo, "CHANGELOG.md"), "# Changelog\n");
 writeFileSync(join(repo, "package.json"), ' {"version":"1.2.3","dependencies":{"sibling":"0.1"}}');
@@ -525,6 +525,23 @@ test("semantic manifest comparison rejects dependency, lock content and malforme
     git("commit", "-qm", "adversarial release metadata");
     assert.equal(classify(event(), git("rev-parse", "HEAD")).macosRequired, true);
   }
+});
+
+test("same-named registry dependency version changes require Mac coverage", () => {
+  git("checkout", "-q", "--detach", base);
+  writeFileSync(
+    join(repo, "Cargo.lock"),
+    readFileSync(join(repo, "Cargo.lock"), "utf8")
+      .replace('version="1.2.3"', 'version="1.2.4"')
+      .replace('version="0.8.0"', 'version="0.8.1"'),
+  );
+  git("add", "Cargo.lock");
+  git("commit", "-qm", "local release and same-named registry dependency update");
+  const result = classify(event(), git("rev-parse", "HEAD"));
+  assert.equal(result.isReleaseOnly, false);
+  assert.equal(result.macosRequired, true);
+  assert.equal(result.reason, "non-version content: Cargo.lock");
+  assert.equal(classify(event(), heads.version).isReleaseOnly, true);
 });
 
 test("release artifact downloads use this run's exact tagged builders and successful Darwin proof", () => {
