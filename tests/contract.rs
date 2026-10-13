@@ -979,9 +979,9 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), EVENTS_BUNDLE_VERSION);
     assert_eq!(
-        divergence_block("121.")["bundle_versions"]["events"],
+        divergence_block("122.")["bundle_versions"]["events"],
         EVENTS_BUNDLE_VERSION,
-        "the rework bundle version must be the manager's recorded ruling"
+        "the scratch bundle version must be the manager's recorded ruling"
     );
     let carried: Vec<String> = bundle
         .schemas()
@@ -1191,7 +1191,7 @@ fn the_contract_states_the_planner_channel_documents_path_version_and_source() {
     assert_eq!(
         divergence_block("121.")["bundle_versions"]["planner_channel"],
         DOCUMENT_VERSION,
-        "the rework bundle version must be the manager's recorded ruling"
+        "the scratch bundle version must be the manager's recorded ruling"
     );
     assert_eq!(bundle.layouts(), [document()]);
 }
@@ -6605,7 +6605,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // undocumented wire; a kind the contract lists and the enum does not carry is
     // a promise nothing keeps. `PIPELINE_KINDS` is what `Journal::emit` accepts,
     // so this is the emitted set and not a second copy of it.
-    assert_eq!(PIPELINE_KINDS.len(), 45, "the closed set changed size");
+    assert_eq!(PIPELINE_KINDS.len(), 47, "the closed set changed size");
     let listed: BTreeSet<String> = backticked()
         .into_iter()
         .filter(|token| {
@@ -6614,13 +6614,15 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
         .collect();
     // The kinds the contract does not list are exactly the ones the divergence
     // record proposes, and no others: a kind neither document names fails here.
-    let proposed: BTreeSet<String> = ["40.", "47.", "55.", "65.", "70.", "92.", "119.", "121."]
-        .into_iter()
-        .flat_map(|entry| {
-            serde_json::from_value::<Vec<String>>(divergence_block(entry)["event_kinds"].clone())
-                .unwrap_or_else(|e| panic!("entry {entry} names the kinds it adds: {e}"))
-        })
-        .collect();
+    let proposed: BTreeSet<String> = [
+        "40.", "47.", "55.", "65.", "70.", "92.", "119.", "121.", "122.",
+    ]
+    .into_iter()
+    .flat_map(|entry| {
+        serde_json::from_value::<Vec<String>>(divergence_block(entry)["event_kinds"].clone())
+            .unwrap_or_else(|e| panic!("entry {entry} names the kinds it adds: {e}"))
+    })
+    .collect();
     let undocumented: BTreeSet<String> = PIPELINE_KINDS
         .iter()
         .map(|kind| kind.as_str().to_string())
@@ -9130,6 +9132,12 @@ fn verb_functions_in_source() -> BTreeSet<String> {
 fn verb_functions_in_contract() -> BTreeSet<String> {
     backticked_in(verbs_paragraph())
         .into_iter()
+        .chain(backticked_in(
+            include_str!("../docs/contract-divergences.md")
+                .split("## 122.")
+                .nth(1)
+                .expect("scratch proposal"),
+        ))
         .filter_map(|span| {
             let name: String = span
                 .chars()
@@ -9176,6 +9184,9 @@ fn the_contract_names_every_post_launch_verb_the_sdk_publishes_and_no_other() {
     let _: fn(&Host) -> String = verbs::render_host;
     let _: fn(&Path, Option<&str>) -> Result<Goals> = verbs::goals;
     let _: fn(&Goals) -> String = verbs::render_goals;
+    let _: fn(&Path, &str) -> Result<verbs::ScratchDiscard> = verbs::scratch_discard;
+    let _: fn(&verbs::ScratchDiscard) -> String = verbs::render_scratch_discard;
+    let _: fn(&verbs::ScratchDiscard) -> String = verbs::render_scratch_discard_errors;
     let _: fn(&RunPaths) -> Result<Results> = verbs::results;
     let _: fn(&Results) -> String = verbs::render_results;
     let _: fn(&RunPaths, Option<&str>) -> Result<Transcript> = verbs::transcript;
@@ -10576,4 +10587,72 @@ fn the_publication_boundary_block_is_the_schema_and_the_guidance_the_binary_prin
             "<host prefix>public/<opaque id>/task-<ordinal>",
         ],
     );
+}
+
+/// Scratch reclamation is the additive event vocabulary the manager approved.
+#[test]
+fn dispatch_scratch_lifetime_is_the_divergence_surface() {
+    use clap::Parser;
+    use onepipeline::cli::{Cli, Command, ScratchCommand};
+    use onepipeline::event::{EventKind, PipelineKind};
+    let contract = divergence_block("122.");
+    assert_eq!(
+        contract["bundle_versions"]["events"],
+        onepipeline::vocabulary::EVENTS_BUNDLE_VERSION
+    );
+    assert!(
+        matches!(Cli::try_parse_from(["onepipeline", "scratch", "discard", "example"]).unwrap().command, Command::Scratch(ScratchCommand::Discard { run }) if run == "example")
+    );
+    for (word, kind) in [
+        ("scratch-removed", PipelineKind::ScratchRemoved),
+        ("scratch-retained", PipelineKind::ScratchRetained),
+    ] {
+        assert_eq!(PipelineKind::from_wire(&EventKind(word.into())), Some(kind));
+        assert_eq!(kind.as_str(), word);
+        onepipeline::payload::registry()
+            .check(&onepipeline::payload::schema_of(kind), &contract[word])
+            .expect("the approved scratch payload validates against its registered document");
+    }
+}
+
+#[test]
+fn scratch_payloads_reject_relative_paths_and_empty_errors_at_the_registered_boundary() {
+    use onepipeline::event::PipelineKind;
+    use onepipeline::payload::{registry, schema_of};
+    let registry = registry();
+    for path in [
+        "/absolute/scratch/dispatch",
+        r"C:\scratch\dispatch",
+        r"\\server\share\dispatch",
+    ] {
+        let retained =
+            json!({"ending":"failed", "dirs":[{"path":path,"bytes":4096}], "total_bytes":4096});
+        registry
+            .check(&schema_of(PipelineKind::ScratchRetained), &retained)
+            .unwrap();
+    }
+    for path in [
+        "relative/dispatch",
+        r"\\\server\share",
+        r"\\server\\share",
+        r"\\server\",
+    ] {
+        let invalid =
+            json!({"ending":"failed", "dirs":[{"path":path,"bytes":4096}], "total_bytes":4096});
+        assert!(
+            registry
+                .check(&schema_of(PipelineKind::ScratchRetained), &invalid)
+                .is_err(),
+            "accepted {path:?}"
+        );
+    }
+    for failure in [
+        json!({"path":"relative/dispatch","error":"denied"}),
+        json!({"path":"/absolute/dispatch","error":""}),
+    ] {
+        let removed = json!({"trigger":"discard", "dirs":0, "bytes":0, "failed":[failure]});
+        assert!(registry
+            .check(&schema_of(PipelineKind::ScratchRemoved), &removed)
+            .is_err());
+    }
 }

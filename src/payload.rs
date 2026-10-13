@@ -1679,6 +1679,140 @@ pub(crate) struct NodeRestacked {
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
+/// The scratch removed at one ending or manager request.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ScratchRemoved {
+    pub(crate) trigger: ScratchTrigger,
+    pub(crate) dirs: u64,
+    pub(crate) bytes: u64,
+    pub(crate) failed: Vec<ScratchFailure>,
+}
+
+/// Why scratch is removed.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ScratchTrigger {
+    Success,
+    Discard,
+}
+
+/// A producer-platform absolute path, including Windows paths in a Unix reader.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(transparent)]
+pub(crate) struct AbsolutePath(std::path::PathBuf);
+
+impl AbsolutePath {
+    pub(crate) fn new(path: std::path::PathBuf) -> Result<Self, &'static str> {
+        let text = path.to_str().ok_or("scratch path is not UTF-8")?;
+        let bytes = text.as_bytes();
+        let drive = bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'/' | b'\\');
+        let unc = text.strip_prefix("\\\\").is_some_and(|tail| {
+            let mut parts = tail.split('\\');
+            parts.next().is_some_and(|part| !part.is_empty())
+                && parts.next().is_some_and(|part| !part.is_empty())
+        });
+        if text.starts_with('/') || drive || unc {
+            Ok(Self(path))
+        } else {
+            Err("scratch path must be absolute")
+        }
+    }
+
+    pub(crate) fn display(&self) -> std::path::Display<'_> {
+        self.0.display()
+    }
+}
+
+impl<'de> Deserialize<'de> for AbsolutePath {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::new(std::path::PathBuf::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+impl JsonSchema for AbsolutePath {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "AbsolutePath".into()
+    }
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({"type": "string", "pattern": r"^(?:/|[A-Za-z]:[\\/]|\\\\[^\\]+\\[^\\]+)"})
+    }
+}
+
+/// A failure always states a reason.
+#[derive(Debug, Clone, Serialize)]
+#[serde(transparent)]
+pub(crate) struct ScratchError(String);
+
+impl ScratchError {
+    pub(crate) fn new(error: String) -> Result<Self, &'static str> {
+        if error.is_empty() {
+            Err("scratch failure error must not be empty")
+        } else {
+            Ok(Self(error))
+        }
+    }
+}
+
+impl std::fmt::Display for ScratchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl<'de> Deserialize<'de> for ScratchError {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+impl JsonSchema for ScratchError {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ScratchError".into()
+    }
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({"type": "string", "minLength": 1})
+    }
+}
+
+/// A directory removal that the filesystem refused.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ScratchFailure {
+    pub(crate) path: AbsolutePath,
+    pub(crate) error: ScratchError,
+}
+
+/// A directory's allocated disk usage at an ending.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ScratchDir {
+    pub(crate) path: AbsolutePath,
+    pub(crate) bytes: u64,
+}
+
+/// Scratch kept for inspection or retry.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ScratchRetained {
+    pub(crate) ending: ScratchEnding,
+    pub(crate) dirs: Vec<ScratchDir>,
+    pub(crate) total_bytes: u64,
+}
+
+/// A non-success ending or pause.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ScratchEnding {
+    Failed,
+    Unfinished,
+    Stopped,
+    Paused,
+}
+
 /// Declares each payload as the bus [`Message`] its kind carries, the total map
 /// from a kind to that id, and the registry every one of them is registered in.
 macro_rules! payload_messages {
@@ -1729,6 +1863,8 @@ macro_rules! payload_messages {
 }
 
 payload_messages! {
+    ScratchRemoved => "scratch-removed";
+    ScratchRetained => "scratch-retained";
     RunStarted => "run-started";
     ConcurrentAcknowledged => "concurrent-acknowledged";
     ConcurrentDeferred => "concurrent-deferred";
@@ -2413,5 +2549,30 @@ mod tests {
         ] {
             assert_eq!(word(&EvidenceWord::from(evidence)), word(&evidence));
         }
+    }
+}
+
+#[cfg(test)]
+mod scratch_boundaries {
+    use super::{AbsolutePath, ScratchError};
+
+    #[test]
+    fn scratch_paths_and_errors_round_trip_and_reject_invalid_input() {
+        for path in [
+            "/absolute/dispatch",
+            r"C:\scratch\dispatch",
+            r"\\server\share\dispatch",
+        ] {
+            let encoded = serde_json::json!(path);
+            let decoded: AbsolutePath = serde_json::from_value(encoded.clone()).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), encoded);
+        }
+        for path in ["relative/dispatch", "C:relative", ""] {
+            assert!(serde_json::from_value::<AbsolutePath>(serde_json::json!(path)).is_err());
+        }
+        let reason: ScratchError =
+            serde_json::from_value(serde_json::json!("permission denied")).unwrap();
+        assert_eq!(serde_json::to_value(reason).unwrap(), "permission denied");
+        assert!(serde_json::from_value::<ScratchError>(serde_json::json!("")).is_err());
     }
 }

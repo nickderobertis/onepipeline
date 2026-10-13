@@ -1609,6 +1609,14 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
         }
         // The firing driver's own stream: it is the process that released the run,
         // and the only one this record can prove let go. See `RunState::let_go_by`.
+        Some(journal::PipelineKind::ScratchRetained) => {
+            state.let_go_by = DriverClaim::of_stream(&event.stream);
+        }
+        Some(journal::PipelineKind::ScratchRemoved)
+            if payload.get("trigger").and_then(Value::as_str) == Some("success") =>
+        {
+            state.let_go_by = DriverClaim::of_stream(&event.stream);
+        }
         Some(journal::PipelineKind::RunHookFired) => {
             state.let_go_by = DriverClaim::of_stream(&event.stream);
         }

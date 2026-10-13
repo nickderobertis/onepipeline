@@ -343,12 +343,18 @@ pub enum PipelineKind {
     /// it the driver dispatches and publishes nothing, and ends once its
     /// dispatches in flight have settled unpublished. Entry 119 records it.
     DriverSuperseded,
+    /// Dispatch scratch was removed at success or on request.
+    ScratchRemoved,
+    /// Dispatch scratch was measured and kept at a non-success ending or pause.
+    ScratchRetained,
 }
 
 impl PipelineKind {
     /// The kind as it appears on the wire.
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::ScratchRemoved => "scratch-removed",
+            Self::ScratchRetained => "scratch-retained",
             Self::RunStarted => "run-started",
             Self::ConcurrentAcknowledged => "concurrent-acknowledged",
             Self::ConcurrentDeferred => "concurrent-deferred",
@@ -423,6 +429,8 @@ impl From<PipelineKind> for EventKind {
 
 /// Every kind, for the lookup above and for the contract's own list.
 pub const PIPELINE_KINDS: &[PipelineKind] = &[
+    PipelineKind::ScratchRemoved,
+    PipelineKind::ScratchRetained,
     PipelineKind::RunStarted,
     PipelineKind::ConcurrentAcknowledged,
     PipelineKind::ConcurrentDeferred,

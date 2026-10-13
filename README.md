@@ -424,13 +424,18 @@ run's observer graph alike, whether the run was launched attached or detached.
 It fails nothing: a node settles on the death exactly as above, and the observer
 is restarted as it always is.
 
+Scratch is removed when every node is done (`SETTLED`). Other endings and pauses
+keep it for inspection or retry; `status` and `results` list its recorded disk
+usage. Remove an ended run’s scratch with `onepipeline scratch discard <run-id>`.
+The journal, reports and launch record stay.
+
 Every node dispatch carries `ONEPIPELINE_NODE_SCRATCH_DIR` in its own
 environment: an absolute path to a directory that exists and is writable before
 the dispatch's first turn, unique to that dispatch — a retry, a requeue and a
 resumed pin of the same node each get their own — and never removed while that
 dispatch runs. Nothing beyond that is promised, and the spelling of the path least
 of all: no consumer may derive one path from another. Not in the approved contract
-yet either: open divergence 48.
+yet either: divergences 48 and 122 record the environment and scratch lifetime.
 
 The planner supervises over the channel:
 

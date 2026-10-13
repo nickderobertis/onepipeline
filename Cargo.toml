@@ -1262,6 +1262,11 @@ path = "tests/release_channel/main.rs"
 name = "stop_verdict"
 path = "tests/stop_verdict/main.rs"
 
+# Large scratch telemetry is a release workload, excluded from per-change tests.
+[[test]]
+name = "scratch_workload"
+path = "tests/scratch_workload/main.rs"
+
 # A CLI binary: optimize for a small, fast-starting artifact.
 [profile.release]
 strip = true

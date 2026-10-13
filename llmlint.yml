@@ -33,3 +33,11 @@ plugins:
   - "https://raw.githubusercontent.com/nickderobertis/dero-skills/main/skills/bootstrap/create-repo/assets/llmlint/languages/rust.llmlint.yml@1"
   - "https://raw.githubusercontent.com/nickderobertis/dero-skills/main/skills/bootstrap/create-repo/assets/llmlint/ci.llmlint.yml@1"
   - "https://raw.githubusercontent.com/nickderobertis/dero-skills/main/skills/bootstrap/create-repo/assets/llmlint/project-graph.llmlint.yml@1"
+rules:
+  - name: new_projects_keep_the_graph_uniform
+    override: true
+    files:
+      include: ["nx.json", "**/project.json"]
+      # Manager-approved exception: this task requires the release-only workload
+      # outside test selection. Its check still reaches format-check and lint.
+      exclude: ["tests/scratch_workload/project.json"]

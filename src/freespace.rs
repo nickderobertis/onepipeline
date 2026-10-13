@@ -300,13 +300,7 @@ fn share(free: u64, total: u64) -> String {
     } else {
         u128::from(free) * 100 / u128::from(total)
     };
-    format!(
-        "{:.1} GiB of {:.1} GiB ({share}% free)",
-        // Precision is a rendering: the lines are read by a person and a
-        // byte count carries nothing a tenth of a gibibyte does not.
-        free as f64 / GIB,
-        total as f64 / GIB
-    )
+    format!("{} of {} ({share}% free)", gib(free), gib(total))
 }
 
 /// What tells one filesystem from another on this host.
@@ -507,4 +501,9 @@ mod tests {
         };
         assert_eq!(empty.reading(), "0.0 GiB of 0.0 GiB (0% free)");
     }
+}
+
+/// Allocated byte counts use the same one-decimal GiB form in scratch and free-space notices.
+pub(crate) fn gib(bytes: u64) -> String {
+    format!("{:.1} GiB", bytes as f64 / GIB)
 }

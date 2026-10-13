@@ -1701,3 +1701,40 @@ fn to_json<T: serde::Serialize>(value: &T) -> Result<String> {
     serde_json::to_string_pretty(value)
         .map_err(|error| Error::Invalid(format!("the answer does not serialise: {error}")))
 }
+
+/// The removal or conservative refusal of `onepipeline scratch discard RUN`.
+#[derive(Debug)]
+pub struct ScratchDiscard {
+    pub(crate) outcome: crate::scratch::DiscardOutcome,
+}
+
+impl ScratchDiscard {
+    /// Zero for removal (including no scratch), one for partial failure, two for refusal.
+    pub fn exit_code(&self) -> i32 {
+        self.outcome.exit_code()
+    }
+}
+
+/// Remove only the dispatch scratch of an ended, undriven run named under `root`.
+///
+/// Unknown or path-like names, non-ended runs, live drivers and a symlink scratch root
+/// are refused without deletion. Links within scratch are removed without following them.
+///
+/// # Errors
+///
+/// A run's store cannot be read, its handover cannot be held, or its removal cannot be journalled.
+pub fn scratch_discard(root: &Path, run: &str) -> Result<ScratchDiscard> {
+    Ok(ScratchDiscard {
+        outcome: crate::scratch::discard(root, run)?,
+    })
+}
+
+/// The removal report on stdout, empty for a refusal.
+pub fn render_scratch_discard(discarded: &ScratchDiscard) -> String {
+    discarded.outcome.stdout()
+}
+
+/// The refusal or each directory removal failure on stderr, empty for complete removal.
+pub fn render_scratch_discard_errors(discarded: &ScratchDiscard) -> String {
+    discarded.outcome.stderr()
+}
