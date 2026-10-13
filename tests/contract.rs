@@ -10621,10 +10621,40 @@ fn review_discovery_is_the_recorded_contract_and_registered_payload() {
     .unwrap();
     assert_eq!(golden["schema_version"], block["results_schema_version"]);
     assert!(serde_json::from_value::<Command>(json!({"op":"review","typo":true})).is_err());
-    let mut wrong = json!({"node":"reader", "change_url":"https://github.com/owner/service/pull/1", "marker":"opaque", "unchanged":false,"cost":onevcs::ReadCost::default(),"comments":[]});
-    registry.check(&id, &wrong).unwrap();
-    wrong["cost"]["graphql_points"] = json!(-1);
-    assert!(registry.check(&id, &wrong).is_err());
+    // Exhaustive destructuring and the return signature hold both the field
+    // set and widths to the sibling type, even if a future field is omitted at
+    // its default by serde.
+    fn producer_cost(value: onevcs::ReadCost) -> (u32, u32) {
+        let onevcs::ReadCost {
+            graphql_points,
+            rest_requests,
+        } = value;
+        (graphql_points, rest_requests)
+    }
+    let maximum = onevcs::ReadCost {
+        graphql_points: u32::MAX,
+        rest_requests: u32::MAX,
+    };
+    assert_eq!(producer_cost(maximum), (u32::MAX, u32::MAX));
+    let serialized = serde_json::to_value(maximum).unwrap();
+    let producer_fields: BTreeSet<_> = serialized.as_object().unwrap().keys().collect();
+    let schema = &registry.schema(&id).unwrap()["properties"]["cost"];
+    let declared_fields: BTreeSet<_> = schema["properties"].as_object().unwrap().keys().collect();
+    assert_eq!(declared_fields, producer_fields);
+    let required: BTreeSet<String> = serde_json::from_value(schema["required"].clone()).unwrap();
+    assert_eq!(required, producer_fields.into_iter().cloned().collect());
+
+    let mut read = json!({"node":"reader", "change_url":"https://github.com/owner/service/pull/1", "marker":"opaque", "unchanged":false,"cost":serialized,"comments":[]});
+    registry.check(&id, &read).unwrap();
+    read["cost"] = serde_json::to_value(onevcs::ReadCost::default()).unwrap();
+    registry.check(&id, &read).unwrap();
+    for field in ["graphql_points", "rest_requests"] {
+        for invalid in [json!(-1), json!(u64::from(u32::MAX) + 1), json!(1.5)] {
+            read["cost"][field] = invalid;
+            assert!(registry.check(&id, &read).is_err(), "{field}: {read}");
+        }
+        read["cost"][field] = json!(0);
+    }
     for receipt in [
         onepipeline::verbs::ReviewReceipt::Performed { error: None },
         onepipeline::verbs::ReviewReceipt::Requested { request: 4 },

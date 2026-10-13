@@ -1785,7 +1785,9 @@ pub(crate) struct ReviewCommentMetadata {
 
 // onevcs owns the Rust type; its two unsigned metrics are described here because
 // that producer type carries no JsonSchema implementation. Contract tests validate
-// a serialized ReadCost through this document, keeping the projection honest.
+// both serialized extrema and rejected out-of-range values through this document.
+// Exhaustive producer destructuring and u32 signatures also hold the complete
+// field set and widths, including future serde-defaulted fields.
 fn read_cost_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     schemars::json_schema!({
         "type": "object",
