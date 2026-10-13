@@ -2600,3 +2600,87 @@ fn a_republication_onto_a_draft_recorded_as_another_branch_s_is_refused_and_surf
         .collect();
     assert_eq!(findings.len(), 1, "{findings:#?}");
 }
+
+/// A `readjust` of a run something drives goes to its driver as the planner-channel op,
+/// durably; a driver that cannot answer within the reply window leaves the verb with its
+/// requested receipt — `requested` and the request's id, exit 0, read without touching
+/// stdin — and the human line says so too.
+#[test]
+fn a_driven_readjust_the_driver_cannot_answer_in_time_returns_requested() {
+    let world = team_world("readjust-requested");
+    let seam = world.root.join("readjust-seam");
+    std::fs::create_dir_all(&seam).expect("the seam directory");
+    std::fs::write(seam.join("after-readjust"), "").expect("the stage is armed");
+    let world = world.with_env("ONEPIPELINE_REVIEW_FAILPOINT", &seam.to_string_lossy());
+    for node in ["a", "b"] {
+        world.script(&format!("{node}.work"), &format!("{node}'s change\n"));
+    }
+    world.script("b.wait", "");
+    let run = "requested";
+    let project = world.plan(
+        run,
+        &plan_of(run, vec![lifecycle("a", &[]), lifecycle("b", &["a"])]),
+    );
+    let driver = world
+        .cmd(&["start", &project, "--attach"])
+        .current_dir(&world.project)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the driver starts");
+    world.until("a to settle and b to be held", |world| {
+        !world.events_of(run, "node-settled").is_empty()
+            && world
+                .events_of(run, "node-dispatched")
+                .iter()
+                .any(|event| event["labels"]["node"] == "b")
+    });
+    let timed = world
+        .as_session(&world.session)
+        .with_env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1");
+    let output = timed.run_with_stdin(&["readjust", run, "--json"], "never read");
+    assert_eq!(output.code, 0, "{}\n{}", output.stdout, output.stderr);
+    let receipt: Value = serde_json::from_str(&output.stdout).expect("a receipt");
+    assert_eq!(receipt["state"], "requested", "{receipt}");
+    assert!(receipt["request"].is_number(), "{receipt}");
+    assert!(
+        std::fs::read_to_string(world.run_file(run, "channel/commands.jsonl"))
+            .is_ok_and(|commands| commands.contains("\"op\":\"readjust\"")),
+        "the readjustment was not requested durably"
+    );
+    let human = timed.run_with_stdin(&["readjust", run], "never read");
+    assert_eq!(human.code, 0, "{}", human.stderr);
+    assert!(
+        human.stdout.starts_with("readjust requested ("),
+        "{}",
+        human.stdout
+    );
+    std::fs::write(seam.join("after-readjust.release"), "").expect("the stage is released");
+    world.script("b.go", "");
+    let ended = driver.wait_with_output().expect("the driver ends");
+    assert!(ended.status.success(), "{ended:?}");
+}
+
+/// A `readjust` is requested alone: an envelope carrying it beside another op is refused
+/// naming why, and nothing of it is applied.
+#[test]
+fn a_readjust_beside_another_op_is_refused() {
+    let world = team_world("readjust-alone");
+    world.script("a.work", "a's change\n");
+    let run = "alone";
+    launched(&world, run, vec![lifecycle("a", &[])]);
+    let refused = reply(
+        &world,
+        run,
+        json!([{"op": "readjust"}, {"op": "add", "node": lifecycle("z", &[])}]),
+    );
+    assert_ne!(refused.code, 0, "{}", refused.stdout);
+    assert!(
+        format!("{}{}", refused.stdout, refused.stderr)
+            .contains("a readjustment must be requested alone"),
+        "{}\n{}",
+        refused.stdout,
+        refused.stderr
+    );
+    assert!(world.events_of(run, "edit-committed").is_empty());
+}

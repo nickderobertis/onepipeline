@@ -2312,7 +2312,9 @@ fn publish(
         // some other way.
         Err(crate::vcs::PublishRefused::NotThisDraft { change, reason }) => {
             let _ = tx.send(Message::Raise(Box::new(not_this_draft_surface(
-                &node.id, &change, &reason,
+                &node.id,
+                change.as_str(),
+                &reason,
             ))));
             publication_failed(format!(
                 "the republication onto {change} was refused, and nothing was pushed: {reason}"

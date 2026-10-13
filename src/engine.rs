@@ -3786,12 +3786,15 @@ fn reconcile_envelope(
                     crate::payload::ReadjustTrigger::Readjust,
                 )
             })
-            .and_then(|detection| match detection.failed() {
-                Some(failed) => Err(Error::Sibling {
-                    tool: "onevcs",
-                    message: failed,
-                }),
-                None => Ok(()),
+            .and_then(|detection| {
+                crate::review::failpoint("after-readjust")?;
+                match detection.failed() {
+                    Some(failed) => Err(Error::Sibling {
+                        tool: "onevcs",
+                        message: failed,
+                    }),
+                    None => Ok(()),
+                }
             });
         channel.answer_commands(&CommandOutcome {
             id: envelope.id,

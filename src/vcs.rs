@@ -310,6 +310,7 @@ pub(crate) fn republish(
     let adopt = change
         .parse::<onevcs::Url>()
         .map_err(|error| PublishRefused::Refused(sibling(format!("review draft URL: {error}"))))?;
+    let adopted = adopt.clone();
     let answer = onevcs::publish_with_cancellation(
         &providers(),
         token,
@@ -331,7 +332,7 @@ pub(crate) fn republish(
             if reason.contains("by this host's newest record of it") =>
         {
             Err(PublishRefused::NotThisDraft {
-                change: change.to_owned(),
+                change: adopted,
                 reason,
             })
         }
@@ -378,7 +379,7 @@ pub(crate) enum PublishRefused {
     /// Carries the change request and the sibling's own sentence.
     NotThisDraft {
         /// The change request the republication named.
-        change: String,
+        change: onevcs::Url,
         /// What the sibling said.
         reason: String,
     },
