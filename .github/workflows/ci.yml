@@ -651,13 +651,7 @@ jobs:
         if: failure() || cancelled()
         continue-on-error: true
         run: ps -ef
-      # After the process table, so the snapshot above is of the leg as it
-      # stopped rather than of these re-runs. This step says why any tests went
-      # unrun, then whether each failed test fails again on the build the step
-      # above archived, re-run from that archive so nothing can be compiled. It
-      # cannot change the verdict: that step has already failed the job, and
-      # `continue-on-error` keeps this one's exit out of it. 25 minutes is
-      # `just rerun-failed`'s bound, and the justfile says why.
+      # Capture the stopped processes before diagnostic re-runs change them.
       - name: Does each failed test fail again on this build
         if: failure() && steps.gate.outcome == 'failure'
         continue-on-error: true
@@ -666,6 +660,7 @@ jobs:
       # On a PR the change is not on the registry yet, so `--path .` is the only
       # way to install *this* revision.
       - name: Install (this revision)
+        # llmlint: ignore[diagnostics_error_or_absent] This reproduces an end-user install, which does not deny warnings; compiler-warning enforcement stays with the existing check jobs.
         run: cargo install --path . --locked
       - name: Smoke-test the installed binary
         run: bash scripts/smoke-published.sh --label "cargo install on $RUNNER_OS/$RUNNER_ARCH"
@@ -790,21 +785,14 @@ jobs:
         if: failure() || cancelled()
         continue-on-error: true
         run: ps -ef
-      # After the process table, so the snapshot above is of the leg as it
-      # stopped rather than of these re-runs. This step says why any tests went
-      # unrun, then whether each failed test fails again on the build the step
-      # above archived, re-run from that archive so nothing can be compiled. It
-      # cannot change the verdict: that step has already failed the job, and
-      # `continue-on-error` keeps this one's exit out of it. 25 minutes is
-      # `just rerun-failed`'s bound, and the justfile says why.
+      # Capture the stopped processes before diagnostic re-runs change them.
       - name: Does each failed test fail again on this build
         if: failure() && steps.gate.outcome == 'failure'
         continue-on-error: true
         timeout-minutes: 25
         run: just rerun-failed "$RUNNER_TEMP/quality-gate.log" "$RUNNER_TEMP/tests.tar.zst"
-      # On a PR the change is not on the registry yet, so `--path .` is the only
-      # way to install *this* revision.
       - name: Install (this revision)
+        # llmlint: ignore[diagnostics_error_or_absent] This reproduces an end-user install, which does not deny warnings; compiler-warning enforcement stays with the existing check jobs.
         run: cargo install --path . --locked
       - name: Smoke-test the installed binary
         run: bash scripts/smoke-published.sh --label "cargo install on $RUNNER_OS/$RUNNER_ARCH"

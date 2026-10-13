@@ -26,8 +26,8 @@
     "lint": {
       "command": "node node_modules/@biomejs/biome/bin/biome lint .github"
     },
-    "typecheck": {
-      "command": "node --check .github/macos-policy.mjs && node --check .github/workflow-graph.mjs && node --check .github/macos-budget.mjs"
+    "syntax-check": {
+      "command": "bash -c 'for file in .github/*.mjs .github/tests/*.mjs; do node --check \"$file\" || exit; done'"
     },
     "budgets": {
       "command": "bash .github/check-budgets.sh",
@@ -36,13 +36,17 @@
     },
     "check": {
       "executor": "nx:noop",
-      "dependsOn": ["format-check", "lint", "typecheck", "budgets"]
+      "dependsOn": ["format-check", "lint", "syntax-check", "budgets"]
     },
     "format-check": {
       "command": "node node_modules/@biomejs/biome/bin/biome format .github"
     },
     "format": {
       "command": "node node_modules/@biomejs/biome/bin/biome format --write .github"
+    },
+    "build": {
+      "executor": "nx:noop",
+      "dependsOn": ["syntax-check"]
     }
   }
 }

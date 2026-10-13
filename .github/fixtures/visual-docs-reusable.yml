@@ -159,6 +159,7 @@ jobs:
       - uses: nickderobertis/screencomp@v0
         with:
           version: ${{ inputs.screencomp-version }}
+      # llmlint: ignore-block[boundary_inputs_validated] This is an unmodified pinned upstream resolver retained as fixture data; screencomp owns validation here. The local graph validates its emitted architecture inventory before expanding it.
       - name: Resolve [capture].arches
         id: read
         shell: bash
@@ -226,6 +227,7 @@ jobs:
               }
             ]}')"
           echo "matrix=$combined" >>"$GITHUB_OUTPUT"
+      # llmlint: ignore-end[boundary_inputs_validated]
   capture:
     needs:
       - pages-preflight

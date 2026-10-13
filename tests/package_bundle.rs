@@ -101,6 +101,20 @@ fn release_packaging_retains_every_target_and_installs_darwin_before_publication
                 .unwrap()
         })
         .collect();
+    // Dispatch-local proof runs on Linux, so it declines a native Rosetta
+    // integration journey. The host-native subprocess journey drives the same
+    // builder/installer; these structural assertions hold the Mac job's runtime
+    // commands before publication without simulating Darwin execution.
+    let installer = std::fs::read_to_string(root.join("scripts/build-staged-release.py")).unwrap();
+    assert!(installer.contains(
+        "['arch', '-x86_64', str(interpreter)] if record['target'] == 'x86_64-apple-darwin'"
+    ));
+    assert!(runs.iter().any(|s| s.contains("exec arch -x86_64")));
+    assert!(builds
+        .iter()
+        .any(|s| s.contains("--target x86_64-apple-darwin")
+            && s.contains("--python \"$RUNNER_TEMP/python-x64\"")
+            && s.contains("--node \"$X64_NODE\"")));
     assert!(runs.iter().any(|s| s.contains("--install-rosetta")));
     assert!(builds.iter().any(|s| s.contains("--node \"$X64_NODE\"")));
     let script = std::fs::read_to_string(root.join("scripts/npm-build.mjs")).unwrap();

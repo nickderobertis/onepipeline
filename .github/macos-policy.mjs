@@ -5,10 +5,14 @@ import { pathToFileURL } from "node:url";
 function git(...args) {
   return execFileSync("git", args, { encoding: "utf8" });
 }
-const versionPattern = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+const versionSource = String.raw`(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?`;
+const versionPattern = new RegExp(`^(?:${versionSource})$`);
 function removeVersion(object) {
   if (Object.hasOwn(object, "version")) {
-    if (typeof object.version !== "string" || !versionPattern.test(object.version))
+    if (
+      typeof object.version !== "string" ||
+      versionPattern.exec(object.version)?.[0] !== object.version
+    )
       throw new Error("invalid version metadata");
     delete object.version;
   }
@@ -26,28 +30,35 @@ function canonical(object) {
 function semantic(path, text) {
   if (path.endsWith(".json")) {
     const value = JSON.parse(text);
+    const versionPresence = [Object.hasOwn(value, "version")];
     if (path === "package-lock.json") {
       removeVersion(value);
+      versionPresence.push(Object.hasOwn(value.packages?.[""] ?? {}, "version"));
       if (value.packages?.[""]) removeVersion(value.packages[""]);
     } else removeVersion(value);
-    return JSON.stringify(canonical(value));
+    return JSON.stringify([versionPresence, canonical(value)]);
   }
   // Python's standard TOML parser proves that dependencies and all other fields
   // are unchanged; deleting arbitrary lines containing "version" would not.
-  const script = String.raw`import json,sys,tomllib,re
+  const script = `import json,sys,tomllib,re
 v=tomllib.loads(sys.stdin.read())
 p=sys.argv[1]
+presence=[]
 def remove_version(obj):
+ presence.append('version' in obj)
  if 'version' in obj:
-  if not isinstance(obj['version'],str) or not re.fullmatch(r'\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?',obj['version']): raise ValueError('invalid version metadata')
+  if not isinstance(obj['version'],str) or not re.fullmatch(sys.argv[2],obj['version']): raise ValueError('invalid version metadata')
   del obj['version']
 if p=='Cargo.lock':
  for package in v.get('package',[]):
   if package.get('name')=='onepipeline' and 'source' not in package: remove_version(package)
 elif p=='Cargo.toml': remove_version(v.get('package',{}))
 else: remove_version(v.get('project',{}))
-print(json.dumps(v,sort_keys=True))`;
-  return execFileSync("python3", ["-c", script, path], { input: text, encoding: "utf8" });
+print(json.dumps([presence,v],sort_keys=True))`;
+  return execFileSync("python3", ["-c", script, path, versionSource], {
+    input: text,
+    encoding: "utf8",
+  });
 }
 export function classify(
   event,
@@ -60,13 +71,18 @@ export function classify(
     return { isReleaseOnly: false, macosRequired: false, reason: "non-PR event" };
   try {
     const pr = event.pull_request;
-    if (!pr?.head?.repo?.full_name || !event.repository?.full_name || !pr.head.ref)
+    if (
+      [pr?.head?.repo?.full_name, event.repository?.full_name, pr?.head?.ref].some(
+        (value) => typeof value !== "string" || !value,
+      )
+    )
       return required("unreadable PR identity");
     if (
       pr.head.repo.full_name !== event.repository.full_name ||
       !pr.head.ref.startsWith("release-plz-")
     )
       return required("ordinary or fork PR");
+    git("check-ref-format", "--branch", pr.head.ref);
     base = git("rev-parse", "--verify", "--end-of-options", `${base}^{commit}`).trim();
     head = git("rev-parse", "--verify", "--end-of-options", `${head}^{commit}`).trim();
     const paths = git("diff", "--name-only", "--no-renames", base, head)
@@ -128,8 +144,12 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       for (let i = 0; i < args.length; i += 2) {
         if (!["--event", "--base", "--head"].includes(args[i]) || !args[i + 1])
           throw new Error("usage: classify --event JSON --base REF --head REF");
-        options[args[i].slice(2)] = args[i + 1];
+        const key = args[i].slice(2);
+        if (Object.hasOwn(options, key)) throw new Error(`duplicate option --${key}`);
+        options[key] = args[i + 1];
       }
+      if (!["event", "base", "head"].every((key) => Object.hasOwn(options, key)))
+        throw new Error("usage: classify --event JSON --base REF --head REF");
       let event;
       try {
         event = JSON.parse(readFileSync(options.event, "utf8"));
@@ -138,6 +158,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       }
       console.log(JSON.stringify(classify(event, options.base, options.head)));
     } else if (mode === "carrier") {
+      if (args.length) throw new Error("usage: carrier takes no arguments");
       console.log(
         carrier({
           changes: process.env.CHANGES_RESULT,

@@ -732,11 +732,11 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-darwin
-          path: staged-release/wheels/**/*.whl
+          path: staged-release/publish-wheels/*.whl
       - uses: actions/upload-artifact@v4
         with:
           name: npm-darwin
-          path: staged-release/npm-artifacts/**/*.tgz
+          path: staged-release/publish-npm/*.tgz
       - uses: actions/upload-artifact@v4
         with:
           name: archives-darwin

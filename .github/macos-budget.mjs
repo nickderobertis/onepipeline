@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { report } from "@onebudgetspec/sdk";
+import { validateTelemetry } from "./telemetry.mjs";
 import { digest } from "./workflow-graph.mjs";
 try {
   const args = process.argv.slice(2);
@@ -10,7 +11,7 @@ try {
     !["jobs-per-run", "runs-per-change"].includes(args[1])
   )
     throw new Error("usage: --metric jobs-per-run|runs-per-change --telemetry JSON");
-  const telemetry = JSON.parse(readFileSync(args[3], "utf8"));
+  const telemetry = validateTelemetry(JSON.parse(readFileSync(args[3], "utf8")));
   if (
     telemetry.schema_version !== 1 ||
     telemetry.source_digest !== digest() ||

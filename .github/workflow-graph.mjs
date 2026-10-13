@@ -1,7 +1,11 @@
 import { createHash } from "node:crypto";
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse } from "yaml";
+import { validateWorkflow } from "./workflow-schema.mjs";
+import { pinnedCallee } from "./pinned-callee.mjs";
 import { Lexer, Parser, Evaluator, data } from "@actions/expressions";
 
 export const reusable =
@@ -11,7 +15,10 @@ export function workflows(root = process.cwd()) {
     readdirSync(join(root, ".github/workflows"))
       .filter((n) => /\.ya?ml$/.test(n))
       .sort()
-      .map((n) => [n, parse(readFileSync(join(root, ".github/workflows", n), "utf8"))]),
+      .map((n) => [
+        n,
+        validateWorkflow(parse(readFileSync(join(root, ".github/workflows", n), "utf8"))),
+      ]),
   );
 }
 export function digest(root = process.cwd()) {
@@ -81,11 +88,100 @@ function resolve(v, context, status) {
     return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, resolve(x, context, status)]));
   return v;
 }
+const producerCache = new Map();
+function producerOutputs(kind, job, context, root, scenario) {
+  const step = job.steps.find((step) => step.id === (kind === "guard" ? "check" : "read"));
+  if (!step?.run || !job.outputs) throw new Error(`unresolved producer ${kind}`);
+  const secrets = {
+    CARGO_REGISTRY_TOKEN: scenario.cratePublish === "false" ? "" : "present",
+    RELEASE_PLZ_TOKEN: "present",
+  };
+  const env = resolve(step.env ?? {}, { ...context, secrets });
+  const key = JSON.stringify([
+    root,
+    step.run,
+    env,
+    job.outputs,
+    kind === "arches" ? readFileSync(join(root, "screencomp.toml"), "utf8") : null,
+  ]);
+  if (producerCache.has(key)) return producerCache.get(key);
+  const scratch = mkdtempSync(
+    join(process.env.ONEPIPELINE_NODE_SCRATCH_DIR ?? tmpdir(), "workflow-producer-"),
+  );
+  try {
+    const output = join(scratch, "output");
+    const bin = join(scratch, "bin");
+    mkdirSync(bin);
+    if (kind === "arches") {
+      const arches = JSON.parse(
+        execFileSync(
+          "python3",
+          [
+            "-c",
+            "import json,tomllib; print(json.dumps(tomllib.load(open('screencomp.toml','rb'))['capture']['arches']))",
+          ],
+          { cwd: root, encoding: "utf8" },
+        ),
+      );
+      // Only the third-party screencomp CLI is doubled; the pinned workflow's
+      // resolver and jq validation run verbatim against the committed config.
+      writeFileSync(
+        join(bin, "screencomp"),
+        `#!/usr/bin/env node\nprocess.stdout.write(${JSON.stringify(JSON.stringify(arches))});\n`,
+        { mode: 0o755 },
+      );
+    }
+    execFileSync("bash", ["-eo", "pipefail", "-c", step.run], {
+      cwd: root,
+      encoding: "utf8",
+      env: {
+        PATH: `${bin}:${process.env.PATH}`,
+        HOME: process.env.HOME,
+        ...env,
+        GITHUB_OUTPUT: output,
+      },
+    });
+    const values = {};
+    for (const line of readFileSync(output, "utf8").trim().split("\n")) {
+      const found = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+      if (!found || Object.hasOwn(values, found[1]))
+        throw new Error(`invalid producer output: ${kind}`);
+      values[found[1]] = found[2];
+    }
+    const outputs = resolve(job.outputs, { ...context, steps: { [step.id]: { outputs: values } } });
+    if (
+      kind === "guard" &&
+      Object.values(outputs).some((value) => !["true", "false"].includes(value))
+    )
+      throw new Error("invalid guard producer output");
+    if (kind === "arches") {
+      const combined = JSON.parse(outputs.matrix);
+      if (
+        !Array.isArray(combined.include) ||
+        !combined.include.length ||
+        combined.include.some((leg) => !["x86_64", "arm64", "aarch64"].includes(leg.arch))
+      )
+        throw new Error("unsupported arches producer output");
+    }
+    producerCache.set(key, outputs);
+    return outputs;
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
 export function matrix(spec, context) {
-  if (!spec) return [{}];
+  if (spec === undefined) return [{}];
   spec = resolve(spec, context);
   if (!spec || typeof spec !== "object" || Array.isArray(spec))
     throw new Error("unresolved matrix");
+  for (const field of ["include", "exclude"]) {
+    if (
+      spec[field] !== undefined &&
+      (!Array.isArray(spec[field]) ||
+        spec[field].some((entry) => !entry || typeof entry !== "object" || Array.isArray(entry)))
+    )
+      throw new Error(`invalid matrix ${field}: expected mapping objects`);
+  }
   let legs = [{}];
   const axes = Object.entries(spec).filter(([key]) => !["include", "exclude"].includes(key));
   for (const [key, choices] of axes) {
@@ -97,9 +193,10 @@ export function matrix(spec, context) {
     (leg) => !(spec.exclude ?? []).some((ex) => Object.entries(ex).every(([k, v]) => leg[k] === v)),
   );
   if (!axes.length) legs = [];
+  const original = [...legs];
   for (const inc of spec.include ?? []) {
     const compatible = axes.length
-      ? legs.filter((leg) => axes.every(([key]) => !(key in inc) || leg[key] === inc[key]))
+      ? original.filter((leg) => axes.every(([key]) => !(key in inc) || leg[key] === inc[key]))
       : [];
     if (compatible.length) for (const leg of compatible) Object.assign(leg, inc);
     else legs.push({ ...inc });
@@ -116,11 +213,48 @@ export function triggered(workflow, scenario) {
       : Object.hasOwn(on, scenario.eventName);
   if (!trigger) return false;
   const settings = on?.[scenario.eventName];
+  if (scenario.eventName === "schedule") return true;
+  const allowed = {
+    push: ["branches", "tags"],
+    pull_request: ["types", "branches"],
+    release: ["types"],
+    workflow_run: ["types", "workflows"],
+    workflow_dispatch: ["inputs"],
+    repository_dispatch: ["types"],
+  }[scenario.eventName];
+  if (!allowed) throw new Error(`unsupported event routing: ${scenario.eventName}`);
+  for (const key of Object.keys(settings ?? {})) {
+    if (!allowed.includes(key)) throw new Error(`unsupported trigger filter: ${key}`);
+    if (key === "inputs") continue;
+    if (
+      !Array.isArray(settings[key]) ||
+      settings[key].some((value) => typeof value !== "string" || !value || /[*?[\]{}!]/.test(value))
+    )
+      throw new Error(`unsupported trigger pattern: ${key}`);
+  }
   if (settings?.types && !settings.types.includes(scenario.event.action)) return false;
+  if (scenario.eventName === "pull_request") {
+    if (
+      !settings?.types &&
+      scenario.event.action &&
+      !["opened", "synchronize", "reopened"].includes(scenario.event.action)
+    )
+      return false;
+    if (settings?.branches) {
+      const branch = scenario.event.pull_request?.base?.ref;
+      if (typeof branch !== "string") throw new Error("unresolved PR base branch");
+      if (!settings.branches.includes(branch)) return false;
+    }
+  }
   if (scenario.eventName === "push") {
-    const branch = scenario.ref.replace("refs/heads/", "");
-    if (settings?.branches && !settings.branches.includes(branch)) return false;
-    if (scenario.ref.startsWith("refs/tags/") && !settings?.tags) return false;
+    const tag = scenario.ref.startsWith("refs/tags/");
+    const branch = scenario.ref.startsWith("refs/heads/");
+    if (!tag && !branch) throw new Error("unresolved push ref");
+    if (tag && settings?.branches && !settings.tags) return false;
+    if (branch && settings?.tags && !settings.branches) return false;
+    const filter = tag ? settings?.tags : settings?.branches;
+    if (filter && !filter.includes(scenario.ref.replace(tag ? "refs/tags/" : "refs/heads/", "")))
+      return false;
   }
   if (
     scenario.eventName === "workflow_run" &&
@@ -130,7 +264,32 @@ export function triggered(workflow, scenario) {
     return false;
   return true;
 }
+function changesOutputs(job, context, scenario) {
+  const steps = {};
+  for (const step of job.steps ?? []) {
+    const affected = step.run?.includes("scripts/nx-affected.sh");
+    const classification = step.run?.includes(".github/macos-policy.mjs classify");
+    if (!affected && !classification) continue;
+    const emitted = [...step.run.matchAll(/echo\s+"([A-Za-z_][A-Za-z0-9_]*)=/g)];
+    if (!step.id || emitted.length !== 1) throw new Error("unresolved changes output producer");
+    let value = scenario.crate ?? "true";
+    if (classification) {
+      const field = step.run.match(
+        /JSON\.parse\(process\.argv\[1\]\)\.([A-Za-z_][A-Za-z0-9_]*)/,
+      )?.[1];
+      if (!field || typeof scenario.classification?.[field] !== "boolean")
+        throw new Error("unresolved changes output classification");
+      value = String(scenario.classification[field]);
+    }
+    steps[step.id] = { outputs: { [emitted[0][1]]: value } };
+  }
+  const outputs = resolve(job.outputs ?? {}, { ...context, steps });
+  if (Object.values(outputs).some((value) => !["true", "false"].includes(value)))
+    throw new Error("unresolved changes output declaration");
+  return outputs;
+}
 export function runGraph(workflow, scenario, root = process.cwd(), prefix = "") {
+  validateWorkflow(workflow);
   const github = {
     event_name: scenario.eventName,
     event: scenario.event,
@@ -163,45 +322,37 @@ export function runGraph(workflow, scenario, root = process.cwd(), prefix = "") 
         Boolean(evaluate(condition, context, status)) &&
         (/\b(always|failure|cancelled|success)\(/.test(condition) || status.success);
       let outputs = {};
-      if (key === "changes")
-        outputs = {
-          crate: scenario.crate ?? "true",
-          macos: String(scenario.classification.macosRequired),
-        };
-      if (key === "guard") outputs = { publish: "true", enabled: "true" };
-      if (key === "arches") {
-        const config = readFileSync(join(root, "screencomp.toml"), "utf8");
-        const arches = JSON.parse(config.match(/arches\s*=\s*(\[[^\]]+\])/)[1]);
-        const projects = JSON.parse(context.inputs.projects ?? "[]");
-        const actual = projects.length
-          ? projects
-          : [{ id: "", current: "shots/current", verify: "shots/verify" }];
-        outputs.matrix = JSON.stringify({
-          include: arches.flatMap((arch) =>
-            actual.map((p) => ({
-              arch,
-              project: p.id,
-              current: p.current ?? `shots/current/${p.id}`,
-              verify: p.verify ?? `shots/verify/${p.id}`,
-              manifest: p.manifest ?? (p.id ? `shots/baseline/${p.id}/${arch}.json` : ""),
-              gallery_title: p["gallery-title"] ?? context.inputs["gallery-title"],
-            })),
-          ),
-        });
-      }
+      if (key === "changes") outputs = changesOutputs(job, context, scenario);
+      if (["guard", "arches"].includes(key))
+        outputs = producerOutputs(key, job, context, root, scenario);
       const result = scenario.results?.[key] ?? (selected ? "success" : "skipped");
       // Declaration-derived outputs retain matrix inventories on intentional skips;
       // dependency status still prevents those rows from requesting a runner.
       context.needs[key] = { result, outputs };
       if (job.uses) {
         if (job.uses !== reusable) throw new Error(`unresolved reusable workflow ${job.uses}`);
-        const nested = parse(
-          readFileSync(join(root, ".github/fixtures/visual-docs-reusable.yml"), "utf8"),
-        );
+        const nested = pinnedCallee(job.uses, root);
         const inputs = Object.fromEntries(
           Object.entries(nested.on.workflow_call.inputs).map(([k, v]) => [k, v.default ?? ""]),
         );
-        Object.assign(inputs, resolve(job.with ?? {}, context));
+        const supplied = resolve(job.with ?? {}, context);
+        const declarations = nested.on.workflow_call.inputs;
+        for (const key of Object.keys(supplied))
+          if (!Object.hasOwn(declarations, key)) throw new Error(`unknown reusable input: ${key}`);
+        for (const [key, declaration] of Object.entries(declarations)) {
+          if (declaration.required && !Object.hasOwn(supplied, key))
+            throw new Error(`missing required reusable input: ${key}`);
+          const input = Object.hasOwn(supplied, key)
+            ? supplied[key]
+            : (declaration.default ??
+              (declaration.type === "boolean" ? false : declaration.type === "number" ? 0 : ""));
+          if (
+            typeof input !== declaration.type ||
+            (declaration.type === "number" && !Number.isFinite(input))
+          )
+            throw new Error(`invalid reusable input type: ${key}`);
+          inputs[key] = input;
+        }
         const children = runGraph(nested, { ...scenario, inputs }, root, `${prefix}${key} / `);
         rows.push(...children.map((row) => ({ ...row, selected: selected && row.selected })));
         continue;

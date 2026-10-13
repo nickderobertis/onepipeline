@@ -760,7 +760,7 @@ fn a_hard_coded_scratch_repository_is_recognised() {
 }
 
 #[test]
-fn the_classified_pr_lane_preserves_the_three_former_mac_proofs() {
+fn the_pr_and_opted_in_diagnostic_lanes_preserve_the_three_former_mac_proofs() {
     let ci = workflow("ci.yml");
     let lane = &ci["jobs"]["macos"];
     assert_eq!(lane["runs-on"].as_str(), Some("macos-latest"));
@@ -768,14 +768,29 @@ fn the_classified_pr_lane_preserves_the_three_former_mac_proofs() {
         condition(lane).as_deref(),
         Some("needs.changes.outputs.macos == 'true'")
     );
-    let text = serde_norway::to_string(lane).unwrap();
-    for proof in [
-        "just check-cross",
-        "cargo install --path . --locked",
-        "documented=$(grep",
-        "git show FETCH_HEAD:scripts/smoke-published.sh",
-    ] {
-        assert!(text.contains(proof), "Mac lane omitted {proof}");
+    // Dispatch-local checks cannot initiate a paid manual Mac probe. These
+    // structural assertions preserve the diagnostic's same real install/smoke
+    // commands; native runner execution remains GitHub's third-party boundary.
+    for key in ["macos", "macos-diagnostic"] {
+        let lane = &ci["jobs"][key];
+        assert_eq!(lane["runs-on"].as_str(), Some("macos-latest"));
+        let commands = lane["steps"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .filter_map(|step| step["run"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        for proof in [
+            "just check-cross",
+            "cargo install --path . --locked",
+            "documented=$(grep",
+            "git show FETCH_HEAD:scripts/smoke-published.sh",
+            "bash scripts/smoke-published.sh",
+            "bash \"$RUNNER_TEMP/smoke-published.sh\"",
+        ] {
+            assert!(commands.contains(proof), "{key} omitted {proof}");
+        }
     }
     for key in ["cross", "install", "install-documented"] {
         assert!(!serde_norway::to_string(&ci["jobs"][key])
