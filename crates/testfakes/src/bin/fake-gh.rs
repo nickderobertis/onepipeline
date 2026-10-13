@@ -1512,7 +1512,7 @@ fn activity(dir: &Path, opened: Option<&Opened>, kind: Kind) -> Vec<Activity> {
     let Some(opened) = opened else {
         return Vec::new();
     };
-    let id = opened.number.to_string();
+    let id = change_key(dir, opened);
     let running = reported_draft_running(dir, &id, state_of_opened(dir, opened));
     Activity::scripted(dir, kind)
         .into_iter()

@@ -791,7 +791,20 @@ fn a_draft_whose_head_has_a_check_suite_in_progress_is_held_until_it_is_green() 
 /// A poll must not mix absent required checks with activity from the next phase.
 #[test]
 fn a_drafts_activity_finishes_only_after_its_next_check_read() {
+    activity_finishes_after_check_read(false);
+}
+
+/// Repository-local change numbers preserve the same phase across activity reads.
+#[test]
+fn repository_local_draft_activity_finishes_only_after_its_next_check_read() {
+    activity_finishes_after_check_read(true);
+}
+
+fn activity_finishes_after_check_read(repo_numbering: bool) {
     let world = World::new("draft-poll");
+    if repo_numbering {
+        world.script("gh.repo-numbering", "1");
+    }
     world.repository("change-open", &[]);
     world.script("service.work", "the worker wrote this\n");
     world.script("gh.checks", GREEN);
@@ -802,7 +815,6 @@ fn a_drafts_activity_finishes_only_after_its_next_check_read() {
         .run_from(&world.project, &["start", &plan, "--attach"])
         .exited(0)
         .settled();
-    assert_eq!(host_holds(&world, 1), "draft");
 
     world.script("gh.draft.finishes-after", "1000000");
     world.script("gh.checks.draft", "build completed success advisory");
@@ -834,6 +846,7 @@ fn a_drafts_activity_finishes_only_after_its_next_check_read() {
         ])
     };
     let before = view();
+    assert_eq!(before["isDraft"], true, "{before}");
     assert_eq!(before["statusCheckRollup"].as_array().unwrap().len(), 1);
     let head = before["headRefOid"].as_str().unwrap();
     let runs = format!("repos/owner/service/actions/runs?head_sha={head}&per_page=100");
