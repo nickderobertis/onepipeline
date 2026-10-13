@@ -69,6 +69,10 @@ fn host(world: &World, run: &str, nodes: &[&str]) -> FileHost {
             }))
             .expect("the real publication supplied this change request"),
         );
+        state.heads.insert(
+            onevcs::ChangeId((offset + 1).to_string()),
+            settlement["branch"].as_str().unwrap().to_owned(),
+        );
     }
     FileHost::seeded(world.fakes.join("review-host.json"), state).expect("host seeded")
 }
@@ -136,6 +140,380 @@ fn reply(world: &World, run: &str, commands: Value) -> crate::harness::Run {
         &["reply", run],
         &json!({"version": 3, "commands": commands}).to_string(),
     )
+}
+
+#[test]
+fn discovery_batches_an_alias_and_its_origin_as_one_repository() {
+    let world = team_world("review-alias-batch");
+    // llmlint: ignore-block[e2e_not_mocked] This task requires scripted agent subprocesses and onevcs-testing at the remote host boundary. The compiled onepipeline and linked onevcs still create and read the drafts over real git; real agents and GitHub belong to the later op-review journey.
+    world.script("a.work", "first draft\n");
+    world.script("b.work", "second draft\n");
+    // llmlint: ignore-end[e2e_not_mocked]
+    let mut second = lifecycle("b", &[]);
+    second["repo"] = json!("github.com/owner/service");
+    let mut plan = plan_of("aliases", vec![lifecycle("a", &[]), second]);
+    plan["concurrency"] = json!(1);
+    let project = world.plan("aliases", &plan);
+    world
+        .run_from(&world.project, &["start", &project, "--attach"])
+        .exited(0);
+    let host = host(&world, "aliases", &["a", "b"]);
+    add(&host, 1, comment("alias-a", CommentKind::Conversation, 1));
+    add(&host, 2, comment("alias-b", CommentKind::Conversation, 2));
+    review(&world, "aliases");
+    assert_eq!(surfaces(&world, "aliases").len(), 2);
+    let calls = host.ledger().unwrap();
+    let batches: Vec<_> = calls
+        .iter()
+        .filter(|call| call.method == "review_standings")
+        .collect();
+    assert_eq!(batches.len(), 1);
+    assert_eq!(
+        batches[0].changes,
+        vec![ChangeId("1".to_owned()), ChangeId("2".to_owned())]
+    );
+    assert!(calls.iter().all(|call| call.method != "review_comments"));
+}
+
+#[test]
+fn discovery_keeps_distinct_roots_in_separate_batches() {
+    let world = team_world("review-root-batches");
+    let checkout = world.root.join("service");
+    crate::harness::git(&world, &checkout, &["branch", "alternate"]);
+    crate::harness::git(&world, &checkout, &["push", "origin", "alternate"]);
+    // llmlint: ignore-block[e2e_not_mocked] The required scripted workers only supply commits. This journey drives the real binary, onevcs, repositories and remote-double query ledger, without substituting discovery or batching.
+    world.script("a.work", "first draft\n");
+    world.script("b.work", "second draft\n");
+    // llmlint: ignore-end[e2e_not_mocked]
+    let mut second = lifecycle("b", &[]);
+    second["base_branch"] = json!("alternate");
+    let mut plan = plan_of("roots", vec![lifecycle("a", &[]), second]);
+    plan["concurrency"] = json!(1);
+    let project = world.plan("roots", &plan);
+    world
+        .run_from(&world.project, &["start", &project, "--attach"])
+        .exited(0);
+    let host = host(&world, "roots", &["a", "b"]);
+    add(&host, 1, comment("root-a", CommentKind::Conversation, 1));
+    add(&host, 2, comment("root-b", CommentKind::Conversation, 2));
+    review(&world, "roots");
+    assert_eq!(surfaces(&world, "roots").len(), 2);
+    let calls = host.ledger().unwrap();
+    let batches: Vec<_> = calls
+        .iter()
+        .filter(|call| call.method == "review_standings")
+        .collect();
+    assert_eq!(batches.len(), 2);
+    assert!(batches.iter().all(|call| call.changes.len() == 1));
+}
+
+#[test]
+fn discovery_retains_a_successful_repository_when_another_read_fails() {
+    let world = team_world("review-repository-failure");
+    world.extra_repository("other");
+    // llmlint: ignore-block[e2e_not_mocked] This task prescribes subprocess workers and the remote double. Both repositories and their publications are real, and only the host's answer is seeded for the failure under test.
+    world.script("a.work", "first draft\n");
+    world.script("b.work", "second draft\n");
+    // llmlint: ignore-end[e2e_not_mocked]
+    let mut second = lifecycle("b", &[]);
+    second["repo"] = json!("github.com/owner/other");
+    let mut plan = plan_of("repositories", vec![lifecycle("a", &[]), second]);
+    plan["concurrency"] = json!(1);
+    let project = world.plan("repositories", &plan);
+    world
+        .run_from(&world.project, &["start", &project, "--attach"])
+        .exited(0);
+    let first = host(&world, "repositories", &["a"]);
+    let state = first.state().unwrap();
+    // llmlint: ignore[e2e_not_mocked] The specified remote double supplies the successful repository's host state; no production review code is mocked.
+    let first =
+        FileHost::seeded(world.fakes.join("review-host.owner.service.json"), state).unwrap();
+    // llmlint: ignore[e2e_not_mocked] An empty remote-double repository is the host refusing the requested draft; the same query is parsed by real onevcs.
+    let failed = FileHost::seeded(
+        world.fakes.join("review-host.owner.other.json"),
+        HostState::default(),
+    )
+    .unwrap();
+    add(
+        &first,
+        1,
+        comment("repository-a", CommentKind::Conversation, 1),
+    );
+    let output = world.run(&["review", "repositories", "--json"]);
+    assert_eq!(output.code, 1, "{}\n{}", output.stdout, output.stderr);
+    let records = world.events_of("repositories", "review-comments-read");
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["payload"]["node"], "a");
+    assert_eq!(surfaces(&world, "repositories").len(), 1);
+    assert_eq!(
+        first
+            .ledger()
+            .unwrap()
+            .iter()
+            .filter(|call| call.method == "review_standings")
+            .count(),
+        1
+    );
+    assert_eq!(
+        failed
+            .ledger()
+            .unwrap()
+            .iter()
+            .filter(|call| call.method == "review_standings")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn discovery_reports_an_unregistered_host_and_recovers_on_the_registered_host() {
+    let world = team_world("review-unregistered");
+    launched(&world, "unregistered");
+    let host = host(&world, "unregistered", &["a", "b"]);
+    add(
+        &host,
+        1,
+        comment("unregistered-a", CommentKind::Conversation, 1),
+    );
+    let empty_home = world.root.join("empty-onevcs-home");
+    std::fs::create_dir(&empty_home).unwrap();
+    let unregistered = world
+        .as_session(&world.session)
+        .with_env("ONEVCS_HOME", &empty_home.to_string_lossy());
+    let refused = unregistered.run(&["review", "unregistered", "--json"]);
+    assert_eq!(refused.code, 1, "{}\n{}", refused.stdout, refused.stderr);
+    assert!(world
+        .events_of("unregistered", "review-comments-read")
+        .is_empty());
+    assert!(surfaces(&world, "unregistered").is_empty());
+    assert!(host.ledger().unwrap().is_empty());
+    review(&world, "unregistered");
+    assert_eq!(surfaces(&world, "unregistered").len(), 1);
+}
+
+#[test]
+fn discovery_refuses_legacy_or_damaged_draft_records_without_reading_the_host() {
+    for (field, value) in [
+        ("base", Value::Null),
+        (
+            "change_url",
+            json!("https://github.com/owner/foreign/pull/1"),
+        ),
+    ] {
+        let world = team_world(&format!("review-damaged-{field}"));
+        launched(&world, "damaged");
+        let host = host(&world, "damaged", &["a", "b"]);
+        let mut events = world.journal("damaged");
+        if field == "base" {
+            // A retained pre-stack journal can lack the session records and the
+            // settlement base newer readers use to reconstruct the root.
+            events.retain(|event| event["source"] != "vcs");
+        }
+        for event in &mut events {
+            if event["kind"] == "node-settled" {
+                event["payload"][field] = value.clone();
+            }
+        }
+        let text = events
+            .iter()
+            .map(|event| format!("{}\n", serde_json::to_string(event).unwrap()))
+            .collect::<String>();
+        std::fs::write(world.run_file("damaged", "events.jsonl"), text).unwrap();
+        let checkpoint = world.run_file("damaged", "checkpoint.json");
+        if checkpoint.exists() {
+            std::fs::remove_file(checkpoint).unwrap();
+        }
+        let refused = world.run(&["review", "damaged", "--json"]);
+        assert_eq!(refused.code, 1, "{}\n{}", refused.stdout, refused.stderr);
+        assert!(world
+            .events_of("damaged", "review-comments-read")
+            .is_empty());
+        assert!(surfaces(&world, "damaged").is_empty());
+        assert!(host.ledger().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn standings_adapter_round_trips_host_states_and_every_check_verdict_through_real_onevcs() {
+    use onevcs::RemoteHost;
+    let world = team_world("review-standings-wire");
+    launched(&world, "wire");
+    let host = host(&world, "wire", &["a", "b"]);
+    let original = host.state().unwrap();
+    for conclusion in [
+        Some("success"),
+        Some("failure"),
+        Some("skipped"),
+        None,
+        Some("none-required"),
+        Some("heterogeneous"),
+    ] {
+        let mut state = original.clone();
+        for change in &state.changes {
+            state.awaiting_checks.insert(change.id.clone());
+            state.bodies.insert(change.id.clone(), format!("preserved body for {}\n<!-- onepipeline:stack -->\nold base\n<!-- /onepipeline:stack -->", change.id.0));
+            if conclusion != Some("none-required") {
+                state.head_checks.insert(
+                    change.head_sha.clone(),
+                    vec![onevcs::Check {
+                        name: "ci".to_owned(),
+                        status: if conclusion.is_some() {
+                            "completed"
+                        } else {
+                            "in_progress"
+                        }
+                        .to_owned(),
+                        conclusion: conclusion.map(|conclusion| {
+                            if conclusion == "heterogeneous" {
+                                if change.id.0 == "1" {
+                                    "success"
+                                } else {
+                                    "failure"
+                                }
+                            } else {
+                                conclusion
+                            }
+                            .to_owned()
+                        }),
+                        required: true,
+                        head: Some(change.head_sha.clone()),
+                        url: None,
+                        started_at: None,
+                        completed_at: None,
+                    }],
+                );
+            }
+        }
+        // llmlint: ignore[e2e_not_mocked] This task mandates the remote double. These are the host's states, sent through the adapter and parsed by the real onevcs subprocess; the adapter and classifier under test are never substituted.
+        let mut host = FileHost::seeded(world.fakes.join("review-host.json"), state).unwrap();
+        let urls: Vec<_> = original
+            .changes
+            .iter()
+            .map(|change| change.url.as_str())
+            .collect();
+        let ids: Vec<_> = original
+            .changes
+            .iter()
+            .map(|change| change.id.clone())
+            .collect();
+        for stage in 0..3 {
+            if stage == 1 {
+                host.retarget_by_person(&ids[0], "parent").unwrap();
+                host.merge_by_person(
+                    &ids[0],
+                    onevcs_testing::PersonMerge::Squash,
+                    AT,
+                    onevcs_testing::HeadAfter::Kept,
+                )
+                .unwrap();
+                host.close_unmerged(&ids[1]).unwrap();
+            }
+            if stage == 2 {
+                let mut state = host.state().unwrap();
+                state.deleted_branches.insert("main".to_owned());
+                // llmlint: ignore[e2e_not_mocked] The required host double now reports the closed draft's deleted base. The real reader must retain that recovery signal in its typed answer.
+                host = FileHost::seeded(world.fakes.join("review-host.json"), state).unwrap();
+            }
+            let expected = host.change_standings("wire-root", &ids).unwrap();
+            assert!(
+                expected.standings.iter().all(|standing| standing.draft),
+                "awaiting_checks must seed drafts even without a caller-owned draft reason"
+            );
+            let command = world.cmd_on(
+                &crate::harness::onevcs_binary(),
+                &[
+                    "change",
+                    "standings",
+                    "service",
+                    "--root",
+                    "wire-root",
+                    "--change",
+                    urls[0],
+                    "--change",
+                    urls[1],
+                    "--json",
+                ],
+            );
+            let output = world.run_on(command, "standings wire read");
+            assert_eq!(output.code, 0, "{}\n{}", output.stdout, output.stderr);
+            let actual: onevcs::ChangeStandings = serde_json::from_str(&output.stdout).unwrap();
+            assert_eq!(
+                actual, expected,
+                "check conclusion {conclusion:?}, stage {stage}"
+            );
+        }
+    }
+    let query = world
+        .invocations()
+        .into_iter()
+        .filter(|call| call["tool"] == "gh")
+        .flat_map(|call| call["args"].as_array().unwrap().clone())
+        .filter_map(|arg| {
+            arg.as_str()
+                .and_then(|arg| arg.strip_prefix("query="))
+                .map(str::to_owned)
+        })
+        .find(|query| query.contains("c0: pullRequest(number:"))
+        .expect("the real onevcs reader issued its standings query");
+    for (query, message) in [
+        (
+            query.replace("pullRequest(number: ", "pullRequest(number:"),
+            "no complete change requests",
+        ),
+        (
+            query.replace("c0: pullRequest(number: 1)", "c0: pullRequest(number: 0)"),
+            "invalid change request",
+        ),
+        (
+            query.replace("c1: pullRequest", "c7: pullRequest"),
+            "unknown alias",
+        ),
+        (
+            query.trim_end_matches('}').to_owned(),
+            "unbalanced delimiters",
+        ),
+        (
+            query.replace("query($owner", "mutation($owner"),
+            "not the repository standings operation",
+        ),
+    ] {
+        let field = format!("query={query}");
+        let malformed = world.cmd_on(
+            &crate::harness::double("fake-gh"),
+            &[
+                "api",
+                "graphql",
+                "-f",
+                "owner=owner",
+                "-f",
+                "name=service",
+                "-f",
+                &field,
+            ],
+        );
+        let output = world.run_on(malformed, "malformed standings query");
+        assert_ne!(output.code, 0);
+        assert!(output.stderr.contains(message), "{}", output.stderr);
+    }
+    std::fs::write(world.fakes.join("review-host.json"), "broken host document").unwrap();
+    let output = world.run_on(
+        world.cmd_on(
+            &crate::harness::onevcs_binary(),
+            &[
+                "change",
+                "standings",
+                "service",
+                "--root",
+                "wire-root",
+                "--change",
+                original.changes[0].url.as_str(),
+                "--json",
+            ],
+        ),
+        "unreadable standings host",
+    );
+    assert_ne!(output.code, 0);
+    assert!(output.stdout.is_empty());
 }
 
 #[test]
@@ -246,6 +624,15 @@ fn discovers_all_comment_kinds_once_per_revision_without_starting_work_or_writin
         }
     }
     assert_eq!(world.events_of(run, "review-comments-read").len(), 2);
+    let calls = host.ledger().unwrap();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call.method == "review_standings")
+            .count(),
+        1
+    );
+    assert!(calls.iter().all(|call| call.method != "review_comments"));
     if let Some(path) = std::env::var_os("ONEPIPELINE_CAPTURE_REVIEW_RECORD") {
         let record = world.events_of(run, "review-comments-read")[0].clone();
         std::fs::write(path, serde_json::to_string(&record).unwrap()).unwrap();
@@ -253,7 +640,7 @@ fn discovers_all_comment_kinds_once_per_revision_without_starting_work_or_writin
     for record in world.events_of(run, "review-comments-read") {
         assert_eq!(
             record["payload"]["cost"],
-            json!({"graphql_points":1,"rest_requests":0})
+            json!({"graphql_points":0,"rest_requests":0})
         );
         assert!(record["payload"]["comments"]
             .as_array()
@@ -436,7 +823,7 @@ fn state_comes_from_current_host_replies_and_rework_provenance() {
 }
 
 #[test]
-fn refuses_unknown_or_foreign_runs_and_journals_successful_reads_before_a_host_failure() {
+fn refuses_unknown_or_foreign_runs_and_keeps_a_failed_repository_read_atomic() {
     let world = team_world("review-refusals");
     assert_eq!(
         world
@@ -490,9 +877,8 @@ fn refuses_unknown_or_foreign_runs_and_journals_successful_reads_before_a_host_f
     );
     assert!(world.events_of("refusals", "finding-recorded").is_empty());
     let read = world.events_of("refusals", "review-comments-read");
-    assert_eq!(read.len(), 1);
-    assert_eq!(read[0]["payload"]["node"], "a");
-    assert_eq!(surfaces(&world, "refusals").len(), 1);
+    assert!(read.is_empty());
+    assert!(surfaces(&world, "refusals").is_empty());
 }
 
 #[test]
@@ -973,6 +1359,10 @@ fn a_mixed_run_reads_only_the_continued_draft_and_the_unlanded_lineage_head() {
     state.ledger.clear();
     let settlement = settled(&cold, "mixed", "s2");
     state.changes.push(serde_json::from_value(json!({"id":"4", "url":settlement["change_url"], "head_sha":settlement["head"], "base":settlement["base"]})).unwrap());
+    state.heads.insert(
+        onevcs::ChangeId("4".to_owned()),
+        settlement["branch"].as_str().unwrap().to_owned(),
+    );
     // llmlint: ignore[e2e_not_mocked] This mixed-run fixture reseeds the task's required onevcs-testing remote double so its host records distinguish superseded and current draft URLs. The binary's onevcs reader stays real; node op-review owns the live GitHub/board onepipeline-smoke journey.
     let host = FileHost::seeded(world.fakes.join("review-host.json"), state).unwrap();
     for number in 1..=4 {
@@ -1001,7 +1391,7 @@ fn a_mixed_run_reads_only_the_continued_draft_and_the_unlanded_lineage_head() {
     let ledger = host.ledger().unwrap();
     let asked: Vec<_> = ledger
         .iter()
-        .filter(|call| call.method == "review_comments")
+        .filter(|call| call.method == "review_standings")
         .flat_map(|call| call.changes.iter().map(|id| id.0.as_str()))
         .collect();
     assert_eq!(asked, ["1", "4"]);

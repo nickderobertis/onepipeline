@@ -10529,3 +10529,43 @@ comes from the discovery journey.
 The planner's dependency ruling retains `onevcs` 0.48.1 and `onevcs-testing` 0.17.0:
 those releases already carry this API; testing 0.18.0 requires onevcs 0.49.0 and
 would resolve a second engine under this manifest's unchanged pin.
+
+## 123. Review discovery reads each repository's drafts together — OPEN
+
+**What the contract says.** Entry 122 reads feedback per draft. The approved
+readjustment task replaces those calls in `onepipeline review` with the sibling's
+combined standings and review read; `review-comments-read` keeps its existing
+payload shape.
+
+**Proposal (approved by the readjustment task).** The explicit discovery pass
+uses `onevcs::review_standings` over the drafts of each repository and root,
+passing no review marker so discovery can derive replies and rework state from
+the full feedback. Discovery takes each draft's feedback from that answer and
+journals it with the unchanged registered payload. A repository read that fails
+contributes no feedback from that repository, and the performed receipt reports
+the failure. View reads keep their existing per-draft operation.
+
+```json
+{
+  "verb": "review",
+  "discovery_read": "review_standings",
+  "record_kind": "review-comments-read",
+  "record_shape_changed": false,
+  "view_read": "review_comments"
+}
+```
+
+**What this build does.** `tests/e2e/review.rs` drives the compiled binary,
+real linked onevcs and real git with the GraphQL response delegated to
+onevcs-testing's remote double. The discovery journey asserts one
+`review_standings` ledger entry for two drafts and no `review_comments` entry,
+while retaining the feedback surfaces. The repository-read refusal journey
+asserts an unsuccessful batched read produces neither feedback records nor
+comment surfaces. The mixed-lineage journey holds the requested draft set. Additional journeys
+hold alias/origin normalization, separate roots, successful discovery alongside
+a failed repository, an unregistered host followed by recovery, and retained
+records lacking a root or naming a foreign change request. The adapter journey
+round-trips open, merged and closed states (including a deleted base), body,
+head, draft state and every checks verdict through the real onevcs CLI against
+the remote double's typed standings, and refuses a malformed query.
+`tests/contract.rs` holds the block above and the unchanged payload registration.

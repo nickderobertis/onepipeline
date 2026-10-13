@@ -531,7 +531,7 @@ fn newest_of(state: &RunState, id: &str) -> String {
 
 /// The root a settled node's work stands on: its own `base_branch`, the root of
 /// the stack it was drafted on, or the base its session opened on.
-fn root_of(state: &RunState, id: &str, seen: &mut BTreeSet<String>) -> Option<String> {
+pub(crate) fn root_of(state: &RunState, id: &str, seen: &mut BTreeSet<String>) -> Option<String> {
     if !seen.insert(id.to_owned()) {
         return None;
     }

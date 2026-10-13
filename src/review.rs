@@ -150,6 +150,86 @@ pub(crate) fn read(state: &RunState) -> Result<BTreeMap<String, Vec<Comment>>> {
     Ok(found)
 }
 
+/// One repository read shared by every draft's discovery in this pass.
+fn discovery_reads(state: &RunState) -> Vec<(String, String, Result<onevcs::ReviewRead>)> {
+    let mut repositories = BTreeMap::<(String, String), Vec<(String, String)>>::new();
+    let mut identities = BTreeMap::<String, std::result::Result<String, String>>::new();
+    let mut reads = Vec::new();
+    for (node, url) in drafts(state) {
+        let repo = state.graph.get(node).and_then(|node| node.repo.clone());
+        let root = crate::stack::root_of(state, node, &mut BTreeSet::new());
+        match repo.zip(root) {
+            Some((repo, root)) => {
+                let identity = identities.entry(repo.clone()).or_insert_with(|| {
+                    crate::vcs::repository_identity(&repo).map_err(|error| error.to_string())
+                });
+                match identity {
+                    Ok(identity) => repositories
+                        .entry((identity.clone(), root))
+                        .or_default()
+                        .push((node.to_owned(), url)),
+                    Err(error) => reads.push((
+                        node.to_owned(),
+                        url,
+                        Err(Error::Sibling {
+                            tool: "onevcs",
+                            message: error.clone(),
+                        }),
+                    )),
+                }
+            }
+            None => reads.push((
+                node.to_owned(),
+                url,
+                Err(Error::Invalid(format!(
+                    "draft {node} has no recorded repository and root to read its standings"
+                ))),
+            )),
+        }
+    }
+    for ((repo, root), drafts) in repositories {
+        let targets = drafts
+            .iter()
+            .map(|(_, url)| {
+                url.parse()
+                    .map(|change| onevcs::ReviewTarget {
+                        change,
+                        since: None,
+                    })
+                    // llmlint: ignore[changed_behavior_has_e2e] `drafts` takes URLs only through RunState::known_change_url, whose StatedLanding parser has already validated their URL spelling. This residual conversion refusal cannot be reached by a plan or journal; the damaged-record journey exercises a syntactically valid foreign change reference at onevcs's repository boundary instead.
+                    .map_err(|error| Error::Invalid(format!("change URL {url}: {error}")))
+            })
+            .collect::<Result<Vec<_>>>();
+        let answer = targets.and_then(|changes| {
+            crate::vcs::review_standings(&onevcs::ReviewStandingsRequest {
+                repo,
+                root,
+                changes,
+            })
+        });
+        match answer {
+            Ok(answer) => {
+                for ((node, url), read) in drafts.into_iter().zip(answer.reads) {
+                    reads.push((node, url, Ok(read)));
+                }
+            }
+            Err(error) => {
+                for (node, url) in drafts {
+                    reads.push((
+                        node,
+                        url,
+                        Err(Error::Sibling {
+                            tool: "onevcs",
+                            message: error.to_string(),
+                        }),
+                    ));
+                }
+            }
+        }
+    }
+    reads
+}
+
 fn metadata(comment: &ReviewComment) -> crate::payload::ReviewCommentMetadata {
     let (path, line, thread) = match &comment.kind {
         CommentKind::ReviewThread {
@@ -213,8 +293,9 @@ pub(crate) fn pass(paths: &RunPaths, state: &RunState, journal: &mut Journal) ->
         }
     }
     let mut failures = Vec::new();
-    for (node, url) in drafts(state) {
-        let read = match crate::vcs::review_comments(&url) {
+    for (node, url, read) in discovery_reads(state) {
+        let node = node.as_str();
+        let read = match read {
             Ok(read) => read,
             Err(error) => {
                 failures.push(format!("{node} ({url}): {error}"));

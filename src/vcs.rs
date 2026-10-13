@@ -73,6 +73,22 @@ fn providers() -> Providers<'static> {
     Providers::real()
 }
 
+/// Standings and review feedback from the sibling's single repository read.
+pub(crate) fn review_standings(
+    request: &onevcs::ReviewStandingsRequest,
+) -> Result<onevcs::ReviewStandings> {
+    onevcs::review_standings(&providers(), request).map_err(refusal)
+}
+
+/// Normalize a repository spelling before collecting a batched host read.
+pub(crate) fn repository_identity(repo: &str) -> Result<String> {
+    providers()
+        .vcs
+        .resolve_identity(repo)
+        .map(|identity| identity.origin)
+        .map_err(refusal)
+}
+
 /// A full host snapshot, by URL, including on a host with no local session.
 pub(crate) fn review_comments(change_url: &str) -> Result<onevcs::ReviewRead> {
     onevcs::review_comments(

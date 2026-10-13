@@ -10595,6 +10595,12 @@ fn review_discovery_is_the_recorded_contract_and_registered_payload() {
         event::PipelineKind,
     };
     let block = divergence_block("122.");
+    let batched = divergence_block("123.");
+    assert_eq!(batched["verb"], block["verb"]);
+    assert_eq!(batched["discovery_read"], "review_standings");
+    assert_eq!(batched["view_read"], "review_comments");
+    assert_eq!(batched["record_kind"], block["record_kind"]);
+    assert_eq!(batched["record_shape_changed"], false);
     assert_eq!(block["verb"], "review");
     assert_eq!(
         serde_json::to_value(Command::Review {}).unwrap(),

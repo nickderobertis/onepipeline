@@ -1951,6 +1951,18 @@ fn review_read(args: &[String], dir: &Path) -> ExitCode {
         }
     }
     let field = |key: &str| fields.get(key).map(String::as_str);
+    if fields.len() == 3
+        && field("owner").is_some()
+        && field("name").is_some()
+        && field("query").is_some_and(|query| query.contains("c0: pullRequest(number:"))
+    {
+        return standings_read(
+            field("query").unwrap(),
+            field("owner").unwrap(),
+            field("name").unwrap(),
+            dir,
+        );
+    }
     let required = [
         "query",
         "owner",
@@ -2238,3 +2250,162 @@ fn review_wire(read: &onevcs::ReviewRead) -> serde_json::Value {
     json!({"data": {"rateLimit": {"cost": read.cost.graphql_points}, "repository": {"pullRequest": {"url": read.change_url, "reviewThreads": page(threads.into_values().collect()), "comments": page(conversation), "reviews": page(reviews)}}}})
 }
 // llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
+
+/// Serve aliased standings through the sibling's remote double, retaining its ledger.
+fn standings_read(query: &str, owner: &str, name: &str, dir: &Path) -> ExitCode {
+    use onevcs::{ChangeId, RemoteHost};
+    let mut delimiters = Vec::new();
+    for character in query.chars() {
+        match character {
+            '{' | '(' => delimiters.push(character),
+            '}' | ')' => {
+                let expected = if character == '}' { '{' } else { '(' };
+                if delimiters.pop() != Some(expected) {
+                    return fake::refuse("standings query has unbalanced delimiters");
+                }
+            }
+            _ => {}
+        }
+    }
+    if !delimiters.is_empty() {
+        return fake::refuse("standings query has unbalanced delimiters");
+    }
+    if !query.starts_with("query($owner: String!, $name: String!)")
+        || !query.contains("rateLimit { cost } repository(owner: $owner, name: $name) {")
+        || !query.contains("url number state isDraft body baseRefName headRefName headRefOid")
+        || !query.contains("statusCheckRollup")
+    {
+        return fake::refuse("standings query is not the repository standings operation");
+    }
+    let mut changes = Vec::new();
+    for (at, fragment) in query.split("pullRequest(number: ").skip(1).enumerate() {
+        let Some(number) = fragment
+            .split(')')
+            .next()
+            .and_then(|number| number.parse::<NonZeroU64>().ok())
+        else {
+            return fake::refuse("standings query names an invalid change request");
+        };
+        if !query.contains(&format!(" c{at}: pullRequest(number: {number})")) {
+            return fake::refuse("standings query has an unknown alias");
+        }
+        changes.push(ChangeId(number.to_string()));
+    }
+    if changes.is_empty() {
+        return fake::refuse("standings query names no complete change requests");
+    }
+    let repository_host = dir.join(format!(
+        "review-host.{}.{}.json",
+        fake::segment(owner),
+        fake::segment(name)
+    ));
+    let path = if repository_host.is_file() {
+        repository_host
+    } else {
+        dir.join("review-host.json")
+    };
+    let host = match onevcs_testing::FileHost::create(path) {
+        Ok(host) => host,
+        Err(error) => return fake::refuse(&error.to_string()),
+    };
+    // The root is used only to classify landings in the double. GitHub's wire
+    // carries the merged base and the real reader classifies against its request.
+    let answer = if query.contains("reviewThreads(") {
+        host.review_standings(
+            "main",
+            &changes
+                .iter()
+                .cloned()
+                .map(|change| (change, None))
+                .collect::<Vec<_>>(),
+        )
+        .map(|answer| (answer.standings, answer.reads, answer.cost))
+    } else {
+        host.change_standings("main", &changes)
+            .map(|answer| (answer.standings, Vec::new(), answer.cost))
+    };
+    match answer {
+        Ok((standings, reads, cost)) => {
+            println!("{}", standings_wire(&standings, &reads, cost));
+            ExitCode::SUCCESS
+        }
+        Err(error) => fake::refuse(&error.to_string()),
+    }
+}
+
+/// Translate sibling-owned standings and verdicts into GitHub's response fields.
+fn standings_wire(
+    standings: &[onevcs::ChangeStanding],
+    reads: &[onevcs::ReviewRead],
+    cost: onevcs::ReadCost,
+) -> serde_json::Value {
+    use onevcs::{ChangeState, ChecksVerdict};
+    use serde_json::{json, Value};
+    let page = |nodes: Vec<Value>| json!({"pageInfo": {"hasNextPage": false}, "nodes": nodes});
+    let mut repository =
+        json!({"defaultBranchRef": {"name": "main"}, "rulesets": page(Vec::new())});
+    let mut protections = Vec::new();
+    let mut required =
+        std::collections::BTreeMap::<String, std::collections::BTreeSet<String>>::new();
+    for standing in standings {
+        let names = match &standing.checks {
+            ChecksVerdict::Pending { waiting } => waiting.clone(),
+            ChecksVerdict::Failed { failed } => failed.clone(),
+            ChecksVerdict::PassedWithSkipped { skipped } => skipped.clone(),
+            ChecksVerdict::Passed => vec!["verified".to_owned()],
+            ChecksVerdict::NoneRequired => Vec::new(),
+            _ => panic!("the linked double emitted an unknown check verdict"),
+        };
+        required
+            .entry(standing.base.clone())
+            .or_default()
+            .extend(names);
+    }
+    for (at, standing) in standings.iter().enumerate() {
+        let (state, commit, merged_at, deleted) = match &standing.state {
+            ChangeState::Open => ("OPEN", None, None, false),
+            ChangeState::Closed { base_deleted } => ("CLOSED", None, None, *base_deleted),
+            ChangeState::Merged {
+                commit, merged_at, ..
+            } => ("MERGED", Some(commit), merged_at.as_ref(), false),
+            _ => panic!("the linked double emitted an unknown change state"),
+        };
+        let (names, conclusion, status) = match &standing.checks {
+            ChecksVerdict::Pending { waiting } => (waiting.clone(), Value::Null, "IN_PROGRESS"),
+            ChecksVerdict::Failed { failed } => (failed.clone(), json!("FAILURE"), "COMPLETED"),
+            ChecksVerdict::PassedWithSkipped { skipped } => {
+                (skipped.clone(), json!("SKIPPED"), "COMPLETED")
+            }
+            ChecksVerdict::Passed => (vec!["verified".to_owned()], json!("SUCCESS"), "COMPLETED"),
+            ChecksVerdict::NoneRequired => (Vec::new(), Value::Null, "COMPLETED"),
+            _ => panic!("the linked double emitted an unknown check verdict"),
+        };
+        let declared = &required[&standing.base];
+        protections.push(json!({"databaseId": at + 1, "pattern": standing.base, "requiredStatusCheckContexts": declared}));
+        let contexts = declared.iter().map(|name| {
+            let (status, conclusion) = if names.contains(name) {
+                (status, conclusion.clone())
+            } else {
+                ("COMPLETED", json!("SUCCESS"))
+            };
+            json!({"__typename": "CheckRun", "name": name, "status": status, "conclusion": conclusion, "isRequired": true})
+        }).collect::<Vec<_>>();
+        let mut pull = json!({
+            "url": standing.url, "state": state, "isDraft": standing.draft,
+            "body": standing.body, "baseRefName": standing.base,
+            "headRefName": standing.head_branch, "headRefOid": standing.head,
+            "mergedAt": merged_at, "mergeCommit": commit.map(|commit| json!({"oid": commit})),
+            "baseRef": if deleted { Value::Null } else { json!({"name": standing.base}) },
+            "headRef": {"target": {"statusCheckRollup": {"contexts": {"nodes": contexts}}}},
+        });
+        if let Some(read) = reads.get(at) {
+            let wire = review_wire(read);
+            for field in ["reviewThreads", "comments", "reviews"] {
+                pull[field] = wire["data"]["repository"]["pullRequest"][field].clone();
+            }
+        }
+        repository[format!("c{at}")] = pull;
+    }
+    repository["branchProtectionRules"] = page(protections);
+    json!({"data": {"rateLimit": {"cost": cost.graphql_points}, "repository": repository}})
+}
