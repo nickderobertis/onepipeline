@@ -1536,6 +1536,7 @@ dependencies = [
  "onetaskgraph-local-md",
  "onetaskgraph-plugin-api",
  "onevcs",
+ "onevcs-testing",
  "serde",
  "serde_json",
  "serde_norway",

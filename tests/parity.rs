@@ -468,6 +468,12 @@ fn results_reports_each_nodes_outcome() {
         &verbs::render_results(&results),
         EXIT_SUCCESS,
     );
+    same(
+        "results RUN --json",
+        &fixture.binary(&["results", RUN, "--json"]),
+        &line(verbs::render_results_json(&results).expect("the JSON view reads")),
+        EXIT_SUCCESS,
+    );
 }
 
 #[test]
@@ -1582,5 +1588,29 @@ fn the_unpublished_host_keeps_every_path_it_writes_inside_windows_max_path() {
         length <= WINDOWS_MAX_PATH,
         "{} would be {length} characters on a Windows runner, past MAX_PATH ({WINDOWS_MAX_PATH})",
         path.display()
+    );
+}
+
+#[test]
+fn review_uses_the_sdk_verb_and_refuses_an_undriven_run_owned_by_another_session() {
+    let sdk = Fixture::new("review-sdk");
+    let cli = Fixture::new("review-cli");
+    let _env = sdk.enter();
+    let receipt = verbs::review(&sdk.paths(), SESSION, Duration::from_secs(1))
+        .expect("the settled run is reviewed");
+    same(
+        "review RUN --json",
+        &cli.binary(&["review", RUN, "--json"]),
+        &line(verbs::render_review(&receipt, true).unwrap()),
+        receipt.exit_code(),
+    );
+    let error = verbs::review(&sdk.paths(), STRANGER, Duration::from_secs(1))
+        .expect_err("the foreign session is refused");
+    refused(
+        "review RUN as another session",
+        &cli.command(STRANGER, &["review", RUN, "--json"])
+            .output()
+            .unwrap(),
+        &error,
     );
 }

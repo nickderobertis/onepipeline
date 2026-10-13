@@ -73,6 +73,16 @@ fn providers() -> Providers<'static> {
     Providers::real()
 }
 
+/// A full host snapshot, by URL, including on a host with no local session.
+pub(crate) fn review_comments(change_url: &str) -> Result<onevcs::ReviewRead> {
+    onevcs::review_comments(
+        &providers(),
+        &onevcs::ChangeRef::Url(change_url.to_owned()),
+        None,
+    )
+    .map_err(refusal)
+}
+
 /// How a refusal this module composed says a session open met a **base
 /// conflict**, written at the **head** of the message.
 ///
