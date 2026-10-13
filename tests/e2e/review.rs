@@ -603,6 +603,71 @@ fn a_cold_host_restores_rework_provenance_from_the_store_without_review_state_ke
             );
         }
     }
+    world.script("a-rework-2.work", "the second rework\n");
+    let output = reply(
+        &cold,
+        run,
+        json!([{"op":"rework","id":"a","replacement":"a-rework-2",
+            "reason":"new feedback","instruction":"Fix comment 502",
+            "comments":[{"id":"502","url":"https://github.com/owner/service/pull/1#issuecomment-502"}]}]),
+    );
+    assert_eq!(output.code, 0, "{}", output.stderr);
+    assert_eq!(cold.run(&["adopt", run]).code, 0);
+    let projected = cold
+        .store_tasks(&project)
+        .into_iter()
+        .find(|task| task["item"]["metadata"]["onepipeline.id"] == "a")
+        .unwrap()["item"]["metadata"]
+        .clone();
+    assert_eq!(projected["onepipeline.node"], "a-rework-2");
+    assert_eq!(projected["onepipeline.rework"]["comments"][0]["id"], "502");
+    assert_eq!(projected["onepipeline.rework"]["reason"], "new feedback");
+    assert_ne!(
+        projected["onepipeline.rework"],
+        original["onepipeline.rework"]
+    );
+    let hot = cold.run(&["results", run, "--json"]);
+    assert_eq!(hot.code, 0, "{}", hot.stderr);
+    let hot: Value = serde_json::from_str(&hot.stdout).unwrap();
+    let hot_comments = hot["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["id"] == "a-rework-2")
+        .unwrap()["comments"]
+        .clone();
+    let fresh = cold.on_host("fourth-review-host");
+    let output = fresh.run_from(&fresh.project, &["start", &project, "--attach"]);
+    assert_eq!(output.code, 0, "{}\n{}", output.stdout, output.stderr);
+    let fresh_results = fresh.run(&["results", run, "--json"]);
+    assert_eq!(fresh_results.code, 0, "{}", fresh_results.stderr);
+    let fresh_results: Value = serde_json::from_str(&fresh_results.stdout).unwrap();
+    let fresh_comments = fresh_results["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["id"] == "a")
+        .unwrap()["comments"]
+        .clone();
+    assert_eq!(hot_comments, fresh_comments);
+    for (id, expected) in [("501", "pending"), ("502", "being-reworked")] {
+        let comment = fresh_comments
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|comment| comment["id"] == id)
+            .unwrap();
+        assert_eq!(comment["state"], expected);
+    }
+    for (host, count) in [(&cold, 2), (&fresh, 1)] {
+        review(host, run);
+        review(host, run);
+        let found = surfaces(host, run);
+        assert_eq!(found.len(), count);
+        assert!(found
+            .iter()
+            .any(|surface| surface["correlation"].as_str().unwrap().contains("501:")));
+    }
 }
 
 #[test]

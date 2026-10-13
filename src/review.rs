@@ -100,17 +100,16 @@ fn derive(
     }
     if let Some(provenance) = state
         .continued_reworks
-        .get(lineage)
+        .get(node)
         .filter(|record| record.comments.iter().any(|named| named.id == comment.id.0))
     {
         return State::BeingReworked {
             rework: provenance.replacement.clone(),
         };
     }
-    if let Some(rework) = state.reworks.iter().find_map(|(parent, record)| {
-        (root(state, parent) == lineage
-            && record.comments.iter().any(|named| named.id == comment.id.0))
-        .then_some(record.replacement.clone())
+    if let Some(rework) = state.reworks.values().find_map(|record| {
+        (record.replacement == node && record.comments.iter().any(|named| named.id == comment.id.0))
+            .then_some(record.replacement.clone())
     }) {
         return State::BeingReworked { rework };
     }

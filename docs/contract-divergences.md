@@ -10407,13 +10407,17 @@ host, by the planner's ruling; results --json instead returns its read error.
 
 **Proposal.** Adopt the dispatch's review discovery contract: marked host replies
 answer the current revision's SHA-256 key (`<lineage root>:<comment id>:<updated_at>`),
-with `label=declined` recording a decline; lineage `onepipeline.rework` provenance
-names comments being reworked only while no marked reply to that comment exists
+with `label=declined` recording a decline; the current lineage head's
+`onepipeline.rework` provenance names comments being reworked only while no
+marked reply to that comment exists
 for **any** revision; other comments except `ours` are pending. This is the
 planner's ruling over the dispatch's ambiguous prose: an edit after a reply must
 be pending even when old rework provenance still names the comment. A new rework
 of an edited comment consequently reads pending until its current reply posts;
-this keeps new reviewer feedback visible without adding review state. A pending
+this keeps new reviewer feedback visible without adding review state. The
+planner further ruled that only the current head's provenance derives this state:
+a later rework replaces the store record, so an unanswered comment named only by
+an older rework becomes pending again on warm and cold hosts alike. A pending
 revision is surfaced once as non-blocking `review-comment`, attributed by `workstream`
 and correlation `review-comment:<id>:<updated_at>`. The message carries the node,
 change URL, author, location, comment URL, body, and the `rework` and `decline` ops.
@@ -10492,6 +10496,9 @@ stops at both failpoints and holds queue/journal recovery.
 `a_cold_host_restores_rework_provenance_from_the_store_without_review_state_keys`
 loses the original runs root and `ONEVCS_HOME`, checks both cold views and discovery,
 and continues on a third host to hold the two preserved store values byte-for-byte.
+It then reworks that continued lineage naming the other comment, checks fresh
+provenance replaces the preserved values, and continues on a fourth host: the
+first comment is pending on both hosts and is surfaced once on each.
 `continuation_refuses_malformed_rework_provenance_at_the_store_boundary` refuses
 unknown or blank provenance and a missing replacement;
 `an_edit_after_a_rework_reply_is_pending_and_surfaced_again_including_on_a_cold_host`
