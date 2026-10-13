@@ -1525,7 +1525,7 @@ fn assembled_run(template: &RunPaths, root: &std::path::Path, id: &str, session:
         (template.launch(), paths.launch()),
         (template.summary(), paths.summary()),
     ] {
-        let read = std::fs::read_to_string(&from)
+        let read = after_document_handles_close(|| std::fs::read_to_string(&from))
             .unwrap_or_else(|error| panic!("{} cannot be read: {error}", from.display()));
         let mut held: Value = serde_json::from_str(&read).expect("a document");
         held["run_id"] = json!(id);
@@ -1540,6 +1540,97 @@ fn assembled_run(template: &RunPaths, root: &std::path::Path, id: &str, session:
     paths
 }
 
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// Windows may refuse an atomic replacement or an open while another handle
+/// is closing. Wait for that filesystem state, under the harness's existing
+/// deadline; unrelated errors still fail at their first attempt.
+fn after_document_handles_close<T>(
+    mut operation: impl FnMut() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    let mut result = None;
+    assert!(
+        waited(|| {
+            match operation() {
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotFound
+                    ) =>
+                {
+                    false
+                }
+                answer => {
+                    result = Some(answer);
+                    true
+                }
+            }
+        }),
+        "the document's open handles never released it"
+    );
+    result.expect("the completed filesystem operation")
+}
+
+/// CreateFileW's FILE_SHARE_DELETE rule is imposed at the filesystem boundary:
+/// a held reader first refuses replacement, then closes before the next attempt.
+/// https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew
+#[test]
+fn the_fixture_waits_for_a_windows_reader_to_release_a_document() {
+    let world = World::new("unwatched-sharing-refusal");
+    world.script("build.wait", "hold");
+    let template = paths_of(&world, &held(&world, "sharingtemplate"));
+    let summary = template.summary();
+    let replacement = summary.with_extension("held.tmp");
+    std::fs::copy(&summary, &replacement).expect("the real document is staged");
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+        options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+    }
+    let mut reader = Some(
+        options
+            .open(&summary)
+            .expect("the reader holds the document"),
+    );
+    let mut attempts = 0;
+    // llmlint: ignore-block[tests_mirror_real_usage] a regression of the suite's own fixture,
+    // as tests/AGENTS.md permits. The dispatch requires Windows sharing behavior through an OS
+    // seam on Linux; only that refusal is imposed, with an actual held reader. The retry then
+    // performs the real rename and the fixture is assembled from a compiled CLI run.
+    after_document_handles_close(|| {
+        attempts += 1;
+        if reader.is_some() {
+            let refusal = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+            drop(reader.take());
+            return Err(refusal);
+        }
+        std::fs::rename(&replacement, &summary)
+    })
+    .expect("the replacement lands after the reader closes");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    assert_eq!(attempts, 2, "the sharing refusal was not exercised");
+    assert!(
+        !replacement.exists(),
+        "the successful retry did not perform the real rename"
+    );
+    let assembled = assembled_run(&template, &world.runs, "sharing-copy", "another-planner");
+    assert_eq!(document(&assembled)["run_id"], "sharing-copy");
+    assert_eq!(document(&assembled)["session"], "another-planner");
+    let failed = after_document_handles_close(|| {
+        Err::<(), _>(std::io::Error::from(std::io::ErrorKind::InvalidInput))
+    });
+    assert_eq!(
+        failed
+            .expect_err("a permanent failure must not be retried")
+            .kind(),
+        std::io::ErrorKind::InvalidInput
+    );
+    world.run(&["stop", &template.run, "--force"]).exited(0);
+}
+
 /// Grow one run's journal to `bytes` and stamp its document for the store that
 /// leaves.
 ///
@@ -1548,6 +1639,9 @@ fn assembled_run(template: &RunPaths, root: &std::path::Path, id: &str, session:
 /// does. The stamp is written after the bytes, so what the document claims is what
 /// the file holds — which is what makes it *current*, and the state the bound is
 /// about.
+// llmlint: ignore-block[tests_mirror_real_usage] the scale fixture grows the compiled
+// CLI's own journal records, then stamps its real summary for those bytes, so the
+// listing reads a current document over a host-sized store rather than invented events.
 fn journal_of(paths: &RunPaths, filler: &[u8], bytes: u64) {
     use std::io::Write;
     let mut file = std::io::BufWriter::new(
@@ -1625,7 +1719,8 @@ fn the_fixture_is_assembled_beside_a_template_still_replacing_its_documents() {
                 let nth = replaced.load(Ordering::Relaxed);
                 let temporary = summary.with_extension(format!("tmp.{nth}"));
                 std::fs::write(&temporary, &held).expect("the temporary beside the document");
-                std::fs::rename(&temporary, &summary).expect("the document replaced");
+                after_document_handles_close(|| std::fs::rename(&temporary, &summary))
+                    .expect("the document replaced");
                 replaced.store(nth + 1, Ordering::Relaxed);
             }
         })

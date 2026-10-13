@@ -98,6 +98,7 @@ mod land;
 mod ledger;
 mod lifecycle;
 mod loopstats;
+mod ordering;
 mod plancheck;
 mod pool;
 mod projection;

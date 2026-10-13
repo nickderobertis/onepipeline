@@ -90,11 +90,6 @@ def write_field(supplied, clear=False):
     return {"projectV2Item": {"id": supplied["itemId"]}}
 
 
-def save():
-    staged = root / "state.next"
-    staged.write_text(json.dumps(state))
-    staged.replace(root / "state.json")
-
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_args):
@@ -107,6 +102,12 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(encoded)))
         self.end_headers()
         self.wfile.write(encoded)
+
+    def do_GET(self):
+        if self.path != "/state":
+            self.reply({"errors": [{"message": "unknown route"}]}, 404)
+            return
+        self.reply(state)
 
     def do_POST(self):
         try:
@@ -130,7 +131,6 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, TypeError, KeyError) as error:
             self.reply({"errors": [{"message": str(error)}]}, 400)
             return
-        save()
         self.reply(answer)
 
     def graphql(self, request):
@@ -188,6 +188,5 @@ class Handler(BaseHTTPRequestHandler):
 
 
 server = HTTPServer(("127.0.0.1", 0), Handler)
-save()
 (root / "endpoint").write_text(f"http://127.0.0.1:{server.server_port}")
 server.serve_forever()
