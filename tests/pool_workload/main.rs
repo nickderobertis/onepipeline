@@ -41,7 +41,6 @@ const DOUBLED: usize = 5;
 
 const RUN: &str = "workload";
 
-/// Where the recording is written, which the budget command reads.
 const RECORDING: &str = "target/budget-records/pool-maintenance.json";
 
 /// Size every identity's pool, naming no host `maintain`: what runs is each
@@ -59,7 +58,6 @@ fn sized_pools(world: &World, names: &[String]) {
         .expect("the workspaces file is written");
 }
 
-/// Commit and push a declaration of a command that does nothing.
 fn declare(world: &World, checkout: &Path) {
     std::fs::write(
         checkout.join("onevcs.toml"),

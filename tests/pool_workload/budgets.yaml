@@ -8,8 +8,7 @@ budgets:
   # 3.6 s on a probe run of the same journey. The engine journals the record 8 ms after
   # the last slot's stamp; nearly all of the sweep is about 130-200 ms per identity
   # inside `onevcs::pool_maintain` (resolving the declaration, claiming, measuring,
-  # running, stamping), which stretches with host load. Re-based from a 5 s estimate,
-  # whose premise that the sweep was local appends did not hold, on the manager's ruling.
+  # running, stamping), which stretches with host load.
   - id: pool-maintenance-engine-seconds
     measure: reported
     command: [node, pool-maintenance-budget.mjs]

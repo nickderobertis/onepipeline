@@ -1739,7 +1739,6 @@ fn declare(world: &World, checkout: &Path, declaration: &str) {
     crate::harness::git(world, checkout, &["push", "origin", "main"]);
 }
 
-/// The declaration naming the committed script, with the arguments given.
 fn declaring(args: &[&str]) -> String {
     let mut argv = vec!["tools/maintain.sh"];
     argv.extend_from_slice(args);
@@ -1835,7 +1834,6 @@ fn gib(bytes: u64) -> String {
     format!("{:.1} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
 }
 
-/// The record's `disk` for slot `number` of `identity`.
 fn disk_of(record: &Value, identity: &str, number: u64) -> Value {
     let entry = record["payload"]["identities"]
         .as_array()
@@ -1859,7 +1857,6 @@ fn dropped(disk: &Value) -> i128 {
         - i128::from(disk["after_bytes"].as_u64().expect("after_bytes"))
 }
 
-/// The line `results` prints directly under the sweep's header.
 fn line_under_header(results: &str) -> Option<&str> {
     let mut lines = results.lines();
     lines.find(|line| line.starts_with("  pool maintenance: last sweep that did something"))?;
