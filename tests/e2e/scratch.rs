@@ -554,11 +554,12 @@ fn discard_reports_its_own_walk_and_preserves_everything_else() {
         serde_json::json!({"trigger": "discard", "dirs": dirs.len(), "bytes": expected.iter().map(|(bytes,_)| bytes).sum::<u64>(), "failed": []})
     );
     for (path, contents) in before {
+        // The journal is held to its prefix above; only the run's own derived
+        // caches at its root may be rewritten, as any append or view does.
         if !path.starts_with(world.run_file(&run, "scratch"))
-            && !matches!(
-                path.file_name().unwrap().to_str().unwrap(),
-                "events.jsonl" | "summary.json" | "checkpoint.json"
-            )
+            && !["events.jsonl", "summary.json", "checkpoint.json"]
+                .iter()
+                .any(|cache| path == world.run_file(&run, cache))
         {
             assert_eq!(
                 std::fs::read(&path).unwrap(),
@@ -789,11 +790,14 @@ fn shutdown_and_parked_keep_scratch_without_records_or_view_side_effects() {
         let before = snapshot(&world.run_file("quiet", "scratch"));
         if shutdown {
             world.run(&["shutdown", "quiet", "--grace", "1"]).exited(0);
+            // The word is journalled before the driver has left, and a driver
+            // still leaving holds the handover gate the verb takes.
             world.until_store("the shutdown driver to exit", |world| {
                 world
                     .run(&["status", "quiet"])
                     .stdout
                     .contains("HOST SHUTDOWN")
+                    && world.run(&["status", "quiet", "--json"]).json()["driven"] == false
             });
         } else {
             world.until_store("a live driver gone quiet", |world| {
