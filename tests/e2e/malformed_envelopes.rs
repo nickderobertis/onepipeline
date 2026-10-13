@@ -637,12 +637,13 @@ fn shadow_reader(path: &std::path::Path) -> std::fs::File {
 #[cfg(windows)]
 fn shadow_reader(path: &std::path::Path) -> std::fs::File {
     use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_READ, FILE_SHARE_WRITE};
     // FILE_FLAG_BACKUP_SEMANTICS permits opening a directory; read/write sharing
     // deliberately omits FILE_SHARE_DELETE, as CreateFileW specifies.
     std::fs::OpenOptions::new()
         .read(true)
-        .share_mode(0x00000001 | 0x00000002)
-        .custom_flags(0x02000000)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
         .open(path)
         .expect("the reader holds the shadow directory")
 }

@@ -4429,9 +4429,16 @@ fn a_cache_enabled_github_store_reads_and_writes_like_an_uncached_store() {
         from_the_launch_directory, projection_completed_after, projection_records, GitHubEndpoint,
     };
 
+    use std::io::Write;
+    use std::process::Stdio;
+
     let journey = |enabled: bool| {
         let world = World::new(&format!("store-github-cache-{enabled}"))
             .with_env("ONEPIPELINE_LOOPBACK_BOARD_TOKEN", "loopback-token");
+        let idle = world.rendezvous("projection-idle");
+        let address = std::fs::read_to_string(world.fakes.join("projection-idle.rendezvous"))
+            .expect("the idle gate address");
+        let world = world.with_env("ONEPIPELINE_TEST_PROJECTION_IDLE_GATE", &address);
         world.script("anchor.wait", "hold");
         let served = GitHubEndpoint::serve(&world, &json!({}));
         let launch = world.root.join("launch");
@@ -4443,6 +4450,9 @@ fn a_cache_enabled_github_store_reads_and_writes_like_an_uncached_store() {
         let start =
             from_the_launch_directory(&world, &launch, &["start", "board:plan", "--detach"]);
         world.run_on(start, "start --detach").exited(0);
+        // The claim completes first; the launch's dispatch projection follows.
+        idle.arrived().release();
+        let mut completed = Some(idle.arrived());
         let run = "github-edits";
         world.until("the launch projection", |_| {
             served.state()["issues"]["anchor"]["status"] == "In Progress"
@@ -4451,26 +4461,57 @@ fn a_cache_enabled_github_store_reads_and_writes_like_an_uncached_store() {
             projection_completed_after(world, run, 0, "anchor")
         });
         let mut costs = Vec::new();
-        for (id, status, evidence, projected) in [
+        for (ordinal, (id, status, evidence, projected)) in [
             ("work", "failed", "failed cache journey", "Needs Attention"),
             ("work", "done", "recovered cache journey", "Done"),
             ("other", "done", "other cache journey", "Done"),
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let projected_before = projection_records(&world, run).len();
             let before = served.state()["requests"]
                 .as_array()
                 .expect("requests")
                 .len();
-            world
-                .run_with_stdin(
-                    &["reply", run],
-                    &json!({
-                        "version": 2, "commands": [{"op": "settle", "id": id,
-                            "outcome": status, "evidence": evidence}]
-                    })
-                    .to_string(),
+            let envelope = json!({"version": 2, "commands": [{"op": "settle", "id": id,
+                "outcome": status, "evidence": evidence}]})
+            .to_string();
+            let mut replying = world
+                .cmd(&["reply", run])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("the reply starts");
+            replying
+                .stdin
+                .take()
+                .expect("the reply's stdin")
+                .write_all(envelope.as_bytes())
+                .expect("the settlement envelope");
+            world.until("this settlement to enter the durable queue", |world| {
+                std::fs::read_to_string(world.run_file(run, "channel/commands.jsonl")).is_ok_and(
+                    |text| {
+                        text.split_inclusive('\n')
+                            .filter(|line| line.ends_with('\n'))
+                            .count()
+                            > ordinal
+                    },
                 )
-                .exited(0);
+            });
+            completed
+                .take()
+                .expect("the previous projection is held idle")
+                .release();
+            let replied = replying.wait_with_output().expect("the reply is answered");
+            assert_eq!(
+                replied.status.code(),
+                Some(0),
+                "{}",
+                String::from_utf8_lossy(&replied.stderr)
+            );
+            completed = Some(idle.arrived());
             world.until("the settlement projection", |_| {
                 let state = served.state();
                 state["issues"][id]["status"] == projected
@@ -4490,6 +4531,13 @@ fn a_cache_enabled_github_store_reads_and_writes_like_an_uncached_store() {
             );
         }
         world.release("anchor.go");
+        completed
+            .take()
+            .expect("the final edit projection is held idle")
+            .release();
+        // Terminal status and released claim each finish before the run exits.
+        idle.arrived().release();
+        idle.arrived().release();
         world.until("the run settlement", |world| {
             world.run_file(run, "result.json").is_file()
         });
