@@ -2768,6 +2768,22 @@ fn patch_pull(args: &[String], dir: &Path, path: &str) -> ExitCode {
 /// based on it is retargeted onto the merged one's base or closed, as `how` says.
 fn person(args: &[String], dir: &Path) -> ExitCode {
     let arg = |at: usize| args.get(at).map(String::as_str).unwrap_or_default();
+    // Each move takes exactly its own arguments: one more or fewer is a journey asking
+    // for something this host does not do.
+    let takes = match arg(0) {
+        "merge" => 5,
+        "retarget" => 4,
+        "close" | "verdict" => 3,
+        other => return fake::refuse(&format!("{other:?} is no person's move")),
+    };
+    if args.len() != takes {
+        return fake::refuse(&format!(
+            "a person's `{}` takes {} arguments after it and was given {}: {args:?}",
+            arg(0),
+            takes - 1,
+            args.len().saturating_sub(1)
+        ));
+    }
     let addressed = || -> Result<Opened, String> {
         let repo = arg(1);
         let number = arg(2)
