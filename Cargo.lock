@@ -1435,6 +1435,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "oneharness"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c6f37f52e1de340dcbc100b8636aff92c0366734a13caf4fd726e250de8c4cb"
+dependencies = [
+ "clap",
+ "oneharness-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "oneharness-core"
 version = "0.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1529,6 +1541,7 @@ version = "0.0.0"
 dependencies = [
  "libc",
  "oneagentgraph",
+ "oneharness",
  "oneharness-core",
  "onejudge",
  "onemessagebus",
