@@ -689,6 +689,15 @@ resolver = "2"
 # requires exactly `=0.48.1` and carries the full-size recovery fixture
 # `tests/stop_verdict/` builds, so the pair moves as one.
 #
+# `onevcs` 0.48.1 is the floor because it **keeps a draft while work on its head is
+# still running**: an early lift also needs every check on the pushed head complete,
+# required or not, and `RemoteHost::head_activity` naming nothing in progress there,
+# so a required check gated by `needs:` holds the draft until it is green rather than
+# being lifted mid-run. `crates/testfakes/src/bin/fake-gh.rs` answers the two reads
+# GitHub's implementation makes, and `tests/e2e/draft_lifecycle.rs` drives both
+# halves. `onevcs-testing` 0.17.0 requires exactly `=0.48.1`, so the pair moves as
+# one.
+#
 # `onevcs` 0.49.0 is the floor because retirement proves a branch merged only
 # from its own repository's change request, reported merged at a head carrying
 # its content. A foreign repository's record proves nothing, base-history

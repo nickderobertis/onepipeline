@@ -1524,6 +1524,13 @@ pub fn change_drafted_in(token: &SessionToken) -> bool {
 /// check had run on it, **and warned** that it did — `draft-lifted-early` with
 /// `warned: true`.
 ///
+/// `onevcs` lifts a draft early only once its grace window has passed with its
+/// required checks absent or skipped **and nothing on its head still running**: no
+/// check the host reports there, required or not, is incomplete, and the host's
+/// `head_activity` names no work in progress — or, where the host will not answer
+/// that, the checks alone say so. A required check gated by `needs:` on jobs still
+/// running therefore holds the draft rather than lifting it.
+///
 /// Read off the session's own stream for [`change_drafted_in`]'s reason. An identity
 /// whose rules say `drafts: {warn_on_early_lift: false}` records the lift with
 /// `warned: false`, and that is the operator having asked not to be told, so it
