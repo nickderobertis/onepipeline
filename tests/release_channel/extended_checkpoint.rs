@@ -67,6 +67,23 @@ fn document(path: &Path) -> Value {
     serde_json::from_slice(&std::fs::read(path).expect("the document")).expect("JSON")
 }
 
+/// Compare the recorded run's answers without live filesystem measurements or
+/// the elapsed duration the two releases compute at different instants.
+fn stable_answer(answer: &str) -> String {
+    answer
+        .lines()
+        .filter(|line| !line.starts_with("  free space: "))
+        .map(|line| {
+            if line.contains(": worker ended when the run was stopped, ") {
+                line.rsplit_once(", ").expect("the stop's duration").0
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// A run is stopped with its dispatch's registry entry left stale, so this
 /// build's `host` proves it ended and extends its checkpoint over the stop; then
 /// the preceding release reads the run with `status`, `host` and `results`.
@@ -129,7 +146,10 @@ fn a_checkpoint_the_host_view_extended_is_refolded_by_the_preceding_release() {
             "results" => Some(&results),
             _ => None,
         } {
-            assert_eq!(String::from_utf8_lossy(&read.stdout), expected.as_str());
+            assert_eq!(
+                stable_answer(&String::from_utf8_lossy(&read.stdout)),
+                stable_answer(expected)
+            );
         }
         assert_eq!(document(&checkpoint)["schema_version"], 11);
         assert_eq!(
