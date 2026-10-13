@@ -96,9 +96,7 @@ attached stream prints changes, and commit the new hero beside the new baseline.
   would otherwise let a cached target replay a stale result. It refuses a
   `[guard].paths` stated more than once for the same reason the pin
   reconciliation beside it does: reading the first block leaves the rest
-  deciding pushes unreconciled. The hook counts `arches` before reading it, on
-  the same grounds — `sed` answers with every line that matched, so two
-  declarations would run together into a lane neither states.
+  deciding capture inputs unreconciled.
 - **No image goes under `docs/`** — that directory is machine-consumed and named
   in a cached build input.
 - **The workflow's `capture-command` runs under `sh`, and `sh` there is dash.**
@@ -112,23 +110,16 @@ attached stream prints changes, and commit the new hero beside the new baseline.
   fails in `just check` rather than in the capture. The `screenshots/*.sh` that
   command calls are bash, and stay bash, because it hands each to `bash` by
   name.
-- The guard runs only where `core.hooksPath` points at `.githooks`, per-clone
-  state `just bootstrap` sets. That directory carries the visual guard **and
-  nothing else**: `just gate` stays unhooked.
-- **A hook's environment is not a shell's:** it carries a `GIT_DIR`, which beats
-  `-C` and beats discovery, so the world states its whole git environment and
-  inherits none.
-- **A failed step reports both streams**, because git refuses on *stdout*.
-- The two above are reached only from a hook, so `just screenshots-guard`
-  rehearses one; `tests/visual_docs.rs` holds both.
-- **The two switches are spelled, not merely present.** `SCREENSHOTS_NO_BUILD`
-  (`capture.sh`) and `SCREENCOMP_GUARD_REQUIRE` (the hook) each read a written-out
-  yes or no — the spellings are the `case` statement beside each — and refuse
-  anything else. Present-means-on would read a `=0` as "on", and a skipped build
-  photographs whatever binary was lying in `target/`, which is a baseline blessed
-  for code nobody here has.
-- **`SCREENCOMP_GUARD_REQUIRE` is parsed before any path that can refuse**, so
-  every "could not evaluate this push" ending answers to it — a host whose arch
-  `[capture].arches` does not declare included. Reach a host-dependent ending
-  from a fixture tree rather than from a runner of that shape: a journey only
-  one platform can reach is one only that platform checks.
+- CI verifies visual drift. Local capture, baseline refresh and review remain
+  manual: `just screenshots` and `just screenshots-bless`. For classification
+  and review after capture, run:
+
+  ```bash
+  lane="$(bash screenshots/host-arch.sh)"
+  screencomp classify --baseline-manifest "shots/baseline/$lane.json" --current shots/current --arch "$lane" --exit-code
+  screencomp gallery --input shots/current --arch "$lane" --output shots/review
+  ```
+- The capture world clears inherited Git environment variables and reports both
+  streams on failure; `tests/visual_docs.rs` holds both properties.
+- `SCREENSHOTS_NO_BUILD` reads a written-out yes or no and refuses anything
+  else, so a skipped build must be deliberate.
