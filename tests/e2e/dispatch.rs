@@ -3827,6 +3827,79 @@ fn a_codex_server_overload_that_outlasts_its_retries_is_stepped_past_as_server_o
     );
 }
 
+/// A dispatched Codex turn starts with plugins **off** unless its config opts
+/// in, so a host's dispatches stop downloading Codex's remote plugin catalog
+/// with no configuration of their own.
+///
+/// What decides it is **this build's lock**: the `oneharness_core` the real
+/// graph links builds the `codex` argv, and from 0.26.0 that argv carries `-c
+/// features.plugins=false` unless the resolved config says `plugins = true`
+/// (nickderobertis/oneharness#1457). Driven through the real graph and the real
+/// core, as the overload journey above is, with `fake-codex` the one stand-in —
+/// it records the argv it was started with, which is the whole of the evidence.
+#[test]
+fn a_dispatched_codex_turn_starts_with_plugins_off_unless_its_config_opts_in() {
+    let started = |name: &str, config: &str| -> Vec<String> {
+        let world = World::new(name);
+        world.write_graphs();
+        std::fs::write(world.graphs().join("codex.toml"), config)
+            .expect("the codex candidate's config is written");
+        let path = world.plan(name, &plan_of(name, vec![agent("build", &[])]));
+        let mut launch = world.agentgraph_cmd(&[
+            "start",
+            &path,
+            "--attach",
+            "--node-set",
+            "members.worker.oneharness_config=./codex.toml",
+        ]);
+        launch.env("ONEHARNESS_BIN_CODEX", crate::harness::double("fake-codex"));
+        world.run_on(launch, "start --attach").settled();
+        world.until("the codex node to settle", |world| {
+            world.run_file(name, "result.json").is_file()
+        });
+        let calls: Vec<Value> = world
+            .invocations()
+            .into_iter()
+            .filter(|call| call["tool"] == "codex")
+            .collect();
+        assert_eq!(calls.len(), 1, "codex was not started once: {calls:#?}");
+        serde_json::from_value(calls[0]["args"].clone()).expect("an argv is strings")
+    };
+    let base =
+        "run_mode = \"fallback\"\nharnesses = [\"codex\"]\nserver_overloaded_max_retries = 0\n";
+    // Any later token that would turn plugins back on: a `-c` override of the
+    // same key to anything but `false`, or Codex's own `--enable plugins`.
+    let reenabled = |argv: &[String], from: usize| {
+        argv.windows(2).skip(from).any(|pair| {
+            (pair[0] == "-c"
+                && pair[1].starts_with("features.plugins=")
+                && pair[1] != "features.plugins=false")
+                || (pair[0] == "--enable" && pair[1] == "plugins")
+        })
+    };
+
+    let unstated = started("codex-plugins-unstated", base);
+    let off = unstated
+        .windows(2)
+        .rposition(|pair| pair == ["-c", "features.plugins=false"])
+        .unwrap_or_else(|| {
+            panic!("a config with no `plugins` key started codex with plugins on: {unstated:?}")
+        });
+    assert!(
+        !reenabled(&unstated, off + 2),
+        "a later flag turned plugins back on after they were disabled: {unstated:?}"
+    );
+
+    let opted_in = started(
+        "codex-plugins-opted-in",
+        &format!("{base}\n[harness.codex]\nplugins = true\n"),
+    );
+    assert!(
+        !opted_in.iter().any(|arg| arg.contains("plugins")),
+        "a config that opts into plugins still started codex with a plugins flag: {opted_in:?}"
+    );
+}
+
 /// The line `fake-codex` answers with is one the **linked** classifier reads as
 /// a server overload.
 ///
@@ -3882,7 +3955,8 @@ fn the_codex_doubles_overload_answer_is_the_one_the_linked_classifier_reads() {
 /// The half no passing journey can show, as for `fake-claude` above: the
 /// overload journey proves the real `oneharness` drives this binary on the one
 /// argv it built there, and this proves each other form it may build is
-/// answered — a resumed thread, a sandbox, a model, a prompt on stdin — and that
+/// answered — a resumed thread, a sandbox, a model, a config override, a prompt
+/// on stdin — and that
 /// an argv it does not build is refused rather than answered: a verb other
 /// than `exec`, a `resume` with no thread, an option with no value or an
 /// unknown one, a flag Codex does not take, two prompts, none, and the probe's
@@ -3924,6 +3998,13 @@ fn the_codex_double_answers_each_exec_line_oneharness_builds_and_refuses_each_it
             "-",
         ][..],
         &["exec", "resume", "thread-1", "--json", "Do build."][..],
+        &[
+            "exec",
+            "-c",
+            "features.plugins=false",
+            "--json",
+            "Do build.",
+        ][..],
     ] {
         let answered = sent(argv);
         let said = String::from_utf8_lossy(&answered.stdout).to_string();
@@ -3986,6 +4067,18 @@ fn the_codex_double_answers_each_exec_line_oneharness_builds_and_refuses_each_it
             "two were sent",
         ),
         (&["exec", "--json"][..], "no prompt"),
+        (
+            &["exec", "--json", "Do build.", "-c"][..],
+            "-c takes a key=value",
+        ),
+        (
+            &["exec", "-c", "--json", "Do build."][..],
+            "\"--json\" is not one",
+        ),
+        (
+            &["exec", "-c", "features.plugins", "--json", "Do build."][..],
+            "\"features.plugins\" is not one",
+        ),
     ] {
         let refused = sent(argv);
         let said = String::from_utf8_lossy(&refused.stderr).to_string();

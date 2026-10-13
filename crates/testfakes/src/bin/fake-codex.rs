@@ -11,8 +11,9 @@
 //! cleanly, so only the structured error can classify the attempt as failed.
 //!
 //! It speaks the `codex exec` line oneharness builds — `codex exec [resume ID]
-//! [--dangerously-bypass-approvals-and-sandbox | --sandbox read-only|
-//! workspace-write] [--model M] [--json] (PROMPT | -)` — and refuses any other,
+//! [-c KEY=VALUE]... [--dangerously-bypass-approvals-and-sandbox | --sandbox
+//! read-only|workspace-write] [--model M] [--json] (PROMPT | -)` — and refuses
+//! any other,
 //! so a line oneharness starts sending that this double does not speak is a
 //! refusal a journey reads rather than an argument it silently swallows.
 
@@ -82,6 +83,22 @@ fn declared(args: &[String]) -> Result<(), String> {
                     .ok_or("codex's --sandbox takes a value, and nothing followed it")?;
                 if !SANDBOXES.contains(&sandbox) {
                     return Err(format!("codex takes no sandbox {sandbox:?}"));
+                }
+            }
+            // A config override, as oneharness 0.26.0 sends `-c
+            // features.plugins=false` on every launch a config did not opt into
+            // plugins. Recorded rather than read: what it set is the journey's
+            // to assert from the argv.
+            "-c" => {
+                let set = rest
+                    .next()
+                    .ok_or("codex's -c takes a key=value, and nothing followed it")?;
+                if set.starts_with('-')
+                    || !set.split_once('=').is_some_and(|(key, _)| !key.is_empty())
+                {
+                    return Err(format!(
+                        "codex's -c takes a key=value, and {set:?} is not one"
+                    ));
                 }
             }
             "--model" => {
