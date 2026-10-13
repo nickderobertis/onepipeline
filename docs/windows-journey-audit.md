@@ -219,3 +219,28 @@ malformed/unwritable unpublished memory (38239153709); rerun-step configuration
 (38318278032). No same-commit passing run/attempt or passing diagnostic repetition
 was found for these in the reviewed set. Later changed commits are not unchanged
 reruns.
+
+## Provisioning cleanup continuation
+
+The amended Linux provisioning journey
+`unix::old_hook_configuration_allows_pushes_without_visual_work` in
+`tests/provisioning.rs` waited for Git commands but allowed their automatic GC
+writers to detach. `Scratch::drop` could then race those writers while removing
+the clone, causing `DirectoryNotEmpty`. Every Git command in this journey now
+uses `gc.autoDetach=false`; the receiving bare repository also stores that
+setting because the local transport can clear command-scoped configuration.
+Git therefore joins automatic maintenance before its command returns.
+
+The journey now creates two real packs and forces automatic GC through its
+pack-count threshold. It asserts that the command's captured trace contains
+`pack-objects`, contains no detached invocation, and leaves no GC pid file.
+These assertions observe completed real maintenance before scratch removal;
+there is no sleep, retry or timeout change. Restoring automatic detachment while
+retaining this forced condition failed the completion assertion and reproduced
+`DirectoryNotEmpty` during cleanup (`provisioning-detached-negative.log`). The
+counterfactual edit was restored immediately.
+
+This continuation copied the prior `/tmp/onepipeline-windows-audit` evidence to
+its own scratch directory as `prior-audit/`, and the prior publication-repair
+node's evidence as `prior-continuation/`. No reviewed CI run was changed. The
+original Windows audit and dispositions above remain applicable.
