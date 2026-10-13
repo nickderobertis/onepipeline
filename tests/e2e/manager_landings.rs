@@ -1253,3 +1253,854 @@ fn a_required_check_failing_wakes_the_owner_while_its_other_checks_are_still_pen
         }
     }
 }
+
+/// Run the real `onevcs` binary against `world`, answering its stdout.
+fn onevcs(world: &World, args: &[&str]) -> String {
+    let output = world
+        .cmd_on(&onevcs_binary(), args)
+        .output()
+        .expect("onevcs runs");
+    assert!(
+        output.status.success(),
+        "onevcs {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// Leave `branch` of `alias` preserved on its origin by a closed session that
+/// `launcher` opened — a branch a manager owes until it is landed or
+/// acknowledged.
+fn preserved_by_session(world: &World, alias: &str, branch: &str, launcher: &str) {
+    let opened = onevcs(
+        world,
+        &[
+            "session",
+            "open",
+            alias,
+            "--branch",
+            branch,
+            "--label",
+            &format!("launcher={launcher}"),
+        ],
+    );
+    let opened: Value = serde_json::from_str(opened.trim()).expect("session open answers JSON");
+    let worktree = PathBuf::from(opened["worktree"].as_str().expect("a worktree"));
+    std::fs::write(worktree.join(format!("{alias}.txt")), "kept\n").expect("written");
+    git(world, &worktree, &["add", "-A"]);
+    git(
+        world,
+        &worktree,
+        &["commit", "-q", "-m", "feat: kept work (incomplete step)"],
+    );
+    onevcs(
+        world,
+        &[
+            "session",
+            "close",
+            opened["token"].as_str().expect("a token"),
+        ],
+    );
+}
+
+/// Replace the world's `pre-push` hook with one holding every push on `go`.
+fn hold_pushes(world: &World, go: &Path) {
+    let hold = held_publication(world, go);
+    let quoted: Vec<String> = hold
+        .argv()
+        .iter()
+        .map(|word| format!("'{}'", word.replace('\'', r"'\''")))
+        .collect();
+    onepipeline_testfakes::executable(
+        &world.root.join("hooks").join("pre-push"),
+        format!("#!/bin/sh\nexec {}\n", quoted.join(" ")),
+    );
+    // The hold is the file; this value's own release is not the journey's.
+    std::mem::forget(hold);
+}
+
+/// A run, owned by this world's own session, that opened a session on a branch
+/// of `service` and left it unlanded — the originating run of a later manager
+/// landing of that branch. Answers the branch.
+fn originating_run(world: &World, run: &str) -> String {
+    world.script("service.work", "the worker wrote this\n");
+    let path = world.plan(
+        run,
+        &crate::harness::plan_of(run, vec![crate::harness::lifecycle("service", &[])]),
+    );
+    world.run(&["start", &path, "--attach"]).settled();
+    world.until("the run to settle", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+    let result = world.run_json(run, "result.json");
+    result["nodes"][0]["branch"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the node named no branch: {result}"))
+        .to_owned()
+}
+
+/// Every record under a directory, by name and contents: what an acknowledgement
+/// that was refused must leave exactly as it was.
+fn snapshot(dir: &Path) -> Vec<(String, String)> {
+    let mut found: Vec<(String, String)> = std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| {
+                    (
+                        entry.file_name().to_string_lossy().into_owned(),
+                        std::fs::read_to_string(entry.path()).unwrap_or_default(),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    found.sort();
+    found
+}
+
+/// A live landing owned by one manager is associated with the run its branch
+/// came from — another manager's run — without becoming that run's: the run's
+/// journal mirrors the landing's events, readable in detail and left out of its
+/// planner view where they are progress, the settled run is not revived, and
+/// neither manager can acknowledge away the work it is advancing while it is
+/// live: not the run, not the landing's flow, not the branch — whatever was
+/// acknowledged before the landing began. The same branch name in another
+/// identity is unaffected. Once the landing has ended, each closes as before.
+#[test]
+fn a_live_landing_refuses_every_acknowledgement_that_would_hide_it_across_owners() {
+    let world = World::new("ml-acks");
+    let _repository = world.repository("local-direct", &["false"]);
+    let branch = originating_run(&world, "origin");
+    let origin_result = std::fs::read_to_string(world.run_file("origin", "result.json"))
+        .expect("the settled run's result");
+    let go = world.root.join("push.go");
+    hold_pushes(&world, &go);
+    // The same branch name, preserved in a second identity.
+    let _other = world.extra_repository("other");
+    preserved_by_session(&world, "other", &branch, &world.session);
+
+    let manager = world.as_session("manager-b");
+    let acknowledgements = world.root.join("acks");
+    let acknowledge_branch = |who: &World, repo: Option<&str>| {
+        let mut argv = vec![
+            "unpublished",
+            "--acknowledge",
+            branch.as_str(),
+            "--reason",
+            "kept deliberately",
+            "--session",
+            who.session.as_str(),
+        ];
+        let directory = acknowledgements.display().to_string();
+        argv.extend(["--acknowledgements", &directory]);
+        if let Some(repo) = repo {
+            argv.extend(["--repo", repo]);
+        }
+        who.run(&argv)
+    };
+    // Acknowledged before the landing began: it cannot answer for the landing.
+    acknowledge_branch(&manager, Some("service")).exited(EXIT_SUCCESS);
+
+    let landing = Started::spawn(
+        &manager,
+        None,
+        &[
+            "publish-branch",
+            &branch,
+            "--repo",
+            "service",
+            "--title",
+            "feat: land the worker's branch",
+            "--no-draft",
+        ],
+    );
+    world.until("the landing's push to be held", |_| {
+        let mut marker = go.as_os_str().to_owned();
+        marker.push(".holding");
+        PathBuf::from(marker).is_file()
+    });
+    let (flow, id) = the_landing(&world);
+    let request = sidecar(&world, &flow, &id, "request.json");
+    assert_eq!(request["session"], json!("manager-b"));
+    assert_eq!(request["runs"], json!(["origin"]), "{request}");
+
+    // The run's journal carries the landing, in detail only where it is
+    // progress, and the run is still its own manager's and still settled.
+    let mirrored = world.journal("origin");
+    let registered = mirrored
+        .iter()
+        .find(|event| event["kind"] == "landing-registered")
+        .expect("the registration is mirrored into the run");
+    assert_eq!(registered["labels"]["run_id"], json!("origin"));
+    assert_eq!(registered["labels"]["landing_id"], json!(id));
+    assert!(
+        mirrored
+            .iter()
+            .any(|event| event["source"] == "vcs" && event["labels"]["landing_id"] == json!(id)),
+        "the operation's events are mirrored into the run"
+    );
+    let detailed = world.run(&["monitor", "origin", "--filter", "detailed"]);
+    detailed.exited(0).out_has("landing-registered");
+    world
+        .run(&["monitor", "origin"])
+        .exited(0)
+        .out_lacks("landing-registered");
+    assert_eq!(
+        world.run_json("origin", "launch.json")["session"],
+        json!(world.session)
+    );
+    assert_eq!(
+        std::fs::read_to_string(world.run_file("origin", "result.json")).expect("result"),
+        origin_result,
+        "the settled run was revived"
+    );
+
+    // Nothing that would hide it is recorded, by either manager.
+    let run_acks = world.run_file("origin", "acknowledgements");
+    let before_run = snapshot(&run_acks);
+    world
+        .run(&[
+            "unwatched",
+            "--session",
+            &world.session,
+            "--acknowledge",
+            "origin",
+            "--reason",
+            "done with it",
+        ])
+        .exited(REFUSED)
+        .err_has(&format!("has a live landing, {id} of flow '{flow}'"));
+    assert_eq!(snapshot(&run_acks), before_run);
+    let before_branch = snapshot(&acknowledgements);
+    acknowledge_branch(&world, Some("service"))
+        .exited(REFUSED)
+        .err_has(&format!("is being landed by {id}"));
+    acknowledge_branch(&manager, Some("service"))
+        .exited(REFUSED)
+        .err_has(&format!("is being landed by {id}"));
+    assert_eq!(snapshot(&acknowledgements), before_branch);
+    manager
+        .run(&[
+            "unwatched",
+            "--session",
+            "manager-b",
+            "--acknowledge-flow",
+            &flow,
+            "--reason",
+            "r",
+        ])
+        .exited(REFUSED)
+        .err_has("is live");
+    // The landing's owner is held, the earlier acknowledgement notwithstanding.
+    let held = manager.run(&["stop-guard", "--session", "manager-b"]);
+    let held: Value = serde_json::from_str(held.stdout.trim()).expect("a verdict");
+    assert_eq!(held["verdict"], json!("block"), "{held}");
+    // The same branch name in the other identity is not this landing's.
+    acknowledge_branch(&world, Some("other")).exited(EXIT_SUCCESS);
+
+    // Released, the landing ends; the run and the branch close as they always did.
+    std::fs::write(&go, "go").expect("released");
+    let (_, _, said) = landing.ended();
+    assert!(
+        landing_dir(&world, &flow, &id)
+            .join("ending.json")
+            .is_file(),
+        "{said}"
+    );
+    world
+        .run(&[
+            "unwatched",
+            "--session",
+            &world.session,
+            "--acknowledge",
+            "origin",
+            "--reason",
+            "landed by hand",
+        ])
+        .exited(EXIT_SUCCESS);
+}
+
+/// A `flow run` this journey started whose program starts a landing in the
+/// background, recording its pid, and then waits on a gate — a longer flow a
+/// landing is one step of.
+struct Parent {
+    child: Child,
+    landing_pid: PathBuf,
+    gate: PathBuf,
+}
+
+impl Parent {
+    fn start(world: &World, name: &str, landing: &[&str]) -> Self {
+        use std::os::unix::process::CommandExt;
+        let landing_pid = world.root.join(format!("{name}.landing-pid"));
+        let gate = world.root.join(format!("{name}.go"));
+        let quoted: Vec<String> = landing
+            .iter()
+            .map(|word| format!("'{}'", word.replace('\'', r"'\''")))
+            .collect();
+        let script = world.root.join(format!("{name}.sh"));
+        std::fs::write(
+            &script,
+            format!(
+                "\"$ONEPIPELINE_FAKE_CLI_BIN\" {} >/dev/null 2>&1 &\necho $! > '{}'\nwhile [ ! -f '{}' ]; do sleep 0.05; done\n",
+                quoted.join(" "),
+                landing_pid.display(),
+                gate.display()
+            ),
+        )
+        .expect("the program is written");
+        let mut command = world.cmd(&[
+            "flow",
+            "run",
+            "--name",
+            name,
+            "--",
+            "sh",
+            script.to_str().expect("a path"),
+        ]);
+        command.process_group(0);
+        let child = command
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("flow run starts");
+        Self {
+            child,
+            landing_pid,
+            gate,
+        }
+    }
+
+    fn landing_pid(&self, world: &World) -> i32 {
+        world.until("the landing to start", |_| {
+            std::fs::read_to_string(&self.landing_pid).is_ok_and(|pid| pid.ends_with('\n'))
+        });
+        std::fs::read_to_string(&self.landing_pid)
+            .expect("a pid")
+            .trim()
+            .parse()
+            .expect("a pid")
+    }
+
+    fn kill_holder(&mut self) {
+        let pid = i32::try_from(self.child.id()).expect("a pid fits");
+        // SAFETY: the flow's own holder, a child of this journey.
+        assert_eq!(unsafe { libc::kill(pid, libc::SIGKILL) }, 0);
+        let _ = self.child.wait();
+    }
+}
+
+/// `SIGKILL` a pid this journey learned from a process it started.
+fn kill(pid: i32) {
+    // SAFETY: `kill` touches no memory; the pid is a landing this journey's own
+    // flow program started and recorded.
+    assert_eq!(
+        unsafe { libc::kill(pid, libc::SIGKILL) },
+        0,
+        "the landing could not be killed"
+    );
+}
+
+/// A landing started inside a longer flow of the same session is that flow's —
+/// no flow of its own is registered — and keeps its own liveness: killed, its
+/// death is a `landing-progress` blocker on the flow's watch while the flow goes
+/// on, never the flow failing; and with the flow's own holder killed, the flow
+/// stays live while the landing does, and dies once the landing has ended.
+#[test]
+fn a_landing_in_a_longer_flow_keeps_its_own_liveness_beside_the_flows() {
+    // The landing dies; the flow goes on.
+    let (world, repository, held) = held_world("ml-nested-child", "change-open");
+    branch_with_work(&world, &repository, BRANCH, "widget.txt");
+    let mut parent = Parent::start(
+        &world,
+        "plan",
+        &["publish-branch", BRANCH, "--repo", "service", "--no-draft"],
+    );
+    let pid = parent.landing_pid(&world);
+    world.until("the landing's push to be held", |_| held.holding());
+    let (flow, id) = the_landing(&world);
+    assert_eq!(flow, "plan", "the landing joined the longer flow");
+    let request = sidecar(&world, &flow, &id, "request.json");
+    assert_eq!(request["pid"], json!(pid));
+    let armed = Armed::arm(&world, &flow, &["--timeout", "600"]);
+    kill(pid);
+    let died = armed.returned();
+    died.progressed("landing-died");
+    assert_eq!(died.record["significance"], json!("blocker"));
+    assert_eq!(died.record["landing_id"], json!(id));
+    // The flow itself is still live, and owed a watch rather than closure.
+    watch(
+        &world,
+        &flow,
+        &["--timeout", "0", "--cursor", &died.cursor()],
+    )
+    .ended_on(ELAPSED, "elapsed");
+    let owed = world.run(&["unwatched", "--session", &world.session]);
+    owed.exited(OWED);
+    assert!(owed.stdout.contains("LIVE"), "{}", owed.stdout);
+    std::fs::write(&parent.gate, "go").expect("the flow ends");
+    let _ = parent.child.wait();
+    watch(
+        &world,
+        &flow,
+        &["--timeout", "0", "--cursor", &died.cursor()],
+    )
+    .ended_on(EXIT_SUCCESS, "ended");
+    drop(held);
+
+    // The flow's holder dies; the landing it started keeps the flow live.
+    let (world, repository, held) = held_world("ml-nested-holder", "change-open");
+    branch_with_work(&world, &repository, BRANCH, "widget.txt");
+    let mut parent = Parent::start(
+        &world,
+        "plan",
+        &["publish-branch", BRANCH, "--repo", "service", "--no-draft"],
+    );
+    parent.landing_pid(&world);
+    world.until("the landing's push to be held", |_| held.holding());
+    let (flow, id) = the_landing(&world);
+    parent.kill_holder();
+    watch(&world, &flow, &["--timeout", "0"]).ended_on(ELAPSED, "elapsed");
+    let owed = world.run(&["unwatched", "--session", &world.session]);
+    owed.exited(OWED);
+    assert!(
+        owed.stdout.contains(&format!("flow {flow}")) && owed.stdout.contains("LIVE"),
+        "a killed holder hid a live landing: {}",
+        owed.stdout
+    );
+    held.release();
+    world.until("the landing to end", |world| {
+        landing_dir(world, &flow, &id).join("ending.json").is_file()
+    });
+    let ended = watch(&world, &flow, &["--timeout", "600", "--filter", "detailed"]);
+    // Its notices come first, then the flow's own death.
+    let mut cursor = ended.cursor();
+    let mut seen = vec![ended.record["condition"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned()];
+    while seen.last().map(String::as_str) == Some("landing-progress") {
+        let next = watch(
+            &world,
+            &flow,
+            &[
+                "--timeout",
+                "600",
+                "--filter",
+                "detailed",
+                "--cursor",
+                &cursor,
+            ],
+        );
+        cursor = next.cursor();
+        seen.push(
+            next.record["condition"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+        );
+        if next.record["condition"] == "flow-failed" {
+            assert_eq!(next.record["died"], json!(true));
+        }
+    }
+    assert_eq!(
+        seen.last().map(String::as_str),
+        Some("flow-failed"),
+        "{seen:?}"
+    );
+}
+
+/// A landing started in a live flow another session owns is refused before
+/// anything is registered, drafted or forwarded.
+#[test]
+fn a_landing_in_another_sessions_flow_is_refused_and_does_no_work() {
+    let (world, repository, held) = held_world("ml-foreign-flow", "change-open");
+    branch_with_work(&world, &repository, BRANCH, "widget.txt");
+    let foreign = world.as_session("someone-else");
+    let mut parent = Parent::start(&foreign, "theirs", &["--version"]);
+    world.until("their flow to register", |world| {
+        world.runs.join(".flows/theirs/flow.json").is_file()
+    });
+    let mut command = world.cmd(&["publish-branch", BRANCH, "--repo", "service", "--no-draft"]);
+    command.env(onepipeline::cli::FLOW_ENV, "theirs");
+    let refused = world.run_on(command, "publish-branch in their flow");
+    refused
+        .exited(REFUSED)
+        .err_has("could not be registered")
+        .err_has("belongs to session");
+    assert!(landings(&world).is_empty(), "{:?}", landings(&world));
+    assert!(!held.holding(), "the refused landing pushed");
+    assert!(world.changes_opened().is_empty());
+    std::fs::write(&parent.gate, "go").expect("their flow ends");
+    parent.kill_holder();
+}
+
+/// With no manager session the verbs run unowned, as they always did, and say
+/// so: nothing is registered and the landing still lands.
+#[test]
+fn with_no_manager_session_a_landing_runs_unowned_and_says_so() {
+    let world = World::new("ml-unowned");
+    let repository = world.repository("change-open", &[]);
+    branch_with_work(&world, &repository, BRANCH, "widget.txt");
+    let mut command = world.cmd(&["publish-branch", BRANCH, "--repo", "service", "--no-draft"]);
+    command.env("ONEPIPELINE_LAUNCHER_SESSION", " ");
+    world
+        .run_on(command, "publish-branch unowned")
+        .exited(0)
+        .err_has("publish-branch: no manager session owns this landing")
+        .err_has("so it runs unowned");
+    assert!(!world.runs.join(".flows").exists());
+    assert_eq!(world.changes_opened().len(), 1);
+}
+
+/// Three managers each land at once, one landing per session, into one
+/// repository: each landing has its own flow, its own operation id and stream,
+/// and its own owner — a manager's `unwatched` names only its own, a death is
+/// reported only to its owner, and the other two finish under theirs. Two of
+/// them name the same branch of different identities, and the third an ordered
+/// train, so isolation is by identity and operation, never by branch name.
+#[test]
+fn three_managers_landing_at_once_are_each_supervised_alone() {
+    let (world, repository, held) = held_world("ml-three", "local-direct");
+    for branch in TRAIN {
+        branch_with_work(&world, &repository, branch, &format!("{branch}.txt"));
+    }
+    branch_with_work(&world, &repository, BRANCH, "widget.txt");
+    let other = world.extra_repository("other");
+    git(&world, &other.checkout, &["checkout", "-b", BRANCH]);
+    std::fs::write(other.checkout.join("other.txt"), "other\n").expect("written");
+    git(&world, &other.checkout, &["add", "-A"]);
+    git(
+        &world,
+        &other.checkout,
+        &["commit", "-q", "-m", "feat: the other widget"],
+    );
+    git(&world, &other.checkout, &["checkout", "main"]);
+
+    let sessions = ["manager-a", "manager-b", "manager-c"];
+    let managers: Vec<World> = sessions.iter().map(|s| world.as_session(s)).collect();
+    let mut started = vec![
+        Started::spawn(
+            &managers[0],
+            None,
+            &["publish-branch", BRANCH, "--repo", "service", "--no-draft"],
+        ),
+        Started::spawn(
+            &managers[1],
+            None,
+            &["publish-branch", BRANCH, "--repo", "other", "--no-draft"],
+        ),
+    ];
+    let mut train = vec!["integrate"];
+    train.extend(TRAIN);
+    train.push("--push");
+    started.push(Started::spawn(
+        &managers[2],
+        Some(&repository.checkout),
+        &train,
+    ));
+    world.until("all three landings to register", |world| {
+        landings(world).len() == 3
+    });
+    world.until("the service landings to be held", |_| held.holding());
+    let mut by_session = std::collections::BTreeMap::new();
+    for (flow, id) in landings(&world) {
+        let request = sidecar(&world, &flow, &id, "request.json");
+        by_session.insert(
+            request["session"].as_str().expect("a session").to_owned(),
+            (flow, id, request),
+        );
+    }
+    assert_eq!(by_session.len(), 3, "{by_session:?}");
+    let identities: std::collections::BTreeSet<String> = by_session
+        .values()
+        .map(|(_, _, request)| request["subjects"][0]["identity"].to_string())
+        .collect();
+    assert_eq!(identities.len(), 2, "two identities share a branch name");
+    let train_request = &by_session["manager-c"].2;
+    assert_eq!(train_request["subjects"].as_array().map(Vec::len), Some(3));
+
+    // Manager b's landing — into the other identity, which no hook holds — ends
+    // on its own; a and c are each owed their own live flow and nobody else's.
+    let mut a = started.remove(0);
+    let b = started.remove(0);
+    let c = started.remove(0);
+    let (b_code, _, b_said) = b.ended();
+    assert_eq!(b_code, 0, "{b_said}");
+    world
+        .run(&["unwatched", "--session", "manager-b"])
+        .exited(EXIT_SUCCESS);
+    for session in ["manager-a", "manager-c"] {
+        let owed = world.run(&["unwatched", "--session", session]);
+        owed.exited(OWED);
+        for (other_session, (other_flow, _, _)) in &by_session {
+            assert_eq!(
+                owed.stdout.contains(&format!("flow {other_flow} ")),
+                other_session == session,
+                "{session}: {}",
+                owed.stdout
+            );
+        }
+    }
+    // Every operation is its own: disjoint ids, and no record of one in another.
+    let mut operations = std::collections::BTreeSet::new();
+    world.until("each landing to prepare its operation", |world| {
+        by_session.values().all(|(flow, id, _)| {
+            landing_dir(world, flow, id)
+                .join("operation.json")
+                .is_file()
+        })
+    });
+    for (flow, id, _) in by_session.values() {
+        let operation = sidecar(&world, flow, id, "operation.json")["operation_id"].clone();
+        assert!(operations.insert(operation.to_string()), "{operations:?}");
+        for event in journal(&world, flow, id)
+            .iter()
+            .filter(|e| e["source"] == "vcs")
+        {
+            assert_eq!(event["labels"]["operation_id"], operation, "{event}");
+        }
+    }
+
+    // Manager a's landing is killed while c's train is still held.
+    a.kill();
+    let (a_flow, _, _) = &by_session["manager-a"];
+    let (c_flow, _, _) = &by_session["manager-c"];
+    watch(&managers[0], a_flow, &["--timeout", "0"]).ended_on(EXIT_FLOW_FAILED, "flow-failed");
+    let c_owed = world.run(&["unwatched", "--session", "manager-c"]);
+    assert!(
+        c_owed.stdout.contains("LIVE") && !c_owed.stdout.contains("DIED"),
+        "{}",
+        c_owed.stdout
+    );
+    held.release();
+    let (c_code, c_out, c_said) = c.ended();
+    assert_eq!(c_code, 0, "{c_out}\n{c_said}");
+    let c_woken = rearmed_until_ended(
+        &managers[2],
+        c_flow,
+        String::from("flow:2:") + c_flow + "::",
+    );
+    assert!(
+        c_woken
+            .iter()
+            .all(|(_, significance)| significance != "progress"),
+        "{c_woken:?}"
+    );
+}
+
+/// An integration train records its own local progress — the lock, the gate's
+/// run and the push — as detail, opens no change request and owes no hosted
+/// check; a second train of the same repository waits on the first's lock in
+/// its own operation, recorded as progress that wakes nobody; and a gate that
+/// refuses the push is a blocker its owner is woken on.
+#[test]
+fn an_integration_train_records_local_progress_and_wakes_its_owner_on_the_gates_refusal() {
+    let (world, repository, held) = held_world("ml-trains", "local-direct");
+    for branch in TRAIN {
+        branch_with_work(&world, &repository, branch, &format!("{branch}.txt"));
+    }
+    let second = world.as_session("manager-two");
+    let mut first_args = vec!["integrate", TRAIN[0], TRAIN[1]];
+    first_args.push("--push");
+    let first = Started::spawn(&world, Some(&repository.checkout), &first_args);
+    world.until("the first train's push to be held", |_| held.holding());
+    let (first_flow, first_id) = the_landing(&world);
+    let waiting = Started::spawn(
+        &second,
+        Some(&repository.checkout),
+        &["integrate", TRAIN[2], "--push"],
+    );
+    world.until("the second train to register", |world| {
+        landings(world).len() == 2
+    });
+    let (second_flow, second_id) = landings(&world)
+        .into_iter()
+        .find(|(flow, _)| *flow != first_flow)
+        .expect("the second train");
+    world.until("the second train to start its operation", |world| {
+        kinds(world, &second_flow, &second_id)
+            .iter()
+            .any(|kind| kind == "landing-started")
+    });
+    // Waiting behind the first train wakes neither owner.
+    watch(&second, &second_flow, &["--timeout", "0"]).ended_on(ELAPSED, "elapsed");
+    watch(&world, &first_flow, &["--timeout", "0"]).ended_on(ELAPSED, "elapsed");
+    let operation =
+        |flow: &str, id: &str| sidecar(&world, flow, id, "operation.json")["operation_id"].clone();
+    assert_ne!(
+        operation(&first_flow, &first_id),
+        operation(&second_flow, &second_id),
+        "two trains of one repository share an operation"
+    );
+    held.release();
+    let (code, out, said) = first.ended();
+    assert_eq!(code, 0, "{out}\n{said}");
+    let (code, out, said) = waiting.ended();
+    assert_eq!(code, 0, "{out}\n{said}");
+    for (flow, id) in [(&first_flow, &first_id), (&second_flow, &second_id)] {
+        let all = kinds(&world, flow, id);
+        for kind in ["lock-wait", "lock-acquired", "gate-run", "push"] {
+            assert!(
+                all.iter().any(|recorded| recorded == kind),
+                "{kind} not in {all:?}"
+            );
+        }
+        let own = sidecar(&world, flow, id, "operation.json")["operation_id"].clone();
+        for event in journal(&world, flow, id)
+            .iter()
+            .filter(|e| e["source"] == "vcs")
+        {
+            assert_eq!(event["labels"]["operation_id"], own, "{event}");
+            if ["lock-wait", "lock-acquired", "push"]
+                .contains(&event["kind"].as_str().unwrap_or_default())
+            {
+                assert_eq!(
+                    event["labels"]["significance"],
+                    json!("progress"),
+                    "{event}"
+                );
+            }
+        }
+        for hosted in ["change-opened", "change-check", "checks-settled"] {
+            assert!(
+                !all.iter().any(|recorded| recorded == hosted),
+                "{hosted} in {all:?}"
+            );
+        }
+    }
+    assert!(world.changes_opened().is_empty());
+
+    // A gate that refuses: the push is refused, and that refusal wakes the owner.
+    let (world, repository) = {
+        let world = World::new("ml-train-refused");
+        let repository = world.repository("local-direct", &["false"]);
+        (world, repository)
+    };
+    for branch in TRAIN {
+        branch_with_work(&world, &repository, branch, &format!("{branch}.txt"));
+    }
+    let mut argv = vec!["integrate"];
+    argv.extend(TRAIN);
+    argv.push("--push");
+    let refused = Started::spawn(&world, Some(&repository.checkout), &argv);
+    let (code, _, said) = refused.ended();
+    assert_ne!(code, 0, "{said}");
+    let (flow, id) = the_landing(&world);
+    let blocker = watch(
+        &world,
+        &flow,
+        &[
+            "--timeout",
+            "0",
+            "--cursor",
+            &format!("flow:2:{flow}:{id}@0:"),
+        ],
+    );
+    blocker.ended_on(EXIT_SUCCESS, "landing-progress");
+    assert_eq!(
+        blocker.record["significance"],
+        json!("blocker"),
+        "{}",
+        blocker.record
+    );
+    assert!(
+        kinds(&world, &flow, &id)
+            .iter()
+            .any(|kind| kind == "gate-run"),
+        "{:?}",
+        kinds(&world, &flow, &id)
+    );
+}
+
+/// Landing state this build cannot read fails closed: the owner's stop guard is
+/// held on it rather than warned, and every acknowledgement that could hide it —
+/// the flow's, a run's, a branch's — is refused with nothing recorded. A flow
+/// and a cursor from before landings read as they always did.
+#[test]
+fn unreadable_landing_state_fails_closed_and_records_from_before_landings_still_read() {
+    let world = World::new("ml-malformed");
+    let repository = world.repository("change-open", &[]);
+    branch_with_work(&world, &repository, BRANCH, "widget.txt");
+    world
+        .run(&["publish-branch", BRANCH, "--repo", "service", "--no-draft"])
+        .exited(0);
+    let (flow, id) = the_landing(&world);
+    // The flow ended cleanly, and is owed nothing.
+    assert_eq!(verdict(&world), json!({"verdict": "none"}));
+    // A cursor printed before landings resumes, replaying none of them.
+    watch(
+        &world,
+        &flow,
+        &["--timeout", "0", "--cursor", &format!("flow:1:{flow}:")],
+    )
+    .ended_on(EXIT_SUCCESS, "ended");
+    // The detailed reader and `next` read the landing's whole journal; the
+    // planner profile leaves its progress out.
+    let detailed = world.run(&["next", "--flow", &flow, "--filter", "detailed"]);
+    detailed.exited(0);
+    let detailed: Value = serde_json::from_str(detailed.stdout.trim()).expect("a document");
+    let every: Vec<&str> = detailed["events"]
+        .as_array()
+        .expect("events")
+        .iter()
+        .map(|event| event["kind"].as_str().unwrap_or_default())
+        .collect();
+    assert!(
+        every.contains(&"landing-registered") && every.contains(&"push"),
+        "{every:?}"
+    );
+    let planner = world.run(&["next", "--flow", &flow]);
+    let planner: Value = serde_json::from_str(planner.stdout.trim()).expect("a document");
+    for event in planner["events"].as_array().expect("events") {
+        assert_ne!(
+            event["labels"]["significance"],
+            json!("progress"),
+            "{event}"
+        );
+    }
+
+    // Now the request is unreadable.
+    let request = landing_dir(&world, &flow, &id).join("request.json");
+    std::fs::write(&request, "{").expect("tampered");
+    let blocked = verdict(&world);
+    assert_eq!(blocked["verdict"], json!("block"), "{blocked}");
+    let owed = world.run(&["unwatched", "--session", &world.session]);
+    owed.exited(OWED);
+    assert!(owed.stdout.contains("UNKNOWN"), "{}", owed.stdout);
+    let flow_acks = world
+        .runs
+        .join(".flows")
+        .join(&flow)
+        .join("acknowledgements");
+    let before = snapshot(&flow_acks);
+    world
+        .run(&[
+            "unwatched",
+            "--session",
+            &world.session,
+            "--acknowledge-flow",
+            &flow,
+            "--reason",
+            "r",
+        ])
+        .exited(REFUSED);
+    assert_eq!(snapshot(&flow_acks), before);
+    let acknowledgements = world.root.join("acks");
+    world
+        .run(&[
+            "unpublished",
+            "--acknowledge",
+            BRANCH,
+            "--reason",
+            "kept",
+            "--session",
+            &world.session,
+            "--acknowledgements",
+            &acknowledgements.display().to_string(),
+        ])
+        .exited(REFUSED)
+        .err_has("cannot be said");
+    assert!(snapshot(&acknowledgements).is_empty());
+}

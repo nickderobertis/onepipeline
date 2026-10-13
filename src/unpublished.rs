@@ -1006,6 +1006,18 @@ pub fn acknowledge(request: &AcknowledgeRequest, graph: Option<PathBuf>) -> Resu
         )));
     }
     named_session(&request.session)?;
+    // Held across the check and the write: a landing registers its subjects
+    // under the same lock, so one cannot start between the two and be hidden.
+    // Landing state that cannot be read refuses before anything else is asked.
+    let root = crate::ledger::runs_root();
+    let _registering = crate::flow::registration_lock(&root)?;
+    let landings = crate::flow::every_landing(&root).map_err(|why| {
+        Error::Refused(format!(
+            "whether a live landing advances {} cannot be said, so it is not acknowledged: \
+             {why}; nothing was recorded",
+            request.branch
+        ))
+    })?;
     let providers = onevcs::Providers::real();
     let rows = providers
         .vcs
@@ -1072,17 +1084,6 @@ pub fn acknowledge(request: &AcknowledgeRequest, graph: Option<PathBuf>) -> Resu
         ))
     })?;
     // llmlint: ignore-end[changed_behavior_has_e2e]
-    // Held across the check and the write: a landing registers its subjects
-    // under the same lock, so one cannot start between the two and be hidden.
-    let root = crate::ledger::runs_root();
-    let _registering = crate::flow::registration_lock(&root)?;
-    let landings = crate::flow::every_landing(&root).map_err(|why| {
-        Error::Refused(format!(
-            "whether a live landing advances {} [{}] cannot be said, so it is not acknowledged: \
-             {why}; nothing was recorded",
-            row.branch.branch, row.identity
-        ))
-    })?;
     if let Some((flow, landing)) = landings
         .iter()
         .find(|(_, landing)| landing.names(&row.identity, &row.branch.branch) && landing.is_live())
