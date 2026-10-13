@@ -96,6 +96,11 @@ fn is_ancestor(world: &World, ancestor: &str, of: &str) -> bool {
         .success()
 }
 
+/// Make the host refuse every standings read of the service repository.
+fn cold_reads_fail(world: &World) {
+    world.script("gh.standings-outage.owner.service", "");
+}
+
 #[test]
 fn a_cold_republication_without_a_head_record_watches_the_same_draft() {
     let world = team_world("rework-cold-watch");
@@ -103,6 +108,9 @@ fn a_cold_republication_without_a_head_record_watches_the_same_draft() {
     let project = launched(&world, "coldwatch", vec![lifecycle("a", &[])], 1, &[]);
     let original = settled(&world, "coldwatch", "a");
     let branch = text(&original["branch"], "original branch");
+    // Every standings read the cold host's triggers make fails, so nothing on it
+    // records which branch the draft carries.
+    cold_reads_fail(&world);
     let cold = world.on_host("without-change-heads");
     cold.run_from(&cold.project, &["start", &project, "--attach"])
         .exited(0);
@@ -138,6 +146,29 @@ fn a_cold_republication_without_a_head_record_watches_the_same_draft() {
         text(&original["head"], "original head"),
         text(&replacement["head"], "replacement head")
     ));
+}
+
+/// A republication of a review draft settles `change-review-draft-unchecked` at its push,
+/// watching no checks; the next trigger reads its verdict, and a green one reads as the
+/// review draft it is from then on.
+fn read_green(world: &World, run: &str, nodes: &[&str]) {
+    for node in nodes {
+        let settlement = settled(world, run, node);
+        assert_eq!(
+            settlement["outcome"], "change-review-draft-unchecked",
+            "{node}: {settlement}"
+        );
+    }
+    world.run(&["readjust", run]).exited(0);
+    for node in nodes {
+        let read = world
+            .events_of(run, "node-checks-read")
+            .into_iter()
+            .rev()
+            .find(|event| event["labels"]["node"] == *node)
+            .unwrap_or_else(|| panic!("no trigger read {node}'s verdict"));
+        assert_eq!(read["payload"]["verdict"], "passed", "{node}: {read}");
+    }
 }
 
 /// The committed operations of every `edit-committed` the run journalled.
@@ -513,7 +544,10 @@ fn a_rework_restacks_every_draft_stacked_on_it_by_merges_alone() {
         .collect();
     for (id, record) in &restacked {
         assert_eq!(record["agent_dispatched"], false, "{id}: {record}");
-        assert_eq!(record["outcome"], "change-review-draft", "{id}: {record}");
+        assert_eq!(
+            record["outcome"], "change-review-draft-unchecked",
+            "{id}: {record}"
+        );
         // No worker and no drafter was dispatched for it again.
         assert_eq!(
             world
@@ -687,7 +721,7 @@ fn a_rework_conflicting_with_the_draft_above_is_concluded_by_that_draft_s_worker
     );
     let b = settled(&world, run, "b");
     assert_eq!(b["status"], "done", "{b}");
-    assert_eq!(b["outcome"], "change-review-draft", "{b}");
+    read_green(&world, run, &["b"]);
     let b_restacked = world
         .events_of(run, "node-restacked")
         .into_iter()
@@ -825,11 +859,7 @@ fn a_restack_starts_before_its_reworked_parent_s_checks_have_settled() {
         position(&journal, "node-restack-started", "b")
             < position(&journal, "node-settled", "a-rework-1")
     );
-    assert_eq!(
-        settled(&world, run, "a-rework-1")["outcome"],
-        "change-review-draft"
-    );
-    assert_eq!(settled(&world, run, "b")["outcome"], "change-review-draft");
+    read_green(&world, run, &["a-rework-1", "b"]);
 }
 
 /// A `retitle` reaching a run while its driver is live is staged by that driver
@@ -910,10 +940,7 @@ fn a_retitle_reaching_a_driven_run_is_applied_by_its_driver() {
     );
     let ended = driver.wait_with_output().expect("the driver ends");
     assert!(ended.status.success(), "{ended:?}");
-    assert_eq!(
-        settled(&world, run, "a-rework-1")["outcome"],
-        "change-review-draft"
-    );
+    read_green(&world, run, &["a-rework-1"]);
     assert_eq!(
         change_from(&world, &c_branch)["title"],
         "fix(c): say what c does"
@@ -1119,7 +1146,7 @@ fn the_op_s_title_outranks_the_drafter_s_and_a_keeps_leaves_the_title_alone() {
     reply(&world, run, json!([stated])).exited(0);
     adopt(&world, run).exited(0);
     let again = settled(&world, run, "x-again");
-    assert_eq!(again["outcome"], "change-review-draft", "{again}");
+    assert_eq!(again["outcome"], "change-review-draft-unchecked", "{again}");
     assert_eq!(again["branch"], branch("x").as_str(), "{again}");
     assert_eq!(
         change_from(&world, &branch("x"))["title"],
@@ -1137,7 +1164,7 @@ fn the_op_s_title_outranks_the_drafter_s_and_a_keeps_leaves_the_title_alone() {
     adopt(&world, run).exited(0);
     assert_eq!(
         settled(&world, run, "y-rework-1")["outcome"],
-        "change-review-draft"
+        "change-review-draft-unchecked"
     );
     assert_eq!(change_from(&world, &branch("y"))["title"], "feat: ship y");
     assert!(retitled(&world, run, "y-rework-1").is_empty());
@@ -1201,7 +1228,10 @@ fn held_unverified(world: &World, run: &str, shown: &Shown, id: &str, title: &st
     let replacement = format!("{id}-rework-1");
     let settlement = settled(world, run, &replacement);
     assert_eq!(settlement["status"], "done", "{settlement}");
-    assert_eq!(settlement["outcome"], "change-review-draft", "{settlement}");
+    assert_eq!(
+        settlement["outcome"], "change-review-draft-unchecked",
+        "{settlement}"
+    );
     let branch = text(&settlement["branch"], "a branch");
     assert_eq!(change_from(world, branch)["title"], title);
     let records = unverified(world, run, &replacement);
@@ -1476,8 +1506,7 @@ fn a_drafter_that_reuses_its_workers_pid_is_read_as_itself() {
 
     reply(&world, run, json!([rework("a", "rework it")])).exited(0);
     adopt(&world, run).exited(0);
-    let settlement = settled(&world, run, "a-rework-1");
-    assert_eq!(settlement["outcome"], "change-review-draft", "{settlement}");
+    read_green(&world, run, &["a-rework-1"]);
     let change = change_from(&world, &branch);
     assert_eq!(change["body"], crate::stacked_drafts::DRAFTED, "{change}");
     assert_eq!(change["title"], "fix(a): say what a does now", "{change}");
@@ -1750,10 +1779,7 @@ fn only_the_planner_may_rework_or_retitle() {
     )
     .exited(0);
     adopt(&world, run).exited(0);
-    assert_eq!(
-        settled(&world, run, "a-rework-1")["outcome"],
-        "change-review-draft"
-    );
+    read_green(&world, run, &["a-rework-1"]);
     reply(
         &world,
         run,
@@ -1868,7 +1894,7 @@ fn a_rework_the_run_cannot_take_is_refused_naming_why() {
     reply(&world, run, json!([uncommented])).exited(0);
     adopt(&world, run);
     let again = settled(&world, run, "a-rework-2");
-    assert_eq!(again["outcome"], "change-review-draft", "{again}");
+    assert_eq!(again["outcome"], "change-review-draft-unchecked", "{again}");
     assert_eq!(again["branch"], settled(&world, run, "a")["branch"]);
     let said = "reworked — as a-rework-2: a reviewer asked for it on the draft; naming no \
                 review comment";
@@ -1954,10 +1980,11 @@ fn a_restack_whose_worker_fails_its_merge_settles_the_draft_failed() {
     assert_eq!(settled(&world, run, "c")["status"], "done");
 }
 
-/// A restack whose publication the host's checks refuse goes back to the draft's
-/// own worker on the same branch, as any publication refusal does — drafted again,
-/// since that worker may change the content — and settles as a review draft once
-/// a later publication of it is green.
+/// A restack whose republication the host's checks refuse goes back to the draft's
+/// own worker on the same branch once a trigger reads that verdict red, as a
+/// `checks-failed` publication's re-dispatch does — drafted again, since that worker may
+/// change the content — and reads as a review draft once a later trigger reads its
+/// repair green.
 #[test]
 fn a_restack_its_checks_refuse_is_asked_of_the_draft_s_worker_again() {
     let world = team_world("rework-restack-retry");
@@ -1977,11 +2004,6 @@ fn a_restack_its_checks_refuse_is_asked_of_the_draft_s_worker_again() {
     );
     let b_branch = text(&settled(&world, run, "b")["branch"], "b's branch").to_owned();
     let b_number = change_from(&world, &b_branch)["number"].clone();
-    // `b`'s checks fail from here, until its worker has been asked again.
-    world.script(
-        &format!("gh.checks.{b_number}"),
-        "lint completed failure required",
-    );
 
     reply(
         &world,
@@ -1989,35 +2011,31 @@ fn a_restack_its_checks_refuse_is_asked_of_the_draft_s_worker_again() {
         json!([rework("a", "say what the review asked in a.md")]),
     )
     .exited(0);
-    let mut driving = world.cmd(&["adopt", run]);
-    driving
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    let driver = driving.spawn().expect("the adopting driver starts");
-    world.until("b's worker to be asked again", |world| {
-        world
-            .events_of(run, "node-dispatched")
-            .iter()
-            .filter(|event| event["labels"]["node"] == "b")
-            .count()
-            == 2
-    });
-    world.script(
-        &format!("gh.checks.{b_number}"),
-        crate::draft_lifecycle::GREEN,
+    adopt(&world, run).exited(0);
+    let restacked = settled(&world, run, "b");
+    assert_eq!(
+        restacked["outcome"], "change-review-draft-unchecked",
+        "{restacked}"
     );
-    let ended = driver.wait_with_output().expect("the driver ends");
-    assert!(ended.status.success(), "{ended:?}");
+    // `b`'s restacked head is red on the host, and the next trigger reads it so.
+    let red = text(&restacked["head"], "b's head").to_owned();
+    std::fs::create_dir_all(world.fakes.join("gh-head-verdict")).expect("a verdict directory");
+    std::fs::write(
+        world.fakes.join("gh-head-verdict").join(&red),
+        "failed:lint",
+    )
+    .expect("the verdict is written");
+    world.run(&["readjust", run]).exited(0);
 
     let b = settled(&world, run, "b");
     assert_eq!(b["status"], "done", "{b}");
-    assert_eq!(b["outcome"], "change-review-draft", "{b}");
-    let restacked = world
+    assert_ne!(b["head"], red.as_str(), "{b}");
+    let restack = world
         .events_of(run, "node-restacked")
         .into_iter()
         .find(|event| event["labels"]["node"] == "b")
         .expect("b's restack is on the record");
-    assert_eq!(restacked["payload"]["agent_dispatched"], true);
+    assert_eq!(restack["payload"]["agent_dispatched"], false);
     let redispatched = world
         .events_of(run, "node-dispatched")
         .into_iter()
@@ -2032,6 +2050,7 @@ fn a_restack_its_checks_refuse_is_asked_of_the_draft_s_worker_again() {
     assert_eq!(tasks_of(&world, run, "b", "pr-author").len(), 2);
     assert_eq!(opened_from(&world, &b_branch), 1);
     assert!(held_as_draft(&world, &b_number));
+    read_green(&world, run, &["b"]);
 }
 
 /// A rework cleared for publication before a takeover may finish its push, but
@@ -2156,10 +2175,7 @@ fn a_rework_title_check_is_validated_by_the_real_producer() {
     )
     .exited(0);
     world.run_on_agentgraph(&["adopt", run]).exited(0);
-    assert_eq!(
-        settled(&world, run, "a-rework-2")["outcome"],
-        "change-review-draft"
-    );
+    read_green(&world, run, &["a-rework-2"]);
     assert_eq!(
         change_from(&world, &branch)["title"],
         "fix(a): answer the review"
