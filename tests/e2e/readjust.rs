@@ -730,3 +730,94 @@ fn a_whole_lower_stack_landing_moves_every_draft_above_it_in_one_readjustment() 
         assert_eq!(landed["detected_by"], "readjust", "{landed}");
     }
 }
+
+/// What a draft of the `other` repository looks like from every side a failed read must
+/// leave alone: its branch's head on that origin, its change request's base and description on the host, and how
+/// many records the run holds about it.
+fn untouched(world: &World, run: &str, node: &str) -> (String, String, String, usize) {
+    let branch = branch_of(world, run, node);
+    let change = change_from(world, &branch);
+    let origin = world.root.join("other.git");
+    let records = world
+        .journal(run)
+        .iter()
+        .filter(|event| event["labels"]["node"] == node)
+        .count();
+    (
+        git(world, &origin, &["rev-parse", &branch])
+            .trim()
+            .to_owned(),
+        text(&change["base"], "the base").to_owned(),
+        text(&change["body"], "the description").to_owned(),
+        records,
+    )
+}
+
+/// A failed read: over two repositories, the standings read of `other` fails on the host
+/// while parents have landed in both. `onepipeline readjust` journals
+/// `readjust-read-failed` naming `other`, leaves `other`'s drafts exactly as they were —
+/// heads, bases, records and Stack blocks — and still moves `service`'s draft onto the
+/// root, exiting with the status a failed host read is given. Once the host answers
+/// again, the next trigger readjusts `other`'s drafts too.
+#[test]
+fn a_repository_whose_read_failed_is_left_as_it_was_and_readjusted_by_the_next_trigger() {
+    let world = team_world("readjust-failed-read");
+    world.extra_repository("other");
+    for node in ["a", "b", "p", "q"] {
+        world.script(&format!("{node}.work"), &format!("{node}'s change\n"));
+    }
+    let on_other = |id: &str, deps: &[&str]| {
+        let mut node = lifecycle(id, deps);
+        node["repo"] = json!("github.com/owner/other");
+        node
+    };
+    let run = "failed";
+    launched(
+        &world,
+        run,
+        vec![
+            lifecycle("a", &[]),
+            lifecycle("b", &["a"]),
+            on_other("p", &[]),
+            on_other("q", &["p"]),
+        ],
+    );
+    let p_change = number_of(&world, run, "p");
+    merge(&world, &number_of(&world, run, "a"), "squash", "kept");
+    person(
+        &world,
+        &[
+            "merge",
+            "owner/other",
+            &p_change.to_string(),
+            "squash",
+            "kept",
+        ],
+    );
+    let before = untouched(&world, run, "q");
+    world.script("gh.standings-outage.owner.other", "");
+
+    let (code, receipt) = readjust(&world, run);
+    assert_eq!(code, 1, "a failed host read is not said: {receipt}");
+    assert_eq!(receipt["state"], "performed", "{receipt}");
+    let failed = world.events_of(run, "readjust-read-failed");
+    assert_eq!(failed.len(), 1, "{failed:#?}");
+    assert_eq!(
+        failed[0]["payload"]["repo"], "github.com/owner/other",
+        "{failed:#?}"
+    );
+    assert_eq!(untouched(&world, run, "q"), before);
+    assert!(record(&world, run, "node-landed", "p").is_none());
+    assert_eq!(settled(&world, run, "b")["base"], "main");
+    let (base, _) = on_host(&world, run, "b");
+    assert_eq!(base, "main");
+
+    std::fs::remove_file(world.fakes.join("gh.standings-outage.owner.other"))
+        .expect("the outage ends");
+    readjusted(&world, run);
+    assert!(record(&world, run, "node-landed", "p").is_some());
+    assert_eq!(settled(&world, run, "q")["base"], "main");
+    let (base, body) = on_host(&world, run, "q");
+    assert_eq!(base, "main");
+    assert!(body.contains("Drafted against `main`, the root"), "{body}");
+}

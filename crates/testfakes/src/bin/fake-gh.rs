@@ -2550,6 +2550,20 @@ fn own_standings(
     changes: &[onevcs::ChangeId],
     dir: &Path,
 ) -> ExitCode {
+    // `gh.standings-outage.<owner>.<name>` is this one repository's read refused, as a
+    // host answering an error for it would, while every other repository's is answered.
+    if dir
+        .join(format!(
+            "gh.standings-outage.{}.{}",
+            fake::segment(owner),
+            fake::segment(name)
+        ))
+        .exists()
+    {
+        return fake::refuse(&format!(
+            "the standings of {owner}/{name} could not be read"
+        ));
+    }
     let repo = format!("{owner}/{name}");
     let opened = opened_changes(dir);
     let mut standings = Vec::new();
