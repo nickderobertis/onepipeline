@@ -648,12 +648,22 @@ pub(crate) enum PublicationVerdict {
 
 /// One rework republication waiting on the next pass's standings read.
 pub(crate) struct ReworkDue {
-    // llmlint: ignore[invalid_states_unrepresentable] the node and the change request are the
-    // run's own strings — a graph-validated id and the URL `known_change_url` parsed — and are
-    // only compared against the record the read folds.
+    // llmlint: ignore-block[invalid_states_unrepresentable] the node and the change request
+    // are the run's own strings — a graph-validated id and the URL `known_change_url` parsed
+    // — and are only compared against the record the read folds.
     pub(crate) node: String,
     pub(crate) change: String,
-    pub(crate) answer: Sender<bool>,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
+    pub(crate) answer: Sender<ReworkVerdict>,
+}
+
+/// What the read continuing a rework's trigger answers its republication.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReworkVerdict {
+    /// The change request is still open: publish onto it.
+    Republish,
+    /// A person merged it after the rework was dispatched: publish nothing.
+    MergedDuringRework,
 }
 
 /// Ask the loop whether the change request a rework's replacement is about to republish
@@ -678,7 +688,7 @@ pub(crate) fn merged_during_rework(tx: &Sender<Message>, node: &str, change: &st
     {
         return false;
     }
-    answered.recv().unwrap_or(false)
+    answered.recv().unwrap_or(ReworkVerdict::Republish) == ReworkVerdict::MergedDuringRework
     // llmlint: ignore-end[changed_behavior_has_e2e]
 }
 
@@ -1763,7 +1773,11 @@ fn converge(
                         ),
                     )?;
                 }
-                let _ = due.answer.send(merged);
+                let _ = due.answer.send(if merged {
+                    ReworkVerdict::MergedDuringRework
+                } else {
+                    ReworkVerdict::Republish
+                });
             }
         }
         if !claimed {

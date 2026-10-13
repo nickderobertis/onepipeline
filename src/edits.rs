@@ -560,6 +560,7 @@ pub struct Frontier {
     pub restacking: BTreeSet<String>,
     /// Each node whose change request was merged into another node's branch, and that
     /// node: a `rework` of one is refused naming it.
+    // llmlint: ignore[invalid_states_unrepresentable] both are node ids, the plain `String` every neighbouring map of this struct keys by — `landings`, `branches`, `superseded` — validated where the graph took the node and copied from `RunState::absorbed`, which folds them off `node-absorbed`; a node-id newtype on this one field would disagree with each of them.
     pub absorbed: BTreeMap<String, String>,
 }
 

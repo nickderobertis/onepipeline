@@ -303,12 +303,19 @@ fn discovery_refuses_legacy_or_damaged_draft_records_without_reading_the_host() 
         let world = team_world(&format!("review-damaged-{field}"));
         launched(&world, "damaged");
         let host = host(&world, "damaged", &["a", "b"]);
+        // llmlint: ignore-block[tests_mirror_real_usage] the planner's ruling on this node
+        // allows this retained-journal fixture: no command of this build writes either shape,
+        // so the only way to put one in front of the reader is to reproduce it on disk.
         let mut events = world.journal("damaged");
         if field == "base" {
-            // A retained pre-stack journal can lack the session records and the
-            // settlement base newer readers use to reconstruct the root.
+            // The journal a build before stacked drafts (entry 115) retained: no relayed
+            // `vcs` session records and no settlement `base`, which newer readers use to
+            // reconstruct the root a draft is read against.
             events.retain(|event| event["source"] != "vcs");
         }
+        // The `change_url` case is a settlement naming another repository's change
+        // request — a record this build never writes, and one a person editing the
+        // journal can — so discovery must refuse it rather than read a foreign draft.
         for event in &mut events {
             if event["kind"] == "node-settled" {
                 event["payload"][field] = value.clone();
@@ -319,10 +326,14 @@ fn discovery_refuses_legacy_or_damaged_draft_records_without_reading_the_host() 
             .map(|event| format!("{}\n", serde_json::to_string(event).unwrap()))
             .collect::<String>();
         std::fs::write(world.run_file("damaged", "events.jsonl"), text).unwrap();
+        // The cached fold covers the journal as this build wrote it, so the reader would
+        // answer from that and never meet the retained shape: removing it is what makes
+        // the next fold read the journal above, as a retained run's first reader does.
         let checkpoint = world.run_file("damaged", "checkpoint.json");
         if checkpoint.exists() {
             std::fs::remove_file(checkpoint).unwrap();
         }
+        // llmlint: ignore-end[tests_mirror_real_usage]
         let refused = world.run(&["review", "damaged", "--json"]);
         assert_eq!(refused.code, 1, "{}\n{}", refused.stdout, refused.stderr);
         assert!(world

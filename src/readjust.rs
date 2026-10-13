@@ -192,6 +192,10 @@ pub(crate) fn connected(state: &RunState, node: &str) -> BTreeSet<String> {
 /// What one readjustment's read found, kept for the rest of the trigger: each draft's
 /// standing, the review reads a review pass discovers from, and what failed.
 #[derive(Debug, Default)]
+// llmlint: ignore-block[invalid_states_unrepresentable] keyed by the run's node ids and holding
+// the host's own answers — the `onevcs` types it parsed, and the repository, base and check
+// names it reported — as the plain strings `RunState` and the request types carry them; this
+// lives for one trigger and is read only to journal and to place.
 pub(crate) struct Detection {
     /// Each draft's standing, by node.
     pub(crate) standings: BTreeMap<String, onevcs::ChangeStanding>,
@@ -208,6 +212,7 @@ pub(crate) struct Detection {
     /// this trigger moves it, and the next trigger's read tries again.
     pub(crate) unrecovered: BTreeSet<String>,
 }
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// A red verdict a trigger read: the head it is about, and the checks that failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -936,6 +941,10 @@ pub(crate) fn root_block(root: &str) -> String {
 
 /// What one driver's readjustments remember between the read and the restacks it owes.
 #[derive(Debug, Default)]
+// llmlint: ignore-block[invalid_states_unrepresentable] in memory for one driver: node ids,
+// the host's descriptions and bases, and the keys a placement read is remembered under, as the
+// plain strings `RunState` and the records it folds carry them — each read off a record or an
+// answer this crate already checked, and none written anywhere.
 pub(crate) struct Readjuster {
     /// A trigger whose readjustment the next pass runs.
     pub(crate) due: Option<ReadjustTrigger>,
@@ -970,6 +979,7 @@ pub(crate) struct Plan {
     /// The landed or absorbed nodes that moved it.
     pub(crate) cause: Vec<String>,
 }
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 impl Readjuster {
     /// Keep what `detection` read for the rest of this trigger.
