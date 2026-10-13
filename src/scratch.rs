@@ -249,7 +249,8 @@ fn emit<T: serde::Serialize>(paths: &RunPaths, kind: PipelineKind, value: &T) ->
     Journal::open(paths).emit(kind, journal::labels(&paths.run, None), payload)
 }
 
-/// A record stands until a graph edit changes its ending.
+/// A record stands until an edit changes its ending or a new dispatch makes
+/// the run live again, including work added while an existing decision waits.
 fn already_recorded(events: &[Envelope]) -> bool {
     let mut state = crate::projection::RunState {
         strict: true,
@@ -260,7 +261,9 @@ fn already_recorded(events: &[Envelope]) -> bool {
         let kind = PipelineKind::from_wire(&event.kind);
         let before = graph_ending(&state);
         crate::projection::fold_one(&mut state, event);
-        if kind == Some(PipelineKind::EditCommitted) && before != graph_ending(&state) {
+        if kind == Some(PipelineKind::NodeDispatched)
+            || (kind == Some(PipelineKind::EditCommitted) && before != graph_ending(&state))
+        {
             recorded = false;
         }
         if matches!(
@@ -517,10 +520,31 @@ fn telemetry(
 }
 
 #[derive(Debug)]
+pub(crate) struct ScratchRun(String);
+
+impl ScratchRun {
+    fn new(run: &str) -> Option<Self> {
+        ledger::is_valid_run_id(run).then(|| Self(run.to_owned()))
+    }
+}
+
+impl std::fmt::Display for ScratchRun {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+fn no_run(run: &str) -> DiscardOutcome {
+    DiscardOutcome::Refused(format!(
+        "no run named '{run}' under the runs root; deleted nothing"
+    ))
+}
+
+#[derive(Debug)]
 pub(crate) enum DiscardOutcome {
     Refused(String),
     Removed {
-        run: String,
+        run: ScratchRun,
         dirs: Vec<ScratchDir>,
         failed: Vec<ScratchFailure>,
     },
@@ -571,15 +595,14 @@ impl DiscardOutcome {
 
 pub(crate) fn discard(root: &Path, run: &str) -> crate::Result<DiscardOutcome> {
     let began = Instant::now();
+    let Some(identity) = ScratchRun::new(run) else {
+        return Ok(no_run(run));
+    };
     let paths = RunPaths::under(root, run);
-    let valid = ledger::is_valid_run_id(run);
-    if !valid
-        || !paths.exists()
+    if !paths.exists()
         || fs::symlink_metadata(&paths.dir).is_ok_and(|metadata| metadata.is_symlink())
     {
-        return Ok(DiscardOutcome::Refused(format!(
-            "no run named '{run}' under the runs root; deleted nothing"
-        )));
+        return Ok(no_run(run));
     }
     let _handover = ledger::Handover::hold(&paths)?;
     let view = RunView::open(&paths)?;
@@ -623,7 +646,7 @@ pub(crate) fn discard(root: &Path, run: &str) -> crate::Result<DiscardOutcome> {
         }
     }
     Ok(DiscardOutcome::Removed {
-        run: run.to_string(),
+        run: identity,
         dirs: result.removed,
         failed: result.record.failed,
     })
@@ -647,9 +670,14 @@ pub(crate) fn lines(view: &RunView, cap: Option<usize>) -> String {
         return String::new();
     };
     if PipelineKind::from_wire(&event.kind) == Some(PipelineKind::ScratchRemoved) {
+        // llmlint: ignore-block[changed_behavior_has_e2e] The real journal boundary
+        // rejects malformed registered payloads before rendering, proven by
+        // contract::scratch_payloads_reject_relative_paths_and_empty_errors_at_the_registered_boundary.
+        // This defensive refusal cannot be reached by a current CLI producer.
         let Ok(record) = serde_json::from_value::<ScratchRemoved>(json!(event.payload)) else {
             return String::new();
         };
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         return record.failed.first().map_or_else(String::new, |first| {
             format!(
                 "  scratch: {} dir(s) could not be removed: {}: {}\n",
@@ -659,9 +687,14 @@ pub(crate) fn lines(view: &RunView, cap: Option<usize>) -> String {
             )
         });
     }
+    // llmlint: ignore-block[changed_behavior_has_e2e] The real journal boundary
+    // rejects malformed registered payloads before rendering, proven by
+    // contract::scratch_payloads_reject_relative_paths_and_empty_errors_at_the_registered_boundary.
+    // This defensive refusal cannot be reached by a current CLI producer.
     let Ok(mut record) = serde_json::from_value::<ScratchRetained>(json!(event.payload)) else {
         return String::new();
     };
+    // llmlint: ignore-end[changed_behavior_has_e2e]
     largest_first(&mut record.dirs);
     let suffix = if views::reading(view).paused.is_some() {
         format!(

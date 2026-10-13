@@ -948,7 +948,7 @@ fn links_are_unlinked_without_following_them_and_a_link_scratch_root_is_refused(
 #[test]
 fn partial_filesystem_failure_is_journalled_and_visible_for_both_removal_triggers() {
     use std::os::unix::fs::PermissionsExt;
-    for success in [true, false] {
+    for (success, failure_count) in [(true, 1), (false, 1), (true, 2), (false, 2)] {
         let world = World::new(if success {
             "scratch-success-partial"
         } else {
@@ -965,8 +965,12 @@ fn partial_filesystem_failure_is_journalled_and_visible_for_both_removal_trigger
             !world.events_of("partial", "turn-started").is_empty()
         });
         let blocked = world.run_file("partial", "scratch/blocked");
+        let another_blocked = world.run_file("partial", "scratch/another-blocked");
         let removable = world.run_file("partial", "scratch/removable");
-        for dir in [&blocked, &removable] {
+        for dir in [&blocked, &removable]
+            .into_iter()
+            .chain((failure_count == 2).then_some(&another_blocked))
+        {
             std::fs::create_dir_all(dir).unwrap();
             std::fs::write(dir.join("data"), "written before the ending").unwrap();
         }
@@ -977,12 +981,18 @@ fn partial_filesystem_failure_is_journalled_and_visible_for_both_removal_trigger
             }
         }
         let _restore = RestorePermissions(blocked.clone());
+        let _restore_another =
+            (failure_count == 2).then(|| RestorePermissions(another_blocked.clone()));
         let good_dirs: Vec<_> = scratch_dirs(&world, "partial")
             .into_iter()
-            .filter(|path| path != &blocked)
+            .filter(|path| path != &blocked && path != &another_blocked)
             .collect();
         let freed: u64 = good_dirs.iter().map(|path| allocated_tree(path)).sum();
         std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o555)).unwrap();
+        if failure_count == 2 {
+            std::fs::set_permissions(&another_blocked, std::fs::Permissions::from_mode(0o555))
+                .unwrap();
+        }
         world.release("build.go");
         world.until("the automatic scratch record", |world| {
             !world
@@ -1009,10 +1019,20 @@ fn partial_filesystem_failure_is_journalled_and_visible_for_both_removal_trigger
             if success { "success" } else { "discard" }
         );
         let failed = record["failed"].as_array().unwrap();
-        assert_eq!(failed.len(), 1);
+        assert_eq!(failed.len(), failure_count);
         assert_eq!(record["dirs"], good_dirs.len());
         assert_eq!(record["bytes"], freed);
-        assert_eq!(failed[0]["path"], blocked.to_str().unwrap());
+        let mut failed_paths: Vec<_> = failed
+            .iter()
+            .map(|failure| failure["path"].as_str().unwrap())
+            .collect();
+        failed_paths.sort();
+        let mut expected_paths = vec![blocked.to_str().unwrap()];
+        if failure_count == 2 {
+            expected_paths.push(another_blocked.to_str().unwrap());
+        }
+        expected_paths.sort();
+        assert_eq!(failed_paths, expected_paths);
         let error = failed[0]["error"].as_str().unwrap();
         assert!(!error.is_empty());
         assert!(!removable.exists());
@@ -1021,8 +1041,9 @@ fn partial_filesystem_failure_is_journalled_and_visible_for_both_removal_trigger
             assert!(status.starts_with("partial  SETTLED"));
         }
         let notice = format!(
-            "  scratch: 1 dir(s) could not be removed: {}: {error}",
-            blocked.display()
+            "  scratch: {} dir(s) could not be removed: {}: {error}",
+            failure_count,
+            failed[0]["path"].as_str().unwrap()
         );
         assert!(status.contains(&notice));
         assert!(results.contains(&notice));
@@ -1031,15 +1052,23 @@ fn partial_filesystem_failure_is_journalled_and_visible_for_both_removal_trigger
                 "removed {} scratch dir(s) of run partial, 0.0 GiB freed:\n",
                 good_dirs.len()
             )));
-            discarded.exited(1).err_has(&format!(
-                "onepipeline scratch discard: could not remove {}: {error}",
-                blocked.display()
-            ));
+            discarded.exited(1);
+            for failure in failed {
+                discarded.err_has(&format!(
+                    "onepipeline scratch discard: could not remove {}: {}",
+                    failure["path"].as_str().unwrap(),
+                    failure["error"].as_str().unwrap()
+                ));
+            }
             assert!(!discarded
                 .stdout
                 .contains(&format!("  {}  ", blocked.display())));
         }
         std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if failure_count == 2 {
+            std::fs::set_permissions(&another_blocked, std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
         world.run(&["scratch", "discard", "partial"]).exited(0);
         assert!(!world.run_file("partial", "scratch").exists());
     }
@@ -1497,4 +1526,43 @@ fn non_utf8_dispatch_names_are_refused_before_any_scratch_is_deleted() {
             .events_of("invalid-name", "scratch-removed")
             .is_empty());
     }
+}
+
+#[test]
+fn a_paused_run_dispatches_added_work_and_records_its_next_pause_freshly() {
+    let world = World::new("scratch-paused-again");
+    let run = settle(
+        &world,
+        "pause-again",
+        vec![
+            agent("build", &[]),
+            crate::harness::human("approve", &["build"]),
+        ],
+    );
+    let first = assert_retained(&world, &run, "paused", 1);
+    let before = snapshot(&world.run_file(&run, "scratch"));
+    reply(
+        &world,
+        &run,
+        serde_json::json!([{"op":"add", "node":agent("extra", &[])}]),
+    );
+    assert_eq!(world.events_of(&run, "scratch-retained").len(), 1);
+    world.run(&["adopt", &run]).settled();
+    assert_eq!(world.events_of(&run, "scratch-retained").len(), 2);
+    let latest = assert_retained(&world, &run, "paused", 2);
+    assert_eq!(first["ending"], "paused");
+    assert!(latest["dirs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|dir| dir["path"] == given(&world, &run, "extra")[0].to_str().unwrap()));
+    for (path, bytes) in before {
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
+    world.run(&["adopt", &run]).settled();
+    assert_eq!(
+        world.events_of(&run, "scratch-retained").len(),
+        2,
+        "an inert adoption cannot repeat an ending"
+    );
 }
