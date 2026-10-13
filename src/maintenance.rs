@@ -985,7 +985,7 @@ pub(crate) fn results_lines(view: &crate::views::RunView) -> String {
 /// around its command, where that is above zero: one that grew, or whose `disk`
 /// is `null` because a measure failed, frees nothing and is not counted. Each
 /// identity is named by its key's last path segment with its slots summed,
-/// largest first.
+/// largest first, equal figures in the record's own order.
 fn freed_line(payload: &Map<String, Value>) -> String {
     let mut by_identity: Vec<(String, u64)> = Vec::new();
     let mut slots = 0usize;
@@ -1031,7 +1031,7 @@ fn freed_line(payload: &Map<String, Value>) -> String {
     if by_identity.is_empty() {
         return String::new();
     }
-    by_identity.sort_by(|(a_name, a), (b_name, b)| b.cmp(a).then_with(|| a_name.cmp(b_name)));
+    by_identity.sort_by_key(|(_, bytes)| std::cmp::Reverse(*bytes));
     let total = by_identity
         .iter()
         .fold(0u64, |sum, (_, bytes)| sum.saturating_add(*bytes));
