@@ -199,6 +199,28 @@ fn launched(world: &World, run: &str, nodes: Vec<Value>) -> String {
     project
 }
 
+/// What became of a merged parent's head in a case-1 journey, and what the host did to
+/// the draft based on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Head {
+    /// The branch stays, and `b` stays on it.
+    Kept,
+    /// The branch is deleted, and the host retargets `b` onto the root itself.
+    DeletedRetargeted,
+    /// The branch is deleted through the refs API, and the host closes `b`.
+    DeletedClosed,
+}
+
+impl Head {
+    fn person(self) -> &'static str {
+        match self {
+            Self::Kept => "kept",
+            Self::DeletedRetargeted => "deleted-retarget",
+            Self::DeletedClosed => "deleted-close",
+        }
+    }
+}
+
 /// Case 1, the head kept: `a → b` settles as stacked drafts on a team identity, a
 /// person squash-merges `a` into the root keeping its branch, and `onepipeline
 /// readjust` moves `b` onto the root. `b`'s change request targets the root and is
@@ -211,7 +233,34 @@ fn launched(world: &World, run: &str, nodes: Vec<Value>) -> String {
 /// wrote outside the block are untouched, with no drafter dispatched for it.
 #[test]
 fn a_parent_merged_with_its_branch_kept_moves_the_draft_above_onto_the_root() {
-    let world = team_world("readjust-kept");
+    a_single_parent_lands("readjust-kept", Head::Kept);
+}
+
+/// Case 1, the head deleted and `b` retargeted by the host: everything the kept case
+/// holds, with the retarget recorded `unchanged` — the host already targets the root,
+/// so the one write carries only the description with its Stack block.
+#[test]
+fn a_parent_merged_and_deleted_with_the_host_retargeting_the_draft_records_it_unchanged() {
+    a_single_parent_lands("readjust-retargeted", Head::DeletedRetargeted);
+}
+
+/// Case 1, the head deleted through the refs API and `b` closed by the host: `b` is
+/// recovered first — `a`'s branch restored at `a`'s merged head and `b` reopened, a
+/// draft still, journalled `change-reopened` — then moved onto the root with the
+/// restored branch deleted again, and everything the kept case holds besides.
+#[test]
+fn a_parent_merged_and_deleted_with_the_host_closing_the_draft_reopens_and_moves_it() {
+    a_single_parent_lands("readjust-closed", Head::DeletedClosed);
+}
+
+/// One case-1 journey: `a → b`, `a` squash-merged by a person with its head as `head`
+/// says, and one `onepipeline readjust`.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one journey's whole bar, held in the order a reader checks it"
+)]
+fn a_single_parent_lands(name: &str, head: Head) {
+    let world = team_world(name);
     world.script("a.work", "a's change\n");
     world.script("b.work", "b's change\n");
     let run = "kept";
@@ -231,7 +280,10 @@ fn a_parent_merged_with_its_branch_kept_moves_the_draft_above_onto_the_root() {
     write_on_host(&world, &b_change["number"], "A reviewer's note.");
     let before_title = change_from(&world, &b_branch)["title"].clone();
 
-    merge(&world, &a_change["number"], "squash", "kept");
+    merge(&world, &a_change["number"], "squash", head.person());
+    if head == Head::DeletedClosed {
+        assert!(!held_as_draft(&world, &b_change["number"]));
+    }
     let root = tip(&world, "main");
     let from = world.invocations().len();
     let (code, receipt) = readjust(&world, run);
@@ -271,7 +323,39 @@ fn a_parent_merged_with_its_branch_kept_moves_the_draft_above_onto_the_root() {
     assert_eq!(landed["trigger"], "readjust", "{landed}");
     let readjusted =
         record(&world, run, "node-readjusted", "b").expect("b's readjustment is recorded");
-    assert_eq!(readjusted["retarget"], "retargeted", "{readjusted}");
+    assert_eq!(
+        readjusted["retarget"],
+        if head == Head::DeletedRetargeted {
+            "unchanged"
+        } else {
+            "retargeted"
+        },
+        "{readjusted}"
+    );
+    let reopened = record(&world, run, "change-reopened", "b");
+    if head == Head::DeletedClosed {
+        let reopened = reopened.expect("b's recovery is recorded");
+        assert_eq!(reopened["restored_base"], a_branch.as_str(), "{reopened}");
+        assert_eq!(reopened["change_url"], b["change_url"], "{reopened}");
+    } else {
+        assert!(reopened.is_none(), "{reopened:?}");
+    }
+    let a_kept = std::process::Command::new("git")
+        .args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{a_branch}"),
+        ])
+        .current_dir(service(&world).origin)
+        .status()
+        .expect("git runs")
+        .success();
+    assert_eq!(
+        a_kept,
+        head == Head::Kept,
+        "a's branch is not where the journey left it"
+    );
     assert_eq!(readjusted["content"], "merged", "{readjusted}");
     assert_eq!(readjusted["cause"], json!(["a"]), "{readjusted}");
     assert_eq!(
@@ -301,7 +385,12 @@ fn a_parent_merged_with_its_branch_kept_moves_the_draft_above_onto_the_root() {
         .filter(|call| is_standings_read(call))
         .collect();
     let writes: Vec<&Value> = calls.iter().filter(|call| is_write(call)).collect();
-    assert_eq!(reads.len(), 3, "{calls:#?}");
+    // A reopen reads its change request before and after its write, as a retarget does.
+    let (expected_reads, expected_writes) = match head {
+        Head::DeletedClosed => (5, 2),
+        _ => (3, 1),
+    };
+    assert_eq!(reads.len(), expected_reads, "{calls:#?}");
     assert!(
         query_of(reads[0]).contains("c1: pullRequest(number:"),
         "the readjustment's read is not one batch over both drafts: {calls:#?}"
@@ -312,9 +401,17 @@ fn a_parent_merged_with_its_branch_kept_moves_the_draft_above_onto_the_root() {
             .all(|read| !query_of(read).contains("c1: pullRequest(")),
         "{calls:#?}"
     );
-    assert_eq!(writes.len(), 1, "{calls:#?}");
+    assert_eq!(writes.len(), expected_writes, "{calls:#?}");
+    if head == Head::DeletedClosed {
+        assert!(
+            writes[0]["args"]
+                .as_array()
+                .is_some_and(|args| args.iter().any(|arg| arg == "state=open")),
+            "{writes:#?}"
+        );
+    }
     assert!(
-        writes[0]["args"]
+        writes[expected_writes - 1]["args"]
             .as_array()
             .is_some_and(
                 |args| args.iter().any(|arg| arg.as_str().is_some_and(|arg| arg
