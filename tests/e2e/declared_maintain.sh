@@ -17,12 +17,17 @@ if [ "$#" -gt 1 ]; then
   exit 64
 fi
 
-case "${1:-0}" in
-  '' | *[!0-9]*)
-    echo "maintain: the status to exit with is '$1', which is not a whole number; declare digits only, such as 3, or no argument for a maintenance that succeeds" >&2
+status=${1:-0}
+case "$status" in
+  '' | *[!0-9]* | ????*)
+    echo "maintain: the status to exit with is '$status', which is not a whole number from 0 to 255; declare one such as 3, or no argument for a maintenance that succeeds" >&2
     exit 64
     ;;
 esac
+if [ "$status" -gt 255 ]; then
+  echo "maintain: the status to exit with is '$status', which is above 255 and would wrap; declare one from 0 to 255, such as 3" >&2
+  exit 64
+fi
 
 if ! rm -rf scratch; then
   echo "maintain: cannot remove scratch in $(pwd); check that nothing holds the slot's worktree read-only" >&2
@@ -43,7 +48,7 @@ if [ -f grow.bytes ]; then
   fi
 fi
 
-if [ "${1:-0}" != "0" ]; then
-  echo "maintain: exiting $1 because the declaration passes $1 as this script's argument, asking for a maintenance that fails after its work; declare no argument for one that succeeds" >&2
+if [ "$status" -ne 0 ]; then
+  echo "maintain: exiting $status because the declaration passes $status as this script's argument, asking for a maintenance that fails after its work; declare no argument for one that succeeds" >&2
 fi
-exit "${1:-0}"
+exit "$status"
