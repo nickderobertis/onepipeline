@@ -702,6 +702,16 @@ resolver = "2"
 # halves. `onevcs-testing` 0.17.0 requires exactly `=0.48.1`, so the pair moves as
 # one.
 #
+# `onevcs` 0.49.0 is the floor because retirement proves a branch merged only
+# from its own repository's change request, reported merged at a head carrying
+# its content. A foreign repository's record proves nothing, base-history
+# matching is corroboration only, and open or closed-unmerged changes keep their
+# branches as `open-change-request` or `closed-change-request`, respectively.
+# `tests/e2e/retirement.rs` drives publication closeout and the idle sweep over
+# two identities with colliding branch names and change-request numbers. A
+# **requirement**, because `^0.48` admits no 0.49.x; `onevcs-testing` 0.18.0
+# requires exactly `=0.49.0`, so the pair moves as one.
+#
 # `oneagentgraph` 0.5.4 is the floor because it relays a turn's `message` and
 # `reasoning` items as `turn-activity` under their own kind — the agent's words,
 # with no tool name — which `src/views.rs` and `src/projection.rs` render as what
@@ -745,7 +755,7 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 oneagentgraph = "0.5.6"
-onevcs = "0.48.1"
+onevcs = "0.49.0"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is
@@ -955,7 +965,7 @@ oneharness-core = "0.24.1"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.17.0"
+onevcs-testing = "0.18.0"
 # The store, linked: `src/taskgraph.rs` says how the engine calls it. `-plugin-api` is
 # named for the values the store answers with, and `-local-md` for the plugin
 # `crates/testfakes` hosts in process.
@@ -987,7 +997,7 @@ tokio = "1"
 
 [package]
 name = "onepipeline"
-version = "0.69.0"
+version = "0.70.1"
 edition = "2021"
 rust-version.workspace = true
 description = "Execute a task DAG over oneagentgraph and onevcs, merging their event streams into one."
