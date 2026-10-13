@@ -1226,7 +1226,7 @@ fn every_draft_names_its_base(world: &World, run: &str, project: &str, bases: &[
     }
 }
 
-/// The branch the newest node of `node`'s lineage settled on, and the commit it stands at.
+/// Wait until `node` has been dispatched and its worker is held on its `.wait` script.
 fn wait_for_hold(world: &World, run: &str, node: &str) {
     world.until(&format!("{node} to be dispatched and held"), |world| {
         world
@@ -2199,6 +2199,33 @@ fn a_draft_merged_into_an_unknown_branch_raises_a_blocking_question() {
     readjusted(&world, run);
     assert!(record(&world, run, "node-readjusted", "b").is_none());
     assert!(record(&world, run, "node-readjusted", "c").is_none());
+    assert_eq!(surfaced(&world, run, "change-merged-elsewhere").len(), 1);
+
+    // Answered, the drafts above it are readjusted again; `b` itself has no change
+    // request left to republish, and nothing is recorded about it.
+    world.run(&["next", run]).exited(0);
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "completion": false, "message": "leave b where it is"})
+                .to_string(),
+        )
+        .exited(0);
+    readjusted(&world, run);
+    assert!(record(&world, run, "node-readjusted", "c").is_some());
+    assert!(is_ancestor(
+        &world,
+        &tip(&world, &branch_of(&world, run, "b")),
+        &tip(&world, &branch_of(&world, run, "c"))
+    ));
+    for kind in [
+        "node-absorbed",
+        "node-landed",
+        "node-readjusted",
+        "node-restack-started",
+    ] {
+        assert!(record(&world, run, kind, "b").is_none(), "b got a {kind}");
+    }
 }
 
 /// Install a `pre-receive` hook on the service origin refusing every push to `branch`.
@@ -2870,4 +2897,66 @@ fn a_cold_host_reads_a_moved_heads_pending_verdict_again_until_it_is_green() {
     let read = record(&cold, run, "node-checks-read", "b").expect("read again");
     assert_eq!(read["verdict"], "passed", "{read}");
     assert_eq!(outcome_of(&cold, run, "b"), "change-review-draft");
+}
+
+/// A change request merged into a branch this run does not know while its own rework runs:
+/// the replacement reads it so before anything is pushed, opens no change request, settles
+/// `failed` with `merged-during-rework`, and the blocking question about the merge is what
+/// it points the planner to.
+#[test]
+fn a_change_merged_elsewhere_during_its_own_rework_is_refused_before_the_push() {
+    let world = team_world("readjust-elsewhere-during");
+    branch_off_main(&world, "someone-else");
+    for node in ["a", "b"] {
+        world.script(&format!("{node}.work"), &format!("{node}'s change\n"));
+    }
+    world.script("b-rework-1.work", "b's change, as the review asked\n");
+    world.script("b-rework-1.work-file", "b");
+    world.script("b-rework-1.wait", "");
+    let run = "elsewhere";
+    launched(
+        &world,
+        run,
+        vec![lifecycle("a", &[]), lifecycle("b", &["a"])],
+    );
+    let b_branch = branch_of(&world, run, "b");
+    let b_number = number_of(&world, run, "b");
+    reply(&world, run, json!([rework("b")])).exited(0);
+    let driver = world
+        .cmd(&["adopt", run])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the adopting driver starts");
+    wait_for_hold(&world, run, "b-rework-1");
+    person(
+        &world,
+        &["retarget", SLUG, &b_number.to_string(), "someone-else"],
+    );
+    merge(&world, &b_number, "merge-commit", "kept");
+    std::fs::write(world.fakes.join("b-rework-1.go"), "").expect("the hold is released");
+    // The question about the merge is outstanding, so the run waits on the planner.
+    let ended = driver.wait_with_output().expect("the driver ends");
+    assert!(
+        String::from_utf8_lossy(&ended.stdout).contains("\"settlement\":\"awaiting-planner\""),
+        "{ended:?}"
+    );
+
+    let replacement = settled(&world, run, "b-rework-1");
+    assert_eq!(replacement["status"], "failed", "{replacement}");
+    assert_eq!(
+        replacement["outcome"], "merged-during-rework",
+        "{replacement}"
+    );
+    assert_eq!(opened_from(&world, &b_branch), 1);
+    for kind in ["node-absorbed", "node-landed"] {
+        assert!(record(&world, run, kind, "b-rework-1").is_none(), "{kind}");
+    }
+    let raised = surfaced(&world, run, "merged-during-rework");
+    assert_eq!(raised.len(), 1, "{raised:#?}");
+    assert!(
+        text(&raised[0]["message"], "the surface").contains("the question raised about that merge"),
+        "{raised:#?}"
+    );
+    assert_eq!(surfaced(&world, run, "change-merged-elsewhere").len(), 1);
 }

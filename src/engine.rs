@@ -1767,9 +1767,13 @@ fn converge(
                             == Some(due.change.as_str())
                     })
                     .map(|(_, into)| into.clone());
-                let merged = landed || absorbed_into.is_some();
+                let elsewhere = state.readjust.merged_elsewhere.contains(&due.node);
+                let merged = landed || absorbed_into.is_some() || elsewhere;
                 if merged {
                     let next = match &absorbed_into {
+                        None if elsewhere => "the question raised about that merge says how \
+                                              the run goes on with it"
+                            .to_owned(),
                         Some(into) => format!(
                             "its work now sits in '{into}''s draft; rework '{into}', or build on it \
                              with an `add` naming what is still to do"
@@ -7149,9 +7153,13 @@ fn start_readjustments(
         };
         // Its stack parents' pushes first: a parent owed a readjustment, or in flight,
         // is not yet where this draft is brought onto.
+        // A parent merged into a branch this run does not know never moves again, so it
+        // holds nothing up once its question is answered.
         let waiting = node.deps.iter().any(|dep| {
             let dep = crate::readjust::head_of(state, dep);
-            in_flight.contains_key(&dep) || state.readjust_owed.contains_key(&dep)
+            in_flight.contains_key(&dep)
+                || (state.readjust_owed.contains_key(&dep)
+                    && !state.readjust.merged_elsewhere.contains(&dep))
         });
         if waiting {
             continue;

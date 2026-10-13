@@ -213,6 +213,9 @@ pub(crate) struct Detection {
     /// Each closed draft whose recovery the host refused: still closed, so nothing of
     /// this trigger moves it, and the next trigger's read tries again.
     pub(crate) unrecovered: BTreeSet<String>,
+    /// Each draft merged into a branch neither the root nor any node's: nothing is left
+    /// on its change request to republish.
+    pub(crate) merged_elsewhere: BTreeSet<String>,
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
@@ -452,7 +455,10 @@ fn take_up(
                         absorbed(paths, journal, draft, &into_node, &commit.0)?;
                         moved_now.insert(node.to_owned());
                     }
-                    None => merged_elsewhere(paths, journal, draft, into, &commit.0)?,
+                    None => {
+                        merged_elsewhere(paths, journal, draft, into, &commit.0)?;
+                        detection.merged_elsewhere.insert(node.to_owned());
+                    }
                 }
             }
             onevcs::ChangeState::Closed { base_deleted } => {
@@ -748,21 +754,16 @@ fn elsewhere_correlation(url: &str, commit: &str) -> onemessagebus::Correlation 
 }
 
 /// The nodes held by an unanswered merged-elsewhere question, and every node depending
-/// on them.
+/// on them: each question still waiting or pending on the planner's queue, as the loop's
+/// decision points read it.
 pub(crate) fn held_elsewhere(paths: &RunPaths, state: &RunState) -> BTreeSet<String> {
-    let channel = crate::channel::ChannelState::new(paths);
-    let answered = channel.answered();
-    let held: Vec<String> = channel
-        .every_surface()
-        .into_iter()
-        .filter(|surface| surface.kind == CHANGE_MERGED_ELSEWHERE)
-        .filter(|surface| {
-            surface
-                .correlation
-                .as_ref()
-                .is_some_and(|correlation| !answered.contains(correlation))
-        })
-        .filter_map(|surface| surface.workstream)
+    let queue = crate::channel::ChannelState::new(paths).queue();
+    let held: Vec<String> = queue
+        .waiting
+        .iter()
+        .chain(queue.pending.iter())
+        .filter(|surface| surface.kind == CHANGE_MERGED_ELSEWHERE && surface.blocking)
+        .filter_map(|surface| surface.workstream.clone())
         .collect();
     let mut all: BTreeSet<String> = held.iter().cloned().collect();
     for node in held {
@@ -988,6 +989,8 @@ pub(crate) struct Readjuster {
     /// Each node a placement read was made for, so a node held across passes is not
     /// read for again.
     pub(crate) placed: BTreeSet<String>,
+    /// Each draft the latest read found merged into a branch this run does not know.
+    pub(crate) merged_elsewhere: BTreeSet<String>,
 }
 
 /// One readjustment in flight.
@@ -1008,6 +1011,12 @@ impl Readjuster {
         self.read_this_pass = true;
         self.tried.clear();
         self.tried.extend(detection.unrecovered.iter().cloned());
+        // A merged draft has no change request left to republish onto: it is never
+        // restacked, whether or not its question was answered.
+        self.tried
+            .extend(detection.merged_elsewhere.iter().cloned());
+        self.merged_elsewhere
+            .clone_from(&detection.merged_elsewhere);
         for (node, standing) in &detection.standings {
             self.bodies.insert(node.clone(), standing.body.clone());
             if matches!(standing.state, onevcs::ChangeState::Open) {
