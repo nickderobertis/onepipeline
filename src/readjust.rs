@@ -184,6 +184,7 @@ pub(crate) fn connected(state: &RunState, node: &str) -> BTreeSet<String> {
         .filter(|id| !state.superseded.contains_key(id))
         .filter(|id| state.landings.get(id) != Some(&Landing::Landed))
         .filter(|id| !state.absorbed.contains_key(id))
+        .filter(|id| !state.closed_changes.contains(id))
         .filter(|id| lineage_change(state, id).is_some())
         .collect()
 }
@@ -203,6 +204,9 @@ pub(crate) struct Detection {
     /// Each draft whose deferred verdict was read red: the head it is about, and the
     /// checks that failed.
     pub(crate) red: BTreeMap<String, Red>,
+    /// Each closed draft whose recovery the host refused: still closed, so nothing of
+    /// this trigger moves it, and the next trigger's read tries again.
+    pub(crate) unrecovered: BTreeSet<String>,
 }
 
 /// A red verdict a trigger read: the head it is about, and the checks that failed.
@@ -232,8 +236,13 @@ impl Detection {
 
 /// One read's group: the drafts of one repository on one root.
 struct Group {
+    // llmlint: ignore-block[invalid_states_unrepresentable] the normalized identity
+    // `onevcs` resolved and the root `RunState` recorded, handed straight to the request
+    // types that take them as these `String`s and hold each to the registry and git's
+    // grammar before the host is asked anything.
     repo: String,
     root: String,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
     drafts: Vec<Draft>,
 }
 
@@ -440,16 +449,33 @@ fn take_up(
                 }
             }
             onevcs::ChangeState::Closed { base_deleted } => {
-                let parent = read.iter().find(|(_, parent)| {
-                    parent.head_branch == standing.base
-                        && matches!(parent.state, onevcs::ChangeState::Merged { .. })
-                });
+                // The merged parent whose branch it was based on: in this read, or recorded
+                // landed by an earlier one, at the head its branch last carried.
+                let parent = read
+                    .iter()
+                    .find(|(_, parent)| {
+                        parent.head_branch == standing.base
+                            && matches!(parent.state, onevcs::ChangeState::Merged { .. })
+                    })
+                    .map(|(_, parent)| parent.head.clone())
+                    .or_else(|| {
+                        state
+                            .branches
+                            .iter()
+                            .find(|(node, branch)| {
+                                **branch == standing.base
+                                    && state.landings.get(*node) == Some(&Landing::Landed)
+                            })
+                            .and_then(|(node, _)| state.heads.get(node))
+                            .map(|head| onevcs::Sha(head.clone()))
+                    });
                 match parent.filter(|_| *base_deleted) {
-                    Some((_, parent)) => {
-                        if let Err(error) = reopen(paths, journal, draft, parent) {
+                    Some(parent) => {
+                        if let Err(error) = reopen(paths, journal, draft, &parent) {
                             detection
                                 .failures
                                 .push((draft.repo.clone(), error.to_string()));
+                            detection.unrecovered.insert(draft.node.clone());
                         }
                     }
                     None => closed(paths, journal, draft)?,
@@ -735,7 +761,7 @@ fn reopen(
     paths: &RunPaths,
     journal: &mut Journal,
     draft: &Draft,
-    parent: &onevcs::ChangeStanding,
+    parent_head: &onevcs::Sha,
 ) -> Result<()> {
     let change = draft
         .url
@@ -744,7 +770,7 @@ fn reopen(
     let reopened = crate::vcs::reopen_change(&onevcs::ReopenRequest {
         repo: draft.repo.clone(),
         change,
-        restore_base_at: parent.head.clone(),
+        restore_base_at: parent_head.clone(),
     })?;
     emit(
         paths,
@@ -919,6 +945,9 @@ pub(crate) struct Readjuster {
     pub(crate) bodies: BTreeMap<String, String>,
     /// Each draft a person moved off its computed base, and the base it targets.
     pub(crate) overridden: BTreeMap<String, String>,
+    /// The base each open draft's change request targets on the host, as the latest read
+    /// found it.
+    pub(crate) host_bases: BTreeMap<String, String>,
     /// Each draft whose deferred verdict was read red, and what it is about.
     pub(crate) red: BTreeMap<String, Red>,
     /// Each readjustment in flight: where it moves its draft from and to, and why.
@@ -947,8 +976,12 @@ impl Readjuster {
     pub(crate) fn absorb(&mut self, detection: &Detection) {
         self.read_this_pass = true;
         self.tried.clear();
+        self.tried.extend(detection.unrecovered.iter().cloned());
         for (node, standing) in &detection.standings {
             self.bodies.insert(node.clone(), standing.body.clone());
+            if matches!(standing.state, onevcs::ChangeState::Open) {
+                self.host_bases.insert(node.clone(), standing.base.clone());
+            }
         }
         self.overridden.extend(detection.overridden.clone());
         self.red.extend(detection.red.clone());
@@ -1003,11 +1036,12 @@ pub(crate) fn finish_undriven(
 /// Where a readjusted draft's change request is moved after its push.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Retarget {
-    // llmlint: ignore-block[invalid_states_unrepresentable] each is the `String`
-    // `onevcs::RetargetRequest` takes it as, read off the run's own record — the plan's
-    // `repo`, a change request `known_change_url` parsed, a branch the placement named —
-    // and held by `retarget_change` to the repository, a URL and git's grammar before
-    // anything is written.
+    // llmlint: ignore-block[invalid_states_unrepresentable] each is the field
+    // `onevcs::RetargetRequest` takes it as — its `String`s read off the run's own record:
+    // the plan's `repo`, a change request `known_change_url` parsed, a branch the placement
+    // named; and its `remove_restored_base` flag, which `retarget_change` refuses for a base
+    // no reopen restored — held by that call to the repository, a URL and git's grammar
+    // before anything is written.
     /// The repository, as the plan names it.
     pub(crate) repo: String,
     /// The change request.
@@ -1019,9 +1053,9 @@ pub(crate) struct Retarget {
     /// Its description as the readjustment's read returned it, where that read is
     /// still in hand.
     pub(crate) body: Option<String>,
-    // llmlint: ignore-end[invalid_states_unrepresentable]
     /// Whether the base it leaves is one a reopen restored, which the move deletes.
     pub(crate) remove_restored_base: bool,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
 /// Move a readjusted draft's change request onto its new base, writing its description

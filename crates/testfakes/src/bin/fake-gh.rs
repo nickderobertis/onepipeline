@@ -94,9 +94,10 @@ enum Change {
     /// The host landed it, at [`MERGE_SHA`] — or, merged by a person, at the commit
     /// its merge record names.
     Merged,
-    /// A person or the host closed it without merging; `draft` is whether it was a
-    /// draft when it closed, which a reopen restores.
-    Closed { draft: bool },
+    /// A person or the host closed it without merging, ready for review when it closed.
+    Closed,
+    /// Closed without merging while it was a draft, which a reopen restores.
+    ClosedDraft,
 }
 
 impl Change {
@@ -106,8 +107,8 @@ impl Change {
             Change::Open => "open",
             Change::Draft => "draft",
             Change::Merged => "merged",
-            Change::Closed { draft: false } => "closed",
-            Change::Closed { draft: true } => "closed-draft",
+            Change::Closed => "closed",
+            Change::ClosedDraft => "closed-draft",
         }
     }
 
@@ -116,8 +117,8 @@ impl Change {
             "open" => Some(Change::Open),
             "draft" => Some(Change::Draft),
             "merged" => Some(Change::Merged),
-            "closed" => Some(Change::Closed { draft: false }),
-            "closed-draft" => Some(Change::Closed { draft: true }),
+            "closed" => Some(Change::Closed),
+            "closed-draft" => Some(Change::ClosedDraft),
             _ => None,
         }
     }
@@ -712,9 +713,15 @@ fn origin_of(dir: &Path, repo: &str) -> Option<PathBuf> {
 /// than trusted for where it came from — `onevcs` decides which checks are about
 /// which commit by comparing it. Read off a journey's script through the same
 /// check, so a seeded thread naming anything else is refused as it is read.
-#[derive(Debug, serde::Deserialize)]
-#[serde(try_from = "String")]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(try_from = "String", into = "String")]
 struct Sha(String);
+
+impl From<Sha> for String {
+    fn from(sha: Sha) -> Self {
+        sha.0
+    }
+}
 
 impl TryFrom<String> for Sha {
     type Error = String;
@@ -1110,7 +1117,7 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
             "body": opened.body,
             "state": match state {
                 Change::Merged => "MERGED",
-                Change::Closed { .. } => "CLOSED",
+                Change::Closed | Change::ClosedDraft => "CLOSED",
                 Change::Open | Change::Draft => "OPEN",
             },
             "mergeable": "MERGEABLE",
@@ -2441,13 +2448,18 @@ const PERSON: &str = "__person";
 
 /// What a person's merge left: the branch it merged into, the commit that reached it,
 /// when, and the head it merged — which outlives a deleted head branch.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MergedRecord {
+    // llmlint: ignore-block[invalid_states_unrepresentable] the branch and the moment are the
+    // host's own words as the standings wire carries them back — `baseRefName` and an RFC 3339
+    // `mergedAt` — written only by `person_merge` from a branch `pr create` recorded and this
+    // program's own clock; the two commits are `Sha`s, held to an object id both ways.
     into: String,
-    commit: String,
+    commit: Sha,
     merged_at: String,
-    head: String,
+    head: Sha,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
 fn merged_record_path(dir: &Path, id: &str) -> PathBuf {
@@ -2521,6 +2533,12 @@ fn head_verdict(dir: &Path, head: &str) -> onevcs::ChecksVerdict {
     else {
         return onevcs::ChecksVerdict::Passed;
     };
+    verdict_of(&scripted).unwrap_or_else(|why| fake::fail(&why))
+}
+
+/// A scripted verdict: `passed`, `none`, `pending:<names>`, `failed:<names>` or
+/// `skipped:<names>`, and nothing else.
+fn verdict_of(scripted: &str) -> Result<onevcs::ChecksVerdict, String> {
     let scripted = scripted.trim();
     let (word, names) = scripted.split_once(':').unwrap_or((scripted, ""));
     let names: Vec<String> = names
@@ -2528,16 +2546,18 @@ fn head_verdict(dir: &Path, head: &str) -> onevcs::ChecksVerdict {
         .filter(|name| !name.is_empty())
         .map(str::to_owned)
         .collect();
-    match word {
+    Ok(match word {
         "passed" => onevcs::ChecksVerdict::Passed,
         "none" => onevcs::ChecksVerdict::NoneRequired,
         "pending" => onevcs::ChecksVerdict::Pending { waiting: names },
         "failed" => onevcs::ChecksVerdict::Failed { failed: names },
         "skipped" => onevcs::ChecksVerdict::PassedWithSkipped { skipped: names },
-        other => fake::fail(&format!(
-            "gh-head-verdict holds {other:?}, which is no verdict"
-        )),
-    }
+        other => {
+            return Err(format!(
+                "{other:?} is no verdict a head can be scripted with"
+            ))
+        }
+    })
 }
 
 /// Answer an aliased standings read out of this host's own records: every change
@@ -2579,8 +2599,9 @@ fn own_standings(
         let merged = merged_record(dir, &id);
         let head = merged
             .as_ref()
-            .map(|merged| merged.head.clone())
-            .unwrap_or_else(|| head_of(dir, held).as_str().to_owned());
+            .map_or_else(|| head_of(dir, held), |merged| Sha(merged.head.0.clone()))
+            .as_str()
+            .to_owned();
         let url = url_of(held)
             .parse::<onevcs::Url>()
             .unwrap_or_else(|error| fake::fail(&format!("this host's own URL: {error}")));
@@ -2590,10 +2611,10 @@ fn own_standings(
             base: held.base.clone(),
             head_branch: held.head.clone(),
             head: onevcs::Sha(head.clone()),
-            draft: matches!(state, Change::Draft | Change::Closed { draft: true }),
+            draft: matches!(state, Change::Draft | Change::ClosedDraft),
             state: match state {
                 Change::Open | Change::Draft => onevcs::ChangeState::Open,
-                Change::Closed { .. } => onevcs::ChangeState::Closed {
+                Change::Closed | Change::ClosedDraft => onevcs::ChangeState::Closed {
                     base_deleted: !origin_holds(dir, &repo, &held.base),
                 },
                 Change::Merged => onevcs::ChangeState::Merged {
@@ -2603,7 +2624,7 @@ fn own_standings(
                     commit: onevcs::Sha(
                         merged
                             .as_ref()
-                            .map_or_else(|| MERGE_SHA.to_owned(), |merged| merged.commit.clone()),
+                            .map_or_else(|| MERGE_SHA.to_owned(), |merged| merged.commit.0.clone()),
                     ),
                     landing: false,
                     merged_at: merged
@@ -2678,16 +2699,21 @@ fn patch_pull(args: &[String], dir: &Path, path: &str) -> ExitCode {
         if *open != "open" || fields.len() != 1 {
             return fake::refuse("a reopen writes state=open alone");
         }
-        let Change::Closed { draft } = state else {
-            return fake::refuse(&format!("pull request {number} is not closed"));
+        let reopened = match state {
+            Change::Closed => Change::Open,
+            Change::ClosedDraft => Change::Draft,
+            _ => return fake::refuse(&format!("pull request {number} is not closed")),
         };
-        record(dir, &id, if draft { Change::Draft } else { Change::Open });
+        record(dir, &id, reopened);
     } else {
-        if state == Change::Merged || matches!(state, Change::Closed { .. }) {
+        if state == Change::Merged || matches!(state, Change::Closed | Change::ClosedDraft) {
             return fake::refuse(&format!("pull request {number} is not open"));
         }
         let base = fields.get("base").map(|base| (*base).to_owned());
         let body = fields.get("body").map(|body| (*body).to_owned());
+        if base.is_some() && dir.join("gh.retarget-refused").exists() {
+            return fake::refuse(&format!("pull request {number} could not be retargeted"));
+        }
         if let Some(base) = &base {
             if !origin_holds(dir, &repo, base) {
                 return fake::refuse(&format!("{repo} has no branch {base}"));
@@ -2711,8 +2737,8 @@ fn patch_pull(args: &[String], dir: &Path, path: &str) -> ExitCode {
         "{}",
         serde_json::json!({
             "number": now.number,
-            "state": if matches!(state, Change::Closed { .. }) { "closed" } else { "open" },
-            "draft": matches!(state, Change::Draft | Change::Closed { draft: true }),
+            "state": if matches!(state, Change::Closed | Change::ClosedDraft) { "closed" } else { "open" },
+            "draft": matches!(state, Change::Draft | Change::ClosedDraft),
             "base": {"ref": now.base},
             "body": now.body,
         })
@@ -2730,43 +2756,94 @@ fn patch_pull(args: &[String], dir: &Path, path: &str) -> ExitCode {
 /// based on it is retargeted onto the merged one's base or closed, as `how` says.
 fn person(args: &[String], dir: &Path) -> ExitCode {
     let arg = |at: usize| args.get(at).map(String::as_str).unwrap_or_default();
-    match arg(0) {
-        "merge" => {
-            let repo = arg(1).to_owned();
-            let Ok(number) = arg(2).parse::<NonZeroU64>() else {
-                return fake::refuse("a person's merge names a pull request number");
+    let addressed = || -> Result<Opened, String> {
+        let repo = arg(1);
+        let number = arg(2)
+            .parse::<NonZeroU64>()
+            .map_err(|_| format!("{:?} is no pull request number", arg(2)))?;
+        opened_changes(dir)
+            .into_iter()
+            .find(|held| held.repo == repo && held.number == number)
+            .ok_or_else(|| format!("no pull request {number} in {repo}"))
+    };
+    let moved = match arg(0) {
+        "merge" => addressed().and_then(|held| {
+            let how = Merging::of(arg(3))?;
+            let after = HeadAfter::of(arg(4))?;
+            person_merge(dir, &held, how, after)
+        }),
+        "close" => addressed().and_then(|held| {
+            let closed = match state_of_opened(dir, &held) {
+                Change::Open => Change::Closed,
+                Change::Draft => Change::ClosedDraft,
+                _ => return Err(format!("pull request {} is not open", held.number)),
             };
-            person_merge(dir, &repo, number, arg(3), arg(4))
+            record(dir, &change_key(dir, &held), closed);
+            Ok(())
+        }),
+        "retarget" => addressed().and_then(|held| {
+            let base = Branch::parse(arg(3))
+                .filter(|base| origin_holds(dir, &held.repo, &base.0))
+                .ok_or_else(|| format!("{:?} is no branch the origin holds", arg(3)))?;
+            rewrite_opened(dir, &held.repo, held.number, |opened| {
+                opened.base.clone_from(&base.0);
+            });
+            Ok(())
+        }),
+        "verdict" => Sha::parse(arg(1))
+            .ok_or_else(|| format!("{:?} is not a commit", arg(1)))
+            .and_then(|head| {
+                verdict_of(arg(2))?;
+                write_file(
+                    &dir.join("gh-head-verdict")
+                        .join(fake::segment(head.as_str())),
+                    arg(2),
+                );
+                Ok(())
+            }),
+        other => Err(format!("{other:?} is no person's move")),
+    };
+    match moved {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(why) => fake::refuse(&why),
+    }
+}
+
+/// How a person merges: one squash commit, or a merge commit of the head.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Merging {
+    Squash,
+    MergeCommit,
+}
+
+impl Merging {
+    fn of(word: &str) -> Result<Self, String> {
+        match word {
+            "squash" => Ok(Self::Squash),
+            "merge-commit" => Ok(Self::MergeCommit),
+            other => Err(format!("{other:?} is no way to merge")),
         }
-        "close" | "retarget" => {
-            let repo = arg(1).to_owned();
-            let Ok(number) = arg(2).parse::<NonZeroU64>() else {
-                return fake::refuse("a person's move names a pull request number");
-            };
-            let Some(held) = opened_changes(dir)
-                .into_iter()
-                .find(|held| held.repo == repo && held.number == number)
-            else {
-                return fake::refuse(&format!("no pull request {number} in {repo}"));
-            };
-            if arg(0) == "close" {
-                let id = change_key(dir, &held);
-                let draft = state_of_opened(dir, &held) == Change::Draft;
-                record(dir, &id, Change::Closed { draft });
-            } else {
-                let base = arg(3).to_owned();
-                rewrite_opened(dir, &repo, number, |opened| opened.base.clone_from(&base));
-            }
-            ExitCode::SUCCESS
+    }
+}
+
+/// What becomes of a merged head, and of what was based on it once it is deleted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeadAfter {
+    Kept,
+    Deleted,
+    DeletedRetargeting,
+    DeletedClosing,
+}
+
+impl HeadAfter {
+    fn of(word: &str) -> Result<Self, String> {
+        match word {
+            "kept" => Ok(Self::Kept),
+            "deleted" => Ok(Self::Deleted),
+            "deleted-retarget" => Ok(Self::DeletedRetargeting),
+            "deleted-close" => Ok(Self::DeletedClosing),
+            other => Err(format!("{other:?} is not what becomes of a head")),
         }
-        "verdict" => {
-            write_file(
-                &dir.join("gh-head-verdict").join(fake::segment(arg(1))),
-                arg(2),
-            );
-            ExitCode::SUCCESS
-        }
-        other => fake::refuse(&format!("{other:?} is no person's move")),
     }
 }
 
@@ -2790,23 +2867,17 @@ fn git_in(at: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
-fn person_merge(dir: &Path, repo: &str, number: NonZeroU64, how: &str, after: &str) -> ExitCode {
-    let Some(held) = opened_changes(dir)
-        .into_iter()
-        .find(|held| held.repo == repo && held.number == number)
-    else {
-        return fake::refuse(&format!("no pull request {number} in {repo}"));
-    };
-    let Some(origin) = origin_of(dir, repo) else {
-        return fake::refuse(&format!("no origin is written down for {repo}"));
-    };
-    let id = change_key(dir, &held);
-    if !matches!(state_of_opened(dir, &held), Change::Open | Change::Draft) {
-        return fake::refuse(&format!("pull request {number} is not open"));
+fn person_merge(dir: &Path, held: &Opened, how: Merging, after: HeadAfter) -> Result<(), String> {
+    let number = held.number;
+    let origin = origin_of(dir, &held.repo)
+        .ok_or_else(|| format!("no origin is written down for {}", held.repo))?;
+    let id = change_key(dir, held);
+    if !matches!(state_of_opened(dir, held), Change::Open | Change::Draft) {
+        return Err(format!("pull request {number} is not open"));
     }
     let work = dir
         .join("gh-person")
-        .join(format!("{}-{number}", fake::segment(repo)));
+        .join(format!("{}-{number}", fake::segment(&held.repo)));
     let _ = std::fs::remove_dir_all(&work);
     let merged = (|| -> Result<(String, String), String> {
         std::fs::create_dir_all(&work).map_err(|error| error.to_string())?;
@@ -2824,33 +2895,18 @@ fn person_merge(dir: &Path, repo: &str, number: NonZeroU64, how: &str, after: &s
             ],
         )?;
         let message = format!("{} (#{number})", held.title);
+        let theirs = format!("origin/{}", held.head);
         match how {
-            "squash" => {
-                git_in(
-                    &work,
-                    &[
-                        "merge",
-                        "--squash",
-                        "--quiet",
-                        &format!("origin/{}", held.head),
-                    ],
-                )?;
+            Merging::Squash => {
+                git_in(&work, &["merge", "--squash", "--quiet", &theirs])?;
                 git_in(&work, &["commit", "--quiet", "-m", &message])?;
             }
-            "merge-commit" => {
+            Merging::MergeCommit => {
                 git_in(
                     &work,
-                    &[
-                        "merge",
-                        "--no-ff",
-                        "--quiet",
-                        "-m",
-                        &message,
-                        &format!("origin/{}", held.head),
-                    ],
+                    &["merge", "--no-ff", "--quiet", "-m", &message, &theirs],
                 )?;
             }
-            other => return Err(format!("{other:?} is no way to merge")),
         }
         let commit = git_in(&work, &["rev-parse", "HEAD"])?;
         git_in(
@@ -2862,7 +2918,7 @@ fn person_merge(dir: &Path, repo: &str, number: NonZeroU64, how: &str, after: &s
                 &format!("HEAD:refs/heads/{}", held.base),
             ],
         )?;
-        if after.starts_with("deleted") {
+        if after != HeadAfter::Kept {
             git_in(
                 &work,
                 &["push", "--quiet", "origin", "--delete", &held.head],
@@ -2871,10 +2927,9 @@ fn person_merge(dir: &Path, repo: &str, number: NonZeroU64, how: &str, after: &s
         Ok((commit, head))
     })();
     let _ = std::fs::remove_dir_all(&work);
-    let (commit, head) = match merged {
-        Ok(merged) => merged,
-        Err(why) => return fake::refuse(&why),
-    };
+    let (commit, head) = merged?;
+    let commit = Sha::parse(&commit).ok_or_else(|| format!("git answered {commit:?}"))?;
+    let head = Sha::parse(&head).ok_or_else(|| format!("git answered {head:?}"))?;
     record(dir, &id, Change::Merged);
     let record_text = serde_json::to_string(&MergedRecord {
         into: held.base.clone(),
@@ -2882,37 +2937,30 @@ fn person_merge(dir: &Path, repo: &str, number: NonZeroU64, how: &str, after: &s
         merged_at: fake::now(),
         head,
     })
-    .unwrap_or_else(|error| fake::fail(&format!("a merge record does not serialise: {error}")));
+    .map_err(|error| format!("a merge record does not serialise: {error}"))?;
     write_file(&merged_record_path(dir, &id), &record_text);
-    match after {
-        "kept" | "deleted" => {}
-        "deleted-retarget" | "deleted-close" => {
-            for dependant in opened_changes(dir)
-                .into_iter()
-                .filter(|other| other.repo == held.repo && other.base == held.head)
-            {
-                let key = change_key(dir, &dependant);
-                let state = state_of_opened(dir, &dependant);
-                if !matches!(state, Change::Open | Change::Draft) {
-                    continue;
+    if matches!(
+        after,
+        HeadAfter::DeletedRetargeting | HeadAfter::DeletedClosing
+    ) {
+        for dependant in opened_changes(dir)
+            .into_iter()
+            .filter(|other| other.repo == held.repo && other.base == held.head)
+        {
+            let key = change_key(dir, &dependant);
+            match (after, state_of_opened(dir, &dependant)) {
+                (HeadAfter::DeletedClosing, Change::Open) => record(dir, &key, Change::Closed),
+                (HeadAfter::DeletedClosing, Change::Draft) => {
+                    record(dir, &key, Change::ClosedDraft);
                 }
-                if after == "deleted-close" {
-                    record(
-                        dir,
-                        &key,
-                        Change::Closed {
-                            draft: state == Change::Draft,
-                        },
-                    );
-                } else {
-                    let base = held.base.clone();
+                (HeadAfter::DeletedRetargeting, Change::Open | Change::Draft) => {
                     rewrite_opened(dir, &held.repo, dependant.number, |opened| {
-                        opened.base.clone_from(&base);
+                        opened.base.clone_from(&held.base);
                     });
                 }
+                _ => {}
             }
         }
-        other => return fake::refuse(&format!("{other:?} is not what becomes of a head")),
     }
-    ExitCode::SUCCESS
+    Ok(())
 }

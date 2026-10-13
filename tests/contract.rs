@@ -10723,7 +10723,6 @@ fn the_readjustment_is_what_the_divergence_record_names() {
     use onepipeline::verbs::{render_readjust, render_review, ReadjustReceipt, ReviewReceipt};
     let block = divergence_block("125.");
 
-    // The op.
     let op = block["verb"]["op"]
         .as_str()
         .expect("entry 125 names its op");
@@ -10747,7 +10746,6 @@ fn the_readjustment_is_what_the_divergence_record_names() {
         "{parsed:?}"
     );
 
-    // The kinds and their records.
     let kinds: Vec<String> =
         serde_json::from_value(block["event_kinds"].clone()).expect("entry 125 names its kinds");
     let registry = registry();
@@ -10813,7 +10811,6 @@ fn the_readjustment_is_what_the_divergence_record_names() {
             .unwrap_or_else(|why| panic!("{kind} is not a surface kind: {why}"));
     }
 
-    // The receipts.
     let performed = ReadjustReceipt::Performed {
         error: block["receipts"]["performed"]["error"]
             .as_str()
@@ -10847,7 +10844,6 @@ fn the_readjustment_is_what_the_divergence_record_names() {
         json!({"state": "performed"})
     );
 
-    // The published documents.
     assert_eq!(
         block["bundle_versions"],
         json!({"events": onepipeline::vocabulary::EVENTS_BUNDLE_VERSION, "planner_channel": DOCUMENT_VERSION})

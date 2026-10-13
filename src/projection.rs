@@ -210,6 +210,11 @@ pub struct RunState {
     /// empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) titles_unverified: BTreeMap<String, crate::payload::TitleUnverified>,
+    // llmlint: ignore-block[invalid_states_unrepresentable] node ids, branches and commits are
+    // the plain strings `bases`, `branches` and `heads` beside these carry them as — node ids
+    // the graph validated, a branch and a commit `vcs::usable` or `onevcs` checked where the
+    // record they fold from was written — and the payload types these hold are the published
+    // records' own; a newtype on these alone would disagree with every neighbouring map.
     /// Each draft whose change request was merged into another node's branch, and that
     /// node. Omitted when empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -235,6 +240,7 @@ pub struct RunState {
     /// Omitted when empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) reopened: BTreeMap<String, String>,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
     /// The branch prefix `onevcs` reported putting in front of the branches it cut
     /// for this run's sessions — `""` once it cut one and reported none — which is
     /// what a stack base is named under. `None` until a session cut a branch.

@@ -323,7 +323,6 @@ fn a_single_parent_lands(name: &str, head: Head) {
         ["b.md"]
     );
 
-    // On the record.
     let landed = record(&world, run, "node-landed", "a").expect("a's landing is recorded");
     assert_eq!(landed["detected_by"], "readjust", "{landed}");
     assert_eq!(landed["trigger"], "readjust", "{landed}");
@@ -1641,6 +1640,16 @@ fn a_draft_merged_into_the_root_ahead_of_its_parent_carries_it_and_says_so() {
         &root,
         &tip(&world, &branch_of(&world, run, "a"))
     ));
+    // The root already carries `a`'s whole tree, so its restack had nothing to publish
+    // past the merge: that merge head went onto its change request, verdict owed.
+    let a = settled(&world, run, "a");
+    assert_eq!(a["outcome"], "change-review-draft-unchecked", "{a}");
+    assert!(
+        a["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("pushed at its merge head")),
+        "{a}"
+    );
     the_engine_merged_closed_and_lifted_nothing(&world, run, from);
 }
 
@@ -2173,4 +2182,218 @@ fn a_draft_merged_into_an_unknown_branch_raises_a_blocking_question() {
     readjusted(&world, run);
     assert!(record(&world, run, "node-readjusted", "b").is_none());
     assert!(record(&world, run, "node-readjusted", "c").is_none());
+}
+
+/// Install a `pre-receive` hook on the service origin refusing every push to `branch`.
+fn origin_refuses(world: &World, branch: &str) -> std::path::PathBuf {
+    let hook = service(world).origin.join("hooks").join("pre-receive");
+    std::fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\nwhile read old new ref; do\n  if [ \"$ref\" = \"refs/heads/{branch}\" ]; then\n    echo \"pushes to {branch} are refused here\" >&2\n    exit 1\n  fi\ndone\n"
+        ),
+    )
+    .expect("the hook is written");
+    onepipeline_testfakes::executable(&hook, &std::fs::read_to_string(&hook).expect("written"));
+    hook
+}
+
+/// A tree-identical republication whose merge head the origin refuses: case 5(b)'s
+/// parent, whose whole tree the root already carries, cannot put its merge head on the
+/// origin, so it settles `failed` naming why, records no readjustment and stays owed;
+/// once the origin takes pushes again, the next trigger moves its change request with
+/// no merge and says `readjust-pending`, whose `retry` brings it up to date.
+#[test]
+fn a_tree_identical_republication_the_origin_refuses_fails_and_stays_owed() {
+    let world = team_world("readjust-identical-refused");
+    for node in ["a", "b"] {
+        world.script(&format!("{node}.work"), &format!("{node}'s change\n"));
+    }
+    let run = "identical";
+    launched(
+        &world,
+        run,
+        vec![lifecycle("a", &[]), lifecycle("b", &["a"])],
+    );
+    let a_branch = branch_of(&world, run, "a");
+    let a_head = tip(&world, &a_branch);
+    let b_number = number_of(&world, run, "b");
+    person(&world, &["retarget", SLUG, &b_number.to_string(), "main"]);
+    merge(&world, &b_number, "squash", "kept");
+    let hook = origin_refuses(&world, &a_branch);
+    readjusted(&world, run);
+
+    let a = settled(&world, run, "a");
+    assert_eq!(a["status"], "failed", "{a}");
+    assert!(
+        a["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("merge head was not put on the origin")),
+        "{a}"
+    );
+    assert!(record(&world, run, "node-readjusted", "a").is_none());
+    assert_eq!(tip(&world, &a_branch), a_head);
+
+    std::fs::remove_file(hook).expect("the origin takes pushes again");
+    readjusted(&world, run);
+    let pending = record(&world, run, "node-readjusted", "a").expect("a was readjusted");
+    assert_eq!(pending["content"], "pending", "{pending}");
+    assert_eq!(surfaced(&world, run, "readjust-pending").len(), 1);
+}
+
+/// A refused reopen: a person merges `a` deleting its head through the refs API, and the
+/// host closes `b`; the origin then declines restoring `a`'s branch, so `b` cannot be
+/// reopened. The readjustment says so in its receipt and exits with a failed host
+/// read's status, records no `change-reopened` and no close, and moves nothing of `b` —
+/// still closed on the host; the next trigger, once the origin takes the restore,
+/// recovers `b` and moves it onto the root.
+#[test]
+fn a_refused_reopen_moves_nothing_and_the_next_trigger_recovers_the_draft() {
+    let world = team_world("readjust-reopen-refused");
+    for node in ["a", "b"] {
+        world.script(&format!("{node}.work"), &format!("{node}'s change\n"));
+    }
+    let run = "refused";
+    launched(
+        &world,
+        run,
+        vec![lifecycle("a", &[]), lifecycle("b", &["a"])],
+    );
+    let a_branch = branch_of(&world, run, "a");
+    let b_branch = branch_of(&world, run, "b");
+    let b_head = tip(&world, &b_branch);
+    let b_number = number_of(&world, run, "b");
+    merge(
+        &world,
+        &number_of(&world, run, "a"),
+        "squash",
+        "deleted-close",
+    );
+    let hook = origin_refuses(&world, &a_branch);
+    let (code, receipt) = readjust(&world, run);
+    assert_eq!(code, 1, "{receipt}");
+    assert!(
+        receipt["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("declined restoring")),
+        "{receipt}"
+    );
+    for kind in ["change-reopened", "node-readjusted", "change-closed"] {
+        assert!(record(&world, run, kind, "b").is_none(), "b got a {kind}");
+    }
+    assert!(!held_as_draft(&world, &b_number));
+    assert_eq!(tip(&world, &b_branch), b_head);
+
+    std::fs::remove_file(hook).expect("the origin takes pushes again");
+    readjusted(&world, run);
+    assert!(record(&world, run, "change-reopened", "b").is_some());
+    let (base, _) = on_host(&world, run, "b");
+    assert_eq!(base, "main");
+}
+
+/// A refused retarget: `b` is restacked onto the root and pushed, and the host refuses to
+/// move its change request. Its settlement says so, no readjustment is recorded, and it
+/// stays owed one; the next trigger, once the host takes the write, moves it.
+#[test]
+fn a_refused_retarget_leaves_the_draft_owed_until_the_next_trigger_moves_it() {
+    let world = team_world("readjust-retarget-refused");
+    for node in ["a", "b"] {
+        world.script(&format!("{node}.work"), &format!("{node}'s change\n"));
+    }
+    let run = "refused";
+    launched(
+        &world,
+        run,
+        vec![lifecycle("a", &[]), lifecycle("b", &["a"])],
+    );
+    let a_branch = branch_of(&world, run, "a");
+    merge(&world, &number_of(&world, run, "a"), "squash", "kept");
+    world.script("gh.retarget-refused", "");
+    readjusted(&world, run);
+    let b = settled(&world, run, "b");
+    assert!(
+        b["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("was not moved onto its new base")),
+        "{b}"
+    );
+    assert!(record(&world, run, "node-readjusted", "b").is_none());
+    let (base, _) = on_host(&world, run, "b");
+    assert_eq!(base, a_branch);
+
+    std::fs::remove_file(world.fakes.join("gh.retarget-refused")).expect("the host writes again");
+    readjusted(&world, run);
+    let moved = record(&world, run, "node-readjusted", "b").expect("b was readjusted");
+    assert_eq!(moved["retarget"], "retargeted", "{moved}");
+    let (base, _) = on_host(&world, run, "b");
+    assert_eq!(base, "main");
+}
+
+/// Every verdict word a deferred republication can be read with: after `a` lands on
+/// `main` and `p` on `release`, `b`, `c` and `d` are readjusted without a watch; the next
+/// trigger reads `b` pending and `c` passed with a skipped check on `main`, and `d`, on a
+/// base that requires nothing, requiring nothing. `c` and `d` read as review drafts from
+/// then on, `b` stays outstanding — named by the receipt and `status` — and a later
+/// trigger reading it passed clears it.
+#[test]
+fn every_deferred_verdict_word_is_recorded_and_only_pending_stays_outstanding() {
+    let world = team_world("readjust-verdict-words");
+    branch_off_main(&world, "release");
+    for node in ["a", "b", "c", "p", "d"] {
+        world.script(&format!("{node}.work"), &format!("{node}'s change\n"));
+    }
+    let on_release = |id: &str, deps: &[&str]| {
+        let mut node = lifecycle(id, deps);
+        node["base_branch"] = json!("release");
+        node
+    };
+    let run = "words";
+    launched(
+        &world,
+        run,
+        vec![
+            lifecycle("a", &[]),
+            lifecycle("b", &["a"]),
+            lifecycle("c", &["a"]),
+            on_release("p", &[]),
+            on_release("d", &["p"]),
+        ],
+    );
+    merge(&world, &number_of(&world, run, "a"), "squash", "kept");
+    merge(&world, &number_of(&world, run, "p"), "squash", "kept");
+    readjusted(&world, run);
+    let head = |node: &str| tip(&world, &branch_of(&world, run, node));
+    person(&world, &["verdict", &head("b"), "pending:ci"]);
+    person(&world, &["verdict", &head("c"), "skipped:lint"]);
+    person(&world, &["verdict", &head("d"), "none"]);
+    let (code, receipt) = readjust(&world, run);
+    assert_eq!(code, 0, "{receipt}");
+    for (node, verdict) in [
+        ("b", "pending"),
+        ("c", "passed-with-skipped"),
+        ("d", "none-required"),
+    ] {
+        let read = record(&world, run, "node-checks-read", node).expect("read");
+        assert_eq!(read["verdict"], verdict, "{node}: {read}");
+    }
+    assert_eq!(receipt["outstanding"], json!(["b"]), "{receipt}");
+    for node in ["c", "d"] {
+        assert_eq!(
+            outcome_of(&world, run, node),
+            "change-review-draft",
+            "{node}"
+        );
+    }
+    assert_eq!(
+        outcome_of(&world, run, "b"),
+        "change-review-draft-unchecked"
+    );
+    let (status, _) = views(&world, run);
+    assert!(status.contains("b: check verdict outstanding"), "{status}");
+    assert!(!status.contains("c: check verdict outstanding"), "{status}");
+
+    person(&world, &["verdict", &head("b"), "passed"]);
+    let (_, receipt) = readjust(&world, run);
+    assert!(receipt.get("outstanding").is_none(), "{receipt}");
+    assert_eq!(outcome_of(&world, run, "b"), "change-review-draft");
 }

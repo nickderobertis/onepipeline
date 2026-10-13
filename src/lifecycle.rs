@@ -2162,15 +2162,20 @@ fn publish(
                 .armed
                 .as_ref()
                 .map(|change| armed_detail(change, publication.reads));
-            // A readjusted draft's change request moves onto its new base only now, after
-            // its push, so the host never shows a diff the push has not made its own.
-            let readjusted = launch.readjusting.as_deref().map(|retarget| {
-                crate::readjust::retarget(retarget).map_err(|error| error.to_string())
-            });
-            let retarget_failed = readjusted
-                .as_ref()
-                .and_then(|answer| answer.as_ref().err())
-                .map(|why| format!("its change request was not moved onto its new base: {why}"));
+            // A readjusted draft's change request moves onto its new base only after its
+            // push, so the host never shows a diff the push has not made its own.
+            let retarget = || {
+                let readjusted = launch.readjusting.as_deref().map(|retarget| {
+                    crate::readjust::retarget(retarget).map_err(|error| error.to_string())
+                });
+                let failed = readjusted
+                    .as_ref()
+                    .and_then(|answer| answer.as_ref().err())
+                    .map(|why| {
+                        format!("its change request was not moved onto its new base: {why}")
+                    });
+                (readjusted, failed)
+            };
             // A tree-identical republication of a review draft has nothing for the
             // publication to push past the merge the restack made, so that merge head is
             // put on the origin onto the same change request, and its verdict is owed.
@@ -2184,17 +2189,23 @@ fn publish(
                     &published.branch,
                     &launch.boundary.term_scope,
                 );
-                let pushed = match &preserved {
-                    Ok(preserved) => format!(
-                        "review draft {change} was pushed at its merge head ({}); its check \
-                         verdict is outstanding until the next trigger",
-                        crate::vcs::preservation_word(preserved.outcome)
-                    ),
-                    Err(why) => format!(
-                        "review draft {change} had nothing new to publish and its merge head \
-                         was not put on the origin: {why}"
-                    ),
+                let preserved = match preserved {
+                    Ok(preserved) => preserved,
+                    // The merge head is not on the origin, so the draft was not brought up
+                    // to date: the restack failed, and the draft stays owed one.
+                    Err(why) => {
+                        return publication_failed(format!(
+                            "review draft {change} had nothing new to publish, and its merge \
+                             head was not put on the origin: {why}"
+                        ));
+                    }
                 };
+                let (readjusted, retarget_failed) = retarget();
+                let pushed = format!(
+                    "review draft {change} was pushed at its merge head ({}); its check verdict \
+                     is outstanding until the next trigger",
+                    crate::vcs::preservation_word(preserved.outcome)
+                );
                 let detail: Vec<String> = [Some(pushed), retarget_failed]
                     .into_iter()
                     .flatten()
@@ -2205,15 +2216,12 @@ fn publish(
                     change_url: Some(change.to_owned()),
                     outcome: Some(crate::vcs::REVIEW_DRAFTED_UNCHECKED.to_owned()),
                     landing: Some(crate::graph::Landing::Unlanded),
-                    head: preserved
-                        .ok()
-                        .and_then(|preserved| preserved.commit)
-                        .as_deref()
-                        .and_then(crate::vcs::usable),
+                    head: preserved.commit.as_deref().and_then(crate::vcs::usable),
                     readjusted,
                     ..Settlement::plain(&node.id, NodeStatus::Done, None)
                 });
             }
+            let (readjusted, retarget_failed) = retarget();
             let detail: Vec<String> = [
                 retarget_failed,
                 unchecked_detail(&published.outcome),

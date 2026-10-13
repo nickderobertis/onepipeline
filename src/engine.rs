@@ -7081,7 +7081,7 @@ fn start_readjustments(
         .filter(|id| {
             state.readjust_owed.contains_key(id) || state.readjust.overridden.contains_key(id)
         })
-        .filter(|id| !state.superseded.contains_key(id))
+        .filter(|id| !state.superseded.contains_key(id) && !state.closed_changes.contains(id))
         .collect();
     if owed.is_empty() {
         if moved {
@@ -7142,12 +7142,22 @@ fn start_readjustments(
             _ => root,
         };
         let recorded = recorded_placement(state, &id).unwrap_or_else(|| placement_on(None, &root));
-        let host_base = state.readjust.overridden.get(&id).cloned();
+        let to = placement_on(stack.as_ref(), &root);
+        // Where the host has the change request now, where the latest read saw it
+        // somewhere other than where it goes: a person's own move, or a write the host
+        // refused earlier.
+        let host_base = state.readjust.overridden.get(&id).cloned().or_else(|| {
+            state
+                .readjust
+                .host_bases
+                .get(&id)
+                .filter(|base| **base != to.base && **base != recorded.base)
+                .cloned()
+        });
         let from = crate::payload::Placement {
             base: host_base.clone().unwrap_or_else(|| recorded.base.clone()),
             stack_parents: recorded.stack_parents.clone(),
         };
-        let to = placement_on(stack.as_ref(), &root);
         let cause: Vec<String> = state
             .readjust_owed
             .get(&id)
@@ -7161,7 +7171,8 @@ fn start_readjustments(
             body: state.readjust.bodies.get(&id).cloned(),
             remove_restored_base: state.reopened.contains_key(&id),
         });
-        let overridden = |journal: &mut Journal| match &host_base {
+        let by_hand = state.readjust.overridden.get(&id).cloned();
+        let overridden = |journal: &mut Journal| match &by_hand {
             Some(base) => crate::readjust::notify(
                 paths,
                 journal,
