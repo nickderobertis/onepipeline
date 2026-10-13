@@ -2402,10 +2402,18 @@ fn every_deferred_verdict_word_is_recorded_and_only_pending_stays_outstanding() 
 fn push_on_main(world: &World, file: &str, body: &str) {
     let checkout = service(world).checkout;
     git(world, &checkout, &["fetch", "--quiet", "origin"]);
-    git(world, &checkout, &["checkout", "--quiet", "-B", "main", "origin/main"]);
+    git(
+        world,
+        &checkout,
+        &["checkout", "--quiet", "-B", "main", "origin/main"],
+    );
     std::fs::write(checkout.join(file), body).expect("the file is written");
     git(world, &checkout, &["add", file]);
-    git(world, &checkout, &["commit", "--quiet", "-m", "chore: a person's change"]);
+    git(
+        world,
+        &checkout,
+        &["commit", "--quiet", "-m", "chore: a person's change"],
+    );
     git(world, &checkout, &["push", "--quiet", "origin", "main"]);
 }
 
@@ -2421,9 +2429,16 @@ fn a_conflicted_readjustment_is_concluded_by_the_draft_s_worker_then_retargeted(
     world.script("a.work-file", "shared");
     world.script("b.work", "b changed this\n");
     world.script("b.work-file", "shared");
-    world.script("b.resolves-merge", "a person changed this, and b changed it\n");
+    world.script(
+        "b.resolves-merge",
+        "a person changed this, and b changed it\n",
+    );
     let run = "conflict";
-    launched(&world, run, vec![lifecycle("a", &[]), lifecycle("b", &["a"])]);
+    launched(
+        &world,
+        run,
+        vec![lifecycle("a", &[]), lifecycle("b", &["a"])],
+    );
     let b_branch = branch_of(&world, run, "b");
     // `b`'s worker is asked only to conclude the merge from here.
     world.unscript("b.work");
@@ -2447,7 +2462,11 @@ fn a_conflicted_readjustment_is_concluded_by_the_draft_s_worker_then_retargeted(
                     .is_some_and(|task| task.contains("opened with a merge in progress"))),
         "b's worker was not handed the merge"
     );
-    assert!(is_ancestor(&world, &tip(&world, "main"), &tip(&world, &b_branch)));
+    assert!(is_ancestor(
+        &world,
+        &tip(&world, "main"),
+        &tip(&world, &b_branch)
+    ));
     assert_eq!(
         crate::stacked_drafts::file_on(&world, &service(&world), &b_branch, "shared.md"),
         "a person changed this, and b changed it"

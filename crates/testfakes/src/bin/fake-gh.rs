@@ -2540,24 +2540,36 @@ fn head_verdict(dir: &Path, head: &str) -> onevcs::ChecksVerdict {
 /// `skipped:<names>`, and nothing else.
 fn verdict_of(scripted: &str) -> Result<onevcs::ChecksVerdict, String> {
     let scripted = scripted.trim();
-    let (word, names) = scripted.split_once(':').unwrap_or((scripted, ""));
-    let names: Vec<String> = names
-        .split(',')
-        .filter(|name| !name.is_empty())
-        .map(str::to_owned)
-        .collect();
-    Ok(match word {
-        "passed" => onevcs::ChecksVerdict::Passed,
-        "none" => onevcs::ChecksVerdict::NoneRequired,
-        "pending" => onevcs::ChecksVerdict::Pending { waiting: names },
-        "failed" => onevcs::ChecksVerdict::Failed { failed: names },
-        "skipped" => onevcs::ChecksVerdict::PassedWithSkipped { skipped: names },
-        other => {
+    let named = |names: &str| -> Result<Vec<String>, String> {
+        let names: Vec<String> = names.split(',').map(str::to_owned).collect();
+        if names
+            .iter()
+            .any(|name| name.trim().is_empty() || name.trim() != name)
+        {
             return Err(format!(
-                "{other:?} is no verdict a head can be scripted with"
-            ))
+                "{scripted:?} names an empty or padded check: list one name or more, \
+                 comma-separated"
+            ));
         }
-    })
+        Ok(names)
+    };
+    match scripted.split_once(':') {
+        None if scripted == "passed" => Ok(onevcs::ChecksVerdict::Passed),
+        None if scripted == "none" => Ok(onevcs::ChecksVerdict::NoneRequired),
+        Some(("pending", names)) => Ok(onevcs::ChecksVerdict::Pending {
+            waiting: named(names)?,
+        }),
+        Some(("failed", names)) => Ok(onevcs::ChecksVerdict::Failed {
+            failed: named(names)?,
+        }),
+        Some(("skipped", names)) => Ok(onevcs::ChecksVerdict::PassedWithSkipped {
+            skipped: named(names)?,
+        }),
+        _ => Err(format!(
+            "{scripted:?} is no verdict a head can be scripted with: `passed`, `none`, or \
+             `pending:`, `failed:` or `skipped:` with the checks named"
+        )),
+    }
 }
 
 /// Answer an aliased standings read out of this host's own records: every change
