@@ -1500,6 +1500,8 @@ impl Activity {
     }
 }
 
+type ActivityShape = fn(&[&str], &str) -> Option<(String, String)>;
+
 /// The change request whose head an activity read asks about, and the commit, or
 /// the refusal that the path is not one GitHub answers.
 ///
@@ -1510,7 +1512,7 @@ impl Activity {
 fn activity_of(
     dir: &Path,
     path: &str,
-    shape: fn(&[&str], &str) -> Option<(String, String)>,
+    shape: ActivityShape,
 ) -> Result<(Sha, Option<Opened>), ExitCode> {
     let (base, query) = path.split_once('?').unwrap_or((path, ""));
     let segments: Vec<&str> = base.split('/').collect();
@@ -2012,6 +2014,19 @@ fn review_read(args: &[String], dir: &Path) -> ExitCode {
             "gh api graphql was given number={given:?}, not a pull request's number"
         ));
     };
+    let review_host = dir.join("review-host.json");
+    if review_host.is_file() {
+        use onevcs::RemoteHost;
+        let read = onevcs_testing::FileHost::create(&review_host)
+            .and_then(|host| host.review_comments(&onevcs::ChangeId(number.to_string()), None));
+        match read {
+            Ok(read) => {
+                println!("{}", review_wire(&read));
+                return ExitCode::SUCCESS;
+            }
+            Err(error) => return fake::refuse(&error.to_string()),
+        }
+    }
     let Some(opened) = opened_changes(dir)
         .into_iter()
         .find(|opened| opened.number == number && opened.repo == repo)
@@ -2160,3 +2175,42 @@ fn hunk_at(origin: &Path, base: &str, head: &str, path: &str, line: NonZeroU32) 
         matches!((start, span), (Some(start), Some(span)) if start <= line && line < start + span)
     })
 }
+
+// llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] spike-review-loop’s recorded real GitHub payloads are this adapter’s source. This dispatch is explicitly remote-double-only; node op-review owns the real GitHub/board onepipeline-smoke journey that reconciles the composed review wire. The adapter retains sibling-owned state and costs and the linked real onevcs reader parses it.
+/// GraphQL adapter over the sibling's remote double. Payload fields follow the
+/// spike-review-loop measurement; state and charges remain the double's own.
+fn review_wire(read: &onevcs::ReviewRead) -> serde_json::Value {
+    use onevcs::CommentKind;
+    use serde_json::{json, Value};
+    use std::collections::BTreeMap;
+    let page = |nodes: Vec<Value>| json!({"pageInfo": {"hasNextPage": false, "endCursor": null}, "nodes": nodes});
+    let mut threads: BTreeMap<String, Value> = BTreeMap::new();
+    let mut conversation = Vec::new();
+    let mut reviews = Vec::new();
+    for comment in &read.comments {
+        let mut raw = json!({"id": comment.id, "author": {"login": comment.author}, "body": comment.body, "url": comment.url, "createdAt": comment.created_at, "updatedAt": comment.updated_at, "lastEditedAt": null, "replyTo": comment.in_reply_to.as_ref().map(|parent| json!({"id": parent}))});
+        match &comment.kind {
+            CommentKind::ReviewThread {
+                thread,
+                path,
+                line,
+                outdated,
+                resolved,
+            } => {
+                let held = threads.entry(thread.clone()).or_insert_with(|| json!({"id": thread, "path": path, "line": line, "isOutdated": outdated, "isResolved": resolved, "comments": page(Vec::new())}));
+                held["comments"]["nodes"]
+                    .as_array_mut()
+                    .expect("adapter builds an array")
+                    .push(raw);
+            }
+            CommentKind::Review { state } => {
+                raw["state"] = json!(state.to_uppercase());
+                reviews.push(raw);
+            }
+            CommentKind::Conversation => conversation.push(raw),
+            _ => panic!("the linked double emitted an unknown comment kind"),
+        }
+    }
+    json!({"data": {"rateLimit": {"cost": read.cost.graphql_points}, "repository": {"pullRequest": {"url": read.change_url, "reviewThreads": page(threads.into_values().collect()), "comments": page(conversation), "reviews": page(reviews)}}}})
+}
+// llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]

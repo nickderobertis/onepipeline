@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "run": "states",
+  "nodes": [
+    {
+      "id": "a-rework-1",
+      "status": "done",
+      "outcome": "change-review-draft",
+      "comments": [
+        {
+          "id": "201",
+          "author": "same-login",
+          "url": "https://github.com/owner/service/pull/1#issuecomment-201",
+          "updated_at": "2026-10-10T18:34:13Z",
+          "state": "answered",
+          "reply_url": "https://github.com/owner/service/pull/1#issuecomment-reply-201"
+        },
+        {
+          "id": "202",
+          "author": "same-login",
+          "url": "https://github.com/owner/service/pull/1#issuecomment-202",
+          "updated_at": "2026-10-10T18:34:13Z",
+          "state": "declined",
+          "reply_url": "https://github.com/owner/service/pull/1#issuecomment-reply-202"
+        },
+        {
+          "id": "203",
+          "author": "same-login",
+          "url": "https://github.com/owner/service/pull/1#issuecomment-203",
+          "updated_at": "2026-10-10T18:34:13Z",
+          "state": "pending"
+        },
+        {
+          "id": "204",
+          "author": "same-login",
+          "url": "https://github.com/owner/service/pull/1#issuecomment-204",
+          "updated_at": "2026-10-10T18:34:13Z",
+          "state": "being-reworked",
+          "rework": "a-rework-1"
+        },
+        {
+          "id": "205",
+          "author": "same-login",
+          "url": "https://github.com/owner/service/pull/1#issuecomment-205",
+          "updated_at": "2026-10-10T18:34:13Z",
+          "state": "pending"
+        }
+      ]
+    }
+  ]
+}

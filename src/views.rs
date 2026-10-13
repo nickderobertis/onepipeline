@@ -2750,6 +2750,7 @@ pub(crate) fn status_reporting(view: &RunView, providers: Providers) -> String {
             }
         }
     }
+    out.push_str(&review_lines(view));
     out
 }
 
@@ -4274,6 +4275,7 @@ pub fn results(view: &RunView) -> String {
         view.paths.run,
         graph::state_of(&view.state.statuses()).as_str()
     );
+    out.push_str(&review_lines(view));
     let shut_down = HostShutdown::of(view);
     let from_the_store = FromTheStore::of(view);
     if let Some(from) = &from_the_store {
@@ -7688,3 +7690,12 @@ mod tests {
         assert_eq!(EndingKind::Stopped.word(), "ENDED stopped");
     }
 }
+
+// llmlint: ignore-block[cli_output_contract] The approved status/results SDK renderers return String and existing terminal diagnostics are part of that view. The planner ruled to retain those signatures and show host-read failures in the view; review and results --json carry failures through their separate exit/error paths. The refusal journey drives all three paths.
+fn review_lines(view: &RunView) -> String {
+    match crate::review::read(&view.state) {
+        Ok(comments) => crate::review::lines(&comments),
+        Err(error) => format!("  review state could not be read: {error}\n"),
+    }
+}
+// llmlint: ignore-end[cli_output_contract]

@@ -1249,11 +1249,22 @@ pub(crate) fn accept(
     author: crate::channel::Author,
     commands: &[Command],
 ) -> Result<Accepted> {
+    accept_as(paths, channel, author, commands, ledger::REPLY_VERB)
+}
+
+/// Coordinate a submission with driver closeout under the handover gate.
+pub(crate) fn accept_as(
+    paths: &RunPaths,
+    channel: &ChannelState,
+    author: crate::channel::Author,
+    commands: &[Command],
+    verb: &str,
+) -> Result<Accepted> {
     // A gate this process could not take refuses the submission rather than
     // making it: nothing reaches the queue, so nothing is reported accepted that
     // no writer is going to see.
     let handover = ledger::Handover::hold(paths)?;
-    let accepted = accepting_under_the_handover(paths, channel, author, commands);
+    let accepted = accepting_under_the_handover(paths, channel, author, commands, verb);
     drop(handover);
     accepted
 }
@@ -1283,8 +1294,9 @@ fn accepting_under_the_handover(
     channel: &ChannelState,
     author: crate::channel::Author,
     commands: &[Command],
+    verb: &str,
 ) -> Result<Accepted> {
-    match OwnershipLock::acquire(paths, ledger::REPLY_VERB) {
+    match OwnershipLock::acquire(paths, verb) {
         Ok(lock) => Ok(Accepted::NothingIsDriving(lock)),
         Err(Error::Locked { .. }) => channel.submit(author, commands).map(Accepted::Queued),
         // A lock nobody can be named as holding is still a claim on the run.
@@ -3539,6 +3551,18 @@ fn reconcile_envelope(
     deliveries: Option<&mut NoteDeliveries>,
     envelope: crate::channel::QueuedCommands,
 ) -> Result<bool> {
+    if envelope.commands == [Command::Review {}] {
+        let result = channel
+            .allows(envelope.author.clone(), &Command::Review {})
+            .and_then(|()| crate::review::pass(paths, state, journal));
+        channel.answer_commands(&CommandOutcome {
+            id: envelope.id,
+            applied: result.is_ok(),
+            reason: result.err().map(|error| error.to_string()),
+            results: Vec::new(),
+        })?;
+        return Ok(false);
+    }
     let author = envelope.author.clone();
     let commands = &envelope.commands;
 
@@ -9115,6 +9139,7 @@ mod tests {
                 id: "node".to_owned(),
                 reason: None,
             }],
+            ledger::REPLY_VERB,
         )
         .expect("the submission is answered")
     }

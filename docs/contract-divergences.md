@@ -10390,3 +10390,126 @@ exclusion. `tests/contract.rs`'s `the_rework_surface_is_what_the_divergence_reco
 holds the block above against the public types, the registered documents and the
 compiled-in allowlist; `src/edits.rs` and `src/lifecycle.rs` hold its operation kinds,
 default replacement, verdicts and cap against the private ones.
+
+## 122. Draft review feedback never reached its owning node — OPEN
+
+**What the code does.** An explicit `onepipeline review RUN [--json]` discovers
+comments only on unlanded lineage heads with a change request. It never schedules
+work, starts a driver, or projects review state onto the plan store. Driven runs
+request the pass through the durable command queue; undriven runs take the ownership
+lock and require the launching session. The receipt is `performed` or `requested`
+within `ONEPIPELINE_REPLY_TIMEOUT_SECONDS`. A performed receipt optionally names
+its `error`; `ReviewReceipt::exit_code` reports 1 for that host failure. Empty passes exit 0, refusals exit 2,
+and host failures exit 1 after recording the successful reads. Human failed
+receipts print on stderr; JSON receipts remain one stdout document. The existing
+String SDK status/results views retain their diagnostic line on an unreadable
+host, by the planner's ruling; results --json instead returns its read error.
+
+**Proposal.** Adopt the dispatch's review discovery contract: marked host replies
+answer the current revision's SHA-256 key (`<lineage root>:<comment id>:<updated_at>`),
+with `label=declined` recording a decline; lineage `onepipeline.rework` provenance
+names comments being reworked only while no marked reply to that comment exists
+for **any** revision; other comments except `ours` are pending. This is the
+planner's ruling over the dispatch's ambiguous prose: an edit after a reply must
+be pending even when old rework provenance still names the comment. A new rework
+of an edited comment consequently reads pending until its current reply posts;
+this keeps new reviewer feedback visible without adding review state. A pending
+revision is surfaced once as non-blocking `review-comment`, attributed by `workstream`
+and correlation `review-comment:<id>:<updated_at>`. The message carries the node,
+change URL, author, location, comment URL, body, and the `rework` and `decline` ops.
+The pass's `review` queue command has no graph effect. No cadence or quota is added.
+`review-comments-read` carries `node`, `change_url`, `marker`, `unchanged`, `cost`
+and comment metadata; bodies live in the envelope's `review-comment-bodies` artifact.
+The correlation uses `:` rather than the dispatch’s proposed `@`, by the
+planner’s ruling: the bus’s validated correlation grammar does not admit `@`.
+Markers and surfaced revisions belong to the journal and channel only.
+Discovery passes `since: None`, by the planner's ruling: full snapshots derive
+state from the current host, including deletion of replies; GraphQL charges the
+same with or without a marker. `planner-surface-queued` carries the optional
+`correlation` for a surfaced review revision. Continuation's optional
+`continued.rework` carries `replacement`, `replaces`, and `comments` from existing
+`onepipeline.rework` metadata. The checkpoint advances to version 12 with its
+golden so a cached fold cannot drop that provenance. A continued rework's
+projection preserves the existing `onepipeline.rework` and `onepipeline.node`
+from the seeded write-back baseline, byte-for-byte, until a live rework supersedes
+it. A missing, malformed or incompatible baseline refuses projection rather than
+erasing the store's record. Its rework value passes the same strict provenance
+reader as continuation and must agree with the journalled predecessor/comments.
+The events and planner-channel bundles advance to 1.3.0 together with their goldens.
+The SDK's corresponding surface is `verbs::review(&RunPaths, session, timeout)`
+returning `ReviewReceipt`, with `render_review` and its typed `exit_code`. The CLI
+parses `ReviewArgs` for this verb and `ResultsArgs` for the new `results --json` option. The latter
+renders through `verbs::render_results_json` as schema version 1: `run`, and
+`nodes` carrying `id`, `status`, optional `outcome`, and optional `comments`
+(omitted when empty). Each comment carries `id`, `author`, `url`, `updated_at`,
+and its `state`; `being-reworked` names `rework`, and `answered` / `declined` name
+`reply_url`. `tests/golden/review-results-v1.json` pins a live reworked node's view.
+
+**Test seam.** Debug binaries compile `ONEPIPELINE_REVIEW_FAILPOINT`, a directory
+containing a stage file (`before-submit`, `after-read` or `after-surface`). A matching stage writes
+`<stage>.reached` and waits for `<stage>.release`, permitting a journey to stop the
+identified subprocess at an exact write boundary. Release binaries ignore it.
+This is a test seam, not a public interface or launch setting.
+
+```json
+{
+  "verb": "review",
+  "surface_kind": "review-comment",
+  "record_kind": "review-comments-read",
+  "event_kinds": ["review-comments-read"],
+  "sdk_verbs": ["review", "render_review", "render_results_json"],
+  "correlation": "review-comment:<id>:<updated_at>",
+  "states": ["pending", "being-reworked", "answered", "declined"],
+  "bundle_versions": {"events": "1.3.0", "planner_channel": "1.3.0"},
+  "store_review_keys": [],
+  "results_schema_version": 1,
+  "results_golden": "tests/golden/review-results-v1.json"
+}
+```
+
+**What this build does.** `tests/e2e/review.rs` drives the compiled binary over a
+local Markdown store, real git and the linked `onevcs`, with review feedback
+served by `onevcs-testing` through the `fake-gh` GraphQL adapter:
+`discovers_all_comment_kinds_once_per_revision_without_starting_work_or_writing_the_store`
+reads two drafts, every kind, same-login marked replies, edits and unchanged
+passes; it checks the write-back projection file stays byte-identical and a long
+comment stays whole in the surface and artifact while its journal message is
+bounded. `state_comes_from_current_host_replies_and_rework_provenance` holds the
+five states against the version-1 JSON golden and both terminal views.
+`a_mixed_run_reads_only_the_continued_draft_and_the_unlanded_lineage_head` excludes
+landed, superseded and URL-less nodes from both the journal and the host's ledger.
+`discovery_is_explicit_and_a_live_driver_answers_the_durable_request` and
+`a_driver_that_cannot_finish_within_the_reply_window_returns_requested_without_reading_stdin`
+hold the live command path, timeout and absence of cadence.
+`refuses_unknown_or_foreign_runs_and_journals_successful_reads_before_a_host_failure`
+holds refusal and partial-read exits; discovery starts no work, and the existing
+`rework::only_the_planner_may_rework_or_retitle` holds the second author's refusal.
+`an_undriven_pass_holds_the_lock_without_reopening_the_run_or_firing_its_hook`
+interleaves a channel reply with the pass, checks its lock and unchanged launch,
+and leaves the success hook at its one original invocation.
+`a_crashed_pass_recovers_each_write_boundary_without_losing_or_duplicating_feedback`
+stops at both failpoints and holds queue/journal recovery.
+`a_cold_host_restores_rework_provenance_from_the_store_without_review_state_keys`
+loses the original runs root and `ONEVCS_HOME`, checks both cold views and discovery,
+and continues on a third host to hold the two preserved store values byte-for-byte.
+`continuation_refuses_malformed_rework_provenance_at_the_store_boundary` refuses
+unknown or blank provenance and a missing replacement;
+`an_edit_after_a_rework_reply_is_pending_and_surfaced_again_including_on_a_cold_host`
+holds the planner's edit rule on both hosts.
+`a_live_driver_records_a_failed_review_outcome` holds the failed durable outcome;
+`driver_closeout_hands_review_to_the_owner_and_refuses_a_foreign_session` stops
+before submission to prove both closeout branches;
+`a_continued_rework_refuses_projection_when_its_seeded_baseline_cannot_preserve_it`
+corrupts the saved baseline at each preservation boundary and checks the store
+provenance remains unchanged. The state journey also deletes a marked reply and
+holds the newly pending state; refusal journeys hold mixed-command refusal,
+terminal diagnostics, human receipts and results JSON read failures.
+`tests/parity.rs` holds the new verb
+and JSON results renderer to their SDK calls. `tests/contract.rs`'s
+`review_discovery_is_the_recorded_contract_and_registered_payload` reads the block
+above, and the recorded `review-comments-read` in `tests/recorded/pipeline-kinds.jsonl`
+comes from the discovery journey.
+
+The planner's dependency ruling retains `onevcs` 0.48.1 and `onevcs-testing` 0.17.0:
+those releases already carry this API; testing 0.18.0 requires onevcs 0.49.0 and
+would resolve a second engine under this manifest's unchanged pin.

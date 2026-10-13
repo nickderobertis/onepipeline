@@ -290,6 +290,9 @@ struct Snapshot {
     /// What each rework's replacement answers, keyed by the replacement: the record
     /// `onepipeline.rework` carries on its item.
     reworks: BTreeMap<String, ReworkProjected>,
+    /// Existing store provenance of continued reworks, preserved until a live rework
+    /// supersedes them. A missing baseline refuses projection rather than erasing it.
+    continued_metadata: Result<BTreeMap<String, BTreeMap<String, Value>>, String>,
     project_metadata: BTreeMap<String, Value>,
     /// Whether a node the run has not started is written as claimed or released.
     claim: Claim,
@@ -1078,6 +1081,61 @@ impl Writeback {
     }
 }
 
+/// The two existing metadata values a continued rework keeps byte-for-byte.
+/// Read from the launch's seeded baseline, never from a fresh store query.
+fn continued_metadata(
+    paths: &RunPaths,
+    launch: &LaunchRecord,
+    state: &RunState,
+) -> Result<BTreeMap<String, BTreeMap<String, Value>>, String> {
+    let continued: Vec<_> = state
+        .continued_reworks
+        .iter()
+        .filter(|(node, _)| !state.superseded.contains_key(*node))
+        .collect();
+    if continued.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let baseline: LandedBaseline = crate::ledger::read_json(&paths.dir.join(WRITEBACK_LANDED_FILE))
+        .map_err(|error| format!("cannot preserve continued rework provenance: {error}"))?;
+    if baseline.schema_version != WRITEBACK_LANDED_SCHEMA_VERSION
+        || baseline.project != launch.project
+    {
+        return Err("cannot preserve continued rework provenance: baseline is not this project's current schema".to_owned());
+    }
+    let mut found = BTreeMap::new();
+    for (node, provenance) in continued {
+        let metadata = baseline
+            .items
+            .get(node)
+            .map(|item| &item.metadata)
+            .ok_or_else(|| {
+                format!("continued rework '{node}' is absent from the seeded baseline")
+            })?;
+        let mut kept = BTreeMap::new();
+        for key in [crate::taskgraph::REWORK_KEY, crate::taskgraph::NODE_KEY] {
+            let value = metadata
+                .get(key)
+                .ok_or_else(|| format!("continued rework '{node}' has no {key} in its baseline"))?;
+            kept.insert(key.to_owned(), value.clone());
+        }
+        let stored = crate::continuation::rework_provenance(&kept[crate::taskgraph::REWORK_KEY])
+            .map_err(|error| format!("continued rework '{node}': {error}"))?;
+        if stored.replaces != provenance.replaces || stored.comments != provenance.comments {
+            return Err(format!(
+                "continued rework '{node}' disagrees with its baseline's provenance"
+            ));
+        }
+        if kept[crate::taskgraph::NODE_KEY] != json!(provenance.replacement) {
+            return Err(format!(
+                "continued rework '{node}' disagrees with its baseline's replacement"
+            ));
+        }
+        found.insert(node.clone(), kept);
+    }
+    Ok(found)
+}
+
 /// The snapshot one publish hands the worker, or `None` for a launch naming no project.
 fn snapshot_of(
     paths: &RunPaths,
@@ -1103,6 +1161,7 @@ fn snapshot_of(
         settlements: settlements(paths),
         superseded: state.superseded.clone(),
         reworks: reworks_of(state),
+        continued_metadata: continued_metadata(paths, launch, state),
         project_metadata: state
             .plan
             .as_ref()
@@ -3735,6 +3794,14 @@ fn task_document(
     for (key, value) in wire {
         metadata.insert(format!("onepipeline.{key}"), value);
     }
+    if let Some(kept) = snapshot
+        .continued_metadata
+        .as_ref()
+        .map_err(Clone::clone)?
+        .get(root)
+    {
+        metadata.extend(kept.iter().map(|(key, value)| (key.clone(), value.clone())));
+    }
     // The settlement, the landing and the change keys are the head's own, absent where the
     // head recorded none: what a superseded attempt closed on is the run journal's to say.
     let id = head.as_str();
@@ -6322,6 +6389,7 @@ mod tests {
                     settlements: BTreeMap::new(),
                     superseded: BTreeMap::new(),
                     reworks: BTreeMap::new(),
+                    continued_metadata: Ok(BTreeMap::new()),
                     project_metadata: BTreeMap::from([(
                         "onepipeline.concurrency".into(),
                         json!(4),
