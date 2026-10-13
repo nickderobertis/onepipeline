@@ -1144,11 +1144,19 @@ fn the_settlement_latency_budget_uses_the_journeys_journal_stamps() {
         "#[test]\nfn the_settlement_readability_latency_is_reported_from_its_journal_stamps()"
     ));
     let output = std::process::Command::new("bash")
-        .arg(root().join("scripts/settlement-latency-budget.sh"))
+        // Bash on Windows reads POSIX paths, not Rust's native C:\... spelling.
+        // Use the same relative command as the registered budget, with its root explicit.
+        .current_dir(root())
+        .arg("scripts/settlement-latency-budget.sh")
         .env_remove("ONEBUDGETSPEC_RESULT")
         .output()
         .expect("the real measurement command runs");
-    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(String::from_utf8_lossy(&output.stderr).contains("ONEBUDGETSPEC_RESULT is not set"));
 }
 

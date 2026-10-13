@@ -184,7 +184,33 @@ The first completed llmlint verdict found missing script-path proof/recovery gui
 
 The timeout-count correction was then verified on its restored implementation: all 10 dispatch-env hook journeys and all 8 dispatch-env/ordering unit tests passed. The prior-driver counterfactual failed at the intended 0-versus-3 ordering assertion; its edits were restored before the successful suite run. Evidence is retained under this node's scratch directory as `hook-every-attempt-negative.log`, `hook-restored-final.log`, `hook-restored-units.log`, `hook-restored-clippy.log`, `hook-restored-fmt.log`, and `hook-restored-llmlint.log`. The earlier verdict above predates this correction; the last file records its fresh diff-scoped verdict.
 
-## Failures without unchanged passing evidence
+## Preserved-branch publication repair
+
+The continuation read run 38362686175's Windows job 115180481951 read-only.
+This later run is outside the reviewed date window above. Its e2e step passed
+all 1,275 journeys, without skips. Publication failed instead at
+`tests/budgets.rs::the_settlement_latency_budget_uses_the_journeys_journal_stamps`:
+the script subprocess exited 1 instead of 2, including all three diagnostic
+reruns. The test passed Rust's native Windows absolute script path to Bash.
+Bash interprets that argument as a shell path rather than converting the native
+drive/backslash spelling; the script therefore never reaches its missing-result
+refusal. The finished test sets the repository working directory explicitly and
+passes the same relative script path the registered budget uses. It still
+requires exit 2 and the exact missing-result diagnostic, and now includes stderr
+in an exit-code failure. No assertion is removed or platform-gated.
+
+The prior audit evidence has been copied from `/tmp/onepipeline-windows-audit`
+into this node's scratch directory under `prior-audit/`. The later job log is
+`windows-115180481951.log`. `native-path-negative.log` demonstrates Bash refusing
+the native drive/backslash argument on Linux; it is a path interpretation
+control, not a claim of native Windows verification.
+
+The repaired file's full test binary passed on Linux: `cargo test --test budgets`,
+13 passed, zero failures or ignored tests (`budgets-repaired.log`). Formatting
+also passed. These changes touch only the budget test and this report; the
+e2e implementation that the later Windows job exercised is unchanged.
+
+## Other failures without unchanged passing evidence
 
 The following failures were read but do not qualify: pooled-identity lifecycle
 (38144885835, 38153801146); cancelled merge-path lifecycle (38136653966); adoption
