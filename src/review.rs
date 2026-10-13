@@ -313,6 +313,14 @@ pub(crate) fn requested(
             Err(error) => Err(error),
         };
     }
+    let deadline = || {
+        std::time::Instant::now()
+            .checked_add(timeout)
+            .ok_or_else(|| {
+                Error::Invalid("review reply timeout is too large for this host's clock".to_owned())
+            })
+    };
+    deadline()?;
     failpoint("before-submit")?;
     let channel = ChannelState::new(paths);
     let id = match crate::engine::accept_as(
@@ -341,7 +349,7 @@ pub(crate) fn requested(
             };
         }
     };
-    let deadline = std::time::Instant::now() + timeout;
+    let deadline = deadline()?;
     loop {
         if let Some(outcome) = channel.outcome_of(id) {
             return Ok(crate::verbs::ReviewReceipt::Performed {
