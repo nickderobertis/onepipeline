@@ -24,7 +24,6 @@ const { spawnSync } = require("node:child_process");
 const PACKAGES = {
   "linux-x64": "onepipeline-cli-linux-x64",
   "linux-arm64": "onepipeline-cli-linux-arm64",
-  "darwin-x64": "onepipeline-cli-darwin-x64",
   "darwin-arm64": "onepipeline-cli-darwin-arm64",
   "win32-x64": "onepipeline-cli-win32-x64",
 };
@@ -42,6 +41,15 @@ function fail(message) {
 
 function binaryPath() {
   const key = `${process.platform}-${process.arch}`;
+  // Intel macOS packages are no longer published, so say that rather than
+  // listing the platforms that are, or failing on a package that is missing.
+  if (key === "darwin-x64") {
+    fail(
+      "Intel macOS (darwin-x64) is no longer supported: prebuilt binaries ship " +
+        "for Apple silicon macOS only. On Apple silicon, run an arm64 Node.js; on an " +
+        "Intel Mac, build from source with 'cargo install onepipeline --locked'.",
+    );
+  }
   const pkg = PACKAGES[key];
   // llmlint: ignore-block[changed_behavior_has_e2e] reaching this branch means running
   // where no prebuilt package exists, and a test could only get there by lying to node

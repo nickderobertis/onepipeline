@@ -204,7 +204,7 @@ def verify(record, quiet=False):
         if not any('.dist-info/sboms/' in n for n in wheel.namelist()):
             raise ValueError('missing SBOM')
         if 'apple-darwin' in target:
-            expected = 0x0100000c if target.startswith('aarch64') else 0x01000007
+            expected = 0x0100000c
             if len(payload) < 8 or payload[:4] != b'\xcf\xfa\xed\xfe' or struct.unpack('<I', payload[4:8])[0] != expected:
                 raise ValueError('Mach-O architecture mismatch')
         with tarfile.open(record['archive']) as archive:
@@ -243,14 +243,13 @@ def verify(record, quiet=False):
 
 
 def install(record, out, python, node):
-    """Native installs, including an x86_64 Python/Node under Rosetta on Darwin."""
+    """Native installs of the staged wheel and npm packages with the host's runtimes."""
     prefix = out.resolve() / 'install' / record['target']
     run(python, '-m', 'venv', str(prefix / 'python'))
     scripts = 'Scripts' if os.name == 'nt' else 'bin'
     pip = prefix / 'python' / scripts / ('pip.exe' if os.name == 'nt' else 'pip')
     interpreter = prefix / 'python' / scripts / ('python.exe' if os.name == 'nt' else 'python')
-    python_command = ['arch', '-x86_64', str(interpreter)] if record['target'] == 'x86_64-apple-darwin' else [str(interpreter)]
-    run(*python_command, '-m', 'pip', 'install', '--no-index', record['wheel'])
+    run(str(interpreter), '-m', 'pip', 'install', '--no-index', record['wheel'])
     env = dict(os.environ, PATH=f"{pip.parent}{os.pathsep}{os.environ['PATH']}")
     run('bash', 'scripts/smoke-published.sh', '--expect-version', record['version'],
         '--label', f"staged wheel {record['target']}", env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)

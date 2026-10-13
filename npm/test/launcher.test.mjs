@@ -7,7 +7,7 @@
 // do locally is publish to the registry; `.github/workflows/release.yml` and
 // `published-smoke.yml` cover that against the real npm.
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, existsSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -24,7 +24,6 @@ function hostTarget() {
   const targets = {
     "linux-x64": "x86_64-unknown-linux-gnu",
     "linux-arm64": "aarch64-unknown-linux-gnu",
-    "darwin-x64": "x86_64-apple-darwin",
     "darwin-arm64": "aarch64-apple-darwin",
     "win32-x64": "x86_64-pc-windows-msvc",
   };
@@ -433,6 +432,56 @@ describe("the npm distribution", () => {
     assert.match(failed.stderr, /Reinstall with optional/);
     assert.match(failed.stderr, /pip install onepipeline-cli/);
   });
+
+  it("refuses Intel macOS by name rather than looking for a package no release ships", () => {
+    const project = mkdtempSync(join(work, "app-"));
+    installInto(project, [launcherTgz]);
+    const manifest = JSON.parse(
+      readFileSync(join(project, "node_modules", "onepipeline-cli", "package.json"), "utf8"),
+    );
+    assert.ok(
+      !Object.keys(manifest.optionalDependencies).some((name) => name.includes("darwin-x64")),
+      "the launcher must not pin an Intel macOS package",
+    );
+    // This host is not an Intel Mac, so the installed launcher runs under the
+    // identity Node reports there; everything after that is the real launcher.
+    const shim = join(project, "intel-mac.cjs");
+    writeFileSync(
+      shim,
+      'Object.defineProperty(process, "platform", { value: "darwin" });\n' +
+        'Object.defineProperty(process, "arch", { value: "x64" });\n',
+    );
+    const launcher = join(project, "node_modules", "onepipeline-cli", "bin", "onepipeline.js");
+    const refused = spawnSync(process.execPath, ["--require", shim, launcher, "--version"], {
+      cwd: project,
+      encoding: "utf8",
+    });
+    assert.equal(refused.status, 1, refused.stderr);
+    assert.equal(refused.stdout, "");
+    assert.match(refused.stderr, /Intel macOS \(darwin-x64\) is no longer supported/);
+    assert.match(refused.stderr, /cargo install onepipeline --locked/);
+    assert.doesNotMatch(refused.stderr, /platform package|unsupported platform/);
+  });
+});
+
+it("refuses to stage an Intel macOS target, which no release builds any more", () => {
+  const work = mkdtempSync(
+    join(process.env.ONEPIPELINE_NODE_SCRATCH_DIR ?? tmpdir(), "intel-mac-"),
+  );
+  const out = join(work, "stage");
+  try {
+    const refused = spawnSync(
+      process.platform === "win32" ? "python" : "python3",
+      ["scripts/build-staged-release.py", "--target", "x86_64-apple-darwin", "--out", out],
+      { cwd: REPO_ROOT, encoding: "utf8" },
+    );
+    assert.equal(refused.status, 1, refused.stderr);
+    assert.match(refused.stderr, /unsupported target; choose one of: .*aarch64-apple-darwin/);
+    assert.doesNotMatch(refused.stderr, /choose one of: .*x86_64-apple-darwin/);
+    assert.equal(existsSync(out), false);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
 });
 
 it("refuses a mismatched release tag before building artifacts", () => {

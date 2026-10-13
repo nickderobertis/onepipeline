@@ -31,9 +31,10 @@ name: Release
 #                     is switched off.
 #   * publish-pypi  — upload those wheels to onepipeline-cli with the
 #                     PYPI_TOKEN secret, gated on the PYPI_PUBLISH repo variable.
-#   * darwin        — build both Darwin targets sequentially, reusing each final wheel
-#                     binary in its archive and npm package; install and smoke both
-#                     architectures before any artifact publishes.
+#   * darwin        — build the Apple silicon Darwin target, reusing its final wheel
+#                     binary in its archive and npm package; install and smoke it
+#                     natively before any artifact publishes. Intel macOS builds
+#                     are discontinued.
 #   * verify-pypi   — pip-install the exact version just published on Linux/Windows,
 #                     then run scripts/smoke-published.sh.
 #   * build-npm     — wrap the same prebuilt binary in per-platform npm packages
@@ -687,7 +688,7 @@ jobs:
           gh release upload "$GITHUB_REF_NAME" "$RUNNER_TEMP/release-outcome.json" --clobber
 
   darwin:
-    name: Build and install both Darwin products
+    name: Build and install the Apple silicon Darwin products
     needs: test
     runs-on: macos-latest
     permissions:
@@ -705,30 +706,16 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just
-      - name: Install packager and both Rust targets
+      - name: Install packager and the Rust target
         run: |
           just nx run onepipeline-npm:bootstrap
           uv tool dir --bin >> "$GITHUB_PATH"
-          rustup target add aarch64-apple-darwin x86_64-apple-darwin
-          softwareupdate --install-rosetta --agree-to-license
-      - name: Install x86_64 runtimes for real Rosetta installs
-        run: |
-          curl -fsSL https://nodejs.org/dist/v22.22.0/node-v22.22.0-darwin-x64.tar.gz | tar -xz -C "$RUNNER_TEMP"
-          echo "X64_NODE=$RUNNER_TEMP/node-v22.22.0-darwin-x64/bin/node" >> "$GITHUB_ENV"
-          curl -fsSL https://www.python.org/ftp/python/3.12.10/python-3.12.10-macos11.pkg -o "$RUNNER_TEMP/python-universal.pkg"
-          sudo installer -pkg "$RUNNER_TEMP/python-universal.pkg" -target /
-          universal=/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12
-          lipo -archs "$universal" | grep -q x86_64
-          # shellcheck disable=SC2016 # The wrapper must forward its own argv at runtime.
-          printf '#!/bin/sh\nexec arch -x86_64 "%s" "$@"\n' "$universal" > "$RUNNER_TEMP/python-x64"
-          chmod +x "$RUNNER_TEMP/python-x64"
-      - name: Build, pack, install and smoke both targets before publication
+          rustup target add aarch64-apple-darwin
+      - name: Build, pack, install and smoke the target before publication
         env:
           RUSTFLAGS: "-D warnings"
           TAG: ${{ github.event.release.tag_name }}
-        run: |
-          python3 scripts/build-staged-release.py --target aarch64-apple-darwin --out staged-release --install --tag "$TAG"
-          python3 scripts/build-staged-release.py --target x86_64-apple-darwin --out staged-release --install --tag "$TAG" --python "$RUNNER_TEMP/python-x64" --node "$X64_NODE"
+        run: python3 scripts/build-staged-release.py --target aarch64-apple-darwin --out staged-release --install --tag "$TAG"
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-darwin

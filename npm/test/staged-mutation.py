@@ -64,10 +64,11 @@ elif case in ['wheel-version', 'wheel-arch', 'sbom', 'sbom-object', 'no-sbom', '
             if case == 'wheel-arch' and entry.filename.endswith('/WHEEL'):
                 payload = b'Wheel-Version: 1.0\nTag: py3-none-wrong_other\n'
             if case == 'macho':
-                record['target'] = 'x86_64-apple-darwin'
-                if entry.filename.endswith('/WHEEL'): payload = b'Wheel-Version: 1.0\nTag: py3-none-macosx_11_0_x86_64\n'
+                # An Apple silicon wheel whose executable is an x86_64 Mach-O.
+                record['target'] = 'aarch64-apple-darwin'
+                if entry.filename.endswith('/WHEEL'): payload = b'Wheel-Version: 1.0\nTag: py3-none-macosx_11_0_arm64\n'
                 if '.data/scripts/' in entry.filename:
-                    payload = b'\xcf\xfa\xed\xfe' + struct.pack('<I', 0x0100000c) + payload[8:]
+                    payload = b'\xcf\xfa\xed\xfe' + struct.pack('<I', 0x01000007) + payload[8:]
             if case == 'macho' and '.data/scripts/' in entry.filename:
                 entry.filename = entry.filename.removesuffix('.exe')
                 record['executables'] = ['onepipeline']

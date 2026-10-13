@@ -67,7 +67,7 @@ fn the_packaged_crate_carries_the_committed_events_bundle() {
 }
 
 #[test]
-fn release_packaging_retains_every_target_and_installs_darwin_before_publication() {
+fn release_packaging_retains_every_target_and_installs_apple_silicon_before_publication() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let text = std::fs::read_to_string(root.join(".github/workflows/release.yml")).unwrap();
     let release: serde_norway::Value = serde_norway::from_str(&text).unwrap();
@@ -101,22 +101,24 @@ fn release_packaging_retains_every_target_and_installs_darwin_before_publication
                 .unwrap()
         })
         .collect();
-    // Dispatch-local proof runs on Linux, so it declines a native Rosetta
-    // integration journey. The host-native subprocess journey drives the same
-    // builder/installer; these structural assertions hold the Mac job's runtime
-    // commands before publication without simulating Darwin execution.
+    // Intel macOS builds are discontinued: the one Mac job builds, packs and
+    // installs the Apple silicon target natively, with no Rosetta and no x86_64
+    // cross-compilation. Dispatch-local proof runs on Linux, so these structural
+    // assertions hold the Mac job's commands without simulating Darwin execution.
+    assert_eq!(darwin_targets, ["aarch64-apple-darwin"]);
+    for forbidden in [
+        "x86_64-apple-darwin",
+        "rosetta",
+        "arch -x86_64",
+        "darwin-x64",
+    ] {
+        assert!(
+            !text.to_lowercase().contains(forbidden),
+            "release.yml still carries Intel macOS: {forbidden}"
+        );
+    }
     let installer = std::fs::read_to_string(root.join("scripts/build-staged-release.py")).unwrap();
-    assert!(installer.contains(
-        "['arch', '-x86_64', str(interpreter)] if record['target'] == 'x86_64-apple-darwin'"
-    ));
-    assert!(runs.iter().any(|s| s.contains("exec arch -x86_64")));
-    assert!(builds
-        .iter()
-        .any(|s| s.contains("--target x86_64-apple-darwin")
-            && s.contains("--python \"$RUNNER_TEMP/python-x64\"")
-            && s.contains("--node \"$X64_NODE\"")));
-    assert!(runs.iter().any(|s| s.contains("--install-rosetta")));
-    assert!(builds.iter().any(|s| s.contains("--node \"$X64_NODE\"")));
+    assert!(!installer.contains("x86_64-apple-darwin") && !installer.contains("-x86_64"));
     let script = std::fs::read_to_string(root.join("scripts/npm-build.mjs")).unwrap();
     let mut declared: Vec<&str> = script
         .lines()

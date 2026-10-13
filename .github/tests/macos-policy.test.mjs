@@ -292,17 +292,25 @@ test("actual workflow graph routes all events, preserves contexts and records li
                     1,
                     `${id}: required context ${name}`,
                   );
-              } else if (eventName === "release")
+              } else if (eventName === "release") {
                 assert.deepEqual(
                   mac.map((j) => j.job),
                   ["darwin"],
                 );
-              else if (id === "manual-opt-in")
+                // Intel macOS is discontinued: the one Mac job builds Apple silicon only.
+                assert.deepEqual(mac[0].targets, ["aarch64-apple-darwin"]);
+              } else if (id === "manual-opt-in")
                 assert.deepEqual(
                   mac.map((j) => j.job),
                   ["macos-diagnostic"],
                 );
               else assert.deepEqual(mac, [], `${id} never requests Mac automatically`);
+              for (const row of resolved.flatMap((r) => r.jobs))
+                assert.ok(
+                  !row.targets.includes("x86_64-apple-darwin") &&
+                    !/intel/i.test(JSON.stringify(row.runner)),
+                  `${id}: ${row.job} must not build or run Intel macOS`,
+                );
               scenarios.push({
                 id: scenarioId(id, kind, fork, { pypi, npm, crate }),
                 runs: resolved,
@@ -447,9 +455,7 @@ test("an ordinary pull request emits every required context, never skipped, what
         ...scenario("pr-synchronize", "pull_request", "synchronize", kind, false, opt, branch),
         results,
       };
-      const contexts = runs(all, s).flatMap((run) =>
-        emittedContexts(all[run.workflow], run.jobs),
-      );
+      const contexts = runs(all, s).flatMap((run) => emittedContexts(all[run.workflow], run.jobs));
       for (const name of required) {
         const emitted = contexts.filter((context) => context.name === name);
         assert.equal(emitted.length, 1, `${kind}/${JSON.stringify(results)}: ${name} reports once`);
@@ -464,7 +470,7 @@ test("an ordinary pull request emits every required context, never skipped, what
 test("the real install prerequisite step fails every leg whose gate did not succeed", () => {
   const job = workflows()["ci.yml"].jobs.install;
   const step = job.steps[0];
-  assert.equal(step.env.GATE_RESULT, "${{ needs.gate.result }}");
+  assert.match(step.env.GATE_RESULT, /^\$\{\{ needs\.gate\.result \}\}$/);
   for (const gate of ["success", "failure", "cancelled", "skipped", ""]) {
     const result = spawnSync("bash", ["-eo", "pipefail", "-c", step.run], {
       encoding: "utf8",
