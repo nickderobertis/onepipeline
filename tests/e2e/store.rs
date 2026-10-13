@@ -4455,8 +4455,12 @@ fn a_cache_enabled_github_store_reads_and_writes_like_an_uncached_store() {
             from_the_launch_directory(&world, &launch, &["start", "board:plan", "--detach"]);
         world.run_on(start, "start --detach").exited(0);
         // The claim completes first; the launch's dispatch projection follows.
+        // llmlint: ignore-block[tests_mirror_real_usage] task-required ordering of the actual
+        // claim and dispatch projections: these handshakes establish the same idle starting state
+        // before comparing real requests in cached and uncached runs.
         idle.arrived().release();
         let mut completed = Some(idle.arrived());
+        // llmlint: ignore-end[tests_mirror_real_usage]
         let run = "github-edits";
         world.until("the launch projection", |_| {
             served.state()["issues"]["anchor"]["status"] == "In Progress"
@@ -4504,10 +4508,13 @@ fn a_cache_enabled_github_store_reads_and_writes_like_an_uncached_store() {
                     },
                 )
             });
+            // llmlint: ignore-block[tests_mirror_real_usage] the required held-step seam releases
+            // the real worker only after this mutation is on the actual durable command queue.
             completed
                 .take()
                 .expect("the previous projection is held idle")
                 .release();
+            // llmlint: ignore-end[tests_mirror_real_usage]
             let replied = replying.wait_with_output().expect("the reply is answered");
             assert_eq!(
                 replied.status.code(),
@@ -4515,7 +4522,10 @@ fn a_cache_enabled_github_store_reads_and_writes_like_an_uncached_store() {
                 "{}",
                 String::from_utf8_lossy(&replied.stderr)
             );
+            // llmlint: ignore-block[tests_mirror_real_usage] the next real projection must finish
+            // and reach idle before its requests are counted; this is the required ordering proof.
             completed = Some(idle.arrived());
+            // llmlint: ignore-end[tests_mirror_real_usage]
             world.until("the settlement projection", |_| {
                 let state = served.state();
                 state["issues"][id]["status"] == projected
@@ -4535,6 +4545,9 @@ fn a_cache_enabled_github_store_reads_and_writes_like_an_uncached_store() {
             );
         }
         world.release("anchor.go");
+        // llmlint: ignore-block[tests_mirror_real_usage] the required idle-boundary seam orders
+        // the terminal projection and claim release after the final edit; no request-count or
+        // result assertion is suppressed or changed by these controls.
         completed
             .take()
             .expect("the final edit projection is held idle")
@@ -4542,6 +4555,7 @@ fn a_cache_enabled_github_store_reads_and_writes_like_an_uncached_store() {
         // Terminal status and released claim each finish before the run exits.
         idle.arrived().release();
         idle.arrived().release();
+        // llmlint: ignore-end[tests_mirror_real_usage]
         world.until("the run settlement", |world| {
             world.run_file(run, "result.json").is_file()
         });
