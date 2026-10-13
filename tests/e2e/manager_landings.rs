@@ -2104,3 +2104,229 @@ fn unreadable_landing_state_fails_closed_and_records_from_before_landings_still_
         .err_has("cannot be said");
     assert!(snapshot(&acknowledgements).is_empty());
 }
+
+/// A landing associated with a **live** run — one whose node opened a session on
+/// the branch and is still working — is mirrored into that run's journal as it
+/// happens, and the run's own observer, the real `monitor --filter detailed` it
+/// reads with only its model turn doubled, sees every transition; the run's
+/// planner view keeps the blocker and leaves the progress out.
+#[test]
+fn a_landing_from_a_live_run_reaches_that_runs_observer() {
+    let world = World::new("ml-observed");
+    let _repository = world.repository("local-direct", &[]);
+    world.script("service.wait", "hold");
+    world.script("observer.wait", "hold");
+    world.script("observer.monitor", "1");
+    let run = "observed";
+    let path = world.plan(
+        run,
+        &crate::harness::plan_of(run, vec![crate::harness::lifecycle("service", &[])]),
+    );
+    world
+        .run(&[
+            "start",
+            &path,
+            "--detach",
+            "--dag-graph",
+            &world.shipped_dag_graph(),
+        ])
+        .exited(0);
+    world.until("the node's session to open", |world| {
+        world
+            .journal(run)
+            .iter()
+            .any(|event| event["source"] == "vcs" && event["kind"] == "session-opened")
+    });
+    world.until("the observer to start", |world| {
+        !world.observer_saw().is_empty()
+    });
+    let branch = world
+        .journal(run)
+        .iter()
+        .find(|event| event["kind"] == "session-opened")
+        .and_then(|event| event["payload"]["branch"].as_str().map(str::to_owned))
+        .expect("the session names its branch");
+
+    // The manager lands the run's branch while the run is still working on it.
+    let landed = world.run(&["publish-branch", &branch, "--repo", "service", "--no-draft"]);
+    let (flow, id) = the_landing(&world);
+    assert_eq!(
+        sidecar(&world, &flow, &id, "request.json")["runs"],
+        json!([run])
+    );
+    let terminal = if landed.code == 0 {
+        "landing-finished"
+    } else {
+        "landing-refused"
+    };
+    let mirrored: Vec<String> = world
+        .journal(run)
+        .iter()
+        .filter(|event| event["labels"]["landing_id"] == json!(id))
+        .map(|event| event["kind"].as_str().unwrap_or_default().to_owned())
+        .collect();
+    assert!(
+        mirrored.first().map(String::as_str) == Some("landing-registered")
+            && mirrored.last().map(String::as_str) == Some(terminal),
+        "{mirrored:?}"
+    );
+
+    // The observer, let go, reads every one of them through the real reader.
+    world.release("observer.go");
+    let read = world.fakes.join("observer-monitor.txt");
+    world.until("the observer to read the run", |_| read.is_file());
+    let seen = std::fs::read_to_string(&read).expect("what the observer read");
+    for kind in ["landing-registered", "landing-started", terminal] {
+        assert!(
+            seen.contains(kind),
+            "the observer did not see {kind}:\n{seen}"
+        );
+    }
+    let planner = world.run(&["monitor", run]);
+    planner.exited(0).out_lacks("landing-registered");
+    if terminal == "landing-refused" {
+        planner.out_has("landing-refused");
+    }
+    world.release("service.go");
+}
+
+/// Under a wake budget the landing's flow is owed a watch that wakes the session
+/// within it: one armed with the budget as its timeout does not qualify, one
+/// armed with the budget less the reserve does — the rule every flow already
+/// answers to.
+#[test]
+fn a_landing_is_owed_a_watch_that_wakes_within_the_wake_budget() {
+    let verb = Verb::publish("ml-budget");
+    let world = &verb.world;
+    let mut landing = verb.start();
+    landing.held_at_push(&verb);
+    let (flow, _) = the_landing(world);
+    let budget = || {
+        let asked = world.run(&[
+            "stop-guard",
+            "--session",
+            world.session.as_str(),
+            "--wake-budget",
+            "600",
+        ]);
+        serde_json::from_str::<Value>(asked.stdout.trim()).expect("a verdict")
+    };
+    let late = Armed::arm(world, &flow, &["--timeout", "600"]);
+    let refused = budget();
+    assert_eq!(refused["verdict"], json!("block"), "{refused}");
+    assert!(
+        refused["reason"]
+            .as_str()
+            .is_some_and(|why| why.contains("--timeout 598")),
+        "{refused}"
+    );
+    let in_time = Armed::arm(world, &flow, &["--timeout", "598"]);
+    assert_eq!(budget(), json!({"verdict": "none"}));
+    verb.held.release();
+    let (code, _, said) = landing.ended();
+    assert_eq!(code, 0, "{said}");
+    for armed in [late, in_time] {
+        let returned = armed.returned();
+        assert_eq!(returned.code, EXIT_SUCCESS, "{}", returned.record);
+    }
+}
+
+/// Whether a process is waiting on a file lock, as Linux reports its wait.
+fn waiting_on_a_lock(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/wchan"))
+        .is_ok_and(|channel| channel.contains("lock"))
+}
+
+/// A branch acknowledgement and a landing's registration are serialized: with
+/// the registration lock held, both wait on it — the landing has written no
+/// ownership and the acknowledgement no record — and once it is let go, the
+/// two never interleave: an acknowledgement recorded before the landing's
+/// registration is one the live landing still owes supervision through, and one
+/// made after it is refused.
+#[test]
+fn a_branch_acknowledgement_and_a_landing_registration_never_interleave() {
+    let world = World::new("ml-serialized");
+    let _repository = world.repository("local-direct", &["true"]);
+    preserved_by_session(&world, "service", BRANCH, &world.session);
+    let go = world.root.join("push.go");
+    hold_pushes(&world, &go);
+    let flows = world.runs.join(".flows");
+    std::fs::create_dir_all(&flows).expect("the flows directory");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(flows.join("landings.lock"))
+        .expect("the registration lock");
+    {
+        use std::os::unix::io::AsRawFd;
+        // SAFETY: a descriptor this journey just opened and still owns.
+        assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+    }
+    let landing = Started::spawn(
+        &world,
+        None,
+        &[
+            "repo-recover",
+            BRANCH,
+            "--repo",
+            "service",
+            "--title",
+            "feat: land the kept work",
+            "--no-draft",
+        ],
+    );
+    let acknowledgements = world.root.join("acks");
+    let directory = acknowledgements.display().to_string();
+    let acknowledging = Started::spawn(
+        &world,
+        None,
+        &[
+            "unpublished",
+            "--acknowledge",
+            BRANCH,
+            "--reason",
+            "kept deliberately",
+            "--session",
+            &world.session,
+            "--acknowledgements",
+            &directory,
+        ],
+    );
+    world.until("both to wait on the registration lock", |_| {
+        waiting_on_a_lock(landing.child.id()) && waiting_on_a_lock(acknowledging.child.id())
+    });
+    assert!(
+        landings(&world).is_empty(),
+        "a landing registered past the lock"
+    );
+    assert!(
+        snapshot(&acknowledgements).is_empty(),
+        "an acknowledgement was written past the lock"
+    );
+    drop(lock);
+
+    let (code, out, said) = acknowledging.ended();
+    let (flow, id) = the_landing(&world);
+    let request = sidecar(&world, &flow, &id, "request.json");
+    if code == EXIT_SUCCESS {
+        // Recorded first: the landing registered after it, and is owed a watch
+        // regardless.
+        let file = snapshot(&acknowledgements);
+        let recorded: Value = serde_json::from_str(&file[0].1).expect("the acknowledgement file");
+        let at = recorded["acknowledged"][0]["at"]
+            .as_str()
+            .expect("an instant")
+            .to_owned();
+        // Compared to the second, the precision the acknowledgement keeps.
+        let began = request["began_at"].as_str().expect("an instant");
+        assert!(at[..19] <= began[..19], "{recorded} {request}");
+        assert_eq!(verdict(&world)["verdict"], json!("block"));
+    } else {
+        assert_eq!(code, REFUSED, "{out}\n{said}");
+        assert!(said.contains(&format!("is being landed by {id}")), "{said}");
+        assert!(snapshot(&acknowledgements).is_empty());
+    }
+    std::fs::write(&go, "go").expect("released");
+    let (code, _, said) = landing.ended();
+    assert_eq!(code, 0, "{said}");
+}
