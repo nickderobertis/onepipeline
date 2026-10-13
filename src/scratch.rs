@@ -38,19 +38,28 @@ struct Seen {
 }
 
 #[cfg(unix)]
+fn counted(is_dir: bool, inode: (u64, u64), nlink: u64, blocks: u64, seen: &mut Seen) -> u64 {
+    // Removal changes the remaining alias's link count. Remember an inode
+    // first seen with multiple links even after unlinking its earlier name.
+    if !is_dir
+        && ((nlink > 1 && !seen.links.insert(inode))
+            || (nlink == 1 && !seen.links.is_empty() && seen.links.contains(&inode)))
+    {
+        return 0;
+    }
+    blocks * 512
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
 fn allocated(_path: &Path, metadata: &fs::Metadata, seen: &mut Seen) -> io::Result<u64> {
     use std::os::unix::fs::MetadataExt;
-    if !metadata.is_dir() {
-        let inode = (metadata.dev(), metadata.ino());
-        // Removal changes the remaining alias's link count. Remember an inode
-        // first seen with multiple links even after unlinking its earlier name.
-        if (metadata.nlink() > 1 && !seen.links.insert(inode))
-            || (metadata.nlink() == 1 && !seen.links.is_empty() && seen.links.contains(&inode))
-        {
-            return Ok(0);
-        }
-    }
-    Ok(metadata.blocks() * 512)
+    Ok(counted(
+        metadata.is_dir(),
+        (metadata.dev(), metadata.ino()),
+        metadata.nlink(),
+        metadata.blocks(),
+        seen,
+    ))
 }
 
 #[cfg(windows)]
@@ -111,6 +120,7 @@ enum Operation {
 }
 
 /// Links are measured and unlinked themselves, never traversed.
+#[cfg(not(target_os = "linux"))]
 fn walk(path: &Path, operation: Operation, totals: &mut Walk, seen: &mut Seen) -> io::Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     totals.entries += 1;
@@ -140,12 +150,118 @@ fn walk(path: &Path, operation: Operation, totals: &mut Walk, seen: &mut Seen) -
     }
 }
 
-/// Linux traversal pins each directory before reading it. A replacement link
-/// cannot redirect a later stat or unlink into its target.
+/// Linux traversal names every entry relative to its parent's open directory:
+/// one lookup per entry, and a replacement link cannot redirect a later stat or
+/// unlink into its target.
+#[cfg(target_os = "linux")]
+mod at {
+    use super::{counted, Operation, Seen, Walk};
+    use std::ffi::{CStr, CString};
+    use std::io;
+    use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+
+    fn checked(result: libc::c_int) -> io::Result<libc::c_int> {
+        if result < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(result)
+        }
+    }
+
+    // `nlink_t` is `u64` on x86_64 and `u32` on aarch64 Linux.
+    #[allow(clippy::useless_conversion)]
+    fn links(stat: &libc::stat) -> u64 {
+        u64::from(stat.st_nlink)
+    }
+
+    pub(super) fn walk(
+        parent: BorrowedFd<'_>,
+        name: &CStr,
+        operation: Operation,
+        totals: &mut Walk,
+        seen: &mut Seen,
+    ) -> io::Result<()> {
+        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: `parent` is an open directory, `name` is NUL-terminated, and
+        // `stat` is writable storage of the type `fstatat` fills.
+        checked(unsafe {
+            libc::fstatat(
+                parent.as_raw_fd(),
+                name.as_ptr(),
+                stat.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        })?;
+        // SAFETY: success above promises the whole struct was filled.
+        let stat = unsafe { stat.assume_init() };
+        let is_dir = stat.st_mode & libc::S_IFMT == libc::S_IFDIR;
+        totals.entries += 1;
+        totals.bytes += counted(
+            is_dir,
+            (stat.st_dev, stat.st_ino),
+            links(&stat),
+            u64::try_from(stat.st_blocks).unwrap_or(0),
+            seen,
+        );
+        if !is_dir {
+            return match operation {
+                Operation::Remove => unlink(parent, name, 0),
+                Operation::Measure => Ok(()),
+            };
+        }
+        let dir = open_dir(parent, name)?;
+        let mut first_error = None;
+        for child in entries(dir.as_fd())? {
+            let result = child.and_then(|child| walk(dir.as_fd(), &child, operation, totals, seen));
+            if let Err(error) = result {
+                first_error.get_or_insert(error);
+            }
+        }
+        if operation == Operation::Remove {
+            if let Err(error) = unlink(parent, name, libc::AT_REMOVEDIR) {
+                first_error.get_or_insert(error);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+
+    /// `O_NOFOLLOW` refuses a name that became a link after it was stat'ed.
+    pub(super) fn open_dir(parent: BorrowedFd<'_>, name: &CStr) -> io::Result<OwnedFd> {
+        // SAFETY: `parent` is an open directory and `name` is NUL-terminated.
+        let fd = checked(unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        })?;
+        // SAFETY: `openat` returned a new descriptor that nothing else owns.
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+
+    fn unlink(parent: BorrowedFd<'_>, name: &CStr, flags: libc::c_int) -> io::Result<()> {
+        // SAFETY: `parent` is an open directory and `name` is NUL-terminated.
+        checked(unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), flags) }).map(drop)
+    }
+
+    /// The open directory's own names, read through its descriptor: one
+    /// resolution per directory rather than per entry.
+    pub(super) fn entries(
+        dir: BorrowedFd<'_>,
+    ) -> io::Result<impl Iterator<Item = io::Result<CString>>> {
+        Ok(
+            std::fs::read_dir(format!("/proc/self/fd/{}", dir.as_raw_fd()))?
+                .map(|entry| CString::new(entry?.file_name().as_bytes()).map_err(io::Error::other)),
+        )
+    }
+}
+
+/// The scratch root, pinned open before its directories are listed.
 struct Anchored {
     path: std::path::PathBuf,
     #[cfg(target_os = "linux")]
-    _file: Option<fs::File>,
+    file: Option<fs::File>,
 }
 
 fn anchor(path: &Path) -> io::Result<Anchored> {
@@ -160,7 +276,7 @@ fn anchor(path: &Path) -> io::Result<Anchored> {
         let path = std::path::PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()));
         Ok(Anchored {
             path,
-            _file: Some(file),
+            file: Some(file),
         })
     }
     #[cfg(not(target_os = "linux"))]
@@ -188,6 +304,19 @@ impl ScratchTree {
         let name = path
             .file_name()
             .ok_or_else(|| io::Error::other("scratch directory has no name"))?;
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsFd;
+            use std::os::unix::ffi::OsStrExt;
+            let root = self
+                .access
+                .file
+                .as_ref()
+                .ok_or_else(|| io::Error::other("scratch root is not open"))?;
+            let name = std::ffi::CString::new(name.as_bytes()).map_err(io::Error::other)?;
+            at::walk(root.as_fd(), &name, operation, totals, seen)
+        }
+        #[cfg(not(target_os = "linux"))]
         walk(&self.access.path.join(name), operation, totals, seen)
     }
 }
@@ -200,7 +329,7 @@ fn directories(paths: &RunPaths) -> io::Result<ScratchTree> {
                 access: Anchored {
                     path: root.clone(),
                     #[cfg(target_os = "linux")]
-                    _file: None,
+                    file: None,
                 },
                 root,
                 dirs: Vec::new(),
@@ -757,9 +886,11 @@ mod traversal_boundary {
         let pinned = anchor(&original).unwrap();
         fs::rename(&original, &displaced).unwrap();
         symlink(&outside, &original).unwrap();
+        let pinned = pinned.file.unwrap();
         let mut total = Walk::default();
-        walk(
-            &pinned.path.join("inside"),
+        at::walk(
+            std::os::fd::AsFd::as_fd(&pinned),
+            c"inside",
             Operation::Remove,
             &mut total,
             &mut Seen::default(),
@@ -769,6 +900,11 @@ mod traversal_boundary {
         assert_eq!(fs::read(outside.join("target")).unwrap(), b"external bytes");
         assert!(fs::symlink_metadata(&original).unwrap().is_symlink());
         assert!(anchor(&original).is_err());
+        // A directory name swapped for a link between its stat and its open is
+        // refused at the open, so nothing beneath the link's target is walked.
+        let parent = anchor(&temp).unwrap().file.unwrap();
+        assert!(at::open_dir(std::os::fd::AsFd::as_fd(&parent), c"dispatch").is_err());
+        assert_eq!(fs::read(outside.join("target")).unwrap(), b"external bytes");
         fs::remove_dir_all(temp).unwrap();
     }
 }
