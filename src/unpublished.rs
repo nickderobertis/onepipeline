@@ -1072,6 +1072,33 @@ pub fn acknowledge(request: &AcknowledgeRequest, graph: Option<PathBuf>) -> Resu
         ))
     })?;
     // llmlint: ignore-end[changed_behavior_has_e2e]
+    // Held across the check and the write: a landing registers its subjects
+    // under the same lock, so one cannot start between the two and be hidden.
+    let root = crate::ledger::runs_root();
+    let _registering = crate::flow::registration_lock(&root)?;
+    let landings = crate::flow::every_landing(&root).map_err(|why| {
+        Error::Refused(format!(
+            "whether a live landing advances {} [{}] cannot be said, so it is not acknowledged: \
+             {why}; nothing was recorded",
+            row.branch.branch, row.identity
+        ))
+    })?;
+    if let Some((flow, landing)) = landings
+        .iter()
+        .find(|(_, landing)| landing.names(&row.identity, &row.branch.branch) && landing.is_live())
+    {
+        return Err(Error::Refused(format!(
+            "{} [{}] is being landed by {} of flow '{}' (session [{}]), which is live work owed \
+             a watch rather than an acknowledgement: watch it with `onepipeline watch --flow {}`; \
+             nothing was recorded",
+            row.branch.branch,
+            row.identity,
+            landing.id(),
+            flow.id(),
+            crate::sys::session_digest(&landing.request.session),
+            flow.id()
+        )));
+    }
     let file = acknowledgement_file(&request.acknowledgements, &request.session);
     let mut kept = match read_file(&file) {
         Ok(entries) => {

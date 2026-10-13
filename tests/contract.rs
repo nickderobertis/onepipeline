@@ -617,15 +617,37 @@ fn the_contracts_launch_config_omits_an_empty_block_and_still_reads() {
 #[test]
 fn the_shipped_profiles_are_the_contracts_own_and_are_overridable() {
     let empty = Filters::default();
-    assert_eq!(
-        empty.profile("planner").expect("planner ships"),
-        EventFilter {
-            include: vec![Matcher {
+    let stamped = |source: Source, significance: onepipeline::vocabulary::Significance| Matcher {
+        source: Some(source),
+        fields: onepipeline::vocabulary::MatchFields {
+            significance: Some(significance),
+            ..onepipeline::vocabulary::MatchFields::default()
+        },
+        ..Matcher::default()
+    };
+    let planner = EventFilter {
+        include: vec![
+            Matcher {
                 source: Some(Source::Pipeline),
                 ..Matcher::default()
-            }],
-            exclude: Vec::new(),
-        }
+            },
+            stamped(
+                Source::Vcs,
+                onepipeline::vocabulary::Significance::Milestone,
+            ),
+            stamped(Source::Vcs, onepipeline::vocabulary::Significance::Blocker),
+        ],
+        exclude: vec![stamped(
+            Source::Pipeline,
+            onepipeline::vocabulary::Significance::Progress,
+        )],
+    };
+    assert_eq!(empty.profile("planner").expect("planner ships"), planner);
+    // And it is the profile entry 123 records, read through the grammar.
+    assert_eq!(
+        serde_json::from_value::<EventFilter>(divergence_block("123.")["planner_profile"].clone())
+            .expect("entry 123's profile is a filter"),
+        planner
     );
     assert_eq!(
         empty.profile("detailed").expect("detailed ships"),
@@ -982,9 +1004,9 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), EVENTS_BUNDLE_VERSION);
     assert_eq!(
-        divergence_block("122.")["bundle_versions"]["events"],
+        divergence_block("123.")["bundle_versions"]["events"],
         EVENTS_BUNDLE_VERSION,
-        "the rework bundle version must be the manager's recorded ruling"
+        "the events bundle version must be the one the landing entry records"
     );
     let carried: Vec<String> = bundle
         .schemas()
@@ -6610,7 +6632,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // undocumented wire; a kind the contract lists and the enum does not carry is
     // a promise nothing keeps. `PIPELINE_KINDS` is what `Journal::emit` accepts,
     // so this is the emitted set and not a second copy of it.
-    assert_eq!(PIPELINE_KINDS.len(), 46, "the closed set changed size");
+    assert_eq!(PIPELINE_KINDS.len(), 52, "the closed set changed size");
     let listed: BTreeSet<String> = backticked()
         .into_iter()
         .filter(|token| {
@@ -6620,7 +6642,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // The kinds the contract does not list are exactly the ones the divergence
     // record proposes, and no others: a kind neither document names fails here.
     let proposed: BTreeSet<String> = [
-        "40.", "47.", "55.", "65.", "70.", "92.", "119.", "121.", "122.",
+        "40.", "47.", "55.", "65.", "70.", "92.", "119.", "121.", "122.", "123.",
     ]
     .into_iter()
     .flat_map(|entry| {
@@ -10672,4 +10694,103 @@ fn review_discovery_is_the_recorded_contract_and_registered_payload() {
             serde_json::to_value(&receipt).unwrap()
         );
     }
+}
+
+/// Entry 123's manager landings are this build's own: its six kinds are spelled by
+/// `PipelineKind`, each registered payload document admits the transition the
+/// block records and refuses one missing what it always carries, its three verbs
+/// are the binary's, `landing-progress` is a condition `--until` reads, and every
+/// significance word it names is `onevcs`'s own.
+#[test]
+fn the_manager_landing_contract_is_what_the_divergence_record_names() {
+    use onepipeline::cli::{watch_conditions, WatchUntil};
+    use onepipeline::event::PipelineKind;
+    use onepipeline::payload::{registry, schema_of};
+    let block = divergence_block("123.");
+    let landing = [
+        PipelineKind::LandingRegistered,
+        PipelineKind::LandingDrafting,
+        PipelineKind::LandingStarted,
+        PipelineKind::LandingFinished,
+        PipelineKind::LandingRefused,
+        PipelineKind::LandingDied,
+    ];
+    let kinds: Vec<String> =
+        serde_json::from_value(block["event_kinds"].clone()).expect("entry 123 names its kinds");
+    assert_eq!(kinds, landing.map(|kind| kind.as_str().to_owned()));
+    let terminal: Vec<String> = serde_json::from_value(block["terminal_kinds"].clone())
+        .expect("entry 123 names its terminal kinds");
+    let registry = registry();
+    for kind in landing {
+        let id = schema_of(kind);
+        let carries_status = matches!(
+            kind,
+            PipelineKind::LandingFinished | PipelineKind::LandingRefused
+        );
+        let example = if carries_status {
+            &block["terminal"]
+        } else {
+            &block["transition"]
+        };
+        registry
+            .check(&id, example)
+            .unwrap_or_else(|why| panic!("entry 123's payload is refused as {kind}: {why}"));
+        if carries_status {
+            assert!(terminal.contains(&kind.as_str().to_owned()), "{kind}");
+            let mut unstated = example.clone();
+            unstated
+                .as_object_mut()
+                .expect("a payload")
+                .remove("status");
+            assert!(
+                registry.check(&id, &unstated).is_err(),
+                "a {kind} carrying no status was admitted"
+            );
+        }
+        for key in ["landing_id", "flow_id", "operation", "subjects", "message"] {
+            let mut partial = example.clone();
+            partial.as_object_mut().expect("a payload").remove(key);
+            assert!(
+                registry.check(&id, &partial).is_err(),
+                "a {kind} with no {key} was admitted"
+            );
+        }
+        let mut unknown = example.clone();
+        unknown["operation"] = json!("rebase");
+        assert!(
+            registry.check(&id, &unknown).is_err(),
+            "a {kind} naming an operation no verb is was admitted"
+        );
+    }
+    // The three verbs are the binary's, `integrate` among them.
+    let verbs: Vec<String> =
+        serde_json::from_value(block["verbs"].clone()).expect("entry 123 names its verbs");
+    let command = Cli::command();
+    for verb in &verbs {
+        assert!(
+            command.find_subcommand(verb).is_some(),
+            "the binary offers no `{verb}`"
+        );
+    }
+    // The condition, read by the parser and named in the vocabulary.
+    let condition = block["watch_condition"].as_str().expect("a condition");
+    assert_eq!(
+        condition.parse::<WatchUntil>(),
+        Ok(WatchUntil::LandingProgress)
+    );
+    assert!(watch_conditions().contains(&condition));
+    // Every word the block stamps is the producer's own.
+    for (kind, word) in block["significance"]
+        .as_object()
+        .expect("entry 123 maps each kind to its significance")
+    {
+        assert!(kinds.contains(kind), "{kind}");
+        serde_json::from_value::<onepipeline::vocabulary::Significance>(word.clone())
+            .unwrap_or_else(|why| panic!("{kind}'s word {word} is not onevcs's: {why}"));
+    }
+    // The bundle carries every kind's document at the version the block records.
+    assert_eq!(
+        block["bundle_versions"]["events"],
+        onepipeline::vocabulary::EVENTS_BUNDLE_VERSION
+    );
 }

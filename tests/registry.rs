@@ -180,6 +180,15 @@ fn differences(left: &Value, right: &Value, at: &str, found: &mut Vec<String>) {
 /// Each registry also registers ids of its own, which is why this checks
 /// containment rather than equality; `every_registered_id_is_listed_in_order`
 /// above pins the shared set exactly.
+/// The one constraining addition since the capture, and the only one tolerated:
+/// a matcher may name the producer's optional `significance` stamp, which admits
+/// filters the capture refused and refuses none it admitted. Entry 123 of
+/// `docs/contract-divergences.md` records it.
+const SIGNIFICANCE: [&str; 2] = [
+    "/$defs/Matcher/properties/significance",
+    "/$defs/Significance",
+];
+
 #[test]
 fn both_registries_hold_every_captured_id_under_its_captured_document() {
     let captured = captured();
@@ -201,6 +210,9 @@ fn both_registries_hold_every_captured_id_under_its_captured_document() {
             let constraining: Vec<&String> = found
                 .iter()
                 .filter(|pointer| !pointer.ends_with("/description"))
+                .filter(|pointer| {
+                    !(text == "agent.event-filter@1" && SIGNIFICANCE.contains(&pointer.as_str()))
+                })
                 .collect();
             assert!(
                 constraining.is_empty(),
@@ -262,9 +274,12 @@ fn the_only_prose_that_moved_is_the_phase_its_producer_now_owns() {
         [
             "agent.event-envelope@1/$defs/Phase/description",
             "agent.event-envelope@2/$defs/Phase/description",
+            "agent.event-filter@1/$defs/Matcher/properties/significance",
             "agent.event-filter@1/$defs/Phase/description",
+            "agent.event-filter@1/$defs/Significance",
         ],
-        "the prose that moved with the vocabulary is not only `onevcs`'s `Phase`"
+        "what moved since the capture is not only `onevcs`'s `Phase` prose and the \
+         `significance` matcher field entry 123 adds"
     );
     // It is that producer's own words, not a third wording invented here.
     let phase = registry

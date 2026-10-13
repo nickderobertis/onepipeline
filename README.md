@@ -722,7 +722,8 @@ and cannot drift from it: `tests/parity.rs` holds the two to one another over a
 recorded run, and a behaviour the binary has that the library lacks is a defect.
 Exit codes do not move; each result answers the code the binary exits with.
 
-`onepipeline monitor RUN [--filter NAME|SPEC | --all] [--cursor CURSOR]` makes one
+`onepipeline monitor RUN | --flow ID [--filter NAME|SPEC | --all] [--cursor CURSOR]` —
+`--flow` in the place of `RUN` reads a flow's manager landings — makes one
 pass over the merged stream and returns. Every pass — including one that renders
 no event — ends its stdout with exactly one resume line after the trailer,
 `-- cursor 1:<run>:<byte>`, whose byte is the end of the last finished record in
@@ -834,9 +835,14 @@ started, and every run it launched — and returns `4` on a surface on the flow'
 own channel or a member run's, `6` on a member run's node settling, `8`
 (`run-joined`, a word a run's watch refuses) on a run joining the flow,
 `0` when the flow ends cleanly and `9` when it fails or dies; `--until run-joined`
-alone returns on a run joining and nothing else of the three. `--filter` and
-`--all` are a run's alone. [`docs/stop-guard.md`](docs/stop-guard.md#flows)
-states it, with the flow's own channel and what `unwatched` owes a flow. Under a
+alone returns on a run joining and nothing else of the four. A flow also holds
+the **manager landings** `publish-branch`, `repo-recover` and `integrate` register
+under `ONEPIPELINE_LAUNCHER_SESSION`, and `--until landing-progress` — in the
+default set — returns `0` on a landing event its `--filter` profile admits: under
+the shipped `planner` profile a milestone or a blocker, never progress, with
+`--filter detailed` waking on every event. `--all` is a run's alone.
+[`docs/stop-guard.md`](docs/stop-guard.md#flows) states it, with the flow's own
+channel, its landings and what `unwatched` owes a flow. Under a
 wake budget a watch given no `--timeout` gives up the wake reserve
 [`docs/stop-guard.md`](docs/stop-guard.md#the-wake-reserve) names before the budget, so it
 has returned by the time the budget is spent.
