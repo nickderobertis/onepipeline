@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.70.0](https://github.com/nickderobertis/onepipeline/compare/v0.69.0...v0.70.0) - 2026-10-13
+
+### Added
+
+- *(channel)* rework a settled review draft on its own branch and restack the drafts above it ([#865](https://github.com/nickderobertis/onepipeline/pull/865))
+- *(deps)* [**breaking**] link the onetaskgraph release that carries comments on copy and caches remote sources ([#884](https://github.com/nickderobertis/onepipeline/pull/884))
+- *(unpublished)* answer whether a session owes a preserved branch, natively in the stop guard ([#828](https://github.com/nickderobertis/onepipeline/pull/828))
+
+### Fixed
+
+- *(hooks)* remove CI-duplicated pre-push checks ([#887](https://github.com/nickderobertis/onepipeline/pull/887))
+- *(deps)* link the onevcs release that keeps a draft while work on its head still runs ([#875](https://github.com/nickderobertis/onepipeline/pull/875))
+
 ## [0.69.0](https://github.com/nickderobertis/onepipeline/compare/v0.68.1...v0.69.0) - 2026-10-12
 
 ### Added

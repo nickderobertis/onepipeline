@@ -791,7 +791,20 @@ fn a_draft_whose_head_has_a_check_suite_in_progress_is_held_until_it_is_green() 
 /// A poll must not mix absent required checks with activity from the next phase.
 #[test]
 fn a_drafts_activity_finishes_only_after_its_next_check_read() {
+    activity_finishes_after_check_read(false);
+}
+
+/// Repository-local change numbers preserve the same phase across activity reads.
+#[test]
+fn repository_local_draft_activity_finishes_only_after_its_next_check_read() {
+    activity_finishes_after_check_read(true);
+}
+
+fn activity_finishes_after_check_read(repo_numbering: bool) {
     let world = World::new("draft-poll");
+    if repo_numbering {
+        world.script("gh.repo-numbering", "1");
+    }
     world.repository("change-open", &[]);
     world.script("service.work", "the worker wrote this\n");
     world.script("gh.checks", GREEN);
@@ -802,7 +815,6 @@ fn a_drafts_activity_finishes_only_after_its_next_check_read() {
         .run_from(&world.project, &["start", &plan, "--attach"])
         .exited(0)
         .settled();
-    assert_eq!(host_holds(&world, 1), "draft");
 
     world.script("gh.draft.finishes-after", "1000000");
     world.script("gh.checks.draft", "build completed success advisory");
@@ -834,6 +846,7 @@ fn a_drafts_activity_finishes_only_after_its_next_check_read() {
         ])
     };
     let before = view();
+    assert_eq!(before["isDraft"], true, "{before}");
     assert_eq!(before["statusCheckRollup"].as_array().unwrap().len(), 1);
     let head = before["headRefOid"].as_str().unwrap();
     let runs = format!("repos/owner/service/actions/runs?head_sha={head}&per_page=100");
@@ -938,4 +951,73 @@ fn a_drafts_activity_finishes_only_after_its_next_check_read() {
             ["status"],
         "in_progress"
     );
+
+    if repo_numbering {
+        // Both repositories hold #1 as a draft. Lifting one leaves the other alone.
+        invoke(&["pr", "ready", "1", "--repo", "owner/service"]);
+        assert_eq!(view()["isDraft"], false);
+        let other_view = || {
+            read(&[
+                "pr",
+                "view",
+                "1",
+                "--repo",
+                "owner/other",
+                "--json",
+                "number,state,mergeStateStatus,headRefOid,mergeCommit,statusCheckRollup",
+            ])
+        };
+        assert_eq!(other_view()["isDraft"], true);
+
+        // Each repository's checks are read under its own number and phase.
+        world.script("gh.draft.finishes-after", "0");
+        other_view();
+        world.script(
+            "gh.checks.owner-service-1",
+            "service-check completed success required",
+        );
+        world.script(
+            "gh.checks.owner-other-1",
+            "other-check completed success required",
+        );
+        for (repo, name) in [
+            ("owner/service", "service-check"),
+            ("owner/other", "other-check"),
+        ] {
+            let checks = read(&[
+                "pr",
+                "checks",
+                "1",
+                "--repo",
+                repo,
+                "--required",
+                "--json",
+                "name",
+            ]);
+            assert_eq!(checks, json!([{"name": name}]), "{repo}: {checks}");
+            let linked = read(&["pr", "checks", "1", "--repo", repo, "--json", "name,link"]);
+            assert_eq!(linked[0]["name"], name, "{repo}: {linked}");
+        }
+
+        // A deferred auto-merge advances only when its own request is polled.
+        world.script("gh.lands-armed", "2");
+        invoke(&[
+            "pr",
+            "merge",
+            "1",
+            "--repo",
+            "owner/service",
+            "--squash",
+            "--auto",
+        ]);
+        let armed = view();
+        assert_eq!(armed["state"], "OPEN", "{armed}");
+        let other = other_view();
+        assert_eq!(other["isDraft"], true, "{other}");
+        assert_eq!(view()["state"], "MERGED");
+        let other = other_view();
+        assert_eq!(other["state"], "OPEN", "{other}");
+        assert_eq!(other["isDraft"], true, "{other}");
+        assert!(other["mergeCommit"].is_null(), "{other}");
+    }
 }
