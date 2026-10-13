@@ -1119,6 +1119,71 @@ fn the_host_view_strip_guard_reads_the_binary() {
     );
 }
 
+/// CreateProcess searches the Windows system directory before PATH, where
+/// bash.exe can be the WSL launcher. Resolve the POSIX shell explicitly, as
+/// tests/linked_engines.rs does, so the script supplies the exit and streams.
+/// https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessw
+fn budget_bash_on(path: &std::ffi::OsStr, system_root: Option<&std::ffi::OsStr>) -> PathBuf {
+    let windows_dir = system_root.map(|root| root.to_string_lossy().to_lowercase());
+    std::env::split_paths(path)
+        .filter(|dir| {
+            windows_dir.as_ref().is_none_or(|root| {
+                !dir.to_string_lossy()
+                    .to_lowercase()
+                    .starts_with(root.as_str())
+            })
+        })
+        .flat_map(|dir| ["bash", "bash.exe"].map(|name| dir.join(name)))
+        .find(|candidate| candidate.is_file())
+        .expect("a bash on PATH outside the Windows system directory runs the budget script")
+}
+
+fn settlement_budget_without_result(bash: &std::path::Path) -> std::process::Output {
+    std::process::Command::new(bash)
+        .current_dir(root())
+        .arg("scripts/settlement-latency-budget.sh")
+        .env_remove("ONEBUDGETSPEC_RESULT")
+        .output()
+        .expect("the real measurement command runs")
+}
+
+/// Impose CreateProcessW's system-directory precedence with a real launcher
+/// refusing before the script, then drive the real budget script with the
+/// explicitly resolved shell. No native Windows installation is required.
+#[cfg(unix)]
+#[test]
+fn the_budget_script_runs_with_a_system_bash_launcher_present() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = scratch("settlement-system-bash");
+    let system = dir.join("Windows/System32");
+    let shell = dir.join("git/bin");
+    std::fs::create_dir_all(&system).unwrap();
+    std::fs::create_dir_all(&shell).unwrap();
+    let launcher = system.join("bash");
+    std::fs::write(
+        &launcher,
+        "#!/bin/sh\necho 'Windows Subsystem for Linux has no installed distributions.'\nexit 1\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let real = budget_bash_on(&std::env::var_os("PATH").unwrap_or_default(), None);
+    std::os::unix::fs::symlink(real, shell.join("bash")).unwrap();
+    let refused = settlement_budget_without_result(&launcher);
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&refused.stdout).contains("no installed distributions"));
+    let path = std::env::join_paths([system, shell]).unwrap();
+    let selected = budget_bash_on(&path, Some(dir.join("Windows").as_os_str()));
+    let output = settlement_budget_without_result(&selected);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("ONEBUDGETSPEC_RESULT is not set"));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// The settlement's original 1000 ms bound remains a reported, gated budget.
 #[test]
 fn the_settlement_latency_budget_uses_the_journeys_journal_stamps() {
@@ -1143,14 +1208,11 @@ fn the_settlement_latency_budget_uses_the_journeys_journal_stamps() {
     assert!(journey.contains(
         "#[test]\nfn the_settlement_readability_latency_is_reported_from_its_journal_stamps()"
     ));
-    let output = std::process::Command::new("bash")
-        // Bash on Windows reads POSIX paths, not Rust's native C:\... spelling.
-        // Use the same relative command as the registered budget, with its root explicit.
-        .current_dir(root())
-        .arg("scripts/settlement-latency-budget.sh")
-        .env_remove("ONEBUDGETSPEC_RESULT")
-        .output()
-        .expect("the real measurement command runs");
+    let bash = budget_bash_on(
+        &std::env::var_os("PATH").unwrap_or_default(),
+        std::env::var_os("SystemRoot").as_deref(),
+    );
+    let output = settlement_budget_without_result(&bash);
     assert_eq!(
         output.status.code(),
         Some(2),

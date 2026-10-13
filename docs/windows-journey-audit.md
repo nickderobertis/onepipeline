@@ -253,3 +253,37 @@ passed with warnings denied (`clippy-final.log`). `just fmt-check` also passed
 onetaskgraph release absent from this fresh workspace; the repository's
 `_ensure-onetaskgraph` recipe supplies that prerequisite before its final rerun.
 These host preparation steps change no test or enforcement rule.
+
+## Latest preserved-head verification
+
+Read-only inspection of PR #892 at head `e5eb2a3` found Windows job
+115273924973 (run 38390316185, outside the reviewed window) passed all 1,277
+e2e journeys without skips, but the budget-script test still exited 1 rather
+than 2 on its initial execution and all three diagnostic repetitions. The
+relative-path repair alone did not fix this failure; its earlier validation
+above establishes Linux behavior only.
+
+`tests/budgets.rs` still invoked bare `bash`. The logs omit stdout, so the
+launcher attribution is an inference from the empty stderr, exit 1 and the
+existing Windows shell failures in this repository. Windows CreateProcess searches the
+system directory before PATH, so its WSL launcher can answer instead of Git's
+POSIX shell (the existing `tests/linked_engines.rs` explains and covers this
+same platform condition). The budget test now explicitly resolves the shell
+outside the Windows system directory, retaining the relative script path and
+all exit/diagnostic assertions. `the_budget_script_runs_with_a_system_bash_launcher_present`
+imposes that search condition through an explicit system-root/path seam,
+executes a refusing launcher, and then executes the real budget script through
+the resolved shell. Its documentation names Microsoft's CreateProcessW page.
+
+This continuation preserved the earlier audit evidence in its scratch directory
+as `prior-audit/`, and retained the latest Windows log as
+`windows-115273924973.log`. No CI run was changed.
+
+On the restored implementation, all 14 budget tests passed (`budgets-restored.log`).
+Allowing the system directory in the seam instead made the new real-script
+regression fail at exit 1 versus the required 2 (`system-launcher-negative.log`);
+the counterfactual was restored and the full binary passed again. The retained
+head's Linux `check-affected` gate passed (job 115272404276); its log is retained
+as `linux-gate-115272404276.log`. This repair touches only the budget tests and
+this report, so the retained e2e evidence remains applicable. Native Windows
+verification of the shell resolution repair remains on the merge path.
