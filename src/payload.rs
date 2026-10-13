@@ -553,6 +553,9 @@ pub(crate) struct NodeSettled {
 /// A settlement a launch continued from its project's store.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct Continued {
+    /// Rework provenance loaded from the store, journal-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) rework: Option<ContinuedRework>,
     /// Where the settlement was read: the project's store.
     pub(crate) source: ContinuedSource,
     // llmlint: ignore-block[invalid_states_unrepresentable] a wire document, as the
@@ -563,6 +566,17 @@ pub(crate) struct Continued {
     pub(crate) run: Option<String>,
     // llmlint: ignore-end[invalid_states_unrepresentable]
 }
+
+// llmlint: ignore-block[invalid_states_unrepresentable] Entry 122 fixes these serialized provenance fields as strings. continuation_of validates the store input before creating this DTO; projection preserves its original metadata rather than executing predecessor text as an instruction.
+/// The rework a continued lineage already carries on its store item.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ContinuedRework {
+    pub(crate) replacement: String,
+    pub(crate) replaces: String,
+    pub(crate) comments: Vec<crate::channel::ReworkComment>,
+}
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// Where a continued settlement was read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -724,6 +738,11 @@ pub(crate) struct EditRejected {
 /// `planner-surface-queued`: a surface sent.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct PlannerSurfaceQueued {
+    // llmlint: ignore-block[invalid_states_unrepresentable] This optional journal DTO preserves entry 122’s wire string. Surface.correlation is the bus’s validated Correlation before record_surface serializes it; no command is executed from this journal text.
+    /// Review revision identity, where the surface names one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) correlation: Option<String>,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
     /// The surface's kind.
     // llmlint: ignore-block[invalid_states_unrepresentable] a queued surface's kind is
     // not `channel::SurfaceKind`'s closed set: the engine queues surfaces of its own —
@@ -1862,6 +1881,58 @@ macro_rules! payload_messages {
     };
 }
 
+// llmlint: ignore-block[invalid_states_unrepresentable] Entry 122 fixes these journal DTOs, including optional flattened location fields alongside the sibling CommentKind. metadata derives all location fields from that same kind; nodes come from the validated graph and host values from onevcs review_comments. These schemas describe recorded output, not a second host parser.
+/// One host read of a draft's review comments; bodies are retained as evidence.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct ReviewCommentsRead {
+    pub(crate) node: String,
+    pub(crate) change_url: String,
+    #[schemars(with = "String")]
+    pub(crate) marker: onevcs::ReadMarker,
+    pub(crate) unchanged: bool,
+    #[schemars(schema_with = "read_cost_schema")]
+    pub(crate) cost: onevcs::ReadCost,
+    pub(crate) comments: Vec<ReviewCommentMetadata>,
+}
+
+/// The metadata of one host comment, without the body retained as an artifact.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct ReviewCommentMetadata {
+    #[schemars(with = "String")]
+    pub(crate) id: onevcs::CommentId,
+    #[schemars(with = "Object")]
+    pub(crate) kind: onevcs::CommentKind,
+    pub(crate) author: String,
+    pub(crate) url: String,
+    pub(crate) updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) line: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) thread: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<String>")]
+    pub(crate) in_reply_to: Option<onevcs::CommentId>,
+}
+// llmlint: ignore-end[invalid_states_unrepresentable]
+
+// onevcs owns the Rust type; its two unsigned metrics are described here because
+// that producer type carries no JsonSchema implementation. Contract tests validate
+// both serialized extrema and rejected out-of-range values through this document.
+// Exhaustive producer destructuring and u32 signatures also hold the complete
+// field set and widths, including future serde-defaulted fields.
+fn read_cost_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "object",
+        "properties": {
+            "graphql_points": {"type": "integer", "minimum": 0, "maximum": u32::MAX},
+            "rest_requests": {"type": "integer", "minimum": 0, "maximum": u32::MAX}
+        },
+        "required": ["graphql_points", "rest_requests"]
+    })
+}
+
 payload_messages! {
     ScratchRemoved => "scratch-removed";
     ScratchRetained => "scratch-retained";
@@ -1905,6 +1976,7 @@ payload_messages! {
     BranchesSuperseded => "branches-superseded";
     BranchesRetired => "branches-retired";
     ChangeRetitled => "change-retitled";
+    ReviewCommentsRead => "review-comments-read";
     TitleUnverified => "title-unverified";
     NodeRestackStarted => "node-restack-started";
     NodeRestacked => "node-restacked";

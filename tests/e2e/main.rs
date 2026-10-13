@@ -232,6 +232,7 @@ mod retirement;
 // and `views` together, against the linked `onevcs` over real git and a bare origin — so the
 // narrowest edge they can honestly sit behind is the crate itself, which is this target's.
 // Same grounds as `mod retirement` above.
+mod review;
 mod rework;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod run_end_hooks;

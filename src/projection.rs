@@ -55,6 +55,10 @@ pub enum StopState {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunState {
+    /// Journal-only rework provenance restored by continuation.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    // llmlint: ignore[invalid_states_unrepresentable] src/AGENTS.md keeps engine-only representations private, and Snapshot’s adjacent node-map suppressions document the String-key convention. These checkpoint keys are graph-validated node ids copied by the fold and joined to the existing String-keyed graph, status and supersession maps; this field retains that serialized identity shape.
+    pub(crate) continued_reworks: BTreeMap<String, crate::payload::ContinuedRework>,
     /// The desired graph the loop is converging toward, with every committed
     /// edit applied.
     pub graph: Graph,
@@ -1204,6 +1208,14 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
             let Some(node) = &event.labels.node else {
                 return;
             };
+            if let Some(rework) = payload
+                .get("continued")
+                .and_then(|continued| continued.get("rework"))
+                .cloned()
+                .and_then(|value| serde_json::from_value(value).ok())
+            {
+                state.continued_reworks.insert(node.clone(), rework);
+            }
             let status = payload
                 .get("status")
                 .and_then(Value::as_str)

@@ -602,12 +602,75 @@ fn a_superseded_human_action_is_retired_with_a_drop_that_states_why() {
 /// out** is answered by that driver before it lets go — it is work the driver
 /// owes, not something it may leave on a queue nothing will claim.
 ///
-/// The window is the run's write-back close-out, held open by a shadow store the
-/// worker cannot write, exactly as the driver journey that proves the same of a
-/// well-formed edit holds it.
+/// A private ordering gate holds the driver after close-out and before its final
+/// command claim. The durable envelope is queued before that gate is released.
 #[test]
 fn an_undecodable_envelope_arriving_while_the_driver_is_leaving_is_answered_before_it_lets_go() {
+    leaving_driver_answers(|_, _| {});
+}
+
+/// CreateFileW refuses deletion while a reader omits FILE_SHARE_DELETE. The
+/// filesystem seam imposes that condition on Linux until the held reader closes.
+/// https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew
+#[test]
+fn a_windows_sharing_refusal_while_holding_closeout_does_not_lose_the_envelope() {
+    leaving_driver_answers(|world, run| {
+        let mut refused = false;
+        // llmlint: ignore-block[tests_mirror_real_usage] the dispatch requires Microsoft's
+        // sharing refusal through a seam on Linux, where unlinking an open directory is allowed.
+        // The refusal is imposed while its reader is held; the next attempt performs real removal
+        // and the compiled CLI still answers the real bus envelope.
+        crate::driver::unwritable_shadow_store_with(world, run, |path| {
+            if !refused {
+                let reader = shadow_reader(path);
+                refused = true;
+                let refusal = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+                drop(reader);
+                return Err(refusal);
+            }
+            std::fs::remove_dir_all(path)
+        });
+        // llmlint: ignore-end[tests_mirror_real_usage]
+        assert!(refused, "the sharing refusal was never imposed");
+    });
+}
+
+#[cfg(unix)]
+fn shadow_reader(path: &std::path::Path) -> std::fs::File {
+    std::fs::File::open(path).expect("the reader holds the shadow directory")
+}
+
+#[cfg(windows)]
+fn shadow_reader(path: &std::path::Path) -> std::fs::File {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+    // FILE_FLAG_BACKUP_SEMANTICS permits opening a directory; read/write sharing
+    // deliberately omits FILE_SHARE_DELETE, as CreateFileW specifies.
+    std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+        .expect("the reader holds the shadow directory")
+}
+
+fn leaving_driver_answers(hold_store: impl FnOnce(&World, &str)) {
     let world = World::new("malformed-leaving");
+    use std::io::Write;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("the closeout peer listens");
+    listener
+        .set_nonblocking(true)
+        .expect("the gate can be checked");
+    // llmlint: ignore-block[tests_mirror_real_usage] the dispatch requires an ordering hook
+    // to force the leaving-driver window without a sleep. It holds the real final claim;
+    // submission and every outcome assertion still use the real CLI/bus and durable records.
+    let world = world.with_env(
+        "ONEPIPELINE_TEST_CLOSEOUT_GATE",
+        &listener.local_addr().expect("the gate address").to_string(),
+    );
+    // llmlint: ignore-end[tests_mirror_real_usage]
     world.script("work.wait", "hold");
     let run = "leaving";
     let path = world.plan(run, &plan_of(run, vec![agent("work", &[])]));
@@ -615,24 +678,46 @@ fn an_undecodable_envelope_arriving_while_the_driver_is_leaving_is_answered_befo
     world.until("the run to dispatch something", |world| {
         !world.events_of(run, "node-dispatched").is_empty()
     });
-    // llmlint: ignore-block[tests_mirror_real_usage] a write-back shadow store that cannot
-    // be written is a state a host produces on its own — a full disk, a permission change —
-    // and `driver.rs`'s `an_edit_that_arrives_while_the_driver_is_leaving_is_applied_before_it_lets_go`
-    // holds its close-out open the same way. It is here because the close-out has to stay
-    // open long enough for an envelope to arrive in it, and how long a store takes to refuse
-    // is not something the CLI exposes an input for.
-    crate::driver::unwritable_shadow_store(&world, run);
-    // llmlint: ignore-end[tests_mirror_real_usage]
+    hold_store(&world, run);
     world.release("work.go");
     world.until("the only node to settle", |world| {
         !world.events_of(run, "node-settled").is_empty()
     });
 
+    // llmlint: ignore-block[tests_mirror_real_usage] the dispatch requires forcing this exact
+    // leaving-driver interleaving through a held step. The socket proves the real final claim
+    // is held; observing the real result file also rejects a driver that exited before the gate.
+    let mut leaving = None;
+    world.until(
+        "the driver to hold its final command claim",
+        |world| match listener.accept() {
+            Ok((stream, _)) => {
+                leaving = Some(stream);
+                true
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                assert!(
+                    !world.run_file(run, "result.json").exists(),
+                    "the driver exited before the leaving-step ordering gate"
+                );
+                false
+            }
+            Err(error) => panic!("the closeout peer cannot accept the driver: {error}"),
+        },
+    );
+    // llmlint: ignore-end[tests_mirror_real_usage]
     sent_through_the_bus(
         &world,
         run,
         &json!({"version": 3, "commands": [{"op": "drop", "id": "work"}]}),
     );
+    // llmlint: ignore-block[tests_mirror_real_usage] the required ordering peer releases the
+    // real final claim only after the real bus accepted its envelope; outcome assertions follow.
+    leaving
+        .expect("the driver is held")
+        .write_all(b"go")
+        .expect("the final claim is released");
+    // llmlint: ignore-end[tests_mirror_real_usage]
     world.until("the leaving driver to answer the envelope", |world| {
         !world.command_outcomes(run).is_empty()
     });

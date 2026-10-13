@@ -29,6 +29,18 @@ budgets:
     direction: max
     threshold: 2
     timeout_seconds: 1800
+  - id: settlement-readability-latency
+    measure: reported
+    command: [bash, scripts/settlement-latency-budget.sh]
+    unit: milliseconds
+    direction: max
+    threshold: 1000
+    timeout_seconds: 1800
+    description: >-
+      A dispatch's member-settled journal stamp to its node-settled journal stamp,
+      measured by an unheld real subprocess journey. The Windows journey checks
+      deterministically that a ready settlement waits on no poll timer; this
+      retains its original 1000 ms latency bound as a gated cost figure.
   - id: stop-guard-unpublished-latency
     measure: reported
     command: [node, scripts/stop-guard-unpublished-budget.mjs]

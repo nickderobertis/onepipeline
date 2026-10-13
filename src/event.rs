@@ -313,6 +313,8 @@ pub enum PipelineKind {
     /// rework, `retitle` for the op of that name. The node's title in the graph
     /// moves with it.
     ChangeRetitled,
+    /// An explicit discovery read and its host-reported cost.
+    ReviewCommentsRead,
     /// A rework's publication could not verify that its change request's title
     /// still says what the change does, and left it unchanged: `node`, the
     /// `title` it kept, and the `reason` — the drafting dispatch failed, no body
@@ -393,6 +395,7 @@ impl PipelineKind {
             Self::BranchesSuperseded => "branches-superseded",
             Self::BranchesRetired => "branches-retired",
             Self::ChangeRetitled => "change-retitled",
+            Self::ReviewCommentsRead => "review-comments-read",
             Self::TitleUnverified => "title-unverified",
             Self::NodeRestackStarted => "node-restack-started",
             Self::NodeRestacked => "node-restacked",
@@ -469,6 +472,7 @@ pub const PIPELINE_KINDS: &[PipelineKind] = &[
     PipelineKind::BranchesSuperseded,
     PipelineKind::BranchesRetired,
     PipelineKind::ChangeRetitled,
+    PipelineKind::ReviewCommentsRead,
     PipelineKind::TitleUnverified,
     PipelineKind::NodeRestackStarted,
     PipelineKind::NodeRestacked,

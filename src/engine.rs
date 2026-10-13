@@ -1251,11 +1251,22 @@ pub(crate) fn accept(
     author: crate::channel::Author,
     commands: &[Command],
 ) -> Result<Accepted> {
+    accept_as(paths, channel, author, commands, ledger::REPLY_VERB)
+}
+
+/// Coordinate a submission with driver closeout under the handover gate.
+pub(crate) fn accept_as(
+    paths: &RunPaths,
+    channel: &ChannelState,
+    author: crate::channel::Author,
+    commands: &[Command],
+    verb: &str,
+) -> Result<Accepted> {
     // A gate this process could not take refuses the submission rather than
     // making it: nothing reaches the queue, so nothing is reported accepted that
     // no writer is going to see.
     let handover = ledger::Handover::hold(paths)?;
-    let accepted = accepting_under_the_handover(paths, channel, author, commands);
+    let accepted = accepting_under_the_handover(paths, channel, author, commands, verb);
     drop(handover);
     accepted
 }
@@ -1285,8 +1296,9 @@ fn accepting_under_the_handover(
     channel: &ChannelState,
     author: crate::channel::Author,
     commands: &[Command],
+    verb: &str,
 ) -> Result<Accepted> {
-    match OwnershipLock::acquire(paths, ledger::REPLY_VERB) {
+    match OwnershipLock::acquire(paths, verb) {
         Ok(lock) => Ok(Accepted::NothingIsDriving(lock)),
         Err(Error::Locked { .. }) => channel.submit(author, commands).map(Accepted::Queued),
         // A lock nobody can be named as holding is still a claim on the run.
@@ -1924,6 +1936,11 @@ fn converge(
             // llmlint: ignore-end[changed_behavior_has_e2e]
             match message {
                 Message::Event(envelope) => {
+                    if envelope.kind == oneagentgraph::event::EventKind::MemberSettled {
+                        if let Some(node) = envelope.labels.node.as_deref() {
+                            crate::ordering::settlement_started(node)?;
+                        }
+                    }
                     if let Some(node) = envelope.labels.node.clone() {
                         if let Some(dispatch) = in_flight.get_mut(&node) {
                             // Only an envelope evidencing progress moves the stall
@@ -2328,6 +2345,12 @@ fn close_out_and_drain(
     }
     // llmlint: ignore-end[changed_behavior_has_e2e]
 
+    static CLOSEOUT_GATE_MET: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    if !CLOSEOUT_GATE_MET.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        crate::ordering::meet("ONEPIPELINE_TEST_CLOSEOUT_GATE")?;
+    }
+
     // The queue last, because the close-out is where the window is widest: a
     // bounded wait on a store is time an edit can arrive in. The channel is a
     // handle on the run's own paths, so this is the queue the loop has been
@@ -2442,7 +2465,11 @@ fn wait_for_work(
                 }
                 return Ok(Some(batch));
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if !left.is_zero() {
+                    crate::ordering::timer_wait()?;
+                }
+            }
             Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(None),
         }
         let now = channel.fingerprint();
@@ -3541,6 +3568,18 @@ fn reconcile_envelope(
     deliveries: Option<&mut NoteDeliveries>,
     envelope: crate::channel::QueuedCommands,
 ) -> Result<bool> {
+    if envelope.commands == [Command::Review {}] {
+        let result = channel
+            .allows(envelope.author.clone(), &Command::Review {})
+            .and_then(|()| crate::review::pass(paths, state, journal));
+        channel.answer_commands(&CommandOutcome {
+            id: envelope.id,
+            applied: result.is_ok(),
+            reason: result.err().map(|error| error.to_string()),
+            results: Vec::new(),
+        })?;
+        return Ok(false);
+    }
     let author = envelope.author.clone();
     let commands = &envelope.commands;
 
@@ -6577,11 +6616,18 @@ fn spawn(
                     return;
                 }
             };
+            let recorded_node = settlement.node.clone();
+            if let Err(error) = crate::ordering::settlement_before_queue(&recorded_node) {
+                eprintln!("{error}");
+            }
             let (recorded, on_record) = mpsc::channel();
             let _ = tx.send(Message::Settled(Box::new(Settled {
                 settlement,
                 recorded,
             })));
+            if let Err(error) = crate::ordering::settlement_queued(&recorded_node) {
+                eprintln!("{error}");
+            }
             // Held until the loop has journaled the settlement, or has gone:
             // `EndedDispatches` says why the registry may not run ahead of the
             // record. Either answer ends the wait, and then the entries go.
@@ -8620,7 +8666,8 @@ fn settle(paths: &RunPaths, journal: &mut Journal, settlement: &Settlement) -> R
         journal::PipelineKind::NodeSettled,
         journal::labels(&paths.run, Some(&settlement.node)),
         payload,
-    )
+    )?;
+    crate::ordering::settlement_recorded(paths, &settlement.node)
 }
 
 /// The surface that tells the planner what an author other than it did on that
@@ -9121,6 +9168,7 @@ mod tests {
                 id: "node".to_owned(),
                 reason: None,
             }],
+            ledger::REPLY_VERB,
         )
         .expect("the submission is answered")
     }

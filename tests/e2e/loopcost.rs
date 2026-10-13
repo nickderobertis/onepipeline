@@ -540,8 +540,27 @@ fn another_runs_ledger_is_read_on_its_own_interval_and_not_on_the_loops() {
 // llmlint: ignore-block[e2e_not_mocked] the converged state every bound here is about is
 // one node held in flight for a whole minute — see the module note above.
 #[test]
-fn every_answer_the_loop_owes_arrives_inside_a_second() {
+fn ready_settlements_wait_on_no_timer_and_other_loop_answers_arrive_inside_a_second() {
     let world = World::new("loopcost-latency");
+    let receiving = world.rendezvous("settlement-received");
+    let queued = world.rendezvous("settlement-queued");
+    let received_address =
+        std::fs::read_to_string(world.fakes.join("settlement-received.rendezvous"))
+            .expect("the receiving gate address");
+    let queued_address = std::fs::read_to_string(world.fakes.join("settlement-queued.rendezvous"))
+        .expect("the queued gate address");
+    // llmlint: ignore-block[tests_mirror_real_usage] the dispatch explicitly requires an
+    // ordering/clock seam to prove scheduling independence, and the manager replaced the
+    // failed wall-clock assertion with this real loop's timer-wait count. The compiled CLI
+    // still receives the producer event and queues its actual settlement on its own channel.
+    let world = world
+        .with_env("ONEPIPELINE_TEST_SETTLEMENT_NODE", "build")
+        .with_env("ONEPIPELINE_TEST_SETTLEMENT_GATE", &received_address)
+        .with_env("ONEPIPELINE_TEST_SETTLEMENT_QUEUED_GATE", &queued_address);
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    // A producer stamp predating receipt forces the old wall-clock assertion
+    // to fail without a sleep. The loop still receives a ready settlement.
+    world.script("build.settlement-clock-stepped", "");
     world.script("build.wait", "hold");
     // A node held open throughout, so the driver is still there to be measured:
     // a graph whose every other node has settled is terminal, and the loop that
@@ -571,16 +590,32 @@ fn every_answer_the_loop_owes_arrives_inside_a_second() {
     // Not from the test's release of the hold, which also spends the dispatch
     // noticing the release and saying so — the double's work, and on a loaded
     // host the larger part of what a clock around it measured.
+    // llmlint: ignore-block[tests_mirror_real_usage] the same required seam: receipt is held
+    // until the real settlement message is queued, then the real loop's timer count proves
+    // that ready work was not paced by a poll. No timer or internal state is substituted.
     world.release("build.go");
+    let received = receiving.arrived();
+    let ready = queued.arrived();
+    // Both the producer record and the final settlement are ready before the
+    // loop continues. Any timer it waits on now is avoidable scheduling work.
+    ready.release();
+    received.release();
     world.until("the settlement to be readable", |world| {
         recorded(world, "prompt", "node-settled", "build")
     });
-    let readable = at(&one(&world, "prompt", "node-settled", "build"))
-        - at(&one(&world, "prompt", "member-settled", "build"));
-    assert!(
-        readable < 1_000,
-        "a settlement took {readable}ms to become readable after its dispatch reported it"
+    world.until("the loop to report its settlement timer waits", |world| {
+        world
+            .run_file("prompt", "settlement-timer-waits.txt")
+            .is_file()
+    });
+    assert_eq!(
+        std::fs::read_to_string(world.run_file("prompt", "settlement-timer-waits.txt"))
+            .expect("the loop's timer count"),
+        "0",
+        "a ready settlement waited on a poll timer"
     );
+
+    // llmlint: ignore-end[tests_mirror_real_usage]
 
     // A node whose last dependency settles is dispatched.
     world.until("the dependent to start", |world| {
@@ -635,6 +670,126 @@ fn every_answer_the_loop_owes_arrives_inside_a_second() {
         world.run_file("prompt", "result.json").is_file()
     });
 } // llmlint: ignore-end[e2e_not_mocked]
+
+/// The positive control for the zero-wait proof: an actual expired poll must
+/// be counted while the final settlement is held before entering the channel.
+#[test]
+fn an_actual_expired_poll_is_counted_before_a_held_settlement_becomes_readable() {
+    let world = World::new("settlement-positive-counter");
+    let receiving = world.rendezvous("positive-received");
+    let before_queue = world.rendezvous("positive-before-queue");
+    let queued = world.rendezvous("positive-queued");
+    let poll = world.rendezvous("positive-poll");
+    let address = |key: &str| {
+        std::fs::read_to_string(world.fakes.join(format!("{key}.rendezvous")))
+            .expect("the ordering peer address")
+    };
+    let addresses = [
+        "positive-received",
+        "positive-before-queue",
+        "positive-queued",
+        "positive-poll",
+    ]
+    .map(address);
+    // llmlint: ignore-block[tests_mirror_real_usage] the task-required ordering seam's
+    // positive control drives the compiled CLI's real channel and real expired poll.
+    // Holding settlement before enqueueing makes the counting site's execution observable.
+    let world = world
+        .with_env("ONEPIPELINE_TEST_SETTLEMENT_NODE", "build")
+        .with_env("ONEPIPELINE_TEST_SETTLEMENT_GATE", &addresses[0])
+        .with_env(
+            "ONEPIPELINE_TEST_SETTLEMENT_BEFORE_QUEUE_GATE",
+            &addresses[1],
+        )
+        .with_env("ONEPIPELINE_TEST_SETTLEMENT_QUEUED_GATE", &addresses[2])
+        .with_env("ONEPIPELINE_TEST_POLL_EXPIRED_GATE", &addresses[3]);
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    world.script("build.wait", "hold");
+    let run = "positive-counter";
+    let path = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
+    world.run(&["start", &path, "--detach"]).exited(0);
+    world.until("the build to dispatch", |world| {
+        recorded(world, run, "node-dispatched", "build")
+    });
+    world.release("build.go");
+    // llmlint: ignore-block[tests_mirror_real_usage] the required held steps force one
+    // actual receiver timeout, then enqueue the real settlement before releasing the loop.
+    // The count is read from the actual driver and checked through its public run result.
+    let received = receiving.arrived();
+    let held = before_queue.arrived();
+    received.release();
+    let expired = poll.arrived();
+    held.release();
+    queued.arrived().release();
+    expired.release();
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    // llmlint: ignore-block[tests_mirror_real_usage] the manager authorized this real
+    // driver's timer count as the deterministic substitute for scheduling latency. This
+    // positive control is required to prove the observer increments instead of always
+    // reporting zero; the actual run result is asserted separately below.
+    world.until("the recorded timer count", |world| {
+        world.run_file(run, "settlement-timer-waits.txt").is_file()
+    });
+    assert_eq!(
+        std::fs::read_to_string(world.run_file(run, "settlement-timer-waits.txt"))
+            .expect("the recorded count"),
+        "1",
+        "an actual expired poll was not counted"
+    );
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    world.until("the run to settle", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+    assert_eq!(
+        world.run_json(run, "result.json")["nodes"][0]["status"],
+        "done"
+    );
+}
+
+/// The latency budget uses an unheld journey's own journal stamps. The
+/// deterministic ordering journey above measures waits, not host CPU scheduling.
+#[test]
+fn the_settlement_readability_latency_is_reported_from_its_journal_stamps() {
+    let world = World::new("settlement-latency-budget");
+    world.script("build.wait", "hold");
+    world.script("hold.wait", "hold");
+    let run = "settlement-latency";
+    let path = world.plan(
+        run,
+        &plan_of(run, vec![agent("build", &[]), agent("hold", &[])]),
+    );
+    world.run(&["start", &path, "--detach"]).exited(0);
+    world.until("the build to dispatch", |world| {
+        recorded(world, run, "node-dispatched", "build")
+    });
+    world.release("build.go");
+    world.until("the settlement to be readable", |world| {
+        recorded(world, run, "node-settled", "build")
+    });
+    let producer = one(&world, run, "member-settled", "build");
+    let readable = one(&world, run, "node-settled", "build");
+    let millis = at(&readable)
+        .checked_sub(at(&producer))
+        .expect("the settlement does not precede its producer");
+    if let Some(result) = std::env::var_os("ONEBUDGETSPEC_RESULT") {
+        std::fs::write(
+            result,
+            crate::budget_result::reported(
+                usize::try_from(millis).expect("a latency in milliseconds"),
+                &format!(
+                    "member-settled {} to node-settled {}, from the journey's journal",
+                    producer["ts"], readable["ts"]
+                ),
+            )
+            .to_string(),
+        )
+        .expect("the measured budget result");
+    }
+    world.release("hold.go");
+    world.until("the run to settle", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+}
 
 /// A node whose cross-DAG dependency settles in another run proceeds within a
 /// second of that settlement.

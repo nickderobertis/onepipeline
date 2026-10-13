@@ -435,7 +435,7 @@ the dispatch's first turn, unique to that dispatch — a retry, a requeue and a
 resumed pin of the same node each get their own — and never removed while that
 dispatch runs. Nothing beyond that is promised, and the spelling of the path least
 of all: no consumer may derive one path from another. Not in the approved contract
-yet either: open divergence 48, whose scratch lifetime divergence 122 revises.
+yet either: open divergence 48, whose scratch lifetime divergence 123 revises.
 
 The planner supervises over the channel:
 

@@ -1468,6 +1468,9 @@ fn compile_into(
             }
             Ok(vec![Operation::RunNodeSetsReplaced { sets: sets.clone() }])
         }
+        Command::Review { .. } => Err(refuse(
+            "review discovery must be requested alone".to_owned(),
+        )),
         Command::Add { node } => compile_add(graph, node),
         Command::Drop {
             id,

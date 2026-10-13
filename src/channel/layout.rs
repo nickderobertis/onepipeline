@@ -488,6 +488,8 @@ impl Message for CommandOutcome {
 /// ops, as the allowlist names them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Op {
+    /// Perform explicit review discovery.
+    Review,
     /// Replace one node's graph overrides.
     SetNodeSets,
     /// Replace run-wide node graph overrides.
@@ -525,7 +527,7 @@ pub enum Op {
 
 impl Op {
     /// Every op, in the order the contract lists them.
-    pub const ALL: [Op; 16] = [
+    pub const ALL: [Op; 17] = [
         Op::SetNodeSets,
         Op::SetRunNodeSets,
         Op::Add,
@@ -542,6 +544,7 @@ impl Op {
         Op::Settle,
         Op::Rework,
         Op::Retitle,
+        Op::Review,
     ];
 
     /// The op's wire word.
@@ -564,6 +567,7 @@ impl Op {
             Op::Settle => "settle",
             Op::Rework => "rework",
             Op::Retitle => "retitle",
+            Op::Review => "review",
         }
     }
 

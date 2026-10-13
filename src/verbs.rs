@@ -317,6 +317,34 @@ pub fn render_results(results: &Results) -> String {
     views::results(&results.view)
 }
 
+/// Render node outcomes and current host-derived review state as JSON.
+///
+/// # Errors
+/// A host read or serialization failure.
+pub fn render_results_json(results: &Results) -> Result<String> {
+    let view = &results.view;
+    let comments = crate::review::read(&view.state)?;
+    let statuses = view.state.statuses();
+    to_json(&crate::review::ResultsDocument {
+        schema_version: 1,
+        run: &view.paths.run,
+        nodes: view
+            .state
+            .graph
+            .iter()
+            .map(|node| crate::review::ResultNode {
+                id: &node.id,
+                status: statuses
+                    .get(&node.id)
+                    .copied()
+                    .unwrap_or(crate::graph::NodeStatus::Pending),
+                outcome: view.state.outcomes.get(&node.id).map(String::as_str),
+                comments: comments.get(&node.id).cloned().unwrap_or_default(),
+            })
+            .collect(),
+    })
+}
+
 /// `onepipeline transcript RUN [NODE]`: a dispatched turn's tools and reasoning,
 /// from the evidence it retained.
 #[derive(Debug)]
@@ -1737,4 +1765,60 @@ pub fn render_scratch_discard(discarded: &ScratchDiscard) -> String {
 /// The refusal or each directory removal failure on stderr, empty for complete removal.
 pub fn render_scratch_discard_errors(discarded: &ScratchDiscard) -> String {
     discarded.outcome.stderr()
+}
+
+/// Receipt for one explicitly requested review discovery pass.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+pub enum ReviewReceipt {
+    /// The single writer completed discovery.
+    Performed {
+        /// A host read failed after successful reads were journalled.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    /// The request is durable and the driver has not yet answered.
+    Requested {
+        /// Its durable command queue id.
+        request: u64,
+    },
+}
+
+/// Discover feedback without starting work or a driver.
+///
+/// # Errors
+/// An unknown run, another session's undriven run, or a ledger/channel refusal.
+/// A host read failure is carried by the performed receipt.
+pub fn review(
+    paths: &RunPaths,
+    session: &str,
+    timeout: std::time::Duration,
+) -> Result<ReviewReceipt> {
+    crate::review::requested(paths, session, timeout)
+}
+
+/// Render the review receipt as one document or one terminal line.
+///
+/// # Errors
+/// A receipt that could not be serialized.
+pub fn render_review(receipt: &ReviewReceipt, json: bool) -> Result<String> {
+    if json {
+        to_json(receipt)
+    } else {
+        Ok(match receipt {
+            ReviewReceipt::Performed { error: None } => "review performed".to_owned(),
+            ReviewReceipt::Performed { error: Some(error) } => format!("review failed: {error}"),
+            ReviewReceipt::Requested { request } => format!("review requested ({request})"),
+        })
+    }
+}
+
+impl ReviewReceipt {
+    /// Success or a durable request exits 0; a performed pass with a host failure exits 1.
+    pub const fn exit_code(&self) -> i32 {
+        match self {
+            Self::Performed { error: Some(_) } => 1,
+            _ => 0,
+        }
+    }
 }
