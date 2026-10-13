@@ -118,21 +118,37 @@ pub(crate) fn answered_alongside(
 enum Removal {
     /// A `retry` superseded it with the named replacement.
     Superseded { replacement: String },
+    /// A `rework` superseded it with the named replacement, on its own branch.
+    Reworked { replacement: String },
     /// A `drop` removed it, or removed a node it depended on and took it along.
     Dropped,
 }
 
 /// Every node `operations` took out of the graph, and by which edit.
 ///
-/// A `retry` records its superseded node as dropped in the same edit, so a
-/// dropped node the same list also retried was superseded rather than dropped.
+/// A `retry` and a `rework` each record the node they supersede as dropped in the
+/// same edit, so a dropped node the same list also retried or reworked was
+/// superseded rather than dropped.
 fn removed_by(operations: &[edits::Operation]) -> BTreeMap<&str, Removal> {
-    let superseded: BTreeMap<&str, &str> = operations
+    let superseded: BTreeMap<&str, Removal> = operations
         .iter()
         .filter_map(|operation| match operation {
             edits::Operation::RetryRequested {
                 node, replacement, ..
-            } => Some((node.as_str(), replacement.as_str())),
+            } => Some((
+                node.as_str(),
+                Removal::Superseded {
+                    replacement: replacement.clone(),
+                },
+            )),
+            edits::Operation::ReworkRequested {
+                node, replacement, ..
+            } => Some((
+                node.as_str(),
+                Removal::Reworked {
+                    replacement: replacement.clone(),
+                },
+            )),
             _ => None,
         })
         .collect();
@@ -143,11 +159,7 @@ fn removed_by(operations: &[edits::Operation]) -> BTreeMap<&str, Removal> {
             _ => None,
         })
         .map(|node| {
-            let removal = superseded
-                .get(node)
-                .map_or(Removal::Dropped, |replacement| Removal::Superseded {
-                    replacement: (*replacement).to_owned(),
-                });
+            let removal = superseded.get(node).cloned().unwrap_or(Removal::Dropped);
             (node, removal)
         })
         .collect()
@@ -161,6 +173,14 @@ fn answer(node: &str, removal: &Removal) -> Reply {
     let edit = match removal {
         Removal::Superseded { replacement } => {
             format!("a committed `retry` of '{node}' superseded it with '{replacement}'")
+        }
+        // llmlint: ignore[changed_behavior_has_e2e] the discharge itself — a standing blocking
+        // decision answered when its node leaves the graph — is driven end to end for a `retry`
+        // and a `drop`; this arm only names the edit, and a node a rework takes is one settled
+        // `done`, which no blocking decision this build raises is still standing about.
+        // `a_rework_is_named_as_a_rework` holds the words.
+        Removal::Reworked { replacement } => {
+            format!("a committed `rework` of '{node}' superseded it with '{replacement}'")
         }
         Removal::Dropped => format!("a committed `drop` removed '{node}' from the graph"),
     };
@@ -313,6 +333,36 @@ mod tests {
         assert_eq!(
             answers[0].reply.reason.as_deref(),
             Some("a committed `drop` removed 'gone' from the graph")
+        );
+    }
+
+    /// A `rework` is named as the rework it was, with the replacement carrying the
+    /// node's work.
+    #[test]
+    fn a_rework_is_named_as_a_rework() {
+        let scratch = Scratch::new("rework");
+        scratch.raised("gone", Some("c-gone"), true);
+        answer_removed(
+            &scratch.paths,
+            &[
+                edits::Operation::ReworkRequested {
+                    node: "gone".to_owned(),
+                    replacement: "gone-rework-1".to_owned(),
+                    reason: "review asked".to_owned(),
+                    instruction: "do it".to_owned(),
+                    comments: Vec::new(),
+                    title: None,
+                },
+                edits::Operation::NodeDropped {
+                    node: "gone".to_owned(),
+                    dependents: crate::channel::Dependents::Detach,
+                },
+            ],
+        )
+        .expect("the commit is recorded");
+        assert_eq!(
+            scratch.answers()[0].reply.reason.as_deref(),
+            Some("a committed `rework` of 'gone' superseded it with 'gone-rework-1'")
         );
     }
 

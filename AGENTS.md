@@ -130,9 +130,8 @@ by requiring it here. `published-smoke.yml` gates nothing either — it runs aft
 the third and is **not** required either: it is a documentation check that needs
 two third-party tools `just check` does not install, and a stale picture is a
 thing to refresh rather than a reason to hold a correct change out of `main`.
-What enforces it is local — `.githooks/pre-push`, which `just bootstrap`
-activates — and no screenshot step is reachable from `check`, from `gate`, or
-from `ci.yml`'s `gate` job. `release-sweep.yml` is not required either: it
+CI verifies visual drift; local capture and review are manual. No screenshot
+step is reachable from `check`, from `gate`, or from `ci.yml`'s `gate` job. `release-sweep.yml` is not required either: it
 runs only on the release PR, and is skipped on every other one. `notignored.yml`
 is not required either: it posts one
 sticky comment listing the suppressions a pull request adds, a review artifact

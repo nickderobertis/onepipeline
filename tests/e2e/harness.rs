@@ -2227,7 +2227,12 @@ impl World {
         std::fs::create_dir_all(&dir).expect("a directory for the graph configs");
         std::fs::write(
             dir.join("body.schema.json"),
-            r#"{"type":"object","properties":{"body":{"type":"string"}},
+            r#"{"type":"object","properties":{
+                 "body":{"type":"string"},
+                 "title_check":{"type":"object","properties":{
+                   "verdict":{"type":"string","enum":["keeps","replaced"]},
+                   "title":{"type":"string"}},
+                   "required":["verdict"],"additionalProperties":false}},
                "required":["body"],"additionalProperties":false}"#,
         )
         .expect("the drafted body's schema is written");

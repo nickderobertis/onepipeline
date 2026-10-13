@@ -663,8 +663,12 @@ resolver = "2"
 # `onevcs` 0.46.0 is the floor because it is the release the boundary work this crate
 # composes was pinned against (`src/boundary.rs`: the term matcher, `TermScope`,
 # `PublicWriteInput` and `export`), and `tests/e2e/publication_boundary.rs` drives
-# that surface against the linked release. A **requirement**, because `^0.45` admits no
-# 0.46.x; `onevcs-testing` 0.14.0 requires exactly `=0.46.0`, so the pair moves as one.
+# that surface against the linked release; and because it carries `review_comments`
+# — a change request's review threads, each with the line it sits on and whether it
+# is outdated — which is how `tests/e2e/rework.rs` holds that a restack leaves an
+# open review thread on its line. A **requirement**, because `^0.45` admits no
+# 0.46.x; `onevcs-testing` 0.14.0 requires exactly `=0.46.0`, so the pair moves as
+# one.
 #
 # `onevcs` 0.48.1 is the floor; 0.48.0 brought what this crate relies on:
 # - `recoverable_matching` reads only the sessions a launcher-labelled

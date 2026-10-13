@@ -1451,6 +1451,31 @@ pub fn session_tip(token: &SessionToken) -> SessionTip {
         .map_or(SessionTip::Unknown, SessionTip::At)
 }
 
+/// The commit a session's publication last put on its own branch at the origin,
+/// when it put one there.
+///
+/// Read off the session's own stream, as [`change_opened_in`] reads its change
+/// request: the last accepted `push` of the branch carrying the `head` `onevcs`
+/// records on a push of the publication's own branch. What the origin was given
+/// is the branch's head, whatever the worktree's own `HEAD` says — a publication
+/// that merged its base again as it synced pushes a commit the worktree never
+/// held. `None` when nothing was pushed, or the stream cannot be read.
+pub(crate) fn pushed_head_in(token: &SessionToken) -> Option<String> {
+    events(token, None)
+        .iter()
+        .rev()
+        .filter(|envelope| is_push(&envelope.kind))
+        .filter(|envelope| {
+            envelope
+                .payload
+                .get("accepted")
+                .and_then(|accepted| accepted.as_bool())
+                == Some(true)
+        })
+        .find_map(|envelope| envelope.payload.get("head").and_then(|head| head.as_str()))
+        .and_then(usable)
+}
+
 /// The change request one session's work reached, when it reached one.
 ///
 /// Read off the session's **own stream**, which is where `onevcs` records a
@@ -2314,6 +2339,89 @@ pub(crate) fn usable(value: &str) -> Option<String> {
     Some(value.to_owned())
 }
 
+/// How much of a rework's net diff its drafting dispatch is shown, in bytes.
+pub(crate) const NET_DIFF_CAP: usize = 200 * 1024;
+
+/// The patch a session's change makes against its base, as its worktree stands
+/// now — committed or not, new files included — capped at [`NET_DIFF_CAP`] with a
+/// line saying where and how much was cut.
+///
+/// Compared from the merge base of the branch and the base's remote-tracking ref,
+/// or the base itself where there is no such ref, which is what the change
+/// request shows a reviewer. Read through a scratch index of its own, so the
+/// worktree's own index — which the publication commits from — is untouched.
+///
+/// # Errors
+///
+/// What git refused, in its own words.
+pub(crate) fn net_diff(
+    worktree: &std::path::Path,
+    base: &str,
+) -> std::result::Result<String, String> {
+    let scratch = std::env::temp_dir().join(format!(
+        "onepipeline-net-diff-{}-{}.index",
+        std::process::id(),
+        crate::sys::now_millis()
+    ));
+    let git = |args: &[&str]| -> std::result::Result<String, String> {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(worktree)
+            .env("GIT_INDEX_FILE", &scratch)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .map_err(|error| format!("cannot run `git {}`: {error}", args.join(" ")))?;
+        if !output.status.success() {
+            return Err(format!(
+                "`git {}` exited {}: {}",
+                args.join(" "),
+                output.status.code().unwrap_or(-1),
+                crate::views::one_line(&String::from_utf8_lossy(&output.stderr))
+            ));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    };
+    let read = (|| {
+        let remote = format!("refs/remotes/origin/{base}");
+        let compared = if git(&["for-each-ref", "--format=%(refname)", &remote])?
+            .trim()
+            .is_empty()
+        {
+            base.to_owned()
+        } else {
+            format!("origin/{base}")
+        };
+        let from = git(&["merge-base", &compared, "HEAD"])?.trim().to_owned();
+        git(&["read-tree", "HEAD"])?;
+        git(&["add", "--all", "--", "."])?;
+        git(&["diff", "--cached", "--no-color", "--no-ext-diff", &from])
+    })();
+    let _ = std::fs::remove_file(&scratch);
+    read.map(|patch| capped(patch, NET_DIFF_CAP))
+}
+
+/// `patch`, cut at the last line end at or before `cap` bytes where it is longer,
+/// with a line saying where it was cut and how much is not shown.
+// llmlint: ignore[changed_behavior_has_e2e] reaching the cut end to end needs a rework whose change is over 200 KB, which a journey would write only to read the line back; `a_net_diff_over_its_cap_is_cut_at_a_line_end_saying_where_and_how_much` holds the cut, and the uncut patch reaches the drafter in `tests/e2e/rework.rs`'s `a_rework_whose_change_outgrew_its_title_is_retitled_by_the_drafter`.
+fn capped(patch: String, cap: usize) -> String {
+    if patch.len() <= cap {
+        return patch;
+    }
+    let mut cut = cap;
+    while !patch.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    if let Some(line_end) = patch[..cut].rfind('\n') {
+        cut = line_end + 1;
+    }
+    format!(
+        "{}[the net diff was cut here, at byte {cut} of {}: the last {} bytes are not shown]\n",
+        &patch[..cut],
+        patch.len(),
+        patch.len() - cut
+    )
+}
+
 /// Whether an envelope is a session opening, in `onevcs`'s own vocabulary.
 ///
 /// Asked through that library's enum rather than against a string of this
@@ -2322,6 +2430,12 @@ pub(crate) fn usable(value: &str) -> Option<String> {
 /// and silently stop folding anything.
 pub fn is_session_opened(kind: &crate::event::EventKind) -> bool {
     *kind == session_opened_kind()
+}
+
+/// Whether an envelope is a push `onevcs` recorded, in its own vocabulary — the
+/// read [`is_session_opened`] makes, for the same reason.
+pub(crate) fn is_push(kind: &crate::event::EventKind) -> bool {
+    *kind == kind_of(onevcs::EventKind::Push)
 }
 
 /// How `onevcs` spells a session opening, for a caller that has to *write* one
@@ -2740,6 +2854,72 @@ mod tests {
             },
             &crate::event::Labels::default(),
         )
+    }
+
+    /// The net diff over real git: against the base a change is drafted on, with
+    /// what the worktree has not committed and a file it has not added in it, from
+    /// a base with no remote-tracking ref to read; the worktree's own index — what
+    /// a publication commits from — left exactly as it was; and a read git refuses
+    /// answered as one.
+    #[test]
+    fn a_net_diff_is_the_whole_change_against_its_base_and_leaves_the_index_alone() {
+        let root =
+            std::env::temp_dir().join(format!("onepipeline-net-diff-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a scratch root");
+        git_in(&root, &["init", "-q", "--initial-branch=main", "repo"]);
+        let repo = root.join("repo");
+        std::fs::write(repo.join("reader.md"), "read the plan from disk\n").expect("a file");
+        git_in(&repo, &["add", "-A"]);
+        git_in(&repo, &["commit", "-q", "-m", "feat: the reader"]);
+        git_in(&repo, &["checkout", "-q", "-b", "feature"]);
+        std::fs::write(repo.join("reader.md"), "read the plan, retrying\n").expect("a file");
+        git_in(&repo, &["commit", "-q", "-am", "feat: retry"]);
+        // Uncommitted, and a file nothing has added.
+        std::fs::write(repo.join("reader.md"), "read the plan, retrying twice\n").expect("a file");
+        std::fs::write(repo.join("retry.md"), "the retry policy\n").expect("a file");
+        let index = || std::fs::read(repo.join(".git").join("index")).expect("the index");
+        let before = index();
+
+        let patch = net_diff(&repo, "main").expect("the diff reads");
+        assert!(patch.contains("-read the plan from disk\n"), "{patch}");
+        assert!(
+            patch.contains("+read the plan, retrying twice\n"),
+            "{patch}"
+        );
+        assert!(
+            patch.contains("+++ b/retry.md") && patch.contains("+the retry policy"),
+            "{patch}"
+        );
+        assert!(!patch.contains("retrying\n+"), "{patch}");
+        assert_eq!(index(), before, "the worktree's own index moved");
+        assert!(
+            std::fs::read_dir(std::env::temp_dir())
+                .expect("the temporary directory")
+                .filter_map(std::result::Result::ok)
+                .all(|entry| !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(&format!("onepipeline-net-diff-{}-", std::process::id()))),
+            "the scratch index was left behind"
+        );
+        // A base git cannot name is a read refused, said in git's words.
+        let refused = net_diff(&repo, "nowhere").expect_err("no such base");
+        assert!(refused.contains("merge-base"), "{refused}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_net_diff_over_its_cap_is_cut_at_a_line_end_saying_where_and_how_much() {
+        let patch = "+one\n+two\n+three\n".to_owned();
+        assert_eq!(capped(patch.clone(), patch.len()), patch);
+        let cut = capped(patch.clone(), 10);
+        assert!(cut.starts_with("+one\n+two\n["), "{cut}");
+        assert!(
+            cut.contains("at byte 10 of 17: the last 7 bytes are not shown"),
+            "{cut}"
+        );
+        assert!(!cut.contains("three"), "{cut}");
     }
 
     /// The conflict a session opened with rides its `session-opened` envelope in

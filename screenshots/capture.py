@@ -27,7 +27,7 @@ import tempfile
 from pathlib import Path
 
 # This directory is not on `sys.path` when the file is run as a script from the
-# repository root, which is how `just screenshots` and the pre-push guard run it.
+# repository root, which is how manual capture and CI run it.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import normalise
 import world as world_module
@@ -62,7 +62,7 @@ WINDOW_WIDTH = 60 + round(WRAP_COLUMNS * 8.42)
 #: it — the reusable workflow's ref and the version it installs. Contract 2 of
 #: the visual-docs adoption requires the copies to be reconciled by something
 #: that fails when they part; this capture is that something, because it is what
-#: both the local guard and the workflow run.
+#: both manual capture and the workflow run.
 WORKFLOW = Path(".github/workflows/visual-docs.yml")
 
 
@@ -100,9 +100,9 @@ def screencomp_pin_refusal() -> str | None:
 
 
 #: Where the build graph declares what can change a rendered shot, beside
-#: `screencomp.toml`'s own list for the local guard. The two are deliberately
+#: `screencomp.toml`'s visual scope list. The two are deliberately
 #: different shapes — Nx enumerates directories a cached target re-runs on, the
-#: guard enumerates files worth paying for a local recapture over — so they are
+#: scope enumerates files that can affect a capture — so they are
 #: reconciled by containment rather than by equality.
 NAMED_INPUTS = Path("nx.json")
 

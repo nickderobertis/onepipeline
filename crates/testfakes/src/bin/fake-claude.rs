@@ -668,7 +668,13 @@ fn structured(prompt: &str, dir: &std::path::Path) -> serde_json::Value {
             prompt.lines().next().unwrap_or_default()
         )
     });
-    serde_json::json!({"body": body})
+    let mut answer = serde_json::json!({"body": body});
+    if let Some(check) = fake::node_script(dir, "harness", "title-check") {
+        answer["title_check"] = serde_json::from_str(&check).unwrap_or_else(|error| {
+            fake::fail(&format!("harness.title-check is not JSON: {error}"))
+        });
+    }
+    answer
 }
 
 /// The line after a task's `## What` heading in `prompt`, or nothing where it has none.

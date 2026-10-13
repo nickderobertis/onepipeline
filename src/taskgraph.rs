@@ -92,6 +92,10 @@ pub(crate) const NODE_KEY: &str = "onepipeline.node";
 /// written only where the head is not the root.
 pub(crate) const SUPERSEDES_KEY: &str = "onepipeline.supersedes";
 
+/// Projection-only metadata on a rework's replacement: the node it replaces, the
+/// reason, the instruction and each review comment it answers, so any host knows
+/// which comments a rework is answering.
+pub(crate) const REWORK_KEY: &str = "onepipeline.rework";
 /// Projection-only metadata saying whether the change a node published reached its base.
 pub(crate) const LANDING_KEY: &str = "onepipeline.landing";
 /// Projection-only metadata naming the commit a landed change reached its base at.
@@ -126,6 +130,7 @@ const PROJECTION_ONLY: &[&str] = &[
     SETTLEMENT_KEY,
     NODE_KEY,
     SUPERSEDES_KEY,
+    REWORK_KEY,
     LANDING_KEY,
     LANDING_COMMIT_KEY,
     CHANGE_URL_KEY,
@@ -1604,6 +1609,30 @@ mod tests {
         );
         // Each task's own metadata, verbatim, keys this engine does not read included.
         assert_eq!(read.metadata["test"]["team.owner"], json!("qa"));
+    }
+
+    /// A task a run projected a rework onto carries `onepipeline.rework` beside the
+    /// lineage keys, and reads back as the node it was launched as: the key is the
+    /// write-back's, and no node field answers to it.
+    #[test]
+    fn a_projected_rework_reads_past_as_the_lineage_keys_do() {
+        let mut metadata = node("reader");
+        metadata["onepipeline.node"] = json!("reader-rework-1");
+        metadata["onepipeline.supersedes"] = json!(["reader"]);
+        metadata[REWORK_KEY] = json!({
+            "replaces": "reader",
+            "reason": "the reviewer asked for a retry",
+            "instruction": "retry a failed read",
+            "comments": [{"id": "1", "url": "https://github.com/o/r/pull/1#discussion_r1"}],
+        });
+        let read = load(store(
+            json!({}),
+            vec![task("t-reader", metadata, json!({}))],
+            vec![],
+        ))
+        .unwrap_or_else(|_| panic!("the project reads as a plan"));
+        assert_eq!(read.plan.tasks.len(), 1);
+        assert_eq!(read.plan.tasks[0].id, "reader");
     }
 
     /// Everything a run projects onto a project it launched from — the settlement, the
