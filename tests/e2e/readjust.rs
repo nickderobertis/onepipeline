@@ -821,3 +821,195 @@ fn a_repository_whose_read_failed_is_left_as_it_was_and_readjusted_by_the_next_t
     assert_eq!(base, "main");
     assert!(body.contains("Drafted against `main`, the root"), "{body}");
 }
+
+/// Reply to `run` with one envelope of `commands`, as the planner.
+fn reply(world: &World, run: &str, commands: Value) -> crate::harness::Run {
+    world.run_with_stdin(
+        &["reply", run],
+        &json!({"version": onepipeline::channel::REPLY_ENVELOPE_VERSION, "commands": commands})
+            .to_string(),
+    )
+}
+
+/// A `rework` of `id`, as a planner relays a reviewer's request.
+fn rework(id: &str) -> Value {
+    json!({
+        "op": "rework",
+        "id": id,
+        "reason": "a reviewer asked for it on the draft",
+        "instruction": "say what the review asked",
+        "comments": [{"id": "101", "url": "https://github.com/owner/service/pull/1#discussion_r101"}],
+    })
+}
+
+/// `onepipeline review RUN --json`, its receipt parsed.
+fn review(world: &World, run: &str) -> Value {
+    let output = world.run(&["review", run, "--json"]);
+    assert_eq!(output.code, 0, "{}\n{}", output.stdout, output.stderr);
+    serde_json::from_str(&output.stdout).expect("a receipt")
+}
+
+/// Whether `call` reads a change request's check rollup or a base's required checks —
+/// what a publication's check watch asks.
+fn is_check_read(call: &Value) -> bool {
+    let args: Vec<&str> = call["args"]
+        .as_array()
+        .map(|args| args.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    (args.first() == Some(&"pr") && args.get(1) == Some(&"checks"))
+        || (args.first() == Some(&"pr")
+            && args.get(1) == Some(&"view")
+            && args.iter().any(|arg| arg.contains("statusCheckRollup")))
+        || args
+            .iter()
+            .any(|arg| arg.contains("/protection/required_status_checks"))
+}
+
+/// The outcome `results --json` reports for `node`: its settlement's word, as a later
+/// verdict read moved it.
+fn outcome_of(world: &World, run: &str, node: &str) -> Value {
+    let output = world.run(&["results", run, "--json"]);
+    output.exited(0);
+    let results: Value = serde_json::from_str(&output.stdout).expect("results as JSON");
+    results["nodes"]
+        .as_array()
+        .and_then(|nodes| nodes.iter().find(|entry| entry["id"] == node))
+        .map(|entry| entry["outcome"].clone())
+        .unwrap_or_else(|| panic!("results names no {node}: {results}"))
+}
+
+/// How many change requests the host was asked to open from `branch`.
+fn opened_from(world: &World, branch: &str) -> usize {
+    world
+        .changes_opened()
+        .iter()
+        .filter(|change| change["head"] == branch)
+        .count()
+}
+
+/// Deferred verdicts: a rework's republication, a restack's and a readjustment's each
+/// settle `change-review-draft-unchecked`, and nothing reads a check rollup or a base's
+/// required checks between their pushes and the next trigger — while every node's
+/// first publication still watches its checks. The next `onepipeline review` records
+/// each verdict: a green draft moves to `change-review-draft`, and one read red is
+/// re-dispatched onto its same branch with the failed checks as its refusal, opening no
+/// change request. Until each is read, `status`, `results` and the pass's output name
+/// it as outstanding.
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one journey's three republications and the two reads that answer them"
+)]
+fn deferred_republications_are_read_by_the_next_trigger_green_or_repaired_red() {
+    let world = team_world("readjust-verdicts");
+    world.script("a.work", "a's change\n");
+    world.script("b.work-anew", "b's change");
+    world.script("x.work", "x's change\n");
+    world.script("y.work", "y's change\n");
+    world.script("a-rework-1.work", "a's change, as the review asked\n");
+    world.script("a-rework-1.work-file", "a");
+    let run = "verdicts";
+    launched(
+        &world,
+        run,
+        vec![
+            lifecycle("a", &[]),
+            lifecycle("b", &["a"]),
+            lifecycle("x", &[]),
+            lifecycle("y", &["x"]),
+        ],
+    );
+    assert!(
+        host_calls(&world, 0).iter().any(is_check_read),
+        "a first publication did not watch its checks"
+    );
+    let from = world.invocations().len();
+
+    // A rework's republication, and the restack it owes the draft above it.
+    reply(&world, run, json!([rework("a")])).exited(0);
+    world.run(&["adopt", run]).exited(0);
+    for node in ["a-rework-1", "b"] {
+        assert_eq!(
+            settled(&world, run, node)["outcome"],
+            "change-review-draft-unchecked",
+            "{node}"
+        );
+    }
+    let b_branch = branch_of(&world, run, "b");
+    let b_head = text(&settled(&world, run, "b")["head"], "b's head").to_owned();
+    person(&world, &["verdict", &b_head, "failed:lint"]);
+
+    // A readjustment's republication, made by the next review's own readjustment.
+    merge(&world, &number_of(&world, run, "x"), "squash", "kept");
+    let before_review = world.invocations().len();
+    let watched: Vec<Value> = world.invocations()[from..before_review]
+        .iter()
+        .filter(|call| call["tool"] == "gh" && is_check_read(call))
+        .cloned()
+        .collect();
+    assert!(
+        watched.is_empty(),
+        "a republication watched its checks: {watched:#?}"
+    );
+    let (status, results) = views(&world, run);
+    for node in ["a-rework-1", "b"] {
+        assert!(
+            status.contains(&format!("{node}: check verdict outstanding")),
+            "{node}:\n{status}"
+        );
+    }
+    assert!(results.contains("check verdict outstanding"), "{results}");
+
+    let receipt = review(&world, run);
+    let read = |node: &str| record(&world, run, "node-checks-read", node);
+    assert_eq!(read("a-rework-1").expect("read")["verdict"], "passed");
+    assert_eq!(read("b").expect("read")["verdict"], "failed");
+    assert_eq!(outcome_of(&world, run, "a-rework-1"), "change-review-draft");
+    assert_eq!(
+        settled(&world, run, "y")["outcome"],
+        "change-review-draft-unchecked",
+        "y's readjustment republished without a watch"
+    );
+    // The red draft was dispatched again on its own branch, its refusal the checks
+    // that failed, and published onto the change request it already had.
+    let redispatched = world
+        .events_of(run, "node-dispatched")
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == "b")
+        .last()
+        .expect("b was dispatched");
+    assert_eq!(redispatched["payload"]["attempt"], 2, "{redispatched}");
+    assert!(
+        redispatched["payload"]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.starts_with("checks-failed") && reason.contains("lint")),
+        "{redispatched}"
+    );
+    let repaired = settled(&world, run, "b");
+    assert_eq!(repaired["branch"], b_branch.as_str(), "{repaired}");
+    assert_eq!(
+        repaired["outcome"], "change-review-draft-unchecked",
+        "{repaired}"
+    );
+    assert_ne!(repaired["head"], b_head.as_str(), "{repaired}");
+    assert_eq!(opened_from(&world, &b_branch), 1);
+    let outstanding: Vec<&str> = receipt["outstanding"]
+        .as_array()
+        .map(|nodes| nodes.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    assert!(
+        outstanding.contains(&"y") && outstanding.contains(&"b"),
+        "{receipt}"
+    );
+    let readjust_line = world.run(&["readjust", run]);
+    readjust_line.exited(0);
+    assert!(
+        readjust_line.stdout.contains("readjust performed")
+            && !readjust_line.stdout.contains("outstanding"),
+        "the readjustment read the outstanding verdicts, so none is left: {}",
+        readjust_line.stdout
+    );
+    assert_eq!(read("y").expect("read")["verdict"], "passed");
+    assert_eq!(outcome_of(&world, run, "y"), "change-review-draft");
+    assert_eq!(outcome_of(&world, run, "b"), "change-review-draft");
+}

@@ -6898,6 +6898,135 @@ fn rework_readjusting(
     }))
 }
 
+/// Re-dispatch every draft whose deferred verdict a trigger read red onto its same
+/// branch, carrying the failed checks as its refusal — the run repairing its own red
+/// publication, exactly as a `checks-failed` publication's re-dispatch does, and never
+/// work a comment started. Its republication defers its checks again, so the next
+/// trigger reads the repair's verdict.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the reconcile loop's borrowed state, as `start_restacks` takes it"
+)]
+fn repair_red_verdicts(
+    paths: &RunPaths,
+    journal: &mut Journal,
+    state: &mut Projected,
+    statuses: &BTreeMap<String, NodeStatus>,
+    rules: &ExecutorRules,
+    launch: &LaunchRecord,
+    tx: &Sender<Message>,
+    in_flight: &mut BTreeMap<String, Dispatch>,
+    paused: &BTreeSet<String>,
+    releases: &crate::release::Watch,
+    notes_in_flight: &DeliveriesInFlight,
+    admit: &mut dyn FnMut() -> bool,
+) -> Result<bool> {
+    let red: Vec<(String, Vec<String>)> = state
+        .readjust
+        .red
+        .iter()
+        .map(|(node, failed)| (node.clone(), failed.clone()))
+        .collect();
+    let mut moved = false;
+    for (id, failed) in red {
+        if in_flight.contains_key(&id) || paused.contains(&id) {
+            continue;
+        }
+        if statuses.get(&id) != Some(&NodeStatus::Done) || state.superseded.contains_key(&id) {
+            state.readjust.red.remove(&id);
+            continue;
+        }
+        if in_flight.len() >= state.graph.concurrency as usize {
+            break;
+        }
+        let (Some(node), Some(branch), Some(head)) = (
+            state.graph.get(&id).cloned(),
+            state.branches.get(&id).cloned(),
+            state.heads.get(&id).cloned(),
+        ) else {
+            state.readjust.red.remove(&id);
+            continue;
+        };
+        let now = crate::boundary::plan_now(state);
+        let Ok(dispatching) = crate::boundary::dispatching(
+            &crate::boundary::of_run(&now),
+            &now,
+            &node,
+            &state.branches,
+            &state.heads,
+            &state.superseded,
+        ) else {
+            continue;
+        };
+        if !admit() {
+            break;
+        }
+        state.readjust.red.remove(&id);
+        // On the placement it was published on, so its session opens on that base.
+        let stack = state.stacks.get(&id).and_then(|_| {
+            crate::stack::placement(
+                state,
+                statuses,
+                &node,
+                &state
+                    .plan
+                    .as_ref()
+                    .and_then(|plan| plan.name.clone())
+                    .unwrap_or_else(|| paths.run.clone()),
+                &same_identity,
+            )
+            .ok()
+            .flatten()
+        });
+        let mut based = node.clone();
+        based.base_branch = stack
+            .as_ref()
+            .map(|stack| stack.base().to_owned())
+            .or_else(|| state.bases.get(&id).cloned());
+        let continuation =
+            crate::lifecycle::Continuation::red_verdict(&based, &branch, &head, &failed);
+        journal.emit(
+            journal::PipelineKind::NodeDispatched,
+            journal::labels(&paths.run, Some(&id)),
+            redispatch_payload(&continuation.redispatch()),
+        )?;
+        let dispatched = continuation.node.clone();
+        let cancel = CancellationToken::new();
+        let references = releases.references(&dispatched);
+        spawn(
+            paths,
+            rules,
+            launch,
+            &dispatched,
+            &references,
+            stack,
+            Coursed::Work,
+            cancel.clone(),
+            tx.clone(),
+            Some(Box::new(continuation)),
+            notes_in_flight,
+            dispatching,
+            review_change_for(state, &id),
+            None,
+        )?;
+        let now = Instant::now();
+        in_flight.insert(
+            id.clone(),
+            Dispatch {
+                node: dispatched,
+                cancel,
+                started: now,
+                last_progress: now,
+                reported_quiet: false,
+                control: None,
+                presentations: crate::note::Presentations::default(),
+            },
+        );
+        moved = true;
+    }
+    Ok(moved)
+}
+
 /// Start the readjustment every owed draft is ready for, bounded by `concurrency`
 /// beside the dispatches already running.
 ///
@@ -6932,6 +7061,20 @@ fn start_readjustments(
     if crate::shutdown::begun(paths) {
         return Ok(false);
     }
+    let mut moved = repair_red_verdicts(
+        paths,
+        journal,
+        state,
+        statuses,
+        rules,
+        launch,
+        tx,
+        in_flight,
+        paused,
+        releases,
+        notes_in_flight,
+        admit,
+    )?;
     let owed: Vec<String> = state
         .graph
         .iter()
@@ -6942,7 +7085,10 @@ fn start_readjustments(
         .filter(|id| !state.superseded.contains_key(id))
         .collect();
     if owed.is_empty() {
-        return Ok(false);
+        if moved {
+            state.refresh(paths);
+        }
+        return Ok(moved);
     }
     let held = crate::readjust::held_elsewhere(paths, state);
     let concurrency = state.graph.concurrency as usize;
@@ -6951,7 +7097,6 @@ fn start_readjustments(
         .as_ref()
         .and_then(|plan| plan.name.clone())
         .unwrap_or_else(|| paths.run.clone());
-    let mut moved = false;
     for id in owed {
         if in_flight.contains_key(&id)
             || paused.contains(&id)

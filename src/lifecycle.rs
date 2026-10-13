@@ -497,6 +497,41 @@ pub(crate) struct Continuation {
 }
 
 impl Continuation {
+    /// The re-dispatch a red verdict read after a deferred republication owes: the
+    /// node's next attempt on its same branch, carrying the failed checks as its
+    /// refusal exactly as a `checks-failed` publication's re-dispatch carries them.
+    pub(crate) fn red_verdict(node: &Node, branch: &str, head: &str, failed: &[String]) -> Self {
+        let attempts = engine::publication_attempts();
+        let attempt = std::num::NonZeroU32::MIN.saturating_add(1).min(attempts);
+        let preserved = Preserved {
+            branch: branch.to_owned(),
+            outcome: crate::vcs::Preserving::ChecksFailed,
+            reason: engine::bounded(&crate::views::one_line(&format!(
+                "the required checks on {head} concluded red, as a later trigger read them: {}",
+                failed.join(", ")
+            ))),
+            evidence: Vec::new(),
+            body_aside: None,
+            tip: crate::vcs::SessionTip::Unknown,
+            handed: None,
+            armed: None,
+            armed_before: None,
+        };
+        let on_remote = OnRemote::At(head.to_owned());
+        let endings = vec![crate::vcs::Preserving::ChecksFailed];
+        Self {
+            node: continued(node, &preserved, &on_remote, attempt, attempts, &endings),
+            attempt,
+            attempts,
+            notes: Vec::new(),
+            endings,
+            published: Some(head.to_owned()),
+            on_remote,
+            preserved,
+            conflicted: Conflicted::default(),
+        }
+    }
+
     /// The preserved branch the resumed attempt is pinned to.
     pub(crate) fn branch(&self) -> &str {
         &self.preserved.branch
