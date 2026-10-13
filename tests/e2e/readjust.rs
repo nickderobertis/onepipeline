@@ -465,3 +465,268 @@ fn a_single_parent_lands(name: &str, head: Head) {
     assert_eq!(checked["head"], new_head.as_str(), "{checked}");
     assert!(receipt.get("outstanding").is_none(), "{receipt}");
 }
+
+/// The `readjust` that every multi-step journey makes: performed, exit 0.
+fn readjusted(world: &World, run: &str) {
+    let (code, receipt) = readjust(world, run);
+    assert_eq!(code, 0, "{receipt}");
+    assert_eq!(receipt["state"], "performed", "{receipt}");
+}
+
+/// What `node`'s change request targets on the host, and its description.
+fn on_host(world: &World, run: &str, node: &str) -> (String, String) {
+    let branch = settled(world, run, node)["branch"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{node} recorded no branch"))
+        .to_owned();
+    let change = change_from(world, &branch);
+    assert!(
+        held_as_draft(world, &change["number"]),
+        "{node}'s change request is not a draft: {change}"
+    );
+    (
+        text(&change["base"], "the base").to_owned(),
+        text(&change["body"], "the description").to_owned(),
+    )
+}
+
+/// The branch `node` settled on.
+fn branch_of(world: &World, run: &str, node: &str) -> String {
+    text(&settled(world, run, node)["branch"], "the branch").to_owned()
+}
+
+/// The change request number `node`'s branch holds.
+fn number_of(world: &World, run: &str, node: &str) -> Value {
+    change_from(world, &branch_of(world, run, node))["number"].clone()
+}
+
+/// Case 2: `a, c, d → e` stacks `e` on a three-parent stack base. A person merges `a`,
+/// and after a readjustment the stack base carries the root's head merged in ahead of
+/// `c` and `d`, `e`'s branch carries it, and `e`'s diff against the stack base is only
+/// its own. A person merges `c`: `d`'s branch carries the root's head, `e` is moved onto
+/// `d`'s branch — its change request retargeted there — with only its own change
+/// against it. A person merges `d`: `e` targets the root, with only its own change.
+/// `e` is a draft throughout, and its record, `status` and Stack block name its base at
+/// every step.
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one journey's three landings, each held where it happens"
+)]
+fn one_of_several_parents_landing_advances_the_stack_base_then_moves_the_draft() {
+    let world = team_world("readjust-several");
+    for node in ["a", "c", "d", "e"] {
+        world.script(&format!("{node}.work"), &format!("{node}'s change\n"));
+    }
+    let run = "several";
+    launched(
+        &world,
+        run,
+        vec![
+            lifecycle("a", &[]),
+            lifecycle("c", &[]),
+            lifecycle("d", &[]),
+            lifecycle("e", &["a", "c", "d"]),
+        ],
+    );
+    let e = settled(&world, run, "e");
+    let stack_base = text(&e["stack"]["stack_base"], "e's stack base").to_owned();
+    assert_eq!(e["base"], stack_base.as_str(), "{e}");
+    let e_branch = branch_of(&world, run, "e");
+
+    // `a` lands: the stack base advances over the root, and `e` merges it.
+    merge(&world, &number_of(&world, run, "a"), "squash", "kept");
+    let root = tip(&world, "main");
+    let base_before = tip(&world, &stack_base);
+    readjusted(&world, run);
+    let base_now = tip(&world, &stack_base);
+    assert!(is_ancestor(&world, &root, &base_now));
+    // The first commit the advance put on the stack base merges the root, ahead of
+    // `c`'s and `d`'s new heads.
+    let advanced = git(
+        &world,
+        &service(&world).origin,
+        &[
+            "rev-list",
+            "--first-parent",
+            "--reverse",
+            &format!("{base_before}..{base_now}"),
+        ],
+    );
+    let first = advanced
+        .lines()
+        .next()
+        .expect("the stack base advanced")
+        .trim();
+    assert!(is_ancestor(&world, &root, first));
+    for parent in ["c", "d"] {
+        let head = tip(&world, &branch_of(&world, run, parent));
+        assert!(
+            !is_ancestor(&world, &head, first),
+            "{parent}'s new head was merged before the root"
+        );
+    }
+    assert!(is_ancestor(&world, &base_now, &tip(&world, &e_branch)));
+    assert_eq!(
+        changed_against(&world, &service(&world), &stack_base, &e_branch),
+        ["e.md"]
+    );
+    let now = settled(&world, run, "e");
+    assert_eq!(now["base"], stack_base.as_str(), "{now}");
+    assert_eq!(
+        now["stack"]["parents"].as_array().map(|parents| parents
+            .iter()
+            .map(|parent| parent["node"].clone())
+            .collect::<Vec<_>>()),
+        Some(vec![json!("c"), json!("d")]),
+        "{now}"
+    );
+    let (base, body) = on_host(&world, run, "e");
+    assert_eq!(base, stack_base);
+    assert!(
+        body.contains(&format!("stack base `{stack_base}`")) && !body.contains("`a` ("),
+        "e's Stack block does not name its two remaining parents:\n{body}"
+    );
+
+    // `c` lands: `d` takes the root's head, and `e` moves onto `d`'s branch.
+    merge(&world, &number_of(&world, run, "c"), "squash", "kept");
+    let root = tip(&world, "main");
+    readjusted(&world, run);
+    let d_branch = branch_of(&world, run, "d");
+    assert!(is_ancestor(&world, &root, &tip(&world, &d_branch)));
+    let now = settled(&world, run, "e");
+    assert_eq!(now["base"], d_branch.as_str(), "{now}");
+    let (base, body) = on_host(&world, run, "e");
+    assert_eq!(base, d_branch);
+    assert!(
+        body.contains(&format!("Drafted against `{d_branch}`, the branch of `d`")),
+        "{body}"
+    );
+    assert_eq!(
+        changed_against(&world, &service(&world), &d_branch, &e_branch),
+        ["e.md"]
+    );
+    let (status, _) = views(&world, run);
+    assert!(
+        status.contains(&format!("drafted against d's branch {d_branch}")),
+        "{status}"
+    );
+
+    // `d` lands: `e` targets the root.
+    merge(&world, &number_of(&world, run, "d"), "squash", "kept");
+    readjusted(&world, run);
+    let now = settled(&world, run, "e");
+    assert_eq!(now["base"], "main", "{now}");
+    let (base, body) = on_host(&world, run, "e");
+    assert_eq!(base, "main");
+    assert!(body.contains("Drafted against `main`, the root"), "{body}");
+    assert_eq!(
+        changed_against(&world, &service(&world), "main", &e_branch),
+        ["e.md"]
+    );
+    let (status, _) = views(&world, run);
+    assert!(
+        status.contains("e: readjusted onto the root main"),
+        "{status}"
+    );
+}
+
+/// Case 3: over `a ← b ← c ← d` and `b, x → y`, a person merges `a` and then `b` — each
+/// head deleted, and the host retargeting what was based on it — with no trigger run
+/// between. One `onepipeline readjust` leaves `c` on the root, `d` on `c`'s branch and
+/// `y` on `x`'s branch, with `x`'s branch carrying the root's head; `c`'s push is
+/// journalled before `d`'s restack starts; every remaining draft's diff against its base
+/// is its own and every one is a draft; nothing targets `a`'s or `b`'s branch on the
+/// host; and the origin took no forced or non-fast-forward push.
+#[test]
+fn a_whole_lower_stack_landing_moves_every_draft_above_it_in_one_readjustment() {
+    let world = team_world("readjust-lower");
+    for node in ["a", "b", "c", "d", "x", "y"] {
+        world.script(&format!("{node}.work"), &format!("{node}'s change\n"));
+    }
+    let run = "lower";
+    launched(
+        &world,
+        run,
+        vec![
+            lifecycle("a", &[]),
+            lifecycle("b", &["a"]),
+            lifecycle("c", &["b"]),
+            lifecycle("d", &["c"]),
+            lifecycle("x", &[]),
+            lifecycle("y", &["b", "x"]),
+        ],
+    );
+    let branch = |node: &str| branch_of(&world, run, node);
+    merge(
+        &world,
+        &number_of(&world, run, "a"),
+        "squash",
+        "deleted-retarget",
+    );
+    merge(
+        &world,
+        &number_of(&world, run, "b"),
+        "squash",
+        "deleted-retarget",
+    );
+    let root = tip(&world, "main");
+    readjusted(&world, run);
+
+    for (node, base) in [
+        ("c", "main".to_owned()),
+        ("d", branch("c")),
+        ("y", branch("x")),
+    ] {
+        let now = settled(&world, run, node);
+        assert_eq!(now["base"], base.as_str(), "{node}: {now}");
+        let (on, _) = on_host(&world, run, node);
+        assert_eq!(on, base, "{node}");
+        assert_eq!(
+            changed_against(&world, &service(&world), &base, &branch(node)),
+            [format!("{node}.md")],
+            "{node}"
+        );
+    }
+    let (x_base, _) = on_host(&world, run, "x");
+    assert_eq!(x_base, "main");
+    assert!(is_ancestor(&world, &root, &tip(&world, &branch("x"))));
+    assert_eq!(
+        changed_against(&world, &service(&world), "main", &branch("x")),
+        ["x.md"]
+    );
+    for change in world.changes_opened() {
+        assert!(
+            change["base"] != branch("a").as_str() && change["base"] != branch("b").as_str(),
+            "a change request still targets a landed branch: {change}"
+        );
+    }
+
+    let journal = world.journal(run);
+    let c_head = text(&settled(&world, run, "c")["head"], "c's head").to_owned();
+    let c_pushed = journal
+        .iter()
+        .position(|event| {
+            event["kind"] == "push"
+                && event["labels"]["node"] == "c"
+                && event["payload"]["head"] == c_head.as_str()
+        })
+        .expect("c's readjustment pushed");
+    let d_started = journal
+        .iter()
+        .position(|event| event["kind"] == "node-restack-started" && event["labels"]["node"] == "d")
+        .expect("d was restacked");
+    assert!(c_pushed < d_started, "d was restacked before c pushed");
+    assert_eq!(journal[d_started]["payload"]["cause"], "readjust");
+    for push in world.events_of(run, "push") {
+        assert_eq!(push["payload"]["accepted"], true, "{push}");
+        assert!(
+            !text(&push["payload"]["output"], "push output").contains("forced update"),
+            "{push}"
+        );
+    }
+    for node in ["a", "b"] {
+        let landed = record(&world, run, "node-landed", node).expect("landed");
+        assert_eq!(landed["detected_by"], "readjust", "{landed}");
+    }
+}

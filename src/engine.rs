@@ -7017,8 +7017,8 @@ fn start_readjustments(
             body: state.readjust.bodies.get(&id).cloned(),
             remove_restored_base: state.reopened.contains_key(&id),
         });
-        if let Some(base) = &host_base {
-            crate::readjust::notify(
+        let overridden = |journal: &mut Journal| match &host_base {
+            Some(base) => crate::readjust::notify(
                 paths,
                 journal,
                 crate::readjust::CHANGE_BASE_OVERRIDDEN,
@@ -7028,12 +7028,14 @@ fn start_readjustments(
                      is moved back onto `{}`, its computed base.",
                     to.base
                 ),
-            )?;
-        }
-        state.readjust.tried.insert(id.clone());
+            ),
+            None => Ok(()),
+        };
         match statuses.get(&id) {
             Some(NodeStatus::Done) => {}
             Some(NodeStatus::Failed | NodeStatus::Parked | NodeStatus::Cancelled) => {
+                state.readjust.tried.insert(id.clone());
+                overridden(journal)?;
                 // Held, not done: its change request is moved where it belongs with no
                 // merge, and a `retry` — whose placement merges the base — brings it up
                 // to date.
@@ -7089,6 +7091,8 @@ fn start_readjustments(
         node.branch = Some(branch.clone());
         node.base_branch = Some(to.base.clone());
         node.resume = None;
+        state.readjust.tried.insert(id.clone());
+        overridden(journal)?;
         let now = crate::boundary::plan_now(state);
         let Ok(dispatching) = crate::boundary::dispatching(
             &crate::boundary::of_run(&now),
