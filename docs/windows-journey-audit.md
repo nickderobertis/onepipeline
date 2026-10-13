@@ -244,3 +244,12 @@ This continuation copied the prior `/tmp/onepipeline-windows-audit` evidence to
 its own scratch directory as `prior-audit/`, and the prior publication-repair
 node's evidence as `prior-continuation/`. No reviewed CI run was changed. The
 original Windows audit and dispositions above remain applicable.
+
+The restored, formatted cleanup journey passed with the forced real GC
+(`provisioning-restored-targeted.log`). All 13 budget tests passed on this tree
+(`budgets-final.log`), and clippy over both provisioning and budget test binaries
+passed with warnings denied (`clippy-final.log`). `just fmt-check` also passed
+(`fmt-restored.log`). The initial full provisioning run found the pinned
+onetaskgraph release absent from this fresh workspace; the repository's
+`_ensure-onetaskgraph` recipe supplies that prerequisite before its final rerun.
+These host preparation steps change no test or enforcement rule.
