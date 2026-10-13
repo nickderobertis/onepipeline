@@ -942,10 +942,15 @@ fn discard_refuses_unknown_and_path_like_names_and_live_or_dead_drivers() {
     world.run(&["stop", "live"]).exited(0);
 }
 
-#[cfg(unix)]
+/// A directory link and a file link, each to a target outside the run. Windows CI
+/// runs this through the platform's own link kinds; the Linux worker runs Unix's.
+#[cfg(any(unix, windows))]
 #[test]
 fn links_are_unlinked_without_following_them_and_a_link_scratch_root_is_refused() {
-    use std::os::unix::fs::symlink;
+    #[cfg(unix)]
+    use std::os::unix::fs::{symlink as symlink_dir, symlink as symlink_file};
+    #[cfg(windows)]
+    use std::os::windows::fs::{symlink_dir, symlink_file};
     for success in [true, false] {
         let world = World::new(if success {
             "scratch-success-links"
@@ -966,8 +971,8 @@ fn links_are_unlinked_without_following_them_and_a_link_scratch_root_is_refused(
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::write(outside.join("precious"), "keep the target").unwrap();
         let dir = scratch_dirs(&world, "links").remove(0);
-        symlink(&outside, dir.join("directory-link")).unwrap();
-        symlink(outside.join("precious"), dir.join("file-link")).unwrap();
+        symlink_dir(&outside, dir.join("directory-link")).unwrap();
+        symlink_file(outside.join("precious"), dir.join("file-link")).unwrap();
         world.release("build.go");
         world.until("the ending scratch record", |world| {
             !world
@@ -990,7 +995,7 @@ fn links_are_unlinked_without_following_them_and_a_link_scratch_root_is_refused(
             b"keep the target"
         );
         if !success {
-            symlink(&outside, world.run_file("links", "scratch")).unwrap();
+            symlink_dir(&outside, world.run_file("links", "scratch")).unwrap();
             let journal = std::fs::read(world.run_file("links", "events.jsonl")).unwrap();
             world
                 .run(&["scratch", "discard", "links"])

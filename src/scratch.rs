@@ -144,6 +144,12 @@ fn walk(path: &Path, operation: Operation, totals: &mut Walk, seen: &mut Seen) -
             None => Ok(()),
         }
     } else if operation == Operation::Remove {
+        // A Windows directory link or junction is a directory entry, which
+        // `DeleteFileW` refuses; removing it removes the link, not its target.
+        #[cfg(windows)]
+        if std::os::windows::fs::FileTypeExt::is_symlink_dir(&metadata.file_type()) {
+            return fs::remove_dir(path);
+        }
         fs::remove_file(path)
     } else {
         Ok(())
@@ -322,7 +328,8 @@ impl ScratchTree {
 }
 
 fn directories(paths: &RunPaths) -> io::Result<ScratchTree> {
-    let root = fs::canonicalize(&paths.dir)?.join("scratch");
+    // Recorded and printed in the plain spelling, never Windows' verbatim `\\?\` one.
+    let root = crate::templates::plain(fs::canonicalize(&paths.dir)?).join("scratch");
     match fs::symlink_metadata(&root) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             return Ok(ScratchTree {
