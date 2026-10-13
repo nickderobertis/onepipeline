@@ -261,11 +261,13 @@ pub enum PipelineKind {
     /// One pool-maintenance sweep an idle driver ran did something.
     ///
     /// Written once per sweep, and only where some slot ran, some identity was
-    /// `claimed` by another run, or some identity failed — a sweep on which every
+    /// `claimed` by another run, some identity's `onevcs.toml` was
+    /// `maintenance-unreadable`, or some identity failed — a sweep on which every
     /// identity answered `no-maintain-command`, `no-slots` or `not-due` writes
     /// nothing. Carries `started_at` and, per identity it records, the `every` it
-    /// was maintained on and the sibling's own `outcome` — per slot, what ran and
-    /// how it ended — or the `error` that stood in for one.
+    /// was maintained on and the sibling's own `outcome` — per slot, what ran, how
+    /// it ended and its worktree's `disk` around it — or the `error` that stood in
+    /// for one.
     PoolMaintenance,
     /// One live dispatch a host shutdown acted on: what its interrupt was
     /// answered with, and how it ended.

@@ -300,13 +300,15 @@ fn share(free: u64, total: u64) -> String {
     } else {
         u128::from(free) * 100 / u128::from(total)
     };
-    format!(
-        "{:.1} GiB of {:.1} GiB ({share}% free)",
-        // Precision is a rendering: the lines are read by a person and a
-        // byte count carries nothing a tenth of a gibibyte does not.
-        free as f64 / GIB,
-        total as f64 / GIB
-    )
+    format!("{} of {} ({share}% free)", gib(free), gib(total))
+}
+
+/// `41.2 GiB`: a byte count as the free-space lines spell it.
+///
+/// Precision is a rendering: the lines are read by a person and a byte count
+/// carries nothing a tenth of a gibibyte does not.
+pub(crate) fn gib(bytes: u64) -> String {
+    format!("{:.1} GiB", bytes as f64 / GIB)
 }
 
 /// What tells one filesystem from another on this host.

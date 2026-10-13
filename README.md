@@ -619,10 +619,13 @@ nothing and has capacity to spare, the driver runs `onevcs pool maintain` over e
 registered identity with that identity's `every`, paced in memory by
 `ONEPIPELINE_MAINTENANCE_PACE_SECONDS` (ten minutes by default). The sibling's
 recorded stamp decides what is due, so nothing is kept here, nothing runs twice, two
-drivers on one host are safe, and between runs nothing runs. A sweep that ran a
-slot's command — or met another run inside an identity, or failed — journals one
-`pool-maintenance` record; `status` names a sweep in progress and `results` the last
-record. A driver closing out mid-sweep finishes the identity in progress and begins
+drivers on one host are safe, and between runs nothing runs. The command a slot
+runs is the one its repository declares in its own `onevcs.toml`, else the host's
+`maintain`. A sweep that ran a slot's command — or met another run inside an
+identity, found a repository's `onevcs.toml` unreadable, or failed — journals one
+`pool-maintenance` record carrying `onevcs`'s report, each slot's `disk` before and
+after its command among it; `status` names a sweep in progress and `results` the last
+record, with how much it freed and any declaration it could not read. A driver closing out mid-sweep finishes the identity in progress and begins
 no other, so a settled run is not held behind the rest; its records carry
 `cut_short` naming the identities it did not reach, which another driver's idle pass
 or the host's own sweep picks up. Naming no schedule runs no maintenance at all.
