@@ -713,10 +713,6 @@ fn a_hook_that_fails_times_out_cannot_start_or_prints_a_malformed_document_refus
     assert!(invocations(&world, run).is_empty(), "{}", world.dump());
 }
 
-/// A node parked and **requeued**, and the replacement node a **retry** puts in
-/// a held node's place, each run the hook again before their dispatch — and are
-/// handed what the hook prints then, which is not what the earlier dispatches
-/// were handed.
 /// A timeout ends the actual hook even before it writes its first invocation.
 /// TerminateProcess closes the process's handles; the socket witnesses that
 /// ending without assuming Unix and Windows report the same killed exit code.
@@ -724,7 +720,7 @@ fn a_hook_that_fails_times_out_cannot_start_or_prints_a_malformed_document_refus
 #[test]
 fn a_compiled_hook_held_before_or_after_output_is_terminated_without_launching_a_worker() {
     use std::io::{BufRead, BufReader, Read};
-    for startup in [true, false] {
+    for (startup, disconnect_clock) in [(true, false), (false, false), (false, true)] {
         let world = hooked_world("hook-timeout-ordering");
         if startup {
             world.script("dispatch-env.startup", "hold");
@@ -735,6 +731,10 @@ fn a_compiled_hook_held_before_or_after_output_is_terminated_without_launching_a
             "dispatch-env.rendezvous",
             &listener.local_addr().expect("the gate address").to_string(),
         );
+        let expiring = world.rendezvous("hook-timeout-clock");
+        let address = std::fs::read_to_string(world.fakes.join("hook-timeout-clock.rendezvous"))
+            .expect("the hook clock gate address");
+        let world = world.with_env("ONEPIPELINE_TEST_HOOK_TIMEOUT_GATE", &address);
         let run = "timed-hook";
         let path = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
         let command = double("fake-dispatch-env-hook");
@@ -752,6 +752,7 @@ fn a_compiled_hook_held_before_or_after_output_is_terminated_without_launching_a
             .stderr(std::process::Stdio::piped())
             .spawn()
             .expect("the real driver starts");
+        let deadline = expiring.arrived();
         let (mut stream, _) = listener.accept().expect("the held hook arrives");
         stream
             .set_read_timeout(Some(std::time::Duration::from_secs(120)))
@@ -761,6 +762,12 @@ fn a_compiled_hook_held_before_or_after_output_is_terminated_without_launching_a
             .read_line(&mut announced)
             .expect("the hook announces its pid");
         assert!(announced.trim().parse::<u32>().is_ok(), "{announced}");
+        // The child is proven held before the existing one-second clock expires.
+        if disconnect_clock {
+            drop(deadline);
+        } else {
+            deadline.release();
+        }
         let output = driving
             .wait_with_output()
             .expect("the timeout settles the run");
@@ -779,6 +786,18 @@ fn a_compiled_hook_held_before_or_after_output_is_terminated_without_launching_a
                 )),
             "the hook retained its socket after termination: {ended:?}"
         );
+        if disconnect_clock {
+            assert!(
+                world
+                    .events_of(run, "node-dispatched")
+                    .iter()
+                    .any(|event| event["payload"]["reason"]
+                        .as_str()
+                        .is_some_and(|reason| reason.contains("could-not-start")
+                            && reason.contains("ordering gate"))),
+                "the failed ordering peer was not reported"
+            );
+        }
         assert!(
             !world.fakes.join("dispatch-env.released").exists(),
             "a held hook returned from its gate"
@@ -803,6 +822,10 @@ fn a_compiled_hook_held_before_or_after_output_is_terminated_without_launching_a
     }
 }
 
+/// A node parked and **requeued**, and the replacement node a **retry** puts in
+/// a held node's place, each run the hook again before their dispatch — and are
+/// handed what the hook prints then, which is not what the earlier dispatches
+/// were handed.
 #[test]
 fn a_requeued_node_and_a_retrys_replacement_each_run_the_hook_again_before_their_dispatch() {
     let world = hooked_world("dispatch-env-edits");

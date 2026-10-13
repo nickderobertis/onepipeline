@@ -224,12 +224,28 @@ fn run(
         ));
     }
 
+    // Hold the first attempt's clock until the regression peer has observed
+    // the real child at its startup/output gate, then advance that deadline.
+    static TIMEOUT_GATE_MET: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    let expired_at_gate = if !TIMEOUT_GATE_MET.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        crate::ordering::meet("ONEPIPELINE_TEST_HOOK_TIMEOUT_GATE").map_err(|error| {
+            let _ = sys::stop(child.id(), sys::Stop::Now);
+            let _ = child.kill();
+            let _ = child.wait();
+            format!("could-not-start: {error}")
+        })?
+    } else {
+        false
+    };
     let timeout = record.dispatch_env_hook_timeout();
     let deadline = hooks::deadline_after(timeout);
     let ended = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Ok(status),
-            Ok(None) if deadline.is_none_or(|deadline| Instant::now() < deadline) => {}
+            Ok(None)
+                if !expired_at_gate
+                    && deadline.is_none_or(|deadline| Instant::now() < deadline) => {}
             // Past the timeout — or a child this process can no longer ask about,
             // which is ended the same way rather than left running unrecorded.
             waited => {

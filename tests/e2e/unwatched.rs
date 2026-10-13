@@ -1580,7 +1580,19 @@ fn the_fixture_waits_for_a_windows_reader_to_release_a_document() {
     let summary = template.summary();
     let replacement = summary.with_extension("held.tmp");
     std::fs::copy(&summary, &replacement).expect("the real document is staged");
-    let mut reader = Some(std::fs::File::open(&summary).expect("the reader holds the document"));
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+        options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+    }
+    let mut reader = Some(
+        options
+            .open(&summary)
+            .expect("the reader holds the document"),
+    );
     let mut attempts = 0;
     after_document_handles_close(|| {
         attempts += 1;

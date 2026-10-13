@@ -1206,6 +1206,8 @@ fn a_previous_projection_does_not_answer_for_a_write_held_in_the_source() {
 /// so a reader never holds a filesystem handle across the server’s next write.
 pub(super) struct GitHubEndpoint {
     child: std::process::Child,
+    // Only the refusal regression holds this decoy snapshot without delete sharing.
+    _held_state: Option<std::fs::File>,
     pub(super) url: String,
 }
 
@@ -1221,6 +1223,19 @@ impl GitHubEndpoint {
         std::fs::create_dir_all(&dir).expect("endpoint directory");
         let seed = dir.join("seeded.json");
         std::fs::write(&seed, seeded.to_string()).expect("seeded metadata");
+        let held_state = refuse_replace.then(|| {
+            let mut options = std::fs::OpenOptions::new();
+            options.read(true).write(true).create_new(true);
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::OpenOptionsExt;
+                use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+                options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+            }
+            options
+                .open(dir.join("state.json"))
+                .expect("the regression reader holds the existing snapshot")
+        });
         let mut command = std::process::Command::new("python3");
         if refuse_replace {
             // CreateFileW: an open handle without FILE_SHARE_DELETE refuses a rename.
@@ -1257,7 +1272,11 @@ runpy.run_path(sys.argv[0], run_name='__main__')
             dir.join("endpoint").is_file()
         });
         let url = std::fs::read_to_string(dir.join("endpoint")).expect("endpoint URL");
-        Self { child, url }
+        Self {
+            child,
+            _held_state: held_state,
+            url,
+        }
     }
 
     pub(super) fn state(&self) -> Value {
