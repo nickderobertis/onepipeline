@@ -92,6 +92,9 @@ fn filed(world: &World, name: &str, plan: &Value) -> String {
                 recreate: false,
                 create: false,
                 dry_run: false,
+                comments: false,
+                no_link: false,
+                expect: None,
             })
             .await
             .unwrap_or_else(|error| panic!("the routed copy files the plan: {error}"))
@@ -725,6 +728,9 @@ fn a_design_documents_fragment_link_to_a_filed_task_lands_on_that_tasks_copy() {
                 recreate: false,
                 create: false,
                 dry_run: false,
+                comments: false,
+                no_link: false,
+                expect: None,
             })
             .await
             .unwrap_or_else(|error| panic!("the document copy runs: {error}"));

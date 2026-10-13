@@ -621,6 +621,17 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         EngineError::UnknownSource { .. } => decided("unknown-source"),
         EngineError::Token { .. } => decided("page-token"),
         EngineError::NoSources => decided("no-sources"),
+        // llmlint: ignore-block[changed_behavior_has_e2e] These store refusals are
+        // unreachable from settlement writes: copies use project members, carry no
+        // comments, set no expected version, and read immutable local shadow tasks.
+        // `every_engine_failure_is_named_as_the_store_names_it` verifies their mapping.
+        EngineError::ExpectOneTask => decided("expect-one-task"),
+        EngineError::NotCached { .. } => decided("not-cached"),
+        EngineError::CommentlessDestination { .. } => decided("no-comments"),
+        EngineError::QueryNotTasks => decided("query-not-tasks"),
+        EngineError::CommentsNotDocuments => decided("comments-not-documents"),
+        EngineError::ChangedWhileCopied { .. } => decided("changed-while-copied"),
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         EngineError::NotWritable { .. }
         | EngineError::CommentsNotWritable { .. }
         | EngineError::StatusNotWritable { .. }
@@ -2590,6 +2601,9 @@ fn create(
         recreate: false,
         create: false,
         dry_run: false,
+        comments: false,
+        no_link: false,
+        expect: None,
     };
     // The one call that is linear in what it carries, so the one whose deadline is.
     let deadline = Deadline::Write {
@@ -3997,13 +4011,16 @@ fn actions(report: &CopyReport) -> ProjectionActions {
             CopyAction::Updated { destination, .. } => Some(destination),
             CopyAction::Created { .. }
             | CopyAction::Unchanged { .. }
-            | CopyAction::Orphaned { .. } => None,
+            | CopyAction::Orphaned { .. }
+            | CopyAction::Failed { .. } => None,
         })
         .collect();
     let mut actions = ProjectionActions::default();
     for item in &report.items {
         let count = match &item.action {
             CopyAction::Orphaned { destination } if rewritten.contains(destination) => continue,
+            // Failed items made no mutation and are not successful projections.
+            CopyAction::Failed { .. } => continue,
             CopyAction::Created { .. } => &mut actions.created,
             CopyAction::Updated { .. } => &mut actions.updated,
             CopyAction::Unchanged { .. } => &mut actions.unchanged,
@@ -5289,6 +5306,17 @@ mod tests {
             },
             EngineError::Token { message: words() },
             EngineError::NoSources,
+            EngineError::ExpectOneTask,
+            EngineError::NotCached {
+                name: "plans".into(),
+            },
+            EngineError::CommentlessDestination {
+                name: "plans".into(),
+                kind: "in-memory".into(),
+            },
+            EngineError::QueryNotTasks,
+            EngineError::CommentsNotDocuments,
+            EngineError::ChangedWhileCopied { item: id() },
             EngineError::NotWritable {
                 name: "plans".into(),
                 kind: "in-memory".into(),
@@ -7377,10 +7405,16 @@ mod tests {
                  "destination": "plans:board/003-design", "via": "created", "link": "recorded"},
                 {"source": "elsewhere:board/gone", "action": "orphaned",
                  "destination": "plans:board/009-gone"},
+                {"source": "elsewhere:board/moving", "action": "failed",
+                 "error": onetaskgraph_core::Failure::from(&onetaskgraph_core::EngineError::ChangedWhileCopied { item: "elsewhere:board/moving".parse().expect("an id") })},
             ],
             "spent": {"requests": 3, "budgets": []},
         }))
         .expect("the store's own report reads");
+        // A failed outcome requires the source task to change during both copy
+        // reads. Write-back copies an immutable local shadow, so no real settlement
+        // can produce it. This store-report assertion covers the compatibility arm
+        // without substituting a mutable source for the layer under test in an e2e.
         assert_eq!(
             super::actions(&report),
             ProjectionActions {

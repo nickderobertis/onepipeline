@@ -969,14 +969,13 @@ onevcs-testing = "0.17.0"
 # updates it, source values winning shared keys (onetaskgraph #3567), so re-copying a
 # plan no longer deletes the design approvals recorded on the board's document.
 #
-# **0.4.0 reads a `github-projects` source's `metadata_fields`**, which the host's
-# `followups` source carries (`{field: Host, key: orchestrator.follow-up, path: [host]}`)
-# and an earlier store refuses as an unknown field; `tests/e2e/linear_writeback.rs` reads and
-# settles a plan through such a source. A new minor, so a breaking change to the `Config`
-# `src/taskgraph.rs` exposes. `justfile`'s `onetaskgraph-version` moves with this release.
-onetaskgraph-core = "=0.4.0"
-onetaskgraph-plugin-api = "=0.4.0"
-onetaskgraph-local-md = "=0.4.0"
+# **0.6.0 carries comments across copies and adds per-source caches**. Engine
+# reads remain unpinned, including settlement write-back reads. The plugin API
+# adds public Task and Comment fields and CopyLink, making this a breaking link.
+# `justfile`'s `onetaskgraph-version` moves with this release.
+onetaskgraph-core = "=0.6.0"
+onetaskgraph-plugin-api = "=0.6.0"
+onetaskgraph-local-md = "=0.6.0"
 # Not engines: two crates both members use, pinned once so they build against one version.
 # `just engines-current` reads only the engines its script names.
 sha2 = "0.10"
