@@ -593,6 +593,22 @@ impl DiscardOutcome {
     }
 }
 
+/// The refusal of a run that is still driven, unproven, or not at an ending.
+fn not_ended(view: &RunView, run: &str) -> Option<DiscardOutcome> {
+    let reading = views::reading(view);
+    let shutdown = views::host_shutdown(view);
+    let word = if shutdown {
+        "HOST SHUTDOWN"
+    } else {
+        reading.word
+    };
+    (!view.state.strict || reading.driven || shutdown || reading.ending.is_none()).then(|| {
+        DiscardOutcome::Refused(format!(
+            "run {run} is {word}, not ended; its scratch is kept and nothing was deleted"
+        ))
+    })
+}
+
 pub(crate) fn discard(root: &Path, run: &str) -> crate::Result<DiscardOutcome> {
     let began = Instant::now();
     let Some(identity) = ScratchRun::new(run) else {
@@ -604,22 +620,14 @@ pub(crate) fn discard(root: &Path, run: &str) -> crate::Result<DiscardOutcome> {
     {
         return Ok(no_run(run));
     }
+    // A refusal deletes nothing, so it is answered from the run as it reads now:
+    // a shut-down driver journals its word before it lets go inside the gate.
+    if let Some(refused) = not_ended(&RunView::open(&paths)?, run) {
+        return Ok(refused);
+    }
     let _handover = ledger::Handover::hold(&paths)?;
-    let view = RunView::open(&paths)?;
-    let reading = views::reading(&view);
-    let word = if views::host_shutdown(&view) {
-        "HOST SHUTDOWN"
-    } else {
-        reading.word
-    };
-    if !view.state.strict
-        || reading.driven
-        || views::host_shutdown(&view)
-        || reading.ending.is_none()
-    {
-        return Ok(DiscardOutcome::Refused(format!(
-            "run {run} is {word}, not ended; its scratch is kept and nothing was deleted"
-        )));
+    if let Some(refused) = not_ended(&RunView::open(&paths)?, run) {
+        return Ok(refused);
     }
     let _ownership = ledger::OwnershipLock::acquire(&paths, "scratch")?;
     let dirs = match directories(&paths) {

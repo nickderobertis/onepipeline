@@ -842,6 +842,71 @@ fn shutdown_and_parked_keep_scratch_without_records_or_view_side_effects() {
     }
 }
 
+/// A shut-down driver journals `host-shutdown` and only then lets go of the run
+/// inside its handover gate. Discard in that interval still answers with the run's
+/// word, since a refusal deletes nothing and needs no gate.
+#[test]
+fn discard_refuses_a_shut_down_run_whose_departing_driver_holds_the_gate() {
+    let world =
+        World::new("scratch-shutdown-gate").with_env("ONEPIPELINE_PARKED_AFTER_SECONDS", "1");
+    world.script("build.wait", "hold");
+    world.script("build.turn-open", "");
+    world.script("build.turn-open", "");
+    world.script("build.stops-when-interrupted", "");
+    world.script("build.fail", "1");
+    let path = world.plan("leaving", &plan_of("leaving", vec![agent("build", &[])]));
+    world.run(&["start", &path, "--detach"]).exited(0);
+    world.until("the held dispatch's scratch", |world| {
+        !world.events_of("leaving", "turn-started").is_empty()
+    });
+    world
+        .run(&["shutdown", "leaving", "--grace", "1"])
+        .exited(0);
+    world.until_store("the shutdown driver to exit", |world| {
+        world
+            .run(&["status", "leaving"])
+            .stdout
+            .contains("HOST SHUTDOWN")
+            && world.run(&["status", "leaving", "--json"]).json()["driven"] == false
+    });
+    // llmlint: ignore-block[tests_mirror_real_usage] which party is inside the gate
+    // is decided in microseconds inside the departing driver, and no CLI input holds
+    // it there. This entry is the one that driver writes while it lets go: a live
+    // process on this host, which every gate taker must wait behind.
+    let gate = world.run_file("leaving", "channel/handover");
+    std::fs::create_dir_all(&gate).unwrap();
+    let host = world.run_json("leaving", "owner.lock")["host"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let holder = gate.join(format!("{:020}", 1));
+    std::fs::write(&holder, format!("{} {host}", std::process::id())).unwrap();
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let journal = std::fs::read(world.run_file("leaving", "events.jsonl")).unwrap();
+    let before = snapshot(&world.run_file("leaving", "scratch"));
+    assert!(!before.is_empty());
+
+    let refused = world.run(&["scratch", "discard", "leaving"]);
+    refused.exited(2);
+    assert_eq!(
+        refused.stderr,
+        "onepipeline scratch discard: run leaving is HOST SHUTDOWN, not ended; its scratch is \
+         kept and nothing was deleted\n"
+    );
+    assert!(refused.stdout.is_empty(), "{}", refused.stdout);
+    assert_eq!(
+        std::fs::read(world.run_file("leaving", "events.jsonl")).unwrap(),
+        journal
+    );
+    assert_eq!(snapshot(&world.run_file("leaving", "scratch")), before);
+
+    std::fs::remove_file(holder).unwrap();
+    world.script("build.fail", "1");
+    world.release("build.go");
+    world.run(&["adopt", "leaving"]).settled();
+    assert_retained(&world, "leaving", "failed", 1);
+}
+
 #[test]
 fn discard_refuses_unknown_and_path_like_names_and_live_or_dead_drivers() {
     let world = World::new("scratch-discard-refusals");
