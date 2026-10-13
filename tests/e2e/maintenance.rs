@@ -1722,6 +1722,7 @@ fn sized_pools(world: &World, pools: &[(&str, u64, Option<&str>)]) {
 /// Commit the repository's own maintenance into its base: `tools/maintain.sh`,
 /// the `declared_maintain.sh` fixture, and `onevcs.toml` as given, pushed so every
 /// slot cut afterwards carries the script.
+#[cfg(unix)]
 fn declare(world: &World, checkout: &Path, declaration: &str) {
     let tools = checkout.join("tools");
     std::fs::create_dir_all(&tools).expect("a tools directory");
@@ -1739,6 +1740,7 @@ fn declare(world: &World, checkout: &Path, declaration: &str) {
     crate::harness::git(world, checkout, &["push", "origin", "main"]);
 }
 
+#[cfg(unix)]
 fn declaring(args: &[&str]) -> String {
     let mut argv = vec!["tools/maintain.sh"];
     argv.extend_from_slice(args);
@@ -1750,6 +1752,7 @@ fn declaring(args: &[&str]) -> String {
 
 /// Cut `n` slots for the identity: `n` real sessions open at once, then closed,
 /// each handing its slot back to the pool.
+#[cfg(unix)]
 fn cut_slots(world: &World, checkout: &Path, n: usize) {
     world.on_onevcs(|| {
         let vcs = onevcs::Providers::real().vcs;
@@ -1779,6 +1782,7 @@ fn cut_slots(world: &World, checkout: &Path, n: usize) {
 }
 
 /// Every slot's worktree of the identity, by slot number.
+#[cfg(unix)]
 fn worktrees(world: &World, repo: &str) -> Vec<PathBuf> {
     let status = pool_status_of(world, repo);
     let mut slots: Vec<(u64, PathBuf)> = status["slots"]
@@ -1797,6 +1801,7 @@ fn worktrees(world: &World, repo: &str) -> Vec<PathBuf> {
 }
 
 /// Write `mebibytes` of ordinary, non-sparse files under the worktree's `scratch/`.
+#[cfg(unix)]
 fn scratch(worktree: &Path, mebibytes: usize) {
     let dir = worktree.join("scratch");
     std::fs::create_dir_all(&dir).expect("a scratch directory");
@@ -1830,10 +1835,12 @@ fn allocated(root: &Path) -> u64 {
 }
 
 /// `0.3 GiB`, as `results` spells a byte count.
+#[cfg(unix)]
 fn gib(bytes: u64) -> String {
     format!("{:.1} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
 }
 
+#[cfg(unix)]
 fn disk_of(record: &Value, identity: &str, number: u64) -> Value {
     let entry = record["payload"]["identities"]
         .as_array()
@@ -1852,11 +1859,13 @@ fn disk_of(record: &Value, identity: &str, number: u64) -> Value {
 }
 
 /// What a `disk` freed: `before_bytes - after_bytes`, signed.
+#[cfg(unix)]
 fn dropped(disk: &Value) -> i128 {
     i128::from(disk["before_bytes"].as_u64().expect("before_bytes"))
         - i128::from(disk["after_bytes"].as_u64().expect("after_bytes"))
 }
 
+#[cfg(unix)]
 fn line_under_header(results: &str) -> Option<&str> {
     let mut lines = results.lines();
     lines.find(|line| line.starts_with("  pool maintenance: last sweep that did something"))?;
