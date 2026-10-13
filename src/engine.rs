@@ -1601,7 +1601,7 @@ fn converge(
         // adoption's, before its first dispatch — reads where every draft stands now.
         if let Some(trigger) = state.readjust.due.take() {
             if superseded_by.is_none() && !state.readjust.read_this_pass {
-                crate::readjust::run(paths, journal, state, trigger, false)?;
+                crate::readjust::run(paths, journal, state, trigger)?;
                 derived = None;
                 unpublished = true;
             }
@@ -1747,7 +1747,6 @@ fn converge(
                     journal,
                     state,
                     crate::payload::ReadjustTrigger::Rework,
-                    false,
                 )?;
                 derived = None;
                 unpublished = true;
@@ -1817,7 +1816,6 @@ fn converge(
                     journal,
                     state,
                     crate::payload::ReadjustTrigger::Placement,
-                    false,
                 )?;
                 derived = None;
             }
@@ -3766,7 +3764,6 @@ fn reconcile_envelope(
                     journal,
                     state,
                     crate::payload::ReadjustTrigger::Readjust,
-                    false,
                 )
             })
             .and_then(|detection| match detection.failed() {
@@ -3797,7 +3794,6 @@ fn reconcile_envelope(
             journal,
             state,
             crate::payload::ReadjustTrigger::Rework,
-            false,
         )?;
     }
     if envelope.commands == [Command::Review {}] {

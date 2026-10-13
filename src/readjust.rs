@@ -298,16 +298,16 @@ fn grouped(drafts: Vec<Draft>, failures: &mut Vec<(String, String)>) -> Vec<Grou
 /// Read every draft's standing — and, in a review pass, its review feedback — and
 /// journal what each answer says, once per change.
 ///
-/// `review` reads through `review_standings`, whose review reads the pass then
-/// discovers from; every other trigger reads `change_standings`. A repository whose
+/// The `review` trigger reads through `review_standings`, whose review reads the pass
+/// then discovers from; every other trigger reads `change_standings`. A repository whose
 /// read failed is journalled `readjust-read-failed` and contributes nothing.
 pub(crate) fn detect(
     paths: &RunPaths,
     journal: &mut Journal,
     state: &RunState,
     trigger: ReadjustTrigger,
-    review: bool,
 ) -> Result<Detection> {
+    let review = trigger == ReadjustTrigger::Review;
     let mut detection = Detection::default();
     let drafts = drafts(state);
     if drafts.is_empty() {
@@ -1005,9 +1005,8 @@ pub(crate) fn run(
     journal: &mut Journal,
     state: &mut crate::checkpoint::Projected,
     trigger: ReadjustTrigger,
-    review: bool,
 ) -> Result<Detection> {
-    let detection = detect(paths, journal, state, trigger, review)?;
+    let detection = detect(paths, journal, state, trigger)?;
     state.readjust.absorb(&detection);
     state.refresh(paths);
     Ok(detection)

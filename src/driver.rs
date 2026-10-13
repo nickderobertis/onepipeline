@@ -3781,7 +3781,6 @@ pub(crate) fn submit_envelope(
                         &mut journal,
                         &mut projected,
                         crate::payload::ReadjustTrigger::Rework,
-                        false,
                     )?;
                     readjusted = RunView::open(paths)?;
                     let frontier = Frontier {

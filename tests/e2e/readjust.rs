@@ -2397,3 +2397,62 @@ fn every_deferred_verdict_word_is_recorded_and_only_pending_stays_outstanding() 
     assert!(receipt.get("outstanding").is_none(), "{receipt}");
     assert_eq!(outcome_of(&world, run, "b"), "change-review-draft");
 }
+
+/// Commit `body` into `file` on the origin's `main`, as a person pushing to the root.
+fn push_on_main(world: &World, file: &str, body: &str) {
+    let checkout = service(world).checkout;
+    git(world, &checkout, &["fetch", "--quiet", "origin"]);
+    git(world, &checkout, &["checkout", "--quiet", "-B", "main", "origin/main"]);
+    std::fs::write(checkout.join(file), body).expect("the file is written");
+    git(world, &checkout, &["add", file]);
+    git(world, &checkout, &["commit", "--quiet", "-m", "chore: a person's change"]);
+    git(world, &checkout, &["push", "--quiet", "origin", "main"]);
+}
+
+/// A readjustment whose merge conflicts: after `a` lands, a person changes on the root
+/// the file `b` changed too. `b`'s readjustment hands the merge to `b`'s own worker, which
+/// concludes it; the draft is then published with drafting, retargeted onto the root
+/// after its push, still a draft, and recorded `node-readjusted` with
+/// `agent_dispatched: true`.
+#[test]
+fn a_conflicted_readjustment_is_concluded_by_the_draft_s_worker_then_retargeted() {
+    let world = team_world("readjust-conflict");
+    world.script("a.work", "a wrote this\n");
+    world.script("a.work-file", "shared");
+    world.script("b.work", "b changed this\n");
+    world.script("b.work-file", "shared");
+    world.script("b.resolves-merge", "a person changed this, and b changed it\n");
+    let run = "conflict";
+    launched(&world, run, vec![lifecycle("a", &[]), lifecycle("b", &["a"])]);
+    let b_branch = branch_of(&world, run, "b");
+    // `b`'s worker is asked only to conclude the merge from here.
+    world.unscript("b.work");
+    merge(&world, &number_of(&world, run, "a"), "squash", "kept");
+    push_on_main(&world, "shared.md", "a person changed this\n");
+    readjusted(&world, run);
+
+    let readjusted = record(&world, run, "node-readjusted", "b").expect("b was readjusted");
+    assert_eq!(readjusted["agent_dispatched"], true, "{readjusted}");
+    assert_eq!(readjusted["retarget"], "retargeted", "{readjusted}");
+    assert_eq!(readjusted["content"], "merged", "{readjusted}");
+    let journal = world.journal(run);
+    let started = first(&world, run, "node-restack-started", "b");
+    assert!(
+        journal[started..]
+            .iter()
+            .any(|event| event["kind"] == "turn-activity"
+                && event["labels"]["node"] == "b"
+                && event["payload"]["task"]
+                    .as_str()
+                    .is_some_and(|task| task.contains("opened with a merge in progress"))),
+        "b's worker was not handed the merge"
+    );
+    assert!(is_ancestor(&world, &tip(&world, "main"), &tip(&world, &b_branch)));
+    assert_eq!(
+        crate::stacked_drafts::file_on(&world, &service(&world), &b_branch, "shared.md"),
+        "a person changed this, and b changed it"
+    );
+    let (base, _) = on_host(&world, run, "b");
+    assert_eq!(base, "main");
+    assert_eq!(settled(&world, run, "b")["base"], "main");
+}

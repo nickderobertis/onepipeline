@@ -194,7 +194,6 @@ pub(crate) fn pass(
         journal,
         projected,
         crate::payload::ReadjustTrigger::Review,
-        true,
     )?;
     let state: &RunState = projected;
     let channel = ChannelState::new(paths);
@@ -449,7 +448,6 @@ fn undriven(
             &mut journal,
             &mut projected,
             crate::payload::ReadjustTrigger::Readjust,
-            false,
         )?
         .failed(),
     };
