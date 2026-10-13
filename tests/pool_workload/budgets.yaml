@@ -1,0 +1,21 @@
+# The budget the `onepipeline-pool-workload` project holds itself to, checked by
+# `onebudgetspec check tests/pool_workload/budgets.yaml` in that project's `workload`
+# target, after the journey that writes the recording it reads.
+schema_version: 1
+budgets:
+  - id: pool-maintenance-engine-seconds
+    measure: reported
+    command: [node, pool-maintenance-budget.mjs]
+    unit: seconds
+    direction: max
+    threshold: 5
+    description: >-
+      Wall-clock seconds one idle maintenance sweep takes beyond its declared commands'
+      own runtime (from the sweep's start, as its `pool-maintenance` record states it, to
+      that record being journalled, less the sum of the slots' `duration_ms`), plus the
+      seconds `onepipeline results` takes to render that run. Workload: one sweep over 25
+      real pooled slots across 20 identities, each declaring in its `onevcs.toml` a command
+      that does nothing, then one `results`. Basis: estimate — journalling one record and
+      rendering about 25 slot lines are local file appends and reads, well under a second;
+      5 s holds the engine far below the repositories' own 60 s maintenance. Read from the
+      journey's recording; this command times nothing.

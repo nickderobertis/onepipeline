@@ -1,0 +1,52 @@
+{
+  "name": "onepipeline-pool-workload",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "library",
+  "sourceRoot": "tests/pool_workload",
+  "tags": [
+    "scope:tests",
+    "lang:rust",
+    "tier:workload"
+  ],
+  "targets": {
+    "bootstrap": {
+      "executor": "nx:noop"
+    },
+    "build": {
+      "command": "just _tier-build pool_workload",
+      "inputs": [
+        "poolWorkloadSource"
+      ]
+    },
+    "format": {
+      "command": "just _tier-format tests/pool_workload/main.rs"
+    },
+    "format-check": {
+      "command": "just _tier-fmt-check tests/pool_workload/main.rs",
+      "inputs": [
+        "poolWorkloadSource"
+      ]
+    },
+    "lint": {
+      "command": "just _tier-lint pool_workload",
+      "inputs": [
+        "poolWorkloadSource"
+      ]
+    },
+    "workload": {
+      "command": "just _pool-workload-run",
+      "inputs": [
+        "poolWorkloadSource"
+      ],
+      "cache": false,
+      "parallelism": false
+    },
+    "check": {
+      "executor": "nx:noop",
+      "dependsOn": [
+        "format-check",
+        "lint"
+      ]
+    }
+  }
+}

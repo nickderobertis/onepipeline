@@ -129,7 +129,15 @@ const LIVE_TARGETS = {
   "onepipeline-release-compat": "release-compat",
 };
 const declaresUniform = (declared, target) =>
-  target !== "test" || !declared.tags?.includes("tier:live");
+  target !== "test" ||
+  (!declared.tags?.includes("tier:live") && !declared.tags?.includes("tier:workload"));
+
+// The workload tiers (`tier:workload`: `onepipeline-pool-workload`) measure a whole
+// host-shaped workload against their own budgets file. Like the live tiers they
+// declare no `test`: their journey and its budget check are one uncached `workload`
+// target, fanned out by `just workload` and reached by no `check`, `test`,
+// coverage or `budgets` target, so no per-change selection pays for one.
+const WORKLOAD = projects.filter((declared) => declared.tags?.includes("tier:workload"));
 
 // The budget tiers (`tier:budget`: `onepipeline-stop-verdict`) produce the telemetry
 // `onepipeline:budgets` reads. They time an uninstrumented release binary over full
@@ -145,7 +153,8 @@ const OFFLINE_RUST = projects.filter(
   (declared) =>
     declared.tags?.includes("lang:rust") &&
     !declared.tags?.includes("tier:live") &&
-    !declared.tags?.includes("tier:budget"),
+    !declared.tags?.includes("tier:budget") &&
+    !declared.tags?.includes("tier:workload"),
 );
 
 describe("the uniform target set", () => {
@@ -240,6 +249,42 @@ describe("the live and network tiers", () => {
   }
 });
 
+describe("the workload tiers", () => {
+  it("are the projects whose journey only `just workload` runs", () => {
+    assert.deepEqual(
+      WORKLOAD.map((declared) => declared.name),
+      ["onepipeline-pool-workload"],
+    );
+    const body = justfile.split("\nworkload:\n")[1]?.split("\n\n")[0] ?? "";
+    assert.match(body, /scripts\/nx\.sh run-many -t workload(\s|$)/, body);
+    assert.equal(nxJson.targetDefaults.workload?.cache, false, "nx.json caches `workload`");
+  });
+
+  for (const declared of WORKLOAD) {
+    it(`keeps \`${declared.name}\`'s journey out of every per-change target`, () => {
+      const workload = declared.targets.workload;
+      assert.ok(workload, `${declared.name} declares no \`workload\` target`);
+      assert.equal(workload.cache, false, `${declared.name}:workload could replay a measure`);
+      assert.equal(workload.parallelism, false, `${declared.name}:workload runs beside others`);
+      assert.equal(declared.targets.test, undefined, `${declared.name} declares a \`test\``);
+      assert.deepEqual(declared.targets.check.dependsOn, ["format-check", "lint"]);
+      for (const owner of projects) {
+        for (const target of ["check", "test", "test-rest", "test-quick", "budgets"]) {
+          assert.doesNotMatch(
+            JSON.stringify(owner.targets?.[target]?.dependsOn ?? []),
+            /workload/,
+            `${owner.name}:${target} reaches a workload`,
+          );
+        }
+        assert.ok(
+          !(owner.implicitDependencies ?? []).includes(declared.name),
+          `${owner.name} depends on ${declared.name}, so a change to it selects them`,
+        );
+      }
+    });
+  }
+});
+
 describe("the offline tier split", () => {
   // The target set `onepipeline-note-journeys` declares is the shape every
   // offline test tier copies, so a tier that grew or lost one is caught here.
@@ -314,7 +359,15 @@ describe("the offline tier split", () => {
       execFileSync("just", ["--evaluate", name], { cwd: root, encoding: "utf8" });
     assert.match(project("onepipeline").targets["test-rest"].command, /just _crate-test-rest/);
     const rest = evaluate("rest-tier");
-    for (const binary of ["e2e", "contract", "note", "smoke", "release_channel", "stop_verdict"]) {
+    for (const binary of [
+      "e2e",
+      "contract",
+      "note",
+      "smoke",
+      "release_channel",
+      "stop_verdict",
+      "pool_workload",
+    ]) {
       assert.ok(
         rest.includes(`not binary(${binary})`),
         `rest-tier runs the ${binary} binary: ${rest}`,

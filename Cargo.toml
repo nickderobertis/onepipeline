@@ -1272,6 +1272,15 @@ path = "tests/release_channel/main.rs"
 name = "stop_verdict"
 path = "tests/stop_verdict/main.rs"
 
+# The pool-maintenance workload journey: one idle sweep over 25 real pooled slots
+# across 20 declaring identities, recorded for `pool-maintenance-engine-seconds`.
+# Its own binary and its own Nx project (`tests/pool_workload/project.json`), run
+# only by that project's `workload` target (`just workload`), so no per-change
+# selection compiles or runs it.
+[[test]]
+name = "pool_workload"
+path = "tests/pool_workload/main.rs"
+
 # A CLI binary: optimize for a small, fast-starting artifact.
 [profile.release]
 strip = true

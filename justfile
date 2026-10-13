@@ -244,7 +244,9 @@ _crate-lint:
 # name rather than by `#[ignore]` so neither journey is ever a skipped test.
 # `stop_verdict` is offline but in none of the four either: it times the release
 # binary rather than the instrumented one, so its project
-# (`onepipeline-stop-verdict`) runs it through `just stop-verdict-journeys`.
+# (`onepipeline-stop-verdict`) runs it through `just stop-verdict-journeys`. Nor
+# is `pool_workload`: it measures a whole host-shaped maintenance sweep, so its
+# project (`onepipeline-pool-workload`) runs it only through `just workload`.
 #
 # `rest-tier` is spelled as the complement of every other binary, so a test
 # binary added later lands in the crate's tier rather than in none.
@@ -260,7 +262,7 @@ _crate-lint:
 # so no change could ever select one without the other, and running the two as
 # separate nextest processes would put eight process trees on the machine where
 # `.config/nextest.toml`'s one group allows four.
-rest-tier := "not binary(smoke) and not binary(release_channel) and not binary(note) and not binary(e2e) and not binary(contract) and not binary(stop_verdict)"
+rest-tier := "not binary(smoke) and not binary(release_channel) and not binary(note) and not binary(e2e) and not binary(contract) and not binary(stop_verdict) and not binary(pool_workload)"
 e2e-tier := "binary(e2e)"
 contract-tier := "binary(contract)"
 note-tier := "binary(note) and not test(/^harness::/)"
@@ -498,6 +500,23 @@ _stop-verdict-run:
     @RUSTFLAGS="-D warnings" cargo build --release --locked --quiet --bin onepipeline
     @ONEPIPELINE_BUDGET_BINARY="$PWD/target/release/onepipeline" RUSTFLAGS="-D warnings" cargo nextest run --locked -E 'binary(stop_verdict)' --no-tests=fail
     @node --test scripts/stop-guard-unpublished-budget.test.mjs
+
+# Outside `check` and `gate`: each runs a whole host-shaped workload journey to
+# measure it, which no per-change selection should pay for. Every project's
+# `workload` target is uncached and reached by no `check`, `test`, coverage or
+# `budgets` target; `release-sweep.yml` runs this after its quality gate.
+# Run every workload journey and check the budgets each one records.
+workload:
+    @bash scripts/nx.sh run-many -t workload
+
+# The `onepipeline-pool-workload` project's `workload` target: the journey writes
+# `target/budget-records/pool-maintenance.json`, which the project's own budgets
+# file reads. `harness::` is the shared harness's own self-tests, which the e2e
+# tier already runs.
+_pool-workload-run:
+    @just _ensure-node-modules
+    @RUSTFLAGS="-D warnings" cargo nextest run --locked -E 'binary(pool_workload) and not test(/^harness::/)' --no-tests=fail
+    @node_modules/.bin/onebudgetspec check tests/pool_workload/budgets.yaml
 
 # Drives the compiled binary — never an in-process `main()`.
 # The end-to-end binary journeys in isolation (also run by `test`/`check`),

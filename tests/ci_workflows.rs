@@ -555,6 +555,28 @@ fn the_release_pull_request_runs_the_full_sweep_and_every_other_pull_request_the
         runs(gate, "just check-affected 2>&1"),
         "the gate runs `just check-affected`"
     );
+    // The workload journeys no `check` reaches run here, after the quality gate.
+    let position = |job: &Value, step_run: &str| {
+        job["steps"]
+            .as_sequence()
+            .expect("the job has steps")
+            .iter()
+            .position(|step| step.get("run").and_then(Value::as_str) == Some(step_run))
+    };
+    let checked = sweep["steps"]
+        .as_sequence()
+        .expect("the job has steps")
+        .iter()
+        .position(|step| step["id"].as_str() == Some("every"))
+        .expect("the release sweep names its quality gate `every`");
+    assert!(
+        position(sweep, "just workload").is_some_and(|workload| workload > checked),
+        "the release sweep does not run `just workload` after its quality gate"
+    );
+    assert!(
+        position(gate, "just workload").is_none(),
+        "the gate runs the workload journeys"
+    );
     assert!(
         !runs(gate, "just check 2>&1"),
         "the gate also runs the full sweep"
