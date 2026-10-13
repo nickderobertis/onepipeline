@@ -459,6 +459,25 @@ fn opened_worktrees() -> std::sync::MutexGuard<'static, std::collections::BTreeM
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// Open a session for a node of a run outside any dispatch — a restack's, which
+/// merges its base in at the open and dispatches an agent only where that merge
+/// stops — labelled exactly as a dispatch's own open labels it, and remembered
+/// against its worktree so a dispatch later run there carries its token.
+///
+/// # Errors
+///
+/// The launch record that could not be read, or `onevcs`'s refusal of the open.
+pub(crate) fn open_session(request: &SessionRequest, labels: &Labels) -> Result<onevcs::Session> {
+    let launched = launched_with(labels)?;
+    let request = SessionRequest {
+        labels: session_labels(&request.labels, labels, launched.as_ref()),
+        ..request.clone()
+    };
+    let session = crate::vcs::session_open(&request)?;
+    remember_worktree(&session);
+    Ok(session)
+}
+
 fn remember_worktree(session: &onevcs::Session) {
     opened_worktrees().insert(session.worktree.clone(), session.token.0.clone());
 }

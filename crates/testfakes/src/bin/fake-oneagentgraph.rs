@@ -2368,8 +2368,32 @@ fn graph_run() -> String {
 }
 
 /// The stream every envelope of this run carries.
+///
+/// The envelope's `stream` is "a unique id per producing process", and the real
+/// sibling mints one from the instant it started beside its pid. A pid alone is
+/// not unique across a run: Windows hands a freed pid straight back, and a
+/// consumer keys what it keeps of a stream — a retained report among it — by
+/// the stream and its `seq`, so a later dispatch reusing an earlier one's pid
+/// would be read as that one's records.
+///
+/// `oneagentgraph.pid` is the pid a journey has every dispatch of this double
+/// stream under, as Windows hands one freed pid to the next process: the one
+/// way a host whose pids only climb can be shown a dispatch that reuses an
+/// earlier one's.
 fn stream() -> String {
-    format!("fake-oneagentgraph-{}", std::process::id())
+    static STARTED: std::sync::OnceLock<u128> = std::sync::OnceLock::new();
+    let started = STARTED.get_or_init(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_millis())
+    });
+    let pid = match fake::node_script(&fake::script_dir(), "oneagentgraph", "pid") {
+        None => std::process::id(),
+        Some(pid) => pid.parse().unwrap_or_else(|error| {
+            fake::fail(&format!("oneagentgraph.pid is not a pid: {error}"))
+        }),
+    };
+    format!("fake-oneagentgraph-{started}-{pid}")
 }
 
 /// Emit the turn's envelopes, as the sibling would: the tool summary from
@@ -2536,7 +2560,7 @@ fn emit(
         publish_oneharness_session(&labels, node, offset, invocation);
     }
     let judged = scripted_decisions(dir, key);
-    let report = report_of(task, scripted_verdicts(dir, key), &judged);
+    let report = report_of(args, task, node, scripted_verdicts(dir, key), &judged);
     envelope(
         4,
         oneagentgraph::event::EventKind::TurnCompleted,
@@ -3079,6 +3103,41 @@ fn publish_oneharness_session(
     }));
 }
 
+/// Read the drafting graph's declared schema through the producer's own types
+/// and validator, so a test answer cannot claim to conform to a different shape.
+fn drafting_schema(args: &[String]) -> oneharness_core::domain::structured::Schema {
+    let graph = std::path::Path::new(&args[1]);
+    let read = |path: &std::path::Path| {
+        std::fs::read_to_string(path)
+            .unwrap_or_else(|error| fake::fail(&format!("cannot read {}: {error}", path.display())))
+    };
+    let configured: oneagentgraph::config::GraphConfig = serde_norway::from_str(&read(graph))
+        .unwrap_or_else(|error| fake::fail(&format!("the drafting graph is invalid: {error}")));
+    let harness = configured
+        .members
+        .values()
+        .find_map(|member| match member {
+            oneagentgraph::config::Member::Oneharness(member) => Some(&member.oneharness_config.0),
+            oneagentgraph::config::Member::Onejudge(_) => None,
+        })
+        .unwrap_or_else(|| fake::fail("the drafting graph has no single-sided member"));
+    let config_path = graph
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join(harness);
+    let config = oneharness_core::domain::config::parse(&read(&config_path))
+        .unwrap_or_else(|error| fake::fail(&format!("the drafting config is invalid: {error}")));
+    let schema = config
+        .schema_file
+        .unwrap_or_else(|| fake::fail("the drafting config declares no schema_file"));
+    let path = config_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join(schema);
+    oneharness_core::domain::structured::Schema::compile(&read(&path))
+        .unwrap_or_else(|error| fake::fail(&format!("the drafting schema is invalid: {error}")))
+}
+
 /// The report a settled member stores.
 ///
 /// Two-party, because the shipped node-scope graph's `worker` is a two-party
@@ -3097,7 +3156,9 @@ fn publish_oneharness_session(
 /// report under the key and shape onejudge's own `Report` writes — nothing for
 /// a member no panel judged.
 fn report_of(
+    args: &[String],
     task: &str,
+    node: &str,
     verdicts: Vec<serde_json::Value>,
     judged: &[oneagentgraph::event::JudgeDecided],
 ) -> serde_json::Value {
@@ -3123,8 +3184,35 @@ fn report_of(
         // practice: an identity whose answer the schema refused, and the next
         // one, which conformed and put nothing in it. A consumer that stopped at
         // the refusal would report a schema that is working as the fault.
+        // `pr-author.title-check` is the `title_check` a drafter answers beside its
+        // body — a JSON value written verbatim, so a journey states a `keeps`, a
+        // `replaced` naming a subject, or a verdict no reader accepts — and nothing
+        // where it is not scripted, which is every drafter written before the field.
+        // `<node>.pr-author.title-check` is the one node's drafter's, ahead of it, so
+        // drafters answering differently can be dispatched at once.
+        let checked = |mut answered: serde_json::Value| {
+            let dir = fake::script_dir();
+            let own = format!("{node}.pr-author");
+            let scripted = fake::node_script(&dir, &own, "title-check")
+                .map(|check| (format!("{own}.title-check"), check))
+                .or_else(|| {
+                    fake::node_script(&dir, "pr-author", "title-check")
+                        .map(|check| ("pr-author.title-check".to_owned(), check))
+                });
+            if let Some((name, check)) = scripted {
+                let check: serde_json::Value = serde_json::from_str(&check)
+                    .unwrap_or_else(|error| fake::fail(&format!("{name} is not JSON: {error}")));
+                answered["structured"]["title_check"] = check;
+            }
+            // The producer's flag is the configured schema's answer, including
+            // the new title check, rather than a promise fabricated by the double.
+            answered["schema_valid"] = serde_json::json!(drafting_schema(args)
+                .validate(&answered["structured"])
+                .is_ok());
+            answered
+        };
         let results = match &answer {
-            Drafted::Body(body) => vec![stepped_past, answered("claude-code", body, true)],
+            Drafted::Body(body) => vec![stepped_past, checked(answered("claude-code", body, true))],
             Drafted::SchemaRefused(attempted) => {
                 vec![stepped_past, answered("claude-code", attempted, false)]
             }

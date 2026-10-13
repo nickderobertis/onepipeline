@@ -11,14 +11,14 @@ owns the contract**, and `docs/contract.md` was amended to carry each ruling. Th
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22, 33, 35–40, 46–73, 76, 80, 84–88, 92, 93, 95, 98, 111, 113–115, 117, 119 and 120 are open**, except **52**, which entry 60
+Entries **10–22, 33, 35–40, 46–73, 76, 80, 84–88, 92, 93, 95, 98, 111, 113–115, 117, 119–121 are open**, except **52**, which entry 60
 supersedes: that proposal added a second manager-note op beside `context`, and 60
 collapses the two into one, so the shape lives in 60 and 52 keeps only the
 history that produced it. Each open entry states what the code does today and the
 proposal it is waiting on. Most are questions for a *producer* rather than for
 this crate, because `oneagentgraph` and `onevcs` are independent tools that expose
 general integration hooks only and nothing in them may know about this one; the
-rest — 36 to 40, 46 to 73, 80, 84 to 88, 92, 93, 95, 98, 111, 113 to 115, 117, 119 and 120 — are for the planner who owns the contract, and
+rest — 36 to 40, 46 to 73, 80, 84 to 88, 92, 93, 95, 98, 111, 113 to 115, 117, 119–121 — are for the planner who owns the contract, and
 name the sentence in it they would change. Entry 40 is for both: its plan-schema and event-kind
 halves are the contract owner's, and the two things it could not compile are
 `onevcs`'s. Entry 76 is for `onemessagebus` and for a node of this crate's own. An
@@ -10176,3 +10176,217 @@ none was re-measured.
 ```
 
 <!-- llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate] -->
+
+## 121. A draft in review could not be reworked in place, and nothing moved the drafts stacked on it — OPEN
+
+**Proposal, for the planner who owns the contract: two planner-channel ops, `rework`
+and `retitle`; two compiled operations, `rework-requested` and `retitled`; and four
+journal kinds, `change-retitled`, `title-unverified`, `node-restack-started` and
+`node-restacked`.** The contract's ops all refuse a node settled `done` — `retry`
+takes a running, failed or cancelled node, and `amend` refuses a done one — so review
+feedback on a draft of a stack (entry 115) could only be answered by improvising a
+new node, which opened a second change request beside the first and left the run's
+record wrong; and nothing moved a draft stacked on a parent whose branch moved. The
+rule below is the approved design of `authoring:pr-feedback-rework` (node
+`op-rework`, which owns it; `op-readjust` and `op-review` restate it), and this build
+implements it; the contract's wording is unchanged until it is ruled on.
+
+**`rework`.** `{op: rework, id, reason, instruction, comments?: [{id, url}], title?,
+replacement?}` supersedes a lifecycle node settled `done` with a replacement in its
+lineage, exactly as a `retry` builds one — the board item is reused and
+`onepipeline.supersedes` names the lineage — under `replacement` or, by default,
+`<lineage root>-rework-<n>` for the first `n` no node of the run has used. Its
+definition is the node's own with `branch` pinned to the branch the node's
+settlement recorded, the same `deps`, `consumes`, `delivers` and `task_record`, the
+op's `title` or the node's, and its task the node's rendered task followed by a
+`## Rework` section stating the reason, the instruction and each comment's URL. Its
+direct dependents are rewired onto the replacement and are **not** reset: they stay
+`done`. It compiles to `rework-requested` `{node, replacement, reason, instruction,
+comments, title}` beside the `node-added`, edges and `node-dropped` a retry records,
+journalled in `edit-committed`. A run that had settled comes back to life as any
+accepted edit makes it, and the run-end hook's epochs are as before.
+
+Each refusal is an `Error::Refused` naming why: the node is unknown; it is not a
+lifecycle node; a dispatch or a restack is in flight for it, for a node of its
+lineage, or for a draft stacked above it; it is not `done`; its landing is `landed`
+(naming `add` as the way to build on landed work); it has no recorded branch;
+`reason` or `instruction` is blank; `title` fails the title rule — a Conventional
+Commit subject, `type(scope)!: description`, within `onevcs`'s 120-character limit;
+or `replacement` names an id the run has used.
+
+**Republication.** The replacement's worker works on the node's branch, on top of
+its commits, based on the stack base `stack::placement` resolves; its publication
+adopts the change request already open from that branch — never a second one — and
+keeps it a draft (`change-review-draft` again under `change-open` with approvals
+required). The replacement's task on the store carries `onepipeline.rework` —
+`{replaces, reason, instruction, comments: [{id, url}]}` — written with the
+replacement itself, so any host knows which comments a rework answers.
+
+**Title.** The body drafter's structured result gains an optional
+`title_check: {verdict: keeps | replaced, title?}`, read beside `body` off the same
+result; a result without it is accepted exactly as before outside a rework. On a
+rework's publication the drafting task carries the `## Rework` section, a
+`## Current title` section and a `## Net diff` section holding the change's actual
+patch against its base — committed or not, new files included — capped at 204800
+bytes with a line saying where and how much was cut, and asks for `title_check`.
+Precedence: the op's `title`; else a valid `replaced` subject; else unchanged. A
+changed title is written through `onevcs`'s `describe_change` and journalled
+`change-retitled` `{node, from, to, by: op | drafter | retitle}`, and the node's title
+in the graph moves with it, so the write-back projects it. Where the drafting was
+unavailable — the dispatch failed, or no body drafter is configured — or its result
+carried no valid `title_check` — none, an unknown verdict, or `replaced` with a
+subject the title rule refuses — and the op stated no title, the title is left as it
+is, the node still settles as a review draft, `title-unverified` `{node, title,
+reason}` is journalled, `status` and `results` show the title as unverified, and a
+non-blocking `title-unverified` surface names the node, its title, its change request
+and the remedy: `{op: retitle, id, title, reason}`, which writes the title through
+`describe_change` with the body the host holds, journals `change-retitled` with
+`by: retitle`, and clears it. `retitle` is refused for an unknown or non-lifecycle
+node, one with no open change request on the run's record, an invalid title, or a
+blank reason. Its write is made in the envelope's delivery phase, as a note's
+conversation is reached there: an envelope refused after it — a later command of the
+same envelope refused — leaves the title on the host and nothing of it journalled,
+the same residue `deliver_envelope` states for a note.
+
+**Restack.** Once a stack member pushes new commits — a rework's replacement, or a
+restacked draft whose merge added commits — every draft stacked on it, directly or
+through a stack base, is restacked, and so on up the stack. The run sees the move off
+the parent's accepted `push`, folded into the record the moment it is relayed, so a
+draft waits for its parents' pushes and never for their checks; restacks of
+independent drafts run concurrently within the plan's concurrency, and a restack is
+in flight as a dispatch is. For each: a stack base is advanced first with
+`assemble_stack_base`, a `Conflicted` outcome handed to the node's worker as entry
+115 hands it; then the draft's own branch is opened on its base, `onevcs` merging the
+base's new head in at the open. A clean merge is published with **no agent dispatch
+and no drafting** — body and title untouched — and settles again as a review draft;
+a conflict dispatches the draft's own worker with the merge-in-progress task, and is
+then published with drafting. Merge only: never a rebase, a squash or a force-push,
+so each draft's diff against its base stays its own. `node-restack-started`
+`{node, onto: [{branch, head}], cause: rework | restack}` is journalled when it
+starts and `node-restacked` `{node, head, agent_dispatched, outcome}` when it
+ends, its `outcome` the node's settlement (`failed`, with the branch unmoved, when the
+draft's worker could not conclude the merge), followed by the node's ordinary
+`node-settled`; a restack its publication
+refused follows the retry-on-the-same-branch rules, and a spent conflict budget
+raises the `session-conflict` finding. A driver adopting a run whose restack its
+predecessor died in reads that node `done` again and restacks it afresh. A lifecycle
+settlement's `head` is now the commit its publication pushed, off the session's own
+`push` record, where the worktree's own `HEAD` differs from it.
+
+**Views and retirement.** `status` and `results` read a reworked node as reworked,
+with its reason and the comments it answers, a restacked one as restacked onto its
+parent at a commit, with or without an agent turn, and a node restacking now as
+running and restacking onto its parents. The idle pass's exclusions name the branch
+of every `done` lifecycle node whose landing is `unlanded`, so a draft awaiting review
+is never retired from under a rework.
+
+**Grants.** The planner is the only author granted either op: the compiled-in
+allowlist grants every op to the planner and declares no other author, and a bus
+configuration that grants an author its other ops refuses it these two.
+
+**The published documents.** The reply envelope stays at version 3, by entry 57's
+ruling that an addition rides it: the profile's version-3 document admits each op's
+own fields. By the manager's ruling, `schemas/planner-channel.json` and `schemas/events.json`
+both rise from the released `1.1.0` to `1.2.0` and are regenerated from this build:
+the planner bundle adds the two ops, and the events bundle adds the four kinds.
+Entry 119's approved `1.1.0` is unchanged; its approval covers the continuation,
+not these additions.
+
+**What would close it.** A ruling adding the two ops and their refusals to the
+channel table, the restack to the stacked-drafts rule entry 115 proposes, and the
+four kinds and the drafter's `title_check` to the event and drafting paragraphs.
+
+```json
+{
+  "ops": [
+    {
+      "op": "rework",
+      "id": "reader",
+      "reason": "the reviewer asked for a retry instead of a cache",
+      "instruction": "remove the read-through cache and retry a failed read",
+      "comments": [{"id": "2001", "url": "https://github.com/owner/service/pull/4#discussion_r2001"}],
+      "title": "feat(reader): retry a failed plan read",
+      "replacement": "reader-retry"
+    },
+    {
+      "op": "retitle",
+      "id": "reader-rework-1",
+      "title": "feat(reader): retry a failed plan read",
+      "reason": "nothing verified the title the rework kept"
+    }
+  ],
+  "bundle_versions": {"events": "1.2.0", "planner_channel": "1.2.0"},
+  "monitor_may_issue": [],
+  "default_replacement": "{root}-rework-{n}",
+  "operation_kinds": ["rework-requested", "retitled"],
+  "event_kinds": ["change-retitled", "title-unverified", "node-restack-started", "node-restacked"],
+  "records": {
+    "change-retitled": {
+      "node": "reader-rework-1",
+      "from": "feat(cache): add a read-through cache to the plan reader",
+      "to": "feat(reader): retry a failed plan read",
+      "by": "drafter"
+    },
+    "title-unverified": {
+      "node": "reader-rework-1",
+      "title": "feat(cache): add a read-through cache to the plan reader",
+      "reason": "the drafter's answer carried no `title_check`"
+    },
+    "node-restack-started": {
+      "node": "parser",
+      "onto": [{"branch": "me/reader", "head": "1f2e3d4c5b6a79881726354453627180918a7b6c"}],
+      "cause": "rework"
+    },
+    "node-restacked": {
+      "node": "parser",
+      "head": "2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d",
+      "agent_dispatched": false,
+      "outcome": "change-review-draft"
+    }
+  },
+  "retitled_by": ["op", "drafter", "retitle"],
+  "restack_causes": ["rework", "restack"],
+  "title_check": {"verdict": "replaced", "title": "feat(reader): retry a failed plan read"},
+  "title_check_verdicts": ["keeps", "replaced"],
+  "net_diff_cap_bytes": 204800,
+  "surface_kind": "title-unverified",
+  "rework_metadata_key": "onepipeline.rework",
+  "rework_metadata": {
+    "replaces": "reader",
+    "reason": "the reviewer asked for a retry instead of a cache",
+    "instruction": "remove the read-through cache and retry a failed read",
+    "comments": [{"id": "2001", "url": "https://github.com/owner/service/pull/4#discussion_r2001"}]
+  }
+}
+```
+
+**What this build does.** `tests/e2e/rework.rs` drives each rule through the
+compiled binary and the real linked `onevcs` over a real origin, with GitHub at
+`onevcs`'s `ONEVCS_GH` seam:
+`a_draft_in_review_is_reworked_on_its_own_branch_and_change_request` reworks a node
+settled `change-review-draft` from the planner's channel — one change request across
+the journey, still a draft, its dependent `done`, `rework-requested` on the record and
+`onepipeline.rework` on the store;
+`a_rework_restacks_every_draft_stacked_on_it_by_merges_alone` reworks the bottom of
+`a ← b ← c` and `a, d ← e` at a concurrency of 3 under an origin refusing
+non-fast-forward pushes, reading the order of the records, each branch's history and
+change request, and a review thread's hunk;
+`a_rework_conflicting_with_the_draft_above_is_concluded_by_that_draft_s_worker` the
+conflicted restack; `a_restack_starts_before_its_reworked_parent_s_checks_have_settled`
+a restack started while its parent's checks are held running;
+`a_rework_whose_change_outgrew_its_title_is_retitled_by_the_drafter` the net diff and
+the drafter's `replaced` verdict, projected onto the store and kept by a later restack;
+`the_op_s_title_outranks_the_drafter_s_and_a_keeps_leaves_the_title_alone`;
+`a_title_nothing_verified_is_left_unverified_until_a_retitle_sets_one` and
+`a_rework_with_no_body_drafter_configured_leaves_its_title_unverified` every
+unverified case, the `retitle` that clears one and each `retitle` refusal;
+`a_retitle_reaching_a_driven_run_is_applied_by_its_driver` a `retitle` a live
+driver stages and applies;
+`a_rework_of_a_settled_run_makes_it_live_and_its_hook_fires_again_at_the_new_ending`;
+and `only_the_planner_may_rework_or_retitle`. Each `rework` and `retitle` refusal has a
+unit test in `src/edits.rs`, and `src/maintenance.rs`'s
+`a_done_unlanded_lifecycle_node_names_the_branch_it_settled_on` the retirement
+exclusion. `tests/contract.rs`'s `the_rework_surface_is_what_the_divergence_record_names`
+holds the block above against the public types, the registered documents and the
+compiled-in allowlist; `src/edits.rs` and `src/lifecycle.rs` hold its operation kinds,
+default replacement, verdicts and cap against the private ones.

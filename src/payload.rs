@@ -1560,6 +1560,125 @@ pub(crate) struct UnretiredIdentity {
 }
 // llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
 
+/// Who retitled a change request, as `change-retitled` names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum RetitledBy {
+    /// A `rework` stating a title.
+    Op,
+    /// The body drafter's `replaced` verdict on a rework's publication.
+    Drafter,
+    /// A `retitle`.
+    Retitle,
+}
+
+// llmlint: ignore-block[invalid_states_unrepresentable] wire documents, as the rework
+// contract spells them: node ids, titles, branches and commits are strings on the wire, as
+// `node-settled`'s own `branch` and `head` are, each checked where its writer composed it.
+/// `change-retitled`: a lifecycle node's change request carries a new title.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct ChangeRetitled {
+    /// The node.
+    pub(crate) node: String,
+    /// The title the change request carried before.
+    pub(crate) from: String,
+    /// The title it carries now.
+    pub(crate) to: String,
+    /// Who decided it.
+    pub(crate) by: RetitledBy,
+}
+
+/// `title-unverified`: a rework's publication left its change request's title
+/// unchanged without anything saying it still describes the change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct TitleUnverified {
+    /// The node.
+    pub(crate) node: String,
+    /// The title it kept.
+    pub(crate) title: String,
+    /// Why nothing verified it.
+    pub(crate) reason: String,
+}
+
+/// One branch a restack brings a draft onto, and the head it brings it onto.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct RestackOnto {
+    /// The stack parent's branch.
+    pub(crate) branch: String,
+    /// The commit it stands at.
+    pub(crate) head: String,
+}
+
+/// The stack parents a restack brings a draft onto: at least one, which is the
+/// only list a restack has — a draft with no stack parent owes none.
+///
+/// Read through [`TryFrom`], so a record naming none is refused where it is read
+/// rather than folded as a restack onto nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "Vec<RestackOnto>", into = "Vec<RestackOnto>")]
+pub(crate) struct Onto(Vec<RestackOnto>);
+
+impl TryFrom<Vec<RestackOnto>> for Onto {
+    type Error = String;
+
+    fn try_from(parents: Vec<RestackOnto>) -> Result<Self, String> {
+        if parents.is_empty() {
+            return Err("a restack names at least one stack parent it brings the node onto".into());
+        }
+        Ok(Self(parents))
+    }
+}
+
+impl From<Onto> for Vec<RestackOnto> {
+    fn from(onto: Onto) -> Self {
+        onto.0
+    }
+}
+
+impl Onto {
+    /// Each stack parent's branch and head, in the node's dependency order.
+    pub(crate) fn as_slice(&self) -> &[RestackOnto] {
+        &self.0
+    }
+}
+
+/// Why a draft is restacked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum RestackCause {
+    /// A stack parent's rework republished with new commits.
+    Rework,
+    /// A stack parent's own restack republished with new commits.
+    Restack,
+}
+
+/// `node-restack-started`: a draft began being brought onto its stack parents'
+/// new heads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct NodeRestackStarted {
+    /// The node.
+    pub(crate) node: String,
+    /// Each stack parent's branch and the head it is brought onto: at least one.
+    #[schemars(with = "Vec<RestackOnto>", length(min = 1))]
+    pub(crate) onto: Onto,
+    /// Why.
+    pub(crate) cause: RestackCause,
+}
+
+/// `node-restacked`: a restack published.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct NodeRestacked {
+    /// The node.
+    pub(crate) node: String,
+    /// The commit the node's branch stands at after the restack.
+    pub(crate) head: String,
+    /// Whether an agent was dispatched to conclude a conflict.
+    pub(crate) agent_dispatched: bool,
+    /// The publication's outcome word, as the node's settlement carries it.
+    pub(crate) outcome: String,
+}
+// llmlint: ignore-end[invalid_states_unrepresentable]
+
 /// Declares each payload as the bus [`Message`] its kind carries, the total map
 /// from a kind to that id, and the registry every one of them is registered in.
 macro_rules! payload_messages {
@@ -1649,6 +1768,10 @@ payload_messages! {
     HostShutdown => "host-shutdown";
     BranchesSuperseded => "branches-superseded";
     BranchesRetired => "branches-retired";
+    ChangeRetitled => "change-retitled";
+    TitleUnverified => "title-unverified";
+    NodeRestackStarted => "node-restack-started";
+    NodeRestacked => "node-restacked";
     DriverTakenOver => "driver-taken-over";
     DriverSuperseded => "driver-superseded";
 }

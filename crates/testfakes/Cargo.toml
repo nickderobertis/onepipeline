@@ -176,6 +176,15 @@ path = "src/bin/reviewer-bar.rs"
 name = "session-holder"
 path = "src/bin/session-holder.rs"
 
+# A change request's review feedback, read through the linked `onevcs` itself, so a
+# journey asks where a review thread sits the way that library's consumers do. Not a
+# double; see the file's own doc.
+# llmlint: ignore[new_command_or_client_gets_its_own_project] a test program of the
+# e2e suite, like the bins beside it; it is not a command this repository publishes.
+[[bin]]
+name = "review-read"
+path = "src/bin/review-read.rs"
+
 [lib]
 name = "onepipeline_testfakes"
 path = "src/lib.rs"
