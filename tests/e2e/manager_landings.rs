@@ -969,3 +969,287 @@ fn each_verb_killed_mid_operation_is_reported_dead_and_closed_by_its_owner() {
         verb.held.release();
     }
 }
+
+/// A `change-auto` world whose check watch waits as long as the journey holds
+/// it: the host reports `checks` until the journey scripts another answer.
+fn hosted(name: &str, checks: &str) -> (World, Repository) {
+    let world = World::new(name).with_env("ONEVCS_CHECKS_TIMEOUT_SECONDS", "900");
+    let repository = world.repository("change-auto", &[]);
+    world.script("gh.checks", checks);
+    (world, repository)
+}
+
+/// Wait until the landing's journal records a `change-check` of `name` at
+/// `state`: the handshake that the host's answer was read before the journey
+/// moves the check sequence on.
+fn check_recorded(world: &World, flow: &str, landing: &str, name: &str, state: &str) {
+    world.until(
+        &format!("the check {name} to be recorded {state}"),
+        |world| {
+            journal(world, flow, landing).iter().any(|event| {
+                event["kind"] == "change-check"
+                    && event["payload"]["name"] == name
+                    && event["payload"]["state"] == state
+            })
+        },
+    );
+}
+
+/// The two milestones a `change-auto` landing opens with, in order — the change
+/// opened, and opened as a draft — each waking the owner's default watch, and
+/// the second's return, whose cursor is past both.
+fn opened_as_draft(world: &World, flow: &str) -> Returned {
+    let opened = Armed::arm(world, flow, &["--timeout", "900"]).returned();
+    opened.progressed("change-opened");
+    assert_eq!(opened.record["significance"], json!("milestone"));
+    let drafted = Armed::arm(
+        world,
+        flow,
+        &["--timeout", "900", "--cursor", &opened.cursor()],
+    )
+    .returned();
+    drafted.progressed("change-drafted");
+    assert_eq!(drafted.record["significance"], json!("milestone"));
+    drafted
+}
+
+/// The two hosted verbs over a change request whose third-party checks move on
+/// the journey's word: the owner's default watch wakes on the change opening
+/// and on its checks settling — milestones — and on nothing between; each
+/// check's movement is progress, recorded and read by the detailed reader while
+/// that watch stays armed; the landing reaching its base is one milestone, and
+/// the final result is the flow's own clean ending.
+#[test]
+fn a_hosted_landing_wakes_its_owner_on_opened_and_settled_checks_and_not_on_their_progress() {
+    for verb in ["publish-branch", "repo-recover"] {
+        let (world, repository) = hosted(
+            &format!("ml-hosted-{verb}"),
+            "lint in_progress - required\nunit queued - required\ndocs queued - advisory",
+        );
+        let args = match verb {
+            "publish-branch" => {
+                branch_with_work(&world, &repository, BRANCH, "widget.txt");
+                words(&["publish-branch", BRANCH, "--repo", "service", "--no-draft"])
+            }
+            _ => {
+                branch_under(
+                    &world,
+                    &repository,
+                    BRANCH,
+                    "widget.txt",
+                    "feat: add the widget (incomplete step)",
+                );
+                let preserved = world
+                    .cmd_on(&onevcs_binary(), &["preserve", BRANCH, "--repo", "service"])
+                    .output()
+                    .expect("onevcs runs");
+                assert!(preserved.status.success());
+                words(&[
+                    "repo-recover",
+                    BRANCH,
+                    "--repo",
+                    "service",
+                    "--title",
+                    "feat: add the widget",
+                    "--no-draft",
+                ])
+            }
+        };
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        let landing = Started::spawn(&world, None, &argv);
+        let (flow, id) = the_landing(&world);
+
+        // The change opening — as a draft, under this policy — is the first thing
+        // that wakes the owner.
+        let opened = opened_as_draft(&world, &flow);
+        check_recorded(&world, &flow, &id, "lint", "pending");
+
+        // Armed again from that cursor, the default watch waits through every
+        // check's movement, which the detailed reader is handed.
+        let mut armed = Armed::arm(
+            &world,
+            &flow,
+            &["--timeout", "900", "--cursor", &opened.cursor()],
+        );
+        world.script(
+            "gh.checks",
+            "lint completed success required\nunit in_progress - required\ndocs queued - advisory",
+        );
+        check_recorded(&world, &flow, &id, "lint", "passed");
+        let detailed = watch(
+            &world,
+            &flow,
+            &[
+                "--timeout",
+                "0",
+                "--filter",
+                "detailed",
+                "--cursor",
+                &opened.cursor(),
+            ],
+        );
+        detailed.ended_on(EXIT_SUCCESS, "landing-progress");
+        assert_eq!(
+            detailed.record["significance"],
+            json!("progress"),
+            "{}",
+            detailed.record
+        );
+        assert!(
+            armed.waiting(),
+            "{verb}: the default watch woke on a check's progress"
+        );
+
+        // Every required check passes, and the host lands the change it armed.
+        world.script("gh.merged", "");
+        world.script(
+            "gh.checks",
+            "lint completed success required\nunit completed success required\ndocs completed success advisory",
+        );
+        let settled = armed.returned();
+        settled.progressed("checks-settled");
+        assert_eq!(settled.record["significance"], json!("milestone"));
+        let woken = rearmed_until_ended(&world, &flow, settled.cursor());
+        let (code, out, said) = landing.ended();
+        assert_eq!(code, 0, "{verb}: {out}\n{said}");
+        assert!(
+            woken
+                .iter()
+                .all(|(_, significance)| significance != "progress"),
+            "{verb}: {woken:?}"
+        );
+        // One notice of the landing reaching its base, however many steps it took.
+        let merged = woken
+            .iter()
+            .filter(|(kind, _)| kind == "change-merged")
+            .count();
+        assert!(merged <= 1, "{verb}: {woken:?}");
+        // The detailed reader holds every step the producer recorded, merge steps
+        // included, whatever the default watch left out.
+        let all = kinds(&world, &flow, &id);
+        for kind in ["change-opened", "change-check", "checks-settled", "push"] {
+            assert!(
+                all.iter().any(|recorded| recorded == kind),
+                "{verb}: {kind} not in {all:?}"
+            );
+        }
+        let shown = detailed_monitor(&world, &flow);
+        for kind in &all {
+            assert!(
+                shown.contains(kind.as_str()),
+                "{verb}: {kind} not in:\n{shown}"
+            );
+        }
+    }
+}
+
+/// A required check failing wakes the owner at once — a blocker — while the
+/// other required check is still pending and the landing is still watching it:
+/// the failure is the event the watch reports, not the landing's later ending.
+#[test]
+fn a_required_check_failing_wakes_the_owner_while_its_other_checks_are_still_pending() {
+    for verb in ["publish-branch", "repo-recover"] {
+        let (world, repository) = hosted(
+            &format!("ml-red-{verb}"),
+            "lint in_progress - required\nunit in_progress - required",
+        );
+        let args = match verb {
+            "publish-branch" => {
+                branch_with_work(&world, &repository, BRANCH, "widget.txt");
+                words(&["publish-branch", BRANCH, "--repo", "service", "--no-draft"])
+            }
+            _ => {
+                branch_under(
+                    &world,
+                    &repository,
+                    BRANCH,
+                    "widget.txt",
+                    "feat: add the widget (incomplete step)",
+                );
+                let preserved = world
+                    .cmd_on(&onevcs_binary(), &["preserve", BRANCH, "--repo", "service"])
+                    .output()
+                    .expect("onevcs runs");
+                assert!(preserved.status.success());
+                words(&[
+                    "repo-recover",
+                    BRANCH,
+                    "--repo",
+                    "service",
+                    "--title",
+                    "feat: add the widget",
+                    "--no-draft",
+                ])
+            }
+        };
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        let landing = Started::spawn(&world, None, &argv);
+        let (flow, id) = the_landing(&world);
+        let opened = opened_as_draft(&world, &flow);
+        check_recorded(&world, &flow, &id, "unit", "pending");
+        let armed = Armed::arm(
+            &world,
+            &flow,
+            &["--timeout", "900", "--cursor", &opened.cursor()],
+        );
+
+        world.script(
+            "gh.checks",
+            "lint completed failure required\nunit in_progress - required",
+        );
+        let red = armed.returned();
+        red.progressed("change-check");
+        assert_eq!(
+            red.record["significance"],
+            json!("blocker"),
+            "{}",
+            red.record
+        );
+        // At the moment it was recorded, the other required check had not
+        // settled: nothing in the journal before it says otherwise.
+        let journal_now = journal(&world, &flow, &id);
+        let at = journal_now
+            .iter()
+            .position(|event| {
+                event["kind"] == "change-check"
+                    && event["payload"]["name"] == "lint"
+                    && event["labels"]["significance"] == "blocker"
+            })
+            .expect("the failure is journalled");
+        assert!(
+            !journal_now[..at]
+                .iter()
+                .any(|event| event["kind"] == "checks-settled"),
+            "{verb}: the checks were settled before the failure"
+        );
+        assert_eq!(
+            journal_now[..at]
+                .iter()
+                .rev()
+                .find(|event| event["kind"] == "change-check" && event["payload"]["name"] == "unit")
+                .map(|event| event["payload"]["state"].clone()),
+            Some(json!("pending")),
+            "{verb}"
+        );
+        // The landing then ends refused: every later notice is a blocker, and
+        // its flow's ending says so.
+        let (code, _, said) = landing.ended();
+        assert_ne!(code, 0, "{verb}: {said}");
+        let mut cursor = red.cursor();
+        loop {
+            let next = watch(&world, &flow, &["--timeout", "0", "--cursor", &cursor]);
+            if next.record["condition"] == "flow-failed" {
+                next.ended_on(EXIT_FLOW_FAILED, "flow-failed");
+                break;
+            }
+            next.ended_on(EXIT_SUCCESS, "landing-progress");
+            assert_eq!(
+                next.record["significance"],
+                json!("blocker"),
+                "{}",
+                next.record
+            );
+            cursor = next.cursor();
+        }
+    }
+}
