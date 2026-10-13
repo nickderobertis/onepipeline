@@ -13,7 +13,7 @@
 set -u
 
 if [ "$#" -gt 1 ]; then
-  echo "maintain: takes at most one argument, the status to exit with" >&2
+  echo "maintain: given $# arguments, but takes at most one, the status to exit with; remove the extra arguments from the command in onevcs.toml's [pool.maintain]" >&2
   exit 64
 fi
 
@@ -35,7 +35,10 @@ if ! rm -rf scratch; then
 fi
 
 if [ -f grow.bytes ]; then
-  grow=$(cat grow.bytes)
+  if ! grow=$(cat grow.bytes); then
+    echo "maintain: cannot read grow.bytes in $(pwd); make it readable, or remove it for a maintenance that does not grow the slot" >&2
+    exit 1
+  fi
   case "$grow" in
     '' | *[!0-9]*)
       echo "maintain: grow.bytes in $(pwd) holds '$grow', which is not a whole number of bytes; write digits only, such as 41943040" >&2
