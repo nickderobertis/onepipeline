@@ -135,6 +135,21 @@ fn the_result_the_journey_writes_is_a_value_the_checker_measures() {
 /// stand-in's shell body, and `result` the file the command is told to write to, if any.
 #[cfg(unix)]
 fn command(name: &str, behaviour: &str, result: Option<&std::path::Path>) -> std::process::Output {
+    command_for(
+        "scripts/linear-writeback-budget.sh",
+        name,
+        behaviour,
+        result,
+    )
+}
+
+#[cfg(unix)]
+fn command_for(
+    script: &str,
+    name: &str,
+    behaviour: &str,
+    result: Option<&std::path::Path>,
+) -> std::process::Output {
     use std::os::unix::fs::PermissionsExt;
 
     let dir = scratch(name);
@@ -147,7 +162,7 @@ fn command(name: &str, behaviour: &str, result: Option<&std::path::Path>) -> std
     )))
     .expect("a PATH");
     let mut run = std::process::Command::new("bash");
-    run.arg(root().join("scripts/linear-writeback-budget.sh"))
+    run.arg(root().join(script))
         .current_dir(root())
         .env("PATH", path)
         .env_remove("ONEBUDGETSPEC_RESULT");
@@ -1102,4 +1117,150 @@ fn the_host_view_strip_guard_reads_the_binary() {
     assert!(
         String::from_utf8_lossy(&refused.stderr).contains("steady.strip_guard must be stripped")
     );
+}
+
+/// CreateProcess searches the Windows system directory before PATH, where
+/// bash.exe can be the WSL launcher. Resolve the POSIX shell explicitly, as
+/// tests/linked_engines.rs does, so the script supplies the exit and streams.
+/// https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessw
+fn budget_bash_on(path: &std::ffi::OsStr, system_root: Option<&std::ffi::OsStr>) -> PathBuf {
+    let windows_dir = system_root.map(|root| root.to_string_lossy().to_lowercase());
+    std::env::split_paths(path)
+        .filter(|dir| {
+            windows_dir.as_ref().is_none_or(|root| {
+                !dir.to_string_lossy()
+                    .to_lowercase()
+                    .starts_with(root.as_str())
+            })
+        })
+        .flat_map(|dir| ["bash", "bash.exe"].map(|name| dir.join(name)))
+        .find(|candidate| candidate.is_file())
+        .expect("a bash on PATH outside the Windows system directory runs the budget script")
+}
+
+fn settlement_budget_without_result(bash: &std::path::Path) -> std::process::Output {
+    std::process::Command::new(bash)
+        .current_dir(root())
+        .arg("scripts/settlement-latency-budget.sh")
+        .env_remove("ONEBUDGETSPEC_RESULT")
+        .output()
+        .expect("the real measurement command runs")
+}
+
+/// Impose CreateProcessW's system-directory precedence with a real launcher
+/// refusing before the script, then drive the real budget script with the
+/// explicitly resolved shell. No native Windows installation is required.
+#[cfg(unix)]
+#[test]
+fn the_budget_script_runs_with_a_system_bash_launcher_present() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = scratch("settlement-system-bash");
+    let system = dir.join("Windows/System32");
+    let shell = dir.join("git/bin");
+    std::fs::create_dir_all(&system).unwrap();
+    std::fs::create_dir_all(&shell).unwrap();
+    let launcher = system.join("bash");
+    std::fs::write(
+        &launcher,
+        "#!/bin/sh\necho 'Windows Subsystem for Linux has no installed distributions.'\nexit 1\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let real = budget_bash_on(&std::env::var_os("PATH").unwrap_or_default(), None);
+    std::os::unix::fs::symlink(real, shell.join("bash")).unwrap();
+    let refused = settlement_budget_without_result(&launcher);
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&refused.stdout).contains("no installed distributions"));
+    let path = std::env::join_paths([system, shell]).unwrap();
+    let selected = budget_bash_on(&path, Some(dir.join("Windows").as_os_str()));
+    let output = settlement_budget_without_result(&selected);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("ONEBUDGETSPEC_RESULT is not set"));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// The settlement's original 1000 ms bound remains a reported, gated budget.
+#[test]
+fn the_settlement_latency_budget_uses_the_journeys_journal_stamps() {
+    let loaded = onebudgetspec_core::load(&[root().join("budgets.yaml")], false)
+        .expect("the budget file loads under the pinned checker");
+    let budget = loaded
+        .files()
+        .iter()
+        .flat_map(|file| &file.contents.budgets)
+        .find(|budget| budget.id == "settlement-readability-latency")
+        .expect("the settlement latency remains registered");
+    assert_eq!(budget.measure, Measure::Reported);
+    assert_eq!(budget.unit, "milliseconds");
+    assert_eq!(budget.direction, Direction::Max);
+    assert!((budget.threshold - 1000.0).abs() < f64::EPSILON);
+    assert_eq!(
+        budget.command,
+        ["bash", "scripts/settlement-latency-budget.sh"]
+    );
+    let journey = std::fs::read_to_string(root().join("tests/e2e/loopcost.rs"))
+        .expect("the measurement journey");
+    assert!(journey.contains(
+        "#[test]\nfn the_settlement_readability_latency_is_reported_from_its_journal_stamps()"
+    ));
+    let bash = budget_bash_on(
+        &std::env::var_os("PATH").unwrap_or_default(),
+        std::env::var_os("SystemRoot").as_deref(),
+    );
+    let output = settlement_budget_without_result(&bash);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("ONEBUDGETSPEC_RESULT is not set"));
+}
+
+/// The script is the real subprocess under test; its external producer stands
+/// in only for failure to produce an output, as the existing Linear command test does.
+#[cfg(unix)]
+#[test]
+fn the_settlement_budget_command_refuses_a_missing_result_and_propagates_failures() {
+    let dir = scratch("settlement-script-results");
+    let script = "scripts/settlement-latency-budget.sh";
+    let result = dir.join("result.json");
+    let silent = command_for(script, "settlement-silent", "exit 0", Some(&result));
+    assert_eq!(silent.status.code(), Some(1));
+    let detail = String::from_utf8_lossy(&silent.stderr);
+    assert!(
+        detail.contains("wrote no measured budget result"),
+        "{detail}"
+    );
+    assert!(
+        detail.contains("verify ONEBUDGETSPEC_RESULT reaches the test process"),
+        "{detail}"
+    );
+    let failed = command_for(script, "settlement-failed", "exit 7", Some(&result));
+    assert_eq!(failed.status.code(), Some(7));
+    let wrote = command_for(
+        script,
+        "settlement-wrote",
+        r#"[ "$1" = test-e2e ] && [ "$2" = 'test(=loopcost::the_settlement_readability_latency_is_reported_from_its_journal_stamps)' ] && [ $# -eq 2 ] && printf '{"value":43,"detail":"journal stamps"}' > "$ONEBUDGETSPEC_RESULT""#,
+        Some(&result),
+    );
+    assert_eq!(
+        wrote.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&wrote.stderr)
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(
+            &std::fs::read_to_string(result).expect("the result")
+        )
+        .expect("the reported measurement")["value"],
+        43
+    );
+    std::fs::remove_dir_all(dir).expect("the command fixture is removed");
 }
