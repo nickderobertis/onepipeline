@@ -1276,7 +1276,7 @@ path = "tests/stop_verdict/main.rs"
 # across 20 declaring identities, recorded for `pool-maintenance-engine-seconds`.
 # Its own binary and its own Nx project (`tests/pool_workload/project.json`), run
 # only by that project's `workload` target (`just workload`), so no per-change
-# selection compiles or runs it.
+# selection runs it; its `check` lints it and stops there.
 [[test]]
 name = "pool_workload"
 path = "tests/pool_workload/main.rs"
