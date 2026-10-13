@@ -725,6 +725,9 @@ fn a_label_strict_destination_accepts_the_settlement_projection() {
                     recreate: false,
                     create: false,
                     dry_run: false,
+                    comments: false,
+                    no_link: false,
+                    expect: None,
                 })
                 .await
         },
@@ -4417,3 +4420,93 @@ fn assertions(source: &str) -> Vec<String> {
     found
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
+
+/// Enabling the source cache changes neither unpinned plan reads nor settlement
+/// projections, including a failed settlement followed by recovery.
+#[test]
+fn a_cache_enabled_github_store_reads_and_writes_like_an_uncached_store() {
+    use crate::linear_writeback::{from_the_launch_directory, GitHubEndpoint};
+
+    let journey = |enabled: bool| {
+        let world = World::new(&format!("store-github-cache-{enabled}"))
+            .with_env("ONEPIPELINE_LOOPBACK_BOARD_TOKEN", "loopback-token");
+        world.script("anchor.wait", "hold");
+        let served = GitHubEndpoint::serve(&world, &json!({}));
+        let launch = world.root.join("launch");
+        std::fs::create_dir_all(&launch).expect("launch directory");
+        std::fs::write(launch.join("onetaskgraph.yaml"), format!(
+            "sources:\n  board:\n    plugin: github-projects\n    cache:\n      enabled: {enabled}\n      dir: cache\n    config:\n      owner: generic\n      project_number: 1\n      token_env: ONEPIPELINE_LOOPBACK_BOARD_TOKEN\n      endpoint: {}/graphql\n      status_mapping:\n        todo: Todo\n        queued: Queued\n        in-progress: In Progress\n        unknown: Needs Attention\n        done: Done\n        cancelled: Canceled\n",
+            served.url
+        )).expect("store configuration");
+        let start =
+            from_the_launch_directory(&world, &launch, &["start", "board:plan", "--detach"]);
+        world.run_on(start, "start --detach").exited(0);
+        let run = "github-edits";
+        world.until("the launch projection", |_| {
+            served.state()["issues"]["anchor"]["status"] == "In Progress"
+        });
+        let mut costs = Vec::new();
+        for (id, status, evidence, projected) in [
+            ("work", "failed", "failed cache journey", "Needs Attention"),
+            ("work", "done", "recovered cache journey", "Done"),
+            ("other", "done", "other cache journey", "Done"),
+        ] {
+            let before = served.state()["requests"]
+                .as_array()
+                .expect("requests")
+                .len();
+            world
+                .run_with_stdin(
+                    &["reply", run],
+                    &json!({
+                        "version": 2, "commands": [{"op": "settle", "id": id,
+                            "outcome": status, "evidence": evidence}]
+                    })
+                    .to_string(),
+                )
+                .exited(0);
+            world.until("the settlement projection", |_| {
+                let state = served.state();
+                state["issues"][id]["status"] == projected
+                    && state["issues"][id]["body"]
+                        .as_str()
+                        .is_some_and(|body| body.contains(evidence))
+            });
+            world.until("the projection record", |world| {
+                std::fs::read_to_string(
+                    world.run_file(run, onepipeline::cli::WRITEBACK_PROJECTIONS_FILE),
+                )
+                .is_ok_and(|text| {
+                    text.lines()
+                        .last()
+                        .is_some_and(|line| line.contains("projected"))
+                })
+            });
+            let state = served.state();
+            costs.push(
+                state["requests"].as_array().expect("requests")[before..]
+                    .iter()
+                    .map(|request| request["query"].clone())
+                    .collect::<Vec<_>>(),
+            );
+        }
+        world.release("anchor.go");
+        world.until("the run settlement", |world| {
+            world.run_file(run, "result.json").is_file()
+        });
+        let result = world.run_json(run, "result.json");
+        assert_eq!(result["state"], "complete", "{result}");
+        let state = served.state();
+        (
+            state["issues"].clone(),
+            state["requests"].as_array().expect("requests").len(),
+            costs,
+        )
+    };
+    let uncached = journey(false);
+    let cached = journey(true);
+    assert_eq!(
+        cached, uncached,
+        "unpinned reads and projections must retain their results and request costs"
+    );
+}

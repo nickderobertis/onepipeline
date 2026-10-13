@@ -193,7 +193,11 @@ fn launched_configured(
 
 /// A command whose store is configured by the launch directory's `onetaskgraph.yaml` alone:
 /// every setting this world's commands carry for their own plans source is taken away.
-fn from_the_launch_directory(world: &World, dir: &Path, args: &[&str]) -> std::process::Command {
+pub(super) fn from_the_launch_directory(
+    world: &World,
+    dir: &Path,
+    args: &[&str],
+) -> std::process::Command {
     let mut command = world.cmd(args);
     // This journey's file is the only source configuration: inherited host settings
     // must not introduce another source, endpoint or credential into the measurement.
@@ -1131,16 +1135,16 @@ fn command_end_refusal_and_timeout_rebuild_the_workers_store() {
 /// The loopback GitHub GraphQL endpoint `tests/e2e/github_loopback.py` serves, for as long as
 /// this is held: its directory, where `state.json` holds the board and every request it was
 /// sent, and the URL it listens on.
-struct GitHubEndpoint {
+pub(super) struct GitHubEndpoint {
     child: std::process::Child,
     dir: PathBuf,
-    url: String,
+    pub(super) url: String,
 }
 
 impl GitHubEndpoint {
     /// Serve the board under `world`, seeding each issue named in `seeded` with that caller
     /// metadata beside its own.
-    fn serve(world: &World, seeded: &Value) -> Self {
+    pub(super) fn serve(world: &World, seeded: &Value) -> Self {
         let dir = world.root.join("github-endpoint");
         std::fs::create_dir_all(&dir).expect("endpoint directory");
         let seed = dir.join("seeded.json");
@@ -1158,7 +1162,7 @@ impl GitHubEndpoint {
         Self { child, dir, url }
     }
 
-    fn state(&self) -> Value {
+    pub(super) fn state(&self) -> Value {
         serde_json::from_str(
             &std::fs::read_to_string(self.dir.join("state.json")).expect("endpoint state"),
         )
