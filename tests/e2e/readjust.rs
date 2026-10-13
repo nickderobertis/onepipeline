@@ -186,8 +186,14 @@ fn projected_settlement(world: &World, project: &str, node: &str) -> Value {
 /// their change requests in plan order, wait for the run's result, and hand back the
 /// project it was launched from.
 fn launched(world: &World, run: &str, nodes: Vec<Value>) -> String {
+    launched_at(world, run, nodes, 1)
+}
+
+/// [`launched`], with the plan's `concurrency` set to `concurrency` for what the run is
+/// given after its launch.
+fn launched_at(world: &World, run: &str, nodes: Vec<Value>, concurrency: u64) -> String {
     let mut plan = plan_of(run, nodes);
-    plan["concurrency"] = json!(1);
+    plan["concurrency"] = json!(concurrency);
     let project = world.plan(run, &plan);
     let launched = world.run_from(&world.project, &["start", &project, "--attach"]);
     assert!(
@@ -1249,6 +1255,13 @@ fn a_rework_after_a_landing_places_its_replacement_on_the_root() {
     reply(&world, run, json!([rework("b")])).exited(0);
     world.run(&["adopt", run]).exited(0);
 
+    found_first(
+        &world,
+        run,
+        "a",
+        "rework",
+        ("node-dispatched", "b-rework-1"),
+    );
     let replacement = settled(&world, run, "b-rework-1");
     assert_eq!(replacement["branch"], b_branch.as_str(), "{replacement}");
     assert_eq!(replacement["base"], "main", "{replacement}");
@@ -1760,4 +1773,287 @@ fn a_draft_closed_unmerged_moves_nothing_and_is_said() {
     assert_eq!(settled(&world, run, "b")["base"], a_branch.as_str());
     assert_eq!(tip(&world, &branch_of(&world, run, "b")), b_head);
     the_engine_merged_closed_and_lifted_nothing(&world, run, from);
+}
+
+/// The position of the first record of `kind` about `node` in `run`'s journal.
+fn first(world: &World, run: &str, kind: &str, node: &str) -> usize {
+    world
+        .journal(run)
+        .iter()
+        .position(|event| event["kind"] == kind && event["labels"]["node"] == node)
+        .unwrap_or_else(|| panic!("no {kind} about {node}: {:#?}", world.kinds(run)))
+}
+
+/// That `node`'s landing was found by `trigger`'s own read, before `then` was recorded
+/// about `about`.
+fn found_first(world: &World, run: &str, node: &str, trigger: &str, then: (&str, &str)) {
+    let landed = record(world, run, "node-landed", node)
+        .unwrap_or_else(|| panic!("{node}'s landing was never found"));
+    assert_eq!(landed["trigger"], trigger, "{landed}");
+    assert!(
+        first(world, run, "node-landed", node) < first(world, run, then.0, then.1),
+        "{node}'s landing was recorded after {} of {}",
+        then.0,
+        then.1
+    );
+}
+
+/// `onepipeline review` readjusts first: `a`'s landing, made before the pass, is found by
+/// its own batched read — the one its discovery reads feedback from — before discovery
+/// records anything, and `b` is moved onto the root.
+#[test]
+fn review_readjusts_before_discovery() {
+    let world = team_world("readjust-trigger-review");
+    for node in ["a", "b"] {
+        world.script(&format!("{node}.work"), &format!("{node}'s change\n"));
+    }
+    let run = "review";
+    launched(
+        &world,
+        run,
+        vec![lifecycle("a", &[]), lifecycle("b", &["a"])],
+    );
+    merge(&world, &number_of(&world, run, "a"), "squash", "kept");
+    let from = world.invocations().len();
+    review(&world, run);
+    found_first(&world, run, "a", "review", ("review-comments-read", "b"));
+    let reads: Vec<Value> = host_calls(&world, from)
+        .into_iter()
+        .filter(|call| is_standings_read(call))
+        .collect();
+    assert!(
+        query_of(&reads[0]).contains("reviewThreads("),
+        "the pass's first read is not the one discovery reads from: {reads:#?}"
+    );
+    assert!(host_calls(&world, from)
+        .iter()
+        .all(|call| !query_of(call).contains("pullRequest(number: $number)")));
+    assert_eq!(settled(&world, run, "b")["base"], "main");
+}
+
+/// A restack reads its stack parents' standings before it starts: `b`'s rework reads
+/// before its republication and its push is held there; a person merges `z` meanwhile;
+/// and the restack `b`'s push owes `c` reads `z` landed — trigger `placement` — before
+/// `c` starts.
+#[test]
+fn a_restack_readjusts_before_it_starts() {
+    let world = World::new("readjust-trigger-restack").with_env("ONEVCS_BRANCH_PREFIX", "me/");
+    let go = world.fakes.join("push.go");
+    let held = crate::harness::held_publication(&world, &go);
+    world.repository("change-open", &held.argv());
+    crate::draft_lifecycle::rules(&world, "change-open", "required", None);
+    world.script("gh.checks", crate::draft_lifecycle::GREEN);
+    for node in ["b", "z", "c"] {
+        world.script(&format!("{node}.work"), &format!("{node}'s change\n"));
+    }
+    world.script("b-rework-1.work", "b's change, as the review asked\n");
+    world.script("b-rework-1.work-file", "b");
+    held.release();
+    let run = "restack";
+    launched(
+        &world,
+        run,
+        vec![
+            lifecycle("b", &[]),
+            lifecycle("z", &[]),
+            lifecycle("c", &["b", "z"]),
+        ],
+    );
+    for marker in [go.clone(), go.with_extension("go.holding")] {
+        std::fs::remove_file(marker).expect("the launch's publications released the gate");
+    }
+    reply(&world, run, json!([rework("b")])).exited(0);
+    let driver = world
+        .cmd(&["adopt", run])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the adopting driver starts");
+    world.until("the rework's push to be held", |_| held.holding());
+    merge(&world, &number_of(&world, run, "z"), "squash", "kept");
+    held.release();
+    let ended = driver.wait_with_output().expect("the driver ends");
+    assert!(ended.status.success(), "{ended:?}");
+    found_first(&world, run, "z", "placement", ("node-restack-started", "c"));
+    assert_eq!(
+        settled(&world, run, "c")["base"],
+        branch_of(&world, run, "b").as_str()
+    );
+}
+
+/// A placement at dispatch reads its stack parents' standings first: on a live driver,
+/// a person merges `a` and then a node is added on `b`. The pass that places it reads
+/// `a` landed — trigger `placement` — before it dispatches the node.
+#[test]
+fn a_placement_at_dispatch_readjusts_before_it_dispatches() {
+    let world = team_world("readjust-trigger-placement");
+    for node in ["a", "b", "e", "x"] {
+        world.script(&format!("{node}.work"), &format!("{node}'s change\n"));
+    }
+    world.script("x.wait", "");
+    let run = "placement";
+    launched_at(
+        &world,
+        run,
+        vec![lifecycle("a", &[]), lifecycle("b", &["a"])],
+        3,
+    );
+    reply(
+        &world,
+        run,
+        json!([{"op": "add", "node": lifecycle("x", &[])}]),
+    )
+    .exited(0);
+    let driver = world
+        .cmd(&["adopt", run])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the adopting driver starts");
+    world.until("x to be held", |world| {
+        world
+            .events_of(run, "node-dispatched")
+            .iter()
+            .any(|event| event["labels"]["node"] == "x")
+    });
+    merge(&world, &number_of(&world, run, "a"), "squash", "kept");
+    reply(
+        &world,
+        run,
+        json!([{"op": "add", "node": lifecycle("e", &["b"])}]),
+    )
+    .exited(0);
+    world.until("e to be dispatched", |world| {
+        world
+            .events_of(run, "node-dispatched")
+            .iter()
+            .any(|event| event["labels"]["node"] == "e")
+    });
+    found_first(&world, run, "a", "placement", ("node-dispatched", "e"));
+    std::fs::write(world.fakes.join("x.go"), "").expect("the hold is released");
+    let ended = driver.wait_with_output().expect("the driver ends");
+    assert!(ended.status.success(), "{ended:?}");
+}
+
+/// A continuing launch on a cold host, from the local Markdown store, readjusts before
+/// its first dispatch: `a`'s landing, made before it, is found by its own read and `b`
+/// is moved onto the root.
+#[test]
+fn a_continuing_launch_readjusts_before_its_first_dispatch() {
+    let world = team_world("readjust-trigger-continuation");
+    for node in ["a", "b"] {
+        world.script(&format!("{node}.work"), &format!("{node}'s change\n"));
+    }
+    let run = "continued";
+    let project = launched(
+        &world,
+        run,
+        vec![lifecycle("a", &[]), lifecycle("b", &["a"])],
+    );
+    world.until_store("b to reach the store", |world| {
+        projected_settlement(world, &project, "b")["status"] == "done"
+    });
+    merge(&world, &number_of(&world, run, "a"), "squash", "kept");
+    let cold = world.on_host("readjust-continued-cold");
+    cold.run_from(&cold.project, &["start", &project, "--attach"])
+        .exited(0);
+    found_first(
+        &cold,
+        run,
+        "a",
+        "continuation",
+        ("node-restack-started", "b"),
+    );
+    assert!(cold.events_of(run, "node-dispatched").is_empty());
+    assert_eq!(settled(&cold, run, "b")["base"], "main");
+}
+
+/// An adoption readjusts before its first dispatch: `a`'s landing, made while nothing
+/// drove the run, is found by the adopting driver's own read and `b` is moved.
+#[test]
+fn an_adoption_readjusts_before_its_first_dispatch() {
+    let world = team_world("readjust-trigger-adoption");
+    for node in ["a", "b"] {
+        world.script(&format!("{node}.work"), &format!("{node}'s change\n"));
+    }
+    let run = "adopted";
+    launched(
+        &world,
+        run,
+        vec![lifecycle("a", &[]), lifecycle("b", &["a"])],
+    );
+    merge(&world, &number_of(&world, run, "a"), "squash", "kept");
+    world.run(&["adopt", run]).exited(0);
+    found_first(
+        &world,
+        run,
+        "a",
+        "continuation",
+        ("node-restack-started", "b"),
+    );
+    assert_eq!(settled(&world, run, "b")["base"], "main");
+}
+
+/// Nothing polls: a live driver with drafts outstanding and nothing to do, left over
+/// three of its idle intervals — shortened through the test seam entry 119 names —
+/// asks the host nothing at all; and `start` takes no readjustment-interval flag.
+#[test]
+fn an_idle_driver_asks_the_host_nothing() {
+    let world = team_world("readjust-idle").with_env("ONEPIPELINE_IDLE_CLAIM_CHECK_SECONDS", "1");
+    for node in ["a", "b", "x"] {
+        world.script(&format!("{node}.work"), &format!("{node}'s change\n"));
+    }
+    world.script("x.wait", "");
+    let run = "idle";
+    launched_at(
+        &world,
+        run,
+        vec![lifecycle("a", &[]), lifecycle("b", &["a"])],
+        3,
+    );
+    reply(
+        &world,
+        run,
+        json!([{"op": "add", "node": lifecycle("x", &[])}]),
+    )
+    .exited(0);
+    let driver = world
+        .cmd(&["adopt", run])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the adopting driver starts");
+    world.until("x's session to be open and its worker held", |world| {
+        world
+            .journal(run)
+            .iter()
+            .any(|event| event["kind"] == "session-opened" && event["labels"]["node"] == "x")
+    });
+    // Past the instant the worker reached its hold, so the window below is the driver's
+    // own idle and nothing of x's dispatch.
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    let from = world.invocations().len();
+    std::thread::sleep(std::time::Duration::from_millis(3500));
+    let asked = host_calls(&world, from);
+    assert!(
+        asked.is_empty(),
+        "an idle driver asked the host: {asked:#?}"
+    );
+    std::fs::write(world.fakes.join("x.go"), "").expect("the hold is released");
+    let ended = driver.wait_with_output().expect("the driver ends");
+    assert!(ended.status.success(), "{ended:?}");
+
+    let refused = world.run(&[
+        "start",
+        "--readjust-interval",
+        "5",
+        "plans:idle",
+        "--attach",
+    ]);
+    assert_ne!(refused.code, 0, "{}", refused.stdout);
+    assert!(
+        refused.stderr.contains("--readjust-interval"),
+        "{}",
+        refused.stderr
+    );
 }
