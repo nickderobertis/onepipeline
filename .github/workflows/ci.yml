@@ -66,7 +66,9 @@ jobs:
         run: |
           classification=$(node .github/macos-policy.mjs classify --event "$GITHUB_EVENT_PATH" --base "$BASE" --head "$HEAD")
           echo "$classification"
-          echo "required=$(node -e 'console.log(JSON.parse(process.argv[1]).macosRequired)' "$classification")" >> "$GITHUB_OUTPUT"
+          # String() and a plain write: console.log colours a boolean whenever
+          # FORCE_COLOR is set (Nx sets it), which would corrupt the output.
+          echo "required=$(node -e 'process.stdout.write(String(JSON.parse(process.argv[1]).macosRequired))' "$classification")" >> "$GITHUB_OUTPUT"
 
   # The gate on a clean checkout: bootstrap from scratch, then the deterministic
   # gate (format, clippy, tests incl. the contract and binary e2e with the

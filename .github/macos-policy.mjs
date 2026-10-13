@@ -60,6 +60,16 @@ print(json.dumps([presence,v],sort_keys=True))`;
     encoding: "utf8",
   });
 }
+// The non-PR events this repository's workflows are triggered by. None of them
+// requests the Mac lane; the manual diagnostic opts in through its own input.
+export const automaticNonPullRequestEvents = new Set([
+  "push",
+  "release",
+  "workflow_run",
+  "repository_dispatch",
+  "schedule",
+  "workflow_dispatch",
+]);
 export function classify(
   event,
   base,
@@ -67,8 +77,10 @@ export function classify(
   eventName = process.env.GITHUB_EVENT_NAME ?? "pull_request",
 ) {
   const required = (reason) => ({ isReleaseOnly: false, macosRequired: true, reason });
-  if (eventName !== "pull_request")
-    return { isReleaseOnly: false, macosRequired: false, reason: "non-PR event" };
+  if (automaticNonPullRequestEvents.has(eventName))
+    return { isReleaseOnly: false, macosRequired: false, reason: `non-PR event: ${eventName}` };
+  // An event this policy does not know is never assumed safe to run without Mac.
+  if (eventName !== "pull_request") return required(`unrecognised event: ${eventName}`);
   try {
     const pr = event.pull_request;
     if (

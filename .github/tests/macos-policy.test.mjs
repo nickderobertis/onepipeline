@@ -168,6 +168,31 @@ test("real classifier admits only semantically verified same-repository automati
   }
   assert.equal(classify("{malformed", heads.source, "push").macosRequired, false);
 });
+test("the real classifier keeps known non-PR events Mac-free and fails closed on unknown ones", () => {
+  const known = [...new Set(classes.map(([, eventName]) => eventName))].filter(
+    (name) => name !== "pull_request",
+  );
+  assert.deepEqual(known.sort(), [
+    "push",
+    "release",
+    "repository_dispatch",
+    "schedule",
+    "workflow_dispatch",
+    "workflow_run",
+  ]);
+  for (const eventName of known)
+    for (const head of Object.values(heads)) {
+      const result = classify(event(), head, eventName);
+      assert.equal(result.macosRequired, false, eventName);
+      assert.match(result.reason, new RegExp(`non-PR event: ${eventName}$`));
+    }
+  for (const eventName of ["merge_group", "pull_request_target", "issue_comment"]) {
+    const result = classify(event(), heads.version, eventName);
+    assert.equal(result.isReleaseOnly, false);
+    assert.equal(result.macosRequired, true, eventName);
+    assert.equal(result.reason, `unrecognised event: ${eventName}`);
+  }
+});
 const required = [
   "cross (macos-latest)",
   "cross (windows-latest)",
@@ -233,7 +258,7 @@ function automaticFanout(all, initial, ancestry = []) {
           conclusion: "success",
         },
       },
-      classification: { isReleaseOnly: false, macosRequired: false, reason: "non-PR event" },
+      classification: classify({}, initial.head, "workflow_run"),
       inputs: {},
     };
     return [run, ...automaticFanout(all, downstream, [...ancestry, run.workflow])];
@@ -634,6 +659,9 @@ test("the actual CI classification step writes the omission-controlling output",
       env: {
         ...process.env,
         ...env,
+        // Nx sets FORCE_COLOR for the tasks the CI gate runs; the step must
+        // still write a plain boolean then.
+        FORCE_COLOR: "1",
         GITHUB_EVENT_PATH: eventPath,
         GITHUB_EVENT_NAME: eventName,
         GITHUB_OUTPUT: output,

@@ -5,8 +5,9 @@ this directory's locked dependencies; checks do not install them.
 
 `macos-policy.mjs classify --event JSON --base REF --head REF` prints the agreed
 JSON decision. `GITHUB_EVENT_NAME` supplies Actions' event kind (defaults to PR
-outside Actions). Exit 0 includes conservative decisions requiring Mac coverage
-when PR input is unreadable. Invalid command syntax/mode exits 1 on stderr.
+outside Actions). The non-PR events the workflows use never request Mac; an
+unrecognised event name does, with a reason naming it. Exit 0 includes
+conservative decisions requiring Mac coverage when PR input is unreadable. Invalid command syntax/mode exits 1 on stderr.
 `carrier` exits 0 only for a successful proof or classifier-authorized omission;
 failed, cancelled, skipped or missing required work exits 1.
 
