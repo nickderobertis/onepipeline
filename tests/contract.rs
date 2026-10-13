@@ -674,9 +674,12 @@ fn a_filter_spec_is_refused_by_the_shared_grammars_own_rules() {
         .expect_err("a matcher field the grammar does not have is refused");
     let said = unknown_field.to_string();
     assert!(said.contains("role"), "the refusal names the field: {said}");
+    // Since `onemessagebus` 0.9.1 the core parses a spec with `serde-saphyr`,
+    // which places a refusal by line and column of the spec rather than by the
+    // list's path, so that position is what the refusal is held to.
     assert!(
-        said.contains("include") && said.contains('1'),
-        "the refusal says which list and where in it: {said}"
+        said.contains("line 1, column 14"),
+        "the refusal says where in the spec: {said}"
     );
 
     let stray = EventFilter::parse(r#"{"includes": []}"#)
@@ -6440,6 +6443,7 @@ fn a_siblings_reserved_labels_source_word_phases_and_matcher_fields_are_this_cra
 
     // 4. Every matcher field, through the wire, in both directions.
     let vcs = onevcs::MatchFields {
+        significance: None,
         phase: Some(onevcs::Phase::Development),
         run_id: Some("R".into()),
         node: Some("build".into()),

@@ -297,7 +297,10 @@ pub(crate) struct Maintained {
 impl Maintained {
     fn is_recorded(&self) -> bool {
         match &self.outcome {
-            Err(_) | Ok(IdentityOutcome::Claimed { .. }) => true,
+            Err(_)
+            | Ok(IdentityOutcome::Claimed { .. } | IdentityOutcome::MaintenanceUnreadable { .. }) => {
+                true
+            }
             Ok(IdentityOutcome::Slots(slots)) => slots.iter().any(|slot| {
                 matches!(
                     slot.outcome,
@@ -968,6 +971,9 @@ fn identity_phrase(outcome: &IdentityOutcome) -> String {
     match outcome {
         IdentityOutcome::NoMaintainCommand => "no maintain command".to_owned(),
         IdentityOutcome::NoSlots => "no slots".to_owned(),
+        IdentityOutcome::MaintenanceUnreadable { reason } => {
+            format!("maintenance unreadable — {}", crate::views::one_line(reason))
+        }
         IdentityOutcome::Claimed { by_pid } => {
             format!("claimed — another pool maintain (pid {by_pid}) was maintaining it")
         }
@@ -1019,6 +1025,7 @@ fn slot_phrase(outcome: &SlotOutcome) -> String {
             outcome,
             duration_ms,
             log,
+            ..
         } => {
             let ended = match outcome {
                 onevcs::MaintenanceOutcome::Succeeded => "succeeded".to_owned(),
@@ -1354,6 +1361,7 @@ mod tests {
                         outcome: MaintenanceOutcome::Succeeded,
                         duration_ms: 12,
                         log: None,
+                        disk: None,
                     },
                 },
                 SlotMaintenance {
@@ -1784,6 +1792,7 @@ mod tests {
                     outcome: MaintenanceOutcome::Succeeded,
                     duration_ms: 12,
                     log: Some(onevcs::ArtifactId("a-1".into())),
+                    disk: None,
                 },
                 "ran — succeeded in 12 ms, log a-1",
             ),
@@ -1792,6 +1801,7 @@ mod tests {
                     outcome: MaintenanceOutcome::Failed { exit: Some(3) },
                     duration_ms: 12,
                     log: None,
+                    disk: None,
                 },
                 "ran — failed (exit 3) in 12 ms",
             ),
@@ -1800,6 +1810,7 @@ mod tests {
                     outcome: MaintenanceOutcome::Failed { exit: None },
                     duration_ms: 12,
                     log: None,
+                    disk: None,
                 },
                 "ran — failed (ended by a signal, or never started) in 12 ms",
             ),
@@ -1808,6 +1819,7 @@ mod tests {
                     outcome: MaintenanceOutcome::TimedOut,
                     duration_ms: 1_000,
                     log: None,
+                    disk: None,
                 },
                 "ran — timed out in 1000 ms",
             ),
@@ -1824,6 +1836,12 @@ mod tests {
             "no maintain command"
         );
         assert_eq!(identity_phrase(&IdentityOutcome::NoSlots), "no slots");
+        assert_eq!(
+            identity_phrase(&IdentityOutcome::MaintenanceUnreadable {
+                reason: "its maintain document could not be read".into(),
+            }),
+            "maintenance unreadable — its maintain document could not be read"
+        );
         assert_eq!(
             identity_phrase(&IdentityOutcome::Slots(vec![
                 SlotMaintenance {
