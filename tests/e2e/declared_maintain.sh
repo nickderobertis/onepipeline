@@ -29,4 +29,7 @@ if [ -f grow.bytes ]; then
   fi
 fi
 
+if [ "${1:-0}" != "0" ]; then
+  echo "maintain: exiting $1 because the declaration passes $1 as this script's argument, asking for a maintenance that fails after its work; declare no argument for one that succeeds" >&2
+fi
 exit "${1:-0}"
