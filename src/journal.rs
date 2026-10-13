@@ -69,6 +69,39 @@ impl Journal {
         labels: Labels,
         payload: Map<String, Value>,
     ) -> Result<()> {
+        self.emit_with_artifacts(kind, labels, payload, Vec::new())
+    }
+
+    /// Retain evidence under this writer's stream and next event sequence.
+    pub(crate) fn artifact<T: serde::Serialize>(
+        &self,
+        kind: &str,
+        body: &T,
+    ) -> Result<crate::event::ArtifactRef> {
+        let path = self
+            .paths
+            .report_for(&format!("{kind}-{}", self.stream), self.next_seq);
+        ledger::write_json(&path, body)?;
+        let bytes = std::fs::metadata(&path)
+            .map_err(|source| crate::error::Error::Ledger {
+                path: path.clone(),
+                source,
+            })?
+            .len();
+        Ok(crate::event::ArtifactRef {
+            id: path.to_string_lossy().into_owned(),
+            kind: kind.to_owned(),
+            bytes,
+        })
+    }
+
+    pub(crate) fn emit_with_artifacts(
+        &mut self,
+        kind: PipelineKind,
+        labels: Labels,
+        payload: Map<String, Value>,
+        artifacts: Vec<crate::event::ArtifactRef>,
+    ) -> Result<()> {
         // Every record an emitter writes is held to its registered document in a
         // debug build of the binary — the build every end-to-end and note journey
         // drives — so an emit site that drifts from its document in `payload` fails
@@ -94,7 +127,7 @@ impl Journal {
             dimensions: Default::default(),
             labels,
             payload,
-            artifacts: Vec::new(),
+            artifacts,
         };
         self.next_seq += 1;
         self.append(&envelope)
@@ -185,6 +218,15 @@ fn over_the_bound(value: &Value) -> bool {
 /// The **head**, because a payload text this crate has to cut is one no producer
 /// described: there is no field-by-field rule left to honour, and a turn's
 /// opening words are what a reader meeting a cut value is looking for.
+/// Keep a journal text inside the envelope's byte bound, on a UTF-8 boundary.
+pub(crate) fn bounded_text(text: &str) -> String {
+    if text.len() > MAX_PAYLOAD_TEXT_BYTES {
+        head(text)
+    } else {
+        text.to_owned()
+    }
+}
+
 fn head(text: &str) -> String {
     let mut end = MAX_PAYLOAD_TEXT_BYTES;
     while !text.is_char_boundary(end) {

@@ -1,5 +1,5 @@
 {
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "The agent stack's event envelope, filter, artifact reference and labels, and the payload of every onepipeline pipeline kind, as onepipeline declares them.",
   "schemas": [
     {
@@ -1189,6 +1189,17 @@
           "Continued": {
             "type": "object",
             "properties": {
+              "rework": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ContinuedRework"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Rework provenance loaded from the store, journal-only."
+              },
               "source": {
                 "$ref": "#/$defs/ContinuedSource",
                 "description": "Where the settlement was read: the project's store."
@@ -1205,6 +1216,49 @@
               "source"
             ],
             "description": "A settlement a launch continued from its project's store."
+          },
+          "ContinuedRework": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "replacement": {
+                "type": "string"
+              },
+              "replaces": {
+                "type": "string"
+              },
+              "comments": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/ReworkComment"
+                }
+              }
+            },
+            "required": [
+              "replacement",
+              "replaces",
+              "comments"
+            ],
+            "description": "The rework a continued lineage already carries on its store item."
+          },
+          "ReworkComment": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "The comment's id on the host."
+              },
+              "url": {
+                "type": "string",
+                "description": "Where a person reads it."
+              }
+            },
+            "required": [
+              "id",
+              "url"
+            ],
+            "description": "One review comment a [`Command::Rework`] answers: its id on the host, and\nwhere a person reads it."
           },
           "ContinuedSource": {
             "oneOf": [
@@ -1431,6 +1485,13 @@
       "schema": {
         "type": "object",
         "properties": {
+          "correlation": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Review revision identity, where the surface names one."
+          },
           "kind": {
             "type": "string",
             "description": "The surface's kind."
@@ -3356,6 +3417,119 @@
               }
             ],
             "description": "Who retitled a change request, as `change-retitled` names it."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.review-comments-read@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "node": {
+            "type": "string"
+          },
+          "change_url": {
+            "type": "string"
+          },
+          "marker": {
+            "type": "string"
+          },
+          "unchanged": {
+            "type": "boolean"
+          },
+          "cost": {
+            "type": "object",
+            "properties": {
+              "graphql_points": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              },
+              "rest_requests": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              }
+            },
+            "required": [
+              "graphql_points",
+              "rest_requests"
+            ]
+          },
+          "comments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/ReviewCommentMetadata"
+            }
+          }
+        },
+        "required": [
+          "node",
+          "change_url",
+          "marker",
+          "unchanged",
+          "cost",
+          "comments"
+        ],
+        "description": "One host read of a draft's review comments; bodies are retained as evidence.",
+        "title": "ReviewCommentsRead",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "ReviewCommentMetadata": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "author": {
+                "type": "string"
+              },
+              "url": {
+                "type": "string"
+              },
+              "updated_at": {
+                "type": "string"
+              },
+              "path": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "line": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "thread": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "in_reply_to": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "kind",
+              "author",
+              "url",
+              "updated_at"
+            ],
+            "description": "The metadata of one host comment, without the body retained as an artifact."
           }
         }
       }

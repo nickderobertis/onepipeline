@@ -28,6 +28,40 @@ use crate::error::{Error, Result};
 use crate::payload::DriverClaim;
 use crate::taskgraph::{QualifiedId, Read, Store, DISPATCH_KEY, DRIVER_KEY, SETTLEMENT_KEY};
 
+// llmlint: ignore-block[invalid_states_unrepresentable] The store’s existing onepipeline.rework contract uses string identities. This boundary DTO rejects unknown fields; rework_provenance validates its values before continuation or baseline preservation uses them. Changing the serialized fields belongs to the shared contract’s owner.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StoredRework {
+    pub(crate) replaces: String,
+    reason: String,
+    instruction: String,
+    pub(crate) comments: Vec<crate::channel::ReworkComment>,
+}
+// llmlint: ignore-end[invalid_states_unrepresentable]
+
+/// Parse the store's existing rework provenance at either read boundary.
+pub(crate) fn rework_provenance(value: &Value) -> Result<StoredRework> {
+    let stored: StoredRework = serde_json::from_value(value.clone())
+        .map_err(|error| Error::Invalid(format!("rework provenance: {error}")))?;
+    if stored.reason.trim().is_empty()
+        || stored.instruction.trim().is_empty()
+        || stored.replaces.trim().is_empty()
+    {
+        return Err(Error::Invalid("blank rework provenance".to_owned()));
+    }
+    if stored.comments.iter().any(|comment| {
+        comment.id.trim().is_empty()
+            || comment.id.chars().any(char::is_control)
+            || !onevcs::Url::parse(&comment.url)
+                .is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
+    }) {
+        return Err(Error::Invalid(
+            "invalid comment in rework provenance".to_owned(),
+        ));
+    }
+    Ok(stored)
+}
+
 /// The longest an idle driver goes between two reads of its project's claim.
 ///
 /// A driver that dispatches or publishes reads the claim at the start of each pass that
@@ -374,7 +408,29 @@ pub(crate) fn continuation_of(read: &Read, claim: Option<&DriverClaim>) -> Resul
             .filter(|settlement| settlement.status == crate::payload::Status::Done)
         {
             let mut payload = done.fields.clone();
-            payload.insert("continued".to_owned(), from.clone());
+            let mut from = from.clone();
+            if let Some(metadata) = metadata {
+                if let Some(rework) = metadata.get(crate::taskgraph::REWORK_KEY) {
+                    let stored = rework_provenance(rework)
+                        .map_err(|error| Error::Invalid(format!("node '{}': {error}", node.id)))?;
+                    let replacement = metadata
+                        .get(crate::taskgraph::NODE_KEY)
+                        .and_then(Value::as_str)
+                        .filter(|replacement| !replacement.trim().is_empty())
+                        .ok_or_else(|| {
+                            Error::Invalid(format!(
+                                "node '{}': rework provenance has no replacement",
+                                node.id
+                            ))
+                        })?;
+                    from["rework"] = json!(crate::payload::ContinuedRework {
+                        replacement: replacement.to_owned(),
+                        replaces: stored.replaces,
+                        comments: stored.comments
+                    });
+                }
+            }
+            payload.insert("continued".to_owned(), from);
             continued
                 .settled
                 .push((node.id.clone(), Continued(payload)));

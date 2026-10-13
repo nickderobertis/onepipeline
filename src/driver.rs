@@ -182,6 +182,21 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             println!("{}", verbs::render_next(&next));
             Ok(EXIT_SUCCESS)
         }
+        Verb::Review(args) => {
+            let timeout = reply_timeout_seconds();
+            let receipt = verbs::review(
+                &resolve(&args.run)?,
+                &sys::launching_session(),
+                Duration::from_secs(timeout),
+            )?;
+            let rendered = verbs::render_review(&receipt, args.json)?;
+            if !args.json && receipt.exit_code() != EXIT_SUCCESS {
+                eprintln!("{rendered}");
+            } else {
+                println!("{rendered}");
+            }
+            Ok(receipt.exit_code())
+        }
         Verb::Reply(args) => {
             let (target, file) =
                 target_and_file(args.run.as_ref(), args.file.as_ref(), args.flow.as_deref())?;
@@ -571,10 +586,12 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
         Verb::PublishBranch(args) => crate::land::land(crate::land::Verb::PublishBranch, args.args),
         Verb::RepoRecover(args) => crate::land::land(crate::land::Verb::Recover, args.args),
         Verb::Results(args) => {
-            print!(
-                "{}",
-                verbs::render_results(&verbs::results(&resolve(&args.run)?)?)
-            );
+            let results = verbs::results(&resolve(&args.run)?)?;
+            if args.json {
+                println!("{}", verbs::render_results_json(&results)?);
+            } else {
+                print!("{}", verbs::render_results(&results));
+            }
             Ok(EXIT_SUCCESS)
         }
         Verb::Supersessions(args) => {
