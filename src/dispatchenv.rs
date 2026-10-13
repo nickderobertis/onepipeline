@@ -224,11 +224,21 @@ fn run(
         ));
     }
 
-    // Hold the first attempt's clock until the regression peer has observed
-    // the real child at its startup/output gate, then advance that deadline.
+    // Hold the requested attempt clocks until the regression peer observes the
+    // actual child at its gate. The startup regression holds the first attempt;
+    // the invocation-count journey holds every retry after its record closes.
     static TIMEOUT_GATE_MET: std::sync::atomic::AtomicBool =
         std::sync::atomic::AtomicBool::new(false);
-    let expired_at_gate = if !TIMEOUT_GATE_MET.swap(true, std::sync::atomic::Ordering::Relaxed) {
+    let expired_at_gate = if std::env::var_os("ONEPIPELINE_TEST_HOOK_TIMEOUT_ATTEMPTS_GATE")
+        .is_some()
+    {
+        crate::ordering::meet("ONEPIPELINE_TEST_HOOK_TIMEOUT_ATTEMPTS_GATE").map_err(|error| {
+            let _ = sys::stop(child.id(), sys::Stop::Now);
+            let _ = child.kill();
+            let _ = child.wait();
+            format!("could-not-start: {error}")
+        })?
+    } else if !TIMEOUT_GATE_MET.swap(true, std::sync::atomic::Ordering::Relaxed) {
         crate::ordering::meet("ONEPIPELINE_TEST_HOOK_TIMEOUT_GATE").map_err(|error| {
             let _ = sys::stop(child.id(), sys::Stop::Now);
             let _ = child.kill();

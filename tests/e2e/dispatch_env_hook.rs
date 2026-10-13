@@ -518,7 +518,9 @@ fn a_hook_that_fails_times_out_cannot_start_or_prints_a_malformed_document_refus
         .into_owned();
     let record = records(&world);
     std::fs::write(record.join("exits.exit"), "7").expect("the exit is scripted");
-    std::fs::write(record.join("outlives.hold"), "").expect("the hold is scripted");
+    let timed_hook = double("fake-dispatch-env-hook")
+        .to_string_lossy()
+        .into_owned();
     prints(
         &world,
         "extra",
@@ -557,7 +559,7 @@ fn a_hook_that_fails_times_out_cannot_start_or_prints_a_malformed_document_refus
             None,
             vec!["could-not-start"],
         ),
-        ("outlives", hook.as_str(), Some("1"), vec!["timeout"]),
+        ("outlives", timed_hook.as_str(), Some("1"), vec!["timeout"]),
         ("extra", hook.as_str(), None, vec!["malformed", "`extra`"]),
         (
             "nonstring",
@@ -626,7 +628,11 @@ fn a_hook_that_fails_times_out_cannot_start_or_prints_a_malformed_document_refus
         if let Some(seconds) = timeout {
             extra.extend(["--dispatch-env-hook-timeout", seconds]);
         }
-        attached(&world, run, vec![agent("build", &[])], &extra).settled();
+        if timeout.is_some() {
+            timed_attempts(&world, run, &extra);
+        } else {
+            attached(&world, run, vec![agent("build", &[])], &extra).settled();
+        }
         let settled = settlement(&world, run, "build");
         assert_eq!(settled["payload"]["status"], "failed", "{settled}");
         assert_eq!(settled["payload"]["outcome"], outcome, "{settled}");
@@ -645,7 +651,7 @@ fn a_hook_that_fails_times_out_cannot_start_or_prints_a_malformed_document_refus
         // nothing dispatched on any attempt.
         let attempts = world.events_of(run, "node-dispatched").len();
         assert!(attempts > 1, "{run} was not retried: {}", world.dump());
-        if command == hook.as_str() && timeout.is_none() {
+        if command != missing.as_str() {
             assert_eq!(invocations(&world, run).len(), attempts, "{}", world.dump());
         }
         assert!(
@@ -711,6 +717,99 @@ fn a_hook_that_fails_times_out_cannot_start_or_prints_a_malformed_document_refus
         "the refusal does not name the log that could not be opened: {detail}"
     );
     assert!(invocations(&world, run).is_empty(), "{}", world.dump());
+}
+
+/// Hold every real timeout attempt after its invocation record closes, then
+/// advance its unchanged timeout. A final connection ends the peer after the
+/// attached driver exits; neither side guesses the retry count or polls a timer.
+fn timed_attempts(world: &World, run: &str, extra: &[&str]) {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::{TcpListener, TcpStream};
+
+    let clock = TcpListener::bind("127.0.0.1:0").expect("the clock peer listens");
+    let clock_address = clock.local_addr().expect("the clock address");
+    let hooks = TcpListener::bind("127.0.0.1:0").expect("the hook peer listens");
+    world.script("dispatch-env.record-invocation", "record before holding");
+    world.script(
+        "dispatch-env.rendezvous",
+        &hooks.local_addr().expect("the hook address").to_string(),
+    );
+    let record = records(world).join(run).join("invocations");
+    // llmlint: ignore-block[tests_mirror_real_usage] this task requires every timeout
+    // attempt to reach a durable invocation before its unchanged deadline advances.
+    // Both peers are actual subprocesses; socket closure proves the held hook ended.
+    let peer = std::thread::spawn(move || {
+        let mut attempts = 0;
+        loop {
+            let (mut deadline, _) = clock.accept().expect("the driver reaches its clock");
+            let mut announcement = String::new();
+            BufReader::new(&deadline)
+                .read_line(&mut announcement)
+                .expect("the clock announces itself");
+            if announcement == "done\n" {
+                break;
+            }
+            assert!(announcement.trim().parse::<u32>().is_ok(), "{announcement}");
+            let (mut hook, _) = hooks.accept().expect("the recorded hook reaches its hold");
+            hook.set_read_timeout(Some(std::time::Duration::from_secs(120)))
+                .expect("the termination backstop");
+            let mut announcement = String::new();
+            BufReader::new(&hook)
+                .read_line(&mut announcement)
+                .expect("the hook announces itself");
+            assert!(announcement.trim().parse::<u32>().is_ok(), "{announcement}");
+            attempts += 1;
+            assert_eq!(
+                std::fs::read_to_string(&record)
+                    .expect("the durable invocation record")
+                    .lines()
+                    .collect::<Vec<_>>(),
+                vec!["build"; attempts],
+            );
+            deadline.write_all(b"go").expect("the timeout advances");
+            let ended = hook.read(&mut [0]);
+            assert!(
+                matches!(ended, Ok(0))
+                    || ended.as_ref().is_err_and(|error| matches!(
+                        error.kind(),
+                        std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+                    )),
+                "the timed-out hook retained its socket: {ended:?}"
+            );
+        }
+        attempts
+    });
+    let path = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
+    let mut args = vec!["start", path.as_str(), "--attach"];
+    args.extend_from_slice(extra);
+    let output = world
+        .cmd(&args)
+        .current_dir(&world.project)
+        .env(
+            "ONEPIPELINE_TEST_HOOK_TIMEOUT_ATTEMPTS_GATE",
+            clock_address.to_string(),
+        )
+        .output()
+        .expect("the real driver runs");
+    TcpStream::connect(clock_address)
+        .expect("the peer is still listening")
+        .write_all(b"done\n")
+        .expect("the completed driver ends its peer");
+    let attempts = peer.join().expect("every timeout attempt was observed");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    assert_eq!(
+        output.status.code(),
+        Some(crate::harness::NOTHING_DRIVING),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(attempts, world.events_of(run, "node-dispatched").len());
+    assert!(
+        !world.fakes.join("dispatch-env.released").exists(),
+        "a timed-out hook returned from its hold"
+    );
+    std::fs::remove_file(world.fakes.join("dispatch-env.record-invocation"))
+        .expect("the timeout-only recording script is removed");
 }
 
 /// A timeout ends the actual hook even before it writes its first invocation.
