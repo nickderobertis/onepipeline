@@ -1770,7 +1770,7 @@ mod tests {
             rendered.trim(),
             GOLDEN.trim(),
             "the checkpoint document changed shape. If that was deliberate, bump \
-             CHECKPOINT_SCHEMA_VERSION and update tests/golden/checkpoint-v11.json together"
+             CHECKPOINT_SCHEMA_VERSION and update tests/golden/checkpoint-v12.json together"
         );
     }
 

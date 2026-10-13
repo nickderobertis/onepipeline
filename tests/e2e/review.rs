@@ -839,6 +839,13 @@ fn a_driver_that_cannot_finish_within_the_reply_window_returns_requested_without
     });
     let host = host(&world, "timeout", &["a"]);
     add(&host, 1, comment("801", CommentKind::Conversation, 1));
+    let oversized = world
+        .as_session(&world.session)
+        .with_env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "18446744073709551615")
+        .run_with_stdin(&["review", "timeout", "--json"], "not read");
+    assert_eq!(oversized.code, 2, "{}", oversized.stderr);
+    assert!(oversized.stderr.contains("review reply timeout is too large"));
+    assert!(surfaces(&world, "timeout").is_empty());
     let mut command = world.cmd(&["review", "timeout", "--json"]);
     command
         .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1")
