@@ -40,9 +40,14 @@ fn exchange(address: SocketAddr) -> std::io::Result<()> {
 
 static TIMER_WAITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static SETTLEMENT_START: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static SETTLEMENT_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-pub(crate) fn timer_wait() {
+pub(crate) fn timer_wait() -> Result<()> {
     TIMER_WAITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if SETTLEMENT_ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
+        meet("ONEPIPELINE_TEST_POLL_EXPIRED_GATE")?;
+    }
+    Ok(())
 }
 
 fn settlement_target(node: &str) -> bool {
@@ -55,7 +60,15 @@ pub(crate) fn settlement_started(node: &str) -> Result<()> {
             TIMER_WAITS.load(std::sync::atomic::Ordering::Relaxed),
             std::sync::atomic::Ordering::Relaxed,
         );
+        SETTLEMENT_ACTIVE.store(true, std::sync::atomic::Ordering::Relaxed);
         meet("ONEPIPELINE_TEST_SETTLEMENT_GATE")?;
+    }
+    Ok(())
+}
+
+pub(crate) fn settlement_before_queue(node: &str) -> Result<()> {
+    if settlement_target(node) {
+        meet("ONEPIPELINE_TEST_SETTLEMENT_BEFORE_QUEUE_GATE")?;
     }
     Ok(())
 }
@@ -69,6 +82,7 @@ pub(crate) fn settlement_queued(node: &str) -> Result<()> {
 
 pub(crate) fn settlement_recorded(paths: &crate::ledger::RunPaths, node: &str) -> Result<()> {
     if settlement_target(node) {
+        SETTLEMENT_ACTIVE.store(false, std::sync::atomic::Ordering::Relaxed);
         let waits = TIMER_WAITS.load(std::sync::atomic::Ordering::Relaxed)
             - SETTLEMENT_START.load(std::sync::atomic::Ordering::Relaxed);
         let path = paths.dir.join("settlement-timer-waits.txt");

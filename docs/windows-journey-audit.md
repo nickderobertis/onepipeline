@@ -164,6 +164,8 @@ With the ordering/OS seams retained, restoring the corresponding base behaviors 
 
 Advancing the watch's deadline before publishing surfaces separately reproduced its old scheduling condition deterministically: the unchanged count assertion failed at 0 versus 3. Removing a redundant extra watch read alone did not fail that journey: the summary already reads the queue directly. That read was removed from the finished implementation; the fix is the journey's ordering, not a product summary bug.
 
+The counter also has a positive integration control, `loopcost::an_actual_expired_poll_is_counted_before_a_held_settlement_becomes_readable`: it holds the real settlement before enqueueing, observes one actual expired receiver poll, then records exactly one wait. Removing the increment made this control fail at 0 versus 1; restoring it made both the positive and zero-wait controls pass. All 59 engine/ordering unit tests passed after that change, as did clippy.
+
 All counterfactual edits were restored. The base-fixed PID and draft-phase causes use the existing regressions and commits named above, as the manager ruled. No timeout, coverage threshold, lint rule, CI job or public schema changed. Only the timeout-case count and failed settlement latency assertion changed, under the explicit manager rulings; the original latency bound is retained as a budget.
 
 ## Validation

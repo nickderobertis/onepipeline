@@ -2453,7 +2453,7 @@ fn wait_for_work(
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if !left.is_zero() {
-                    crate::ordering::timer_wait();
+                    crate::ordering::timer_wait()?;
                 }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(None),
@@ -6591,6 +6591,9 @@ fn spawn(
                 }
             };
             let recorded_node = settlement.node.clone();
+            if let Err(error) = crate::ordering::settlement_before_queue(&recorded_node) {
+                eprintln!("{error}");
+            }
             let (recorded, on_record) = mpsc::channel();
             let _ = tx.send(Message::Settled(Box::new(Settled {
                 settlement,
