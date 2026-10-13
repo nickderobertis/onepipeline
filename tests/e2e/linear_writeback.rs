@@ -1132,12 +1132,82 @@ fn command_end_refusal_and_timeout_rebuild_the_workers_store() {
     scenario.finish();
 }
 
+/// Completed projection records, excluding an append's unfinished final line.
+pub(super) fn projection_records(world: &World, run: &str) -> Vec<Value> {
+    let path = world.run_file(run, onepipeline::cli::WRITEBACK_PROJECTIONS_FILE);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(error) => panic!("{} cannot be read: {error}", path.display()),
+    };
+    text.split_inclusive('\n')
+        .filter(|line| line.ends_with('\n'))
+        .map(|line| serde_json::from_str(line).expect("a completed projection record"))
+        .collect()
+}
+
+/// The record for this mutation must be newer than its submission and name its item.
+pub(super) fn projection_completed_after(
+    world: &World,
+    run: &str,
+    before: usize,
+    id: &str,
+) -> bool {
+    let records = projection_records(world, run);
+    records.iter().skip(before).any(|record| {
+        record["outcome"] == "projected"
+            && record["items"]
+                .as_array()
+                .is_some_and(|items| items.len() == 1 && items[0] == id)
+    })
+}
+
+#[test]
+fn a_previous_projection_does_not_answer_for_a_write_held_in_the_source() {
+    let world = World::new("projection-held-record").through_scripted_source();
+    world.script("anchor.wait", "hold");
+    let run = "held-record";
+    let path = world.plan(
+        run,
+        &crate::harness::plan_of(
+            run,
+            vec![
+                crate::harness::agent("anchor", &[]),
+                crate::harness::human("approve", &[]),
+            ],
+        ),
+    );
+    world.run(&["start", &path, "--detach"]).exited(0);
+    world.until(
+        "the claim and the dispatch/waiting projection to finish",
+        |world| projection_records(world, run).len() >= 2,
+    );
+    let before = projection_records(&world, run).len();
+    let meeting = world.store_holds("update_task");
+    world.run(&["attest", run, "approve"]).exited(0);
+    let held = meeting.arrived();
+    assert!(
+        !projection_completed_after(&world, run, before, "approve"),
+        "an earlier projected record answered while the new write was held"
+    );
+    world.store_stops_holding("update_task");
+    held.release();
+    world.until("this approval's projection to finish", |world| {
+        projection_completed_after(world, run, before, "approve")
+    });
+    world.release("anchor.go");
+    world.until("the run to settle", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+}
+
 /// The loopback GitHub GraphQL endpoint `tests/e2e/github_loopback.py` serves, for as long as
-/// this is held: its directory, where `state.json` holds the board and every request it was
-/// sent, and the URL it listens on.
+/// this is held. Snapshots are read from the same server that accepts mutations,
+/// so a reader never holds a filesystem handle across the server’s next write.
 pub(super) struct GitHubEndpoint {
     child: std::process::Child,
-    dir: PathBuf,
+    // Only the refusal regression holds this decoy snapshot without delete sharing.
+    _held_state: Option<std::fs::File>,
     pub(super) url: String,
 }
 
@@ -1145,28 +1215,98 @@ impl GitHubEndpoint {
     /// Serve the board under `world`, seeding each issue named in `seeded` with that caller
     /// metadata beside its own.
     pub(super) fn serve(world: &World, seeded: &Value) -> Self {
+        Self::serve_with_replace_refusal(world, seeded, false)
+    }
+
+    fn serve_with_replace_refusal(world: &World, seeded: &Value, refuse_replace: bool) -> Self {
         let dir = world.root.join("github-endpoint");
         std::fs::create_dir_all(&dir).expect("endpoint directory");
         let seed = dir.join("seeded.json");
         std::fs::write(&seed, seeded.to_string()).expect("seeded metadata");
-        let child = std::process::Command::new("python3")
+        let held_state = refuse_replace.then(|| {
+            let mut options = std::fs::OpenOptions::new();
+            options.read(true).write(true).create_new(true);
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::OpenOptionsExt;
+                use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+                options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+            }
+            options
+                .open(dir.join("state.json"))
+                .expect("the regression reader holds the existing snapshot")
+        });
+        let mut command = std::process::Command::new("python3");
+        // llmlint: ignore-block[tests_mirror_real_usage] the dispatch explicitly requires a
+        // Microsoft-documented Windows semantic imposed through an OS seam on Linux. An existing
+        // snapshot is held without delete sharing for this endpoint's lifetime; only os.replace
+        // is refused. The real server and real HTTP mutations/snapshots run unchanged.
+        if refuse_replace {
+            // CreateFileW: an open handle without FILE_SHARE_DELETE refuses a rename.
+            // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew
+            command.args([
+                "-c",
+                r#"
+import os, runpy, sys
+replace = os.replace
+def sharing_refusal(source, destination):
+    if os.path.basename(destination) == 'state.json':
+        raise PermissionError(13, 'held without FILE_SHARE_DELETE', destination)
+    return replace(source, destination)
+os.replace = sharing_refusal
+sys.argv = sys.argv[1:]
+runpy.run_path(sys.argv[0], run_name='__main__')
+"#,
+            ]);
+        }
+        // llmlint: ignore-end[tests_mirror_real_usage]
+        let mut child = command
             .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/e2e/github_loopback.py"))
             .arg(&dir)
             .arg(&seed)
             .spawn()
             .expect("loopback endpoint starts");
         world.until("the GitHub endpoint to listen", |_| {
+            assert!(
+                child
+                    .try_wait()
+                    .expect("the endpoint process is readable")
+                    .is_none(),
+                "the GitHub endpoint exited before listening"
+            );
             dir.join("endpoint").is_file()
         });
         let url = std::fs::read_to_string(dir.join("endpoint")).expect("endpoint URL");
-        Self { child, dir, url }
+        Self {
+            child,
+            _held_state: held_state,
+            url,
+        }
     }
 
     pub(super) fn state(&self) -> Value {
-        serde_json::from_str(
-            &std::fs::read_to_string(self.dir.join("state.json")).expect("endpoint state"),
+        use std::io::{Read, Write};
+        let address = self
+            .url
+            .trim()
+            .strip_prefix("http://")
+            .expect("a loopback URL");
+        let mut socket = std::net::TcpStream::connect(address).expect("the endpoint listens");
+        socket
+            .set_read_timeout(Some(Duration::from_secs(120)))
+            .expect("a read backstop");
+        write!(
+            socket,
+            "GET /state HTTP/1.0\r\nHost: {address}\r\nConnection: close\r\n\r\n"
         )
-        .expect("endpoint JSON")
+        .expect("the snapshot request");
+        let mut response = String::new();
+        socket
+            .read_to_string(&mut response)
+            .expect("the endpoint snapshot");
+        let (headers, body) = response.split_once("\r\n\r\n").expect("an HTTP response");
+        assert!(headers.starts_with("HTTP/1.0 200 "), "{response}");
+        serde_json::from_str(body).expect("endpoint JSON")
     }
 }
 
@@ -1179,6 +1319,47 @@ impl Drop for GitHubEndpoint {
 
 /// A reused GitHub Projects source must release its command snapshot: a metadata-only
 /// settlement keeps both a person's new body and a Status move made since the previous one.
+/// A board snapshot still follows real HTTP mutations when Windows refuses
+/// replacing a file held without FILE_SHARE_DELETE (CreateFileW, linked above).
+#[test]
+fn github_snapshots_and_mutations_do_not_replace_an_open_state_file() {
+    let world = World::new("github-sharing-refusal");
+    let served = GitHubEndpoint::serve_with_replace_refusal(&world, &json!({}), true);
+    assert_eq!(served.state()["issues"]["work"]["status"], "Todo");
+    let output = std::process::Command::new("python3")
+        .args([
+            "-c",
+            r#"
+import json, sys, urllib.request, urllib.error
+base = sys.argv[1]
+for status in ['Queued', 'Done']:
+    data = json.dumps({'body':'changed through HTTP', 'status':status}).encode()
+    urllib.request.urlopen(urllib.request.Request(base + '/human', data=data)).read()
+    snapshot = json.loads(urllib.request.urlopen(base + '/state').read())
+    assert snapshot['issues']['work']['status'] == status
+try:
+    urllib.request.urlopen(base + '/missing').read()
+except urllib.error.HTTPError as error:
+    assert error.code == 404
+else:
+    raise AssertionError('an unknown route was accepted')
+"#,
+            served.url.trim(),
+        ])
+        .output()
+        .expect("HTTP requests reach the real fixture server");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(served.state()["issues"]["work"]["status"], "Done");
+    assert_eq!(
+        served.state()["issues"]["work"]["body"],
+        "changed through HTTP"
+    );
+}
+
 #[test]
 fn a_reused_github_store_keeps_body_edits_and_status_moves_between_settlements() {
     let world = World::new("github-command-boundary")
@@ -1374,7 +1555,14 @@ fn a_github_source_projecting_a_follow_ups_host_is_read_and_settled_without_writ
     world.run_on(started, "start --detach").exited(0);
     let run = "github-edits";
     world.until("the launch projections", |_| {
-        served.state()["issues"]["anchor"]["status"] == "In Progress"
+        let state = served.state();
+        state["issues"]["anchor"]["status"] == "In Progress"
+            && ["work", "other"]
+                .iter()
+                .all(|id| state["issues"][id]["status"] == "Queued")
+    });
+    world.until("the launch projection to finish", |world| {
+        projection_completed_after(world, run, 0, "anchor")
     });
     let requests = || {
         served.state()["requests"]
@@ -1384,6 +1572,7 @@ fn a_github_source_projecting_a_follow_ups_host_is_read_and_settled_without_writ
     };
     let settled = |id: &str| -> (String, Vec<Value>) {
         let sent = requests().len();
+        let before = projection_records(&world, run).len();
         let evidence = format!("{id} settled on the board");
         let mut command = settle("done", &evidence);
         command["id"] = json!(id);
@@ -1400,17 +1589,9 @@ fn a_github_source_projecting_a_follow_ups_host_is_read_and_settled_without_writ
                     .as_str()
                     .is_some_and(|body| body.contains(&evidence))
         });
-        world.until("the projection record to land", |world| {
-            std::fs::read_to_string(
-                world.run_file(run, onepipeline::cli::WRITEBACK_PROJECTIONS_FILE),
-            )
-            .is_ok_and(|text| {
-                text.lines()
-                    .last()
-                    .is_some_and(|line| line.contains("projected"))
-            })
+        world.until("this settlement's projection record to land", |world| {
+            projection_completed_after(world, run, before, id)
         });
-        std::thread::sleep(Duration::from_millis(1500));
         (evidence, requests()[sent..].to_vec())
     };
 

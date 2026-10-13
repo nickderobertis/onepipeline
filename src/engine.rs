@@ -1934,6 +1934,11 @@ fn converge(
             // llmlint: ignore-end[changed_behavior_has_e2e]
             match message {
                 Message::Event(envelope) => {
+                    if envelope.kind == oneagentgraph::event::EventKind::MemberSettled {
+                        if let Some(node) = envelope.labels.node.as_deref() {
+                            crate::ordering::settlement_started(node)?;
+                        }
+                    }
                     if let Some(node) = envelope.labels.node.clone() {
                         if let Some(dispatch) = in_flight.get_mut(&node) {
                             // Only an envelope evidencing progress moves the stall
@@ -2338,6 +2343,12 @@ fn close_out_and_drain(
     }
     // llmlint: ignore-end[changed_behavior_has_e2e]
 
+    static CLOSEOUT_GATE_MET: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    if !CLOSEOUT_GATE_MET.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        crate::ordering::meet("ONEPIPELINE_TEST_CLOSEOUT_GATE")?;
+    }
+
     // The queue last, because the close-out is where the window is widest: a
     // bounded wait on a store is time an edit can arrive in. The channel is a
     // handle on the run's own paths, so this is the queue the loop has been
@@ -2452,7 +2463,11 @@ fn wait_for_work(
                 }
                 return Ok(Some(batch));
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if !left.is_zero() {
+                    crate::ordering::timer_wait()?;
+                }
+            }
             Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(None),
         }
         let now = channel.fingerprint();
@@ -6620,11 +6635,18 @@ fn spawn(
                     return;
                 }
             };
+            let recorded_node = settlement.node.clone();
+            if let Err(error) = crate::ordering::settlement_before_queue(&recorded_node) {
+                eprintln!("{error}");
+            }
             let (recorded, on_record) = mpsc::channel();
             let _ = tx.send(Message::Settled(Box::new(Settled {
                 settlement,
                 recorded,
             })));
+            if let Err(error) = crate::ordering::settlement_queued(&recorded_node) {
+                eprintln!("{error}");
+            }
             // Held until the loop has journaled the settlement, or has gone:
             // `EndedDispatches` says why the registry may not run ahead of the
             // record. Either answer ends the wait, and then the entries go.
@@ -8663,7 +8685,8 @@ fn settle(paths: &RunPaths, journal: &mut Journal, settlement: &Settlement) -> R
         journal::PipelineKind::NodeSettled,
         journal::labels(&paths.run, Some(&settlement.node)),
         payload,
-    )
+    )?;
+    crate::ordering::settlement_recorded(paths, &settlement.node)
 }
 
 /// The surface that tells the planner what an author other than it did on that

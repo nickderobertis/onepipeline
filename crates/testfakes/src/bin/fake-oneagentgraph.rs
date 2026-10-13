@@ -2445,7 +2445,10 @@ fn emit(
             "{}",
             serde_json::json!({
                 "v": 1,
-                "ts": stamp(seq),
+                "ts": if kind == oneagentgraph::event::EventKind::MemberSettled
+                    && dir.join(format!("{key}.settlement-clock-stepped")).exists() {
+                    STEPPED_BACK.to_string()
+                } else { stamp(seq) },
                 "stream": stream(),
                 "seq": seq,
                 "source": "agentgraph",

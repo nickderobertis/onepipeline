@@ -1746,6 +1746,11 @@ fn worker(
         let (lock, ready) = &*pending;
         if let Ok(mut state) = lock.lock() {
             state.worker = WorkerState::Idle;
+            // The peer observes the completed record and idle worker together,
+            // before the next snapshot or close-out can take this lock.
+            if let Err(error) = crate::ordering::meet("ONEPIPELINE_TEST_PROJECTION_IDLE_GATE") {
+                eprintln!("{error}");
+            }
             ready.notify_all();
         }
     }
