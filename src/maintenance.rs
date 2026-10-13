@@ -39,9 +39,10 @@
 //!
 //! What reaches the run's record is **one** `pool-maintenance` entry per sweep
 //! that did something — a slot ran, a due slot could not be maintained, an
-//! identity was `Claimed`, or one failed — carrying per identity and slot what
-//! ran and how it ended. A sweep on which every identity answered
-//! `NoMaintainCommand`, `NoSlots`, `NotDue` or `InUse` writes nothing: those are
+//! identity was `Claimed`, its maintenance configuration could not be read, or
+//! one failed — carrying per identity and slot what ran and how it ended. A
+//! sweep on which every identity answered `NoMaintainCommand`, `NoSlots`,
+//! `NotDue` or `InUse` writes nothing: those are
 //! the schedule and the pool working, they are the common case on a schedule
 //! measured in days, and a record of them would be a record of nothing.
 //!
@@ -297,7 +298,9 @@ pub(crate) struct Maintained {
 impl Maintained {
     fn is_recorded(&self) -> bool {
         match &self.outcome {
-            Err(_) | Ok(IdentityOutcome::Claimed { .. }) => true,
+            Err(_)
+            | Ok(IdentityOutcome::Claimed { .. })
+            | Ok(IdentityOutcome::MaintenanceUnreadable { .. }) => true,
             Ok(IdentityOutcome::Slots(slots)) => slots.iter().any(|slot| {
                 matches!(
                     slot.outcome,
@@ -968,6 +971,10 @@ fn identity_phrase(outcome: &IdentityOutcome) -> String {
     match outcome {
         IdentityOutcome::NoMaintainCommand => "no maintain command".to_owned(),
         IdentityOutcome::NoSlots => "no slots".to_owned(),
+        IdentityOutcome::MaintenanceUnreadable { reason } => format!(
+            "maintenance configuration unreadable — {}",
+            crate::views::one_line(reason)
+        ),
         IdentityOutcome::Claimed { by_pid } => {
             format!("claimed — another pool maintain (pid {by_pid}) was maintaining it")
         }
@@ -1019,6 +1026,7 @@ fn slot_phrase(outcome: &SlotOutcome) -> String {
             outcome,
             duration_ms,
             log,
+            ..
         } => {
             let ended = match outcome {
                 onevcs::MaintenanceOutcome::Succeeded => "succeeded".to_owned(),
@@ -1354,6 +1362,7 @@ mod tests {
                         outcome: MaintenanceOutcome::Succeeded,
                         duration_ms: 12,
                         log: None,
+                        disk: None,
                     },
                 },
                 SlotMaintenance {
@@ -1687,6 +1696,32 @@ mod tests {
             assert!(held.is_recorded(), "{kept:?} was not recorded");
         }
 
+        // A configuration the sibling could not read ran nothing, but it is a
+        // refusal rather than the schedule working, so it is recorded the way a
+        // failed identity is — in the sibling's own shape.
+        let unreadable = PoolsMaintained {
+            started_at: "2026-09-20T00:00:00.000Z".into(),
+            identities: Ok(vec![
+                quiet("a", IdentityOutcome::NoSlots),
+                quiet(
+                    "b",
+                    IdentityOutcome::MaintenanceUnreadable {
+                        reason: "onevcs.toml could not be parsed".into(),
+                    },
+                ),
+            ]),
+            unreached: Vec::new(),
+        };
+        assert!(unreadable.is_recorded());
+        let payload = Value::Object(unreadable.payload());
+        let identities = payload["identities"].as_array().expect("an array");
+        assert_eq!(identities.len(), 1, "{payload}");
+        assert_eq!(identities[0]["identity"], "b");
+        assert_eq!(
+            identities[0]["outcome"]["maintenance-unreadable"]["reason"],
+            "onevcs.toml could not be parsed"
+        );
+
         let something = PoolsMaintained {
             started_at: "2026-09-20T00:00:00.000Z".into(),
             identities: Ok(vec![
@@ -1784,6 +1819,10 @@ mod tests {
                     outcome: MaintenanceOutcome::Succeeded,
                     duration_ms: 12,
                     log: Some(onevcs::ArtifactId("a-1".into())),
+                    disk: Some(onevcs::SlotDisk {
+                        before_bytes: 4_096,
+                        after_bytes: 1_024,
+                    }),
                 },
                 "ran — succeeded in 12 ms, log a-1",
             ),
@@ -1792,6 +1831,7 @@ mod tests {
                     outcome: MaintenanceOutcome::Failed { exit: Some(3) },
                     duration_ms: 12,
                     log: None,
+                    disk: None,
                 },
                 "ran — failed (exit 3) in 12 ms",
             ),
@@ -1800,6 +1840,7 @@ mod tests {
                     outcome: MaintenanceOutcome::Failed { exit: None },
                     duration_ms: 12,
                     log: None,
+                    disk: None,
                 },
                 "ran — failed (ended by a signal, or never started) in 12 ms",
             ),
@@ -1808,6 +1849,7 @@ mod tests {
                     outcome: MaintenanceOutcome::TimedOut,
                     duration_ms: 1_000,
                     log: None,
+                    disk: None,
                 },
                 "ran — timed out in 1000 ms",
             ),
@@ -1824,6 +1866,12 @@ mod tests {
             "no maintain command"
         );
         assert_eq!(identity_phrase(&IdentityOutcome::NoSlots), "no slots");
+        assert_eq!(
+            identity_phrase(&IdentityOutcome::MaintenanceUnreadable {
+                reason: "onevcs.toml: expected a table\nat line 3".into(),
+            }),
+            "maintenance configuration unreadable — onevcs.toml: expected a table at line 3"
+        );
         assert_eq!(
             identity_phrase(&IdentityOutcome::Slots(vec![
                 SlotMaintenance {
