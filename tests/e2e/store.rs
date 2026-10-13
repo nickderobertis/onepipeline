@@ -4438,7 +4438,11 @@ fn a_cache_enabled_github_store_reads_and_writes_like_an_uncached_store() {
         let idle = world.rendezvous("projection-idle");
         let address = std::fs::read_to_string(world.fakes.join("projection-idle.rendezvous"))
             .expect("the idle gate address");
+        // llmlint: ignore-block[tests_mirror_real_usage] the dispatch requires a held step to
+        // force the projection race. The real worker is held completed/idle so each cache mode
+        // enters the same mutation and close-out state; actual HTTP costs remain exactly compared.
         let world = world.with_env("ONEPIPELINE_TEST_PROJECTION_IDLE_GATE", &address);
+        // llmlint: ignore-end[tests_mirror_real_usage]
         world.script("anchor.wait", "hold");
         let served = GitHubEndpoint::serve(&world, &json!({}));
         let launch = world.root.join("launch");

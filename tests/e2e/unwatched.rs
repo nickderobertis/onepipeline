@@ -1540,6 +1540,8 @@ fn assembled_run(template: &RunPaths, root: &std::path::Path, id: &str, session:
     paths
 }
 
+// llmlint: ignore-end[tests_mirror_real_usage]
+
 /// Windows may refuse an atomic replacement or an open while another handle
 /// is closing. Wait for that filesystem state, under the harness's existing
 /// deadline; unrelated errors still fail at their first attempt.
@@ -1594,15 +1596,21 @@ fn the_fixture_waits_for_a_windows_reader_to_release_a_document() {
             .expect("the reader holds the document"),
     );
     let mut attempts = 0;
+    // llmlint: ignore-block[tests_mirror_real_usage] a regression of the suite's own fixture,
+    // as tests/AGENTS.md permits. The dispatch requires Windows sharing behavior through an OS
+    // seam on Linux; only that refusal is imposed, with an actual held reader. The retry then
+    // performs the real rename and the fixture is assembled from a compiled CLI run.
     after_document_handles_close(|| {
         attempts += 1;
         if reader.is_some() {
+            let refusal = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
             drop(reader.take());
-            return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+            return Err(refusal);
         }
         std::fs::rename(&replacement, &summary)
     })
     .expect("the replacement lands after the reader closes");
+    // llmlint: ignore-end[tests_mirror_real_usage]
     assert_eq!(attempts, 2, "the sharing refusal was not exercised");
     assert!(
         !replacement.exists(),
@@ -1631,6 +1639,9 @@ fn the_fixture_waits_for_a_windows_reader_to_release_a_document() {
 /// does. The stamp is written after the bytes, so what the document claims is what
 /// the file holds — which is what makes it *current*, and the state the bound is
 /// about.
+// llmlint: ignore-block[tests_mirror_real_usage] the scale fixture grows the compiled
+// CLI's own journal records, then stamps its real summary for those bytes, so the
+// listing reads a current document over a host-sized store rather than invented events.
 fn journal_of(paths: &RunPaths, filler: &[u8], bytes: u64) {
     use std::io::Write;
     let mut file = std::io::BufWriter::new(

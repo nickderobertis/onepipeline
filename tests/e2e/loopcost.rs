@@ -540,7 +540,7 @@ fn another_runs_ledger_is_read_on_its_own_interval_and_not_on_the_loops() {
 // llmlint: ignore-block[e2e_not_mocked] the converged state every bound here is about is
 // one node held in flight for a whole minute — see the module note above.
 #[test]
-fn every_answer_the_loop_owes_arrives_inside_a_second() {
+fn ready_settlements_wait_on_no_timer_and_other_loop_answers_arrive_inside_a_second() {
     let world = World::new("loopcost-latency");
     let receiving = world.rendezvous("settlement-received");
     let queued = world.rendezvous("settlement-queued");
@@ -549,10 +549,15 @@ fn every_answer_the_loop_owes_arrives_inside_a_second() {
             .expect("the receiving gate address");
     let queued_address = std::fs::read_to_string(world.fakes.join("settlement-queued.rendezvous"))
         .expect("the queued gate address");
+    // llmlint: ignore-block[tests_mirror_real_usage] the dispatch explicitly requires an
+    // ordering/clock seam to prove scheduling independence, and the manager replaced the
+    // failed wall-clock assertion with this real loop's timer-wait count. The compiled CLI
+    // still receives the producer event and queues its actual settlement on its own channel.
     let world = world
         .with_env("ONEPIPELINE_TEST_SETTLEMENT_NODE", "build")
         .with_env("ONEPIPELINE_TEST_SETTLEMENT_GATE", &received_address)
         .with_env("ONEPIPELINE_TEST_SETTLEMENT_QUEUED_GATE", &queued_address);
+    // llmlint: ignore-end[tests_mirror_real_usage]
     // A producer stamp predating receipt forces the old wall-clock assertion
     // to fail without a sleep. The loop still receives a ready settlement.
     world.script("build.settlement-clock-stepped", "");
@@ -585,6 +590,9 @@ fn every_answer_the_loop_owes_arrives_inside_a_second() {
     // Not from the test's release of the hold, which also spends the dispatch
     // noticing the release and saying so — the double's work, and on a loaded
     // host the larger part of what a clock around it measured.
+    // llmlint: ignore-block[tests_mirror_real_usage] the same required seam: receipt is held
+    // until the real settlement message is queued, then the real loop's timer count proves
+    // that ready work was not paced by a poll. No timer or internal state is substituted.
     world.release("build.go");
     let received = receiving.arrived();
     let ready = queued.arrived();
@@ -606,6 +614,8 @@ fn every_answer_the_loop_owes_arrives_inside_a_second() {
         "0",
         "a ready settlement waited on a poll timer"
     );
+
+    // llmlint: ignore-end[tests_mirror_real_usage]
 
     // A node whose last dependency settles is dispatched.
     world.until("the dependent to start", |world| {

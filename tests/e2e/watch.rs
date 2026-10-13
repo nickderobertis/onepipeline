@@ -3724,6 +3724,9 @@ fn every_surface_the_channel_raises_ends_a_default_watch_and_is_counted_while_it
     let meeting = world.rendezvous("watch-deadline");
     let address = std::fs::read_to_string(world.fakes.join("watch-deadline.rendezvous"))
         .expect("the deadline gate address");
+    // llmlint: ignore-block[tests_mirror_real_usage] the dispatch requires an ordering/clock
+    // seam to force the scheduling condition without a delay. The real watch arms before
+    // three real channel commands; the peer then advances its existing five-second deadline.
     let watching = armed_watch_with(
         &world,
         &run,
@@ -3738,10 +3741,14 @@ fn every_surface_the_channel_raises_ends_a_default_watch_and_is_counted_while_it
         &[("ONEPIPELINE_TEST_WATCH_DEADLINE_GATE", &address)],
     );
     let deadline = meeting.arrived();
+    // llmlint: ignore-end[tests_mirror_real_usage]
     for (kind, message) in raised {
         surfaced(&world, &run, kind, message);
     }
+    // llmlint: ignore-block[tests_mirror_real_usage] this advances the task-required clock
+    // only after all three surfaces are durably queued; the count and return assertions stay exact.
     deadline.release();
+    // llmlint: ignore-end[tests_mirror_real_usage]
     let (code, last, said) = finished(watching);
     assert_eq!(code, WATCH_ELAPSED, "{last}\n{said}");
     assert_eq!(

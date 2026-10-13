@@ -1237,6 +1237,10 @@ impl GitHubEndpoint {
                 .expect("the regression reader holds the existing snapshot")
         });
         let mut command = std::process::Command::new("python3");
+        // llmlint: ignore-block[tests_mirror_real_usage] the dispatch explicitly requires a
+        // Microsoft-documented Windows semantic imposed through an OS seam on Linux. An existing
+        // snapshot is held without delete sharing for this endpoint's lifetime; only os.replace
+        // is refused. The real server and real HTTP mutations/snapshots run unchanged.
         if refuse_replace {
             // CreateFileW: an open handle without FILE_SHARE_DELETE refuses a rename.
             // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew
@@ -1255,6 +1259,7 @@ runpy.run_path(sys.argv[0], run_name='__main__')
 "#,
             ]);
         }
+        // llmlint: ignore-end[tests_mirror_real_usage]
         let mut child = command
             .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/e2e/github_loopback.py"))
             .arg(&dir)

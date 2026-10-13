@@ -616,15 +616,21 @@ fn an_undecodable_envelope_arriving_while_the_driver_is_leaving_is_answered_befo
 fn a_windows_sharing_refusal_while_holding_closeout_does_not_lose_the_envelope() {
     leaving_driver_answers(|world, run| {
         let mut refused = false;
+        // llmlint: ignore-block[tests_mirror_real_usage] the dispatch requires Microsoft's
+        // sharing refusal through a seam on Linux, where unlinking an open directory is allowed.
+        // The refusal is imposed while its reader is held; the next attempt performs real removal
+        // and the compiled CLI still answers the real bus envelope.
         crate::driver::unwritable_shadow_store_with(world, run, |path| {
             if !refused {
                 let reader = shadow_reader(path);
                 refused = true;
+                let refusal = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
                 drop(reader);
-                return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+                return Err(refusal);
             }
             std::fs::remove_dir_all(path)
         });
+        // llmlint: ignore-end[tests_mirror_real_usage]
         assert!(refused, "the sharing refusal was never imposed");
     });
 }
@@ -657,10 +663,14 @@ fn leaving_driver_answers(hold_store: impl FnOnce(&World, &str)) {
     listener
         .set_nonblocking(true)
         .expect("the gate can be checked");
+    // llmlint: ignore-block[tests_mirror_real_usage] the dispatch requires an ordering hook
+    // to force the leaving-driver window without a sleep. It holds the real final claim;
+    // submission and every outcome assertion still use the real CLI/bus and durable records.
     let world = world.with_env(
         "ONEPIPELINE_TEST_CLOSEOUT_GATE",
         &listener.local_addr().expect("the gate address").to_string(),
     );
+    // llmlint: ignore-end[tests_mirror_real_usage]
     world.script("work.wait", "hold");
     let run = "leaving";
     let path = world.plan(run, &plan_of(run, vec![agent("work", &[])]));

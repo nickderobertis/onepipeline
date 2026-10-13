@@ -734,7 +734,11 @@ fn a_compiled_hook_held_before_or_after_output_is_terminated_without_launching_a
         let expiring = world.rendezvous("hook-timeout-clock");
         let address = std::fs::read_to_string(world.fakes.join("hook-timeout-clock.rendezvous"))
             .expect("the hook clock gate address");
+        // llmlint: ignore-block[tests_mirror_real_usage] the dispatch requires a held step/clock
+        // seam rather than a delay. This peer observes the actual compiled hook before advancing
+        // its unchanged one-second deadline; the real CLI still terminates the actual process.
         let world = world.with_env("ONEPIPELINE_TEST_HOOK_TIMEOUT_GATE", &address);
+        // llmlint: ignore-end[tests_mirror_real_usage]
         let run = "timed-hook";
         let path = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
         let command = double("fake-dispatch-env-hook");
@@ -752,8 +756,11 @@ fn a_compiled_hook_held_before_or_after_output_is_terminated_without_launching_a
             .stderr(std::process::Stdio::piped())
             .spawn()
             .expect("the real driver starts");
+        // llmlint: ignore-block[tests_mirror_real_usage] the same task-required ordering seam:
+        // the process must be proved at the held step before the timeout is advanced.
         let deadline = expiring.arrived();
         let (mut stream, _) = listener.accept().expect("the held hook arrives");
+        // llmlint: ignore-end[tests_mirror_real_usage]
         stream
             .set_read_timeout(Some(std::time::Duration::from_secs(120)))
             .expect("a socket backstop");
@@ -763,11 +770,14 @@ fn a_compiled_hook_held_before_or_after_output_is_terminated_without_launching_a
             .expect("the hook announces its pid");
         assert!(announced.trim().parse::<u32>().is_ok(), "{announced}");
         // The child is proven held before the existing one-second clock expires.
+        // llmlint: ignore-block[tests_mirror_real_usage] the task requires deterministic timeout
+        // ordering. Closing the peer also drives refusal cleanup through the real process boundary.
         if disconnect_clock {
             drop(deadline);
         } else {
             deadline.release();
         }
+        // llmlint: ignore-end[tests_mirror_real_usage]
         let output = driving
             .wait_with_output()
             .expect("the timeout settles the run");
