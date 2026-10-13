@@ -9885,10 +9885,13 @@ fn record_result(paths: &RunPaths, state: &RunState, settled: GraphState) -> Res
 /// nothing.
 fn landings_after_asking_again(state: &RunState) -> BTreeMap<String, Landing> {
     let mut landings = state.landings.clone();
+    // A draft merged into another node's branch lands only with that node: its own
+    // merged change request says nothing about the root.
     let unlanded: Vec<String> = landings
         .iter()
         .filter(|(_, landing)| **landing == Landing::Unlanded)
         .map(|(node, _)| node.clone())
+        .filter(|node| !state.absorbed.contains_key(node))
         .collect();
     for node in unlanded {
         let Some(branch) = state.branches.get(&node) else {

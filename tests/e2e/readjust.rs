@@ -1480,3 +1480,284 @@ fn a_rework_of_a_node_merged_since_the_last_trigger_is_refused_naming_add() {
         .all(|event| event["labels"]["node"] != "a-rework-1"));
     every_draft_names_its_base(&world, run, &project, &[("b", "main")]);
 }
+
+/// That the engine asked the host to merge, close or lift nothing since `from`, and
+/// pushed nothing onto the root.
+fn the_engine_merged_closed_and_lifted_nothing(world: &World, run: &str, from: usize) {
+    for call in host_calls(world, from) {
+        let args: Vec<&str> = call["args"]
+            .as_array()
+            .map(|args| args.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        assert!(
+            !(args.first() == Some(&"pr")
+                && matches!(args.get(1), Some(&"merge" | &"ready" | &"close"))),
+            "the engine asked the host to {:?}: {call}",
+            args.get(1)
+        );
+        assert!(
+            !args.contains(&"state=closed"),
+            "the engine closed a change request: {call}"
+        );
+    }
+    for push in world.events_of(run, "push") {
+        assert!(
+            push["payload"]["branch"] != "main" && push["payload"]["ref"] != "refs/heads/main",
+            "the engine pushed onto the root: {push}"
+        );
+    }
+}
+
+/// The non-blocking surfaces of `kind` the run raised.
+fn surfaced(world: &World, run: &str, kind: &str) -> Vec<Value> {
+    world
+        .events_of(run, "planner-surface-queued")
+        .into_iter()
+        .filter(|event| event["payload"]["kind"] == kind)
+        .map(|event| event["payload"].clone())
+        .collect()
+}
+
+/// Case 5(a): a person merges `b`'s change request into `a`'s branch in `a ← b ← c`.
+/// `b` is absorbed and surfaced, not landed; `c` is placed on `a`'s branch with only its
+/// own change against it; a `rework` of `b` is refused naming `a`; and once `a` lands,
+/// `b` reads landed via `a` and `c` is on the root.
+#[test]
+fn a_draft_merged_into_its_parent_s_branch_is_absorbed_and_lands_with_it() {
+    let world = team_world("readjust-absorbed");
+    for node in ["a", "b", "c"] {
+        world.script(&format!("{node}.work"), &format!("{node}'s change\n"));
+    }
+    let run = "absorbed";
+    launched(
+        &world,
+        run,
+        vec![
+            lifecycle("a", &[]),
+            lifecycle("b", &["a"]),
+            lifecycle("c", &["b"]),
+        ],
+    );
+    let a_branch = branch_of(&world, run, "a");
+    let c_branch = branch_of(&world, run, "c");
+    let from = world.invocations().len();
+    merge(&world, &number_of(&world, run, "b"), "merge-commit", "kept");
+    readjusted(&world, run);
+
+    let absorbed = record(&world, run, "node-absorbed", "b").expect("b was absorbed");
+    assert_eq!(absorbed["into"], "a", "{absorbed}");
+    assert!(record(&world, run, "node-landed", "b").is_none());
+    assert_eq!(surfaced(&world, run, "stack-merged-out-of-order").len(), 1);
+    assert_eq!(settled(&world, run, "c")["base"], a_branch.as_str());
+    let (base, _) = on_host(&world, run, "c");
+    assert_eq!(base, a_branch);
+    assert_eq!(
+        changed_against(&world, &service(&world), &a_branch, &c_branch),
+        ["c.md"]
+    );
+    let (status, _) = views(&world, run);
+    assert!(
+        status.contains("b: merged into a's branch, and lands only with it"),
+        "{status}\n{:#?}",
+        world
+            .journal(run)
+            .iter()
+            .filter(|event| event["labels"]["node"] == "b")
+            .map(|event| format!("{} {}", event["kind"], event["payload"]))
+            .collect::<Vec<_>>()
+    );
+
+    let refused = reply(&world, run, json!([rework("b")]));
+    assert_ne!(refused.code, 0, "{}", refused.stdout);
+    let said = format!("{}{}", refused.stdout, refused.stderr);
+    assert!(
+        said.contains("merged into the branch of 'a'") && said.contains("rework 'a'"),
+        "{said}"
+    );
+
+    merge(&world, &number_of(&world, run, "a"), "squash", "kept");
+    readjusted(&world, run);
+    let landed = record(&world, run, "node-landed", "b").expect("b landed with a");
+    assert_eq!(landed["detected_by"], "absorber-landed", "{landed}");
+    assert_eq!(landed["via"], "a", "{landed}");
+    assert_eq!(settled(&world, run, "c")["base"], "main");
+    assert_eq!(
+        changed_against(&world, &service(&world), "main", &c_branch),
+        ["c.md"]
+    );
+    the_engine_merged_closed_and_lifted_nothing(&world, run, from);
+}
+
+/// Case 5(b): a person retargets `b` to the root and merges it while `a` is unlanded.
+/// `b` is landed, `stack-landed-out-of-order` names `a`, and `a` is brought up to date
+/// — its branch carrying the root's head.
+#[test]
+fn a_draft_merged_into_the_root_ahead_of_its_parent_carries_it_and_says_so() {
+    let world = team_world("readjust-ahead");
+    for node in ["a", "b"] {
+        world.script(&format!("{node}.work"), &format!("{node}'s change\n"));
+    }
+    let run = "ahead";
+    launched(
+        &world,
+        run,
+        vec![lifecycle("a", &[]), lifecycle("b", &["a"])],
+    );
+    let from = world.invocations().len();
+    let b_number = number_of(&world, run, "b");
+    person(&world, &["retarget", SLUG, &b_number.to_string(), "main"]);
+    merge(&world, &b_number, "squash", "kept");
+    let root = tip(&world, "main");
+    readjusted(&world, run);
+
+    assert!(record(&world, run, "node-landed", "b").is_some());
+    let carried =
+        record(&world, run, "stack-landed-out-of-order", "b").expect("the carry is recorded");
+    assert_eq!(carried["carried"], json!(["a"]), "{carried}");
+    let raised = surfaced(&world, run, "stack-landed-out-of-order");
+    assert_eq!(raised.len(), 1, "{raised:#?}");
+    assert!(
+        raised[0]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("'a'")),
+        "{raised:#?}"
+    );
+    assert!(record(&world, run, "node-readjusted", "a").is_some());
+    assert!(is_ancestor(
+        &world,
+        &root,
+        &tip(&world, &branch_of(&world, run, "a"))
+    ));
+    the_engine_merged_closed_and_lifted_nothing(&world, run, from);
+}
+
+/// Case 5(c): `b`'s node failed holding an open change request when `a` lands. Its change
+/// request is retargeted to the root at once with no merge, recorded with `content:
+/// pending`, and `readjust-pending` is surfaced; a later `retry` merges the root in, with
+/// only `b`'s change against it.
+#[test]
+fn a_failed_draft_is_retargeted_with_no_merge_and_a_retry_brings_it_up_to_date() {
+    let world =
+        team_world("readjust-failed-draft").with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "1");
+    for node in ["a", "b"] {
+        world.script(&format!("{node}.work"), &format!("{node}'s change\n"));
+    }
+    // `b`'s change request is the second opened, and its checks fail.
+    world.script("gh.checks.2", "lint completed failure required");
+    let run = "failed";
+    launched(
+        &world,
+        run,
+        vec![lifecycle("a", &[]), lifecycle("b", &["a"])],
+    );
+    let b = settled(&world, run, "b");
+    assert_eq!(b["status"], "failed", "{b}");
+    let b_branch = branch_of(&world, run, "b");
+    let b_head = tip(&world, &b_branch);
+    let from = world.invocations().len();
+    merge(&world, &number_of(&world, run, "a"), "squash", "kept");
+    readjusted(&world, run);
+
+    let pending = record(&world, run, "node-readjusted", "b").expect("b was readjusted");
+    assert_eq!(pending["content"], "pending", "{pending}");
+    assert_eq!(pending["agent_dispatched"], false, "{pending}");
+    assert_eq!(pending["retarget"], "retargeted", "{pending}");
+    assert_eq!(tip(&world, &b_branch), b_head, "b's branch was merged into");
+    let base = change_from(&world, &b_branch)["base"].clone();
+    assert_eq!(base, "main");
+    assert_eq!(surfaced(&world, run, "readjust-pending").len(), 1);
+    the_engine_merged_closed_and_lifted_nothing(&world, run, from);
+
+    world.script("gh.checks.2", crate::draft_lifecycle::GREEN);
+    reply(
+        &world,
+        run,
+        json!([{"op": "retry", "id": "b", "node": lifecycle("b-2", &["a"])}]),
+    )
+    .exited(0);
+    world.run(&["adopt", run]).exited(0);
+    let retried = settled(&world, run, "b-2");
+    assert_eq!(retried["status"], "done", "{retried}");
+    assert_eq!(retried["branch"], b_branch.as_str(), "{retried}");
+    assert_eq!(retried["base"], "main", "{retried}");
+    assert!(is_ancestor(
+        &world,
+        &tip(&world, "main"),
+        &tip(&world, &b_branch)
+    ));
+    assert_eq!(
+        changed_against(&world, &service(&world), "main", &b_branch),
+        ["b.md"]
+    );
+}
+
+/// Case 5(d): a person retargets a draft by hand. Its next readjustment moves it back
+/// onto its computed base — the record's `from` naming the base the person put it on —
+/// and surfaces `change-base-overridden`.
+#[test]
+fn a_draft_retargeted_by_hand_is_moved_back_and_said() {
+    let world = team_world("readjust-overridden");
+    for node in ["a", "b"] {
+        world.script(&format!("{node}.work"), &format!("{node}'s change\n"));
+    }
+    let run = "overridden";
+    launched(
+        &world,
+        run,
+        vec![lifecycle("a", &[]), lifecycle("b", &["a"])],
+    );
+    let a_branch = branch_of(&world, run, "a");
+    let from = world.invocations().len();
+    person(
+        &world,
+        &[
+            "retarget",
+            SLUG,
+            &number_of(&world, run, "b").to_string(),
+            "main",
+        ],
+    );
+    readjusted(&world, run);
+    let moved = record(&world, run, "node-readjusted", "b").expect("b was moved back");
+    assert_eq!(moved["from"]["base"], "main", "{moved}");
+    assert_eq!(moved["to"]["base"], a_branch.as_str(), "{moved}");
+    assert_eq!(moved["retarget"], "retargeted", "{moved}");
+    let (base, _) = on_host(&world, run, "b");
+    assert_eq!(base, a_branch);
+    assert_eq!(surfaced(&world, run, "change-base-overridden").len(), 1);
+    the_engine_merged_closed_and_lifted_nothing(&world, run, from);
+}
+
+/// Case 5(e): a draft closed without merging moves nothing — the draft above it stays
+/// where it is — and is surfaced.
+#[test]
+fn a_draft_closed_unmerged_moves_nothing_and_is_said() {
+    let world = team_world("readjust-closed-unmerged");
+    for node in ["a", "b"] {
+        world.script(&format!("{node}.work"), &format!("{node}'s change\n"));
+    }
+    let run = "closed";
+    launched(
+        &world,
+        run,
+        vec![lifecycle("a", &[]), lifecycle("b", &["a"])],
+    );
+    let a_branch = branch_of(&world, run, "a");
+    let b_head = tip(&world, &branch_of(&world, run, "b"));
+    let from = world.invocations().len();
+    person(
+        &world,
+        &["close", SLUG, &number_of(&world, run, "a").to_string()],
+    );
+    readjusted(&world, run);
+    let closed = record(&world, run, "change-closed", "a").expect("a's close is recorded");
+    assert_eq!(
+        closed["change_url"],
+        settled(&world, run, "a")["change_url"]
+    );
+    assert_eq!(surfaced(&world, run, "change-closed").len(), 1);
+    assert!(record(&world, run, "node-readjusted", "b").is_none());
+    assert_eq!(settled(&world, run, "b")["base"], a_branch.as_str());
+    assert_eq!(tip(&world, &branch_of(&world, run, "b")), b_head);
+    the_engine_merged_closed_and_lifted_nothing(&world, run, from);
+}

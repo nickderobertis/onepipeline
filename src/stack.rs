@@ -444,9 +444,13 @@ pub(crate) fn restacks_owed(
     let mut owed = Vec::new();
     for node in state.graph.iter() {
         let id = node.id.as_str();
+        // A draft merged into another's branch, or closed, has no change request left
+        // to republish onto.
         if node.repo.is_none()
             || statuses.get(id) != Some(&NodeStatus::Done)
             || state.landings.get(id) != Some(&Landing::Unlanded)
+            || state.absorbed.contains_key(id)
+            || state.closed_changes.contains(id)
             || busy(id)
         {
             continue;

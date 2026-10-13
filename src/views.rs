@@ -4554,7 +4554,7 @@ fn readjust_phrases(state: &RunState, id: &str) -> Vec<String> {
         });
     }
     if let Some(into) = state.absorbed.get(id) {
-        if state.landings.get(id) != Some(&crate::graph::Landing::Landed) {
+        if !state.landed_how.contains_key(id) {
             said.push(format!(
                 "merged into {}'s branch, and lands only with it",
                 one_line(into)
