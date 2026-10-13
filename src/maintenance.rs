@@ -972,7 +972,10 @@ fn identity_phrase(outcome: &IdentityOutcome) -> String {
         IdentityOutcome::NoMaintainCommand => "no maintain command".to_owned(),
         IdentityOutcome::NoSlots => "no slots".to_owned(),
         IdentityOutcome::MaintenanceUnreadable { reason } => {
-            format!("maintenance unreadable — {}", crate::views::one_line(reason))
+            format!(
+                "maintenance unreadable — {}",
+                crate::views::one_line(reason)
+            )
         }
         IdentityOutcome::Claimed { by_pid } => {
             format!("claimed — another pool maintain (pid {by_pid}) was maintaining it")
