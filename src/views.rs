@@ -4912,6 +4912,15 @@ fn goals_of(view: &RunView) -> String {
     out
 }
 
+// llmlint: ignore-block[cli_output_contract] The approved status/results SDK renderers return String and existing terminal diagnostics are part of that view. The planner ruled to retain those signatures and show host-read failures in the view; review and results --json carry failures through their separate exit/error paths. The refusal journey drives all three paths.
+fn review_lines(view: &RunView) -> String {
+    match crate::review::read(&view.state) {
+        Ok(comments) => crate::review::lines(&comments),
+        Err(error) => format!("  review state could not be read: {error}\n"),
+    }
+}
+// llmlint: ignore-end[cli_output_contract]
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7690,12 +7699,3 @@ mod tests {
         assert_eq!(EndingKind::Stopped.word(), "ENDED stopped");
     }
 }
-
-// llmlint: ignore-block[cli_output_contract] The approved status/results SDK renderers return String and existing terminal diagnostics are part of that view. The planner ruled to retain those signatures and show host-read failures in the view; review and results --json carry failures through their separate exit/error paths. The refusal journey drives all three paths.
-fn review_lines(view: &RunView) -> String {
-    match crate::review::read(&view.state) {
-        Ok(comments) => crate::review::lines(&comments),
-        Err(error) => format!("  review state could not be read: {error}\n"),
-    }
-}
-// llmlint: ignore-end[cli_output_contract]
