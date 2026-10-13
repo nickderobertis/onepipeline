@@ -506,7 +506,8 @@ pub(crate) struct NodeRequeued {
 pub(crate) struct NodeSettled {
     /// The terminal status.
     pub(crate) status: Status,
-    /// The word its settlement was reached under.
+    /// The word its settlement was reached under. A review draft republished
+    /// without a check watch settles change-review-draft-unchecked at its push.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) outcome: Option<String>,
     /// The bounded detail.

@@ -96,6 +96,50 @@ fn is_ancestor(world: &World, ancestor: &str, of: &str) -> bool {
         .success()
 }
 
+#[test]
+fn a_cold_republication_without_a_head_record_watches_the_same_draft() {
+    let world = team_world("rework-cold-watch");
+    world.script("a.work", "first draft\n");
+    let project = launched(&world, "coldwatch", vec![lifecycle("a", &[])], 1, &[]);
+    let original = settled(&world, "coldwatch", "a");
+    let branch = text(&original["branch"], "original branch");
+    let cold = world.on_host("without-change-heads");
+    cold.run_from(&cold.project, &["start", &project, "--attach"])
+        .exited(0);
+    assert!(!cold.onevcs_home().join("change-heads").exists());
+    cold.script("a-rework-1.work", "changed on the cold host\n");
+    cold.script("a-rework-1.work-file", "a");
+    reply(
+        &cold,
+        "coldwatch",
+        json!([rework("a", "address the review on this host")]),
+    )
+    .exited(0);
+    let before = cold.invocations().len();
+    let output = adopt(&cold, "coldwatch");
+    output
+        .exited(0)
+        .err_has("no local head-branch record; watching its existing draft instead");
+    let replacement = settled(&cold, "coldwatch", "a-rework-1");
+    assert_eq!(replacement["outcome"], "change-review-draft");
+    assert_eq!(replacement["change_url"], original["change_url"]);
+    assert_eq!(replacement["branch"], original["branch"]);
+    assert_eq!(opened_from(&cold, branch), 1);
+    assert!(held_as_draft(&cold, &change_from(&cold, branch)["number"]));
+    assert!(cold
+        .invocations()
+        .iter()
+        .skip(before)
+        .any(|call| call["tool"] == "gh"
+            && call["args"][0] == "pr"
+            && call["args"][1] == "checks"));
+    assert!(is_ancestor(
+        &cold,
+        text(&original["head"], "original head"),
+        text(&replacement["head"], "replacement head")
+    ));
+}
+
 /// The committed operations of every `edit-committed` the run journalled.
 fn committed(world: &World, run: &str) -> Vec<Value> {
     world
@@ -138,6 +182,14 @@ fn a_draft_in_review_is_reworked_on_its_own_branch_and_change_request() {
     let a_branch = text(&a["branch"], "a's branch").to_owned();
     let a_head = text(&a["head"], "a's head").to_owned();
     let a_number = change_from(&world, &a_branch)["number"].clone();
+    let publication_calls = world.invocations();
+    assert!(
+        publication_calls.iter().any(|call| call["tool"] == "gh"
+            && call["args"][0] == "pr"
+            && call["args"][1] == "checks"),
+        "first publications must watch their checks"
+    );
+    let before_rework = publication_calls.len();
 
     reply(
         &world,
@@ -146,6 +198,13 @@ fn a_draft_in_review_is_reworked_on_its_own_branch_and_change_request() {
     )
     .exited(0);
     adopt(&world, run).exited(0);
+    let republication_calls = world.invocations();
+    assert!(
+        republication_calls.iter().skip(before_rework).all(|call| {
+            call["tool"] != "gh" || !(call["args"][0] == "pr" && call["args"][1] == "checks")
+        }),
+        "a rework and its clean restack must defer their check watches"
+    );
 
     // On the record: the rework, with what it asked.
     let reworked = committed(&world, run)
@@ -167,7 +226,7 @@ fn a_draft_in_review_is_reworked_on_its_own_branch_and_change_request() {
     let replacement = settled(&world, run, "a-rework-1");
     assert_eq!(replacement["status"], "done", "{replacement}");
     assert_eq!(
-        replacement["outcome"], "change-review-draft",
+        replacement["outcome"], "change-review-draft-unchecked",
         "{replacement}"
     );
     assert_eq!(replacement["branch"], a_branch.as_str(), "{replacement}");

@@ -413,7 +413,7 @@ pub const EVENTS_BUNDLE_PATH: &str = "schemas/events.json";
 // through the bus's own `SchemaBundle`, asserts its version equals this, and holds the
 // contract paragraph naming it to the same string — so a value that is not a bundle version
 // fails the deterministic tier rather than reaching a link.
-pub const EVENTS_BUNDLE_VERSION: &str = "1.3.0";
+pub const EVENTS_BUNDLE_VERSION: &str = "1.4.0";
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// The ids [`EVENTS_BUNDLE_PATH`] publishes, in the order the bundle lists

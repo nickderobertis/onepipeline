@@ -1,5 +1,5 @@
 {
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "The agent stack's event envelope, filter, artifact reference and labels, and the payload of every onepipeline pipeline kind, as onepipeline declares them.",
   "schemas": [
     {
@@ -968,7 +968,7 @@
               "string",
               "null"
             ],
-            "description": "The word its settlement was reached under."
+            "description": "The word its settlement was reached under. A review draft republished\nwithout a check watch settles change-review-draft-unchecked at its push."
           },
           "detail": {
             "type": [

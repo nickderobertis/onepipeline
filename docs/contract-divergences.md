@@ -10569,3 +10569,41 @@ round-trips open, merged and closed states (including a deleted base), body,
 head, draft state and every checks verdict through the real onevcs CLI against
 the remote double's typed standings, and refuses a malformed query.
 `tests/contract.rs` holds the block above and the unchanged payload registration.
+
+## 124. Review draft republications defer their check watch — OPEN
+
+**What the contract says.** A first publication watches its checks. The approved
+readjustment task makes a review draft's republication settle at its push, with
+its verdict held for the next explicit trigger.
+
+**Proposal (approved by the task and its fallback amendment).** A republication
+adopts the recorded change request with `defer_checks`. Its engine outcome is
+`change-review-draft-unchecked`, its status is `done`, and its landing remains
+`unlanded`. A clean restack reads no description and writes none. Reworks and
+conflicted restacks keep their existing drafting. The distinct producer refusal
+`UnrecordedChangeHead` falls back to the existing watched publication on the
+same change request; a record naming a different branch stays a refusal.
+
+```json
+{
+  "deferred_outcome": "change-review-draft-unchecked",
+  "status": "done",
+  "landing": "unlanded",
+  "first_publication": "watched",
+  "republication": {"defer_checks": true, "adopt": true},
+  "fallback_refusal": "UnrecordedChangeHead",
+  "fallback": "watched",
+  "branch_mismatch": "refused",
+  "bundle_versions": {"events": "1.4.0", "planner_channel": "1.3.0"}
+}
+```
+
+**What this build does.** The private publication seam defers a recorded review
+republication, falls back only for the producer's missing-record refusal, and
+names that fallback on stderr. The rework journey drives the real binary and
+onevcs over real git and the fake host: first publications watch checks, while
+its rework and clean restack make no check-watch call. The cold-host journey
+continues from the Markdown store with no change-head record, reworks the
+same branch, observes the fallback, and holds the single original change request
+open as a draft. Unit tests hold the outcome, status and landing classifier;
+`tests/contract.rs` reads the block and the generated events bundle together.

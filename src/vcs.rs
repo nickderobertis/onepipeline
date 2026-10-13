@@ -267,14 +267,55 @@ pub fn publish(
             body: body.map(str::to_owned),
             draft: draft.cloned(),
             term_scope: term_scope.clone(),
-            // Every publication here reads its checks: deferring them is for a
-            // caller that reads the verdict later, which nothing in this engine does.
+            // First publications and missing-head-record fallbacks watch their checks.
             defer_checks: false,
             adopt: None,
         },
         &NodeCancellation(cancel),
     )
     .map_err(publication_refusal)
+}
+
+/// Push into a recorded review draft; watch it when this host lacks its branch record.
+pub(crate) fn republish(
+    token: &SessionToken,
+    policy: Option<MergePolicy>,
+    title: Option<&str>,
+    body: Option<&str>,
+    change: &str,
+    cancel: &crate::executor::CancellationToken,
+    term_scope: &onevcs::TermScope,
+) -> std::result::Result<Publication, PublishRefused> {
+    let subject = title
+        .map(|title| title.parse::<Subject>().map_err(sibling))
+        .transpose()
+        .map_err(PublishRefused::Refused)?;
+    let adopt = change
+        .parse::<onevcs::Url>()
+        .map_err(|error| PublishRefused::Refused(sibling(format!("review draft URL: {error}"))))?;
+    let answer = onevcs::publish_with_cancellation(
+        &providers(),
+        token,
+        &PublishRequest {
+            policy,
+            title: subject,
+            body: body.map(str::to_owned),
+            draft: None,
+            term_scope: term_scope.clone(),
+            defer_checks: true,
+            adopt: Some(adopt),
+        },
+        &NodeCancellation(cancel),
+    );
+    match answer {
+        // This refusal proves that nothing was pushed. A different recorded
+        // branch is a distinct refusal and must remain a planner-visible failure.
+        Err(onevcs::Error::UnrecordedChangeHead { .. }) => {
+            eprintln!("onepipeline: review draft {change} has no local head-branch record; watching its existing draft instead");
+            publish(token, policy, title, body, None, cancel, term_scope)
+        }
+        answer => answer.map_err(publication_refusal),
+    }
 }
 
 /// The node's cancellation, as the publication watch asks it.
@@ -414,6 +455,9 @@ pub const DRAFTED: &str = "change-draft";
 /// `change-open` is already asking the team for review.
 pub const REVIEW_DRAFTED: &str = "change-review-draft";
 
+/// A review draft pushed without a check watch, awaiting the next standings read.
+pub(crate) const REVIEW_DRAFTED_UNCHECKED: &str = "change-review-draft-unchecked";
+
 /// How a publication settles the node that made it.
 ///
 /// This crate's own outcome vocabulary, which a plan's readers and `results`
@@ -429,11 +473,7 @@ pub fn outcome_of(outcome: &PublishOutcome) -> &'static str {
         PublishOutcome::ChangeDraft(_) => DRAFTED,
         // Green and done, but not yet lifted: see [`REVIEW_DRAFTED`].
         PublishOutcome::ChangeReviewDraft(_) => REVIEW_DRAFTED,
-        // A push into a review draft with its checks unread answers only a
-        // `defer_checks` publication, which this engine never makes, so receiving
-        // it is a disagreement with `onevcs` about the request: the residual, and
-        // never a word that reads as finished work.
-        PublishOutcome::ChangeReviewDraftUnchecked(_) => Failure::RESIDUAL,
+        PublishOutcome::ChangeReviewDraftUnchecked(_) => REVIEW_DRAFTED_UNCHECKED,
         PublishOutcome::Queued(_) => "queued",
         PublishOutcome::NothingToPublish => "no-changes",
         PublishOutcome::Failed { kind, .. } => failure_of(*kind).outcome(),
@@ -698,11 +738,10 @@ pub fn landing_of(outcome: &PublishOutcome) -> Option<crate::graph::Landing> {
         PublishOutcome::ChangeOpen(_)
         | PublishOutcome::ChangeDraft(_)
         | PublishOutcome::ChangeReviewDraft(_)
+        | PublishOutcome::ChangeReviewDraftUnchecked(_)
         | PublishOutcome::Queued(_) => Some(Landing::Unlanded),
         // Settled as the residual, as `Failed` is: see [`outcome_of`].
-        PublishOutcome::NothingToPublish
-        | PublishOutcome::ChangeReviewDraftUnchecked(_)
-        | PublishOutcome::Failed { .. } => None,
+        PublishOutcome::NothingToPublish | PublishOutcome::Failed { .. } => None,
     }
 }
 
@@ -3218,16 +3257,14 @@ mod tests {
             "change-review-draft"
         );
         assert_eq!(REVIEW_DRAFTED, "change-review-draft");
-        // A push into a review draft with its checks unread answers a request this
-        // engine never makes, so it is the residual and claims no landing: nothing
-        // read its checks, and no word that reads as finished work may say so.
+        // A deferred republication remains an unlanded draft at its push.
         assert_eq!(
             outcome_of(&PublishOutcome::ChangeReviewDraftUnchecked(url.clone())),
-            Failure::RESIDUAL
+            REVIEW_DRAFTED_UNCHECKED
         );
         assert_eq!(
             landing_of(&PublishOutcome::ChangeReviewDraftUnchecked(url.clone())),
-            None
+            Some(crate::graph::Landing::Unlanded)
         );
         assert_eq!(outcome_of(&PublishOutcome::Queued(url)), "queued");
         assert_eq!(outcome_of(&PublishOutcome::NothingToPublish), "no-changes");

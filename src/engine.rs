@@ -6222,6 +6222,7 @@ fn start_ready(
             resume,
             notes_in_flight,
             dispatching,
+            review_change_for(state, &node.id),
         )?;
         let now = Instant::now();
         in_flight.insert(
@@ -6360,6 +6361,7 @@ fn start_restacks(
             None,
             notes_in_flight,
             dispatching,
+            review_change_for(state, &node.id),
         )?;
         let now = Instant::now();
         in_flight.insert(
@@ -6488,6 +6490,23 @@ enum Coursed {
     Restack,
 }
 
+/// The recorded review draft this node, or its reworked predecessor, republishes.
+fn review_change_for(state: &Projected, node: &str) -> Option<String> {
+    let recorded = state
+        .reworks
+        .iter()
+        .find_map(|(predecessor, rework)| {
+            (rework.replacement == node).then_some(predecessor.as_str())
+        })
+        .unwrap_or(node);
+    matches!(
+        state.outcomes.get(recorded).map(String::as_str),
+        Some(crate::vcs::REVIEW_DRAFTED | crate::vcs::REVIEW_DRAFTED_UNCHECKED)
+    )
+    .then(|| state.known_change_url(recorded))
+    .flatten()
+}
+
 /// Run one node's dispatch on a thread, reporting back to the single writer.
 #[allow(
     clippy::too_many_arguments,
@@ -6508,6 +6527,7 @@ fn spawn(
     resume: Option<Box<crate::lifecycle::Continuation>>,
     notes_in_flight: &DeliveriesInFlight,
     boundary: crate::boundary::Dispatching,
+    review_change: Option<String>,
 ) -> Result<()> {
     // The labels a `node_label` rule selects on. An executor is chosen once per
     // node, before its steps run, so a node's own labels are what exists here.
@@ -6550,6 +6570,7 @@ fn spawn(
             .project
             .parse::<crate::taskgraph::QualifiedId>()
             .is_ok(),
+        review_change,
         boundary,
     };
     std::thread::Builder::new()

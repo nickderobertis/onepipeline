@@ -979,7 +979,7 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), EVENTS_BUNDLE_VERSION);
     assert_eq!(
-        divergence_block("122.")["bundle_versions"]["events"],
+        divergence_block("124.")["bundle_versions"]["events"],
         EVENTS_BUNDLE_VERSION,
         "the rework bundle version must be the manager's recorded ruling"
     );
@@ -10674,4 +10674,24 @@ fn review_discovery_is_the_recorded_contract_and_registered_payload() {
             serde_json::to_value(&receipt).unwrap()
         );
     }
+}
+
+#[test]
+fn deferred_review_republication_is_the_recorded_outcome() {
+    use onepipeline::event::PipelineKind;
+    let block = divergence_block("124.");
+    assert_eq!(block["deferred_outcome"], "change-review-draft-unchecked");
+    assert_eq!(block["status"], "done");
+    assert_eq!(block["landing"], "unlanded");
+    assert_eq!(
+        block["republication"],
+        json!({"defer_checks":true,"adopt":true})
+    );
+    assert_eq!(block["fallback_refusal"], "UnrecordedChangeHead");
+    assert_eq!(block["fallback"], "watched");
+    assert_eq!(block["branch_mismatch"], "refused");
+    onepipeline::payload::registry().check(
+        &onepipeline::payload::schema_of(PipelineKind::NodeSettled),
+        &json!({"node":"draft", "status":"done", "outcome":block["deferred_outcome"], "landing":block["landing"]}),
+    ).unwrap();
 }

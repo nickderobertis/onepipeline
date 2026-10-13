@@ -62,6 +62,8 @@ pub struct Launch {
     /// launched from a store, whose project a driver claims, and none an older record names
     /// no project for.
     pub(crate) publication_gated: bool,
+    /// The change request a republication adopts without watching its checks.
+    pub(crate) review_change: Option<String>,
     /// What the publication boundary tells and gives this node's dispatches: the run's
     /// term scope, which every check its closeout asks derives its terms from, and in a
     /// mixed plan its side of the boundary.
@@ -1710,7 +1712,13 @@ fn publish(
     // A host that could not be asked has not said the session holds nothing, so
     // that is said out loud rather than read as `None`: the publication below
     // asks the same host again and settles on its own words.
-    let held = match crate::vcs::session_change(token) {
+    let clean_republication =
+        matches!(closeout, Closeout::Untouched) && launch.review_change.is_some();
+    let held = match if clean_republication {
+        Ok(None)
+    } else {
+        crate::vcs::session_change(token)
+    } {
         Ok(held) => held,
         Err(error) => {
             eprintln!(
@@ -1893,11 +1901,12 @@ fn publish(
         draft.as_ref(),
         cancel,
         &launch.boundary.term_scope,
+        launch.review_change.as_deref(),
     );
     // The Stack block, written by the engine itself onto every change request a
     // publication of a stacked node leaves — failed ones included, since the
     // change request outlives the attempt and a re-dispatch publishes onto it.
-    if publication.answered.is_ok() {
+    if publication.answered.is_ok() && !clean_republication {
         if let Some(stack) = stack {
             write_stack_block(node, token, stack, &launch.boundary.term_scope);
         }
@@ -1968,14 +1977,6 @@ fn publish(
                 }
                 return failed;
             }
-            // A push into a review draft with its checks unread answers only a
-            // publication that deferred them, and this engine never sets
-            // `defer_checks`: receiving it means `onevcs` and this engine disagree
-            // about the request. Settled as the residual rather than `done`, so no
-            // dependent proceeds on a change whose checks nobody read.
-            if let Some(detail) = unchecked_detail(&published.outcome) {
-                return publication_failed(detail);
-            }
             let labels =
                 engine::dispatch_labels(&paths.run, &node.id, None, node.persona.as_deref());
             let _ = tx.send(Message::Event(Box::new(crate::vcs::published_event(
@@ -2038,6 +2039,7 @@ fn publish(
                 .as_ref()
                 .map(|change| armed_detail(change, publication.reads));
             let detail: Vec<String> = [
+                unchecked_detail(&published.outcome),
                 armed,
                 drafted,
                 kept_for_review,
@@ -2207,9 +2209,7 @@ fn drafted_status(
         ) => NodeStatus::CompleteDraft,
         (onevcs::PublishOutcome::ChangeDraft(_), _) => NodeStatus::Done,
         (onevcs::PublishOutcome::ChangeReviewDraft(_), _) => NodeStatus::Done,
-        // Settled before it is asked — see `unchecked_detail` — and never `done` if
-        // that ever changes: nobody read its checks.
-        (onevcs::PublishOutcome::ChangeReviewDraftUnchecked(_), _) => NodeStatus::Failed,
+        (onevcs::PublishOutcome::ChangeReviewDraftUnchecked(_), _) => NodeStatus::Done,
         (
             onevcs::PublishOutcome::Merged(_)
             | onevcs::PublishOutcome::ChangeOpen(_)
@@ -2221,18 +2221,13 @@ fn drafted_status(
     }
 }
 
-/// The residual's detail for a publication that answered a push into a review draft
-/// with its checks unread, which only a `defer_checks` publication answers and this
-/// engine never makes one: the outcome and its change request, named. `None` for
-/// every other outcome, which settles as its own word says.
+/// The review draft whose verdict the next trigger still owes.
 fn unchecked_detail(outcome: &onevcs::PublishOutcome) -> Option<String> {
     let onevcs::PublishOutcome::ChangeReviewDraftUnchecked(url) = outcome else {
         return None;
     };
     Some(format!(
-        "onevcs answered `ChangeReviewDraftUnchecked` for {url} — pushed into a draft kept for \
-         its user's review without its checks being read — to a publication that did not defer \
-         its checks, so nothing read them and the node is not settled done"
+        "review draft {url} was pushed; its check verdict is outstanding until the next trigger"
     ))
 }
 
@@ -2380,8 +2375,20 @@ fn publish_rereading_the_merge_path(
     draft: Option<&onevcs::DraftReason>,
     cancel: &crate::executor::CancellationToken,
     term_scope: &onevcs::TermScope,
+    review_change: Option<&str>,
 ) -> Published {
     let publish = || {
+        if let Some(change) = review_change.filter(|_| draft.is_none()) {
+            return crate::vcs::republish(
+                token,
+                node.merge_policy,
+                node.title.as_deref(),
+                body,
+                change,
+                cancel,
+                term_scope,
+            );
+        }
         crate::vcs::publish(
             token,
             node.merge_policy,
@@ -4043,17 +4050,15 @@ mod tests {
             drafted_status(&onevcs::PublishOutcome::ChangeOpen(url()), None),
             NodeStatus::Done
         );
-        // A review draft nobody read the checks of is never done: this engine
-        // never defers its checks, so the answer is a disagreement, not work.
+        // A deferred republication is done at its push; the next trigger reads its verdict.
         assert_eq!(
             drafted_status(
                 &onevcs::PublishOutcome::ChangeReviewDraftUnchecked(url()),
                 None
             ),
-            NodeStatus::Failed
+            NodeStatus::Done
         );
-        // Every outcome this engine's publications answer settles as its own word
-        // says; only the unchecked review draft is turned back before it settles.
+        // Only the unchecked review draft carries an outstanding verdict detail.
         for settles in [
             onevcs::PublishOutcome::ChangeOpen(url()),
             onevcs::PublishOutcome::ChangeReviewDraft(url()),
@@ -4062,11 +4067,11 @@ mod tests {
             assert_eq!(unchecked_detail(&settles), None, "{settles:?}");
         }
         let said = unchecked_detail(&onevcs::PublishOutcome::ChangeReviewDraftUnchecked(url()))
-            .expect("an unchecked review draft is turned back before it settles");
+            .expect("an unchecked review draft names its outstanding verdict");
         assert!(
-            said.contains("ChangeReviewDraftUnchecked")
+            said.contains("verdict is outstanding")
                 && said.contains("https://github.com/owner/service/pull/7"),
-            "the residual does not name the outcome and its change request: {said}"
+            "the outstanding verdict does not name its change request: {said}"
         );
     }
 
