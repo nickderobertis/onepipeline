@@ -3802,11 +3802,15 @@ fn a_watch_refuses_a_malformed_or_non_loopback_ordering_peer() {
     world.script("build.wait", "hold");
     let run = running(&world, "watchordering", vec![agent("build", &[])]);
     for address in ["not-a-socket", "192.0.2.1:8080"] {
+        // llmlint: ignore-block[tests_mirror_real_usage] the task-required ordering input
+        // must reject malformed/non-loopback peers at its trust boundary. This drives
+        // that private seam through the real watch CLI, which returns the actual refusal.
         let output = world
             .cmd(&["watch", &run, "--timeout", "5"])
             .env("ONEPIPELINE_TEST_WATCH_DEADLINE_GATE", address)
             .output()
             .expect("the real watch starts");
+        // llmlint: ignore-end[tests_mirror_real_usage]
         assert_eq!(output.status.code(), Some(crate::harness::REFUSED));
         assert!(String::from_utf8_lossy(&output.stderr).contains("must name a loopback socket"));
     }

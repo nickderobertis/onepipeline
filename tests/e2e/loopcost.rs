@@ -723,6 +723,10 @@ fn an_actual_expired_poll_is_counted_before_a_held_settlement_becomes_readable()
     queued.arrived().release();
     expired.release();
     // llmlint: ignore-end[tests_mirror_real_usage]
+    // llmlint: ignore-block[tests_mirror_real_usage] the manager authorized this real
+    // driver's timer count as the deterministic substitute for scheduling latency. This
+    // positive control is required to prove the observer increments instead of always
+    // reporting zero; the actual run result is asserted separately below.
     world.until("the recorded timer count", |world| {
         world.run_file(run, "settlement-timer-waits.txt").is_file()
     });
@@ -732,6 +736,7 @@ fn an_actual_expired_poll_is_counted_before_a_held_settlement_becomes_readable()
         "1",
         "an actual expired poll was not counted"
     );
+    // llmlint: ignore-end[tests_mirror_real_usage]
     world.until("the run to settle", |world| {
         world.run_file(run, "result.json").is_file()
     });
