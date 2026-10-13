@@ -802,11 +802,21 @@ fn a_repository_whose_read_failed_is_left_as_it_was_and_readjusted_by_the_next_t
     let before = untouched(&world, run, "q");
     world.script("gh.standings-outage.owner.other", "");
 
+    let human = world.run(&["readjust", run]);
+    assert_eq!(human.code, 1, "{}", human.stderr);
+    assert!(human.stdout.is_empty(), "{}", human.stdout);
+    assert!(
+        human
+            .stderr
+            .contains("readjust failed: github.com/owner/other"),
+        "{}",
+        human.stderr
+    );
     let (code, receipt) = readjust(&world, run);
     assert_eq!(code, 1, "a failed host read is not said: {receipt}");
     assert_eq!(receipt["state"], "performed", "{receipt}");
     let failed = world.events_of(run, "readjust-read-failed");
-    assert_eq!(failed.len(), 1, "{failed:#?}");
+    assert_eq!(failed.len(), 2, "{failed:#?}");
     assert_eq!(
         failed[0]["payload"]["repo"], "github.com/owner/other",
         "{failed:#?}"
@@ -1678,6 +1688,13 @@ fn a_failed_draft_is_retargeted_with_no_merge_and_a_retry_brings_it_up_to_date()
     let b_head = tip(&world, &b_branch);
     let from = world.invocations().len();
     merge(&world, &number_of(&world, run, "a"), "squash", "kept");
+    // The host refuses the move at first: nothing is recorded, and `b` stays owed it.
+    world.script("gh.retarget-refused", "");
+    readjusted(&world, run);
+    assert!(record(&world, run, "node-readjusted", "b").is_none());
+    assert!(surfaced(&world, run, "readjust-pending").is_empty());
+    assert_ne!(change_from(&world, &b_branch)["base"], "main");
+    std::fs::remove_file(world.fakes.join("gh.retarget-refused")).expect("the host writes again");
     readjusted(&world, run);
 
     let pending = record(&world, run, "node-readjusted", "b").expect("b was readjusted");
@@ -2683,4 +2700,92 @@ fn a_readjust_beside_another_op_is_refused() {
         refused.stderr
     );
     assert!(world.events_of(run, "edit-committed").is_empty());
+}
+
+/// A read that fails on a run something drives: the live driver's readjustment answers
+/// the request refused, and the verb's performed receipt carries the failed read and
+/// exits with a failed host read's status.
+#[test]
+fn a_driven_readjust_whose_read_fails_says_so() {
+    let world = team_world("readjust-driven-failure");
+    for node in ["a", "b"] {
+        world.script(&format!("{node}.work"), &format!("{node}'s change\n"));
+    }
+    world.script("b.wait", "");
+    let run = "driven";
+    let project = world.plan(
+        run,
+        &plan_of(run, vec![lifecycle("a", &[]), lifecycle("b", &["a"])]),
+    );
+    let driver = world
+        .cmd(&["start", &project, "--attach"])
+        .current_dir(&world.project)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the driver starts");
+    world.until("a to settle and b to be held", |world| {
+        !world.events_of(run, "node-settled").is_empty()
+            && world
+                .events_of(run, "node-dispatched")
+                .iter()
+                .any(|event| event["labels"]["node"] == "b")
+    });
+    world.script("gh.standings-outage.owner.service", "");
+    let (code, receipt) = readjust(&world, run);
+    assert_eq!(code, 1, "{receipt}");
+    assert_eq!(receipt["state"], "performed", "{receipt}");
+    assert!(
+        receipt["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("the standings of owner/service could not be read")),
+        "{receipt}"
+    );
+    assert_eq!(world.events_of(run, "readjust-read-failed").len(), 1);
+    world.script("b.go", "");
+    let ended = driver.wait_with_output().expect("the driver ends");
+    assert!(ended.status.success(), "{ended:?}");
+}
+
+/// Successive absorptions: in `a ← b ← c ← d`, a person merges `c` into `b`'s branch and
+/// then `b` into `a`'s. Both are absorbed, and `d` — whose dependency `c` sits in `b`'s
+/// draft, which sits in `a`'s — is placed on `a`'s branch, its change request moved there,
+/// with only its own change against it.
+#[test]
+fn a_draft_above_two_absorptions_is_placed_on_the_last_absorber() {
+    let world = team_world("readjust-absorbed-twice");
+    for node in ["a", "b", "c", "d"] {
+        world.script(&format!("{node}.work"), &format!("{node}'s change\n"));
+    }
+    let run = "twice";
+    launched(
+        &world,
+        run,
+        vec![
+            lifecycle("a", &[]),
+            lifecycle("b", &["a"]),
+            lifecycle("c", &["b"]),
+            lifecycle("d", &["c"]),
+        ],
+    );
+    let a_branch = branch_of(&world, run, "a");
+    merge(&world, &number_of(&world, run, "c"), "merge-commit", "kept");
+    merge(&world, &number_of(&world, run, "b"), "merge-commit", "kept");
+    readjusted(&world, run);
+    for (node, into) in [("c", "b"), ("b", "a")] {
+        let absorbed = record(&world, run, "node-absorbed", node).expect("absorbed");
+        assert_eq!(absorbed["into"], into, "{absorbed}");
+    }
+    assert_eq!(settled(&world, run, "d")["base"], a_branch.as_str());
+    let (base, _) = on_host(&world, run, "d");
+    assert_eq!(base, a_branch);
+    assert_eq!(
+        changed_against(
+            &world,
+            &service(&world),
+            &a_branch,
+            &branch_of(&world, run, "d")
+        ),
+        ["d.md"]
+    );
 }
