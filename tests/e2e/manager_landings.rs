@@ -721,6 +721,26 @@ fn each_verb_held_mid_operation_is_supervised_and_finishes_under_its_owners_watc
             ["landing-registered", "landing-started"],
             "{started:?}"
         );
+        // The default profile, read once, wakes on neither; the detailed reader
+        // returns each in turn, and its cursor resumes past exactly what it read.
+        watch(world, &flow, &["--timeout", "0"]).ended_on(ELAPSED, "elapsed");
+        let registered = watch(world, &flow, &["--timeout", "0", "--filter", "detailed"]);
+        registered.progressed("landing-registered");
+        assert_eq!(registered.record["subjects"], request["subjects"]);
+        let forwarded = watch(
+            world,
+            &flow,
+            &[
+                "--timeout",
+                "0",
+                "--filter",
+                "detailed",
+                "--cursor",
+                &registered.cursor(),
+            ],
+        );
+        forwarded.progressed("landing-started");
+        assert_eq!(forwarded.record["operation_id"], operation["operation_id"]);
 
         // Live and unwatched, the session is held; a qualifying watch clears it.
         assert_eq!(verdict(world)["verdict"], json!("block"));
@@ -2329,4 +2349,88 @@ fn a_branch_acknowledgement_and_a_landing_registration_never_interleave() {
     std::fs::write(&go, "go").expect("released");
     let (code, _, said) = landing.ended();
     assert_eq!(code, 0, "{said}");
+}
+
+/// `repo-recover` where it drafts: held at its drafting turn, the landing is
+/// already owned — its request names the preserved branch, and its journal holds
+/// `landing-registered` then `landing-drafting` — before the turn is paid for,
+/// and nothing is forwarded until the body is drafted; released, it lands with
+/// the drafted body and its flow ends `0`.
+#[test]
+fn repo_recover_is_owned_before_it_drafts() {
+    let world = World::new("ml-recover-drafts");
+    let repository = world.repository("change-open", &[]);
+    branch_under(
+        &world,
+        &repository,
+        BRANCH,
+        "widget.txt",
+        "feat: add the widget (incomplete step)",
+    );
+    onevcs(&world, &["preserve", BRANCH, "--repo", "service"]);
+    world.script("pr-author.body", "## What\nA recovered widget.\n");
+    world.script("pr-author.records-tree", "1");
+    world.script("pr-author.holds", "1");
+    let graph = world.pr_author_graph();
+    let landing = Started::spawn(
+        &world,
+        None,
+        &[
+            "repo-recover",
+            BRANCH,
+            "--repo",
+            "service",
+            "--title",
+            "feat: add the widget",
+            "--pr-author-graph",
+            &graph,
+        ],
+    );
+    let tree = world.fakes.join("pr-author-tree.jsonl");
+    world.until("the drafting turn to be in flight", |_| {
+        std::fs::read_to_string(&tree).is_ok_and(|said| said.ends_with('\n'))
+    });
+    let (flow, id) = the_landing(&world);
+    assert_eq!(flow, "repo-recover");
+    assert_eq!(
+        kinds(&world, &flow, &id),
+        ["landing-registered", "landing-drafting"]
+    );
+    assert!(!landing_dir(&world, &flow, &id)
+        .join("operation.json")
+        .exists());
+    watch(&world, &flow, &["--timeout", "0"]).ended_on(ELAPSED, "elapsed");
+    let registered = watch(&world, &flow, &["--timeout", "0", "--filter", "detailed"]);
+    registered.progressed("landing-registered");
+    let drafting = watch(
+        &world,
+        &flow,
+        &[
+            "--timeout",
+            "0",
+            "--filter",
+            "detailed",
+            "--cursor",
+            &registered.cursor(),
+        ],
+    );
+    drafting.progressed("landing-drafting");
+    std::fs::write(world.fakes.join("pr-author.go"), "go").expect("the draft is released");
+    let (code, _, said) = landing.ended();
+    assert_eq!(code, 0, "{said}");
+    assert_eq!(
+        world
+            .changes_opened()
+            .iter()
+            .map(|change| change["body"].as_str().unwrap_or_default().to_owned())
+            .collect::<Vec<_>>(),
+        ["## What\nA recovered widget."]
+    );
+    let woken = rearmed_until_ended(&world, &flow, drafting.cursor());
+    assert!(
+        woken
+            .iter()
+            .all(|(_, significance)| significance != "progress"),
+        "{woken:?}"
+    );
 }
