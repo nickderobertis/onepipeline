@@ -420,6 +420,63 @@ function driveCarrier(proof, changes, macos, required, crate = "true") {
     env: { ...process.env, ...env },
   });
 }
+// The contexts a run reports: every selected row under its rendered name, and a
+// job skipped outright under its own name only when it has no matrix — GitHub
+// reports a skipped matrix job under its bare key, never under a leg's name.
+function emittedContexts(workflow, rows) {
+  return rows
+    .filter((row) => row.selected || !workflow.jobs[row.job]?.strategy?.matrix)
+    .map((row) => ({ name: row.name, selected: row.selected }));
+}
+test("an ordinary pull request emits every required context, never skipped, whatever its jobs conclude", () => {
+  const all = workflows();
+  const opt = { pypi: "true", npm: "true", crate: "true" };
+  for (const results of [
+    {},
+    { gate: "failure" },
+    { macos: "failure" },
+    { cross: "failure" },
+    { gate: "failure", macos: "failure", cross: "failure" },
+  ])
+    for (const [kind, branch] of [
+      ["source", "feature"],
+      ["dependency", "feature"],
+      ["version", "release-plz-fixture"],
+    ]) {
+      const s = {
+        ...scenario("pr-synchronize", "pull_request", "synchronize", kind, false, opt, branch),
+        results,
+      };
+      const contexts = runs(all, s).flatMap((run) =>
+        emittedContexts(all[run.workflow], run.jobs),
+      );
+      for (const name of required) {
+        const emitted = contexts.filter((context) => context.name === name);
+        assert.equal(emitted.length, 1, `${kind}/${JSON.stringify(results)}: ${name} reports once`);
+        assert.equal(
+          emitted[0].selected,
+          true,
+          `${kind}/${JSON.stringify(results)}: ${name} runs rather than being skipped`,
+        );
+      }
+    }
+});
+test("the real install prerequisite step fails every leg whose gate did not succeed", () => {
+  const job = workflows()["ci.yml"].jobs.install;
+  const step = job.steps[0];
+  assert.equal(step.env.GATE_RESULT, "${{ needs.gate.result }}");
+  for (const gate of ["success", "failure", "cancelled", "skipped", ""]) {
+    const result = spawnSync("bash", ["-eo", "pipefail", "-c", step.run], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        GATE_RESULT: String(evaluate(step.env.GATE_RESULT, { needs: { gate: { result: gate } } })),
+      },
+    });
+    assert.equal(result.status === 0, gate === "success", `${gate}: ${result.stderr}`);
+    if (gate !== "success") assert.match(result.stderr, /install is not proven/);
+  }
+});
 test("real carrier command refuses every failed prerequisite and unauthorized omission", () => {
   for (const proof of ["cross", "install", "install-documented"])
     for (const changes of ["success", "failure", "cancelled", "skipped", ""])

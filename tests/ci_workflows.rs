@@ -97,8 +97,15 @@ const VISUAL_DOCS_LEG_INPUTS: &[&str] = &["arches", "projects", "gallery-title"]
 /// pull request or skips the job — and a skipped job reports its context as
 /// passed — so none of them can leave a context unreported. A new condition is
 /// a new way to be unreported, and has to be argued for here.
+///
+/// A skipped *matrix* job is the exception to "reports as passed": it reports
+/// under its bare key, never a leg's rendered name. So `install`, which waits
+/// on `gate`, runs after a failed gate (`!cancelled()`) and fails there itself
+/// rather than being skipped by the failure and leaving `install (<os>)`
+/// unreported — the shape of run 38398392919.
 const ALLOWED_CONDITIONS: &[&str] = &[
     "needs.changes.outputs.crate == 'true'",
+    "!cancelled() && needs.changes.outputs.crate == 'true'",
     "needs.changes.outputs.crate == 'true' && github.event_name == 'pull_request'",
     "github.event_name == 'pull_request'",
 ];

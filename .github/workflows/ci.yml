@@ -418,9 +418,14 @@ jobs:
   # against PyPI and npm, so what a release checks cannot drift from what a pull
   # request checks. `cargo install --path .` is the same code path as the
   # documented `cargo install onepipeline`, minus the registry fetch.
+  #
+  # It waits for `gate` but is not skipped by a gate that failed: a skipped matrix
+  # job reports under its bare name, so the `install (<os>)` contexts branch
+  # protection requires would never report. Each leg runs and fails instead,
+  # naming the gate, before installing anything.
   install:
     needs: [changes, gate]
-    if: needs.changes.outputs.crate == 'true'
+    if: ${{ !cancelled() && needs.changes.outputs.crate == 'true' }}
     strategy:
       fail-fast: false
       matrix:
@@ -430,6 +435,14 @@ jobs:
       run:
         shell: bash
     steps:
+      - name: The gate this install waits for succeeded
+        env:
+          GATE_RESULT: ${{ needs.gate.result }}
+        run: |
+          if [ "$GATE_RESULT" != success ]; then
+            echo "::error::gate finished '$GATE_RESULT', so this revision's install is not proven" >&2
+            exit 1
+          fi
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
       # On a PR the change is not on the registry yet, so `--path .` is the only
