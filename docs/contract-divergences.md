@@ -9786,8 +9786,10 @@ dispatches. And a script could read the answer only by parsing text.
   — same schema version 11, same seal, no new key and no new file — covers the
   records sharing the journal's last timestamp, which every writer otherwise holds
   back, written by atomic rename and only when its marker moves.
-  `tests/release_channel/extended_checkpoint.rs` drives 0.65.0's `status`, `host`
-  and `results` over such a document: each exits 0 and leaves it byte for byte.
+  At schema 11, `tests/release_channel/extended_checkpoint.rs` drove 0.65.0's
+  `status`, `host` and `results` over such a document: each exited 0 and left it
+  byte for byte. Entry 122 advances the fold schema; that journey now proves
+  the preceding release refolds the journal at its own version.
 
 `tests/e2e/host_view.rs` drives the compiled binary over generated runs roots for
 every claim above. The `host-view-time` budget in `budgets.yaml` times the release
@@ -10433,7 +10435,11 @@ same with or without a marker. `planner-surface-queued` carries the optional
 `correlation` for a surfaced review revision. Continuation's optional
 `continued.rework` carries `replacement`, `replaces`, and `comments` from existing
 `onepipeline.rework` metadata. The checkpoint advances to version 12 with its
-golden so a cached fold cannot drop that provenance. A continued rework's
+golden so a cached fold cannot drop that provenance.
+`tests/release_channel/extended_checkpoint.rs` drives 0.65.0 over an extended
+version-12 checkpoint: it recovers a version-11 checkpoint from the journal,
+returns the same `status` and `results`, and leaves the journal byte-identical.
+A continued rework's
 projection preserves the existing `onepipeline.rework` and `onepipeline.node`
 from the seeded write-back baseline, byte-for-byte, until a live rework supersedes
 it. A missing, malformed or incompatible baseline refuses projection rather than

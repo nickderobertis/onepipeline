@@ -1,13 +1,11 @@
 //! The checkpoint `onepipeline host` extends over an ended run's final records,
 //! read by the last release before this build began extending it.
 //!
-//! A reader that has proved a run ended covers, in that run's `checkpoint.json`,
-//! the trailing records sharing the journal's last timestamp, which every writer
-//! otherwise holds back. The document keeps its schema version and its seal, so
-//! an engine at the same version — a long-lived driver keeps the binary it
-//! launched with, and other readers link their own copy — must verify it, fold on
-//! from it, and leave it exactly as it found it. This drives that release's own
-//! `status`, `host` and `results` over one.
+//! A reader that has proved a run ended covers its trailing records in
+//! `checkpoint.json`. Review intake advances the fold schema to 12, so the
+//! preceding release must discard that checkpoint and recover the same answers
+//! from the journal, writing its own schema-11 checkpoint. This drives that
+//! release's `status`, `host` and `results` over the extended checkpoint.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -71,10 +69,11 @@ fn document(path: &Path) -> Value {
 
 /// A run is stopped with its dispatch's registry entry left stale, so this
 /// build's `host` proves it ended and extends its checkpoint over the stop; then
-/// the release before that change reads the run with `status`, `host` and
-/// `results`. Each exits 0, and the checkpoint is left byte for byte.
+/// the preceding release reads the run with `status`, `host` and `results`.
+/// Each exits 0, status and results agree with this build, and the release
+/// recovers its own checkpoint without changing the journal.
 #[test]
-fn a_checkpoint_the_host_view_extended_is_read_by_the_release_before_it_and_left_as_it_is() {
+fn a_checkpoint_the_host_view_extended_is_refolded_by_the_preceding_release() {
     let world = World::new("extended-checkpoint");
     world.script("build.wait", "hold");
     let run = "extended";
@@ -106,9 +105,12 @@ fn a_checkpoint_the_host_view_extended_is_read_by_the_release_before_it_and_left
         Some(journal_len()),
         "this build's view did not extend the ended run's checkpoint"
     );
-    assert_eq!(extended["schema_version"], 11);
+    assert_eq!(extended["schema_version"], 12);
 
-    let written = std::fs::read(&checkpoint).expect("the checkpoint");
+    let status = world.run(&["status", run]).exited(0).stdout.clone();
+    let results = world.run(&["results", run]).exited(0).stdout.clone();
+    let journal = world.run_file(run, "events.jsonl");
+    let recorded = std::fs::read(&journal).expect("the journal");
     for args in [&["status", run][..], &["host"], &["results", run]] {
         let read = world
             .cmd_on(before(), args)
@@ -122,10 +124,18 @@ fn a_checkpoint_the_host_view_extended_is_read_by_the_release_before_it_and_left
             read.status.code(),
             String::from_utf8_lossy(&read.stderr)
         );
+        if let Some(expected) = match args[0] {
+            "status" => Some(&status),
+            "results" => Some(&results),
+            _ => None,
+        } {
+            assert_eq!(String::from_utf8_lossy(&read.stdout), expected.as_str());
+        }
+        assert_eq!(document(&checkpoint)["schema_version"], 11);
         assert_eq!(
-            std::fs::read(&checkpoint).expect("the checkpoint"),
-            written,
-            "{BEFORE}'s `{}` rewrote the extended checkpoint",
+            std::fs::read(&journal).expect("the journal"),
+            recorded,
+            "{BEFORE}'s `{}` changed the journal while refolding",
             args.join(" ")
         );
     }
