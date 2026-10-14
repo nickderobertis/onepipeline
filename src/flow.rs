@@ -571,7 +571,13 @@ pub(crate) fn every_landing(root: &Path) -> std::result::Result<Vec<(Flow, Landi
         let entry = entry.map_err(|error| {
             format!("the flows under {} cannot be read: {error}", dir.display())
         })?;
-        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+        let kind = entry.file_type().map_err(|error| {
+            format!(
+                "{} cannot be read, so whether it holds a live landing cannot be said: {error}",
+                entry.path().display()
+            )
+        })?;
+        if !kind.is_dir() {
             continue;
         }
         let path = entry.path();

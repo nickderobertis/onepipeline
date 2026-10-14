@@ -97,6 +97,10 @@ struct Progress {
     subjects: Vec<crate::flow::LandingSubject>,
 }
 
+// Sound: an envelope is compared field by field, and the one field its type
+// leaves at `PartialEq` is JSON, whose numbers `serde_json` holds finite — it
+// refuses NaN and infinities — so its equality is reflexive, which is all `Eq`
+// adds.
 impl Eq for Progress {}
 
 impl Progress {
