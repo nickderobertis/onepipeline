@@ -5209,6 +5209,11 @@ pub fn reaped_pid() -> u32 {
 /// question is whether it can still write, and a zombie cannot. Every other answer
 /// this host cannot give reads as still running, so a wait on this outlives the
 /// process rather than stopping short of it.
+///
+/// The state is asked of `ps` rather than read from `/proc`, which macOS does
+/// not have: there, a double a teardown killed and nothing reaped read as still
+/// running, and every teardown journey failed on the macOS leg alone. `ps`
+/// leads a zombie's state with `Z` on every Unix, so Linux runs this path too.
 #[cfg(unix)]
 pub fn process_ended(pid: u32) -> bool {
     let Ok(raw) = i32::try_from(pid) else {
@@ -5218,11 +5223,17 @@ pub fn process_ended(pid: u32) -> bool {
     if unsafe { libc::kill(raw, 0) } != 0 {
         return std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
     }
-    // The state field follows the command name's closing parenthesis.
-    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
-        stat.rsplit_once(')')
-            .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z'))
-    })
+    Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .is_ok_and(|listed| {
+            String::from_utf8_lossy(&listed.stdout)
+                .trim_start()
+                .starts_with('Z')
+        })
 }
 
 /// The same question on Windows, where a process handle is signalled once — and
