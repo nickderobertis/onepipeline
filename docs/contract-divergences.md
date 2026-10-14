@@ -10667,7 +10667,17 @@ and a non-blocking `readjust-pending` names `retry`, whose placement merges the 
 a draft a person retargeted by hand is moved back, its `from` naming the replaced base,
 with `change-base-overridden`. A tree-identical republication that answers
 `NothingToPublish` puts its merge head on the origin with `preserve_branch` onto the
-same change request and settles `change-review-draft-unchecked`.
+same change request and settles `change-review-draft-unchecked`; one the origin refuses
+settles `failed`, records no readjustment, and stays owed. A retarget the host refuses
+leaves the pushed draft's settlement saying so, records no readjustment and leaves it
+owed, and the next trigger moves it — the host's base, as the latest read saw it,
+counted beside the record's. A reopen the origin or host refuses is said in the receipt
+(exit 1), records nothing and moves nothing of the still-closed draft until a later
+trigger's read recovers it, from a parent recorded landed when that read no longer
+carries the parent. A closed draft, and one merged into an unknown branch, is never
+restacked; once the question about the latter is answered — claimed and answered on
+the planner's queue, as every decision point is — the drafts above it are readjusted
+again.
 
 **Verdicts.** A republication of a review draft — a readjustment's, a restack's, a
 rework's and a repair's — settles `done` at its push as `change-review-draft-unchecked`
@@ -10677,7 +10687,9 @@ records `node-checks-read {node, head, verdict: pending | passed | passed-with-s
 review draft whose head on the host moved past the recorded one — a cold host's case —
 once per head. A green verdict reads as `change-review-draft`; `failed` re-dispatches
 the node onto its same branch with the failed checks as its refusal, as a
-`checks-failed` publication's re-dispatch does; `pending` leaves it outstanding.
+`checks-failed` publication's re-dispatch does; `pending` leaves it outstanding and is
+read again by the next trigger — a moved head read `pending` included, which then reads
+as `change-review-draft-unchecked` until a verdict is reached.
 `status`, `results`, and the `review` and `readjust` receipts name every draft whose
 verdict is outstanding.
 
@@ -10685,9 +10697,14 @@ verdict is outstanding.
 — readjusts first, so a node found landed is refused naming `add` and one absorbed is
 refused naming its absorber. The read immediately before a rework's republication
 continues that trigger, batched across the republications ready in one pass: a
-replacement whose change request a person merged after it was dispatched publishes
+replacement whose change request a person merged after it was dispatched — into the
+root, into another node's branch, or into a branch this run does not know — publishes
 nothing, settles `failed` with `merged-during-rework`, keeps its work on its branch,
-and a non-blocking `merged-during-rework` names `add`. A replacement placed anywhere
+and a non-blocking `merged-during-rework` names what goes on: `add`, the absorbing
+node, or the question about the unknown merge. A deferred republication whose change
+request this host's newest record says carries another branch is refused by `onevcs`
+before anything is pushed; it never falls back to a watched publication, settles the
+replacement `failed` saying so, and raises a non-blocking `finding` to the planner. A replacement placed anywhere
 but where its lineage's change request was drafted is retargeted after its push,
 journalled `node-readjusted` as above.
 
@@ -10778,23 +10795,33 @@ binary and the real linked `onevcs` over a real origin on disk, with GitHub at
 the retarget and the reopen out of the change requests it holds, and a person's moves —
 a squash or merge commit written onto the origin, a head kept or deleted with the host
 retargeting or closing what was based on it, a close, a retarget by hand, a verdict on a
-head — are made through its hidden `__person` entry, which no ledger records. The
-journeys are case 1 with the head kept, deleted and retargeted, and deleted and closed
-(`a_parent_merged_*`); case 2 (`one_of_several_parents_landing_*`); case 3
-(`a_whole_lower_stack_landing_*`); a failed read (`a_repository_whose_read_failed_*`);
-the four landings around a rework (`a_rework_after_a_landing_*`,
-`a_landing_during_a_rework_*`, `a_change_merged_during_its_own_rework_*`,
-`a_rework_of_a_node_merged_since_*`); the five out-of-order merges (`a_draft_merged_into_its_parent_s_branch_*`,
-`a_draft_merged_into_the_root_ahead_*`, `a_failed_draft_is_retargeted_*`,
-`a_draft_retargeted_by_hand_*`, `a_draft_closed_unmerged_*`); deferred verdicts
-(`deferred_republications_*`); store writes (`the_store_is_written_only_*`); a journey
-per trigger and the idle driver (`review_readjusts_before_discovery`,
-`a_restack_readjusts_before_it_starts`, `a_placement_at_dispatch_*`,
-`a_continuing_launch_*`, `an_adoption_*`, `an_idle_driver_asks_the_host_nothing`); and
-the amendment's two-root grouping and unknown branch
-(`drafts_on_two_roots_*`, `a_draft_merged_into_an_unknown_branch_*`). The rework and
-restack journeys of entry 121 read a republication `change-review-draft-unchecked` at
-its push and `change-review-draft` once `readjust` reads it green.
-`tests/contract.rs`'s `the_readjustment_is_what_the_divergence_record_names` holds the
-block above against the public types, the registered documents and the published
-bundles.
+head — are made through its hidden `__person` entry, which validates every argument
+before it writes and is recorded on no ledger. The journeys: case 1 with the head kept,
+deleted and retargeted, and deleted and closed (`a_parent_merged_*`); case 2
+(`one_of_several_parents_landing_*`); case 3 (`a_whole_lower_stack_landing_*`); a
+failed read, undriven and driven (`a_repository_whose_read_failed_*`,
+`a_driven_readjust_whose_read_fails_says_so`); the landings around a rework
+(`a_rework_after_a_landing_*`, `a_landing_during_a_rework_*`,
+`a_change_merged_during_its_own_rework_*`, `a_change_absorbed_during_its_own_rework_*`,
+`a_change_merged_elsewhere_during_its_own_rework_*`, `a_rework_of_a_node_merged_since_*`);
+the out-of-order merges (`a_draft_merged_into_its_parent_s_branch_*`,
+`a_draft_above_two_absorptions_*`, `a_draft_merged_into_the_root_ahead_*`,
+`a_failed_draft_is_retargeted_*`, `a_draft_retargeted_by_hand_*`,
+`a_draft_closed_unmerged_*`); the refusals (`a_refused_reopen_*`, `a_refused_retarget_*`,
+`a_tree_identical_republication_the_origin_refuses_*`,
+`a_republication_onto_a_draft_recorded_as_another_branch_s_*`) and a conflicted
+readjustment (`a_conflicted_readjustment_*`); deferred verdicts
+(`deferred_republications_*`, `every_deferred_verdict_word_*`,
+`a_cold_host_reads_a_moved_heads_pending_verdict_*`); store writes
+(`the_store_is_written_only_*`); a journey per trigger and the idle driver
+(`review_readjusts_before_discovery`, `a_restack_readjusts_before_it_starts`,
+`a_placement_at_dispatch_*`, `a_continuing_launch_*`, `an_adoption_*`,
+`an_idle_driver_asks_the_host_nothing`); the verb's requested receipt and its refusal
+beside another op (`a_driven_readjust_the_driver_cannot_answer_in_time_*`,
+`a_readjust_beside_another_op_is_refused`); and the amendment's two-root grouping and
+unknown branch (`drafts_on_two_roots_*`, `a_draft_merged_into_an_unknown_branch_*`). The
+rework and restack journeys of entry 121 read a republication
+`change-review-draft-unchecked` at its push and `change-review-draft` once `readjust`
+reads it green. `tests/contract.rs`'s `the_readjustment_is_what_the_divergence_record_names`
+holds the block above against the public types, the registered documents and the
+published bundles.
