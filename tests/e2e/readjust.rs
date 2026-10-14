@@ -2957,3 +2957,48 @@ fn a_change_merged_elsewhere_during_its_own_rework_is_refused_before_the_push() 
     );
     assert_eq!(surfaced(&world, run, "change-merged-elsewhere").len(), 1);
 }
+
+/// A restack brings its new base in whatever the base-merge policy: on an identity whose
+/// rules merge a base only on a conflict, over a host that does not require branches up to
+/// date, `onevcs`'s open leaves `b`'s branch at its tip after `a` lands — and the
+/// readjustment merges the root in itself, so `b`'s branch carries the root's head and its
+/// diff against the root is only its own.
+#[test]
+fn a_readjustment_merges_the_root_in_where_the_policy_merges_only_on_a_conflict() {
+    let world = team_world("readjust-on-conflict");
+    std::fs::write(
+        world.onevcs_home().join("rules.yml"),
+        "version: 3\nrules: []\ndefault:\n  publication: change-open\n  approvals: required\n  base_merge: on-conflict\n",
+    )
+    .expect("the rules file is written");
+    world.script("gh.up-to-date-not-required", "");
+    for node in ["a", "b"] {
+        world.script(&format!("{node}.work"), &format!("{node}'s change\n"));
+    }
+    let run = "on-conflict";
+    launched(
+        &world,
+        run,
+        vec![lifecycle("a", &[]), lifecycle("b", &["a"])],
+    );
+    let b_branch = branch_of(&world, run, "b");
+    let b_head = tip(&world, &b_branch);
+    merge(&world, &number_of(&world, run, "a"), "squash", "kept");
+    let root = tip(&world, "main");
+    readjusted(&world, run);
+
+    let readjusted = record(&world, run, "node-readjusted", "b").expect("b was readjusted");
+    assert_eq!(readjusted["agent_dispatched"], false, "{readjusted}");
+    let now = tip(&world, &b_branch);
+    assert!(
+        is_ancestor(&world, &root, &now),
+        "b's branch does not carry the root's head"
+    );
+    assert!(is_ancestor(&world, &b_head, &now));
+    assert_eq!(
+        changed_against(&world, &service(&world), "main", &b_branch),
+        ["b.md"]
+    );
+    let (base, _) = on_host(&world, run, "b");
+    assert_eq!(base, "main");
+}

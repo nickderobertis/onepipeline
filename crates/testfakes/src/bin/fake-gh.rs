@@ -349,7 +349,7 @@ fn protection(args: &[String], dir: &Path, path: &str) -> ExitCode {
             let mut required: Vec<String> = declared_required(dir);
             required.sort();
             required.dedup();
-            let rules = if required.is_empty() {
+            let mut rules = if required.is_empty() {
                 serde_json::json!([])
             } else {
                 serde_json::json!([{
@@ -362,6 +362,14 @@ fn protection(args: &[String], dir: &Path, path: &str) -> ExitCode {
                     },
                 }])
             };
+            // `gh.up-to-date-not-required` is a host whose rules say outright that a
+            // branch need not be up to date with its base before it merges.
+            if dir.join("gh.up-to-date-not-required").exists() {
+                if let Some(rule) = rules.get_mut(0) {
+                    rule["parameters"]["strict_required_status_checks_policy"] =
+                        serde_json::json!(false);
+                }
+            }
             println!("{rules}");
             ExitCode::SUCCESS
         }

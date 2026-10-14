@@ -2225,6 +2225,77 @@ pub(crate) fn merge_in_progress(session: &Session) -> Option<crate::plan::MergeI
     })
 }
 
+/// Merge the head of `session`'s base into its branch, in its worktree, where the
+/// branch does not carry it already: `Ok(None)` for a branch that carries it or a merge
+/// that concluded, and `Ok(Some(conflict))` for one git stopped on, left in progress for
+/// a worker to conclude.
+///
+/// What a restack owes whatever the identity's base-merge policy: `onevcs` merges a moved
+/// base at a continued session's open only where it conflicts or the host requires an
+/// up-to-date branch, and a restacked draft has to carry its new base's work either way,
+/// or its diff against that base is not its own. Merge only, never a rebase: the branch
+/// only grows. The base is read off the session clone's `origin/<base>`, which `onevcs`
+/// brings up to the origin at the open, and off the local branch where that is absent.
+pub(crate) fn bring_base_in(
+    session: &Session,
+) -> std::result::Result<Option<onevcs::OpenConflict>, String> {
+    let at = &session.worktree;
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(at)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .map_err(|error| format!("git {args:?}: {error}"))
+    };
+    let resolve = |name: &str| -> Option<String> {
+        git(&[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{name}^{{commit}}"),
+        ])
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    };
+    let base = resolve(&format!("origin/{}", session.base))
+        .or_else(|| resolve(&session.base))
+        .ok_or_else(|| format!("the session's base {} names no commit", session.base))?;
+    let tip = resolve("HEAD").ok_or_else(|| "the session's branch names no commit".to_owned())?;
+    if git(&["merge-base", "--is-ancestor", &base, &tip])?
+        .status
+        .success()
+    {
+        return Ok(None);
+    }
+    let message = format!("Merge {} into {}", session.base, session.branch);
+    let merged = git(&["merge", "--no-ff", "--no-edit", "-m", &message, &base])?;
+    if merged.status.success() {
+        return Ok(None);
+    }
+    let unmerged = git(&["diff", "--name-only", "--diff-filter=U"])?;
+    let paths: Vec<String> = String::from_utf8_lossy(&unmerged.stdout)
+        .lines()
+        .map(str::to_owned)
+        .filter(|path| !path.is_empty())
+        .collect();
+    if paths.is_empty() {
+        let _ = git(&["merge", "--abort"]);
+        return Err(format!(
+            "merging {} into {} failed: {}",
+            session.base,
+            session.branch,
+            String::from_utf8_lossy(&merged.stderr).trim()
+        ));
+    }
+    Ok(Some(onevcs::OpenConflict {
+        paths,
+        base_commit: base,
+        branch_tip: tip,
+    }))
+}
+
 /// One commit's line as a conflicted dispatch is shown it: a subject is the
 /// committer's prose, so it is cut where a line in a task stops being one.
 fn commit_line(line: &str) -> String {

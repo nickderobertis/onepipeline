@@ -1191,8 +1191,15 @@ fn restack_open(
     // neither a journey can time. What a restack refused later, by its publication, is the
     // retry-on-the-same-branch loop every lifecycle node runs, driven by `tests/e2e/
     // lifecycle.rs`.
-    let session = crate::executor::open_session(&request, &labels)
+    let mut session = crate::executor::open_session(&request, &labels)
         .map_err(|error| failed(error.to_string()))?;
+    // A restack brings its base in whatever the identity's base-merge policy says: a
+    // session that opened clean on a base whose head its branch does not carry — the
+    // policy merges only on a conflict or a host requiring up-to-date branches — has
+    // that head merged here, its conflict handed on exactly as one the open stopped on.
+    if session.conflict.is_none() {
+        session.conflict = crate::vcs::bring_base_in(&session).map_err(failed)?;
+    }
     let Some(merge) = crate::vcs::merge_in_progress(&session) else {
         return Ok(RestackOpened {
             session,

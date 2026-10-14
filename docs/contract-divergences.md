@@ -10653,7 +10653,11 @@ fresh record (a landed dependency dropped, an absorbed one replaced by its absor
 restacked by entry 121's procedure: `node-restack-started` with cause `readjust` — onto
 the root's branch at the landing commit for a draft placed on the root — a session on
 its own branch with the new base merged in at the open, a stack base advanced over the
-root before its remaining parents. A clean merge publishes with `defer_checks` and
+root before its remaining parents. Whatever the identity's `base_merge` policy, a
+session that opened clean on a base whose head its branch does not carry has that head
+merged into its worktree by the engine — `onevcs`'s `on-conflict` open merges only on a
+conflict or a host requiring up-to-date branches — and a conflict there is handed to the
+draft's worker exactly as one the open stopped on. A clean merge publishes with `defer_checks` and
 `adopt` and no drafting; a conflict is concluded by the draft's worker. After the push,
 and only then, one `retarget_change` moves the change request and writes its
 description with the Stack block rewritten between its markers from the body the read
@@ -10810,7 +10814,10 @@ the out-of-order merges (`a_draft_merged_into_its_parent_s_branch_*`,
 `a_draft_closed_unmerged_*`); the refusals (`a_refused_reopen_*`, `a_refused_retarget_*`,
 `a_tree_identical_republication_the_origin_refuses_*`,
 `a_republication_onto_a_draft_recorded_as_another_branch_s_*`) and a conflicted
-readjustment (`a_conflicted_readjustment_*`); deferred verdicts
+readjustment (`a_conflicted_readjustment_*`) and one under `base_merge: on-conflict`
+over a host not requiring up-to-date branches
+(`a_readjustment_merges_the_root_in_where_the_policy_merges_only_on_a_conflict`);
+deferred verdicts
 (`deferred_republications_*`, `every_deferred_verdict_word_*`,
 `a_cold_host_reads_a_moved_heads_pending_verdict_*`); store writes
 (`the_store_is_written_only_*`); a journey per trigger and the idle driver
