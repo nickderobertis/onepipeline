@@ -2225,6 +2225,14 @@ pub(crate) fn merge_in_progress(session: &Session) -> Option<crate::plan::MergeI
     })
 }
 
+// llmlint: ignore-block[code_lands_in_the_domain_that_owns_it] this merge belongs in
+// `onevcs`, and the pinned 0.49.0 offers no public operation that does it: whether a
+// continued session's open merges its moved base is decided by `onevcs`'s crate-private
+// `base_merge::decide` from the identity's rules file alone, with no per-open override,
+// and its git helpers are private too. The op-readjust amendment requires a restacked
+// draft to carry its new base's head whatever that policy resolves, so this helper stays
+// here, operating only on the session worktree `onevcs` opened, until `onevcs` exposes
+// the operation and this helper is replaced by a call to it.
 /// Merge the head of `session`'s base into its branch, in its worktree, where the
 /// branch does not carry it already: `Ok(None)` for a branch that carries it or a merge
 /// that concluded, and `Ok(Some(conflict))` for one git stopped on, left in progress for
@@ -2303,6 +2311,7 @@ pub(crate) fn bring_base_in(
     }))
     // llmlint: ignore-end[changed_behavior_has_e2e]
 }
+// llmlint: ignore-end[code_lands_in_the_domain_that_owns_it]
 
 /// One commit's line as a conflicted dispatch is shown it: a subject is the
 /// committer's prose, so it is cut where a line in a task stops being one.
