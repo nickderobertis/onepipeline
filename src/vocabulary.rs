@@ -40,6 +40,14 @@ pub use onemessagebus::ArtifactRef;
 /// than a second enum here that the first could come apart from.
 pub use onevcs::Phase;
 
+/// Which audience an event is for — a milestone, a blocker, or ordinary
+/// progress — as its producer stamps it in the `significance` label.
+///
+/// `onevcs`'s own type, re-exported rather than restated: which of its kinds is
+/// which is that producer's one table, and this crate's own landing
+/// transitions are stamped in the same three words.
+pub use onevcs::Significance;
+
 /// The agent stack's vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Agent;
@@ -250,6 +258,10 @@ impl Message for Labels {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MatchFields {
+    /// The producer's `significance` stamp, carried among the labels' extras as
+    /// `onevcs` carries it. An envelope with no stamp matches no value here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub significance: Option<Significance>,
     /// The phase the envelope was stamped at.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<Phase>,
@@ -413,7 +425,7 @@ pub const EVENTS_BUNDLE_PATH: &str = "schemas/events.json";
 // through the bus's own `SchemaBundle`, asserts its version equals this, and holds the
 // contract paragraph naming it to the same string — so a value that is not a bundle version
 // fails the deterministic tier rather than reaching a link.
-pub const EVENTS_BUNDLE_VERSION: &str = "1.3.0";
+pub const EVENTS_BUNDLE_VERSION: &str = "1.4.0";
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// The ids [`EVENTS_BUNDLE_PATH`] publishes, in the order the bundle lists
