@@ -25,6 +25,8 @@
       "inputs": [
         "{projectRoot}/**/*",
         "{workspaceRoot}/**/project.json",
+        "{workspaceRoot}/justfile",
+        "{workspaceRoot}/rust-toolchain.toml",
         "{workspaceRoot}/.github/workflows/release-sweep.yml",
         "sharedGlobals"
       ]
