@@ -3627,3 +3627,58 @@ fn landing_progress_is_a_flow_watchs_condition_to_name_or_leave_out() {
     verb.held.release();
     let _ = landing.ended();
 }
+
+/// An originating run whose journal refuses a mirrored record fails the
+/// landing closed: refused at registration, the landing starts no work and its
+/// flow is owed closure; refused while the operation's events are relayed, the
+/// verb's own status stands, the landing is settled refused and its flow fails.
+// llmlint: ignore-block[tests_mirror_real_usage] the run's journal is made read-only — by the
+// journey before the landing starts, and by the repository's own `pre-push` hook while it
+// runs — because no verb leaves a run journal that refuses an append; what is changed is the
+// host's permission on that file, and everything asserted is read back off the binary.
+#[test]
+fn an_originating_run_that_refuses_its_mirror_fails_the_landing_closed() {
+    // Refused at registration.
+    let world = World::new("ml-mirror-refused");
+    let _repository = world.repository("local-direct", &["false"]);
+    let branch = originating_run(&world, "origin");
+    onepipeline_testfakes::executable(
+        &world.root.join("hooks").join("pre-push"),
+        "#!/bin/sh\nexit 0\n",
+    );
+    let run_journal = world.run_file("origin", "events.jsonl");
+    writable(&run_journal, false);
+    let refused = world.run(&["publish-branch", &branch, "--repo", "service", "--no-draft"]);
+    writable(&run_journal, true);
+    refused.exited(REFUSED).err_has("could not be registered");
+    let (flow, _) = the_landing(&world);
+    watch(&world, &flow, &["--timeout", "0"]).ended_on(EXIT_FLOW_FAILED, "flow-failed");
+    assert!(
+        !world
+            .journal("origin")
+            .iter()
+            .any(|event| event["kind"] == "landing-started"),
+        "a landing refused at registration started"
+    );
+
+    // Refused while the operation's events are relayed.
+    let world = World::new("ml-mirror-relay");
+    let _repository = world.repository("local-direct", &["false"]);
+    let branch = originating_run(&world, "origin");
+    onepipeline_testfakes::executable(
+        &world.root.join("hooks").join("pre-push"),
+        "#!/bin/sh\nchmod a-w \"$ONEPIPELINE_RUNS_DIR\"/origin/events.jsonl\nexit 0\n",
+    );
+    let landed = world.run(&["publish-branch", &branch, "--repo", "service", "--no-draft"]);
+    writable(&world.run_file("origin", "events.jsonl"), true);
+    landed.exited(0).err_has("could not be relayed");
+    let (flow, id) = the_landing(&world);
+    let every = journal(&world, &flow, &id);
+    let last = every.last().expect("a journal");
+    assert_eq!(last["kind"], json!("landing-refused"), "{every:?}");
+    assert_eq!(last["payload"]["status"], json!(0));
+    let failed = watch(&world, &flow, &["--timeout", "0"]);
+    failed.ended_on(EXIT_FLOW_FAILED, "flow-failed");
+    assert_eq!(failed.record["status"], json!(1));
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
