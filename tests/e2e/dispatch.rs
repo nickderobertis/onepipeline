@@ -3924,6 +3924,14 @@ fn the_codex_double_answers_each_exec_line_oneharness_builds_and_refuses_each_it
             "-",
         ][..],
         &["exec", "resume", "thread-1", "--json", "Do build."][..],
+        &[
+            "exec",
+            "-c",
+            "features.plugins=false",
+            "--json",
+            "Do build.",
+        ][..],
+        &["exec", "-c", "features.plugins=true", "--json", "Do build."][..],
     ] {
         let answered = sent(argv);
         let said = String::from_utf8_lossy(&answered.stdout).to_string();
@@ -3986,6 +3994,14 @@ fn the_codex_double_answers_each_exec_line_oneharness_builds_and_refuses_each_it
             "two were sent",
         ),
         (&["exec", "--json"][..], "no prompt"),
+        (
+            &["exec", "-c", "model=o3", "--json", "Do build."][..],
+            "no setting \"model=o3\"",
+        ),
+        (
+            &["exec", "--json", "Do build.", "-c"][..],
+            "-c takes a setting",
+        ),
     ] {
         let refused = sent(argv);
         let said = String::from_utf8_lossy(&refused.stderr).to_string();

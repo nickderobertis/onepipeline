@@ -11,10 +11,11 @@
 //! cleanly, so only the structured error can classify the attempt as failed.
 //!
 //! It speaks the `codex exec` line oneharness builds — `codex exec [resume ID]
-//! [--dangerously-bypass-approvals-and-sandbox | --sandbox read-only|
-//! workspace-write] [--model M] [--json] (PROMPT | -)` — and refuses any other,
-//! so a line oneharness starts sending that this double does not speak is a
-//! refusal a journey reads rather than an argument it silently swallows.
+//! [-c features.plugins=false|true] [--dangerously-bypass-approvals-and-sandbox |
+//! --sandbox read-only|workspace-write] [--model M] [--json] (PROMPT | -)` — and
+//! refuses any other, so a line oneharness starts sending that this double does
+//! not speak is a refusal a journey reads rather than an argument it silently
+//! swallows.
 
 use onepipeline_testfakes as fake;
 use std::process::ExitCode;
@@ -82,6 +83,16 @@ fn declared(args: &[String]) -> Result<(), String> {
                     .ok_or("codex's --sandbox takes a value, and nothing followed it")?;
                 if !SANDBOXES.contains(&sandbox) {
                     return Err(format!("codex takes no sandbox {sandbox:?}"));
+                }
+            }
+            // The one config override oneharness sends: Codex's plugins, off unless the
+            // run opted in.
+            "-c" => {
+                let setting = rest
+                    .next()
+                    .ok_or("codex's -c takes a setting, and nothing followed it")?;
+                if !["features.plugins=false", "features.plugins=true"].contains(&setting) {
+                    return Err(format!("codex takes no setting {setting:?} here"));
                 }
             }
             "--model" => {
