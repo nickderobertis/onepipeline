@@ -231,6 +231,12 @@ impl Acknowledgement {
                 owner: launch.owner_label(session),
             });
         }
+        // A manager landing that came from this run is live work an
+        // acknowledgement must not hide, whichever session owns the landing —
+        // checked and written under the lock a registration takes, so a landing
+        // registering at the same moment is either seen here or registers after.
+        let _registering = crate::flow::registration_lock(root)?;
+        refuse_live_landings(root, run)?;
         let acknowledged = Self {
             schema_version: ACKNOWLEDGEMENT_SCHEMA_VERSION,
             run_id: run.to_owned(),
@@ -469,6 +475,31 @@ pub(crate) fn asked(root: &Path, session: &str, budget: Option<WakeBudget>) -> R
     })
 }
 
+/// Refuse to acknowledge `run` while a live manager landing — of any session —
+/// names it as an originating run, or while whether one does cannot be said.
+fn refuse_live_landings(root: &Path, run: &str) -> Result<()> {
+    let landings = crate::flow::every_landing(root).map_err(|why| {
+        Error::Refused(format!(
+            "whether a live landing came from run '{run}' cannot be said, so it is not \
+             acknowledged: {why}; nothing was recorded"
+        ))
+    })?;
+    if let Some((flow, landing)) = landings.iter().find(|(_, landing)| {
+        landing.request.runs.iter().any(|named| named == run) && landing.is_live()
+    }) {
+        return Err(Error::Refused(format!(
+            "run '{run}' has a live landing, {} of flow '{}' (session [{}]), which is owed a \
+             watch rather than a closure: watch it with `onepipeline watch --flow {}`; nothing \
+             was recorded",
+            landing.id(),
+            flow.id(),
+            sys::session_digest(&landing.request.session),
+            flow.id()
+        )));
+    }
+    Ok(())
+}
+
 /// What a session owes one of its flows.
 enum FlowOwes {
     /// Nothing: it ended `0`, or a closure it was owed has been acknowledged.
@@ -515,6 +546,19 @@ impl Closure {
 /// `docs/stop-guard.md` states.
 fn owed_by_flow(flow: &crate::flow::Flow, session: &str, budget: Option<WakeBudget>) -> FlowOwes {
     let id = flow.id();
+    // Landing state this build cannot read is never an unknown to warn on: it
+    // may be the live landing a manager owes, so it is owed — and blocks —
+    // until it reads or is repaired.
+    if let Err(why) = flow.landings() {
+        return FlowOwes::Line(UnwatchedRun {
+            run: format!("flow {id}"),
+            standing: "UNKNOWN",
+            why_not_watched: why,
+            remedy: format!(
+                "repair its landing state, then watch it: onepipeline watch --flow {id}"
+            ),
+        });
+    }
     let closure = |ended: Closure| match flow.acknowledged_by(session) {
         Ok(true) => FlowOwes::Nothing,
         Ok(false) => FlowOwes::Line(UnwatchedRun {

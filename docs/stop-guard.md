@@ -165,29 +165,112 @@ and the line saying so names the reserve. The run-watch rule is unchanged.
 ### `watch --flow`
 
 ```
-onepipeline watch --flow <ID> [--timeout <SECONDS|none>] [--tick-interval <SECONDS>] [--cursor <CURSOR>] [--until <CONDITION>]... [--log <PATH>]
+onepipeline watch --flow <ID> [--filter <NAME|SPEC>] [--timeout <SECONDS|none>] [--tick-interval <SECONDS>] [--cursor <CURSOR>] [--until <CONDITION>]... [--log <PATH>]
 ```
 
-`<RUN>` and `--flow` are mutually exclusive, and `--filter` and `--all` are a
-run's alone. The watch records its lease and terms on the flow exactly as a run
-watch does on a run, so `unwatched` counts it. It returns on the first of:
+`<RUN>` and `--flow` are mutually exclusive, and `--all` is a run's alone.
+`--filter` names the profile a landing's events are judged through — a shipped
+profile name or a spec, `planner` by default. The watch records its lease and
+terms on the flow exactly as a run watch does on a run, so `unwatched` counts it.
+It returns on the first of:
 
 | Exit | Condition | When |
 | --- | --- | --- |
 | `4` | `surface` | A planner surface is waiting on the flow's own channel or on any member run's; the line names the flow or the run. |
+| `0` | `landing-progress` | A landing of the flow recorded an event its profile admits; the line names the landing, the event's kind, its significance and its subjects. |
 | `6` | `node-settled` | A member run's node settled; the line names the run and the node. |
 | `8` | `run-joined` | A member run was launched after the watch armed, or is past its cursor; the line names the run. |
 | `0` | `ended` | The flow ended with status 0. |
 | `9` | `flow-failed` | The flow ended non-zero, or died; the line names the status or the death and the `--acknowledge-flow` command. |
 | `5` | `elapsed` | Its timeout elapsed. |
 
-`--until` accepts `surface`, `node-settled` and `run-joined`, all three by
-default; the flow's ending always ends the wait. Every ending line carries
-`cursor <cursor>` to re-arm from, and each heartbeat carries the unread-surface
-count summed over the flow's own channel and its member runs. Each line is written
-twice, as a run watch's is: the human line on standard error (or `--log`), and one
-JSON record on standard output — `{"watch":"return","flow_id":…,"condition":…,"exit":…,"cursor":…,"unread":{"count":…}}`,
-with `run_id`, `node`, `status` or `died` where the condition names one.
+`--until` accepts `surface`, `node-settled`, `run-joined` and
+`landing-progress`, all four by default; the flow's ending always ends the wait.
+Every ending line carries `cursor <cursor>` to re-arm from, and each heartbeat
+carries the unread-surface count summed over the flow's own channel and its member
+runs. Each line is written twice, as a run watch's is: the human line on standard
+error (or `--log`), and one JSON record on standard output — `{"watch":"return","flow_id":…,"condition":…,"exit":…,"cursor":…,"unread":{"count":…}}`,
+with `run_id`, `node`, `status`, `died`, `landing_id`, `kind`, `source`, `subjects`, `significance`, `operation_id`, `stream` or `seq` where the condition names one.
+
+The cursor is `flow:2:<ID>:<LANDING>@<BYTE>/...:<RUN>@<BYTE>/...` — one place per
+landing and one per member run. A `flow:1:<ID>:<RUN>@<BYTE>/...` cursor printed
+before landings still resumes: every landing it could not name starts where its
+journal stood when the watch armed, so nothing it never knew of is replayed.
+
+### Manager landings
+
+```
+onepipeline publish-branch <BRANCH> --repo <CHECKOUT|ALIAS> [--pr-author-graph <PATH>] [--no-draft] [ONEVCS-ARGS]...
+onepipeline repo-recover <BRANCH> --repo <CHECKOUT|ALIAS> [--pr-author-graph <PATH>] [--no-draft] [ONEVCS-ARGS]...
+onepipeline integrate <BRANCHES>... [--push] [ONEVCS-ARGS]...
+```
+
+`integrate` forwards exactly the linked `onevcs integrate` grammar and exit status,
+in the registered repository the current directory is in; the other two keep every
+operand, body, drafting flag and subject derivation they always had. With
+`ONEPIPELINE_LAUNCHER_SESSION` naming a manager, each is that session's
+**supervised work**:
+
+- **Before anything else** every subject is resolved — the one branch, or every
+  member of the integration train in order — together with every run whose own
+  record opened a session on one, and the landing is registered as one landing of
+  a flow: the live flow of the same session the verb runs in under
+  `ONEPIPELINE_FLOW`, or a flow registered for this landing alone, whose id the
+  verb prints as `flow run` does. A flow of another session is refused, and a
+  registration that fails drafts and forwards nothing. With no session the verb
+  runs unowned, as it always did, and one line on standard error says so.
+- **What is kept**, under the flow's `landings/<LANDING>/`: `request.json`, written
+  whole before any side effect and read closed —
+  `{"schema_version":1,"landing_id":…,"flow_id":…,"session":…,"operation":"publish-branch"|"repo-recover"|"integrate","subjects":[{"identity":…,"branch":…}],"runs":[…],"pid":…,"host":…,"started":…,"began_at":…}`;
+  `operation.json`, `{"schema_version":1,"operation_id":…}`, the `onevcs`
+  operation handle prepared before the linked call; `ending.json`,
+  `{"schema_version":1,"landing_id":…,"status":…,"at":…}`, the forwarded status;
+  and `events.jsonl`, the landing's journal. A flow with no `landings/` holds none.
+- **Its journal** holds the landing's own transitions — `landing-registered`,
+  `landing-drafting` and `landing-started` (`significance: progress`),
+  `landing-finished` (`milestone`), and `landing-refused` and `landing-died`
+  (`blocker`), each carrying `landing_id`, `flow_id`, `operation`, `subjects` and
+  `message`, the first two terminal ones `status` too — and every event the
+  `onevcs` operation records, relayed whole with its producer's `significance` as
+  it is recorded, labelled `landing_id`, `flow_id` and `operation_id`. Every one is
+  mirrored into each associated run's journal; the run stays its own manager's.
+- **Liveness.** A landing is live until its process records `ending.json`, on the
+  rule a flow's holder is (its pid and start token). One proved gone with no
+  ending has **died**: the first reader to prove it relays what the operation had
+  recorded and writes `landing-died` — never a completion. A flow is **live**
+  while its holder or any of its landings is, so an outer flow ending cannot hide
+  a landing still running.
+- **Acknowledgement.** `unwatched --acknowledge <RUN>` is refused while a live
+  landing of any session names that run, `unwatched --acknowledge-flow` while the
+  flow is live, and `unpublished --acknowledge <BRANCH>` while a live landing of
+  any session advances that branch of that identity — checked and written under
+  the lock a registration takes, so neither falls between the other's check and
+  write. An acknowledgement made before a landing never answers for it. Landing
+  state that cannot be read refuses every one of the three, and `unwatched` owes
+  its flow a line — which the stop guard blocks on — rather than an unknown.
+
+**Re-arming, and how a landing closes.** A landing's progress wakes its owner's
+`watch --flow` only where the watch's profile admits it: under `planner`, a change
+opened or drafted, checks settled, the landing reaching its base and its final
+result are milestones, and every refusal, required check failing — even while
+others are pending — conflict, review-held draft and death is a blocker;
+registration, drafting, the start and every other `onevcs` step are progress,
+consumed on the way without waking anybody and read with `--filter detailed`, or
+`monitor --flow <ID> --filter detailed`. Each return's cursor sits just past the
+event it reports, so re-arming with it never replays that event and never skips
+the next. A watch given no cursor reads a live landing from its first recorded
+transition, so a registration recorded before the watch armed is not lost. In a
+flow registered for one landing, that landing's ending is what the flow's own
+`ended` or `flow-failed` reports; inside a longer flow its `landing-finished`,
+`landing-refused` or `landing-died` is a `landing-progress` return, and the flow
+goes on. A refused or dead landing's own flow is then owed closure, released by
+`unwatched --acknowledge-flow <ID> --reason <TEXT>`; under a wake budget the
+watch's timeout is the budget less the reserve, exactly as below.
+
+**Where detail is read.** A flow has no graph, so a landing gains no observer:
+`monitor --flow <ID> --filter detailed` and `next --flow <ID> --filter detailed`
+read every event of its landings, and an associated run's own observer reads the
+mirrored events in that run's journal. A settled run is not revived for them.
 
 ### The wake reserve
 

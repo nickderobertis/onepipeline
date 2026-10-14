@@ -170,7 +170,9 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
         Verb::Next(args) => {
             let next = match (&args.run, &args.flow) {
                 (_, Some(flow)) => {
-                    crate::flow::next(&crate::flow::Flow::open(&ledger::runs_root(), flow)?)?
+                    let root = ledger::runs_root();
+                    let flow = crate::flow::Flow::open(&root, flow)?;
+                    crate::flow::next(&root, &flow, &flow_filter(args.filter.as_deref())?)?
                 }
                 (Some(run), None) => {
                     let paths = resolve(run)?;
@@ -310,7 +312,31 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             Ok(EXIT_SUCCESS)
         }
         Verb::Monitor(args) => {
-            let paths = resolve(&args.read.run)?;
+            let run = match (&args.read.run, &args.read.flow) {
+                (_, Some(flow)) => {
+                    let root = ledger::runs_root();
+                    let flow = crate::flow::Flow::open(&root, flow)?;
+                    let rendered = crate::flowwatch::monitor(
+                        &root,
+                        &flow,
+                        &flow_filter(args.read.filter.as_deref())?,
+                        args.cursor.as_deref(),
+                    )?;
+                    let mut out = std::io::stdout();
+                    // llmlint: ignore[cli_output_contract] `monitor --flow` has no machine form, as `monitor`'s own arm below says: one line-oriented document whose last line is the resume cursor.
+                    writeln!(out, "{rendered}")
+                        .and_then(|()| out.flush())
+                        .map_err(|e| {
+                            Error::Invalid(format!(
+                                "`monitor` could not write to standard output: {e}"
+                            ))
+                        })?;
+                    return Ok(EXIT_SUCCESS);
+                }
+                (Some(run), None) => run,
+                (None, None) => return Err(named_neither()),
+            };
+            let paths = resolve(run)?;
             let filter = read_filter(&paths, args.read.filter.as_deref(), args.read.all)?;
             let monitored = verbs::monitor(&paths, &filter, args.cursor.as_deref())?;
             // One write of the whole document, and a failed one refused rather than
@@ -585,6 +611,7 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
         }
         Verb::PublishBranch(args) => crate::land::land(crate::land::Verb::PublishBranch, args.args),
         Verb::RepoRecover(args) => crate::land::land(crate::land::Verb::Recover, args.args),
+        Verb::Integrate(args) => crate::land::land(crate::land::Verb::Integrate, args.args),
         Verb::Results(args) => {
             let results = verbs::results(&resolve(&args.run)?)?;
             if args.json {
@@ -747,6 +774,7 @@ fn watch_flow(flow: &str, args: &crate::cli::WatchArgs) -> Result<i32> {
         tick: Duration::from_secs(args.tick_interval),
         cursor: args.cursor.clone(),
         until: args.until.clone(),
+        filter: flow_filter(args.read.filter.as_deref())?,
     };
     let mut log = match &args.log {
         Some(path) => Some((crate::watch::open_log(path)?, path.display().to_string())),
@@ -993,6 +1021,23 @@ fn read_filter(paths: &RunPaths, named: Option<&str>, all: bool) -> Result<Event
         // failed, and this is the second reading rather than a fallback that
         // hides it — a name that is neither a profile nor a readable file is
         // answered with the profile refusal, which names the ones this run has.
+        Err(unknown) => match Path::new(named).is_file() {
+            true => Ok(EventFilter::read(named)?),
+            false => Err(unknown),
+        },
+    }
+}
+
+/// The profile a flow's landing events are read through: a flow is launched
+/// with no launch configuration, so a name is one of the shipped profiles —
+/// `planner` where none is named — and anything else a spec, inline or a file.
+fn flow_filter(named: Option<&str>) -> Result<EventFilter> {
+    let named = named.unwrap_or(filter::DEFAULT_PROFILE);
+    if named.trim_start().starts_with('{') {
+        return Ok(EventFilter::read(named)?);
+    }
+    match filter::Filters::default().profile(named) {
+        Ok(filter) => Ok(filter),
         Err(unknown) => match Path::new(named).is_file() {
             true => Ok(EventFilter::read(named)?),
             false => Err(unknown),
