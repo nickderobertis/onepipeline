@@ -406,12 +406,12 @@ fn already_recorded(events: &[Envelope], ending: Option<ScratchEnding>) -> bool 
         }
         match kind {
             Some(PipelineKind::ScratchRemoved) => recorded = Some(None),
-            // The strict fold this runs under has already admitted the payload.
+            // A payload that does not read stands for no ending, so it can never
+            // suppress a fresh record; the strict fold has admitted it in any case.
             Some(PipelineKind::ScratchRetained) => {
-                recorded = Some(
-                    serde_json::from_value::<ScratchRetained>(json!(event.payload))
-                        .map_or(ending, |record| Some(record.ending)),
-                );
+                recorded = serde_json::from_value::<ScratchRetained>(json!(event.payload))
+                    .ok()
+                    .map(|record| Some(record.ending));
             }
             _ => {}
         }
