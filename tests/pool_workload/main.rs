@@ -184,6 +184,7 @@ fn one_sweep_over_twenty_declaring_identities_is_recorded_for_the_budget() {
         .as_str()
         .expect("the sweep's start");
     let journalled_at = record["ts"].as_str().expect("the record's own time");
+    // llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] this recording's one reader, `tests/pool_workload/pool-maintenance-budget.mjs`, runs right after this journey in the same `workload` target over the same tree, so a field drifted on either side reaches onebudgetspec as a missing or non-finite result, which it refuses; a drift gate in `check` would put this project's journey in a per-change selection its project is kept out of.
     let recording: Value = json!({
         "run": RUN,
         "started_at": started_at,
@@ -193,6 +194,7 @@ fn one_sweep_over_twenty_declaring_identities_is_recorded_for_the_budget() {
         "identities": identities.len(),
         "slots": slots,
     });
+    // llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
     let target = Path::new(env!("CARGO_MANIFEST_DIR")).join(RECORDING);
     std::fs::create_dir_all(target.parent().expect("a directory")).expect("the records directory");
     std::fs::write(
