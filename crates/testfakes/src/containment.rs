@@ -19,9 +19,11 @@
 //!   orphan is reached as surely as a child. Nothing this suite runs asks to
 //!   leave a job, and nothing could: the job does not allow breakaway.
 //! - **Unix**: every process still descended from the calling one, walked through
-//!   the kernel's parent links at the moment of the teardown. A process whose
-//!   parent had already exited was handed to `init` then, and nothing links it
-//!   back here. The one thing that would keep it here, Linux's
+//!   the kernel's parent links at the moment of the teardown, and waited for by
+//!   its own identity once found — killing a parent hands a child still on its
+//!   way out to `init`, out of the walk's reach but not out of the teardown's.
+//!   A process whose parent had already exited *before* the teardown was handed
+//!   to `init` then, and nothing links it back here. The one thing that would keep it here, Linux's
 //!   `PR_SET_CHILD_SUBREAPER`, would make every such orphan a zombie of the test
 //!   process once it ended, and a zombie answers the liveness probe the engine
 //!   reads its drivers with as alive. macOS has nothing like it.
@@ -76,49 +78,96 @@ mod platform {
 
     pub fn enrol() {}
 
+    /// One process this teardown found, told apart from a later process that
+    /// is given the same pid by when it started.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct Found {
+        pid: u32,
+        started: String,
+    }
+
+    /// One row of the process table: the process, its parent, and its state.
+    struct Row {
+        process: Found,
+        parent: u32,
+        state: String,
+    }
+
     pub fn end_descendants() -> Result<(), String> {
         let me = std::process::id();
         let deadline = std::time::Instant::now() + PATIENCE;
+        // Everything any walk below has found, kept after it stops being found.
+        // Killing a parent hands a child still on its way out to `init`, so the
+        // next walk from here no longer reaches it; it was a descendant at the
+        // teardown all the same, and the teardown is not over until it has gone.
+        let mut ended: Vec<Found> = Vec::new();
         loop {
-            let found = descendants(me)?;
-            if found.is_empty() {
+            let table = list()?;
+            remember(&mut ended, descendants(me, &table));
+            let running: Vec<&Found> = ended
+                .iter()
+                .filter(|found| still_running(found, &table))
+                .collect();
+            if running.is_empty() {
                 return Ok(());
             }
             if std::time::Instant::now() >= deadline {
+                let pids: Vec<u32> = running.iter().map(|found| found.pid).collect();
                 return Err(format!(
-                    "pids {found:?} are still running {}s after they were ended",
+                    "pids {pids:?} are still running {}s after they were ended",
                     PATIENCE.as_secs()
                 ));
             }
             // Stopped first, all of them, and the walk read again until it finds
             // nothing new: a stopped process starts nothing, so the set this
-            // ends has stopped growing. Killed before that, a parent hands any
-            // child it started in the meantime to `init`, where no walk from
-            // here finds it.
-            let mut frozen = found;
-            for pid in &frozen {
-                signal(*pid, libc::SIGSTOP);
+            // ends has stopped growing.
+            let mut frozen: Vec<Found> = running.into_iter().cloned().collect();
+            for found in &frozen {
+                signal(found.pid, libc::SIGSTOP);
             }
             loop {
-                let fresh: Vec<u32> = descendants(me)?
+                let table = list()?;
+                let fresh: Vec<Found> = descendants(me, &table)
                     .into_iter()
-                    .filter(|pid| !frozen.contains(pid))
+                    .filter(|found| !frozen.contains(found))
                     .collect();
                 // Bounded too: another thread of this process still starting
                 // things would otherwise keep this from ever reaching the kill.
                 if fresh.is_empty() || std::time::Instant::now() >= deadline {
                     break;
                 }
-                for pid in &fresh {
-                    signal(*pid, libc::SIGSTOP);
+                for found in &fresh {
+                    signal(found.pid, libc::SIGSTOP);
                 }
+                remember(&mut ended, fresh.iter().cloned());
                 frozen.extend(fresh);
             }
-            for pid in &frozen {
-                signal(*pid, libc::SIGKILL);
+            for found in &frozen {
+                signal(found.pid, libc::SIGKILL);
             }
             std::thread::sleep(POLL);
         }
+    }
+
+    /// Add to `ended` whatever in `found` it does not already hold.
+    fn remember(ended: &mut Vec<Found>, found: impl IntoIterator<Item = Found>) {
+        for found in found {
+            if !ended.contains(&found) {
+                ended.push(found);
+            }
+        }
+    }
+
+    /// Whether `found` is still running: listed under its own pid with the
+    /// start it was found with, wherever it is parented now, and not a zombie.
+    ///
+    /// A zombie has released everything it held and only waits to be
+    /// collected, and a pid listed with another start is a different process
+    /// that has been given it since.
+    fn still_running(found: &Found, table: &[Row]) -> bool {
+        table
+            .iter()
+            .any(|row| row.process == *found && !row.state.starts_with('Z'))
     }
 
     /// Send `signal` to one process, by a pid the walk found under this one.
@@ -140,21 +189,19 @@ mod platform {
         unsafe { libc::kill(raw, signal) };
     }
 
-    /// Every process below `root` that has not yet ended, however deep.
+    /// Every process on the host, through `ps`, which every Unix answers.
     ///
-    /// Through `ps`, which every Unix answers, and with its state so that a
-    /// child that has ended and is only waiting for this process to collect it
-    /// is not counted: it holds no handle and cannot be ended again.
-    ///
-    /// The `ps` that answers is itself a child of `root` while it lists, and a
-    /// new one each time, so it is left out by its pid: counted, it would be a
-    /// descendant every listing found afresh.
-    fn descendants(root: u32) -> Result<Vec<u32>, String> {
+    /// The `ps` that answers is itself a child of this process while it lists,
+    /// and a new one each time, so it is left out by its pid: counted, it would
+    /// be a descendant every listing found afresh.
+    fn list() -> Result<Vec<Row>, String> {
         let lister = std::process::Command::new("ps")
-            .args(["-A", "-o", "pid=,ppid=,stat="])
+            .args(["-A", "-o", "pid=,ppid=,stat=,lstart="])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
+            // `lstart`'s words are the C locale's in every `ps` that has it.
+            .env("LC_ALL", "C")
             .spawn()
             .map_err(|error| format!("ps did not run: {error}"))?;
         let lister_pid = lister.id();
@@ -166,35 +213,42 @@ mod platform {
         }
         let text = String::from_utf8(listed.stdout)
             .map_err(|error| format!("ps wrote something other than text: {error}"))?;
-        let table = parse(&text)?;
-        let mut found = Vec::new();
-        let mut frontier = vec![root];
-        while let Some(parent) = frontier.pop() {
-            for (pid, _, _) in table.iter().filter(|(_, ppid, _)| *ppid == parent) {
-                if *pid != root && *pid != lister_pid && !found.contains(pid) {
-                    found.push(*pid);
-                    frontier.push(*pid);
-                }
-            }
-        }
-        // Walked through ended processes too, because one that has ended but
-        // not been collected still parents what it started, and only then
-        // dropped from what is ended.
-        Ok(found
+        Ok(parse(&text)?
             .into_iter()
-            .filter(|pid| {
-                table
-                    .iter()
-                    .any(|(listed, _, state)| listed == pid && !state.starts_with('Z'))
-            })
+            .filter(|row| row.process.pid != lister_pid)
             .collect())
     }
 
-    /// `(pid, parent, state)` for every row, or the row that is not one.
+    /// Every process below `root` in `table` that has not yet ended, however
+    /// deep.
+    ///
+    /// Walked through ended processes too, because one that has ended but not
+    /// been collected still parents what it started, and only then dropped from
+    /// what is ended.
+    fn descendants(root: u32, table: &[Row]) -> Vec<Found> {
+        let mut found: Vec<&Row> = Vec::new();
+        let mut frontier = vec![root];
+        while let Some(parent) = frontier.pop() {
+            for row in table.iter().filter(|row| row.parent == parent) {
+                let pid = row.process.pid;
+                if pid != root && !found.iter().any(|seen| seen.process.pid == pid) {
+                    found.push(row);
+                    frontier.push(pid);
+                }
+            }
+        }
+        found
+            .into_iter()
+            .filter(|row| !row.state.starts_with('Z'))
+            .map(|row| row.process.clone())
+            .collect()
+    }
+
+    /// Every row, or the row that is not one.
     ///
     /// Every row is read or the listing is refused: a row skipped could be the
     /// descendant the teardown exists to reach.
-    fn parse(listed: &str) -> Result<Vec<(u32, u32, String)>, String> {
+    fn parse(listed: &str) -> Result<Vec<Row>, String> {
         listed
             .lines()
             .filter(|line| !line.trim().is_empty())
@@ -204,10 +258,12 @@ mod platform {
             .collect()
     }
 
-    /// Exactly the three columns asked for: two ids, and a state whose first
-    /// character is the one-letter code every `ps` leads it with — the rest are
-    /// flags (`Ss`, `R+`, `S<l`). A pid of `0` is no process this may signal.
-    fn row(line: &str) -> Option<(u32, u32, String)> {
+    /// Exactly the columns asked for: two ids; a state whose first character
+    /// is the one-letter code every `ps` leads it with, in either case — Linux
+    /// writes a traced process `t` — and the rest flags (`Ss`, `R+`, `S<l`); and
+    /// the start, which is several words and the rest
+    /// of the row. A pid of `0` is no process this may signal.
+    fn row(line: &str) -> Option<Row> {
         let mut columns = line.split_whitespace();
         let pid = columns.next()?.parse().ok().filter(|pid| *pid != 0)?;
         let parent = columns.next()?.parse().ok()?;
@@ -215,9 +271,14 @@ mod platform {
         let well_formed = state
             .chars()
             .next()
-            .is_some_and(|code| code.is_ascii_uppercase())
+            .is_some_and(|code| code.is_ascii_alphabetic())
             && state.chars().all(|flag| flag.is_ascii_graphic());
-        (well_formed && columns.next().is_none()).then(|| (pid, parent, state.to_owned()))
+        let started = columns.collect::<Vec<_>>().join(" ");
+        (well_formed && !started.is_empty()).then(|| Row {
+            process: Found { pid, started },
+            parent,
+            state: state.to_owned(),
+        })
     }
 }
 

@@ -4065,6 +4065,57 @@ fn a_worlds_teardown_ends_a_double_it_started_and_the_descendant_that_double_sta
     double.wait().expect("the ended double is collected");
 }
 
+/// The same, where what the double started is still on its way out when the
+/// double is gone: killed beside the double, it is held at its exit by a tracer
+/// outside the test's tree, so the double's death hands it to `init` before it
+/// has finished. No walk from the test reaches it then, and it was a descendant
+/// when the teardown found it; the teardown is not over until it has gone.
+///
+/// Linux only, because the exit stop is `ptrace`'s.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_worlds_teardown_waits_for_a_descendant_still_exiting_after_its_double_is_gone() {
+    let (double_pid, descendant) = {
+        let world = World::new("teardown-exiting");
+        let record = world.root.join("descendant.pids");
+        // Collected by nothing here: the teardown kills it, and its zombie is
+        // this process's until it ends, which the assertions below allow for.
+        #[expect(
+            clippy::zombie_processes,
+            reason = "the teardown under test is what ends it; see the comment above"
+        )]
+        let _double = world
+            .cmd_on(
+                &double("fake-oneharness"),
+                &[
+                    "leave-a-descendant",
+                    &record.to_string_lossy(),
+                    "hold-at-exit",
+                ],
+            )
+            .spawn()
+            .expect("the double starts");
+        let pids = left_descendant(&record);
+        for pid in [pids.0, pids.1] {
+            assert!(
+                !process_ended(pid),
+                "pid {pid} had ended before the teardown, so this proves nothing about it"
+            );
+        }
+        pids
+    };
+
+    assert!(
+        process_ended(double_pid),
+        "the double at pid {double_pid} outlived the world whose spawning path started it"
+    );
+    assert!(
+        process_ended(descendant),
+        "pid {descendant}, which the double at pid {double_pid} started and the teardown \
+         killed, was still exiting when the world was gone"
+    );
+}
+
 /// The same, where the double has already exited by the teardown and what it
 /// started is an orphan: the process the Windows leg was left holding.
 ///
@@ -4122,7 +4173,10 @@ fn left_descendant(record: &Path) -> (u32, u32) {
     };
     let pids: Vec<u32> = text
         .split_whitespace()
-        .map(|pid| pid.parse().expect("the record holds pids"))
+        .map(|pid| {
+            pid.parse()
+                .unwrap_or_else(|_| panic!("the record is not two pids: {text:?}"))
+        })
         .collect();
     let [double, descendant] = pids[..] else {
         panic!("the record is not two pids: {text:?}")
