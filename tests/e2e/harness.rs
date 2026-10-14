@@ -4170,21 +4170,37 @@ fn a_failing_tests_own_failure_survives_a_teardown_that_also_fails() {
     ends_what_it_left(&[double_pid, descendant]);
 }
 
-/// A teardown told to wait for something that is no length of time says so,
-/// rather than guessing one.
+/// A teardown told to wait for something that is no length of time, or for
+/// longer than it may, says so rather than guessing one — and with its own
+/// patience back, ends what it found.
 #[test]
-fn a_worlds_teardown_given_an_unreadable_patience_fails_saying_so() {
-    let world = World::new("teardown-unreadable-patience");
+fn a_worlds_teardown_given_a_patience_it_cannot_keep_fails_saying_so() {
+    let world = World::new("teardown-unkeepable-patience");
     let (double_pid, descendant) = holding_a_descendant(&world);
 
-    let refused = with_variable(PATIENCE_VARIABLE, "soon", move || drop(world))
-        .expect_err("a teardown with no patience it could read let its test pass");
-    let said = panic_text(refused.as_ref());
-    assert!(
-        said.contains(PATIENCE_VARIABLE) && said.contains("is not a number of milliseconds"),
-        "the teardown's failure does not say its patience was unreadable: {said}"
-    );
-    ends_what_it_left(&[double_pid, descendant]);
+    for (patience, refusal) in [
+        ("soon", "is not a number of milliseconds"),
+        ("600001", "is longer than the 600s a teardown may wait"),
+    ] {
+        let answered = with_variable(
+            PATIENCE_VARIABLE,
+            patience,
+            onepipeline_testfakes::containment::end_descendants,
+        )
+        .expect("the teardown answers rather than panicking");
+        let said = answered.expect_err("a patience the teardown cannot keep was kept");
+        assert!(
+            said.contains(PATIENCE_VARIABLE) && said.contains(refusal),
+            "a patience of {patience:?} is not refused as one: {said}"
+        );
+    }
+    drop(world);
+    for pid in [double_pid, descendant] {
+        assert!(
+            process_ended(pid),
+            "pid {pid} outlived the world once its patience was its own"
+        );
+    }
 }
 
 /// A teardown that cannot list this host's processes says so by name, rather

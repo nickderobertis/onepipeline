@@ -220,7 +220,7 @@ fn linger_held_at_exit(args: &[String]) -> ExitCode {
     let [record, double] = args else {
         return fake::refuse(usage);
     };
-    if process_id(double).is_none() {
+    if ProcessId::parse(double).is_none() {
         return fake::refuse(usage);
     }
     let me = std::env::current_exe()
@@ -235,7 +235,7 @@ fn linger_held_at_exit(args: &[String]) -> ExitCode {
         .ok()
         .filter(|started| started.status.success())
         .and_then(|started| String::from_utf8(started.stdout).ok())
-        .and_then(|pid| process_id(pid.trim()));
+        .and_then(|pid| ProcessId::parse(pid.trim()));
     let Some(tracer) = tracer else {
         write_record(record, "refused: the tracer did not start");
         return ExitCode::FAILURE;
@@ -244,7 +244,7 @@ fn linger_held_at_exit(args: &[String]) -> ExitCode {
     let allowed = unsafe {
         libc::prctl(
             libc::PR_SET_PTRACER,
-            libc::c_ulong::from(tracer.unsigned_abs()),
+            libc::c_ulong::from(tracer.0.unsigned_abs()),
             0_u64,
             0_u64,
             0_u64,
@@ -254,7 +254,8 @@ fn linger_held_at_exit(args: &[String]) -> ExitCode {
         write_record(
             record,
             &format!(
-                "refused: the tracer at pid {tracer} may not be let in: {}",
+                "refused: the tracer at pid {} may not be let in: {}",
+                tracer.0,
                 std::io::Error::last_os_error()
             ),
         );
@@ -310,15 +311,15 @@ fn hold_at_exit(args: &[String]) -> ExitCode {
     let [pid, double, record] = args else {
         return fake::refuse(usage);
     };
-    let (Some(traced), Some(double)) = (process_id(pid), process_id(double)) else {
+    let (Some(traced), Some(double)) = (ProcessId::parse(pid), ProcessId::parse(double)) else {
         return fake::refuse(usage);
     };
     // Named rather than read off this process's parent, which by the time it
     // is read may already be whatever `init` the starter's exit handed it to.
     let Some(starter) = std::env::var(ORPHANED_BY)
         .ok()
-        .and_then(|starter| process_id(&starter))
-        .map(libc::pid_t::unsigned_abs)
+        .and_then(|starter| ProcessId::parse(&starter))
+        .map(|starter| starter.0.unsigned_abs())
     else {
         return fake::refuse(&format!(
             "hold-at-exit is started through `orphan`, which sets {ORPHANED_BY}"
@@ -331,7 +332,7 @@ fn hold_at_exit(args: &[String]) -> ExitCode {
         let seized = unsafe {
             libc::ptrace(
                 libc::PTRACE_SEIZE,
-                traced,
+                traced.0,
                 std::ptr::null_mut::<libc::c_void>(),
                 libc::PTRACE_O_TRACEEXIT as usize as *mut libc::c_void,
             )
@@ -351,12 +352,12 @@ fn hold_at_exit(args: &[String]) -> ExitCode {
     while std::os::unix::process::parent_id() == starter {
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
-    write_record(record, &format!("{double} {pid}"));
+    write_record(record, &format!("{} {}", double.0, traced.0));
     let at_exit = libc::SIGTRAP | (libc::PTRACE_EVENT_EXIT << 8);
     loop {
         let mut status = 0;
         // SAFETY: `status` outlives the call.
-        if unsafe { libc::waitpid(traced, &raw mut status, libc::__WALL) } != traced {
+        if unsafe { libc::waitpid(traced.0, &raw mut status, libc::__WALL) } != traced.0 {
             let error = std::io::Error::last_os_error();
             if error.kind() == std::io::ErrorKind::Interrupted {
                 continue;
@@ -374,7 +375,7 @@ fn hold_at_exit(args: &[String]) -> ExitCode {
         unsafe {
             libc::ptrace(
                 libc::PTRACE_CONT,
-                traced,
+                traced.0,
                 std::ptr::null_mut::<libc::c_void>(),
                 std::ptr::null_mut::<libc::c_void>(),
             )
@@ -382,12 +383,21 @@ fn hold_at_exit(args: &[String]) -> ExitCode {
     }
 }
 
-/// `text` as the id of one process: positive, because `ptrace` and `prctl`
-/// read zero and below as something other than a single process — and
+/// The id of exactly one process: positive, because `ptrace`, `waitpid` and
+/// `prctl` read zero and below as something other than a single process — and
 /// `PR_SET_PTRACER` reads zero as lifting the restriction altogether.
 #[cfg(target_os = "linux")]
-fn process_id(text: &str) -> Option<libc::pid_t> {
-    text.parse::<libc::pid_t>().ok().filter(|pid| *pid > 0)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProcessId(libc::pid_t);
+
+#[cfg(target_os = "linux")]
+impl ProcessId {
+    fn parse(text: &str) -> Option<Self> {
+        text.parse::<libc::pid_t>()
+            .ok()
+            .filter(|pid| *pid > 0)
+            .map(Self)
+    }
 }
 
 #[cfg(not(target_os = "linux"))]

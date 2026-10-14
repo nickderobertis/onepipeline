@@ -47,16 +47,27 @@ const PATIENCE: std::time::Duration = std::time::Duration::from_secs(30);
 /// its first look, before it has ended anything.
 pub const PATIENCE_VARIABLE: &str = "ONEPIPELINE_TESTFAKES_TEARDOWN_PATIENCE_MS";
 
+/// The longest [`PATIENCE_VARIABLE`] may ask for: a bound a teardown still
+/// keeps, where a larger one would read on Windows as a wait without end.
+const LONGEST_PATIENCE: std::time::Duration = std::time::Duration::from_secs(600);
+
 /// [`PATIENCE`], or what [`PATIENCE_VARIABLE`] replaces it with.
 fn patience() -> Result<std::time::Duration, String> {
-    match std::env::var_os(PATIENCE_VARIABLE) {
-        None => Ok(PATIENCE),
-        Some(set) => set
-            .to_str()
-            .and_then(|millis| millis.parse().ok())
-            .map(std::time::Duration::from_millis)
-            .ok_or_else(|| format!("{PATIENCE_VARIABLE}={set:?} is not a number of milliseconds")),
+    let Some(set) = std::env::var_os(PATIENCE_VARIABLE) else {
+        return Ok(PATIENCE);
+    };
+    let patience = set
+        .to_str()
+        .and_then(|millis| millis.parse().ok())
+        .map(std::time::Duration::from_millis)
+        .ok_or_else(|| format!("{PATIENCE_VARIABLE}={set:?} is not a number of milliseconds"))?;
+    if patience > LONGEST_PATIENCE {
+        return Err(format!(
+            "{PATIENCE_VARIABLE}={set:?} is longer than the {LONGEST_PATIENCE:?} a teardown may \
+             wait"
+        ));
     }
+    Ok(patience)
 }
 
 /// How often the teardown looks again while it waits.
@@ -98,11 +109,29 @@ mod platform {
 
     pub fn enrol() {}
 
+    /// The id of exactly one process: positive, and within what `kill` takes,
+    /// which reads zero and below as a group or a broadcast.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct Pid(libc::pid_t);
+
+    impl Pid {
+        fn new(pid: u32) -> Option<Self> {
+            libc::pid_t::try_from(pid)
+                .ok()
+                .filter(|pid| *pid > 0)
+                .map(Self)
+        }
+
+        fn get(self) -> u32 {
+            self.0.unsigned_abs()
+        }
+    }
+
     /// One process this teardown found, told apart from a later process that
     /// is given the same pid by when it started.
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct Found {
-        pid: u32,
+        pid: Pid,
         started: String,
     }
 
@@ -144,7 +173,7 @@ mod platform {
                 return Ok(());
             }
             if std::time::Instant::now() >= deadline {
-                let pids: Vec<u32> = running.iter().map(|found| found.pid).collect();
+                let pids: Vec<u32> = running.iter().map(|found| found.pid.get()).collect();
                 return Err(format!(
                     "pids {pids:?} are still running {patience:?} after they were ended"
                 ));
@@ -214,19 +243,10 @@ mod platform {
     ///
     /// A pid that is no longer there is not an error: it ended between the walk
     /// and the signal, which is what this was going to make it do.
-    fn signal(pid: u32, signal: i32) {
-        let Ok(raw) = i32::try_from(pid) else {
-            return;
-        };
-        // `kill` reads zero and below as a group or a broadcast, never one
-        // process; nothing the walk returns is one, but a signal is not sent
-        // on the strength of that.
-        if raw <= 0 {
-            return;
-        }
-        // SAFETY: `kill` touches no memory this call owns, and `raw` addresses
-        // one process.
-        unsafe { libc::kill(raw, signal) };
+    fn signal(pid: Pid, signal: i32) {
+        // SAFETY: `kill` touches no memory this call owns, and a `Pid`
+        // addresses one process.
+        unsafe { libc::kill(pid.0, signal) };
     }
 
     /// Every process on the host, through `ps`, which every Unix answers.
@@ -255,7 +275,7 @@ mod platform {
             .map_err(|error| format!("ps wrote something other than text: {error}"))?;
         Ok(parse(&text)?
             .into_iter()
-            .filter(|row| row.process.pid != lister_pid)
+            .filter(|row| row.process.pid.get() != lister_pid)
             .collect())
     }
 
@@ -271,9 +291,9 @@ mod platform {
         while let Some(parent) = frontier.pop() {
             for row in table.iter().filter(|row| row.parent == parent) {
                 let pid = row.process.pid;
-                if pid != root && !found.iter().any(|seen| seen.process.pid == pid) {
+                if pid.get() != root && !found.iter().any(|seen| seen.process.pid == pid) {
                     found.push(row);
-                    frontier.push(pid);
+                    frontier.push(pid.get());
                 }
             }
         }
@@ -301,11 +321,11 @@ mod platform {
     /// Exactly the columns asked for: two ids; a state whose first character
     /// is the one-letter code every `ps` leads it with, in either case — Linux
     /// writes a traced process `t` — and the rest flags (`Ss`, `R+`, `S<l`); and
-    /// the start, which is several words and the rest of the row. A pid of `0`
-    /// is no process this may signal.
+    /// the start, which is several words and the rest of the row. A pid that
+    /// is no [`Pid`] is no row.
     fn row(line: &str) -> Option<Row> {
         let mut columns = line.split_whitespace();
-        let pid = columns.next()?.parse().ok().filter(|pid| *pid != 0)?;
+        let pid = Pid::new(columns.next()?.parse().ok()?)?;
         let parent = columns.next()?.parse().ok()?;
         let state = columns.next()?;
         let well_formed = state
@@ -425,7 +445,9 @@ mod platform {
         if asked != 0 && inside != 0 {
             // SAFETY: `process` is live and was opened with the right to end it.
             unsafe { TerminateProcess(process, 1) };
-            let millis = u32::try_from(patience.as_millis()).unwrap_or(u32::MAX);
+            // Never `INFINITE`, which is `u32::MAX`: `patience` is bounded well
+            // below it, and a value past it would still be a bounded wait.
+            let millis = u32::try_from(patience.as_millis()).unwrap_or(u32::MAX - 1);
             // Whatever the wait answers, the caller lists the job again: a member
             // still there is ended again, and one that outlasts the bound is
             // named.
