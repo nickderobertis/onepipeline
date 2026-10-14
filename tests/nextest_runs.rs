@@ -11,6 +11,13 @@
 //! one-thread tests finish while tests outside the group hold the slots a queued
 //! four-thread test needs.
 //!
+//! # A test that leaves a process running
+//!
+//! A test that returns while a process it started still holds its output is a
+//! `LEAK`, which nextest counts as a pass, and on Windows that process holds the
+//! pipe a CI step tees the run through. The `ci` profile fails such a test by
+//! name instead; driven here through the configuration verbatim.
+//!
 //! # After a failure
 //!
 //! `scripts/rerun-failed.sh` is what CI runs once a test step has failed. These
@@ -382,6 +389,107 @@ fn a_run_ended_with_tests_unrun_and_no_reason_is_named_by_nextests_exit_status()
     assert!(
         text.contains("nothing to re-run") && text.contains("verdict stays failed"),
         "with no failed test there is nothing to re-run, and the verdict stands:\n{text}"
+    );
+}
+
+/// One test that returns while a process it started still holds its output, one
+/// that waits for what it started, and the program both start: this binary
+/// again, which sleeps when told it is the one started.
+const LEAKING_E2E: &str = r#"
+fn start_the_lingerer() -> std::process::Child {
+    std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "lingers_when_started_by_another_test"])
+        .env("FIXTURE_LINGER", "1")
+        .spawn()
+        .unwrap()
+}
+#[test]
+fn lingers_when_started_by_another_test() {
+    if std::env::var_os("FIXTURE_LINGER").is_some() {
+        std::thread::sleep(std::time::Duration::from_secs(3));
+    }
+}
+#[test]
+fn leaves_a_process_holding_its_output() {
+    start_the_lingerer();
+}
+#[test]
+fn waits_for_what_it_started() {
+    start_the_lingerer().wait().unwrap();
+}
+"#;
+
+fn leaking_fixture(case: &str) -> Fixture {
+    Fixture::new(
+        case,
+        SCHEDULING_MANIFEST,
+        &[
+            ("src/lib.rs", ""),
+            (".config/nextest.toml", &repository_config()),
+            ("tests/e2e.rs", LEAKING_E2E),
+            ("tests/note.rs", "#[test]\nfn one() {}\n"),
+            ("tests/release_channel.rs", "#[test]\nfn one() {}\n"),
+            ("tests/oneagentgraph_liveness.rs", "#[test]\nfn one() {}\n"),
+        ],
+    )
+}
+
+/// Under the profile CI's cross-platform legs run, a test that returns while a
+/// process it started still holds its output fails the run and is named for it,
+/// and `rerun-failed` reads that as the failure it is. Under the default profile
+/// the same test is a `LEAK`: a pass, which is how the Windows leg of run
+/// 38465733761 passed two such tests and then hung on the process one of them
+/// had left.
+#[test]
+fn a_test_leaving_a_process_holding_its_output_fails_the_ci_profile_by_name() {
+    let fixture = leaking_fixture("leak-fails");
+    archive(&fixture);
+    let leaker = "nextest-scheduling-fixture::e2e leaves_a_process_holding_its_output";
+
+    let (output, log) = fixture.nextest_run(&["--no-fail-fast"]);
+    assert!(
+        output.status.success() && log.contains("passed (1 leaky)"),
+        "under the default profile a leak is still counted as a leaky pass:\n{log}"
+    );
+
+    let (output, log) = fixture.nextest_run(&["--no-fail-fast", "--profile", "ci"]);
+    assert!(
+        !output.status.success(),
+        "under the ci profile a test that left a process holding its output passed:\n{log}"
+    );
+    assert!(
+        log.lines()
+            .any(|line| line.trim_start().starts_with("LEAK-FAIL ") && line.ends_with(leaker)),
+        "the ci profile's failure does not name the test that leaked:\n{log}"
+    );
+    for passing in [
+        "waits_for_what_it_started",
+        "lingers_when_started_by_another_test",
+    ] {
+        assert!(
+            log.lines()
+                .any(|line| line.trim_start().starts_with("PASS ")
+                    && line.ends_with(&format!("e2e {passing}"))),
+            "{passing} did not pass beside the leak:\n{log}"
+        );
+    }
+
+    let (report, text) = fixture.rerun_failed_in(
+        &known_flakes(),
+        &["cargo", "nextest", "run"],
+        &[("NEXTEST_PROFILE", "ci")],
+    );
+    assert_eq!(
+        report.status.code(),
+        Some(1),
+        "a run failed by a leak is reported as failed:\n{text}"
+    );
+    let times = rerun_times();
+    assert!(
+        text.lines().any(|line| line.starts_with(&format!(
+            "  {leaker}: failed {times} of {times} re-runs; fails every time"
+        ))),
+        "the leak is not re-run as the failure it is:\n{text}"
     );
 }
 

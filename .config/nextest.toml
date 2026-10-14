@@ -78,6 +78,16 @@ status-level = "slow"
 # leg say how far it got: the last line names where it stopped.
 [profile.ci]
 status-level = "pass"
+# A test that returns while a process it started still holds its output fails,
+# naming itself, rather than passing as `LEAK`. A `LEAK` is a pass, and the
+# process behind one stays running after the test has passed: on Windows it
+# holds the pipe the cross-platform step tees the run's output through. Run
+# 38465733761's Windows leg passed every test, marked two `LEAK`, and then waited
+# 13 minutes on that pipe until its step timed out. Failing the test makes the
+# leg say which test left the process. 100ms is nextest's own default: the
+# fixture's teardown has already waited for what it ended, so a process still
+# holding the output past that is a leak and not a slow exit.
+leak-timeout = { period = "100ms", result = "fail" }
 
 # The two host-sized journeys take the **whole** group while they run.
 #
