@@ -204,12 +204,20 @@ mod platform {
             .collect()
     }
 
+    /// Exactly the three columns asked for: two ids, and a state whose first
+    /// character is the one-letter code every `ps` leads it with — the rest are
+    /// flags (`Ss`, `R+`, `S<l`). A pid of `0` is no process this may signal.
     fn row(line: &str) -> Option<(u32, u32, String)> {
         let mut columns = line.split_whitespace();
-        let pid = columns.next()?.parse().ok()?;
+        let pid = columns.next()?.parse().ok().filter(|pid| *pid != 0)?;
         let parent = columns.next()?.parse().ok()?;
-        let state = columns.next()?.to_owned();
-        Some((pid, parent, state))
+        let state = columns.next()?;
+        let well_formed = state
+            .chars()
+            .next()
+            .is_some_and(|code| code.is_ascii_uppercase())
+            && state.chars().all(|flag| flag.is_ascii_graphic());
+        (well_formed && columns.next().is_none()).then(|| (pid, parent, state.to_owned()))
     }
 }
 
@@ -220,9 +228,7 @@ mod platform {
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob, JobObjectBasicProcessIdList,
-        JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
-        JOBOBJECT_BASIC_PROCESS_ID_LIST, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        QueryInformationJobObject, JOBOBJECT_BASIC_PROCESS_ID_LIST,
     };
     use windows_sys::Win32::System::Threading::{
         GetCurrentProcess, OpenProcess, TerminateProcess, WaitForSingleObject,
@@ -244,30 +250,6 @@ mod platform {
             assert!(
                 !job.is_null(),
                 "no job object for this test's processes: {}",
-                std::io::Error::last_os_error()
-            );
-            // The backstop for a test process that ends without its fixtures
-            // being dropped — an abort, or a panic while panicking. The job's
-            // one handle is this process's, so the kernel closes it as the
-            // process exits and ends everything still in the job then.
-            //
-            // SAFETY: a zeroed limit structure is a valid "no limits" value, and
-            // the flag set on it is the one limit asked for.
-            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
-            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            // SAFETY: `job` is live, and the pointer and size describe
-            // `limits`, which outlives the call.
-            let limited = unsafe {
-                SetInformationJobObject(
-                    job,
-                    JobObjectExtendedLimitInformation,
-                    (&raw const limits).cast(),
-                    u32::try_from(std::mem::size_of_val(&limits)).expect("a small structure"),
-                )
-            };
-            assert!(
-                limited != 0,
-                "the job for this test's processes took no limits: {}",
                 std::io::Error::last_os_error()
             );
             // SAFETY: both handles are live; the pseudo-handle for this process

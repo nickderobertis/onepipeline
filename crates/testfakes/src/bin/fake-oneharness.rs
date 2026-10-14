@@ -83,11 +83,15 @@ fn leave_a_descendant(args: &[String]) -> ExitCode {
     let [record, then] = args else {
         return fake::refuse("leave-a-descendant takes a record path and `hold` or `exit`");
     };
-    if then != "hold" && then != "exit" {
-        return fake::refuse(&format!(
-            "leave-a-descendant then {then:?}: `hold` or `exit`"
-        ));
-    }
+    let then = match then.as_str() {
+        "hold" => Then::Hold,
+        "exit" => Then::Exit,
+        other => {
+            return fake::refuse(&format!(
+                "leave-a-descendant then {other:?}: `hold` or `exit`"
+            ))
+        }
+    };
     let me = std::env::current_exe()
         .unwrap_or_else(|error| fake::fail(&format!("this double cannot name itself: {error}")));
     let mut descendant = std::process::Command::new(me);
@@ -110,13 +114,22 @@ fn leave_a_descendant(args: &[String]) -> ExitCode {
     )
     .and_then(|()| std::fs::rename(&staged, record))
     .unwrap_or_else(|error| fake::fail(&format!("cannot record the pids: {error}")));
-    if then == "exit" {
+    if then == Then::Exit {
         return ExitCode::SUCCESS;
     }
     // Held for as long as the descendant runs, which is until something ends
     // one of them from outside.
     let _ = descendant.wait();
     linger()
+}
+
+/// What `leave-a-descendant` does once its descendant is running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Then {
+    /// Keep running beside it.
+    Hold,
+    /// End at once, leaving it an orphan.
+    Exit,
 }
 
 /// Run until something ends this process from outside.
