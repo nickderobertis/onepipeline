@@ -99,13 +99,12 @@ const VISUAL_DOCS_LEG_INPUTS: &[&str] = &["arches", "projects", "gallery-title"]
 /// a new way to be unreported, and has to be argued for here.
 ///
 /// A skipped *matrix* job is the exception to "reports as passed": it reports
-/// under its bare key, never a leg's rendered name. So `install`, which waits
-/// on `gate`, runs after a failed gate (`!cancelled()`) and fails there itself
-/// rather than being skipped by the failure and leaving `install (<os>)`
-/// unreported — the shape of run 38398392919.
+/// under its bare key, never a leg's rendered name — the shape of run
+/// 38398392919, where a failed gate left `install (<os>)` unreported. So no
+/// required context is reported by a conditional matrix job; carriers report
+/// those names instead (see `carrier_runs`).
 const ALLOWED_CONDITIONS: &[&str] = &[
     "needs.changes.outputs.crate == 'true'",
-    "!cancelled() && needs.changes.outputs.crate == 'true'",
     "needs.changes.outputs.crate == 'true' && github.event_name == 'pull_request'",
     "github.event_name == 'pull_request'",
 ];
@@ -222,6 +221,20 @@ fn needs(job: &Value) -> Vec<String> {
     }
 }
 
+/// The result command a carrier job runs, if this job is one: a Linux job that
+/// reports a required name for a proof that may legitimately not run.
+fn carrier_run(job: &Value) -> Option<&str> {
+    job["steps"].as_sequence()?.iter().find_map(|step| {
+        step["run"].as_str().filter(|run| {
+            [
+                "node .github/macos-policy.mjs carrier",
+                "node .github/macos-policy.mjs path-carrier",
+            ]
+            .contains(run)
+        })
+    })
+}
+
 fn condition(job: &Value) -> Option<String> {
     job.get("if").map(|c| {
         c.as_str()
@@ -256,16 +269,28 @@ fn every_required_context_is_reported_on_every_pull_request() {
             .unwrap_or_else(|| panic!("no job reports `{context}` on a pull request"));
         let jobs = &all[file]["jobs"];
         let job = &jobs[key.as_str()];
-        if key.ends_with("-macos") {
+        if let Some(run) = carrier_run(job) {
             assert_eq!(condition(job).as_deref(), Some("always()"));
-            assert_eq!(needs(job), ["changes", "macos"]);
             assert_eq!(job["runs-on"].as_str(), Some("ubuntu-latest"));
-            assert!(job["steps"].as_sequence().unwrap().iter().any(|step| {
-                step["run"].as_str() == Some("node .github/macos-policy.mjs carrier")
-            }));
+            let upstream = needs(job);
+            assert_eq!(upstream.len(), 2, "`{context}` carries one proof");
+            assert_eq!(upstream[0], "changes");
+            if run.ends_with(" carrier") {
+                assert_eq!(upstream[1], "macos");
+            }
+            assert!(
+                rendered(&upstream[1], &jobs[upstream[1].as_str()])
+                    .iter()
+                    .all(|name| !REQUIRED.contains(&name.as_str())),
+                "`{context}`'s proof reports a required name itself, so it would report twice"
+            );
             continue;
         }
         if let Some(condition) = condition(job) {
+            assert!(
+                job.get("strategy").is_none(),
+                "`{context}` ({file} job `{key}`) is a conditional matrix job, whose skip reports no leg's name"
+            );
             assert!(
                 ALLOWED_CONDITIONS.contains(&condition.as_str()),
                 "`{context}` ({file} job `{key}`) runs only if `{condition}`, a condition that can leave it unreported"
@@ -371,7 +396,7 @@ fn no_required_job_waits_on_an_advisory_one() {
                     let upstream_names = rendered(&upstream, &parsed["jobs"][upstream.as_str()]);
                     assert!(
                         upstream == "changes"
-                            || (key.ends_with("-macos") && upstream == "macos")
+                            || (carrier_run(job).is_some() && needs(job)[1] == upstream)
                             || upstream_names.iter().any(|name| REQUIRED.contains(&name.as_str())),
                         "{file}'s required `{key}` waits on `{upstream}`, which is not itself required"
                     );

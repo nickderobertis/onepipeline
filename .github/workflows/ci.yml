@@ -203,6 +203,7 @@ jobs:
   # renames both and every open pull request waits on a context that never reports.
   # llmlint: ignore-end[comments_earn_their_place]
   cross:
+    name: cross proof (${{ matrix.os }})
     needs: changes
     if: needs.changes.outputs.crate == 'true'
     strategy:
@@ -210,6 +211,9 @@ jobs:
       matrix:
         os: [windows-latest]
     runs-on: ${{ matrix.os }}
+    # One verdict per leg, each under its own name, for the carrier below.
+    outputs:
+      windows-latest: ${{ steps.proved.outputs.windows-latest }}
     timeout-minutes: 130
     env:
       NEXTEST_PROFILE: ci
@@ -265,6 +269,11 @@ jobs:
         continue-on-error: true
         timeout-minutes: 25
         run: just rerun-failed "$RUNNER_TEMP/quality-gate.log" "$RUNNER_TEMP/tests.tar.zst"
+      - name: Record this leg's verdict
+        id: proved
+        env:
+          LEG: ${{ matrix.os }}
+        run: echo "$LEG=success" >> "$GITHUB_OUTPUT"
 
   # The declared MSRV is a promise to consumers, so prove it rather than document
   # it: a floor that only lives in Cargo.toml drifts the first time a dependency
@@ -418,31 +427,22 @@ jobs:
   # against PyPI and npm, so what a release checks cannot drift from what a pull
   # request checks. `cargo install --path .` is the same code path as the
   # documented `cargo install onepipeline`, minus the registry fetch.
-  #
-  # It waits for `gate` but is not skipped by a gate that failed: a skipped matrix
-  # job reports under its bare name, so the `install (<os>)` contexts branch
-  # protection requires would never report. Each leg runs and fails instead,
-  # naming the gate, before installing anything.
   install:
+    name: install proof (${{ matrix.os }})
     needs: [changes, gate]
-    if: ${{ !cancelled() && needs.changes.outputs.crate == 'true' }}
+    if: needs.changes.outputs.crate == 'true'
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    outputs:
+      ubuntu-latest: ${{ steps.proved.outputs.ubuntu-latest }}
+      windows-latest: ${{ steps.proved.outputs.windows-latest }}
     defaults:
       run:
         shell: bash
     steps:
-      - name: The gate this install waits for succeeded
-        env:
-          GATE_RESULT: ${{ needs.gate.result }}
-        run: |
-          if [ "$GATE_RESULT" != success ]; then
-            echo "::error::gate finished '$GATE_RESULT', so this revision's install is not proven" >&2
-            exit 1
-          fi
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
       # On a PR the change is not on the registry yet, so `--path .` is the only
@@ -468,6 +468,11 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           just host-view-budget "$(command -v onepipeline)" "ci.yml install job ($RUNNER_OS/$RUNNER_ARCH): cargo install --path . --locked"
+      - name: Record this leg's verdict
+        id: proved
+        env:
+          LEG: ${{ matrix.os }}
+        run: echo "$LEG=success" >> "$GITHUB_OUTPUT"
 
   # The README's from-source one-liner, read out of README.md and run verbatim.
   # The command is not spelled again here: the README is its one source, so this
@@ -531,24 +536,23 @@ jobs:
   # packaging is proven on every pull request rather than first at a release,
   # where a broken wheel is already public. Built by `just wheel-linux`, the
   # recipe release.yml's Linux `build-wheels` legs run, for both of their targets
-  # on the same native runners. The x86_64 leg keeps the bare `wheel` name
-  # branch protection already requires.
+  # on the same native runners. The `wheel-x86_64` carrier below reports the
+  # x86_64 leg under the bare `wheel` name branch protection requires.
   wheel:
-    name: ${{ matrix.check }}
+    name: wheel proof (${{ matrix.target }})
     needs: changes
     if: needs.changes.outputs.crate == 'true'
     strategy:
       fail-fast: false
       matrix:
         include:
-          - check: wheel
-            target: x86_64-unknown-linux-gnu
+          - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-          # llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the required set lives in GitHub, which no check in this tree can read; AGENTS.md reconciles it by re-applying governance whenever a leg is added
-          - check: wheel (aarch64-unknown-linux-gnu)
-            target: aarch64-unknown-linux-gnu
+          - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
     runs-on: ${{ matrix.os }}
+    outputs:
+      x86_64-unknown-linux-gnu: ${{ steps.proved.outputs.x86_64-unknown-linux-gnu }}
     steps:
       - uses: actions/checkout@v4
       - uses: taiki-e/install-action@v2
@@ -565,6 +569,93 @@ jobs:
         run: |
           pip install --no-index --find-links dist onepipeline-cli
           bash scripts/smoke-published.sh --label "the wheel built from this revision"
+      - name: Record this leg's verdict
+        id: proved
+        env:
+          LEG: ${{ matrix.target }}
+        run: echo "$LEG=success" >> "$GITHUB_OUTPUT"
+
+  # The required contexts of the path-selected matrix proofs above. A matrix job
+  # skipped by its `if:` reports only under its bare key, never a leg's name, so
+  # each protected leg name is reported by an always-running Linux job instead:
+  # it passes when its leg recorded success, or when affected-project selection
+  # skipped the proof, and fails on a failed, cancelled or missing prerequisite
+  # or proof. One job per name keeps each verdict that leg's own.
+  cross-windows:
+    name: cross (windows-latest)
+    needs: [changes, cross]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Report the proof or authorized path omission
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          CRATE_AFFECTED: ${{ needs.changes.outputs.crate }}
+          PROOF_RESULT: ${{ needs.cross.result }}
+          LEG: windows-latest
+          LEG_VERDICT: ${{ needs.cross.outputs['windows-latest'] }}
+        run: node .github/macos-policy.mjs path-carrier
+
+  install-ubuntu:
+    name: install (ubuntu-latest)
+    needs: [changes, install]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Report the proof or authorized path omission
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          CRATE_AFFECTED: ${{ needs.changes.outputs.crate }}
+          PROOF_RESULT: ${{ needs.install.result }}
+          LEG: ubuntu-latest
+          LEG_VERDICT: ${{ needs.install.outputs['ubuntu-latest'] }}
+        run: node .github/macos-policy.mjs path-carrier
+
+  install-windows:
+    name: install (windows-latest)
+    needs: [changes, install]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Report the proof or authorized path omission
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          CRATE_AFFECTED: ${{ needs.changes.outputs.crate }}
+          PROOF_RESULT: ${{ needs.install.result }}
+          LEG: windows-latest
+          LEG_VERDICT: ${{ needs.install.outputs['windows-latest'] }}
+        run: node .github/macos-policy.mjs path-carrier
+
+  wheel-x86_64:
+    name: wheel
+    needs: [changes, wheel]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Report the proof or authorized path omission
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          CRATE_AFFECTED: ${{ needs.changes.outputs.crate }}
+          PROOF_RESULT: ${{ needs.wheel.result }}
+          LEG: x86_64-unknown-linux-gnu
+          LEG_VERDICT: ${{ needs.wheel.outputs['x86_64-unknown-linux-gnu'] }}
+        run: node .github/macos-policy.mjs path-carrier
 
   # Lint the PR title: under squash-merge it becomes the release-driving commit.
   pr-title:

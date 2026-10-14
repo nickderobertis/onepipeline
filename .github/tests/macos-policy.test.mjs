@@ -461,51 +461,124 @@ function emittedContexts(workflow, rows) {
     .filter((row) => row.selected || !workflow.jobs[row.job]?.strategy?.matrix)
     .map((row) => ({ name: row.name, selected: row.selected }));
 }
-test("an ordinary pull request emits every required context, never skipped, whatever its jobs conclude", () => {
+// A required job skipped by its own path condition still reports its name, and
+// GitHub counts that as passing; only a matrix job loses its legs' names.
+function skippedOnPath(workflow, row) {
+  const job = workflow.jobs[row.job];
+  return (
+    !row.selected && !job?.strategy?.matrix && /needs\.changes\.outputs\.crate/.test(job?.if ?? "")
+  );
+}
+test("an ordinary pull request emits every required context once, whatever the diff reaches or its jobs conclude", () => {
   const all = workflows();
   const opt = { pypi: "true", npm: "true", crate: "true" };
-  for (const results of [
-    {},
-    { gate: "failure" },
-    { macos: "failure" },
-    { cross: "failure" },
-    { gate: "failure", macos: "failure", cross: "failure" },
-  ])
-    for (const [kind, branch] of [
-      ["source", "feature"],
-      ["dependency", "feature"],
-      ["version", "release-plz-fixture"],
-    ]) {
-      const s = {
-        ...scenario("pr-synchronize", "pull_request", "synchronize", kind, false, opt, branch),
-        results,
-      };
-      const contexts = runs(all, s).flatMap((run) => emittedContexts(all[run.workflow], run.jobs));
-      for (const name of required) {
-        const emitted = contexts.filter((context) => context.name === name);
-        assert.equal(emitted.length, 1, `${kind}/${JSON.stringify(results)}: ${name} reports once`);
-        assert.equal(
-          emitted[0].selected,
-          true,
-          `${kind}/${JSON.stringify(results)}: ${name} runs rather than being skipped`,
+  for (const crate of ["true", "false"])
+    for (const results of [
+      {},
+      { gate: "failure" },
+      { macos: "failure" },
+      { cross: "failure" },
+      { install: "failure" },
+      { wheel: "failure" },
+      { gate: "failure", macos: "failure", cross: "failure" },
+      { changes: "failure" },
+      { changes: "cancelled" },
+    ])
+      for (const [kind, branch] of [
+        ["source", "feature"],
+        ["dependency", "feature"],
+        ["version", "release-plz-fixture"],
+      ]) {
+        const s = {
+          ...scenario("pr-synchronize", "pull_request", "synchronize", kind, false, opt, branch),
+          crate,
+          results,
+        };
+        const label = `${kind}/crate=${crate}/${JSON.stringify(results)}`;
+        const resolved = runs(all, s);
+        const contexts = resolved.flatMap((run) =>
+          emittedContexts(all[run.workflow], run.jobs).map((context) => ({
+            ...context,
+            pathSkip: skippedOnPath(
+              all[run.workflow],
+              run.jobs.find((row) => row.name === context.name),
+            ),
+          })),
         );
+        for (const name of required) {
+          const emitted = contexts.filter((context) => context.name === name);
+          assert.equal(emitted.length, 1, `${label}: ${name} reports exactly once`);
+          // A crate-touching PR runs every required context; otherwise only a
+          // non-matrix job's own path condition may skip it.
+          if (crate === "true" && !results.changes)
+            assert.equal(emitted[0].selected, true, `${label}: ${name} runs`);
+          else
+            assert.ok(
+              emitted[0].selected || emitted[0].pathSkip,
+              `${label}: ${name} is neither run nor reported by its own path skip`,
+            );
+        }
       }
-    }
 });
-test("the real install prerequisite step fails every leg whose gate did not succeed", () => {
-  const job = workflows()["ci.yml"].jobs.install;
-  const step = job.steps[0];
-  assert.match(step.env.GATE_RESULT, /^\$\{\{ needs\.gate\.result \}\}$/);
-  for (const gate of ["success", "failure", "cancelled", "skipped", ""]) {
-    const result = spawnSync("bash", ["-eo", "pipefail", "-c", step.run], {
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        GATE_RESULT: String(evaluate(step.env.GATE_RESULT, { needs: { gate: { result: gate } } })),
-      },
-    });
-    assert.equal(result.status === 0, gate === "success", `${gate}: ${result.stderr}`);
-    if (gate !== "success") assert.match(result.stderr, /install is not proven/);
+// The Linux jobs that report a required matrix context: the job display name,
+// the proof job it reads and the leg whose verdict it carries.
+function pathCarriers() {
+  const jobs = workflows()["ci.yml"].jobs;
+  return Object.entries(jobs)
+    .filter(([, job]) =>
+      (job.steps ?? []).some((step) => step.run === "node .github/macos-policy.mjs path-carrier"),
+    )
+    .map(([key, job]) => ({ key, job, step: job.steps.find((step) => step.env?.PROOF_RESULT) }));
+}
+test("the real path carriers pass only a proven leg or an authorized path omission", () => {
+  const carriers = pathCarriers();
+  assert.deepEqual(carriers.map(({ job }) => job.name).sort(), [
+    "cross (windows-latest)",
+    "install (ubuntu-latest)",
+    "install (windows-latest)",
+    "wheel",
+  ]);
+  for (const { key, job, step } of carriers) {
+    assert.equal(job["runs-on"], "ubuntu-latest", key);
+    assert.equal(job.if, "always()", key);
+    const proof = job.needs.find((need) => need !== "changes");
+    assert.deepEqual(job.needs, ["changes", proof], key);
+    const leg = step.env.LEG_VERDICT.match(/outputs\['([^']+)'\]/)?.[1];
+    assert.ok(leg, `${key} reads one leg's verdict`);
+    for (const changes of ["success", "failure", "cancelled", "skipped", ""])
+      for (const crate of ["true", "false", ""])
+        for (const result of ["success", "failure", "cancelled", "skipped", ""])
+          for (const verdict of ["success", ""]) {
+            const context = {
+              needs: {
+                changes: { result: changes, outputs: changes === "success" ? { crate } : {} },
+                [proof]: { result, outputs: verdict ? { [leg]: verdict } : {} },
+              },
+            };
+            const env = Object.fromEntries(
+              Object.entries(step.env).map(([name, expression]) => [
+                name,
+                expression.includes("${{")
+                  ? String(evaluate(expression, context) ?? "")
+                  : expression,
+              ]),
+            );
+            const run = spawnSync("bash", ["-eo", "pipefail", "-c", step.run], {
+              encoding: "utf8",
+              env: { ...process.env, ...env },
+            });
+            const accepted =
+              changes === "success" &&
+              ((crate === "false" && result === "skipped" && !verdict) ||
+                (crate === "true" &&
+                  ["success", "failure"].includes(result) &&
+                  verdict === "success"));
+            const label = `${key}/${changes}/${crate}/${result}/${verdict}`;
+            assert.equal(run.status === 0, accepted, `${label}: ${run.stdout}${run.stderr}`);
+            if (accepted && crate === "false") assert.match(run.stdout, /no tests claimed/);
+            if (accepted && crate === "true")
+              assert.match(run.stdout, new RegExp(`${leg} succeeded`));
+          }
   }
 });
 test("real carrier command refuses every failed prerequisite and unauthorized omission", () => {

@@ -321,11 +321,13 @@ export function runGraph(workflow, scenario, root = process.cwd(), prefix = "") 
       const selected =
         Boolean(evaluate(condition, context, status)) &&
         (/\b(always|failure|cancelled|success)\(/.test(condition) || status.success);
+      const result = scenario.results?.[key] ?? (selected ? "success" : "skipped");
       let outputs = {};
-      if (key === "changes") outputs = changesOutputs(job, context, scenario);
+      // A producer that did not succeed sets no outputs for its dependents to read.
+      if (key === "changes" && result === "success")
+        outputs = changesOutputs(job, context, scenario);
       if (["guard", "arches"].includes(key))
         outputs = producerOutputs(key, job, context, root, scenario);
-      const result = scenario.results?.[key] ?? (selected ? "success" : "skipped");
       // Declaration-derived outputs retain matrix inventories on intentional skips;
       // dependency status still prevents those rows from requesting a runner.
       context.needs[key] = { result, outputs };

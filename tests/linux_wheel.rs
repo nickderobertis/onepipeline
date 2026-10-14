@@ -412,8 +412,17 @@ fn the_pull_request_check_builds_the_release_linux_legs_through_the_recipe() {
         "ci.yml's wheel builds through the recipe"
     );
     assert!(
-        block.contains("- check: wheel\n"),
-        "one ci.yml wheel leg keeps the bare `wheel` name branch protection requires"
+        block.contains(
+            "x86_64-unknown-linux-gnu: ${{ steps.proved.outputs.x86_64-unknown-linux-gnu }}"
+        ),
+        "ci.yml's wheel proof records the x86_64 leg's verdict"
+    );
+    let carrier = job_block("ci.yml", "wheel-x86_64");
+    assert!(
+        carrier.contains("name: wheel\n")
+            && carrier
+                .contains("LEG_VERDICT: ${{ needs.wheel.outputs['x86_64-unknown-linux-gnu'] }}"),
+        "the bare `wheel` name branch protection requires reports the x86_64 leg"
     );
     let release = job_block("release.yml", "build-wheels");
     assert!(
