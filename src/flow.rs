@@ -1614,9 +1614,15 @@ mod tests {
         let mut single = block["request"].clone();
         single["subjects"] = serde_json::json!([{"identity": "git/owner/repo", "branch": "a"}]);
         serde_json::from_value::<LandingRequest>(single).expect("a single-label host reads");
-        // An absolute local identity may carry what an origin never does.
+        // An absolute local identity may carry what an origin never does,
+        // spelled the way this platform spells an absolute path.
+        let absolute = if cfg!(windows) {
+            r"C:\home\a b\service"
+        } else {
+            "/home/a b/service"
+        };
         let mut local = block["request"].clone();
-        local["subjects"] = serde_json::json!([{"identity": "/home/a b/service", "branch": "a"}]);
+        local["subjects"] = serde_json::json!([{"identity": absolute, "branch": "a"}]);
         serde_json::from_value::<LandingRequest>(local).expect("an absolute local identity reads");
 
         let ending: LandingEnding =
