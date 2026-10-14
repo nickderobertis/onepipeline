@@ -1500,6 +1500,31 @@ fn optional_telemetry_errors_preserve_endings_and_discard_outcomes() {
     }
 }
 
+/// The telemetry destination is an environment value: a relative one is refused
+/// where it enters, so nothing is written beside the verb's working directory,
+/// and the discard it rode on still removes the run's scratch.
+#[test]
+fn a_relative_telemetry_destination_is_refused_and_the_discard_still_runs() {
+    let world = World::new("scratch-telemetry-relative");
+    world.script("build.fail", "1");
+    let run = settle(&world, "metrics", vec![agent("build", &[])]);
+    assert_retained(&world, &run, "failed", 1);
+    let world = world.with_env("ONEPIPELINE_SCRATCH_TELEMETRY_DIR", "telemetry-here");
+    let discarded = world.run(&["scratch", "discard", &run]);
+    discarded.exited(0).err_has(
+        "onepipeline: scratch telemetry: ONEPIPELINE_SCRATCH_TELEMETRY_DIR must be an \
+         absolute path, not 'telemetry-here'; nothing is recorded",
+    );
+    assert!(discarded
+        .stdout
+        .starts_with("removed 1 scratch dir(s) of run metrics, 0.0 GiB freed:\n"));
+    assert!(!world.run_file(&run, "scratch").exists());
+    assert_eq!(world.events_of(&run, "scratch-removed").len(), 1);
+    for dir in [&world.root, &world.project, &world.runs] {
+        assert!(!dir.join("telemetry-here").exists(), "{}", dir.display());
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn a_symlink_run_directory_is_not_a_named_run_and_its_target_stays_unchanged() {

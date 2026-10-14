@@ -79,9 +79,7 @@ const DRIVER_LOG_LINES: usize = 8;
 /// its own is a launch — `start`, `plan check`, and the two hidden retained
 /// verbs — which is not a post-launch verb.
 pub fn dispatch(cli: Cli) -> Result<i32> {
-    crate::scratch::telemetry_to(
-        std::env::var_os("ONEPIPELINE_SCRATCH_TELEMETRY_DIR").map(PathBuf::from),
-    );
+    crate::scratch::telemetry_to(std::env::var_os("ONEPIPELINE_SCRATCH_TELEMETRY_DIR"));
     use crate::cli::Command as Verb;
     use crate::verbs;
     // llmlint: ignore-block[no_panics_on_recoverable_errors] how this binary writes a verb's

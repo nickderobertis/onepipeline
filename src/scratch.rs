@@ -8,7 +8,26 @@ use std::time::Instant;
 static TELEMETRY_ROOT: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
 
 /// The CLI resolves its optional telemetry destination before executing a verb.
-pub(crate) fn telemetry_to(root: Option<std::path::PathBuf>) {
+///
+/// The destination is an environment value, so it is checked here, where it
+/// enters: an unset or empty value records nothing, and one that is not an
+/// absolute path is refused with a diagnostic and records nothing either, never
+/// writing beside whatever directory the verb happened to start in. Telemetry is
+/// optional, so a refused destination leaves the verb's outcome unchanged.
+pub(crate) fn telemetry_to(value: Option<std::ffi::OsString>) {
+    let root = value.filter(|value| !value.is_empty()).and_then(|value| {
+        let root = std::path::PathBuf::from(&value);
+        if root.is_absolute() {
+            Some(root)
+        } else {
+            eprintln!(
+                "onepipeline: scratch telemetry: ONEPIPELINE_SCRATCH_TELEMETRY_DIR must be \
+                 an absolute path, not '{}'; nothing is recorded",
+                root.display()
+            );
+            None
+        }
+    });
     let _ = TELEMETRY_ROOT.set(root);
 }
 
