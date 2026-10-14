@@ -3781,9 +3781,13 @@ fn consume_detail(world: &World, flow: &str, cursor: &str) -> (Vec<Value>, Strin
 /// once each; each landing's operation is its own, its id and stream disjoint
 /// from the others' and every record it relays labelled with it; and every event
 /// the public `onevcs` operation reader returns reaches the landing's journal
-/// exactly once. Concluding, two landings' checks pass and their owners' watches
-/// wake on that milestone; the third's first check fails and its owner's watch
-/// wakes on that failure — each identified by the record it names, not by when.
+/// exactly once. Concluding, every landing's checks pass and each owner's watch
+/// wakes on that milestone, identified by the record it names, not by when; each
+/// then lands, and every one of the three carries at least twelve operation
+/// steps beside its checks. Every landing concludes green because `onevcs`
+/// refuses on a required check's first red reading, before the steps that make
+/// up the workload; that wake has its own journey,
+/// `a_required_check_failing_wakes_the_owner_while_its_other_checks_are_still_pending`.
 #[test]
 fn three_hosted_landings_at_once_each_relay_their_whole_check_sequence_to_their_owner() {
     let (world, repository) = hosted("ml-workload", &workload_rollup(&["queued -"; 6]));
@@ -3949,73 +3953,43 @@ fn three_hosted_landings_at_once_each_relay_their_whole_check_sequence_to_their_
         }
     }
 
-    // The fourth transition concludes every check: green on the first two
-    // changes, the first check red on the third.
+    // The fourth transition concludes every check, green on every change.
     world.script("gh.merged", "");
-    for (index, number) in numbers.iter().enumerate() {
-        let mut states = ["completed success"; 6];
-        if index == 2 {
-            states[0] = "completed failure";
-        }
-        world.script(&format!("gh.checks.{number}"), &workload_rollup(&states));
+    for number in &numbers {
+        world.script(
+            &format!("gh.checks.{number}"),
+            &workload_rollup(&["completed success"; 6]),
+        );
     }
     let mut woken = Vec::new();
     for watch in armed {
         woken.push(watch.returned());
     }
-    for index in 0..2 {
-        let (flow, id) = &owned[index];
+    for (index, (flow, id)) in owned.iter().enumerate() {
         woken[index].progressed("checks-settled");
         assert_eq!(woken[index].record["significance"], json!("milestone"));
         let record = the_record(&world, flow, id, &woken[index]);
         assert_eq!(record["kind"], json!("checks-settled"), "{record}");
         assert_eq!(record["payload"]["verdict"], json!("passed"), "{record}");
     }
-    let (red_flow, red_id) = &owned[2];
-    woken[2].progressed("change-check");
-    assert_eq!(woken[2].record["significance"], json!("blocker"));
-    let red = the_record(&world, red_flow, red_id, &woken[2]);
-    assert_eq!(red["payload"]["name"], json!("check-1"), "{red}");
-    assert_eq!(red["payload"]["conclusion"], json!("failure"), "{red}");
 
-    // Each then ends under its own owner: the green two cleanly, waking only on
-    // milestones; the red one refused, waking only on blockers.
-    for index in 0..2 {
-        let rest = rearmed_until_ended(&managers[index], &owned[index].0, woken[index].cursor());
+    // Each then ends cleanly under its own owner, waking only on milestones.
+    for ((manager, (flow, _)), woke) in managers.iter().zip(&owned).zip(&woken) {
+        let rest = rearmed_until_ended(manager, flow, woke.cursor());
         assert!(
             rest.iter()
                 .all(|(_, significance)| significance != "progress"),
             "{rest:?}"
         );
     }
-    let mut cursor = woken[2].cursor();
-    loop {
-        let next = watch(
-            &managers[2],
-            red_flow,
-            &["--timeout", "900", "--cursor", &cursor],
-        );
-        if next.record["condition"] == "flow-failed" {
-            next.ended_on(EXIT_FLOW_FAILED, "flow-failed");
-            break;
-        }
-        next.ended_on(EXIT_SUCCESS, "landing-progress");
-        assert_eq!(
-            next.record["significance"],
-            json!("blocker"),
-            "{}",
-            next.record
-        );
-        cursor = next.cursor();
-    }
     for (index, landing) in started.into_iter().enumerate() {
         let (code, _, said) = landing.ended();
-        assert_eq!(code == 0, index < 2, "landing {index}: {said}");
+        assert_eq!(code, 0, "landing {index}: {said}");
     }
 
     // The whole sequence, and every event the public operation reader returns,
     // reached each landing's journal exactly once.
-    for (index, ((flow, id), operation)) in owned.iter().zip(&operations).enumerate() {
+    for ((flow, id), operation) in owned.iter().zip(&operations) {
         let every = journal(&world, flow, id);
         for name in WORKLOAD_CHECKS {
             let read: Vec<(String, String)> = every
@@ -4034,16 +4008,12 @@ fn three_hosted_landings_at_once_each_relay_their_whole_check_sequence_to_their_
             // The four scripted transitions after the first reading, in order. A
             // green change's host reports one more — the run it starts when the
             // draft is lifted, at a new start — which is its own record.
-            let concluded = match (index, name) {
-                (2, "check-1") => "\"failure\"",
-                _ => "\"success\"",
-            };
             let scripted = [
                 ("queued", "null"),
                 ("in_progress", "null"),
                 ("queued", "null"),
                 ("in_progress", "null"),
-                ("completed", concluded),
+                ("completed", "\"success\""),
             ]
             .map(|(status, conclusion)| (status.to_owned(), conclusion.to_owned()));
             assert_eq!(
@@ -4086,12 +4056,10 @@ fn three_hosted_landings_at_once_each_relay_their_whole_check_sequence_to_their_
             .iter()
             .filter(|e| e["kind"] != "change-check")
             .count();
-        if index < 2 {
-            assert!(
-                steps >= 12,
-                "{flow}: only {steps} operation steps beside its checks"
-            );
-        }
+        assert!(
+            steps >= 12,
+            "{flow}: only {steps} operation steps beside its checks"
+        );
         let shown = detailed_monitor(&world, flow);
         for event in &relayed {
             assert!(
