@@ -625,16 +625,11 @@ pub(crate) fn registration_lock(root: &Path) -> Result<std::fs::File> {
         return Ok(file);
     }
     eprintln!(
-        "onepipeline: {}: {}",
-        REGISTRATION_LOCK_WAIT,
+        "onepipeline: waiting on the landing registration lock: {}",
         path.display()
     );
     sys::open_locked_append(&path).map_err(ledger)
 }
-
-/// What a process says on stderr when another holds the registration lock and
-/// it waits for that one to let go.
-const REGISTRATION_LOCK_WAIT: &str = "waiting on the landing registration lock";
 
 /// Whether a flow id names one flow under the runs root and nothing else: the
 /// alphabet a minted id is spelled in, `[A-Za-z0-9._-]`, and not only dots.
