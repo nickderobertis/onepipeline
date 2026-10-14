@@ -194,13 +194,21 @@ fn linger_held_at_exit(args: &[String]) -> ExitCode {
         .ok()
         .filter(|started| started.status.success())
         .and_then(|started| String::from_utf8(started.stdout).ok())
-        .and_then(|pid| pid.trim().parse::<libc::c_ulong>().ok());
+        .and_then(|pid| process_id(pid.trim()));
     let Some(tracer) = tracer else {
         write_record(record, "refused: the tracer did not start");
         return ExitCode::FAILURE;
     };
     // SAFETY: `prctl` reads its integer arguments and touches no memory.
-    let allowed = unsafe { libc::prctl(libc::PR_SET_PTRACER, tracer, 0_u64, 0_u64, 0_u64) };
+    let allowed = unsafe {
+        libc::prctl(
+            libc::PR_SET_PTRACER,
+            libc::c_ulong::from(tracer.unsigned_abs()),
+            0_u64,
+            0_u64,
+            0_u64,
+        )
+    };
     if allowed != 0 {
         write_record(
             record,
@@ -260,14 +268,15 @@ fn hold_at_exit(args: &[String]) -> ExitCode {
     let [pid, double, record] = args else {
         return fake::refuse("hold-at-exit takes a pid, the double's pid and a record path");
     };
-    let Ok(traced) = pid.parse::<libc::pid_t>() else {
+    let Some(traced) = process_id(pid) else {
         return fake::refuse(&format!("hold-at-exit: {pid:?} is not a pid"));
     };
     // Named rather than read off this process's parent, which by the time it
     // is read may already be whatever `init` the starter's exit handed it to.
     let Some(starter) = std::env::var(ORPHANED_BY)
         .ok()
-        .and_then(|starter| starter.parse::<u32>().ok())
+        .and_then(|starter| process_id(&starter))
+        .map(libc::pid_t::unsigned_abs)
     else {
         return fake::refuse(&format!(
             "hold-at-exit is started through `orphan`, which sets {ORPHANED_BY}"
@@ -329,6 +338,14 @@ fn hold_at_exit(args: &[String]) -> ExitCode {
             )
         };
     }
+}
+
+/// `text` as the id of one process: positive, because `ptrace` and `prctl`
+/// read zero and below as something other than a single process — and
+/// `PR_SET_PTRACER` reads zero as lifting the restriction altogether.
+#[cfg(target_os = "linux")]
+fn process_id(text: &str) -> Option<libc::pid_t> {
+    text.parse::<libc::pid_t>().ok().filter(|pid| *pid > 0)
 }
 
 #[cfg(not(target_os = "linux"))]

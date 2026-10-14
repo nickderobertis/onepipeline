@@ -161,7 +161,6 @@ mod platform {
         }
     }
 
-    /// Add to `ended` whatever in `found` it does not already hold.
     fn remember(ended: &mut Vec<Found>, found: impl IntoIterator<Item = Found>) {
         for found in found {
             if !ended.contains(&found) {
