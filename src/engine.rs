@@ -2396,8 +2396,9 @@ fn converge(
                     in_flight.remove(&settlement.node);
                     // A restack says what it did ahead of the node's ordinary
                     // settlement, which follows it as any settlement does.
-                    // llmlint: ignore[names_match_behavior] `node-restacked` and its `outcome` are the plan's agreed record (entry 121): it ends every restack, a failed one included, and `outcome` says which; renaming it is a contract change, not this site's, and `a_restack_whose_worker_fails_its_merge_settles_the_draft_failed` holds the failed case.
                     let readjusting = state.readjust.plans.remove(&settlement.node);
+                    // A readjustment's restack is recorded as the readjustment it is.
+                    let restacked = settlement.restacked.filter(|_| readjusting.is_none());
                     if let Some(plan) = readjusting {
                         // A readjustment says what it did ahead of the settlement: only once
                         // its push and its retarget both answered, so a draft whose change
@@ -2429,7 +2430,9 @@ fn converge(
                                 })?,
                             )?;
                         }
-                    } else if let Some(restacked) = settlement.restacked {
+                    }
+                    // llmlint: ignore[names_match_behavior] `node-restacked` and its `outcome` are the plan's agreed record (entry 121): it ends every restack, a failed one included, and `outcome` says which; renaming it is a contract change, not this site's, and `a_restack_whose_worker_fails_its_merge_settles_the_draft_failed` holds the failed case.
+                    if let Some(restacked) = restacked {
                         journal.emit(
                             journal::PipelineKind::NodeRestacked,
                             journal::labels(&paths.run, Some(&settlement.node)),
