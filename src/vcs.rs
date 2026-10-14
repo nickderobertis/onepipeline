@@ -2274,6 +2274,13 @@ pub(crate) fn bring_base_in(
     if merged.status.success() {
         return Ok(None);
     }
+    // llmlint: ignore-block[changed_behavior_has_e2e] no journey reaches either ending below:
+    // a session the identity's policy opened clean is one whose base `onevcs` found merging
+    // cleanly into this very branch, so a conflict here needs the base to move between the
+    // open and this merge, and a merge git refuses with nothing unmerged needs a damaged
+    // worktree. `bring_base_in_hands_on_a_conflict_and_refuses_a_merge_git_will_not_make`
+    // holds both over real git repositories; the clean merge every journey takes is driven by
+    // `a_readjustment_merges_the_root_in_where_the_policy_merges_only_on_a_conflict`.
     let unmerged = git(&["diff", "--name-only", "--diff-filter=U"])?;
     let paths: Vec<String> = String::from_utf8_lossy(&unmerged.stdout)
         .lines()
@@ -2294,6 +2301,7 @@ pub(crate) fn bring_base_in(
         base_commit: base,
         branch_tip: tip,
     }))
+    // llmlint: ignore-end[changed_behavior_has_e2e]
 }
 
 /// One commit's line as a conflicted dispatch is shown it: a subject is the
@@ -2719,6 +2727,89 @@ mod tests {
 
     use super::*;
     use crate::plan::Node;
+
+    /// Run git in `at`, as a person setting a repository up, and hand back its stdout.
+    fn git_out(at: &std::path::Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(["-c", "user.name=Test", "-c", "user.email=test@example.com"])
+            .args(args)
+            .current_dir(at)
+            .output()
+            .expect("git runs");
+        assert!(output.status.success(), "git {args:?}: {output:?}");
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    /// A repository with `main` and a branch `draft` off it, each having written
+    /// `shared.md` differently, checked out on `draft`, as a session's worktree.
+    fn diverged(name: &str) -> Session {
+        let at =
+            std::env::temp_dir().join(format!("onepipeline-base-in-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&at);
+        std::fs::create_dir_all(&at).expect("a scratch repository");
+        git_out(&at, &["init", "--quiet", "--initial-branch=main"]);
+        git_out(&at, &["config", "user.name", "Test"]);
+        git_out(&at, &["config", "user.email", "test@example.com"]);
+        std::fs::write(at.join("shared.md"), "first\n").expect("written");
+        git_out(&at, &["add", "shared.md"]);
+        git_out(&at, &["commit", "--quiet", "-m", "first"]);
+        git_out(&at, &["checkout", "--quiet", "-b", "draft"]);
+        std::fs::write(at.join("shared.md"), "the draft's\n").expect("written");
+        git_out(&at, &["commit", "--quiet", "-am", "draft"]);
+        git_out(&at, &["checkout", "--quiet", "main"]);
+        std::fs::write(at.join("shared.md"), "the base's\n").expect("written");
+        git_out(&at, &["commit", "--quiet", "-am", "base"]);
+        git_out(&at, &["checkout", "--quiet", "draft"]);
+        Session {
+            token: SessionToken("s-test".into()),
+            worktree: at,
+            branch: "draft".into(),
+            base: "main".into(),
+            conflict: None,
+        }
+    }
+
+    /// A base whose merge conflicts is left in progress and answered as the conflict an
+    /// open would have reported; a merge git refuses with nothing unmerged — local
+    /// changes it would overwrite — is aborted and refused; and a branch already carrying
+    /// its base is left as it is.
+    #[test]
+    fn bring_base_in_hands_on_a_conflict_and_refuses_a_merge_git_will_not_make() {
+        let session = diverged("conflict");
+        let tip = git_out(&session.worktree, &["rev-parse", "HEAD"]);
+        let base = git_out(&session.worktree, &["rev-parse", "main"]);
+        let conflict = bring_base_in(&session)
+            .expect("the merge was made")
+            .expect("it conflicted");
+        assert_eq!(conflict.paths, ["shared.md"]);
+        assert_eq!(conflict.branch_tip, tip);
+        assert_eq!(conflict.base_commit, base);
+        assert!(session.worktree.join(".git").join("MERGE_HEAD").is_file());
+
+        let session = diverged("refused");
+        std::fs::write(session.worktree.join("shared.md"), "uncommitted\n").expect("written");
+        let refused = bring_base_in(&session).expect_err("git would not merge");
+        assert!(
+            refused.contains("merging main into draft failed"),
+            "{refused}"
+        );
+        assert!(!session.worktree.join(".git").join("MERGE_HEAD").exists());
+
+        let session = diverged("carried");
+        git_out(
+            &session.worktree,
+            &["merge", "--quiet", "-X", "ours", "--no-edit", "main"],
+        );
+        let tip = git_out(&session.worktree, &["rev-parse", "HEAD"]);
+        assert_eq!(bring_base_in(&session), Ok(None));
+        assert_eq!(git_out(&session.worktree, &["rev-parse", "HEAD"]), tip);
+        for name in ["conflict", "refused", "carried"] {
+            let _ = std::fs::remove_dir_all(
+                std::env::temp_dir()
+                    .join(format!("onepipeline-base-in-{name}-{}", std::process::id())),
+            );
+        }
+    }
 
     /// Every `FailureKind` the sibling distinguishes.
     ///
