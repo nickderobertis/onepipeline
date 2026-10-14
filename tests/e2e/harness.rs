@@ -4208,6 +4208,55 @@ fn a_worlds_teardown_that_cannot_list_processes_fails_saying_why() {
     ends_what_it_left(&[double_pid, descendant]);
 }
 
+/// A teardown handed a process list it cannot read refuses it by name, rather
+/// than reading it as a host with nothing left to end: a `ps` that fails, one
+/// that writes something other than text, and one that writes a row that is no
+/// process are each its own refusal — and with the host's own `ps` back, the
+/// teardown ends what it found.
+#[cfg(unix)]
+#[test]
+fn a_worlds_teardown_refuses_a_process_list_it_cannot_read() {
+    let world = World::new("teardown-unreadable-list");
+    let (double_pid, descendant) = holding_a_descendant(&world);
+    for (case, script, refusal) in [
+        ("fails", "exit 3", "ps exited"),
+        (
+            "not-text",
+            "printf '\\377\\n'",
+            "ps wrote something other than text",
+        ),
+        (
+            "not-a-row",
+            "printf 'not a process\\n'",
+            "ps wrote a row that is not a process",
+        ),
+    ] {
+        let bin = world.root.join(format!("ps-that-{case}"));
+        std::fs::create_dir_all(&bin).expect("a directory for the stand-in ps");
+        let ps = bin.join("ps");
+        std::fs::write(&ps, format!("#!/bin/sh\n{script}\n")).expect("the stand-in ps");
+        std::fs::set_permissions(&ps, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .expect("the stand-in ps is runnable");
+
+        let answered = with_variable("PATH", &bin, || {
+            onepipeline_testfakes::containment::end_descendants()
+        })
+        .expect("the teardown answers rather than panicking");
+        let said = answered.expect_err("a process list nobody could read was read as empty");
+        assert!(
+            said.contains(refusal),
+            "a ps that {case} is not refused as one: {said}"
+        );
+    }
+    drop(world);
+    for pid in [double_pid, descendant] {
+        assert!(
+            process_ended(pid),
+            "pid {pid} outlived the world once its process list could be read"
+        );
+    }
+}
+
 /// More descendants than the teardown's first look has room for are all gone
 /// once the world is: on Windows the job is asked again, with room for all of
 /// them, rather than ended as far as the first answer went.
@@ -4352,6 +4401,9 @@ fn with_variable<T>(
 ) -> std::thread::Result<T> {
     let was = std::env::var_os(name);
     std::env::set_var(name, value);
+    // Unwind-safe in fact: nothing `run` could leave half-changed is read after
+    // a panic except the variable, which is put back below either way, and the
+    // panic itself, which is handed to the caller rather than resumed past.
     let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run));
     match was {
         Some(was) => std::env::set_var(name, was),

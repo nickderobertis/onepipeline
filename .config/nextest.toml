@@ -79,11 +79,10 @@ status-level = "slow"
 [profile.ci]
 status-level = "pass"
 # A test that returns while a process it started still holds its output fails,
-# naming itself, rather than passing as `LEAK` — on Windows that process holds
-# the pipe the leg tees its output through, so the step outlives every test
-# (`crates/testfakes/src/containment.rs` says how). 100ms is nextest's default:
-# a world's teardown has already waited for what it ended, so anything still
-# holding the output past it is a leak rather than a slow exit.
+# naming itself, rather than passing as `LEAK`: `crates/testfakes/src/
+# containment.rs` says why such a process holds the leg. 100ms is nextest's
+# default: a world's teardown has already waited for what it ended, so anything
+# still holding the output past it is a leak rather than a slow exit.
 leak-timeout = { period = "100ms", result = "fail" }
 
 # The two host-sized journeys take the **whole** group while they run.
