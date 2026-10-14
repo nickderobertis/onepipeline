@@ -2300,8 +2300,12 @@ fn a_landing_is_owed_a_watch_that_wakes_within_the_wake_budget() {
         serde_json::from_str::<Value>(asked.stdout.trim()).expect("a verdict")
     };
     let late = Armed::arm(world, &flow, &["--timeout", "600"]);
+    // Until its terms are recorded the guard warns that it cannot judge the
+    // watch; once it can, it refuses it.
+    world.until("the late watch's terms to be judged", |_| {
+        budget()["verdict"] == json!("block")
+    });
     let refused = budget();
-    assert_eq!(refused["verdict"], json!("block"), "{refused}");
     assert!(
         refused["reason"]
             .as_str()
@@ -2309,7 +2313,11 @@ fn a_landing_is_owed_a_watch_that_wakes_within_the_wake_budget() {
         "{refused}"
     );
     let in_time = Armed::arm(world, &flow, &["--timeout", "598"]);
-    assert_eq!(budget(), json!({"verdict": "none"}));
+    // A watch records its lease and then its terms; the guard is asked until it
+    // has read both, which is the moment that watch qualifies.
+    world.until("the in-time watch to qualify", |_| {
+        budget() == json!({"verdict": "none"})
+    });
     verb.held.release();
     let (code, _, said) = landing.ended();
     assert_eq!(code, 0, "{said}");
@@ -3336,7 +3344,6 @@ fn a_landings_progress_and_the_flows_own_conditions_are_each_reported_once() {
     });
     let (flow, id) = the_landing(&world);
     assert_eq!(flow, "plan");
-    let held_kinds = kinds(&world, &flow, &id);
 
     // A run joining is reported first; the landing's events wait for the next.
     let joined = watch(
@@ -3423,9 +3430,35 @@ fn a_landings_progress_and_the_flows_own_conditions_are_each_reported_once() {
             _ => panic!("{}", next.record),
         }
     }
+    // Whatever the relay recorded after that pass is still the next watch's to
+    // report: read to the end, every landing event has been reported exactly
+    // once, in the order its journal holds them.
+    loop {
+        let next = watch(
+            &world,
+            &flow,
+            &[
+                "--timeout",
+                "0",
+                "--filter",
+                "detailed",
+                "--cursor",
+                &cursor,
+            ],
+        );
+        cursor = next.cursor();
+        match next.record["condition"].as_str() {
+            Some("landing-progress") => {
+                reported.push(next.record["kind"].as_str().unwrap_or_default().to_owned());
+            }
+            Some("elapsed") => break,
+            _ => panic!("{}", next.record),
+        }
+    }
     assert_eq!(
-        reported, held_kinds,
-        "every landing event once, in order, before the settlement"
+        reported,
+        kinds(&world, &flow, &id),
+        "every landing event once, in order, around the settlement"
     );
     held.release();
     std::fs::write(&gate, "go").expect("the flow ends");
@@ -3486,3 +3519,39 @@ fn a_relay_that_fails_inside_a_longer_flow_is_its_landings_blocker_and_the_flow_
     let _ = parent.child.wait();
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
+
+/// A train whose report cannot be written — its caller closed the pipe before
+/// reading — exits with the refusal's code and says why on standard error, so
+/// no caller reads an unshown report as a delivered one; what the train did is
+/// still in the landing's own journal.
+#[test]
+fn integrate_whose_report_cannot_be_written_exits_non_zero_and_says_why() {
+    let world = World::new("ml-unreported-train");
+    let repository = world.repository("local-direct", &[]);
+    for branch in TRAIN {
+        branch_with_work(&world, &repository, branch, &format!("{branch}.txt"));
+    }
+    let (reader, writer) = std::io::pipe().expect("a pipe");
+    drop(reader);
+    let mut argv = vec!["integrate"];
+    argv.extend(TRAIN);
+    argv.push("--push");
+    let said = world.root.join("integrate.stderr");
+    let status = world
+        .cmd(&argv)
+        .current_dir(&repository.checkout)
+        .stdout(writer)
+        .stderr(std::fs::File::create(&said).expect("a stderr file"))
+        .status()
+        .expect("integrate runs");
+    let said = std::fs::read_to_string(&said).expect("what it said");
+    assert_eq!(status.code(), Some(REFUSED), "{said}");
+    assert!(
+        said.contains("could not write its report to standard output"),
+        "{said}"
+    );
+    let (flow, id) = the_landing(&world);
+    let every = kinds(&world, &flow, &id);
+    assert!(every.iter().any(|kind| kind == "base-arrived"), "{every:?}");
+    assert_eq!(every.last().map(String::as_str), Some("landing-refused"));
+}

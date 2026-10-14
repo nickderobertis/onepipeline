@@ -280,17 +280,26 @@ fn report_integration(integrated: onevcs::Result<onevcs::Integration>) -> i32 {
                 said(outcome.ending.advanced()),
                 said(outcome.ending.pushed())
             ));
-            // A reader that closed the pipe early is told on standard error; the
-            // train's own status is still what the landing settles with.
+            // A report its caller could not be handed is the refusal every verb
+            // of this binary answers an unwritable standard output with — said on
+            // standard error, at the refusal's code — so a caller never reads a
+            // train it was not shown as one it was. What the train did is still
+            // the landing's own record: its operation's events say it.
             use std::io::Write;
             let mut out = std::io::stdout().lock();
-            if let Err(error) = out
+            match out
                 .write_all(rendered.as_bytes())
                 .and_then(|()| out.flush())
             {
-                eprintln!("onepipeline: integrate could not write its report: {error}");
+                Ok(()) => 0,
+                Err(error) => {
+                    eprintln!(
+                        "onepipeline: integrate could not write its report to standard output: \
+                         {error}"
+                    );
+                    crate::error::EXIT_REFUSED
+                }
             }
-            0
         }
         Err(error) => {
             eprintln!("onevcs: {error}");
