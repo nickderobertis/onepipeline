@@ -406,6 +406,9 @@ fn hold_at_exit(_: &[String]) -> ExitCode {
 }
 
 /// Run until something ends this process from outside.
+///
+/// In a loop because `park` may return without being unparked, and nothing here
+/// unparks it.
 fn linger() -> ! {
     loop {
         std::thread::park();

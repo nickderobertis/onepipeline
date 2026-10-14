@@ -70,7 +70,10 @@ fn patience() -> Result<std::time::Duration, String> {
     Ok(patience)
 }
 
-/// How often the teardown looks again while it waits.
+/// How long the teardown sleeps between ending what it found and looking again.
+///
+/// Every teardown that ends anything pays at least one, so it is short; on Unix
+/// each look runs `ps`, so it is not shorter.
 const POLL: std::time::Duration = std::time::Duration::from_millis(20);
 
 /// Make every process the calling one starts from now on one that

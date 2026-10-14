@@ -4497,7 +4497,8 @@ fn ends_what_it_left(pids: &[u32]) {
     }
 }
 
-/// What a caught panic said.
+/// What a caught panic said: a `String` when `panic!` formatted its message, a
+/// `&str` when it was a literal.
 fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
     payload
         .downcast_ref::<String>()
