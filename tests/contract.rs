@@ -643,6 +643,18 @@ fn the_shipped_profiles_are_the_contracts_own_and_are_overridable() {
         )],
     };
     assert_eq!(empty.profile("planner").expect("planner ships"), planner);
+    // And it is the profile the read-time profiles paragraph spells, read through
+    // the grammar the paragraph's own spelling is in.
+    let spelled = CONTRACT
+        .split_once("Shipped: `planner` is `")
+        .and_then(|(_, rest)| rest.split_once('`'))
+        .map(|(spec, _)| spec)
+        .expect("the contract spells the shipped planner profile");
+    assert_eq!(
+        EventFilter::parse(&format!("{{{spelled}}}")).expect("the spelling is a filter"),
+        planner,
+        "docs/contract.md spells a planner profile this build does not ship"
+    );
     // And it is the profile entry 123 records, read through the grammar.
     assert_eq!(
         serde_json::from_value::<EventFilter>(divergence_block("123.")["planner_profile"].clone())
