@@ -172,7 +172,7 @@ pub(crate) fn connected(state: &RunState, node: &str) -> BTreeSet<String> {
             state
                 .graph
                 .iter()
-                .filter(|other| other.deps.iter().any(|dep| *dep == at))
+                .filter(|other| other.deps.contains(&at))
                 .map(|other| other.id.clone()),
         );
         for next in neighbours {
@@ -513,7 +513,7 @@ fn take_up(
         let settled = state
             .recorded
             .get(node)
-            .map(|recorded| recorded.clone().status())
+            .map(|recorded| (*recorded).status())
             == Some(crate::graph::NodeStatus::Done)
             && !state.restacking.contains_key(node);
         if !settled {
@@ -863,7 +863,7 @@ fn verdict(
         && state
             .recorded
             .get(node)
-            .map(|recorded| recorded.clone().status())
+            .map(|recorded| (*recorded).status())
             == Some(crate::graph::NodeStatus::Done)
         && state.checks_read.get(node) != Some(&standing.head.0);
     if !owed && !moved_past {

@@ -990,8 +990,7 @@ fn deferred_republications_are_read_by_the_next_trigger_green_or_repaired_red() 
     let redispatched = world
         .events_of(run, "node-dispatched")
         .into_iter()
-        .filter(|event| event["labels"]["node"] == "b")
-        .last()
+        .rfind(|event| event["labels"]["node"] == "b")
         .expect("b was dispatched");
     assert_eq!(redispatched["payload"]["attempt"], 2, "{redispatched}");
     assert!(
@@ -1845,7 +1844,7 @@ fn review_readjusts_before_discovery() {
     found_first(&world, run, "a", "review", ("review-comments-read", "b"));
     let reads: Vec<Value> = host_calls(&world, from)
         .into_iter()
-        .filter(|call| is_standings_read(call))
+        .filter(is_standings_read)
         .collect();
     assert!(
         query_of(&reads[0]).contains("reviewThreads("),
@@ -2117,7 +2116,7 @@ fn drafts_on_two_roots_of_one_repository_are_read_in_one_batch_per_root() {
     readjusted(&world, run);
     let reads: Vec<Value> = host_calls(&world, from)
         .into_iter()
-        .filter(|call| is_standings_read(call))
+        .filter(is_standings_read)
         .collect();
     assert_eq!(reads.len(), 2, "{reads:#?}");
     for read in &reads {
@@ -2231,14 +2230,12 @@ fn a_draft_merged_into_an_unknown_branch_raises_a_blocking_question() {
 /// Install a `pre-receive` hook on the service origin refusing every push to `branch`.
 fn origin_refuses(world: &World, branch: &str) -> std::path::PathBuf {
     let hook = service(world).origin.join("hooks").join("pre-receive");
-    std::fs::write(
+    onepipeline_testfakes::executable(
         &hook,
         format!(
             "#!/bin/sh\nwhile read old new ref; do\n  if [ \"$ref\" = \"refs/heads/{branch}\" ]; then\n    echo \"pushes to {branch} are refused here\" >&2\n    exit 1\n  fi\ndone\n"
         ),
-    )
-    .expect("the hook is written");
-    onepipeline_testfakes::executable(&hook, &std::fs::read_to_string(&hook).expect("written"));
+    );
     hook
 }
 
