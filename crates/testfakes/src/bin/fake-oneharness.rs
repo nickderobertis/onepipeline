@@ -46,6 +46,15 @@ pub const WORK_FILE: &str = "work.md";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // Not oneharness's surface: the fixture `harness::a_worlds_teardown_*`
+    // drives, so a journey can hold this double to what its teardown promises
+    // about a process it started. Answered before anything is required of the
+    // environment, because the descendant is started with none of it.
+    match args.first().map(String::as_str) {
+        Some("leave-a-descendant") => return leave_a_descendant(&args[1..]),
+        Some("linger") => linger(),
+        _ => {}
+    }
     let dir = fake::script_dir();
     fake::record(&dir, "oneharness", &args);
 
@@ -53,6 +62,67 @@ fn main() -> ExitCode {
         Some("run") => run(&args, &dir),
         Some(other) => fake::refuse(&format!("unknown oneharness command '{other}'")),
         None => fake::refuse("oneharness takes a command"),
+    }
+}
+
+/// Start a long-lived descendant of this double, record both pids, and then
+/// either keep running (`hold`) or end at once and orphan it (`exit`).
+///
+/// What the run that left the Windows leg hanging had in it: a `fake-oneharness`
+/// a test had started, or something under it, still running and holding the
+/// standard handles it inherited after the test that started it had returned.
+/// The descendant inherits this double's standard streams, as one started by
+/// default does, and on Unix takes a process group of its own, as the engine
+/// gives its drivers, so a teardown that only ended this double's group would
+/// leave it.
+///
+/// The record is `<double pid> <descendant pid>`, written whole under a
+/// temporary name and renamed into place, so a reader polling for it never
+/// reads half of one.
+fn leave_a_descendant(args: &[String]) -> ExitCode {
+    let [record, then] = args else {
+        return fake::refuse("leave-a-descendant takes a record path and `hold` or `exit`");
+    };
+    if then != "hold" && then != "exit" {
+        return fake::refuse(&format!(
+            "leave-a-descendant then {then:?}: `hold` or `exit`"
+        ));
+    }
+    let me = std::env::current_exe()
+        .unwrap_or_else(|error| fake::fail(&format!("this double cannot name itself: {error}")));
+    let mut descendant = std::process::Command::new(me);
+    descendant.arg("linger").stdin(std::process::Stdio::null());
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut descendant, 0);
+    // Never waited for on the `exit` path, which is the point: this double ends
+    // and leaves the descendant running, and `init` is what collects it then.
+    #[expect(
+        clippy::zombie_processes,
+        reason = "the descendant is left running on purpose; see this function's doc"
+    )]
+    let mut descendant = descendant
+        .spawn()
+        .unwrap_or_else(|error| fake::fail(&format!("cannot start the descendant: {error}")));
+    let staged = format!("{record}.partial");
+    std::fs::write(
+        &staged,
+        format!("{} {}\n", std::process::id(), descendant.id()),
+    )
+    .and_then(|()| std::fs::rename(&staged, record))
+    .unwrap_or_else(|error| fake::fail(&format!("cannot record the pids: {error}")));
+    if then == "exit" {
+        return ExitCode::SUCCESS;
+    }
+    // Held for as long as the descendant runs, which is until something ends
+    // one of them from outside.
+    let _ = descendant.wait();
+    linger()
+}
+
+/// Run until something ends this process from outside.
+fn linger() -> ! {
+    loop {
+        std::thread::park();
     }
 }
 

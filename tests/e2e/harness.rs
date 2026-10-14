@@ -743,6 +743,9 @@ impl World {
     /// names itself; its scratch directory does not have to.
     pub fn new(name: &str) -> Self {
         static NTH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        // Before anything is started, so that everything this test starts is
+        // something its teardown can reach. See [`Drop for World`](World).
+        onepipeline_testfakes::containment::enrol();
         LIVE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let root = std::env::temp_dir().join(format!(
             "op-{}-{}",
@@ -3841,6 +3844,26 @@ impl World {
 impl Drop for World {
     fn drop(&mut self) {
         self.stop_the_runs_it_can();
+        let last = LIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) == 1;
+        // Then whatever that left, when no world is left that could still want
+        // it: a process this test started, or one *they* started, that `stop`
+        // did not reach — no run to stop it through, or no longer descended from
+        // the run's driver when `stop` walked its tree. On Windows such a
+        // process holds the pipe nextest reads this test's output from, so the
+        // test is reported `LEAK` and the CI step teeing the run waits on it
+        // after every test has passed. Before the directories go, because
+        // Windows will not remove a directory a running process is in.
+        // `containment` says what each platform reaches.
+        if last {
+            // Not asserted while the test is already failing: a second panic
+            // during the first aborts, and loses the message that says why.
+            match onepipeline_testfakes::containment::end_descendants() {
+                Err(left) if !std::thread::panicking() => {
+                    panic!("this test's teardown left processes running: {left}")
+                }
+                _ => {}
+            }
+        }
         // A host [`on_host`](World::on_host) made removes only what is its own: the world it
         // was made from still has runs to stop and a root to remove.
         let removed = match &self.home {
@@ -3853,7 +3876,7 @@ impl Drop for World {
         // target directory. Best-effort: Windows refuses to unlink a running
         // image, and a directory left behind there costs a directory entry
         // rather than a binary, because these are links and not copies.
-        if LIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+        if last {
             let _ = std::fs::remove_dir_all(held_dir());
         }
     }
@@ -3995,6 +4018,121 @@ fn still_running(pid: u64) -> bool {
         .expect("this host answers about a process it owns")
         .success()
 } // llmlint: ignore-end[tests_mirror_real_usage]
+
+/// A double this test started through a world's own spawning path, and the
+/// long-lived process that double started in turn, are both gone once the world
+/// is.
+///
+/// No run is involved, so the binary's own `stop` has nothing to walk: what ends
+/// them is the teardown every world runs last. The descendant takes a process
+/// group of its own on Unix, and both inherit this test's standard streams,
+/// which is how a process left running makes nextest report a test `LEAK` and
+/// keeps a CI step that tees the run waiting after its last test.
+///
+/// The double is still running at teardown here, which is the case every
+/// platform reaches; the journey below is the one where it is not.
+// llmlint: ignore-block[tests_mirror_real_usage] as above: a journey cannot assert what
+// is true after itself, and being dropped is the only way this property is ever reached.
+#[test]
+fn a_worlds_teardown_ends_a_double_it_started_and_the_descendant_that_double_started() {
+    let (pids, mut double) = {
+        let world = World::new("teardown-descendant");
+        let record = world.root.join("descendant.pids");
+        let double = world
+            .cmd_on(
+                &self::double("fake-oneharness"),
+                &["leave-a-descendant", &record.to_string_lossy(), "hold"],
+            )
+            .spawn()
+            .expect("the double starts");
+        let pids = left_descendant(&record);
+        for pid in [pids.0, pids.1] {
+            assert!(
+                !process_ended(pid),
+                "pid {pid} had ended before the teardown, so this proves nothing about it"
+            );
+        }
+        (pids, double)
+    };
+
+    let (double_pid, descendant) = pids;
+    assert!(
+        process_ended(double_pid),
+        "the double at pid {double_pid} outlived the world whose spawning path started it"
+    );
+    assert!(
+        process_ended(descendant),
+        "pid {descendant}, which the double at pid {double_pid} started, outlived the world \
+         that started the double"
+    );
+    // Collected, so the ended double leaves no entry behind in this process.
+    double.wait().expect("the ended double is collected");
+}
+
+/// The same, where the double has already exited by the teardown and what it
+/// started is an orphan: the process the Windows leg was left holding.
+///
+/// Windows only, because only there does the teardown reach it. A Unix process
+/// whose parent has exited belongs to `init`, and nothing descends from this
+/// test to it any more — `containment` says why that is not closed there.
+#[cfg(windows)]
+#[test]
+fn a_worlds_teardown_ends_a_descendant_whose_double_has_already_exited() {
+    let descendant = {
+        let world = World::new("teardown-orphan");
+        let record = world.root.join("descendant.pids");
+        let exited = world
+            .cmd_on(
+                &double("fake-oneharness"),
+                &["leave-a-descendant", &record.to_string_lossy(), "exit"],
+            )
+            .status()
+            .expect("the double runs");
+        assert!(exited.success(), "the double refused: {exited}");
+        let (double_pid, descendant) = left_descendant(&record);
+        assert!(
+            process_ended(double_pid),
+            "the double at pid {double_pid} is still running, so its descendant is no orphan"
+        );
+        assert!(
+            !process_ended(descendant),
+            "pid {descendant} had ended before the teardown, so this proves nothing about it"
+        );
+        descendant
+    };
+
+    assert!(
+        process_ended(descendant),
+        "pid {descendant}, orphaned by a double this test started, outlived the world that \
+         started it"
+    );
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// The pids `fake-oneharness leave-a-descendant` records, once it has: the
+/// double's own, then its descendant's.
+fn left_descendant(record: &Path) -> (u32, u32) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let text = loop {
+        if let Ok(text) = std::fs::read_to_string(record) {
+            break text;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the double never recorded what it started at {}",
+            record.display()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let pids: Vec<u32> = text
+        .split_whitespace()
+        .map(|pid| pid.parse().expect("the record holds pids"))
+        .collect();
+    let [double, descendant] = pids[..] else {
+        panic!("the record is not two pids: {text:?}")
+    };
+    (double, descendant)
+}
 
 /// A repository `onevcs` knows about, and what its base branch carries.
 pub struct Repository {
