@@ -51,7 +51,6 @@ pub const PATIENCE_VARIABLE: &str = "ONEPIPELINE_TESTFAKES_TEARDOWN_PATIENCE_MS"
 /// keeps, where a larger one would read on Windows as a wait without end.
 const LONGEST_PATIENCE: std::time::Duration = std::time::Duration::from_secs(600);
 
-/// [`PATIENCE`], or what [`PATIENCE_VARIABLE`] replaces it with.
 fn patience() -> Result<std::time::Duration, String> {
     let Some(set) = std::env::var_os(PATIENCE_VARIABLE) else {
         return Ok(PATIENCE);
@@ -379,6 +378,8 @@ mod platform {
             // SAFETY: null attributes and a null name make an unnamed job
             // whose handle no child inherits; the result is checked below.
             let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+            // llmlint: ignore[no_panics_on_recoverable_errors] This is test-fixture setup:
+            // without containment the test cannot run safely, so fail the test here.
             assert!(
                 !job.is_null(),
                 "no job object for this test's processes: {}",
@@ -387,6 +388,9 @@ mod platform {
             // SAFETY: both handles are live; the pseudo-handle for this process
             // needs no closing.
             let assigned = unsafe { AssignProcessToJobObject(job, GetCurrentProcess()) };
+            // llmlint: ignore[no_panics_on_recoverable_errors] Failure must fail fixture
+            // setup before any test process can start outside its required containment;
+            // nextest then exits this test's process, releasing its job handle too.
             assert!(
                 assigned != 0,
                 "this test's process could not join its own job: {}",
