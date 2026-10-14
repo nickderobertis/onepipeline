@@ -323,9 +323,13 @@ mod platform {
 
     /// Exactly the columns asked for: two ids; a state whose first character
     /// is the one-letter code every `ps` leads it with, in either case — Linux
-    /// writes a traced process `t` — and the rest flags (`Ss`, `R+`, `S<l`); and
-    /// the start, which is several words and the rest of the row. A pid that
-    /// is no [`Pid`] is no row.
+    /// writes a traced process `t` — or the `?` macOS writes for a process it
+    /// cannot classify, such as one mid-exit, and the rest flags (`Ss`, `R+`,
+    /// `S<l`, `?<`); and the start, which is several words and the rest of the
+    /// row. A pid that is no [`Pid`] is no row.
+    ///
+    /// A `?` is read as live: nothing says it has ended, so it is ended and
+    /// waited on until it is listed as a zombie or not at all.
     fn row(line: &str) -> Option<Row> {
         let mut columns = line.split_whitespace();
         let pid = Pid::new(columns.next()?.parse().ok()?)?;
@@ -334,7 +338,7 @@ mod platform {
         let well_formed = state
             .chars()
             .next()
-            .is_some_and(|code| code.is_ascii_alphabetic())
+            .is_some_and(|code| code.is_ascii_alphabetic() || code == '?')
             && state.chars().all(|flag| flag.is_ascii_graphic());
         let started = columns.collect::<Vec<_>>().join(" ");
         (well_formed && !started.is_empty()).then(|| Row {

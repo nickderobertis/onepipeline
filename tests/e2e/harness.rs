@@ -4329,6 +4329,50 @@ fn a_worlds_teardown_refuses_a_process_list_it_cannot_read() {
     }
 }
 
+/// A row whose state `ps` could not classify — the `?` macOS writes for a
+/// process mid-exit, as `?<` — is a process the teardown ends, rather than a
+/// row it refuses: the host's own `ps`, with the double's and its
+/// descendant's states rewritten that way until each has ended, leaves the
+/// teardown answering and neither still running.
+#[cfg(unix)]
+#[test]
+fn a_worlds_teardown_ends_a_process_ps_lists_in_a_state_it_could_not_classify() {
+    let world = World::new("teardown-unclassified-state");
+    let (double_pid, descendant) = holding_a_descendant(&world);
+    let host_path = std::env::var_os("PATH").expect("the host has a PATH");
+    let bin = world.root.join("ps-unclassified");
+    std::fs::create_dir_all(&bin).expect("a directory for the stand-in ps");
+    let ps = bin.join("ps");
+    // The host's own `ps`, found on the host's own PATH. Only a row not yet a
+    // zombie is rewritten: a zombie written `?` would be a process that never
+    // ends, which is not what macOS reports.
+    std::fs::write(
+        &ps,
+        format!(
+            "#!/bin/sh\nPATH='{}'\nexport PATH\n\
+             ps \"$@\" | awk -v pids=' {double_pid} {descendant} ' \
+             '{{ if (index(pids, \" \" $1 \" \") && $3 !~ /^Z/) $3 = \"?\" substr($3, 2); print }}'\n",
+            host_path.to_string_lossy().replace('\'', "'\\''")
+        ),
+    )
+    .expect("the stand-in ps");
+    std::fs::set_permissions(&ps, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+        .expect("the stand-in ps is runnable");
+
+    let answered = with_variable("PATH", &bin, || {
+        onepipeline_testfakes::containment::end_descendants()
+    })
+    .expect("the teardown answers rather than panicking");
+    answered.expect("a row in a state ps could not classify was refused as no process");
+    for pid in [double_pid, descendant] {
+        assert!(
+            process_ended(pid),
+            "pid {pid}, listed in a state ps could not classify, outlived the teardown"
+        );
+    }
+    drop(world);
+}
+
 /// More descendants than the teardown's first look has room for are all gone
 /// once the world is: on Windows the job is asked again, with room for all of
 /// them, rather than ended as far as the first answer went.
