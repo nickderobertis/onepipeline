@@ -1259,9 +1259,41 @@ fn a_rework_after_a_landing_places_its_replacement_on_the_root() {
         ],
     );
     let b_branch = branch_of(&world, run, "b");
+    let b_change = number_of(&world, run, "b");
+    write_on_host(&world, &b_change, "A reviewer's note, kept.");
     merge(&world, &number_of(&world, run, "a"), "squash", "kept");
     reply(&world, run, json!([rework("b")])).exited(0);
+    // The rework was applied by a process that is gone: the driver that publishes and
+    // retargets the replacement starts cold, holding no description it read itself.
+    let from = world.invocations().len();
     world.run(&["adopt", run]).exited(0);
+
+    // Its reads are batches over every draft, beside the two single reads the linked
+    // `retarget_change` makes inside each call: no description is read draft by draft.
+    let calls = host_calls(&world, from);
+    let reads: Vec<&Value> = calls
+        .iter()
+        .filter(|call| is_standings_read(call))
+        .collect();
+    let single: Vec<&Value> = reads
+        .iter()
+        .copied()
+        .filter(|read| !query_of(read).contains("c1: pullRequest("))
+        .collect();
+    let retargets = calls.iter().filter(|call| is_write(call)).count();
+    assert_eq!(single.len(), 2 * retargets, "{reads:#?}");
+    let of_b = format!("c0: pullRequest(number: {b_change})");
+    assert_eq!(
+        single
+            .iter()
+            .filter(|read| query_of(read).contains(&of_b))
+            .count(),
+        2,
+        "{reads:#?}"
+    );
+    let (_, body) = on_host(&world, run, "b-rework-1");
+    assert!(body.starts_with("A reviewer's note, kept.\n\n"), "{body}");
+    assert!(body.contains("Drafted against `main`, the root"), "{body}");
 
     found_first(
         &world,

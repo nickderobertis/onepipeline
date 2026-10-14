@@ -6933,7 +6933,14 @@ fn rework_readjusting(
         change: crate::readjust::lineage_change(state, &node.id)?,
         base: to.base,
         block: block_on(stack, &root),
-        body: state.readjust.bodies.get(&predecessor).cloned(),
+        // Every read since the rework was applied holds the description under the
+        // replacement, the lineage head; one made before it, under the node it replaced.
+        body: state
+            .readjust
+            .bodies
+            .get(&node.id)
+            .or_else(|| state.readjust.bodies.get(&predecessor))
+            .cloned(),
         remove_restored_base: state.reopened.contains_key(&predecessor),
     }))
 }

@@ -1166,8 +1166,8 @@ pub(crate) struct Retarget {
     pub(crate) base: String,
     /// The Stack block it carries there.
     pub(crate) block: String,
-    /// Its description as the readjustment's read returned it, where that read is
-    /// still in hand.
+    /// Its description as the batched read of this driver returned it; a draft no such
+    /// read answered has none, and is not moved.
     pub(crate) body: Option<String>,
     /// Whether the base it leaves is one a reopen restored, which the move deletes.
     pub(crate) remove_restored_base: bool,
@@ -1185,24 +1185,19 @@ pub(crate) fn retarget(retarget: &Retarget) -> Result<crate::payload::RetargetWo
         .change
         .parse::<onevcs::Url>()
         .map_err(|error| Error::Invalid(format!("change URL {}: {error}", retarget.change)))?;
-    let body = match &retarget.body {
-        Some(body) => body.clone(),
-        None => crate::vcs::change_standings(&onevcs::ChangeStandingsRequest {
-            repo: retarget.repo.clone(),
-            root: retarget.base.clone(),
-            changes: vec![change.clone()],
-        })?
-        .standings
-        .into_iter()
-        .next()
-        .map(|standing| standing.body)
-        .unwrap_or_default(),
+    // The description comes from a batched read, never one of its own: a draft no read
+    // of this driver answered is left where it is, and the next trigger's read moves it.
+    let Some(body) = &retarget.body else {
+        return Err(Error::Invalid(format!(
+            "no read of this driver returned {change}'s description, so its Stack block \
+             cannot be rewritten; the next trigger's read moves it"
+        )));
     };
     let moved = crate::vcs::retarget_change(&onevcs::RetargetRequest {
         repo: retarget.repo.clone(),
         change,
         base: retarget.base.clone(),
-        body: Some(crate::stack::splice(&body, &retarget.block)),
+        body: Some(crate::stack::splice(body, &retarget.block)),
         remove_restored_base: retarget.remove_restored_base,
     })?;
     Ok(match moved.outcome {

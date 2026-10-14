@@ -10900,7 +10900,9 @@ branch on the origin and its verdict off its first trigger's read.
 
 **The host's calls, counted.** A readjustment's own calls are one batched standings read
 per group and one `retarget_change` or `reopen_change` call per affected change request,
-none bypassing `onevcs`. Inside each call the linked `onevcs` 0.51.2 — whose two calls
+none bypassing `onevcs`; a retarget writes the description the driver's own batched
+read returned, which a whole-journal re-fold keeps, and a draft no such read answered is
+left owed rather than read alone. Inside each call the linked `onevcs` 0.51.2 — whose two calls
 are unchanged since 0.49.0 — makes its own: a
 `retarget_change` two single-change standings reads (before and after its write) and
 the repository's visibility read its write guard makes; a `reopen_change` two
