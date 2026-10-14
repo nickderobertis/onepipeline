@@ -1832,7 +1832,7 @@ fn converge(
             // A placement at dispatch, and a restack, read their stack parents' standings
             // first: once a pass, and once for each node however long it is held.
             if !state.readjust.read_this_pass
-                && placing_on_drafts(state, &statuses, &in_flight, &paused)
+                && claim_placement_reads(state, &statuses, &in_flight, &paused)
             {
                 crate::readjust::run(
                     paths,
@@ -6790,10 +6790,10 @@ fn review_change_for(state: &Projected, node: &str) -> Option<String> {
     .flatten()
 }
 
-/// Whether this pass places a lifecycle node on unlanded drafts or restacks one, for a
-/// node it has not read for yet — which is what a placement's or a restack's standings
-/// read is owed for, once per node however many passes it is held across.
-fn placing_on_drafts(
+/// Claim the standings read owed by this pass's placements on unlanded drafts and its
+/// restacks, for each node not read for yet, once per node however many passes it is
+/// held across: marks those nodes read for, and answers whether any were.
+fn claim_placement_reads(
     state: &mut Projected,
     statuses: &BTreeMap<String, NodeStatus>,
     in_flight: &BTreeMap<String, Dispatch>,
