@@ -801,10 +801,20 @@ fn gib(bytes: u64) -> String {
 }
 
 /// Views read only the latest record; the tree can have changed since it was kept.
+///
+/// The record speaks only while the run still reads as the ending or pause that
+/// wrote it: a run made live again reads as what it is now, so a kept notice and
+/// its discard instruction, which the verb would refuse, wait for the next ending.
 pub(crate) fn lines(view: &RunView, cap: Option<usize>) -> String {
     if views::host_shutdown(view) || view.liveness() == views::DriverLiveness::Parked {
         return String::new();
     }
+    let reading = views::reading(view);
+    let current = match (&reading.ending, &reading.paused) {
+        (Some(ending), _) => Some(ending.kind),
+        (None, Some(_)) => None,
+        (None, None) => return String::new(),
+    };
     let Some(event) = view.events.iter().rev().find(|event| {
         matches!(
             PipelineKind::from_wire(&event.kind),
@@ -839,8 +849,21 @@ pub(crate) fn lines(view: &RunView, cap: Option<usize>) -> String {
         return String::new();
     };
     // llmlint: ignore-end[changed_behavior_has_e2e]
+    let written_for_now = matches!(
+        (record.ending, current),
+        (ScratchEnding::Failed, Some(views::EndingKind::Failed))
+            | (
+                ScratchEnding::Unfinished,
+                Some(views::EndingKind::Unfinished)
+            )
+            | (ScratchEnding::Stopped, Some(views::EndingKind::Stopped))
+            | (ScratchEnding::Paused, None)
+    );
+    if !written_for_now {
+        return String::new();
+    }
     largest_first(&mut record.dirs);
-    let suffix = if views::reading(view).paused.is_some() {
+    let suffix = if current.is_none() {
         format!(
             "kept while paused; discard with onepipeline scratch discard {} once the run ends",
             view.paths.run

@@ -677,6 +677,50 @@ fn retry_retains_a_new_ending_then_undriven_success_removes_the_tree() {
     assert!(!results.contains("scratch kept:"));
 }
 
+/// A run made live again reads as what it is now: the kept notice and its discard
+/// instruction, which the verb would refuse, wait for the run's next ending.
+#[test]
+fn a_run_made_live_again_shows_no_scratch_notice_until_it_ends_again() {
+    let world = World::new("scratch-live-again");
+    world.script("build.fail", "1");
+    let run = settle(&world, "relive", vec![agent("build", &[])]);
+    assert_retained(&world, &run, "failed", 1);
+    world.script("again.wait", "hold");
+    world.script("again.turn-open", "");
+    reply(
+        &world,
+        &run,
+        serde_json::json!([{"op":"retry", "id":"build", "node": agent("again", &[])}]),
+    );
+    let silent = |world: &World, word: &str| {
+        let (status, results) = read_views(world, &run);
+        assert!(status.starts_with(&format!("{run}  {word}")), "{status}");
+        for text in [status, results] {
+            assert!(
+                !text.contains("scratch kept:") && !text.contains("scratch discard"),
+                "{text}"
+            );
+        }
+    };
+    silent(&world, "DRIVER DEAD");
+    world.run(&["adopt", &run, "--detach"]).exited(0);
+    world.until("the retried dispatch to start", |world| {
+        !world.events_of(&run, "turn-started").is_empty()
+    });
+    silent(&world, "ACTIVE");
+    assert_eq!(world.events_of(&run, "scratch-retained").len(), 1);
+    world.script("again.fail", "1");
+    world.release("again.go");
+    world.until("the run to end again", |world| {
+        world.events_of(&run, "scratch-retained").len() == 2
+    });
+    world.until("the driver to let go", |world| {
+        world.run(&["status", &run, "--json"]).json()["driven"] == false
+    });
+    let latest = assert_retained(&world, &run, "failed", 2);
+    assert_eq!(latest["dirs"].as_array().unwrap().len(), 2);
+}
+
 #[test]
 fn a_paused_run_keeps_scratch_and_an_undriven_reply_records_its_failed_ending() {
     let world = World::new("scratch-paused-reply");
@@ -875,7 +919,9 @@ fn discard_refuses_a_shut_down_run_whose_departing_driver_holds_the_gate() {
     // process on this host, which every gate taker must wait behind.
     let gate = world.run_file("leaving", "channel/handover");
     std::fs::create_dir_all(&gate).unwrap();
-    let host = world.run_json("leaving", "owner.lock")["host"]
+    // The departed driver's ownership lock is gone; its launch record still names
+    // the host its pid is meaningful on.
+    let host = world.run_json("leaving", "launch.json")["host"]
         .as_str()
         .unwrap()
         .to_owned();
