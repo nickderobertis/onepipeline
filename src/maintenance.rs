@@ -1717,10 +1717,6 @@ mod tests {
             .is_some_and(|error| error.contains("the registry could not be read")));
     }
 
-    /// A sweep on which nothing was due and nothing was wrong writes nothing; one
-    /// on which a slot ran, a due slot could not be maintained, an identity was
-    /// claimed or one failed writes one record carrying exactly those identities,
-    /// each with the sibling's own outcome shape.
     /// A slot frees only what its `disk` shows it shrank by: one that grew, one
     /// whose measure failed and one whose `disk` is absent free nothing, and do not
     /// stop the others being summed, counted and ordered.
@@ -1777,6 +1773,10 @@ mod tests {
         assert_eq!(freed_line(&nothing.payload()), "");
     }
 
+    /// A sweep on which nothing was due and nothing was wrong writes nothing; one
+    /// on which a slot ran, a due slot could not be maintained, an identity was
+    /// claimed, one's declaration was unreadable or one failed writes one record carrying exactly those identities,
+    /// each with the sibling's own outcome shape.
     #[test]
     fn a_sweep_is_recorded_where_something_ran_or_a_due_slot_could_not_and_never_otherwise() {
         let nothing = PoolsMaintained {
