@@ -2992,16 +2992,19 @@ fn spelled_repository(world: &World, alias: &str, origin: &str) -> PathBuf {
 }
 
 /// The identity `onevcs` keys a registered origin by is one a landing's request
-/// is held to, whichever spelling the host gave it — ssh, https with and
-/// without `.git` — so every one registers, and reads back.
+/// is held to, whichever spelling `onevcs register` took — ssh and http(s),
+/// with and without `.git`, and a host whose name is one label — so each
+/// registers, and reads back.
 #[test]
-fn every_spelling_of_an_origin_onevcs_normalizes_registers_a_landing() {
+fn each_spelling_onevcs_registers_an_origin_by_registers_a_landing() {
     let world = World::new("ml-spellings");
     let _repository = world.repository("local-direct", &[]);
     for (alias, origin) in [
         ("sshrepo", "ssh://git@github.com/owner/sshrepo.git"),
         ("httpsrepo", "https://github.com/owner/httpsrepo"),
         ("dotgit", "https://github.com/owner/dotgit.git"),
+        ("plain", "http://git.example/owner/plain"),
+        ("single", "ssh://git@git/owner/single.git"),
     ] {
         let checkout = spelled_repository(&world, alias, origin);
         git(&world, &checkout, &["checkout", "-q", "-b", BRANCH]);
@@ -3023,6 +3026,8 @@ fn every_spelling_of_an_origin_onevcs_normalizes_registers_a_landing() {
         "github.com/owner/sshrepo",
         "github.com/owner/httpsrepo",
         "github.com/owner/dotgit",
+        "git.example/owner/plain",
+        "git/owner/single",
     ] {
         assert!(identities.contains(&json!(expected)), "{identities:?}");
     }
@@ -3682,3 +3687,24 @@ fn an_originating_run_that_refuses_its_mirror_fails_the_landing_closed() {
     assert_eq!(failed.record["status"], json!(1));
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
+
+/// A launcher session that is set and is not text may name a manager, so the
+/// landing is refused rather than run unowned, with nothing done.
+#[test]
+fn a_launcher_session_that_is_not_text_refuses_the_landing() {
+    use std::os::unix::ffi::OsStrExt;
+    let world = World::new("ml-session-bytes");
+    let repository = world.repository("change-open", &[]);
+    branch_with_work(&world, &repository, BRANCH, "widget.txt");
+    let mut command = world.cmd(&["publish-branch", BRANCH, "--repo", "service", "--no-draft"]);
+    command.env(
+        "ONEPIPELINE_LAUNCHER_SESSION",
+        std::ffi::OsStr::from_bytes(b"manager-\xff"),
+    );
+    world
+        .run_on(command, "publish-branch under a session that is not text")
+        .exited(REFUSED)
+        .err_has("is set and is not text");
+    assert!(world.changes_opened().is_empty());
+    assert!(!world.runs.join(".flows").exists());
+}

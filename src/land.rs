@@ -119,7 +119,7 @@ pub(crate) fn land(verb: Verb, args: Vec<OsString>) -> Result<i32> {
         }
     };
     let root = crate::ledger::runs_root();
-    let Some(session) = launcher_session() else {
+    let Some(session) = launcher_session()? else {
         eprintln!(
             "onepipeline: {}: no manager session owns this landing — {} names none — so it runs \
              unowned, and nothing will hold a session for it",
@@ -154,10 +154,21 @@ pub(crate) fn land(verb: Verb, args: Vec<OsString>) -> Result<i32> {
 }
 
 /// The manager session `ONEPIPELINE_LAUNCHER_SESSION` names, where it names one.
-fn launcher_session() -> Option<String> {
-    std::env::var(crate::sys::LAUNCHER_SESSION_ENV)
-        .ok()
-        .filter(|session| !session.trim().is_empty())
+///
+/// # Errors
+///
+/// A value that is set and is not text: it may name a manager, so the landing
+/// is refused rather than run unowned.
+fn launcher_session() -> Result<Option<String>> {
+    match std::env::var(crate::sys::LAUNCHER_SESSION_ENV) {
+        Ok(session) => Ok(Some(session).filter(|session| !session.trim().is_empty())),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(Error::Invalid(format!(
+            "{} is set and is not text, so whether a manager owns this landing cannot be said; \
+             nothing was drafted or forwarded",
+            crate::sys::LAUNCHER_SESSION_ENV
+        ))),
+    }
 }
 
 /// Every branch a parsed landing can advance, in the identity it belongs to:

@@ -211,22 +211,22 @@ fn an_identity<'de, D: serde::Deserializer<'de>>(
     Ok(found)
 }
 
-/// Whether `text` is an origin as `onevcs` normalizes one: `host/owner/name`.
+/// Whether `text` could be an identity `onevcs` keys a hosted repository by.
+///
+/// How an origin normalizes is `onevcs`'s, and private to it; what is held here
+/// is only the structural half of that crate's own rule for a key it reads back
+/// — text with no whitespace or control character, which is no URL left
+/// unnormalized — so this never refuses a key the sibling writes and never
+/// admits one that names a scheme, a credential or nothing. Which spellings the
+/// sibling turns into which keys is reconciled against the linked release by
+/// registering them, in `tests/e2e/manager_landings.rs`.
 fn is_normalized_origin(text: &str) -> bool {
-    if text.contains("://")
-        || text.contains(':')
-        || text.starts_with('/')
-        || text.chars().any(|c| c.is_whitespace() || c.is_control())
-    {
-        return false;
-    }
-    matches!(
-        text.split('/').collect::<Vec<_>>()[..],
-        [host, owner, name] if host.contains('.')
-            && !owner.is_empty()
-            && !name.is_empty()
-            && ![owner, name].iter().any(|part| *part == "." || *part == "..")
-    )
+    !text.contains("://")
+        && !text.contains('@')
+        && !text.starts_with('/')
+        && !text.chars().any(|c| c.is_whitespace() || c.is_control())
+        && text.split('/').all(|segment| !segment.is_empty())
+        && text.contains('/')
 }
 
 /// An id a cursor names: the flow-id alphabet, so neither `:` nor `@` nor `/`
@@ -1598,10 +1598,6 @@ mod tests {
             ),
             (
                 "subjects",
-                serde_json::json!([{"identity": "github.com/../s", "branch": "a"}]),
-            ),
-            (
-                "subjects",
                 serde_json::json!([{"identity": "/abs", "branch": " "}]),
             ),
             (
@@ -1617,6 +1613,10 @@ mod tests {
                 "a request with {key}={value} was read"
             );
         }
+        // A host with no `.` in its name is one `onevcs` keys by as readily.
+        let mut single = block["request"].clone();
+        single["subjects"] = serde_json::json!([{"identity": "git/owner/repo", "branch": "a"}]);
+        serde_json::from_value::<LandingRequest>(single).expect("a single-label host reads");
         // An absolute local identity may carry what an origin never does.
         let mut local = block["request"].clone();
         local["subjects"] = serde_json::json!([{"identity": "/home/a b/service", "branch": "a"}]);

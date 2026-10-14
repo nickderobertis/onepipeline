@@ -1245,6 +1245,15 @@ mod tests {
         let defaults: Vec<String> = DEFAULT_UNTIL.iter().map(ToString::to_string).collect();
         assert_eq!(block["flow_watch_default_until"], json!(defaults));
         assert_eq!(block["flow_cursor"], json!(cursor_shape()));
+        // The README's `monitor` passage states the same resume line.
+        let readme = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md"),
+        )
+        .expect("the README ships");
+        assert!(
+            readme.contains(&format!("`-- cursor {}`", cursor_shape())),
+            "the README does not state `monitor --flow`'s resume line"
+        );
         assert_eq!(block["legacy_flow_cursor"], json!(legacy_cursor_shape()));
         // And what the watch prints is that shape filled in.
         let mut known = Known::default();

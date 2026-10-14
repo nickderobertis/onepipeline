@@ -726,7 +726,8 @@ Exit codes do not move; each result answers the code the binary exits with.
 `--flow` in the place of `RUN` reads a flow's manager landings — makes one
 pass over the merged stream and returns. Every pass — including one that renders
 no event — ends its stdout with exactly one resume line after the trailer,
-`-- cursor 1:<run>:<byte>`, whose byte is the end of the last finished record in
+`-- cursor 1:<run>:<byte>` — for `--flow`, the flow watch's own
+`-- cursor flow:2:<flow>:<landing>@<byte>/...:<run>@<byte>/...` — whose byte is the end of the last finished record in
 the journal at the moment of the read: past records the profile hid, and short of
 a record whose writer has not finished it. `--cursor` renders only the events
 recorded after that place, so a caller that keeps the last line and hands it back
