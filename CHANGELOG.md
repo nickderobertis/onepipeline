@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.72.0](https://github.com/nickderobertis/onepipeline/compare/v0.71.1...v0.72.0) - 2026-10-14
+
+### Added
+
+- [**breaking**] supervise manager-started landings through flows ([#914](https://github.com/nickderobertis/onepipeline/pull/914))
+
 ## [0.71.1](https://github.com/nickderobertis/onepipeline/compare/v0.71.0...v0.71.1) - 2026-10-13
 
 ### Fixed
