@@ -50,13 +50,15 @@ elif case in ['schema', 'tag', 'unknown', 'missing', 'field-type', 'target', 'in
     if case == 'inventory-type': record['executables'] = [42]
     if case == 'inventory-unsafe': record['executables'] = ['../escape']
     if case == 'inventory': record['executables'].append('missing-helper')
-elif case in ['wheel-version', 'wheel-arch', 'sbom', 'sbom-object', 'no-sbom', 'macho', 'wheel-duplicate', 'wheel-path', 'wheel-primary']:
+elif case in ['wheel-version', 'wheel-arch', 'sbom', 'sbom-object', 'no-sbom', 'macho', 'wheel-duplicate', 'wheel-path', 'wheel-primary', 'no-metadata', 'no-wheel-tags']:
     source = record['wheel']
     target = out / Path(source).name
     with zipfile.ZipFile(source) as original, zipfile.ZipFile(target, 'w') as changed:
         for entry in original.infolist():
             payload = original.read(entry)
             if case == 'no-sbom' and '/sboms/' in entry.filename: continue
+            if case == 'no-metadata' and entry.filename.endswith('.dist-info/METADATA'): continue
+            if case == 'no-wheel-tags' and entry.filename.endswith('.dist-info/WHEEL'): continue
             if case == 'sbom-object' and '/sboms/' in entry.filename: payload = b'[]'
             if case == 'sbom' and '/sboms/' in entry.filename: payload = b'{"bomFormat":"wrong"}'
             if case == 'wheel-version' and entry.filename.endswith('/METADATA'):

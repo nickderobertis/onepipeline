@@ -64,6 +64,13 @@ def wheel_scripts(bundle, primary):
     return scripts
 
 
+def dist_info_member(wheel, name):
+    for member in wheel.namelist():
+        if member.endswith(f'.dist-info/{name}'):
+            return member
+    raise ValueError(f'wheel is missing its .dist-info/{name}')
+
+
 def tar_payload(bundle, name):
     member = bundle.getmember(name)
     if not member.isfile():
@@ -187,10 +194,10 @@ def verify(record, quiet=False):
         if sorted(Path(n).name for n in scripts) != sorted(record['executables']):
             raise ValueError('executable inventory differs from wheel')
         payload = wheel.read(next(n for n in scripts if Path(n).name == binary_name))
-        metadata = BytesParser().parsebytes(wheel.read(next(n for n in wheel.namelist() if n.endswith('/METADATA'))))
+        metadata = BytesParser().parsebytes(wheel.read(dist_info_member(wheel, 'METADATA')))
         if metadata['Name'] != 'onepipeline-cli' or metadata['Version'] != version:
             raise ValueError('wheel name/version mismatch')
-        tags = wheel.read(next(n for n in wheel.namelist() if n.endswith('/WHEEL'))).decode()
+        tags = wheel.read(dist_info_member(wheel, 'WHEEL')).decode()
         arch = 'arm64' if 'apple' in target and target.startswith('aarch64') else 'aarch64' if target.startswith('aarch64') else 'amd64' if 'windows' in target else 'x86_64'
         platforms = ['macosx_'] if 'apple' in target else ['win_'] if 'windows' in target else ['manylinux', 'musllinux', 'linux_']
         if not any(line.startswith('Tag: ') and line.endswith(arch) and

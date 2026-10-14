@@ -12,6 +12,7 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "nod
 import { join, resolve } from "node:path";
 import { test, after } from "node:test";
 import { workflows, runGraph, triggered, digest, matrix, evaluate } from "../workflow-graph.mjs";
+import { automaticNonPullRequestEvents } from "../macos-policy.mjs";
 
 const root = resolve(".");
 const scratch = mkdtempSync(
@@ -192,6 +193,37 @@ test("the real classifier keeps known non-PR events Mac-free and fails closed on
     assert.equal(result.macosRequired, true, eventName);
     assert.equal(result.reason, `unrecognised event: ${eventName}`);
   }
+});
+// Workflow triggers the workload's event classes do not model: such an event
+// would escape the telemetry and so both Mac budgets.
+function unmodelledTriggers(all) {
+  const modelled = new Set(classes.map(([, eventName]) => eventName));
+  return [
+    ...new Set(
+      Object.values(all).flatMap((workflow) =>
+        typeof workflow.on === "string"
+          ? [workflow.on]
+          : Array.isArray(workflow.on)
+            ? workflow.on
+            : Object.keys(workflow.on),
+      ),
+    ),
+  ]
+    .filter((eventName) => !modelled.has(eventName))
+    .sort();
+}
+test("the workload models every trigger the workflows declare and every event the classifier knows", () => {
+  const all = workflows();
+  assert.deepEqual(unmodelledTriggers(all), []);
+  const extended = structuredClone(all);
+  extended["ci.yml"].on.merge_group = null;
+  assert.deepEqual(unmodelledTriggers(extended), ["merge_group"]);
+  assert.deepEqual(
+    [...automaticNonPullRequestEvents].sort(),
+    [...new Set(classes.map(([, eventName]) => eventName))]
+      .filter((eventName) => eventName !== "pull_request")
+      .sort(),
+  );
 });
 const required = [
   "cross (macos-latest)",

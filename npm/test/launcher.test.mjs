@@ -236,6 +236,8 @@ describe("the npm distribution", () => {
     ["wheel-arch", "wheel architecture tag mismatch"],
     ["sbom", "invalid SBOM"],
     ["no-sbom", "missing SBOM"],
+    ["no-metadata", "wheel is missing its .dist-info/METADATA"],
+    ["no-wheel-tags", "wheel is missing its .dist-info/WHEEL"],
     ["macho", "Mach-O architecture mismatch"],
     ["archive-layout", "archive layout mismatch"],
     ["archive-payload", "archive executable differs"],
