@@ -251,6 +251,12 @@
     },
     "screenshots-bless": {
       "cache": false
+    },
+    "budgets": {
+      "cache": false
+    },
+    "budgets-host": {
+      "cache": false
     }
   }
 }

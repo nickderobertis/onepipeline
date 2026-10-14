@@ -1,0 +1,40 @@
+{
+  "name": "pool-maintenance",
+  "$schema": "../node_modules/nx/schemas/project-schema.json",
+  "projectType": "library",
+  "sourceRoot": "pool-maintenance",
+  "tags": ["scope:host", "lang:shell"],
+  "targets": {
+    "bootstrap": {
+      "command": "just _ensure-prune-superseded"
+    },
+    "build": {
+      "executor": "nx:noop"
+    },
+    "format": {
+      "command": "node node_modules/@biomejs/biome/bin/biome format --write pool-maintenance"
+    },
+    "format-check": {
+      "command": "node node_modules/@biomejs/biome/bin/biome format pool-maintenance"
+    },
+    "lint": {
+      "command": "node node_modules/@biomejs/biome/bin/biome lint pool-maintenance && bash -n pool-maintenance/measure.sh"
+    },
+    "test": {
+      "command": "node --test pool-maintenance/*.test.mjs",
+      "inputs": [
+        "{projectRoot}/**/*",
+        "{workspaceRoot}/**/project.json",
+        "{workspaceRoot}/.github/workflows/release-sweep.yml",
+        "sharedGlobals"
+      ]
+    },
+    "check": {
+      "executor": "nx:noop",
+      "dependsOn": ["format-check", "lint", "test"]
+    },
+    "budgets-host": {
+      "command": "just _pool-maintenance-budgets"
+    }
+  }
+}

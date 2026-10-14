@@ -67,4 +67,8 @@ jobs:
         run: just rerun-failed-coverage "$RUNNER_TEMP/quality-gate.log" "$RUNNER_TEMP/tests.tar.zst"
       - name: Committed generated files are up to date
         run: git diff --exit-code -- Cargo.lock package-lock.json
+      # The host budgets, after the gate: the pool-maintenance pass's measurement builds
+      # the workspace twice, so no per-change path reaches it (`just budgets-host`).
+      - name: Host budgets
+        run: just budgets-host
   # llmlint: ignore-end[no_second_broader_sweep_over_an_already_gated_commit]
