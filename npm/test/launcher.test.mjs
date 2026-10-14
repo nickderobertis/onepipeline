@@ -180,6 +180,20 @@ describe("the npm distribution", () => {
     }
     assert.match(workflow, /packages-dir: dist/);
     assert.match(workflow, /npm-artifacts\/\*\.tgz/);
+    for (const escaping of [
+      "staged-release/../outside/*.whl",
+      "staged-release//tmp/*.whl",
+      "staged-release/./publish-wheels/*.whl",
+    ]) {
+      const refused = spawnSync(
+        process.platform === "win32" ? "python" : "python3",
+        ["npm/test/artifact-transport.py", escaping, dist, join(work, "transport", "escape")],
+        { cwd: REPO_ROOT, encoding: "utf8" },
+      );
+      assert.notEqual(refused.status, 0, escaping);
+      assert.match(refused.stderr, /escapes its root/);
+      assert.equal(existsSync(join(work, "transport", "escape")), false);
+    }
   });
 
   it("refuses a staged record whose payload hash disagrees with the real packages", () => {
@@ -243,6 +257,8 @@ describe("the npm distribution", () => {
     ["wheel-dist-info", "exactly one .dist-info directory"],
     ["wheel-data-scheme", "unsafe wheel member"],
     ["wheel-filename", "wheel filename tags differ from its WHEEL tags"],
+    ["wheel-filename-version", "wheel filename name/version mismatch"],
+    ["wheel-repeat", "wheel repeats a member"],
     ["macho", "Mach-O architecture mismatch"],
     ["archive-layout", "archive layout mismatch"],
     ["archive-payload", "archive executable differs"],
