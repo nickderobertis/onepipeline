@@ -323,6 +323,7 @@ pub(crate) struct LandingRequest {
     /// The process doing the landing.
     pub(crate) pid: NonZeroU32,
     /// The host that pid means something on.
+    #[serde(deserialize_with = "said")]
     pub(crate) host: String,
     /// That process's start token, empty where this host would not say.
     pub(crate) started: String,
@@ -1569,6 +1570,7 @@ mod tests {
             ("session", serde_json::json!(" ")),
             ("landing_id", serde_json::json!("")),
             ("landing_id", serde_json::json!("landing:1@2")),
+            ("host", serde_json::json!(" ")),
             ("flow_id", serde_json::json!("a/b")),
             ("subjects", serde_json::json!([])),
             ("operation", serde_json::json!("rebase")),

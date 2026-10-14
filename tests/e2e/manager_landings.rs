@@ -2069,13 +2069,27 @@ fn unreadable_landing_state_fails_closed_and_records_from_before_landings_still_
     let (flow, id) = the_landing(&world);
     // The flow ended cleanly, and is owed nothing.
     assert_eq!(verdict(&world), json!({"verdict": "none"}));
-    // A cursor printed before landings resumes, replaying none of them.
+    // A cursor printed before landings resumes, replaying none of them — in a
+    // watch and in a monitor alike.
     watch(
         &world,
         &flow,
         &["--timeout", "0", "--cursor", &format!("flow:1:{flow}:")],
     )
     .ended_on(EXIT_SUCCESS, "ended");
+    world
+        .run(&[
+            "monitor",
+            "--flow",
+            &flow,
+            "--filter",
+            "detailed",
+            "--cursor",
+            &format!("flow:1:{flow}:"),
+        ])
+        .exited(0)
+        .out_lacks("landing-registered")
+        .out_lacks("landing-finished");
     // The detailed reader and `next` read the landing's whole journal; the
     // planner profile leaves its progress out.
     let detailed = world.run(&["next", "--flow", &flow, "--filter", "detailed"]);
@@ -3417,3 +3431,58 @@ fn a_landings_progress_and_the_flows_own_conditions_are_each_reported_once() {
     std::fs::write(&gate, "go").expect("the flow ends");
     let _ = parent.wait();
 }
+
+/// Inside a longer flow, a landing whose progress could not be relayed is
+/// settled refused — a blocker the flow's watch is woken on as that landing's
+/// terminal notice — while the flow it is a step of goes on, owed its watch.
+// llmlint: ignore-block[tests_mirror_real_usage] the repository's own `pre-push` hook appends a
+// record no reader can parse to the operation's stream, because `onevcs` only ever appends
+// whole envelopes; everything asserted is read back off the compiled binary.
+#[test]
+fn a_relay_that_fails_inside_a_longer_flow_is_its_landings_blocker_and_the_flow_goes_on() {
+    let (world, repository) = hooked_world(
+        "ml-unrelayed-nested",
+        "change-open",
+        "for stream in \"$ONEVCS_HOME\"/operations/o-*/events.ndjson; do printf 'not a record\\n' >> \"$stream\"; done; exit 0",
+    );
+    branch_with_work(&world, &repository, BRANCH, "widget.txt");
+    let mut parent = Parent::start(
+        &world,
+        "plan",
+        &["publish-branch", BRANCH, "--repo", "service", "--no-draft"],
+    );
+    parent.landing_pid(&world);
+    let (flow, id) = the_landing(&world);
+    assert_eq!(flow, "plan");
+    world.until("the landing to end", |world| {
+        landing_dir(world, &flow, &id).join("ending.json").is_file()
+    });
+    let mut cursor = format!("flow:2:{flow}:{id}@0:");
+    let refused = loop {
+        let next = watch(&world, &flow, &["--timeout", "0", "--cursor", &cursor]);
+        next.ended_on(EXIT_SUCCESS, "landing-progress");
+        cursor = next.cursor();
+        if next.record["kind"] == "landing-refused" {
+            break next;
+        }
+    };
+    assert_eq!(refused.record["significance"], json!("blocker"));
+    assert_eq!(
+        refused.record["status"],
+        json!(0),
+        "the verb itself succeeded"
+    );
+    // The flow it was a step of is still live, and owed its watch.
+    watch(
+        &world,
+        &flow,
+        &["--timeout", "0", "--cursor", &refused.cursor()],
+    )
+    .ended_on(ELAPSED, "elapsed");
+    let owed = world.run(&["unwatched", "--session", &world.session]);
+    owed.exited(OWED);
+    assert!(owed.stdout.contains("LIVE"), "{}", owed.stdout);
+    std::fs::write(&parent.gate, "go").expect("the flow ends");
+    let _ = parent.child.wait();
+}
+// llmlint: ignore-end[tests_mirror_real_usage]

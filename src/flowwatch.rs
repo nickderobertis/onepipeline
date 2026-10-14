@@ -858,7 +858,14 @@ pub(crate) fn events(
     let mut events = Vec::new();
     for landing in landings_of(flow)? {
         crate::land::settle_death(root, flow, &landing)?;
-        let at = known.landings.get(landing.id()).copied().unwrap_or(0);
+        let at = known
+            .landings
+            .get(landing.id())
+            .copied()
+            .unwrap_or_else(|| match known.unnamed {
+                Unnamed::FromStart => 0,
+                Unnamed::FromEnd => end_of(&landing.journal()),
+            });
         let (fresh, through) = crate::journal::finished_after(&landing.journal(), at);
         known.landings.insert(landing.id().to_owned(), through);
         events.extend(fresh.into_iter().filter(|event| filter.matches(event)));

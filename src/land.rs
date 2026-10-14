@@ -266,13 +266,30 @@ fn forward(
 fn report_integration(integrated: onevcs::Result<onevcs::Integration>) -> i32 {
     match integrated {
         Ok(outcome) => {
-            println!("Integration train for {}:", outcome.base);
-            for branch in &outcome.branches {
-                println!("  {}: {}", branch.branch, branch.status.describe());
-            }
             let said = |yes: bool| if yes { "yes" } else { "no" };
-            println!("Base advanced: {}", said(outcome.ending.advanced()));
-            println!("Pushed: {}", said(outcome.ending.pushed()));
+            let mut rendered = format!("Integration train for {}:\n", outcome.base);
+            for branch in &outcome.branches {
+                rendered.push_str(&format!(
+                    "  {}: {}\n",
+                    branch.branch,
+                    branch.status.describe()
+                ));
+            }
+            rendered.push_str(&format!(
+                "Base advanced: {}\nPushed: {}\n",
+                said(outcome.ending.advanced()),
+                said(outcome.ending.pushed())
+            ));
+            // A reader that closed the pipe early is told on standard error; the
+            // train's own status is still what the landing settles with.
+            use std::io::Write;
+            let mut out = std::io::stdout().lock();
+            if let Err(error) = out
+                .write_all(rendered.as_bytes())
+                .and_then(|()| out.flush())
+            {
+                eprintln!("onepipeline: integrate could not write its report: {error}");
+            }
             0
         }
         Err(error) => {

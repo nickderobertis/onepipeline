@@ -841,11 +841,13 @@ under `ONEPIPELINE_LAUNCHER_SESSION`, and `--until landing-progress` — in the
 default set — returns `0` on a landing event its `--filter` profile admits: under
 the shipped `planner` profile a milestone or a blocker, never progress, with
 `--filter detailed` waking on every event. `--all` is a run's alone.
+<!-- llmlint: ignore-block[no_redundant_instruction_pointers] this README is the page crates.io, PyPI and npm publish, read by a user with none of this repository's agent instructions in hand, so its links to the document that states the surface are the only route such a reader has to it. -->
 [`docs/stop-guard.md`](docs/stop-guard.md#flows) states it, with the flow's own
 channel and what `unwatched` owes a flow. Under a
 wake budget a watch given no `--timeout` gives up the wake reserve
 [`docs/stop-guard.md`](docs/stop-guard.md#the-wake-reserve) names before the budget, so it
 has returned by the time the budget is spent.
+<!-- llmlint: ignore-end[no_redundant_instruction_pointers] -->
 
 ## Where a dispatch runs
 
