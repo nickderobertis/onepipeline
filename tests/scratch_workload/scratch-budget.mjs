@@ -7,12 +7,13 @@ if (selector !== "ending" && selector !== "discard") {
 }
 
 // llmlint: ignore-block[boundary_inputs_validated] The task explicitly assigns telemetry
-// result presence, shape, finiteness and threshold validation to onebudgetspec. This
-// analysis only reads the journey's recording and reports its figures through the SDK.
+// result presence, shape, finiteness and threshold validation to onebudgetspec, and forbids
+// this analysis a second validator. It only reads the journey's recording, its fields
+// included, and reports their figures through the SDK, which owns validating them.
+// `tests/scratch_workload/main.rs` drives it over synthetic recordings.
 const recording = JSON.parse(
   readFileSync("../../target/budget-records/scratch-workload.json", "utf8"),
 );
-// llmlint: ignore-end[boundary_inputs_validated]
 const describe = (name, timing) =>
   `${name}: ${timing.entries} entries, ${timing.dirs} directories, ${timing.bytes} bytes, ${timing.seconds.toFixed(3)} seconds`;
 if (selector === "ending") {
@@ -26,3 +27,4 @@ if (selector === "ending") {
     `${describe("discard removal", recording.discard)}; state check ${recording.discard.state_seconds.toFixed(3)} seconds; invocation to exit ${recording.discard.wall_seconds.toFixed(3)} seconds`,
   );
 }
+// llmlint: ignore-end[boundary_inputs_validated]
