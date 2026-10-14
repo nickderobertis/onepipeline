@@ -177,6 +177,11 @@ mod loopcost;
 // project edged narrower would drop them out of `nx affected` for the very changes they
 // exist to catch. Same grounds as `mod dispatch_env_hook` above.
 mod maintenance;
+// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] what these journeys exercise is
+// `land`, `flow`, `flowwatch`, `unwatched`, `unpublished` and `stopguard` together against the
+// linked `onevcs` over a real origin, so the narrowest edge they can honestly sit behind is the
+// crate itself, which is this target's. Same grounds as `mod flow` and `mod lifecycle` above.
+mod manager_landings;
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the reason is at the
 // head of the leaving-driver journey in `tests/e2e/malformed_envelopes.rs` and is not
 // restated here; this declaration is the other site the rule reads, and what it adds is
