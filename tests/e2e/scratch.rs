@@ -681,32 +681,35 @@ fn retry_retains_a_new_ending_then_undriven_success_removes_the_tree() {
 /// instruction, which the verb would refuse, wait for the run's next ending.
 #[test]
 fn a_run_made_live_again_shows_no_scratch_notice_until_it_ends_again() {
-    let world = World::new("scratch-live-again");
+    for partly_discarded in [false, true] {
+        made_live_again_after(partly_discarded);
+    }
+}
+
+fn made_live_again_after(partly_discarded: bool) {
+    use std::os::unix::fs::PermissionsExt;
+    let world = World::new(if partly_discarded {
+        "scratch-live-again-discarded"
+    } else {
+        "scratch-live-again"
+    });
     world.script("build.fail", "1");
     let run = settle(&world, "relive", vec![agent("build", &[])]);
     assert_retained(&world, &run, "failed", 1);
-    // A discard the filesystem partly refuses leaves its failure line as the
-    // latest record, which a run made live again must not print either.
-    use std::os::unix::fs::PermissionsExt;
-    let blocked = world.run_file(&run, "scratch/blocked");
-    std::fs::create_dir_all(&blocked).unwrap();
-    std::fs::write(blocked.join("data"), "written before the discard").unwrap();
     struct RestorePermissions(std::path::PathBuf);
     impl Drop for RestorePermissions {
         fn drop(&mut self) {
             let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
         }
     }
+    let blocked = world.run_file(&run, "scratch/blocked");
     let _restore = RestorePermissions(blocked.clone());
-    std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o555)).unwrap();
-    world.run(&["scratch", "discard", &run]).exited(1);
-    let (status, results) = read_views(&world, &run);
-    let failure = format!(
-        "  scratch: 1 dir(s) could not be removed: {}: ",
-        blocked.display()
-    );
-    assert!(status.contains(&failure), "{status}");
-    assert!(results.contains(&failure), "{results}");
+    if partly_discarded {
+        // A discard the filesystem partly refuses leaves its failure line as the
+        // latest record, which a run made live again must not print either.
+        partly_discard(&world, &run, &blocked);
+    }
+
     world.script("again.wait", "hold");
     world.script("again.turn-open", "");
     reply(
@@ -743,6 +746,21 @@ fn a_run_made_live_again_shows_no_scratch_notice_until_it_ends_again() {
     });
     let latest = assert_retained(&world, &run, "failed", 2);
     assert_eq!(latest["dirs"].as_array().unwrap().len(), 2);
+}
+
+fn partly_discard(world: &World, run: &str, blocked: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(blocked).unwrap();
+    std::fs::write(blocked.join("data"), "written before the discard").unwrap();
+    std::fs::set_permissions(blocked, std::fs::Permissions::from_mode(0o555)).unwrap();
+    world.run(&["scratch", "discard", run]).exited(1);
+    let (status, results) = read_views(world, run);
+    let failure = format!(
+        "  scratch: 1 dir(s) could not be removed: {}: ",
+        blocked.display()
+    );
+    assert!(status.contains(&failure), "{status}");
+    assert!(results.contains(&failure), "{results}");
 }
 
 #[test]
