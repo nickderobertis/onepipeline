@@ -1177,9 +1177,9 @@ pub(crate) struct Retarget {
 /// Move a readjusted draft's change request onto its new base, writing its description
 /// with only the Stack block rewritten, in one write.
 ///
-/// A description no read of this trigger returned is read first, in a standings read of
-/// that one change request: the block is spliced into the text the host holds now, so
-/// nothing a person wrote outside its markers moves.
+/// The block is spliced into the description this driver's batched read returned, so
+/// nothing a person wrote outside its markers moves; a draft no such read answered is
+/// refused, and stays owed until the next trigger's read.
 pub(crate) fn retarget(retarget: &Retarget) -> Result<crate::payload::RetargetWord> {
     let change = retarget
         .change
