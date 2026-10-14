@@ -348,6 +348,7 @@ impl Asked {
 pub(crate) enum Answered {
     Performed {
         error: Option<String>,
+        // llmlint: ignore[invalid_states_unrepresentable] these are node ids read off the folded `RunState`'s own keys, which come from the validated graph and are `String` throughout this crate, which has no node-identity type; they are only printed, never parsed or executed, and no external input reaches this field.
         outstanding: Vec<String>,
     },
     Requested(u64),
