@@ -254,11 +254,12 @@ fn the_document_reader_names_a_constraining_difference_and_a_prose_one_apart() {
     assert_eq!(found, ["/properties/extra"]);
 }
 
-/// And `Phase`'s prose really is the one difference the assertion above tolerates
-/// — so a second one appearing is something somebody decided rather than
-/// something this reader was already letting through.
+/// And `Phase`'s prose and the `significance` matcher really are the only
+/// differences the assertion above tolerates — so a further one appearing is
+/// something somebody decided rather than something this reader was already
+/// letting through.
 #[test]
-fn the_only_prose_that_moved_is_the_phase_its_producer_now_owns() {
+fn what_moved_since_the_capture_is_the_phase_prose_and_the_significance_matcher() {
     let captured = captured();
     let registry = registry();
     let mut moved: Vec<String> = Vec::new();

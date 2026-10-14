@@ -1213,9 +1213,9 @@ fn git_in<'a>(
 pub(crate) struct Supervision {
     /// The flow that holds it.
     flow: Flow,
-    /// Whether this process registered `flow` for this landing alone, so the
-    /// flow ends when the landing does.
-    holds_the_flow: bool,
+    /// Whose flow it is: one registered for this landing alone, which ends when
+    /// the landing does, or a longer one it is a step of.
+    holding: Holding,
     /// The landing, as registered.
     landing: Registered,
     /// Its journal and every associated run's, behind one lock the relay thread
@@ -1255,11 +1255,11 @@ impl Supervision {
         };
         let runs = associated_runs(root, &subjects).map_err(refused)?;
         let lock = crate::flow::registration_lock(root).map_err(|e| refused(e.to_string()))?;
-        let (flow, holds_the_flow) = match crate::flow::inherited()
+        let (flow, holding) = match crate::flow::inherited()
             .and_then(|id| Flow::open(root, id.as_str()).ok())
             .filter(Flow::is_live)
         {
-            Some(parent) if parent.record.session == session => (parent, false),
+            Some(parent) if parent.record.session == session => (parent, Holding::ParentFlow),
             Some(parent) => {
                 return Err(refused(format!(
                     "this process runs in flow '{}', which belongs to session [{}], not to this \
@@ -1281,7 +1281,7 @@ impl Supervision {
                 let flow =
                     crate::flow::register(root, operation.as_str(), session, &first, &rest, None)
                         .map_err(|e| refused(e.to_string()))?;
-                (flow, true)
+                (flow, Holding::OwnFlow)
             }
         };
         let landing_id = format!("landing-{}", crate::watchers::nonce());
@@ -1315,17 +1315,25 @@ impl Supervision {
             });
         if let Err(why) = placed {
             let _ = std::fs::remove_dir_all(&staged);
-            if holds_the_flow {
+            if holding == Holding::OwnFlow {
                 crate::flow::record_ending(&flow, REGISTRATION_FAILED);
             }
             return Err(refused(why));
         }
         drop(lock);
         let landing = Registered { dir, request };
-        let relay = Relay::open(&flow, &landing, root);
+        let relay = match Relay::open(&flow, &landing, root) {
+            Ok(relay) => relay,
+            Err(error) => {
+                if holding == Holding::OwnFlow {
+                    crate::flow::record_ending(&flow, REGISTRATION_FAILED);
+                }
+                return Err(refused(error.to_string()));
+            }
+        };
         let mut supervision = Self {
             flow,
-            holds_the_flow,
+            holding,
             landing,
             relay: Arc::new(Mutex::new(relay)),
             relay_failed: None,
@@ -1337,13 +1345,13 @@ impl Supervision {
                 crate::sys::session_digest(session)
             ),
         ) {
-            if supervision.holds_the_flow {
+            if supervision.holding == Holding::OwnFlow {
                 crate::flow::record_ending(&supervision.flow, REGISTRATION_FAILED);
             }
-            supervision.record_ending(REGISTRATION_FAILED);
+            let _ = supervision.record_ending(REGISTRATION_FAILED);
             return Err(refused(error.to_string()));
         }
-        if supervision.holds_the_flow {
+        if supervision.holding == Holding::OwnFlow {
             eprintln!(
                 "flow {id}: watch it with: onepipeline watch --flow {id}",
                 id = supervision.flow.id()
@@ -1453,10 +1461,14 @@ impl Supervision {
             Ok(status) => *status,
             Err(error) => error.exit_code(),
         };
-        self.record_ending(status);
-        let refused = status != 0 || self.relay_failed.is_some();
+        let ending_kept = self.record_ending(status);
+        let refused = status != 0 || self.relay_failed.is_some() || !ending_kept;
         let message = match (&forwarded, &self.relay_failed) {
             (Err(error), _) => format!("refused: {}", crate::views::one_line(&error.to_string())),
+            (Ok(_), None) if !ending_kept => format!(
+                "the forwarded verb ended with status {status}, and that ending could not be \
+                 recorded, so the landing reads as died once its process is gone"
+            ),
             (Ok(_), Some(why)) => format!(
                 "its operation's progress could not be relayed, so it is not fully supervised: \
                  {why}"
@@ -1487,7 +1499,7 @@ impl Supervision {
                 self.landing.id()
             );
         }
-        if self.holds_the_flow {
+        if self.holding == Holding::OwnFlow {
             // Fail closed: a landing whose progress or ending could not be kept
             // leaves a flow owed closure even where the verb itself succeeded.
             let flow_status = if status == 0 && (refused || recorded.is_err()) {
@@ -1500,26 +1512,40 @@ impl Supervision {
         forwarded
     }
 
-    /// Write `ending.json`, saying on standard error where it could not be: an
-    /// unrecorded ending reads as a death once this process is gone, which is
-    /// owed closure — never a success nobody recorded.
-    fn record_ending(&mut self, status: i32) {
+    /// Write `ending.json`, saying on standard error where it could not be, and
+    /// answer whether it was kept: an unrecorded ending reads as a death once
+    /// this process is gone, which is owed closure — never a success nobody
+    /// recorded.
+    fn record_ending(&mut self, status: i32) -> bool {
         let ending = crate::flow::LandingEnding {
             schema_version: crate::flow::FLOW_SCHEMA_VERSION,
             landing_id: self.landing.id().to_owned(),
             status,
             at: crate::sys::now_rfc3339(),
         };
-        if let Err(error) =
-            crate::ledger::write_json(&self.landing.dir.join("ending.json"), &ending)
-        {
-            eprintln!(
-                "onepipeline: landing {}: its ending (status {status}) could not be recorded, so \
-                 it will read as died: {error}",
-                self.landing.id()
-            );
+        match crate::ledger::write_json(&self.landing.dir.join("ending.json"), &ending) {
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!(
+                    "onepipeline: landing {}: its ending (status {status}) could not be recorded, \
+                     so it will read as died: {error}",
+                    self.landing.id()
+                );
+                false
+            }
         }
     }
+}
+
+/// Whether a landing's process holds the flow it is supervised in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Holding {
+    /// The flow was registered for this landing alone: its holder is this
+    /// process, and its ending is the landing's.
+    OwnFlow,
+    /// The landing is one step of a longer flow of the same session, which goes
+    /// on when the landing ends.
+    ParentFlow,
 }
 
 /// The status a landing's flow ends with where registration, relay or the
@@ -1567,6 +1593,7 @@ const RELAY_POLL: std::time::Duration = std::time::Duration::from_millis(20);
 /// Where one landing's progress is written: its own journal and every
 /// associated run's, each appended through the store's locked writer and never
 /// twice for one record of the operation.
+// llmlint: ignore-block[invalid_states_unrepresentable] the ids are the labels every relayed record carries, as JSON strings on the wire, and each was checked where it was read: the landing and flow ids against the directories their request sits in, the run ids by `LandingRequest`'s own run-id rule, and the operation id by `onevcs::OperationHandle::open`, which refuses one it cannot open. A newtype per id would be a conversion back to the same string at the one place each is used.
 pub(crate) struct Relay {
     landing_id: String,
     flow_id: String,
@@ -1577,13 +1604,21 @@ pub(crate) struct Relay {
     seen: Seen,
 }
 
+// llmlint: ignore-end[invalid_states_unrepresentable]
+
 /// The `(stream, seq)` of every operation record a journal already holds.
 type Seen = std::collections::HashSet<(String, u64)>;
 
 impl Relay {
     /// The journals of `landing` and of every run it names.
-    fn open(flow: &Flow, landing: &Registered, root: &Path) -> Self {
-        let operation_id = landing.operation_id().ok().flatten();
+    ///
+    /// # Errors
+    ///
+    /// An operation record that is there and cannot be read: relaying as though
+    /// the landing were legacy coarse-only work would drop the evidence its
+    /// operation recorded.
+    fn open(flow: &Flow, landing: &Registered, root: &Path) -> Result<Self> {
+        let operation_id = landing.operation_id().map_err(Error::Invalid)?;
         let runs = landing
             .request
             .runs
@@ -1594,29 +1629,14 @@ impl Relay {
                 (run.clone(), crate::journal::Journal::open(&paths), seen)
             })
             .collect();
-        Self {
+        Ok(Self {
             landing_id: landing.id().to_owned(),
             flow_id: flow.id().to_owned(),
             seen: seen_in(&landing.journal(), operation_id.as_deref()),
             operation_id,
             journal: LandingJournal::open(landing.journal()),
             runs,
-        }
-    }
-
-    /// The labels every record of this landing carries beside its own.
-    fn label(&self, labels: &mut Labels) {
-        labels
-            .extra
-            .insert("landing_id".to_owned(), self.landing_id.clone().into());
-        labels
-            .extra
-            .insert("flow_id".to_owned(), self.flow_id.clone().into());
-        if let Some(operation) = &self.operation_id {
-            labels
-                .extra
-                .insert("operation_id".to_owned(), operation.clone().into());
-        }
+        })
     }
 
     /// Record one landing transition, stamped with its significance.
@@ -1625,14 +1645,12 @@ impl Relay {
         kind: PipelineKind,
         payload: serde_json::Map<String, serde_json::Value>,
     ) -> Result<()> {
-        let mut labels = Labels::default();
-        self.label(&mut labels);
-        if let Some(significance) = crate::flow::landing_significance(kind) {
-            labels.extra.insert(
-                "significance".to_owned(),
-                serde_json::to_value(significance).unwrap_or_default(),
-            );
-        }
+        let labels = landing_labels(
+            &self.landing_id,
+            &self.flow_id,
+            self.operation_id.as_deref(),
+            crate::flow::landing_significance(kind),
+        );
         self.journal.emit(kind, labels.clone(), payload.clone())?;
         for (run, journal, _) in &mut self.runs {
             let mut labels = labels.clone();
@@ -1648,9 +1666,11 @@ impl Relay {
         let mut value = serde_json::to_value(envelope)
             .map_err(|e| Error::Invalid(format!("an operation event did not serialize: {e}")))?;
         let key = (envelope.stream.clone(), envelope.seq);
+        // The producer's own `operation_id` and `significance` are kept as it
+        // stamped them; this landing's two labels are added beside them.
+        let ours = landing_labels(&self.landing_id, &self.flow_id, None, None);
         if let Some(labels) = value.get_mut("labels").and_then(|l| l.as_object_mut()) {
-            labels.insert("landing_id".to_owned(), self.landing_id.clone().into());
-            labels.insert("flow_id".to_owned(), self.flow_id.clone().into());
+            labels.extend(ours.extra);
         }
         let crossed: Envelope = serde_json::from_value(value).map_err(|e| {
             Error::Invalid(format!(
@@ -1669,6 +1689,37 @@ impl Relay {
         }
         Ok(())
     }
+}
+
+/// The labels a landing's records carry beside their own: the landing, its
+/// flow, the operation it prepared once it has, and — on the engine's own
+/// transitions — the significance it stamps. The one place their names are
+/// spelled.
+fn landing_labels(
+    landing: &str,
+    flow: &str,
+    operation: Option<&str>,
+    significance: Option<onevcs::Significance>,
+) -> Labels {
+    let mut labels = Labels::default();
+    labels
+        .extra
+        .insert("landing_id".to_owned(), landing.to_owned().into());
+    labels
+        .extra
+        .insert("flow_id".to_owned(), flow.to_owned().into());
+    if let Some(operation) = operation {
+        labels
+            .extra
+            .insert("operation_id".to_owned(), operation.to_owned().into());
+    }
+    if let Some(significance) = significance {
+        labels.extra.insert(
+            "significance".to_owned(),
+            serde_json::to_value(significance).unwrap_or_default(),
+        );
+    }
+    labels
 }
 
 /// The `(stream, seq)` of every record of `operation` a journal already holds.
@@ -1831,7 +1882,7 @@ pub(crate) fn settle_death(root: &Path, flow: &Flow, landing: &Registered) -> Re
     if ended {
         return Ok(());
     }
-    let mut relay = Relay::open(flow, landing, root);
+    let mut relay = Relay::open(flow, landing, root)?;
     let mut evidence = "no operation was prepared".to_owned();
     if let Some(operation) = relay.operation_id.clone() {
         evidence = match onevcs::OperationHandle::open(&operation)
@@ -1953,6 +2004,41 @@ mod tests {
             !valued.iter().any(|known| known == "--policy"),
             "{valued:?}"
         );
+    }
+
+    /// Entry 123 of `docs/contract-divergences.md` names the labels a landing's
+    /// records carry, and they are exactly the ones this builds.
+    #[test]
+    fn the_landing_labels_are_the_ones_the_divergence_record_names() {
+        let record = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("docs")
+                .join("contract-divergences.md"),
+        )
+        .expect("the divergence record ships");
+        let entry = record
+            .split("\n## ")
+            .find(|entry| entry.starts_with("123."))
+            .expect("entry 123 is recorded");
+        let block: serde_json::Value = serde_json::from_str(
+            entry
+                .split("```json")
+                .nth(1)
+                .and_then(|rest| rest.split("```").next())
+                .expect("entry 123 carries its block"),
+        )
+        .expect("the block is JSON");
+        let built: Vec<String> = landing_labels(
+            "landing-1",
+            "plan",
+            Some("o-1"),
+            Some(onevcs::Significance::Progress),
+        )
+        .extra
+        .keys()
+        .cloned()
+        .collect();
+        assert_eq!(block["labels"], serde_json::json!(built));
     }
 
     /// A death reads as the producer classified it, and a truncated detail says so.

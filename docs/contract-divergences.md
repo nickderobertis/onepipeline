@@ -10535,11 +10535,10 @@ would resolve a second engine under this manifest's unchanged pin.
 
 **Proposal, for the planner who owns the contract: supervise every landing a
 manager starts directly — `onepipeline publish-branch`, `repo-recover` and the
-new `onepipeline integrate` — as work of that manager's flow, exactly as the
-*Manager landings* part of the Flows section of [`docs/stop-guard.md`](stop-guard.md)
-states it.** That section is the one statement of the surface and is not
-restated here; this entry records why it exists, what it adds to the contract's
-declarations, and where it departs from the task that specified it.
+new `onepipeline integrate` — as work of that manager's flow, as the *Manager
+landings* surface of the Flows section states it.** This entry records why it
+exists, what it adds to the contract's declarations, and where it departs from
+the task that specified it.
 
 **What was wrong.** A landing a manager ran by hand was one blocking call the
 manager's watch and stop hook knew nothing about. A required check failing, a

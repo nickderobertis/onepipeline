@@ -651,7 +651,12 @@ impl Verb {
     /// `integrate` of an ordered train of three branches, pushing the base,
     /// from the registered checkout.
     fn integrate(name: &str) -> Self {
-        let (world, repository, held) = held_world(name, "local-direct");
+        Self::integrate_under(name, "local-direct")
+    }
+
+    /// [`integrate`](Self::integrate), in an identity publishing `publication`.
+    fn integrate_under(name: &str, publication: &str) -> Self {
+        let (world, repository, held) = held_world(name, publication);
         for branch in TRAIN {
             branch_with_work(&world, &repository, branch, &format!("{branch}.txt"));
         }
@@ -840,8 +845,10 @@ fn each_verb_refused_by_onevcs_ends_refused_and_owes_closure() {
             words(&["repo-recover", "missing", "--repo", "service", "--no-draft"]),
         ),
         (
-            Verb::integrate("ml-no-integrate"),
-            words(&["integrate", "train-a", "missing", "--push"]),
+            // A train is refused for an identity whose rules do not publish
+            // `local-direct`; it is resolved and registered first.
+            Verb::integrate_under("ml-no-integrate", "change-open"),
+            words(&["integrate", "train-a", "train-b", "--push"]),
         ),
     ] {
         let world = &verb.world;
@@ -852,16 +859,9 @@ fn each_verb_refused_by_onevcs_ends_refused_and_owes_closure() {
         let (flow, id) = the_landing(world);
         let ending = sidecar(world, &flow, &id, "ending.json");
         assert_eq!(ending["status"], json!(code), "{out}\n{said}");
+        assert_ne!(code, 0, "{}: {out}\n{said}", verb.operation);
         let every = journal(world, &flow, &id);
         let last = every.last().expect("a journal");
-        if code == 0 {
-            // A train that skips a member it cannot find still lands the rest:
-            // `onevcs` reports the skip and succeeds, and so does the landing.
-            assert_eq!(verb.operation, "integrate", "{out}\n{said}");
-            assert_eq!(last["kind"], json!("landing-finished"));
-            assert!(out.contains("missing: skipped"), "{out}");
-            continue;
-        }
         assert_eq!(last["kind"], json!("landing-refused"), "{every:?}");
         assert_eq!(last["payload"]["status"], json!(code));
         assert_eq!(last["labels"]["significance"], json!("blocker"));
@@ -2082,8 +2082,14 @@ fn unreadable_landing_state_fails_closed_and_records_from_before_landings_still_
     }
 
     // Now the request is unreadable.
+    // llmlint: ignore-block[tests_mirror_real_usage] the sidecar is written to directly
+    // because no verb leaves a landing whose request cannot be read: registration writes
+    // it whole and renames it into place. What is arranged is what a truncated disk or a
+    // hand edit leaves, which is the state the fail-closed reads exist for; everything
+    // asserted about it is read back off the compiled binary's own verbs.
     let request = landing_dir(&world, &flow, &id).join("request.json");
     std::fs::write(&request, "{").expect("tampered");
+    // llmlint: ignore-end[tests_mirror_real_usage]
     let blocked = verdict(&world);
     assert_eq!(blocked["verdict"], json!("block"), "{blocked}");
     let owed = world.run(&["unwatched", "--session", &world.session]);
@@ -2270,6 +2276,10 @@ fn a_branch_acknowledgement_and_a_landing_registration_never_interleave() {
     preserved_by_session(&world, "service", BRANCH, &world.session);
     let go = world.root.join("push.go");
     hold_pushes(&world, &go);
+    // llmlint: ignore-block[tests_mirror_real_usage] the registration lock is taken by
+    // this journey because no command holds it open past its own check and write — which
+    // is the whole of what it promises — so there is no interface to hold the window open
+    // through. Both contenders are the compiled binary, driven as a manager drives it.
     let flows = world.runs.join(".flows");
     std::fs::create_dir_all(&flows).expect("the flows directory");
     let lock = std::fs::OpenOptions::new()
@@ -2282,6 +2292,7 @@ fn a_branch_acknowledgement_and_a_landing_registration_never_interleave() {
         // SAFETY: a descriptor this journey just opened and still owns.
         assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
     }
+    // llmlint: ignore-end[tests_mirror_real_usage]
     let landing = Started::spawn(
         &world,
         None,
@@ -2433,4 +2444,366 @@ fn repo_recover_is_owned_before_it_drafts() {
             .all(|(_, significance)| significance != "progress"),
         "{woken:?}"
     );
+}
+
+/// A world whose single repository's own `pre-push` hook runs `script` with
+/// `sh -c` at each publishing push, and then lets it through.
+fn hooked_world(name: &str, publication: &str, script: &str) -> (World, Repository) {
+    let world = World::new(name);
+    let repository = world.repository(publication, &["sh", "-c", script]);
+    (world, repository)
+}
+
+/// Make `path` read-only, or writable again.
+///
+/// The failure journeys below stage a host that refuses a write — the one
+/// condition no verb leaves behind — by taking write permission away from the
+/// directory or file a landing writes, and giving it back before reading.
+// llmlint: ignore-block[tests_mirror_real_usage] what is changed is the host's permission on
+// a path, never the content a verb wrote: a disk or a directory that refuses writes is the
+// condition each of these journeys is about, and no command of this crate or its siblings
+// produces one. Everything asserted is read back off the compiled binary.
+fn writable(path: &Path, yes: bool) {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = match (path.is_dir(), yes) {
+        (true, true) => 0o755,
+        (true, false) => 0o555,
+        (false, true) => 0o644,
+        (false, false) => 0o444,
+    };
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+        .unwrap_or_else(|e| panic!("{} could not be re-permitted: {e}", path.display()));
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// A registration that cannot be kept starts no work at all — no flow where
+/// none could be written, no landing where its request could not be placed
+/// inside a longer flow — and the manager is told it was refused.
+#[test]
+fn a_registration_that_cannot_be_kept_starts_no_work() {
+    // No flow can be registered under a runs root whose flows cannot be written.
+    let world = World::new("ml-unregistered");
+    let repository = world.repository("change-open", &[]);
+    branch_with_work(&world, &repository, BRANCH, "widget.txt");
+    let flows = world.runs.join(".flows");
+    std::fs::create_dir_all(&flows).expect("the flows directory");
+    std::fs::write(flows.join("landings.lock"), "").expect("the lock exists");
+    writable(&flows, false);
+    let refused = world.run(&["publish-branch", BRANCH, "--repo", "service", "--no-draft"]);
+    writable(&flows, true);
+    refused.exited(REFUSED).err_has(
+        "could not be registered with its manager session, so nothing was drafted or forwarded",
+    );
+    assert!(world.changes_opened().is_empty());
+    assert!(landings(&world).is_empty());
+
+    // Inside a longer flow, a landing whose request cannot be placed is refused,
+    // and the flow it would have joined goes on.
+    let world = World::new("ml-unplaced");
+    let repository = world.repository("change-open", &[]);
+    branch_with_work(&world, &repository, BRANCH, "widget.txt");
+    let gate = world.root.join("start.go");
+    let said = world.root.join("landing.said");
+    let script = world.root.join("plan.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "while [ ! -f '{gate}' ]; do sleep 0.05; done\n\"$ONEPIPELINE_FAKE_CLI_BIN\" publish-branch {BRANCH} --repo service --no-draft 2> '{said}'\necho $? > '{said}.status'\nwhile [ ! -f '{gate}.end' ]; do sleep 0.05; done\n",
+            gate = gate.display(),
+            said = said.display()
+        ),
+    )
+    .expect("the program is written");
+    let mut parent = world
+        .cmd(&[
+            "flow",
+            "run",
+            "--name",
+            "plan",
+            "--",
+            "sh",
+            script.to_str().expect("a path"),
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("flow run starts");
+    world.until("the flow to register", |world| {
+        world.runs.join(".flows/plan/flow.json").is_file()
+    });
+    let placed = world.runs.join(".flows/plan").join("landings");
+    std::fs::create_dir_all(&placed).expect("the landings directory");
+    writable(&placed, false);
+    std::fs::write(&gate, "go").expect("the landing starts");
+    let status = PathBuf::from(format!("{}.status", said.display()));
+    world.until("the landing to end", |_| status.is_file());
+    writable(&placed, true);
+    assert_ne!(
+        std::fs::read_to_string(&status).expect("a status").trim(),
+        "0"
+    );
+    assert!(std::fs::read_to_string(&said)
+        .expect("what the landing said")
+        .contains("could not be registered"),);
+    assert!(landings(&world).is_empty());
+    assert!(
+        std::fs::read_dir(&placed)
+            .expect("the landings directory")
+            .next()
+            .is_none(),
+        "a staged registration was left behind"
+    );
+    assert!(world.changes_opened().is_empty());
+    watch(&world, "plan", &["--timeout", "0"]).ended_on(ELAPSED, "elapsed");
+    std::fs::write(PathBuf::from(format!("{}.end", gate.display())), "go").expect("the flow ends");
+    let _ = parent.wait();
+}
+
+/// An operation `onevcs` will not prepare forwards nothing: the landing is
+/// refused before its first push, and its flow is owed closure.
+#[test]
+fn an_operation_that_cannot_be_prepared_forwards_nothing() {
+    let verb = Verb::publish("ml-unprepared");
+    let world = &verb.world;
+    let operations = world.onevcs_home().join("operations");
+    std::fs::create_dir_all(&operations).expect("the operations directory");
+    writable(&operations, false);
+    let started = verb.start();
+    let (code, _, said) = started.ended();
+    writable(&operations, true);
+    assert_eq!(code, REFUSED, "{said}");
+    assert!(
+        said.contains("would not prepare the landing's operation"),
+        "{said}"
+    );
+    assert!(!verb.held.holding(), "an unprepared landing pushed");
+    assert!(world.changes_opened().is_empty());
+    let (flow, id) = the_landing(world);
+    assert!(!landing_dir(world, &flow, &id)
+        .join("operation.json")
+        .exists());
+    assert_eq!(
+        kinds(world, &flow, &id),
+        ["landing-registered", "landing-refused"]
+    );
+    watch(world, &flow, &["--timeout", "0"]).ended_on(EXIT_FLOW_FAILED, "flow-failed");
+}
+
+/// A landing whose operation's progress cannot be relayed — the stream holds a
+/// record no reader can parse — still answers the forwarded verb's status, but
+/// is settled refused, a blocker, and its own flow fails closed.
+#[test]
+fn a_relay_that_fails_keeps_the_verbs_status_and_fails_the_flow_closed() {
+    let (world, repository) = hooked_world(
+        "ml-unrelayed",
+        "change-open",
+        "for stream in \"$ONEVCS_HOME\"/operations/o-*/events.ndjson; do printf 'not a record\\n' >> \"$stream\"; done; exit 0",
+    );
+    branch_with_work(&world, &repository, BRANCH, "widget.txt");
+    let landed = world.run(&["publish-branch", BRANCH, "--repo", "service", "--no-draft"]);
+    landed.exited(0).err_has("could not be relayed");
+    assert_eq!(world.changes_opened().len(), 1, "the verb itself landed");
+    let (flow, id) = the_landing(&world);
+    let every = journal(&world, &flow, &id);
+    let last = every.last().expect("a journal");
+    assert_eq!(last["kind"], json!("landing-refused"), "{every:?}");
+    assert_eq!(last["payload"]["status"], json!(0));
+    assert_eq!(last["labels"]["significance"], json!("blocker"));
+    let failed = watch(&world, &flow, &["--timeout", "0"]);
+    failed.ended_on(EXIT_FLOW_FAILED, "flow-failed");
+    assert_eq!(failed.record["status"], json!(1));
+}
+
+/// A landing whose journal, or whose ending, cannot be written once it is
+/// under way fails its own flow closed rather than reading as a clean finish:
+/// an unwritable journal leaves the flow ended non-zero, and an ending that
+/// could not be recorded reads, once the process is gone, as a death — never
+/// as the success the verb reported.
+#[test]
+fn a_landing_whose_journal_or_ending_cannot_be_written_fails_closed() {
+    let (world, repository) = hooked_world(
+        "ml-unjournalled",
+        "change-open",
+        "chmod a-w \"$ONEPIPELINE_RUNS_DIR\"/.flows/*/landings/*/events.jsonl; exit 0",
+    );
+    branch_with_work(&world, &repository, BRANCH, "widget.txt");
+    let landed = world.run(&["publish-branch", BRANCH, "--repo", "service", "--no-draft"]);
+    landed.exited(0);
+    let (flow, id) = the_landing(&world);
+    let journal_path = landing_dir(&world, &flow, &id).join("events.jsonl");
+    writable(&journal_path, true);
+    assert_eq!(
+        sidecar(&world, &flow, &id, "ending.json")["status"],
+        json!(0)
+    );
+    assert!(!kinds(&world, &flow, &id)
+        .iter()
+        .any(|kind| kind == "landing-finished"));
+    let failed = watch(&world, &flow, &["--timeout", "0"]);
+    failed.ended_on(EXIT_FLOW_FAILED, "flow-failed");
+    assert_eq!(failed.record["status"], json!(1));
+
+    let (world, repository) = hooked_world(
+        "ml-unended",
+        "change-open",
+        "chmod a-w \"$ONEPIPELINE_RUNS_DIR\"/.flows/*/landings/landing-*; exit 0",
+    );
+    branch_with_work(&world, &repository, BRANCH, "widget.txt");
+    let landed = world.run(&["publish-branch", BRANCH, "--repo", "service", "--no-draft"]);
+    landed
+        .exited(0)
+        .err_has("could not be recorded, so it will read as died");
+    let (flow, id) = the_landing(&world);
+    let dir = landing_dir(&world, &flow, &id);
+    writable(&dir, true);
+    assert!(!dir.join("ending.json").exists());
+    let failed = watch(&world, &flow, &["--timeout", "0"]);
+    failed.ended_on(EXIT_FLOW_FAILED, "flow-failed");
+    assert_eq!(failed.record["status"], json!(1));
+    // Settled as what it is — a blocker — and never read as finished.
+    let every = journal(&world, &flow, &id);
+    assert!(!every
+        .iter()
+        .any(|event| event["kind"] == "landing-finished"));
+    let last = every.last().expect("a journal");
+    assert_eq!(last["kind"], json!("landing-refused"), "{every:?}");
+    assert!(
+        last["payload"]["message"]
+            .as_str()
+            .is_some_and(|said| said.contains("could not be recorded")),
+        "{last}"
+    );
+}
+
+/// A flow's landing events read through a filter spec — inline or a file — as a
+/// run's are; a spec naming a field the grammar does not have is refused before
+/// anything waits; and a cursor that cannot be placed against a landing's
+/// journal — past its end, inside a record, or naming one landing twice — is
+/// refused naming why.
+#[test]
+fn a_flow_is_read_through_a_filter_spec_and_refuses_a_cursor_it_cannot_place() {
+    let world = World::new("ml-specs");
+    let repository = world.repository("change-open", &[]);
+    branch_with_work(&world, &repository, BRANCH, "widget.txt");
+    world
+        .run(&["publish-branch", BRANCH, "--repo", "service", "--no-draft"])
+        .exited(0);
+    let (flow, id) = the_landing(&world);
+    let from_start = format!("flow:2:{flow}:{id}@0:");
+    let inline = r#"{"include": [{"kind": "push"}]}"#;
+    watch(
+        &world,
+        &flow,
+        &[
+            "--timeout",
+            "0",
+            "--filter",
+            inline,
+            "--cursor",
+            &from_start,
+        ],
+    )
+    .progressed("push");
+    let file = world.root.join("pushes.json");
+    std::fs::write(&file, inline).expect("the spec is written");
+    watch(
+        &world,
+        &flow,
+        &[
+            "--timeout",
+            "0",
+            "--filter",
+            &file.display().to_string(),
+            "--cursor",
+            &from_start,
+        ],
+    )
+    .progressed("push");
+    let shown = world.run(&["monitor", "--flow", &flow, "--filter", inline]);
+    shown
+        .exited(0)
+        .out_has("push")
+        .out_lacks("landing-registered");
+    world
+        .run(&[
+            "watch",
+            "--flow",
+            &flow,
+            "--timeout",
+            "0",
+            "--filter",
+            r#"{"include": [{"role": "x"}]}"#,
+        ])
+        .exited(REFUSED)
+        .err_has("role");
+
+    let journal_path = landing_dir(&world, &flow, &id).join("events.jsonl");
+    let length = std::fs::metadata(&journal_path).expect("the journal").len();
+    for (cursor, said) in [
+        (
+            format!("flow:2:{flow}:{id}@{}:", length + 10),
+            "not the end of a record",
+        ),
+        (format!("flow:2:{flow}:{id}@3:"), "not the end of a record"),
+        (format!("flow:2:{flow}:{id}@0/{id}@0:"), "names landing"),
+    ] {
+        world
+            .run(&[
+                "watch",
+                "--flow",
+                &flow,
+                "--timeout",
+                "0",
+                "--cursor",
+                &cursor,
+            ])
+            .exited(REFUSED)
+            .err_has(said);
+    }
+}
+
+/// `onepipeline integrate` answers exactly what `onevcs integrate` answers over
+/// the same train — the same lines, the same status — whether the train lands
+/// or is refused, beside the registration it adds on standard error.
+#[test]
+fn integrate_answers_in_onevcs_integrates_own_words_and_status() {
+    for publication in ["local-direct", "change-open"] {
+        let train = |name: &str| {
+            let world = World::new(name);
+            let repository = world.repository(publication, &[]);
+            for branch in TRAIN {
+                branch_with_work(&world, &repository, branch, &format!("{branch}.txt"));
+            }
+            (world, repository)
+        };
+        let (theirs, their_repository) = train(&format!("ml-parity-onevcs-{publication}"));
+        let mut argv = vec!["integrate"];
+        argv.extend(TRAIN);
+        argv.push("--push");
+        let sibling = theirs
+            .cmd_on(&onevcs_binary(), &argv)
+            .current_dir(&their_repository.checkout)
+            .output()
+            .expect("onevcs runs");
+        let (ours, our_repository) = train(&format!("ml-parity-onepipeline-{publication}"));
+        let started = Started::spawn(&ours, Some(&our_repository.checkout), &argv);
+        let (code, out, said) = started.ended();
+        assert_eq!(Some(code), sibling.status.code(), "{publication}: {said}");
+        assert_eq!(
+            out,
+            String::from_utf8_lossy(&sibling.stdout),
+            "{publication}"
+        );
+        // Each world's own paths stand for one another; everything else is the
+        // sibling's line, byte for byte.
+        let theirs_said = String::from_utf8_lossy(&sibling.stderr)
+            .replace(&theirs.root.display().to_string(), "<root>");
+        let said = said.replace(&ours.root.display().to_string(), "<root>");
+        for line in theirs_said
+            .lines()
+            .filter(|line| line.starts_with("onevcs: "))
+        {
+            assert!(said.contains(line), "{publication}: {line} not in {said}");
+        }
+    }
 }

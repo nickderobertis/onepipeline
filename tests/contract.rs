@@ -10762,7 +10762,6 @@ fn the_manager_landing_contract_is_what_the_divergence_record_names() {
             "a {kind} naming an operation no verb is was admitted"
         );
     }
-    // The three verbs are the binary's, `integrate` among them.
     let verbs: Vec<String> =
         serde_json::from_value(block["verbs"].clone()).expect("entry 123 names its verbs");
     let command = Cli::command();
@@ -10772,14 +10771,12 @@ fn the_manager_landing_contract_is_what_the_divergence_record_names() {
             "the binary offers no `{verb}`"
         );
     }
-    // The condition, read by the parser and named in the vocabulary.
     let condition = block["watch_condition"].as_str().expect("a condition");
     assert_eq!(
         condition.parse::<WatchUntil>(),
         Ok(WatchUntil::LandingProgress)
     );
     assert!(watch_conditions().contains(&condition));
-    // Every word the block stamps is the producer's own.
     for (kind, word) in block["significance"]
         .as_object()
         .expect("entry 123 maps each kind to its significance")
@@ -10788,7 +10785,6 @@ fn the_manager_landing_contract_is_what_the_divergence_record_names() {
         serde_json::from_value::<onepipeline::vocabulary::Significance>(word.clone())
             .unwrap_or_else(|why| panic!("{kind}'s word {word} is not onevcs's: {why}"));
     }
-    // The bundle carries every kind's document at the version the block records.
     assert_eq!(
         block["bundle_versions"]["events"],
         onepipeline::vocabulary::EVENTS_BUNDLE_VERSION

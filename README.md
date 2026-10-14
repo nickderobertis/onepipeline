@@ -842,7 +842,7 @@ default set — returns `0` on a landing event its `--filter` profile admits: un
 the shipped `planner` profile a milestone or a blocker, never progress, with
 `--filter detailed` waking on every event. `--all` is a run's alone.
 [`docs/stop-guard.md`](docs/stop-guard.md#flows) states it, with the flow's own
-channel, its landings and what `unwatched` owes a flow. Under a
+channel and what `unwatched` owes a flow. Under a
 wake budget a watch given no `--timeout` gives up the wake reserve
 [`docs/stop-guard.md`](docs/stop-guard.md#the-wake-reserve) names before the budget, so it
 has returned by the time the budget is spent.

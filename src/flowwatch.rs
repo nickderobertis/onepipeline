@@ -285,16 +285,28 @@ const LANDING_CURSOR_VERSION: &str = "2";
 
 /// Where a flow watch has read to: each member run's journal, and each
 /// landing's.
+// llmlint: ignore-block[invalid_states_unrepresentable] the keys are a run id `Flow::members` admitted and a landing id `Flow::landings` read off the request that names it — the two readers that are the check — and the two maps keep the domains apart; the crate spells both ids `String` everywhere it reads them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Known {
     runs: BTreeMap<String, Cursor>,
     /// Each landing's journal, by byte.
     landings: BTreeMap<String, u64>,
-    /// Where a landing the cursor does not name starts: its first record for a
-    /// cursor that places landings — it was registered after the watch that
-    /// printed it — and its end for one printed before landings existed, which
-    /// never replays a stream it did not know of.
-    unnamed_from_start: bool,
+    /// Where a landing the cursor does not name starts.
+    unnamed: Unnamed,
+}
+// llmlint: ignore-end[invalid_states_unrepresentable]
+
+/// Where a watch starts reading a landing its cursor does not name.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum Unnamed {
+    /// From its first record: the cursor places landings, so one it does not
+    /// name was registered after the watch that printed it — and a watch given
+    /// no cursor reads a live landing from its registration.
+    #[default]
+    FromStart,
+    /// From where its journal stands: the cursor was printed before landings
+    /// existed, and never replays a stream it did not know of.
+    FromEnd,
 }
 
 /// `watch --flow`: block until the flow or one of its runs needs a supervisor,
@@ -397,7 +409,7 @@ fn armed_at(root: &std::path::Path, flow: &Flow) -> Result<Known> {
     Ok(Known {
         runs,
         landings,
-        unnamed_from_start: true,
+        unnamed: Unnamed::FromStart,
     })
 }
 
@@ -416,6 +428,22 @@ fn end_of(journal: &std::path::Path) -> u64 {
     crate::journal::finished_after(journal, 0).1
 }
 
+/// Whether `at` is a place a cursor can resume a journal from: its start, or
+/// just past one of its finished records — never inside one, which would read
+/// the rest of that record as a record of its own, and never past the end.
+fn on_a_record_boundary(journal: &std::path::Path, at: u64) -> bool {
+    if at == 0 {
+        return true;
+    }
+    if at > end_of(journal) {
+        return false;
+    }
+    let Ok(at) = usize::try_from(at) else {
+        return false;
+    };
+    std::fs::read(journal).is_ok_and(|bytes| bytes.get(at - 1) == Some(&b'\n'))
+}
+
 /// The member runs a cursor token names, each placed against its own journal.
 ///
 /// A member the token does not name is past the cursor: it joined after the
@@ -424,9 +452,9 @@ fn resume(root: &std::path::Path, flow: &Flow, token: &str) -> Result<Known> {
     let refusal = || {
         Error::Invalid(format!(
             "'{token}' is not a cursor this build reads for a flow; a flow's cursor is what an \
-             earlier `onepipeline watch --flow` printed, spelled \
-             `{CURSOR_PREFIX}:{LANDING_CURSOR_VERSION}:<flow>:<landing>@<byte>/...:<run>@<byte>/...`, \
-             or before landings `{CURSOR_PREFIX}:{WATCH_CURSOR_VERSION}:<flow>:<run>@<byte>/...`"
+             earlier `onepipeline watch --flow` printed, spelled `{}`, or before landings `{}`",
+            cursor_shape(),
+            legacy_cursor_shape()
         ))
     };
     let (rest, placed) =
@@ -496,10 +524,11 @@ fn resume(root: &std::path::Path, flow: &Flow, token: &str) -> Result<Known> {
             )));
         };
         let at: u64 = at.parse().map_err(|_| refusal())?;
-        if at > end_of(&registered.journal()) {
+        if !on_a_record_boundary(&registered.journal(), at) {
             return Err(Error::Invalid(format!(
-                "cursor '{token}' places landing '{landing}' past the end of its journal; a \
-                 cursor is only readable against the journal it was printed for"
+                "cursor '{token}' places landing '{landing}' at byte {at}, which is not the end \
+                 of a record its journal holds; a cursor is only readable against the journal it \
+                 was printed for"
             )));
         }
         if placed_landings.insert(landing.to_owned(), at).is_some() {
@@ -519,8 +548,21 @@ fn resume(root: &std::path::Path, flow: &Flow, token: &str) -> Result<Known> {
     Ok(Known {
         runs: known,
         landings: placed_landings,
-        unnamed_from_start: placed,
+        unnamed: match placed {
+            true => Unnamed::FromStart,
+            false => Unnamed::FromEnd,
+        },
     })
+}
+
+/// How a flow cursor is spelled, as a refusal names it and entry 123 records it.
+fn cursor_shape() -> String {
+    format!("{CURSOR_PREFIX}:{LANDING_CURSOR_VERSION}:<flow>:<landing>@<byte>/...:<run>@<byte>/...")
+}
+
+/// How a flow cursor printed before landings is spelled.
+fn legacy_cursor_shape() -> String {
+    format!("{CURSOR_PREFIX}:{WATCH_CURSOR_VERSION}:<flow>:<run>@<byte>/...")
 }
 
 /// The token a later flow watch resumes from: every member and landing this
@@ -561,9 +603,9 @@ fn pass(
     let landings = landings_of(flow)?;
     for landing in &landings {
         if !known.landings.contains_key(landing.id()) {
-            let at = match known.unnamed_from_start {
-                true => 0,
-                false => end_of(&landing.journal()),
+            let at = match known.unnamed {
+                Unnamed::FromStart => 0,
+                Unnamed::FromEnd => end_of(&landing.journal()),
             };
             known.landings.insert(landing.id().to_owned(), at);
         }
@@ -811,10 +853,7 @@ pub(crate) fn events(
 ) -> Result<(Vec<crate::event::Envelope>, String)> {
     let mut known = match cursor {
         Some(token) => resume(root, flow, token)?,
-        None => Known {
-            unnamed_from_start: true,
-            ..Known::default()
-        },
+        None => Known::default(),
     };
     let mut events = Vec::new();
     for landing in landings_of(flow)? {
@@ -1168,6 +1207,45 @@ mod tests {
                 "the section does not state {stated}"
             );
         }
+    }
+
+    /// Entry 123 of `docs/contract-divergences.md` records the flow watch's
+    /// default conditions and both cursor spellings, and this holds that record
+    /// to the constants this watch reads and prints with.
+    #[test]
+    fn the_landing_entry_states_this_watchs_defaults_and_cursors() {
+        let record = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("docs")
+                .join("contract-divergences.md"),
+        )
+        .expect("the divergence record ships");
+        let entry = record
+            .split("\n## ")
+            .find(|entry| entry.starts_with("123."))
+            .expect("entry 123 is recorded");
+        let block: serde_json::Value = serde_json::from_str(
+            entry
+                .split("```json")
+                .nth(1)
+                .and_then(|rest| rest.split("```").next())
+                .expect("entry 123 carries its block"),
+        )
+        .expect("the block is JSON");
+        let defaults: Vec<String> = DEFAULT_UNTIL.iter().map(ToString::to_string).collect();
+        assert_eq!(block["flow_watch_default_until"], json!(defaults));
+        assert_eq!(block["flow_cursor"], json!(cursor_shape()));
+        assert_eq!(block["legacy_flow_cursor"], json!(legacy_cursor_shape()));
+        // And what the watch prints is that shape filled in.
+        let mut known = Known::default();
+        known.landings.insert("landing-1".to_owned(), 7);
+        known.runs.insert("run".to_owned(), Cursor::start("run"));
+        let printed = cursor_of("plan", &known);
+        let shape = cursor_shape();
+        let (prefix, _) = shape
+            .split_once("<flow>")
+            .expect("the shape names the flow");
+        assert_eq!(printed, format!("{prefix}plan:landing-1@7:run@0"));
     }
 
     /// A run watch's conditions are refused on a flow watch, naming the three it

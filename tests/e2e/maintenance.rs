@@ -1009,6 +1009,37 @@ fn a_failed_or_timed_out_command_an_unmaintainable_identity_and_an_unlistable_ho
         .out_has(&format!("{SERVICE_IDENTITY} (every 1s): failed — "));
     release(&world, "unmaintainable");
 
+    // An identity whose own maintenance declaration the sibling cannot read: a
+    // repository `onevcs.toml` that is not TOML is that identity's outcome —
+    // nothing ran — recorded and named by `results` in this build's words.
+    pooled_with_maintenance(&world, None);
+    let declaration = repo.checkout.join("onevcs.toml");
+    std::fs::write(&declaration, "maintain = [").expect("the declaration is written");
+    std::thread::sleep(std::time::Duration::from_millis(1_100));
+    held_run(&world, "unreadable", 2, &["--maintenance-config", &second]).exited(0);
+    world.until("the record of the unreadable declaration", |world| {
+        !records(world, "unreadable").is_empty()
+    });
+    let unreadable = &records(&world, "unreadable")[0];
+    let outcome = &unreadable["payload"]["identities"][0]["outcome"];
+    assert!(
+        outcome["maintenance-unreadable"]["reason"].is_string(),
+        "{unreadable}"
+    );
+    assert_eq!(
+        marker_lines(&world),
+        1,
+        "an unreadable declaration ran a command"
+    );
+    world
+        .run(&["results", "unreadable"])
+        .exited(0)
+        .out_has(&format!(
+            "{SERVICE_IDENTITY} (every 1s): maintenance unreadable — "
+        ));
+    std::fs::remove_file(&declaration).expect("the declaration is removed");
+    release(&world, "unreadable");
+
     // A host whose registered identities could not be enumerated: the registry
     // the sibling keys them by is not a document it can read while the sweep
     // asks, and the record says so with no identity at all.

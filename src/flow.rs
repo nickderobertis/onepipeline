@@ -193,18 +193,35 @@ impl LandingOperation {
     }
 }
 
-/// An identity a landing names: a normalized `onevcs` origin, which carries no
-/// whitespace, or an absolute local identity.
+/// An identity a landing names: an absolute local identity, or a normalized
+/// `onevcs` origin — `host/owner/name`, the form `onevcs` keys a hosted identity
+/// by: no scheme, no credentials, no whitespace, no `.git`, and every segment
+/// one that says something and navigates nowhere.
 fn an_identity<'de, D: serde::Deserializer<'de>>(
     reader: D,
 ) -> std::result::Result<String, D::Error> {
     let found = said(reader)?;
-    if !(Path::new(&found).is_absolute() || !found.chars().any(char::is_whitespace)) {
+    if !(Path::new(&found).is_absolute() || is_normalized_origin(&found)) {
         return Err(serde::de::Error::custom(format!(
             "'{found}' is neither a normalized onevcs origin nor an absolute local identity"
         )));
     }
     Ok(found)
+}
+
+/// Whether `text` is an origin as `onevcs` normalizes one: `host/owner/name`.
+fn is_normalized_origin(text: &str) -> bool {
+    let segments: Vec<&str> = text.split('/').collect();
+    segments.len() >= 3
+        && !text.contains("://")
+        && !text.contains('@')
+        && !text.ends_with(".git")
+        && segments.iter().all(|segment| {
+            !segment.is_empty()
+                && *segment != "."
+                && *segment != ".."
+                && !segment.chars().any(|c| c.is_whitespace() || c == '\\')
+        })
 }
 
 /// Run ids, each one and each named once.
@@ -518,16 +535,32 @@ pub(crate) fn every_landing(root: &Path) -> std::result::Result<Vec<(Flow, Landi
         }
     };
     let mut found = Vec::new();
-    for id in entries
-        .filter_map(std::result::Result::ok)
-        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-        .filter_map(|entry| entry.file_name().into_string().ok())
-    {
-        let Ok(flow) = Flow::open(root, &id) else {
-            // A directory with no record is no flow, and holds no landing a
-            // registration could have written: registration writes the record
-            // before any landing.
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            format!("the flows under {} cannot be read: {error}", dir.display())
+        })?;
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
             continue;
+        }
+        let path = entry.path();
+        let Ok(id) = entry.file_name().into_string() else {
+            return Err(format!(
+                "{} is a flow directory whose name is not text, so whether it holds a live \
+                 landing cannot be said",
+                path.display()
+            ));
+        };
+        let flow = match Flow::open(root, &id) {
+            Ok(flow) => flow,
+            // A directory holding no landings is no landing's, whatever its record
+            // says: registration writes a flow's record before any landing.
+            Err(_) if !path.join(LANDINGS_DIR).exists() => continue,
+            Err(why) => {
+                return Err(format!(
+                    "flow {id} holds landings and its record cannot be read, so whether one is \
+                     live cannot be said: {why}"
+                ))
+            }
         };
         for landing in flow.landings().map_err(|why| format!("flow {id}: {why}"))? {
             found.push((flow.clone(), landing));
@@ -750,6 +783,15 @@ impl Flow {
                 return Err(unreadable(format!(
                     "it names landing '{}' of flow '{}'",
                     request.landing_id, request.flow_id
+                )));
+            }
+            // A landing is supervised by the session that owns its flow; one
+            // claiming another is not this flow's to answer for.
+            if request.session != self.record.session {
+                return Err(unreadable(format!(
+                    "it names session [{}], and the flow belongs to session [{}]",
+                    sys::session_digest(&request.session),
+                    sys::session_digest(&self.record.session)
                 )));
             }
             landings.push(Landing {
@@ -1503,6 +1545,22 @@ mod tests {
             (
                 "subjects",
                 serde_json::json!([{"identity": "not absolute", "branch": "a"}]),
+            ),
+            (
+                "subjects",
+                serde_json::json!([{"identity": "service", "branch": "a"}]),
+            ),
+            (
+                "subjects",
+                serde_json::json!([{"identity": "https://github.com/o/s", "branch": "a"}]),
+            ),
+            (
+                "subjects",
+                serde_json::json!([{"identity": "github.com/o/s.git", "branch": "a"}]),
+            ),
+            (
+                "subjects",
+                serde_json::json!([{"identity": "github.com/../s", "branch": "a"}]),
             ),
             (
                 "subjects",
