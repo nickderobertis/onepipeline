@@ -3845,15 +3845,11 @@ impl Drop for World {
     fn drop(&mut self) {
         self.stop_the_runs_it_can();
         let last = LIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) == 1;
-        // Then whatever that left, when no world is left that could still want
-        // it: a process this test started, or one *they* started, that `stop`
-        // did not reach — no run to stop it through, or no longer descended from
-        // the run's driver when `stop` walked its tree. On Windows such a
-        // process holds the pipe nextest reads this test's output from, so the
-        // test is reported `LEAK` and the CI step teeing the run waits on it
-        // after every test has passed. Before the directories go, because
-        // Windows will not remove a directory a running process is in.
-        // `containment` says what each platform reaches.
+        // Then whatever that left — what `stop` had no run to reach it through, or
+        // no longer found under the run's driver — once no world is left that
+        // could still want it. `containment` says why and what each platform
+        // reaches. Before the directories go, because Windows will not remove a
+        // directory a running process is in.
         if last {
             // Not asserted while the test is already failing: a second panic
             // during the first aborts, and loses the message that says why.

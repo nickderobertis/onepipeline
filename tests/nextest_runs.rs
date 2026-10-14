@@ -437,9 +437,7 @@ fn leaking_fixture(case: &str) -> Fixture {
 /// Under the profile CI's cross-platform legs run, a test that returns while a
 /// process it started still holds its output fails the run and is named for it,
 /// and `rerun-failed` reads that as the failure it is. Under the default profile
-/// the same test is a `LEAK`: a pass, which is how the Windows leg of run
-/// 38465733761 passed two such tests and then hung on the process one of them
-/// had left.
+/// the same test is still a leaky pass.
 #[test]
 fn a_test_leaving_a_process_holding_its_output_fails_the_ci_profile_by_name() {
     let fixture = leaking_fixture("leak-fails");
