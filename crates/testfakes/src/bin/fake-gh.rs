@@ -582,9 +582,7 @@ fn record(dir: &Path, id: &str, state: Change) {
             fake::fail(&format!("cannot create {}: {error}", parent.display()));
         }
     }
-    if let Err(error) = std::fs::write(&path, state.as_str()) {
-        fake::fail(&format!("cannot write {}: {error}", path.display()));
-    }
+    write_file(&path, state.as_str());
 }
 
 /// Run one write of `opened.jsonl` while no other process of this host is writing
@@ -611,7 +609,13 @@ fn holding_the_records(dir: &Path, write: impl FnOnce() -> ExitCode) -> ExitCode
             .open(&lock)
         {
             Ok(_) => break,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            // Windows answers a create of a file another process is still deleting
+            // with `PermissionDenied`, not `AlreadyExists`: the lock is being let go,
+            // so it is waited for like one still held.
+            Err(error)
+                if error.kind() == std::io::ErrorKind::AlreadyExists
+                    || (cfg!(windows) && error.kind() == std::io::ErrorKind::PermissionDenied) =>
+            {
                 if std::time::Instant::now() >= deadline {
                     fake::fail(&format!(
                         "{} was held for a minute by a writer that never let it go",
@@ -1877,9 +1881,7 @@ fn edit(args: &[String], dir: &Path) -> ExitCode {
             })
         })
         .collect();
-    if let Err(error) = std::fs::write(&path, format!("{}\n", rewritten.join("\n"))) {
-        fake::fail(&format!("cannot write {}: {error}", path.display()));
-    }
+    write_file(&path, &format!("{}\n", rewritten.join("\n")));
     println!("{}", url_of(&edited));
     ExitCode::SUCCESS
 }
@@ -2484,14 +2486,38 @@ fn merged_record(dir: &Path, id: &str) -> Option<MergedRecord> {
     }))
 }
 
+/// Replace `path` with `text` whole: written beside it and renamed over it.
+///
+/// The readers of these files take no lock, and a write in place truncates before
+/// it writes, so a read between the two sees an empty or half-written record — a
+/// change request reported missing, which under load is a retarget refused for a
+/// change request this host opened. A rename is seen whole or not at all.
 fn write_file(path: &Path, text: &str) {
     if let Some(parent) = path.parent() {
         if let Err(error) = std::fs::create_dir_all(parent) {
             fake::fail(&format!("cannot create {}: {error}", parent.display()));
         }
     }
-    if let Err(error) = std::fs::write(path, text) {
-        fake::fail(&format!("cannot write {}: {error}", path.display()));
+    let mut beside = path.as_os_str().to_owned();
+    beside.push(format!(".{}.tmp", std::process::id()));
+    let beside = PathBuf::from(beside);
+    if let Err(error) = std::fs::write(&beside, text) {
+        fake::fail(&format!("cannot write {}: {error}", beside.display()));
+    }
+    // Windows refuses the rename while a reader holds the target open without
+    // sharing its deletion, which a reader lets go of within moments.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match std::fs::rename(&beside, path) {
+            Ok(()) => return,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::PermissionDenied
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(error) => fake::fail(&format!("cannot write {}: {error}", path.display())),
+        }
     }
 }
 
