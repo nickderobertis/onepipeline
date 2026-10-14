@@ -2231,8 +2231,11 @@ pub(crate) fn merge_in_progress(session: &Session) -> Option<crate::plan::MergeI
 // `base_merge::decide` from the identity's rules file alone, with no per-open override,
 // and its git helpers are private too. The op-readjust amendment requires a restacked
 // draft to carry its new base's head whatever that policy resolves, so this helper stays
-// here, operating only on the session worktree `onevcs` opened, until `onevcs` exposes
-// the operation and this helper is replaced by a call to it.
+// here, operating only on the session worktree `onevcs` opened; publication still goes
+// through `onevcs`. The missing operation is a per-open base-merge override on
+// `onevcs::SessionRequest` (a `base_merge: Some(BaseMerge::Always)` that the open honours
+// over the rules file); once `onevcs` ships it, a restack's open asks for it and this
+// helper is deleted.
 /// Merge the head of `session`'s base into its branch, in its worktree, where the
 /// branch does not carry it already: `Ok(None)` for a branch that carries it or a merge
 /// that concluded, and `Ok(Some(conflict))` for one git stopped on, left in progress for
