@@ -1015,12 +1015,10 @@ onevcs-testing = "0.19.2"
 # adds public Task and Comment fields and CopyLink, making this a breaking link.
 # `justfile`'s `onetaskgraph-version` moves with this release.
 #
-# **0.6.1 reads and writes the store's YAML through `serde-saphyr`**, the reader
-# the run's write-back shadow documents (`src/writeback.rs`) are read back and
-# edited by.
-#
 # **0.7.0 caches every vouched project and document read**, a breaking minor of
-# the plugin API whose `SourceName` `src/plan.rs` exposes.
+# the plugin API whose `SourceName` `src/plan.rs` exposes. Its local-md source is
+# what reads back and edits the run's write-back shadow documents
+# (`src/writeback.rs`).
 onetaskgraph-core = "=0.7.0"
 onetaskgraph-plugin-api = "=0.7.0"
 onetaskgraph-local-md = "=0.7.0"
