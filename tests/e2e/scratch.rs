@@ -1520,7 +1520,10 @@ fn a_relative_telemetry_destination_is_refused_and_the_discard_still_runs() {
         .starts_with("removed 1 scratch dir(s) of run metrics, 0.0 GiB freed:\n"));
     assert!(!world.run_file(&run, "scratch").exists());
     assert_eq!(world.events_of(&run, "scratch-removed").len(), 1);
-    for dir in [&world.root, &world.project, &world.runs] {
+    // The verb inherits this process's working directory, which is where a
+    // relative destination would have been written.
+    let inherited = std::env::current_dir().expect("a working directory");
+    for dir in [&inherited, &world.root, &world.project, &world.runs] {
         assert!(!dir.join("telemetry-here").exists(), "{}", dir.display());
     }
 }
