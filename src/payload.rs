@@ -1823,7 +1823,7 @@ pub(crate) struct ScratchRetained {
 }
 
 /// A non-success ending or pause.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum ScratchEnding {
     Failed,

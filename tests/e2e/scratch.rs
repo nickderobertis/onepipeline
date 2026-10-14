@@ -1725,3 +1725,53 @@ fn a_paused_run_dispatches_added_work_and_records_its_next_pause_freshly() {
         "an inert adoption cannot repeat an ending"
     );
 }
+
+/// Append a copy of the run's latest `scratch-retained` record naming another
+/// ending, as the next record of its journal's stream.
+fn retain_as(world: &World, run: &str, ending: &str) {
+    let journal = world.journal(run);
+    let mut record = world
+        .events_of(run, "scratch-retained")
+        .pop()
+        .expect("a retained record to copy");
+    record["seq"] = serde_json::json!(journal.last().unwrap()["seq"].as_u64().unwrap() + 1);
+    record["payload"]["ending"] = serde_json::json!(ending);
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(world.run_file(run, "events.jsonl"))
+        .unwrap();
+    std::io::Write::write_all(&mut file, format!("{record}\n").as_bytes()).unwrap();
+}
+
+/// A kept record speaks only for the ending it was written at: a `paused` record
+/// on a run that now reads `ENDED failed` gives no paused wording, and a `failed`
+/// record on a `PAUSED` run gives no discard instruction the verb would refuse.
+#[test]
+fn a_retained_record_for_another_ending_than_the_runs_reading_prints_no_notice() {
+    let world = World::new("scratch-mismatched-ending");
+    world.script("failed.fail", "1");
+    world.script("paused.fail", "1");
+    let failed = settle(&world, "failed", vec![agent("failed", &[])]);
+    let paused = settle(
+        &world,
+        "paused",
+        vec![agent("paused", &[]), crate::harness::human("approve", &[])],
+    );
+    for (run, word, recorded, other) in [
+        (&failed, "ENDED failed", "failed", "paused"),
+        (&paused, "PAUSED", "paused", "failed"),
+    ] {
+        assert_retained(&world, run, recorded, 1);
+        retain_as(&world, run, other);
+        let status = world.run(&["status", run]);
+        status.exited(0).out_has(word);
+        let (status, results) = read_views(&world, run);
+        for text in [status, results] {
+            assert!(!text.contains("scratch kept:"), "{text}");
+            assert!(!text.contains("scratch discard"), "{text}");
+        }
+    }
+    // The appended record is one the journal admits strictly: the verb, which
+    // refuses a run whose fold is not, removes the failed run's scratch.
+    world.run(&["scratch", "discard", &failed]).exited(0);
+}
