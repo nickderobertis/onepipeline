@@ -1754,6 +1754,26 @@ fn a_landing_in_another_sessions_flow_is_refused_and_does_no_work() {
     assert!(world.changes_opened().is_empty());
     std::fs::write(&parent.gate, "go").expect("their flow ends");
     parent.kill_holder();
+
+    // A flow it runs in that is there and cannot be read is refused too, never
+    // replaced by a flow of the landing's own.
+    // llmlint: ignore-block[tests_mirror_real_usage] the record is written by hand because no
+    // verb writes a flow record this build cannot read; the refusal it stages is driven
+    // through the compiled binary.
+    let broken = world.runs.join(".flows").join("broken");
+    std::fs::create_dir_all(&broken).expect("a flow directory");
+    std::fs::write(broken.join("flow.json"), "{").expect("an unreadable record");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let mut command = world.cmd(&["publish-branch", BRANCH, "--repo", "service", "--no-draft"]);
+    command.env(onepipeline::cli::FLOW_ENV, "broken");
+    world
+        .run_on(command, "publish-branch in an unreadable flow")
+        .exited(REFUSED)
+        .err_has("could not be registered")
+        .err_has("record cannot be read");
+    assert!(landings(&world).is_empty(), "{:?}", landings(&world));
+    assert!(!held.holding());
+    assert!(world.changes_opened().is_empty());
 }
 
 /// With no manager session the verbs run unowned, as they always did, and say
@@ -2080,6 +2100,34 @@ fn unreadable_landing_state_fails_closed_and_records_from_before_landings_still_
             "{event}"
         );
     }
+
+    // An ending this build cannot read — or one naming another landing — says
+    // neither that the landing ended nor that it did not: the flow is owed
+    // supervision again, and no acknowledgement closes it.
+    let ending = landing_dir(&world, &flow, &id).join("ending.json");
+    let kept = std::fs::read_to_string(&ending).expect("the ending");
+    // llmlint: ignore-block[tests_mirror_real_usage] the ending is written by hand because no
+    // verb writes one this build cannot read or one naming another landing; the reads it
+    // stages are the fail-closed ones each assertion holds, driven through the binary.
+    for tampered in ["{".to_owned(), kept.replace(&id, "landing-someone-else")] {
+        std::fs::write(&ending, &tampered).expect("tampered");
+        assert_eq!(verdict(&world)["verdict"], json!("block"), "{tampered}");
+        world
+            .run(&[
+                "unwatched",
+                "--session",
+                &world.session,
+                "--acknowledge-flow",
+                &flow,
+                "--reason",
+                "r",
+            ])
+            .exited(REFUSED)
+            .err_has("is live");
+    }
+    std::fs::write(&ending, &kept).expect("restored");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    assert_eq!(verdict(&world), json!({"verdict": "none"}));
 
     // Now the request is unreadable.
     // llmlint: ignore-block[tests_mirror_real_usage] the sidecar is written to directly
@@ -2592,6 +2640,11 @@ fn an_operation_that_cannot_be_prepared_forwards_nothing() {
 /// A landing whose operation's progress cannot be relayed — the stream holds a
 /// record no reader can parse — still answers the forwarded verb's status, but
 /// is settled refused, a blocker, and its own flow fails closed.
+// llmlint: ignore-block[tests_mirror_real_usage] the repository's own `pre-push` hook appends
+// a record no reader can parse to the operation's stream, because no command of `onevcs`
+// writes one: every record it appends is a whole envelope. What is arranged is what a
+// writer killed mid-append or a disk error leaves, which is the condition the relay's
+// failure exists for; everything asserted is read back off the compiled binary.
 #[test]
 fn a_relay_that_fails_keeps_the_verbs_status_and_fails_the_flow_closed() {
     let (world, repository) = hooked_world(
@@ -2613,6 +2666,7 @@ fn a_relay_that_fails_keeps_the_verbs_status_and_fails_the_flow_closed() {
     failed.ended_on(EXIT_FLOW_FAILED, "flow-failed");
     assert_eq!(failed.record["status"], json!(1));
 }
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// A landing whose journal, or whose ending, cannot be written once it is
 /// under way fails its own flow closed rather than reading as a clean finish:
@@ -2806,4 +2860,91 @@ fn integrate_answers_in_onevcs_integrates_own_words_and_status() {
             assert!(said.contains(line), "{publication}: {line} not in {said}");
         }
     }
+}
+
+/// A landing killed mid-operation whose operation record can no longer be read
+/// is not read as legacy coarse-only work: the reader refuses to write its death
+/// without the evidence its operation recorded, naming the record, and writes it
+/// once the record reads again.
+#[test]
+fn a_dead_landings_unreadable_operation_record_refuses_rather_than_dropping_its_evidence() {
+    let verb = Verb::publish("ml-dead-unread");
+    let world = &verb.world;
+    let mut landing = verb.start();
+    landing.held_at_push(&verb);
+    let (flow, id) = the_landing(world);
+    landing.kill();
+    let record = landing_dir(world, &flow, &id).join("operation.json");
+    let kept = std::fs::read_to_string(&record).expect("the operation record");
+    // llmlint: ignore-block[tests_mirror_real_usage] the operation record is written by hand
+    // because no verb writes one that cannot be read; what it stages is the refusal the
+    // death reader owes such a record, read back off the binary's own watch.
+    std::fs::write(&record, "{").expect("tampered");
+    world
+        .run(&["watch", "--flow", &flow, "--timeout", "0"])
+        .exited(REFUSED)
+        .err_has("operation record cannot be read");
+    assert!(!kinds(world, &flow, &id)
+        .iter()
+        .any(|kind| kind == "landing-died"));
+    std::fs::write(&record, &kept).expect("restored");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    watch(world, &flow, &["--timeout", "0"]).ended_on(EXIT_FLOW_FAILED, "flow-failed");
+    let every = journal(world, &flow, &id);
+    let died = every
+        .iter()
+        .find(|event| event["kind"] == "landing-died")
+        .expect("the death is written once the record reads");
+    assert!(
+        died["payload"]["message"]
+            .as_str()
+            .is_some_and(|said| said.contains("recorded events were kept")),
+        "{died}"
+    );
+    verb.held.release();
+}
+
+/// A landing whose prepared operation's id cannot be kept forwards nothing: no
+/// reader could reopen that invocation, so the landing is refused before the
+/// linked call and its flow fails closed.
+#[test]
+fn an_operation_whose_id_cannot_be_kept_forwards_nothing() {
+    let world = World::new("ml-unkept-operation");
+    let repository = world.repository("change-open", &[]);
+    branch_with_work(&world, &repository, BRANCH, "widget.txt");
+    world.script("pr-author.body", "## What\nA widget.\n");
+    world.script("pr-author.records-tree", "1");
+    world.script("pr-author.holds", "1");
+    let graph = world.pr_author_graph();
+    let landing = Started::spawn(
+        &world,
+        None,
+        &[
+            "publish-branch",
+            BRANCH,
+            "--repo",
+            "service",
+            "--title",
+            "feat: add the widget",
+            "--pr-author-graph",
+            &graph,
+        ],
+    );
+    let tree = world.fakes.join("pr-author-tree.jsonl");
+    world.until("the drafting turn to be in flight", |_| {
+        std::fs::read_to_string(&tree).is_ok_and(|said| said.ends_with('\n'))
+    });
+    let (flow, id) = the_landing(&world);
+    let dir = landing_dir(&world, &flow, &id);
+    writable(&dir, false);
+    std::fs::write(world.fakes.join("pr-author.go"), "go").expect("the draft is released");
+    let (code, _, said) = landing.ended();
+    writable(&dir, true);
+    assert_eq!(code, REFUSED, "{said}");
+    assert!(!dir.join("operation.json").exists());
+    assert!(
+        world.changes_opened().is_empty(),
+        "an unkept operation forwarded"
+    );
+    watch(&world, &flow, &["--timeout", "0"]).ended_on(EXIT_FLOW_FAILED, "flow-failed");
 }

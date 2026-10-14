@@ -1255,10 +1255,18 @@ impl Supervision {
         };
         let runs = associated_runs(root, &subjects).map_err(refused)?;
         let lock = crate::flow::registration_lock(root).map_err(|e| refused(e.to_string()))?;
-        let (flow, holding) = match crate::flow::inherited()
-            .and_then(|id| Flow::open(root, id.as_str()).ok())
-            .filter(Flow::is_live)
-        {
+        // The flow this process runs in, where `ONEPIPELINE_FLOW` names one of
+        // this runs root: one that is there and cannot be read is refused rather
+        // than passed over, because a landing registered beside it could be the
+        // second owner of work that flow already supervises. A name with no flow
+        // under this root — another root's, or one long gone — names none.
+        let inherited = match crate::flow::inherited() {
+            Some(id) if crate::flow::paths(root, id.as_str()).dir.exists() => {
+                Some(Flow::open(root, id.as_str()).map_err(|e| refused(e.to_string()))?)
+            }
+            _ => None,
+        };
+        let (flow, holding) = match inherited.filter(Flow::is_live) {
             Some(parent) if parent.record.session == session => (parent, Holding::ParentFlow),
             Some(parent) => {
                 return Err(refused(format!(
