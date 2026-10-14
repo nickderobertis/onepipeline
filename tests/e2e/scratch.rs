@@ -685,6 +685,28 @@ fn a_run_made_live_again_shows_no_scratch_notice_until_it_ends_again() {
     world.script("build.fail", "1");
     let run = settle(&world, "relive", vec![agent("build", &[])]);
     assert_retained(&world, &run, "failed", 1);
+    // A discard the filesystem partly refuses leaves its failure line as the
+    // latest record, which a run made live again must not print either.
+    use std::os::unix::fs::PermissionsExt;
+    let blocked = world.run_file(&run, "scratch/blocked");
+    std::fs::create_dir_all(&blocked).unwrap();
+    std::fs::write(blocked.join("data"), "written before the discard").unwrap();
+    struct RestorePermissions(std::path::PathBuf);
+    impl Drop for RestorePermissions {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+    let _restore = RestorePermissions(blocked.clone());
+    std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o555)).unwrap();
+    world.run(&["scratch", "discard", &run]).exited(1);
+    let (status, results) = read_views(&world, &run);
+    let failure = format!(
+        "  scratch: 1 dir(s) could not be removed: {}: ",
+        blocked.display()
+    );
+    assert!(status.contains(&failure), "{status}");
+    assert!(results.contains(&failure), "{results}");
     world.script("again.wait", "hold");
     world.script("again.turn-open", "");
     reply(
@@ -697,7 +719,9 @@ fn a_run_made_live_again_shows_no_scratch_notice_until_it_ends_again() {
         assert!(status.starts_with(&format!("{run}  {word}")), "{status}");
         for text in [status, results] {
             assert!(
-                !text.contains("scratch kept:") && !text.contains("scratch discard"),
+                !text.contains("scratch kept:")
+                    && !text.contains("  scratch:")
+                    && !text.contains("scratch discard"),
                 "{text}"
             );
         }
