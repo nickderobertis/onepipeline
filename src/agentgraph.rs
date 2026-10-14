@@ -3502,7 +3502,7 @@ mod tests {
 
         fn read(version: u32) -> std::result::Result<(), String> {
             let graph: oneagentgraph::config::GraphConfig =
-                serde_norway::from_str(&document(version)).map_err(|error| error.to_string())?;
+                crate::yaml::from_str(&document(version))?;
             oneagentgraph::config::validate(&graph).map_err(|refusal| refusal.to_string())
         }
 

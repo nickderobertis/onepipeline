@@ -21,6 +21,7 @@
 use std::path::{Path, PathBuf};
 
 pub mod hosted;
+pub mod yaml;
 
 /// The environment variable naming the directory a double is scripted from.
 pub const SCRIPT_DIR_ENV: &str = "ONEPIPELINE_FAKE_DIR";
@@ -952,7 +953,7 @@ pub fn scheduled_member(graph: &str) -> std::result::Result<String, String> {
 
     let text = std::fs::read_to_string(graph)
         .map_err(|error| format!("cannot read the graph {graph}: {error}"))?;
-    let config: oneagentgraph::config::GraphConfig = serde_norway::from_str(&text)
+    let config: oneagentgraph::config::GraphConfig = crate::yaml::from_str(&text)
         .map_err(|error| format!("{graph} is not an agent graph: {error}"))?;
     oneagentgraph::config::validate(&config)
         .map_err(|refusal| format!("{graph} is not a graph oneagentgraph would run: {refusal}"))?;
@@ -975,7 +976,7 @@ pub fn scheduled_member(graph: &str) -> std::result::Result<String, String> {
 pub fn declared_members(graph: &str) -> std::result::Result<Vec<String>, String> {
     let text = std::fs::read_to_string(graph)
         .map_err(|error| format!("cannot read the graph {graph}: {error}"))?;
-    let config: oneagentgraph::config::GraphConfig = serde_norway::from_str(&text)
+    let config: oneagentgraph::config::GraphConfig = crate::yaml::from_str(&text)
         .map_err(|error| format!("{graph} is not an agent graph: {error}"))?;
     oneagentgraph::config::validate(&config)
         .map_err(|refusal| format!("{graph} is not a graph oneagentgraph would run: {refusal}"))?;
@@ -1003,7 +1004,7 @@ fn declared_judge_command(graph: &str) -> std::result::Result<(String, Vec<Strin
 
     let text = std::fs::read_to_string(graph)
         .map_err(|error| format!("cannot read the graph {graph}: {error}"))?;
-    let config: oneagentgraph::config::GraphConfig = serde_norway::from_str(&text)
+    let config: oneagentgraph::config::GraphConfig = crate::yaml::from_str(&text)
         .map_err(|error| format!("{graph} is not an agent graph: {error}"))?;
     oneagentgraph::config::validate(&config)
         .map_err(|refusal| format!("{graph} is not a graph oneagentgraph would run: {refusal}"))?;

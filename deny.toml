@@ -9,15 +9,7 @@ all-features = true
 
 [advisories]
 yanked = "deny"
-ignore = [
-    # Temporary, authorized by the user. `unsafe-libyaml` is unmaintained
-    # (informational, no vulnerability) and reaches this crate only through
-    # `serde_yaml_ng`, which the `onevcs` and `onejudge` releases this crate links
-    # depend on; the advisory names no fixed version. The fleet's planned move to
-    # `serde_norway` (plan `authoring:serde-yaml-replacement`) removes it, and this
-    # entry goes with it.
-    { id = "RUSTSEC-2024-0449", reason = "temporary: unmaintained unsafe-libyaml via serde_yaml_ng in onevcs and onejudge, no fixed version; removed by the serde_norway move (plan authoring:serde-yaml-replacement)" },
-]
+ignore = []
 
 [licenses]
 # Permissive licenses compatible with this MIT-licensed crate. Adding a
@@ -61,7 +53,18 @@ wildcards = "deny"
 # artifact, so this buys that member and nothing else.
 allow-wildcard-paths = true
 allow = []
-deny = []
+# The fleet's YAML contract: every YAML read and write goes through `serde-saphyr`, safe
+# Rust, so a crate carrying the libyaml translation — or a reader built on it — that
+# re-enters the graph through any dependency turns this check red.
+deny = [
+    { crate = "serde_yaml", reason = "RUSTSEC-2024-0449: the unmaintained libyaml translation, or a reader built on it; YAML goes through serde-saphyr" },
+    { crate = "serde_yaml_ng", reason = "RUSTSEC-2024-0449: the unmaintained libyaml translation, or a reader built on it; YAML goes through serde-saphyr" },
+    { crate = "serde_norway", reason = "RUSTSEC-2024-0449: the unmaintained libyaml translation, or a reader built on it; YAML goes through serde-saphyr" },
+    { crate = "serde_yml", reason = "RUSTSEC-2024-0449: the unmaintained libyaml translation, or a reader built on it; YAML goes through serde-saphyr" },
+    { crate = "unsafe-libyaml", reason = "RUSTSEC-2024-0449: the unmaintained libyaml translation, or a reader built on it; YAML goes through serde-saphyr" },
+    { crate = "unsafe-libyaml-norway", reason = "RUSTSEC-2024-0449: the unmaintained libyaml translation, or a reader built on it; YAML goes through serde-saphyr" },
+    { crate = "libyml", reason = "RUSTSEC-2024-0449: the unmaintained libyaml translation, or a reader built on it; YAML goes through serde-saphyr" },
+]
 skip = []
 skip-tree = []
 

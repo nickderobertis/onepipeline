@@ -51,7 +51,7 @@ oneharness-core = { workspace = true }
 # The graph document's own reader, so the observer double runs the judge-side
 # provider the graph *declares* rather than one it remembered: a graph that named
 # a different provider would otherwise still be supervised by this copy.
-serde_norway = "0.9"
+serde-saphyr = { workspace = true }
 # The store's reference plugin host, the plugin it hosts, and the plugin API whose
 # types `scripted-source` reads its scenario through; see `src/hosted.rs`.
 onetaskgraph-core = { workspace = true }

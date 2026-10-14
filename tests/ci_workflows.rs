@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
-use serde_norway::Value;
+use serde_json::Value;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -30,7 +30,8 @@ fn workflow(file: &str) -> Value {
     let path = repo_root().join(".github/workflows").join(file);
     let text = fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("could not read {}: {e}", path.display()));
-    serde_norway::from_str(&text).unwrap_or_else(|e| panic!("{file} does not parse: {e}"))
+    onepipeline_testfakes::yaml::from_str(&text)
+        .unwrap_or_else(|e| panic!("{file} does not parse: {e}"))
 }
 
 fn workflows() -> BTreeMap<String, Value> {
@@ -103,11 +104,9 @@ const ALLOWED_CONDITIONS: &[&str] = &[
     "github.event_name == 'pull_request'",
 ];
 
-/// `on:` parses as the boolean `true` under YAML 1.1, which serde_norway follows.
 fn triggers(parsed: &Value) -> &Value {
     parsed
         .get("on")
-        .or_else(|| parsed.get(Value::Bool(true)))
         .expect("the workflow declares its triggers")
 }
 
@@ -123,7 +122,7 @@ fn runs_on_every_pull_request(file: &str, parsed: &Value) -> bool {
     }
     pull_request
         .get("types")
-        .and_then(Value::as_sequence)
+        .and_then(Value::as_array)
         .is_none_or(|types| {
             ["opened", "synchronize", "reopened"]
                 .iter()
@@ -138,30 +137,30 @@ fn rendered(key: &str, job: &Value) -> Vec<String> {
         match job.get("strategy").and_then(|s| s.get("matrix")) {
             None => vec![BTreeMap::new()],
             Some(matrix) => {
-                if let Some(include) = matrix.get("include").and_then(Value::as_sequence) {
+                if let Some(include) = matrix.get("include").and_then(Value::as_array) {
                     include
                         .iter()
                         .map(|leg| {
-                            leg.as_mapping()
+                            leg.as_object()
                                 .expect("an include leg is a mapping")
                                 .iter()
-                                .map(|(k, v)| (k.as_str().expect("a key").to_owned(), scalar(v)))
+                                .map(|(k, v)| (k.clone(), scalar(v)))
                                 .collect()
                         })
                         .collect()
                 } else {
                     let axes: Vec<(String, Vec<String>)> = matrix
-                        .as_mapping()
+                        .as_object()
                         .expect("the matrix is a mapping")
                         .iter()
                         .map(|(k, v)| {
                             let values = v
-                                .as_sequence()
+                                .as_array()
                                 .expect("a matrix axis is a list")
                                 .iter()
                                 .map(scalar)
                                 .collect();
-                            (k.as_str().expect("an axis name").to_owned(), values)
+                            (k.clone(), values)
                         })
                         .collect();
                     axes.iter()
@@ -196,7 +195,7 @@ fn rendered(key: &str, job: &Value) -> Vec<String> {
 fn scalar(value: &Value) -> String {
     match value {
         Value::String(s) => s.clone(),
-        other => serde_norway::to_string(other)
+        other => onepipeline_testfakes::yaml::to_string(other)
             .expect("a scalar renders")
             .trim()
             .to_owned(),
@@ -207,7 +206,7 @@ fn needs(job: &Value) -> Vec<String> {
     match job.get("needs") {
         None => Vec::new(),
         Some(Value::String(one)) => vec![one.clone()],
-        Some(Value::Sequence(many)) => many
+        Some(Value::Array(many)) => many
             .iter()
             .map(|need| need.as_str().expect("a needed job is named").to_owned())
             .collect(),
@@ -235,8 +234,7 @@ fn every_required_context_is_reported_on_every_pull_request() {
         if !runs_on_every_pull_request(file, parsed) {
             continue;
         }
-        for (key, job) in parsed["jobs"].as_mapping().expect("the workflow has jobs") {
-            let key = key.as_str().expect("a job key");
+        for (key, job) in parsed["jobs"].as_object().expect("the workflow has jobs") {
             for name in rendered(key, job) {
                 reporters.insert(name, (file.clone(), key.to_owned()));
             }
@@ -344,9 +342,8 @@ fn no_required_job_waits_on_an_advisory_one() {
     // `needs` only reaches jobs of the same workflow, so a required job waits on
     // an advisory one only if the two share a file — which none of these do.
     for (file, parsed) in &all {
-        let jobs = parsed["jobs"].as_mapping().expect("the workflow has jobs");
+        let jobs = parsed["jobs"].as_object().expect("the workflow has jobs");
         for (key, job) in jobs {
-            let key = key.as_str().expect("a job key");
             if rendered(key, job)
                 .iter()
                 .any(|name| REQUIRED.contains(&name.as_str()))
@@ -541,7 +538,7 @@ fn the_release_pull_request_runs_the_full_sweep_and_every_other_pull_request_the
     let gate = &workflow("ci.yml")["jobs"]["gate"];
     let runs = |job: &Value, step_run: &str| {
         job["steps"]
-            .as_sequence()
+            .as_array()
             .expect("the job has steps")
             .iter()
             .filter_map(|step| step.get("run").and_then(Value::as_str))
@@ -635,12 +632,11 @@ const SMOKE_REPO_KEY: &str = "ONEPIPELINE_SMOKE_REPO";
 fn strings(value: &Value, into: &mut Vec<String>) {
     match value {
         Value::String(s) => into.push(s.clone()),
-        Value::Sequence(items) => items.iter().for_each(|item| strings(item, into)),
-        Value::Mapping(map) => map.iter().for_each(|(key, item)| {
-            strings(key, into);
+        Value::Array(items) => items.iter().for_each(|item| strings(item, into)),
+        Value::Object(map) => map.iter().for_each(|(key, item)| {
+            into.push(key.clone());
             strings(item, into);
         }),
-        Value::Tagged(tagged) => strings(&tagged.value, into),
         _ => {}
     }
 }
@@ -670,7 +666,7 @@ fn the_smoke_step_reads_its_scratch_repository_from_the_secret_of_the_same_name(
     let secret = format!("${{{{ secrets.{SMOKE_REPO_KEY} }}}}");
     let ci = workflow("ci.yml");
     let steps = ci["jobs"]["smoke"]["steps"]
-        .as_sequence()
+        .as_array()
         .expect("ci.yml's smoke job has steps");
     let runs: Vec<&Value> = steps
         .iter()
@@ -708,11 +704,11 @@ fn the_smoke_step_reads_its_scratch_repository_from_the_secret_of_the_same_name(
 
     for (file, parsed) in workflows() {
         let mut env_blocks = vec![parsed.get("env")];
-        for (_, job) in parsed["jobs"].as_mapping().into_iter().flatten() {
+        for (_, job) in parsed["jobs"].as_object().into_iter().flatten() {
             env_blocks.push(job.get("env"));
             for step in job
                 .get("steps")
-                .and_then(Value::as_sequence)
+                .and_then(Value::as_array)
                 .into_iter()
                 .flatten()
             {

@@ -32,12 +32,12 @@ set positional-arguments := true
 # release into this clone's own build directory, never onto `PATH`, and
 # `tests/linked_engines.rs` fails if this line ever names a release other than the one
 # the lock links.
-onetaskgraph-version := "0.6.0"
+onetaskgraph-version := "0.6.1"
 onetaskgraph-root := justfile_directory() / "target" / "tools" / ("onetaskgraph-" + onetaskgraph-version)
 
 # The budget checker `budgets.yaml` is measured with (`just budgets`), installed at this
 # release into this clone's own build directory, never onto `PATH`, as `onetaskgraph` is above.
-onebudgetspec-version := "0.1.1"
+onebudgetspec-version := "0.1.5"
 onebudgetspec-root := justfile_directory() / "target" / "tools" / ("onebudgetspec-" + onebudgetspec-version)
 
 # The renderer the visual-docs capture draws each scene with (`just screenshots`).

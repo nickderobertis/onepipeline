@@ -2146,7 +2146,7 @@ impl World {
         use oneagentgraph::config::Member;
 
         let shipped = repo_file("graphs/dag-scope.yaml");
-        let config: oneagentgraph::config::GraphConfig = serde_norway::from_str(
+        let config: oneagentgraph::config::GraphConfig = onepipeline_testfakes::yaml::from_str(
             &std::fs::read_to_string(&shipped).expect("the shipped dag-scope graph"),
         )
         .expect("the shipped dag-scope graph is a valid oneagentgraph config");
@@ -2778,7 +2778,7 @@ impl World {
         let mut document = String::from("---\n");
         for (key, value) in front {
             document.push_str(
-                &serde_norway::to_string(&json!({ *key: value }))
+                &onepipeline_testfakes::yaml::to_string(&json!({ *key: value }))
                     .expect("a front-matter field serialises"),
             );
         }
@@ -4509,7 +4509,7 @@ fn title_of(path: &Path) -> Result<String, String> {
         .and_then(|rest| rest.split_once("---\n"))
         .map(|(front, _)| front)
         .ok_or_else(|| "its project document has no front matter".to_owned())?;
-    let front = serde_norway::from_str::<serde_json::Map<String, Value>>(front)
+    let front = onepipeline_testfakes::yaml::from_str::<serde_json::Map<String, Value>>(front)
         .map_err(|error| format!("its front matter is not a mapping ({error})"))?;
     front
         .get("title")

@@ -142,7 +142,7 @@ fn project(world: &World, name: &str) -> (String, String) {
 }
 
 fn answers(what: &str, criteria: &[&str]) -> String {
-    serde_norway::to_string(&json!({"what": what, "acceptance_criteria": criteria}))
+    onepipeline_testfakes::yaml::to_string(&json!({"what": what, "acceptance_criteria": criteria}))
         .expect("answers serialise")
 }
 
@@ -2002,7 +2002,7 @@ fn board(world: &World) -> Vec<(String, String)> {
 /// plugin reads one line break after the front matter and the one that ends the file as its
 /// framing, so the content is written between them exactly as it is.
 fn board_item(front: &Value, content: &str) -> String {
-    let front = serde_norway::to_string(front).expect("front matter serialises");
+    let front = onepipeline_testfakes::yaml::to_string(front).expect("front matter serialises");
     format!("---\n{front}---\n{content}\n")
 }
 

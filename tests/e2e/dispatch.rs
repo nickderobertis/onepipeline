@@ -4027,7 +4027,7 @@ fn turns_dispatched(world: &World, run: &str, node: &str, step: Option<&str>) ->
         .as_str()
         .expect("the sibling publishes the config it launched the member with");
     let text = std::fs::read_to_string(config).expect("that configuration is on disk");
-    let effective: Value = serde_norway::from_str(&text).expect("it parses");
+    let effective: Value = onepipeline_testfakes::yaml::from_str(&text).expect("it parses");
     effective["user"]["max_turns"]
         .as_u64()
         .unwrap_or_else(|| panic!("{config} states no turn ceiling: {text}"))
@@ -4189,7 +4189,7 @@ fn settled_report(world: &World, run: &str) -> Value {
 
 /// The provider block onejudge read the dispatch of the worker in `run` from.
 fn provider_block(world: &World, run: &str) -> Value {
-    let effective: Value = serde_norway::from_str(&config_of(world, run, "worker"))
+    let effective: Value = onepipeline_testfakes::yaml::from_str(&config_of(world, run, "worker"))
         .expect("the member's effective onejudge config parses");
     effective["provider"].clone()
 }

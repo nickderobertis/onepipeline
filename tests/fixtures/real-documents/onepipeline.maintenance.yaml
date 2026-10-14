@@ -1,0 +1,46 @@
+# A redacted copy of a real host file: this host's maintenance schedule
+# (`config/onepipeline.maintenance.yaml`), read by `src/yaml.rs`'s real-document test.
+# It held no employer, workplace, private repository, path, host, user, email or internal
+# URL to replace, so every byte below this header is the host's.
+# How often an idle driver on this host maintains each repository's warm worktree slots.
+#
+# `scripts/onepipeline.sh` names this file as `--maintenance-config` on every
+# `onepipeline start` the caller named none for — `just orchestrate`, `just plan`, the
+# design-document launch and the follow-up run alike — exactly as it names the
+# dispatch-env hook.
+# `adopt` takes none, because an adopted run replays the schedule its launch record
+# retained. The engine reads it at launch and refuses a run before it is minted for an
+# unknown key, a `version` other than 1, a rule naming no match field or a malformed
+# span, naming the key at fault.
+#
+# The schedule is a pure function of this file and the stamp `onevcs` keeps on each
+# slot: a driver that finds itself idle sweeps every registered identity through
+# `onevcs pool maintain <identity> --older-than <every>`, which runs the identity's
+# `maintain` command from `config/onevcs.workspaces.yml` in each idle slot not
+# maintained within `every` and records the attempt on the slot as `last_maintained`.
+# Nothing here keeps state, so late is fine, nothing runs twice, two drivers on one host
+# are safe by the same fact, and between runs nothing runs and nothing needs to. A sweep
+# that did something is journalled once as a `pool-maintenance` record, which `just
+# results` names; one that found every slot not due, in use, or without a command
+# writes nothing.
+#
+# `every` is a `Span` — digits then one of `s`, `m`, `h`, `d`, no spaces, no zero — and
+# is the only key `default` or a rule may carry: no `at`, no cron shape. `rules` match
+# an identity the way the rules file does, first match wins, and there are none yet:
+# every identity is maintained on the default, a week, which is the `--time 7` the
+# Rust identities' `cargo sweep` keeps a warm `target/` to.
+#
+# llmlint: ignore[changed_behavior_has_e2e] What an idle driver does with this schedule
+# — sweep every registered identity through `onevcs pool maintain` on its cadence and
+# journal the `pool-maintenance` record — is the engine's, driven end to end by
+# `tests/e2e/maintenance.rs` in the onepipeline repository at the release
+# `tests/test_adopted_engine_carries_this_plan.py` holds the pin to; a launch here idles
+# for ten minutes before its first sweep, which is not a journey this suite can spend.
+# What this repository owns is proven here: that every launch names this file and the
+# engine retains its parse (`tests/e2e/launch_monitor_observer/test_orchestrate_launch_e2e.py`), and that the
+# verb it schedules runs the workspaces file's `maintain` command in an idle slot and
+# stamps it (`tests/e2e/publish_and_landing/test_worktree_pool_e2e.py`).
+version: 1
+default:
+  every: 7d
+rules: []
