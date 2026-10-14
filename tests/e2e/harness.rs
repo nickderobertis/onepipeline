@@ -4078,6 +4078,10 @@ fn a_worlds_teardown_ends_a_double_it_started_and_the_descendant_that_double_sta
 /// Linux only, because the exit stop is `ptrace`'s.
 #[cfg(target_os = "linux")]
 #[test]
+// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] the three-second hold is the
+// property under test — a killed descendant still exiting after the walk has stopped finding
+// it — and what it proves is `World`'s own teardown, which every e2e and note journey runs, so
+// this edge is the harness's; one bounded hold does not warrant a project of its own.
 fn a_worlds_teardown_waits_for_a_descendant_still_exiting_after_its_double_is_gone() {
     let (double_pid, descendant) = {
         let world = World::new("teardown-exiting");
