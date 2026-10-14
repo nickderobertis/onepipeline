@@ -10575,6 +10575,9 @@ results lists all. While paused the header ends
 `— kept while paused; discard with onepipeline scratch discard <run-id> once the run ends`.
 A partial removal prints in both views
 `  scratch: <k> dir(s) could not be removed: <first path>: <error>`.
+A run whose reading is neither an ending nor a pause (`ACTIVE`, `PARKED`,
+`DRIVER DEAD`, `HOST SHUTDOWN`), including one made live again after an ending,
+prints neither line until its next ending writes a fresh record.
 Neither view walks scratch. `RunReading` and planner surfaces do not change.
 
 `onepipeline scratch discard RUN` resolves exactly one id under the runs root,
