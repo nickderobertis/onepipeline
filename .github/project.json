@@ -19,6 +19,7 @@
         "{workspaceRoot}/release-targets.toml",
         "{workspaceRoot}/Cargo.toml",
         "{workspaceRoot}/npm/onepipeline-cli/package.json",
+        "{workspaceRoot}/tests/ci_workflows.rs",
         "sharedGlobals"
       ],
       "outputs": ["{projectRoot}/.telemetry/macos-policy.json"]

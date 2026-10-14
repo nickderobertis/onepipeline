@@ -225,25 +225,18 @@ test("the workload models every trigger the workflows declare and every event th
       .sort(),
   );
 });
+// The required contexts, read from the one list tests/ci_workflows.rs holds.
 const required = [
-  "cross (macos-latest)",
-  "cross (windows-latest)",
-  "deny",
-  "gate",
-  "install (macos-latest)",
-  "install (ubuntu-latest)",
-  "install (windows-latest)",
-  "install-documented (macos-latest)",
-  "install-documented (ubuntu-latest)",
-  "install-documented (windows-latest)",
-  "llmlint",
-  "msrv",
-  "pr-title",
-  "release-compat",
-  "smoke",
-  "visual-docs / report (x86_64, shots/current, shots/verify, Visual docs)",
-  "wheel",
-];
+  ...readFileSync("tests/ci_workflows.rs", "utf8")
+    .match(/const REQUIRED: &\[&str\] = &\[([\s\S]*?)\];/)[1]
+    .matchAll(/"([^"]+)"/g),
+].map((found) => found[1]);
+test("the required contexts are the list tests/ci_workflows.rs holds", () => {
+  assert.ok(required.length > 0, "tests/ci_workflows.rs declares no REQUIRED contexts");
+  assert.ok(required.includes("install (ubuntu-latest)"));
+  assert.ok(required.includes("install (windows-latest)"));
+  assert.equal(new Set(required).size, required.length);
+});
 
 function scenario(id, eventName, action, kind, fork, opt, branch = "release-plz-fixture") {
   const payload = event(fork, branch);

@@ -129,6 +129,8 @@ def validate_npm_archive(bundle, binary_name):
             raise ValueError('unexpected npm archive member')
         if name != f'package/bin/{binary_name}' and member.mode & 0o111:
             raise ValueError('unexpected executable npm archive member')
+        if name == f'package/bin/{binary_name}' and not binary_name.endswith('.exe') and not member.mode & 0o111:
+            raise ValueError('npm executable lacks execute permission')
     if not files.issubset(names):
         raise ValueError('npm archive omitted required members')
 
@@ -237,9 +239,10 @@ def verify(record, quiet=False):
         tags = wheel.read(dist_info_member(wheel, 'WHEEL')).decode()
         arch = 'arm64' if 'apple' in target and target.startswith('aarch64') else 'aarch64' if target.startswith('aarch64') else 'amd64' if 'windows' in target else 'x86_64'
         platforms = ['macosx_'] if 'apple' in target else ['win_'] if 'windows' in target else ['manylinux', 'musllinux', 'linux_']
-        if not any(line.startswith('Tag: ') and line.endswith(arch) and
-                   any(line.rsplit('-', 1)[-1].startswith(platform) for platform in platforms)
-                   for line in tags.splitlines()):
+        tag_lines = [line for line in tags.splitlines() if line.startswith('Tag: ')]
+        if not tag_lines or not all(line.endswith(arch) and
+                                    any(line.rsplit('-', 1)[-1].startswith(platform) for platform in platforms)
+                                    for line in tag_lines):
             raise ValueError('wheel architecture tag mismatch')
         for name in [n for n in wheel.namelist() if '.dist-info/sboms/' in n]:
             bom = json.loads(wheel.read(name))
@@ -259,6 +262,8 @@ def verify(record, quiet=False):
             for member in archive.getmembers():
                 if not member.isfile():
                     raise ValueError(f'archive member is not a regular file: {member.name}')
+                if member.name in record['executables'] and 'windows' not in target and not member.mode & 0o111:
+                    raise ValueError(f'archive executable lacks execute permission: {member.name}')
             for name in scripts:
                 if tar_payload(archive, Path(name).name) != wheel.read(name):
                     raise ValueError('archive executable differs from wheel payload')
