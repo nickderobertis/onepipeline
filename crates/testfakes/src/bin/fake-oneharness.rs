@@ -52,6 +52,7 @@ fn main() -> ExitCode {
     // environment, because the descendant is started with none of it.
     match args.first().map(String::as_str) {
         Some("leave-a-descendant") => return leave_a_descendant(&args[1..]),
+        Some("leave-descendants") => return leave_descendants(&args[1..]),
         Some("linger") => linger(),
         Some("linger-held-at-exit") => return linger_held_at_exit(&args[1..]),
         Some("orphan") => return orphan(&args[1..]),
@@ -71,10 +72,9 @@ fn main() -> ExitCode {
 /// Start a long-lived descendant of this double, record both pids, and then
 /// either keep running (`hold`) or end at once and orphan it (`exit`).
 ///
-/// `hold-at-exit [seconds]` keeps running too, but its descendant is one that
-/// outlasts its own kill by that long — [`HELD_AT_EXIT_SECONDS`] unless said:
-/// see [`linger_held_at_exit`]. The record is written once that is arranged,
-/// and by the process arranging it rather than by this one.
+/// `hold-at-exit` keeps running too, but its descendant is one that outlasts
+/// its own kill: see [`linger_held_at_exit`]. The record is written once that
+/// is arranged, and by the process arranging it rather than by this one.
 ///
 /// What the run that left the Windows leg hanging had in it: a `fake-oneharness`
 /// a test had started, or something under it, still running and holding the
@@ -88,26 +88,27 @@ fn main() -> ExitCode {
 /// temporary name and renamed into place, so a reader polling for it never
 /// reads half of one.
 fn leave_a_descendant(args: &[String]) -> ExitCode {
-    let usage = "leave-a-descendant takes a record path and `hold`, `exit` or \
-                 `hold-at-exit [seconds]`";
-    let (record, then) = match args {
-        [record, then] if then == "hold" => (record, Then::Hold),
-        [record, then] if then == "exit" => (record, Then::Exit),
-        [record, then] if then == "hold-at-exit" => {
-            (record, Then::HoldAtExit(HELD_AT_EXIT_SECONDS))
+    let [record, then] = args else {
+        return fake::refuse(
+            "leave-a-descendant takes a record path and `hold`, `exit` or `hold-at-exit`",
+        );
+    };
+    let then = match then.as_str() {
+        "hold" => Then::Hold,
+        "exit" => Then::Exit,
+        "hold-at-exit" => Then::HoldAtExit,
+        other => {
+            return fake::refuse(&format!(
+                "leave-a-descendant then {other:?}: `hold`, `exit` or `hold-at-exit`"
+            ))
         }
-        [record, then, seconds] if then == "hold-at-exit" => match seconds.parse() {
-            Ok(seconds) => (record, Then::HoldAtExit(seconds)),
-            Err(_) => return fake::refuse(&format!("{usage}: {seconds:?} is not seconds")),
-        },
-        _ => return fake::refuse(usage),
     };
     let me = std::env::current_exe()
         .unwrap_or_else(|error| fake::fail(&format!("this double cannot name itself: {error}")));
     let mut descendant = std::process::Command::new(me);
-    if let Then::HoldAtExit(seconds) = then {
+    if then == Then::HoldAtExit {
         let double = std::process::id().to_string();
-        descendant.args(["linger-held-at-exit", record, &double, &seconds.to_string()]);
+        descendant.args(["linger-held-at-exit", record, &double]);
     } else {
         descendant.arg("linger");
     }
@@ -123,7 +124,7 @@ fn leave_a_descendant(args: &[String]) -> ExitCode {
     let mut descendant = descendant
         .spawn()
         .unwrap_or_else(|error| fake::fail(&format!("cannot start the descendant: {error}")));
-    if !matches!(then, Then::HoldAtExit(_)) {
+    if then != Then::HoldAtExit {
         write_record(
             record,
             &format!("{} {}", std::process::id(), descendant.id()),
@@ -138,6 +139,42 @@ fn leave_a_descendant(args: &[String]) -> ExitCode {
     linger()
 }
 
+/// Start `<count>` long-lived descendants of this double, record
+/// `<double pid> <descendant pid>...`, and keep running beside them.
+///
+/// Each is started as [`leave_a_descendant`] starts its one. Many, so that a
+/// teardown has more to end than its first look makes room for.
+fn leave_descendants(args: &[String]) -> ExitCode {
+    let usage = "leave-descendants takes a record path and a count";
+    let [record, count] = args else {
+        return fake::refuse(usage);
+    };
+    let Some(count) = count.parse::<usize>().ok().filter(|count| *count > 0) else {
+        return fake::refuse(usage);
+    };
+    let me = std::env::current_exe()
+        .unwrap_or_else(|error| fake::fail(&format!("this double cannot name itself: {error}")));
+    let mut pids = vec![std::process::id()];
+    for _ in 0..count {
+        let mut descendant = std::process::Command::new(&me);
+        descendant.arg("linger").stdin(std::process::Stdio::null());
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut descendant, 0);
+        // Never waited for: they run until the teardown under test ends them.
+        #[expect(
+            clippy::zombie_processes,
+            reason = "the descendants are left running on purpose; see this function's doc"
+        )]
+        let started = descendant
+            .spawn()
+            .unwrap_or_else(|error| fake::fail(&format!("cannot start a descendant: {error}")));
+        pids.push(started.id());
+    }
+    let line: Vec<String> = pids.iter().map(u32::to_string).collect();
+    write_record(record, &line.join(" "));
+    linger()
+}
+
 /// What `leave-a-descendant` does once its descendant is running.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Then {
@@ -145,9 +182,8 @@ enum Then {
     Hold,
     /// End at once, leaving it an orphan.
     Exit,
-    /// Keep running beside a descendant that outlasts its own kill by this
-    /// many seconds.
-    HoldAtExit(u64),
+    /// Keep running beside a descendant that outlasts its own kill.
+    HoldAtExit,
 }
 
 /// Write `line` to `record` whole, under a temporary name renamed into place,
@@ -159,13 +195,13 @@ fn write_record(record: &str, line: &str) {
         .unwrap_or_else(|error| fake::fail(&format!("cannot record the pids: {error}")));
 }
 
-/// How long, in seconds, [`hold_at_exit`] keeps a killed process from
-/// finishing its exit unless told otherwise.
+/// How long [`hold_at_exit`] keeps a killed process from finishing its exit.
 ///
 /// Long beside the moment a teardown's kill lands and its next look at the
 /// process table, so that a teardown which stops looking once the walk from
 /// the test finds nothing returns well inside it.
-const HELD_AT_EXIT_SECONDS: u64 = 3;
+#[cfg(target_os = "linux")]
+const HELD_AT_EXIT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// The descendant `leave-a-descendant <record> hold-at-exit` starts: one that,
 /// once killed, is still on its way out after the double above it has gone.
@@ -180,18 +216,18 @@ const HELD_AT_EXIT_SECONDS: u64 = 3;
 /// Linux only: the exit stop is `ptrace`'s `PTRACE_O_TRACEEXIT`.
 #[cfg(target_os = "linux")]
 fn linger_held_at_exit(args: &[String]) -> ExitCode {
-    let usage = "linger-held-at-exit takes a record path, the double's pid and seconds";
-    let [record, double, seconds] = args else {
+    let usage = "linger-held-at-exit takes a record path and the double's pid";
+    let [record, double] = args else {
         return fake::refuse(usage);
     };
-    if process_id(double).is_none() || seconds.parse::<u64>().is_err() {
+    if process_id(double).is_none() {
         return fake::refuse(usage);
     }
     let me = std::env::current_exe()
         .unwrap_or_else(|error| fake::fail(&format!("this double cannot name itself: {error}")));
     let pid = std::process::id().to_string();
     let started = std::process::Command::new(me)
-        .args(["orphan", "hold-at-exit", &pid, double, record, seconds])
+        .args(["orphan", "hold-at-exit", &pid, double, record])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .output();
@@ -259,7 +295,7 @@ fn orphan(args: &[String]) -> ExitCode {
 }
 
 /// Trace `<pid>`, record `<double pid> <pid>` once that holds and this process
-/// is an orphan, and keep `<pid>` at its exit for `<seconds>` once it is
+/// is an orphan, and keep `<pid>` at its exit for [`HELD_AT_EXIT`] once it is
 /// killed. Ends when `<pid>` does.
 ///
 /// The trace is asked for until `<pid>` has let this process in, which it does
@@ -270,13 +306,11 @@ fn orphan(args: &[String]) -> ExitCode {
 /// exiting, which is a different process from the one this stands for.
 #[cfg(target_os = "linux")]
 fn hold_at_exit(args: &[String]) -> ExitCode {
-    let usage = "hold-at-exit takes a pid, the double's pid, a record path and seconds";
-    let [pid, double, record, seconds] = args else {
+    let usage = "hold-at-exit takes a pid, the double's pid and a record path";
+    let [pid, double, record] = args else {
         return fake::refuse(usage);
     };
-    let (Some(traced), Some(double), Ok(seconds)) =
-        (process_id(pid), process_id(double), seconds.parse::<u64>())
-    else {
+    let (Some(traced), Some(double)) = (process_id(pid), process_id(double)) else {
         return fake::refuse(usage);
     };
     // Named rather than read off this process's parent, which by the time it
@@ -334,7 +368,7 @@ fn hold_at_exit(args: &[String]) -> ExitCode {
             return ExitCode::SUCCESS;
         }
         if status >> 8 == at_exit {
-            std::thread::sleep(std::time::Duration::from_secs(seconds));
+            std::thread::sleep(HELD_AT_EXIT);
         }
         // SAFETY: as above; a zero `data` delivers no signal.
         unsafe {

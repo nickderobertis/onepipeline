@@ -32,12 +32,32 @@
 //! under nextest and that process is the unit both platforms can describe. A
 //! caller holding several fixtures ends its descendants when the last one goes.
 
-/// How long [`end_descendants`] waits for what it ended to be gone.
+/// How long [`end_descendants`] waits for what it ended to be gone, unless
+/// [`PATIENCE_VARIABLE`] says otherwise.
 ///
 /// A process ended with `SIGKILL` or `TerminateProcess` cannot refuse it, so
 /// anything still running past this is something the teardown did not reach,
 /// and the caller is told which pids those are.
 const PATIENCE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The environment variable that replaces [`PATIENCE`], in whole milliseconds.
+///
+/// So that a test can hold the teardown to what it reports when the wait runs
+/// out without waiting thirty seconds for it: at `0` the teardown gives up at
+/// its first look, before it has ended anything.
+pub const PATIENCE_VARIABLE: &str = "ONEPIPELINE_TESTFAKES_TEARDOWN_PATIENCE_MS";
+
+/// [`PATIENCE`], or what [`PATIENCE_VARIABLE`] replaces it with.
+fn patience() -> Result<std::time::Duration, String> {
+    match std::env::var_os(PATIENCE_VARIABLE) {
+        None => Ok(PATIENCE),
+        Some(set) => set
+            .to_str()
+            .and_then(|millis| millis.parse().ok())
+            .map(std::time::Duration::from_millis)
+            .ok_or_else(|| format!("{PATIENCE_VARIABLE}={set:?} is not a number of milliseconds")),
+    }
+}
 
 /// How often the teardown looks again while it waits.
 const POLL: std::time::Duration = std::time::Duration::from_millis(20);
@@ -66,15 +86,15 @@ pub fn enrol() {
 ///
 /// # Errors
 ///
-/// The pids still running when the wait ran out, or the reason this host would
-/// not describe its processes.
+/// The pids still running when the wait ran out, the reason this host would
+/// not describe its processes, or a [`PATIENCE_VARIABLE`] that is no number.
 pub fn end_descendants() -> Result<(), String> {
-    platform::end_descendants()
+    platform::end_descendants(patience()?)
 }
 
 #[cfg(unix)]
 mod platform {
-    use super::{PATIENCE, POLL};
+    use super::POLL;
 
     pub fn enrol() {}
 
@@ -105,9 +125,9 @@ mod platform {
         Zombie,
     }
 
-    pub fn end_descendants() -> Result<(), String> {
+    pub fn end_descendants(patience: std::time::Duration) -> Result<(), String> {
         let me = std::process::id();
-        let deadline = std::time::Instant::now() + PATIENCE;
+        let deadline = std::time::Instant::now() + patience;
         // Everything any walk below has found, kept after it stops being found.
         // Killing a parent hands a child still on its way out to `init`, so the
         // next walk from here no longer reaches it; it was a descendant at the
@@ -126,8 +146,7 @@ mod platform {
             if std::time::Instant::now() >= deadline {
                 let pids: Vec<u32> = running.iter().map(|found| found.pid).collect();
                 return Err(format!(
-                    "pids {pids:?} are still running {}s after they were ended",
-                    PATIENCE.as_secs()
+                    "pids {pids:?} are still running {patience:?} after they were ended"
                 ));
             }
             // Stopped first, all of them, and the walk read again until it finds
@@ -137,6 +156,10 @@ mod platform {
             for found in &frozen {
                 signal(found.pid, libc::SIGSTOP);
             }
+            // llmlint: ignore-block[changed_behavior_has_e2e] what this loop exists for is a
+            // process started in the microseconds between a walk and its stop, which no test
+            // can make happen on demand; every journey that ends a tree runs through it, and
+            // what each asserts — nothing it started is left — is what it would break.
             loop {
                 let table = list()?;
                 let fresh: Vec<Found> = descendants(me, &table)
@@ -154,6 +177,7 @@ mod platform {
                 remember(&mut ended, fresh.iter().cloned());
                 frozen.extend(fresh);
             }
+            // llmlint: ignore-end[changed_behavior_has_e2e]
             for found in &frozen {
                 signal(found.pid, libc::SIGKILL);
             }
@@ -176,6 +200,11 @@ mod platform {
     /// collected, and a pid listed with another start is a different process
     /// that has been given it since.
     fn still_running(found: &Found, table: &[Row]) -> bool {
+        // llmlint: ignore[changed_behavior_has_e2e] the start half of the identity only
+        // matters once the kernel has given a found pid to another process, which a test
+        // cannot arrange without cycling the host's whole pid space; the pid half is what
+        // `a_worlds_teardown_waits_for_a_descendant_still_exiting_after_its_double_is_gone`
+        // proves.
         table
             .iter()
             .any(|row| row.process == *found && row.state == State::Live)
@@ -299,7 +328,7 @@ mod platform {
 
 #[cfg(windows)]
 mod platform {
-    use super::{PATIENCE, POLL};
+    use super::POLL;
     use std::sync::OnceLock;
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::System::JobObjects::{
@@ -340,14 +369,14 @@ mod platform {
         });
     }
 
-    pub fn end_descendants() -> Result<(), String> {
+    pub fn end_descendants(patience: std::time::Duration) -> Result<(), String> {
         let Some(job) = JOB.get().map(|job| *job as HANDLE) else {
             // Nothing was enrolled, so nothing this process started is in a job
             // to end.
             return Ok(());
         };
         let me = std::process::id();
-        let deadline = std::time::Instant::now() + PATIENCE;
+        let deadline = std::time::Instant::now() + patience;
         loop {
             // llmlint: ignore[changed_behavior_has_e2e] the job's handle is this module's
             // own and is never closed, so no test can make the kernel refuse to list it;
@@ -356,18 +385,14 @@ mod platform {
             if members.is_empty() {
                 return Ok(());
             }
-            // llmlint: ignore[changed_behavior_has_e2e] reaching this needs a job member
-            // that `TerminateProcess` cannot end inside thirty seconds, which a test cannot
-            // make without a driver; the Unix counterpart is proven by
-            // `a_worlds_teardown_names_a_descendant_it_could_not_end_in_time`.
             if std::time::Instant::now() >= deadline {
                 return Err(format!(
-                    "pids {members:?} are still in this test's job {}s after they were ended",
-                    PATIENCE.as_secs()
+                    "pids {members:?} are still in this test's job {patience:?} after they were \
+                     ended"
                 ));
             }
             for pid in members {
-                end(job, pid);
+                end(job, pid, patience);
             }
             std::thread::sleep(POLL);
         }
@@ -380,7 +405,7 @@ mod platform {
     /// again whether it is in the job before it is ended: a pid is only a
     /// number, and the handle is what cannot have been reissued to something
     /// else in between.
-    fn end(job: HANDLE, pid: u32) {
+    fn end(job: HANDLE, pid: u32, patience: std::time::Duration) {
         // SAFETY: `OpenProcess` returns null on failure and otherwise a handle
         // closed below.
         let process = unsafe {
@@ -400,7 +425,7 @@ mod platform {
         if asked != 0 && inside != 0 {
             // SAFETY: `process` is live and was opened with the right to end it.
             unsafe { TerminateProcess(process, 1) };
-            let millis = u32::try_from(PATIENCE.as_millis()).unwrap_or(u32::MAX);
+            let millis = u32::try_from(patience.as_millis()).unwrap_or(u32::MAX);
             // Whatever the wait answers, the caller lists the job again: a member
             // still there is ended again, and one that outlasts the bound is
             // named.
