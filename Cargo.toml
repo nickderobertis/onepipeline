@@ -752,20 +752,14 @@ resolver = "2"
 # it. It requires `onejudge` 0.19.0, which `^0.17.1` admits no version of, so the
 # two requirements move as one.
 #
-# `oneagentgraph` 0.5.8 is the floor because it relinks onto the `oneharness-core`
-# 0.26.0 below, which starts Codex with plugins off unless a config opts in, so
-# every single-sided turn a dispatch runs on Codex stops downloading its remote
-# plugin catalog. Nothing here reads anything new from it; it requires
-# `oneharness-core` `^0.26.0`, which `^0.24.1` admits no version of, and
-# `onejudge` `^0.19.1`, so the three move as one. `tests/e2e/dispatch.rs`'s
+# `oneagentgraph` 0.5.10 is the floor because it relinks onto the
+# `oneharness-core` 0.26.0 below, which starts Codex with plugins off unless a
+# config opts in, so every single-sided turn a dispatch runs on Codex stops
+# downloading its remote plugin catalog. Nothing here reads anything new from it;
+# it requires `oneharness-core` `^0.26.0`, which `^0.24.1` admits no version of,
+# and `onejudge` `^0.19.2`, so the three move as one. `tests/e2e/dispatch.rs`'s
 # `a_dispatched_codex_turn_starts_with_plugins_off_unless_its_config_opts_in`
 # reads the argv the linked core starts Codex with.
-#
-# 0.5.10 is the floor because it is the release that links `onejudge` 0.19.2,
-# which it requires as `^0.19.2`; both read and write YAML with serde-saphyr, so
-# the lock drops `serde_yaml_ng`. Nothing here
-# reads anything new from it, and it still requires `oneharness-core` `^0.26.0`,
-# so the three resolve one copy each.
 #
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
@@ -902,13 +896,9 @@ onemessagebus = "0.9.0"
 # same pre-1.0 reason as every raise above: `^0.17` admits no 0.19.x.
 # `oneagentgraph` 0.5.6 requires it.
 #
-# 0.19.1 relinks onto `oneharness-core` 0.26.0, so the spawned side of a two-party
-# member resolves the same plugins-off core. Nothing here reads anything new from
-# it; `oneagentgraph` 0.5.8 requires it as its floor.
-#
-# 0.19.2 is the release `oneagentgraph` 0.5.10 requires as its floor; it keeps
-# `oneharness-core` `^0.26.0` and reads its YAML with serde-saphyr. Nothing here
-# reads anything new from it.
+# 0.19.2 relinks onto `oneharness-core` 0.26.0, so the spawned side of a
+# two-party member resolves the same plugins-off core. Nothing here reads anything
+# new from it; `oneagentgraph` 0.5.10 requires it as its floor.
 onejudge = "0.19.2"
 # **Test-support only**, and named for one reason: `crates/testfakes`'s
 # `oneharness` double writes the report onejudge reads back, and that report is

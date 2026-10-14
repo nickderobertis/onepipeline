@@ -4338,8 +4338,8 @@ pub fn oneagentgraph_binary() -> PathBuf {
     held_alias(held, "oneagentgraph")
 }
 
-/// The **real** `oneharness` binary, built from the release the manifest's
-/// dev-dependency names over the one `oneharness-core` this lock resolves.
+/// The **real** `oneharness` binary, built from the release `crates/testfakes`
+/// names as a normal dependency, over the one `oneharness-core` this lock resolves.
 ///
 /// For the journeys whose claim is about the process a two-party member's
 /// onejudge spawns for each turn rather than about what this suite's double
