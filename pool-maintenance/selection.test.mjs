@@ -65,9 +65,10 @@ describe("the pool-maintenance budget", () => {
   it("is run by the release-PR sweep after its quality gate", () => {
     const workflow = readFileSync(join(root, ".github", "workflows", "release-sweep.yml"), "utf8");
     const gate = workflow.indexOf("just check");
-    const budgets = workflow.indexOf("run: just budgets-host");
+    const job = workflow.split(/\n {2}host-budgets:\n/)[1]?.split(/\n {2}\S/)[0] ?? "";
     assert.ok(gate > 0, "release-sweep.yml no longer runs `just check`");
-    assert.ok(budgets > gate, "release-sweep.yml does not run `just budgets-host` after its gate");
+    assert.match(job, /^ {4}needs: release-sweep$/m, "the host budgets do not wait for the gate");
+    assert.match(job, /^ {8}run: just budgets-host$/m, job);
     const justfile = readFileSync(join(root, "justfile"), "utf8");
     const recipe = justfile.split("\nbudgets-host:\n")[1]?.split("\n\n")[0] ?? "";
     assert.match(recipe, /scripts\/nx\.sh run-many -t budgets-host$/m, recipe);
