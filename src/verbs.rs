@@ -1761,7 +1761,7 @@ impl From<crate::review::Answered> for ReviewReceipt {
     }
 }
 
-/// Discover feedback without starting work or a driver.
+/// Readjust a run's drafts, then discover their feedback, starting no work from it.
 ///
 /// Readjusts first: the run's drafts are read where they stand on the host, in one
 /// batched read per repository and root, and what that read found is recorded before
