@@ -3555,3 +3555,75 @@ fn integrate_whose_report_cannot_be_written_exits_non_zero_and_says_why() {
     assert!(every.iter().any(|kind| kind == "base-arrived"), "{every:?}");
     assert_eq!(every.last().map(String::as_str), Some("landing-refused"));
 }
+
+/// `--until landing-progress` named alone returns on a landing's event as the
+/// default set does; named without it, a watch consumes the landing's events
+/// without waking, so the cursor it ends on is past them; and on a run's watch
+/// the word is refused, naming the flow watch it belongs to.
+#[test]
+fn landing_progress_is_a_flow_watchs_condition_to_name_or_leave_out() {
+    let verb = Verb::publish("ml-until");
+    let world = &verb.world;
+    let mut landing = verb.start();
+    landing.held_at_push(&verb);
+    let (flow, id) = the_landing(world);
+    let named = watch(
+        world,
+        &flow,
+        &[
+            "--timeout",
+            "0",
+            "--filter",
+            "detailed",
+            "--until",
+            "landing-progress",
+        ],
+    );
+    named.progressed("landing-registered");
+    // Left out, every landing event is read past and none wakes the watch: its
+    // cursor is at least as far as the journal reached before it was armed.
+    let reached = std::fs::metadata(landing_dir(world, &flow, &id).join("events.jsonl"))
+        .expect("the journal")
+        .len();
+    let without = watch(
+        world,
+        &flow,
+        &[
+            "--timeout",
+            "0",
+            "--filter",
+            "detailed",
+            "--until",
+            "run-joined",
+        ],
+    );
+    without.ended_on(ELAPSED, "elapsed");
+    let cursor = without.cursor();
+    let place: u64 = cursor
+        .split_once(&format!("{id}@"))
+        .and_then(|(_, rest)| rest.split(|c: char| !c.is_ascii_digit()).next())
+        .and_then(|digits| digits.parse().ok())
+        .unwrap_or_else(|| panic!("{cursor} places no {id}"));
+    assert!(place >= reached, "{cursor} is short of {reached}");
+    // On a run's watch the word is refused before anything waits.
+    world.script("solo.wait", "hold");
+    let plan = world.plan(
+        "solo",
+        &crate::harness::plan_of("solo", vec![crate::harness::agent("solo", &[])]),
+    );
+    world.run(&["start", &plan, "--detach"]).exited(0);
+    world
+        .run(&[
+            "watch",
+            "solo",
+            "--until",
+            "landing-progress",
+            "--timeout",
+            "0",
+        ])
+        .exited(REFUSED)
+        .err_has("is a flow watch's condition");
+    world.release("solo.go");
+    verb.held.release();
+    let _ = landing.ended();
+}

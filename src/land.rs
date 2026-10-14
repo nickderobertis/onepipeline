@@ -1237,7 +1237,6 @@ fn git_in<'a>(
 /// A manager landing this process registered and is doing: the flow that holds
 /// it, its own record, and the journals its progress goes to.
 pub(crate) struct Supervision {
-    /// The flow that holds it.
     flow: Flow,
     /// Whose flow it is: one registered for this landing alone, which ends when
     /// the landing does, or a longer one it is a step of.

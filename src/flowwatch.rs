@@ -90,7 +90,6 @@ struct Progress {
     /// The landing whose journal holds it.
     // llmlint: ignore[invalid_states_unrepresentable] a landing id read off the flow's own `landings/`, which `Flow::landings` admits only as the id its request names.
     landing: String,
-    /// The event.
     event: crate::event::Envelope,
     /// The branches the landing registered, which a relayed `onevcs` event does
     /// not name itself.

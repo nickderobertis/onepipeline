@@ -414,7 +414,8 @@ pub(crate) const fn landing_significance(
     }
 }
 
-/// Whether a kind ends a landing.
+/// Whether a kind ends a landing: its finish, its refusal, or its death — the
+/// three a death reader will not write over and a holder's flow ending reports.
 pub(crate) fn is_terminal_landing_kind(kind: &str) -> bool {
     use crate::event::PipelineKind;
     [
@@ -442,7 +443,6 @@ impl Landing {
         self.dir.join("events.jsonl")
     }
 
-    /// The id.
     pub(crate) fn id(&self) -> &str {
         &self.request.landing_id
     }
