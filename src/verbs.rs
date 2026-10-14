@@ -1764,8 +1764,10 @@ impl From<crate::review::Answered> for ReviewReceipt {
 /// Discover feedback without starting work or a driver.
 ///
 /// Readjusts first: the run's drafts are read where they stand on the host, in one
-/// batched read per repository, and every draft a landing moved is brought onto its
-/// placement before discovery reads their feedback out of that same read.
+/// batched read per repository and root, and what that read found is recorded before
+/// discovery reads each draft's feedback out of the same read. Bringing the drafts a
+/// landing moved onto their placement follows: a run something drives does it in its
+/// loop, and on a run nothing drives this call drives the run until those settle.
 ///
 /// # Errors
 /// An unknown run, another session's undriven run, or a ledger/channel refusal.
