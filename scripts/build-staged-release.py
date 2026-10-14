@@ -64,21 +64,39 @@ def wheel_scripts(bundle, primary):
     return scripts
 
 
-def validate_wheel_members(wheel):
-    """Refuse a wheel pip would install differently from what is verified here."""
+def validate_wheel_members(wheel, version):
+    """Refuse a wheel pip would install differently from what is verified here.
+
+    A bin-bindings wheel installs nothing but its metadata and the executables
+    under `.data/scripts`, the inventory `wheel_scripts` reconciles.
+    """
     names = wheel.namelist()
     if len(set(names)) != len(names):
         raise ValueError('wheel repeats a member')
+    if len({name.split('/')[0] for name in names if name.split('/')[0].endswith('.dist-info')}) != 1:
+        raise ValueError('wheel must carry exactly one .dist-info directory')
+    stem = f'onepipeline_cli-{version}'
     for info in wheel.infolist():
         parts = info.filename.rstrip('/').split('/')
         if (info.filename.startswith('/') or '\\' in info.filename or
                 any(part in ['', '.', '..'] for part in parts) or
-                not parts[0].endswith(('.dist-info', '.data'))):
+                parts[0] not in [f'{stem}.dist-info', f'{stem}.data'] or
+                (parts[0] == f'{stem}.data' and len(parts) > 1 and parts[1] != 'scripts')):
             raise ValueError(f'unsafe wheel member: {info.filename}')
         if not info.is_dir() and (info.external_attr >> 16) & 0o170000 not in (0, 0o100000):
             raise ValueError(f'wheel member is not a regular file: {info.filename}')
-    if len({name.split('/')[0] for name in names if name.split('/')[0].endswith('.dist-info')}) != 1:
-        raise ValueError('wheel must carry exactly one .dist-info directory')
+
+
+def validate_wheel_filename(path, version, tags):
+    """The filename is what an installer selects by, so it must say what WHEEL says."""
+    found = re.fullmatch(r'onepipeline_cli-([^-]+)-([^-]+)-([^-]+)-([^-]+)\.whl', Path(path).name)
+    if not found or found[1] != version:
+        raise ValueError('wheel filename name/version mismatch')
+    advertised = {f'{py}-{abi}-{plat}' for py in found[2].split('.')
+                  for abi in found[3].split('.') for plat in found[4].split('.')}
+    declared = {line[len('Tag: '):] for line in tags.splitlines() if line.startswith('Tag: ')}
+    if advertised != declared:
+        raise ValueError('wheel filename tags differ from its WHEEL tags')
 
 
 def dist_info_member(wheel, name):
@@ -208,7 +226,7 @@ def verify(record, quiet=False):
         raise ValueError('record tag/version mismatch')
     binary_name = 'onepipeline.exe' if 'windows' in target else 'onepipeline'
     with zipfile.ZipFile(record['wheel']) as wheel:
-        validate_wheel_members(wheel)
+        validate_wheel_members(wheel, version)
         scripts = wheel_scripts(wheel, binary_name)
         if sorted(Path(n).name for n in scripts) != sorted(record['executables']):
             raise ValueError('executable inventory differs from wheel')
@@ -233,6 +251,7 @@ def verify(record, quiet=False):
             expected = 0x0100000c
             if len(payload) < 8 or payload[:4] != b'\xcf\xfa\xed\xfe' or struct.unpack('<I', payload[4:8])[0] != expected:
                 raise ValueError('Mach-O architecture mismatch')
+        validate_wheel_filename(record['wheel'], version, tags)
         with tarfile.open(record['archive']) as archive:
             expected_names = sorted(record['executables'] + ['README.md', 'LICENSE', 'CHANGELOG.md'])
             if sorted(archive.getnames()) != expected_names:

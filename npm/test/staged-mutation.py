@@ -50,7 +50,7 @@ elif case in ['schema', 'tag', 'unknown', 'missing', 'field-type', 'target', 'in
     if case == 'inventory-type': record['executables'] = [42]
     if case == 'inventory-unsafe': record['executables'] = ['../escape']
     if case == 'inventory': record['executables'].append('missing-helper')
-elif case in ['wheel-version', 'wheel-arch', 'sbom', 'sbom-object', 'no-sbom', 'macho', 'wheel-duplicate', 'wheel-path', 'wheel-primary', 'no-metadata', 'no-wheel-tags', 'wheel-traversal', 'wheel-symlink', 'wheel-dist-info']:
+elif case in ['wheel-version', 'wheel-arch', 'sbom', 'sbom-object', 'no-sbom', 'macho', 'wheel-duplicate', 'wheel-path', 'wheel-primary', 'no-metadata', 'no-wheel-tags', 'wheel-traversal', 'wheel-symlink', 'wheel-dist-info', 'wheel-data-scheme', 'wheel-filename']:
     source = record['wheel']
     target = out / Path(source).name
     with zipfile.ZipFile(source) as original, zipfile.ZipFile(target, 'w') as changed:
@@ -85,10 +85,15 @@ elif case in ['wheel-version', 'wheel-arch', 'sbom', 'sbom-object', 'no-sbom', '
                 link = zipfile.ZipInfo(entry.filename.split('/')[0] + '/link')
                 link.external_attr = (0o120777 << 16)
                 changed.writestr(link, b'/etc/passwd')
+            if case == 'wheel-data-scheme' and '.data/scripts/' in entry.filename:
+                changed.writestr(entry.filename.replace('/scripts/', '/data/bin/'), payload)
             if case == 'wheel-dist-info' and entry.filename.endswith('.dist-info/WHEEL'):
                 changed.writestr('other-1.0.dist-info/METADATA', b'Name: other\n')
             if case == 'wheel-duplicate' and '.data/scripts/' in entry.filename:
                 changed.writestr('duplicate.data/scripts/' + Path(entry.filename).name, payload)
+    if case == 'wheel-filename':
+        stem, version, rest = target.name.split('-', 2)
+        target = target.rename(target.with_name(f'{stem}-{version}-py3-none-win_amd64.whl'))
     record['wheel'] = str(target)
 elif case in ['archive-layout', 'archive-payload', 'npm-payload', 'npm-version', 'npm-object', 'npm-directory', 'npm-name', 'npm-os', 'npm-cpu', 'archive-directory', 'npm-unsafe', 'npm-duplicate', 'npm-link', 'npm-executable', 'npm-unexpected', 'npm-missing', 'archive-doc-directory', 'archive-doc-symlink', 'archive-doc-hardlink']:
     key = 'npm' if case.startswith('npm-') else 'archive'
