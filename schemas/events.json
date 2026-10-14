@@ -1,5 +1,5 @@
 {
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "The agent stack's event envelope, filter, artifact reference and labels, and the payload of every onepipeline pipeline kind, as onepipeline declares them.",
   "schemas": [
     {
@@ -460,6 +460,17 @@
                 ],
                 "description": "A glob over the kind's kebab-case wire string, where `*` stands for any\nrun of characters including none and every other character is itself."
               },
+              "significance": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Significance"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The producer's `significance` stamp, carried among the labels' extras as\n`onevcs` carries it. An envelope with no stamp matches no value here."
+              },
               "phase": {
                 "anyOf": [
                   {
@@ -528,6 +539,26 @@
               }
             ],
             "description": "The library that produced an event."
+          },
+          "Significance": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "milestone",
+                "description": "A change opened, its checks passed, or its landing reached its base."
+              },
+              {
+                "type": "string",
+                "const": "blocker",
+                "description": "An attempted action failed, was refused, or needs a person."
+              },
+              {
+                "type": "string",
+                "const": "progress",
+                "description": "Ordinary running or successful detail."
+              }
+            ],
+            "description": "How much attention an event asks of its consumer, stamped by its producer."
           },
           "Phase": {
             "oneOf": [
@@ -3772,6 +3803,534 @@
               "claimed_at"
             ],
             "description": "A project's `onepipeline.driver` claim: the run driving it, the host and launching\nsession that run is driven from, its driver's pid, and when it claimed.\n\nThe document a journal record carries, and so no stricter than any other payload here;\nthe store's copy is external input, and `continuation::claim_of` refuses one carrying a\nkey this shape does not name before it is read as one."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.landing-registered@2",
+      "schema": {
+        "$ref": "#/$defs/LandingTransition",
+        "description": "`landing-registered`: a manager landing's ownership, recorded before any\nside effect.",
+        "title": "LandingRegistered",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "LandingTransition": {
+            "type": "object",
+            "properties": {
+              "landing_id": {
+                "type": "string",
+                "description": "The landing."
+              },
+              "flow_id": {
+                "type": "string",
+                "description": "The flow that holds it."
+              },
+              "operation": {
+                "$ref": "#/$defs/LandingOperation",
+                "description": "The verb it forwards."
+              },
+              "subjects": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/LandingSubject"
+                },
+                "description": "Every branch it can advance."
+              },
+              "message": {
+                "type": "string",
+                "description": "What happened, for a person."
+              }
+            },
+            "required": [
+              "landing_id",
+              "flow_id",
+              "operation",
+              "subjects",
+              "message"
+            ],
+            "description": "What every landing transition's payload carries."
+          },
+          "LandingOperation": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "publish-branch",
+                "description": "`onepipeline publish-branch`, over `onevcs publish-branch`."
+              },
+              {
+                "type": "string",
+                "const": "repo-recover",
+                "description": "`onepipeline repo-recover`, over `onevcs recover`."
+              },
+              {
+                "type": "string",
+                "const": "integrate",
+                "description": "`onepipeline integrate`, over `onevcs integrate`."
+              }
+            ],
+            "description": "The engine verb a manager landing forwards to the linked `onevcs`."
+          },
+          "LandingSubject": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "identity": {
+                "type": "string",
+                "description": "The `onevcs` identity key the branch belongs to."
+              },
+              "branch": {
+                "type": "string",
+                "description": "The branch."
+              }
+            },
+            "required": [
+              "identity",
+              "branch"
+            ],
+            "description": "One branch a landing advances, in the identity it belongs to."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.landing-drafting@2",
+      "schema": {
+        "$ref": "#/$defs/LandingTransition",
+        "description": "`landing-drafting`: a manager landing started drafting its body.",
+        "title": "LandingDrafting",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "LandingTransition": {
+            "type": "object",
+            "properties": {
+              "landing_id": {
+                "type": "string",
+                "description": "The landing."
+              },
+              "flow_id": {
+                "type": "string",
+                "description": "The flow that holds it."
+              },
+              "operation": {
+                "$ref": "#/$defs/LandingOperation",
+                "description": "The verb it forwards."
+              },
+              "subjects": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/LandingSubject"
+                },
+                "description": "Every branch it can advance."
+              },
+              "message": {
+                "type": "string",
+                "description": "What happened, for a person."
+              }
+            },
+            "required": [
+              "landing_id",
+              "flow_id",
+              "operation",
+              "subjects",
+              "message"
+            ],
+            "description": "What every landing transition's payload carries."
+          },
+          "LandingOperation": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "publish-branch",
+                "description": "`onepipeline publish-branch`, over `onevcs publish-branch`."
+              },
+              {
+                "type": "string",
+                "const": "repo-recover",
+                "description": "`onepipeline repo-recover`, over `onevcs recover`."
+              },
+              {
+                "type": "string",
+                "const": "integrate",
+                "description": "`onepipeline integrate`, over `onevcs integrate`."
+              }
+            ],
+            "description": "The engine verb a manager landing forwards to the linked `onevcs`."
+          },
+          "LandingSubject": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "identity": {
+                "type": "string",
+                "description": "The `onevcs` identity key the branch belongs to."
+              },
+              "branch": {
+                "type": "string",
+                "description": "The branch."
+              }
+            },
+            "required": [
+              "identity",
+              "branch"
+            ],
+            "description": "One branch a landing advances, in the identity it belongs to."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.landing-started@2",
+      "schema": {
+        "$ref": "#/$defs/LandingTransition",
+        "description": "`landing-started`: a manager landing started its forwarded verb.",
+        "title": "LandingStarted",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "LandingTransition": {
+            "type": "object",
+            "properties": {
+              "landing_id": {
+                "type": "string",
+                "description": "The landing."
+              },
+              "flow_id": {
+                "type": "string",
+                "description": "The flow that holds it."
+              },
+              "operation": {
+                "$ref": "#/$defs/LandingOperation",
+                "description": "The verb it forwards."
+              },
+              "subjects": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/LandingSubject"
+                },
+                "description": "Every branch it can advance."
+              },
+              "message": {
+                "type": "string",
+                "description": "What happened, for a person."
+              }
+            },
+            "required": [
+              "landing_id",
+              "flow_id",
+              "operation",
+              "subjects",
+              "message"
+            ],
+            "description": "What every landing transition's payload carries."
+          },
+          "LandingOperation": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "publish-branch",
+                "description": "`onepipeline publish-branch`, over `onevcs publish-branch`."
+              },
+              {
+                "type": "string",
+                "const": "repo-recover",
+                "description": "`onepipeline repo-recover`, over `onevcs recover`."
+              },
+              {
+                "type": "string",
+                "const": "integrate",
+                "description": "`onepipeline integrate`, over `onevcs integrate`."
+              }
+            ],
+            "description": "The engine verb a manager landing forwards to the linked `onevcs`."
+          },
+          "LandingSubject": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "identity": {
+                "type": "string",
+                "description": "The `onevcs` identity key the branch belongs to."
+              },
+              "branch": {
+                "type": "string",
+                "description": "The branch."
+              }
+            },
+            "required": [
+              "identity",
+              "branch"
+            ],
+            "description": "One branch a landing advances, in the identity it belongs to."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.landing-finished@2",
+      "schema": {
+        "$ref": "#/$defs/LandingTerminal",
+        "description": "`landing-finished`: a manager landing's verb ended `0`.",
+        "title": "LandingFinished",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "LandingTerminal": {
+            "type": "object",
+            "properties": {
+              "landing_id": {
+                "type": "string",
+                "description": "The landing."
+              },
+              "flow_id": {
+                "type": "string",
+                "description": "The flow that holds it."
+              },
+              "operation": {
+                "$ref": "#/$defs/LandingOperation",
+                "description": "The verb it forwards."
+              },
+              "subjects": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/LandingSubject"
+                },
+                "description": "Every branch it can advance."
+              },
+              "message": {
+                "type": "string",
+                "description": "What happened, for a person."
+              },
+              "status": {
+                "type": "integer",
+                "format": "int32",
+                "description": "The forwarded command's exit status."
+              }
+            },
+            "required": [
+              "landing_id",
+              "flow_id",
+              "operation",
+              "subjects",
+              "message",
+              "status"
+            ],
+            "description": "A terminal transition's payload: the transition, and the forwarded\ncommand's exit status."
+          },
+          "LandingOperation": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "publish-branch",
+                "description": "`onepipeline publish-branch`, over `onevcs publish-branch`."
+              },
+              {
+                "type": "string",
+                "const": "repo-recover",
+                "description": "`onepipeline repo-recover`, over `onevcs recover`."
+              },
+              {
+                "type": "string",
+                "const": "integrate",
+                "description": "`onepipeline integrate`, over `onevcs integrate`."
+              }
+            ],
+            "description": "The engine verb a manager landing forwards to the linked `onevcs`."
+          },
+          "LandingSubject": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "identity": {
+                "type": "string",
+                "description": "The `onevcs` identity key the branch belongs to."
+              },
+              "branch": {
+                "type": "string",
+                "description": "The branch."
+              }
+            },
+            "required": [
+              "identity",
+              "branch"
+            ],
+            "description": "One branch a landing advances, in the identity it belongs to."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.landing-refused@2",
+      "schema": {
+        "$ref": "#/$defs/LandingTerminal",
+        "description": "`landing-refused`: a manager landing's verb ended non-zero, or its progress\ncould not be relayed.",
+        "title": "LandingRefused",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "LandingTerminal": {
+            "type": "object",
+            "properties": {
+              "landing_id": {
+                "type": "string",
+                "description": "The landing."
+              },
+              "flow_id": {
+                "type": "string",
+                "description": "The flow that holds it."
+              },
+              "operation": {
+                "$ref": "#/$defs/LandingOperation",
+                "description": "The verb it forwards."
+              },
+              "subjects": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/LandingSubject"
+                },
+                "description": "Every branch it can advance."
+              },
+              "message": {
+                "type": "string",
+                "description": "What happened, for a person."
+              },
+              "status": {
+                "type": "integer",
+                "format": "int32",
+                "description": "The forwarded command's exit status."
+              }
+            },
+            "required": [
+              "landing_id",
+              "flow_id",
+              "operation",
+              "subjects",
+              "message",
+              "status"
+            ],
+            "description": "A terminal transition's payload: the transition, and the forwarded\ncommand's exit status."
+          },
+          "LandingOperation": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "publish-branch",
+                "description": "`onepipeline publish-branch`, over `onevcs publish-branch`."
+              },
+              {
+                "type": "string",
+                "const": "repo-recover",
+                "description": "`onepipeline repo-recover`, over `onevcs recover`."
+              },
+              {
+                "type": "string",
+                "const": "integrate",
+                "description": "`onepipeline integrate`, over `onevcs integrate`."
+              }
+            ],
+            "description": "The engine verb a manager landing forwards to the linked `onevcs`."
+          },
+          "LandingSubject": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "identity": {
+                "type": "string",
+                "description": "The `onevcs` identity key the branch belongs to."
+              },
+              "branch": {
+                "type": "string",
+                "description": "The branch."
+              }
+            },
+            "required": [
+              "identity",
+              "branch"
+            ],
+            "description": "One branch a landing advances, in the identity it belongs to."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.landing-died@2",
+      "schema": {
+        "$ref": "#/$defs/LandingTransition",
+        "description": "`landing-died`: a manager landing's process proved gone with no ending.",
+        "title": "LandingDied",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "LandingTransition": {
+            "type": "object",
+            "properties": {
+              "landing_id": {
+                "type": "string",
+                "description": "The landing."
+              },
+              "flow_id": {
+                "type": "string",
+                "description": "The flow that holds it."
+              },
+              "operation": {
+                "$ref": "#/$defs/LandingOperation",
+                "description": "The verb it forwards."
+              },
+              "subjects": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/LandingSubject"
+                },
+                "description": "Every branch it can advance."
+              },
+              "message": {
+                "type": "string",
+                "description": "What happened, for a person."
+              }
+            },
+            "required": [
+              "landing_id",
+              "flow_id",
+              "operation",
+              "subjects",
+              "message"
+            ],
+            "description": "What every landing transition's payload carries."
+          },
+          "LandingOperation": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "publish-branch",
+                "description": "`onepipeline publish-branch`, over `onevcs publish-branch`."
+              },
+              {
+                "type": "string",
+                "const": "repo-recover",
+                "description": "`onepipeline repo-recover`, over `onevcs recover`."
+              },
+              {
+                "type": "string",
+                "const": "integrate",
+                "description": "`onepipeline integrate`, over `onevcs integrate`."
+              }
+            ],
+            "description": "The engine verb a manager landing forwards to the linked `onevcs`."
+          },
+          "LandingSubject": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "identity": {
+                "type": "string",
+                "description": "The `onevcs` identity key the branch belongs to."
+              },
+              "branch": {
+                "type": "string",
+                "description": "The branch."
+              }
+            },
+            "required": [
+              "identity",
+              "branch"
+            ],
+            "description": "One branch a landing advances, in the identity it belongs to."
           }
         }
       }

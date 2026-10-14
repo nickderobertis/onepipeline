@@ -914,8 +914,9 @@ fn the_flag_beats_the_key_a_blank_names_none_and_a_bad_schedule_is_refused_befor
 
 /// What a sweep records when it could not do its work — each one record, each
 /// named by `results`: a maintain command that failed, one that timed out under
-/// the identity's own bound, an identity the sibling could not maintain, and a
-/// host whose identities could not be enumerated at all.
+/// the identity's own bound, an identity the sibling could not maintain, a
+/// repository whose maintenance configuration could not be read, and a host
+/// whose identities could not be enumerated at all.
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] This
 // src/maintenance.rs journey has no narrower Nx edge: noteJourneySource includes src/**/*.
 #[test]
@@ -1008,6 +1009,36 @@ fn a_failed_or_timed_out_command_an_unmaintainable_identity_and_an_unlistable_ho
         .exited(0)
         .out_has(&format!("{SERVICE_IDENTITY} (every 1s): failed — "));
     release(&world, "unmaintainable");
+
+    // A repository whose own `onevcs.toml` the sibling cannot parse: nothing
+    // ran, and no host rule stands in for it, so the identity answers that its
+    // maintenance configuration is unreadable — a refusal the sweep records in
+    // the sibling's own shape rather than drops as the schedule working.
+    pooled_with_maintenance(&world, None);
+    let document = repo.checkout.join("onevcs.toml");
+    std::fs::write(&document, "[pool\n").expect("an unparseable onevcs.toml");
+    held_run(&world, "unreadable", 2, &["--maintenance-config", &second]).exited(0);
+    world.until("the record of the unreadable configuration", |world| {
+        !records(world, "unreadable").is_empty()
+    });
+    let unreadable = &records(&world, "unreadable")[0];
+    let identity = &unreadable["payload"]["identities"][0];
+    assert_eq!(identity["identity"], SERVICE_IDENTITY, "{unreadable}");
+    assert!(
+        identity["outcome"]["maintenance-unreadable"]["reason"]
+            .as_str()
+            .is_some_and(|reason| !reason.is_empty()),
+        "{unreadable}"
+    );
+    assert_eq!(marker_lines(&world), 1, "an unreadable configuration ran");
+    world
+        .run(&["results", "unreadable"])
+        .exited(0)
+        .out_has(&format!(
+            "{SERVICE_IDENTITY} (every 1s): maintenance configuration unreadable — "
+        ));
+    std::fs::remove_file(&document).expect("the document is taken away");
+    release(&world, "unreadable");
 
     // A host whose registered identities could not be enumerated: the registry
     // the sibling keys them by is not a document it can read while the sweep

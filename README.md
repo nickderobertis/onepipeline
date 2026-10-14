@@ -435,7 +435,7 @@ the dispatch's first turn, unique to that dispatch — a retry, a requeue and a
 resumed pin of the same node each get their own — and never removed while that
 dispatch runs. Nothing beyond that is promised, and the spelling of the path least
 of all: no consumer may derive one path from another. Not in the approved contract
-yet either: open divergence 48, whose scratch lifetime divergence 123 revises.
+yet either: open divergence 48, whose scratch lifetime divergence 124 revises.
 
 The planner supervises over the channel:
 
@@ -727,10 +727,12 @@ and cannot drift from it: `tests/parity.rs` holds the two to one another over a
 recorded run, and a behaviour the binary has that the library lacks is a defect.
 Exit codes do not move; each result answers the code the binary exits with.
 
-`onepipeline monitor RUN [--filter NAME|SPEC | --all] [--cursor CURSOR]` makes one
+`onepipeline monitor RUN | --flow ID [--filter NAME|SPEC | --all] [--cursor CURSOR]` —
+`--flow` in the place of `RUN` reads a flow's manager landings — makes one
 pass over the merged stream and returns. Every pass — including one that renders
 no event — ends its stdout with exactly one resume line after the trailer,
-`-- cursor 1:<run>:<byte>`, whose byte is the end of the last finished record in
+`-- cursor 1:<run>:<byte>` — for `--flow`, the flow watch's own
+`-- cursor flow:2:<flow>:<landing>@<byte>/...:<run>@<byte>/...` — whose byte is the end of the last finished record in
 the journal at the moment of the read: past records the profile hid, and short of
 a record whose writer has not finished it. `--cursor` renders only the events
 recorded after that place, so a caller that keeps the last line and hands it back
@@ -839,12 +841,19 @@ started, and every run it launched — and returns `4` on a surface on the flow'
 own channel or a member run's, `6` on a member run's node settling, `8`
 (`run-joined`, a word a run's watch refuses) on a run joining the flow,
 `0` when the flow ends cleanly and `9` when it fails or dies; `--until run-joined`
-alone returns on a run joining and nothing else of the three. `--filter` and
-`--all` are a run's alone. [`docs/stop-guard.md`](docs/stop-guard.md#flows)
-states it, with the flow's own channel and what `unwatched` owes a flow. Under a
+alone returns on a run joining and nothing else of the four. A flow also holds
+the **manager landings** `publish-branch`, `repo-recover` and `integrate` register
+under `ONEPIPELINE_LAUNCHER_SESSION`, and `--until landing-progress` — in the
+default set — returns `0` on a landing event its `--filter` profile admits: under
+the shipped `planner` profile a milestone or a blocker, never progress, with
+`--filter detailed` waking on every event. `--all` is a run's alone.
+<!-- llmlint: ignore-block[no_redundant_instruction_pointers] this README is the page crates.io, PyPI and npm publish, read by a user with none of this repository's agent instructions in hand, so its links to the document that states the surface are the only route such a reader has to it. -->
+[`docs/stop-guard.md`](docs/stop-guard.md#flows) states it, with the flow's own
+channel and what `unwatched` owes a flow. Under a
 wake budget a watch given no `--timeout` gives up the wake reserve
 [`docs/stop-guard.md`](docs/stop-guard.md#the-wake-reserve) names before the budget, so it
 has returned by the time the budget is spent.
+<!-- llmlint: ignore-end[no_redundant_instruction_pointers] -->
 
 ## Where a dispatch runs
 

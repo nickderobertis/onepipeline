@@ -749,6 +749,30 @@ pub fn observe(dir: &Path) -> std::process::ExitCode {
             dir.join(format!("observer.go.{nth}")),
         ]);
     }
+    // What a real monitor member reads once it is let go, where a journey asks
+    // (`observer.monitor`): the run's whole merged stream, through the very
+    // `onepipeline monitor RUN --filter detailed` it is told to read — the
+    // build under test, not a copy of its rendering — kept as it was printed.
+    if dir.join("observer.monitor").exists() {
+        let cli = std::env::var(CLI_BIN_ENV)
+            .unwrap_or_else(|_| fail(&format!("{CLI_BIN_ENV} is unset: no monitor to read")));
+        let read = std::process::Command::new(cli)
+            .args(["monitor", &run, "--filter", "detailed"])
+            .output()
+            .unwrap_or_else(|error| {
+                fail(&format!("the observer's monitor could not run: {error}"))
+            });
+        if !read.status.success() {
+            fail(&format!(
+                "the observer's monitor refused: {}",
+                String::from_utf8_lossy(&read.stderr)
+            ));
+        }
+        append(
+            &dir.join("observer-monitor.txt"),
+            &String::from_utf8_lossy(&read.stdout),
+        );
+    }
     std::process::ExitCode::SUCCESS
 }
 

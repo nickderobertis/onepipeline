@@ -1933,6 +1933,38 @@ fn read_cost_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     })
 }
 
+/// `landing-registered`: a manager landing's ownership, recorded before any
+/// side effect.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(transparent)]
+pub(crate) struct LandingRegistered(pub(crate) crate::flow::LandingTransition);
+
+/// `landing-drafting`: a manager landing started drafting its body.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(transparent)]
+pub(crate) struct LandingDrafting(pub(crate) crate::flow::LandingTransition);
+
+/// `landing-started`: a manager landing started its forwarded verb.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(transparent)]
+pub(crate) struct LandingStarted(pub(crate) crate::flow::LandingTransition);
+
+/// `landing-finished`: a manager landing's verb ended `0`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(transparent)]
+pub(crate) struct LandingFinished(pub(crate) crate::flow::LandingTerminal);
+
+/// `landing-refused`: a manager landing's verb ended non-zero, or its progress
+/// could not be relayed.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(transparent)]
+pub(crate) struct LandingRefused(pub(crate) crate::flow::LandingTerminal);
+
+/// `landing-died`: a manager landing's process proved gone with no ending.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(transparent)]
+pub(crate) struct LandingDied(pub(crate) crate::flow::LandingTransition);
+
 payload_messages! {
     ScratchRemoved => "scratch-removed";
     ScratchRetained => "scratch-retained";
@@ -1982,6 +2014,12 @@ payload_messages! {
     NodeRestacked => "node-restacked";
     DriverTakenOver => "driver-taken-over";
     DriverSuperseded => "driver-superseded";
+    LandingRegistered => "landing-registered";
+    LandingDrafting => "landing-drafting";
+    LandingStarted => "landing-started";
+    LandingFinished => "landing-finished";
+    LandingRefused => "landing-refused";
+    LandingDied => "landing-died";
 }
 
 #[cfg(test)]
@@ -2032,9 +2070,26 @@ mod tests {
             // Everything a validator reads, which is the document minus its
             // prose: `Phase` is `onevcs`'s type now, so its `description` is
             // written and wrapped there. `tests/registry.rs` is where that
-            // tolerance is pinned to exactly those three pointers.
+            // tolerance is pinned to exactly those three pointers, and to the
+            // one deliberate addition since the capture — the filter's optional
+            // `significance` matcher field, which only admits more.
+            let mut held = held.clone();
+            if text == "agent.event-filter@1" {
+                if let Some(properties) = held
+                    .pointer_mut("/$defs/Matcher/properties")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    properties.remove("significance");
+                }
+                if let Some(definitions) = held
+                    .pointer_mut("/$defs")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    definitions.remove("Significance");
+                }
+            }
             assert_eq!(
-                without_prose(held),
+                without_prose(&held),
                 without_prose(document),
                 "the registry holds {text} under a document that constrains differently from \
                  the one `onemessagebus-agent` 0.8.0 registered it under"

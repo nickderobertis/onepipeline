@@ -617,15 +617,49 @@ fn the_contracts_launch_config_omits_an_empty_block_and_still_reads() {
 #[test]
 fn the_shipped_profiles_are_the_contracts_own_and_are_overridable() {
     let empty = Filters::default();
-    assert_eq!(
-        empty.profile("planner").expect("planner ships"),
-        EventFilter {
-            include: vec![Matcher {
+    let stamped = |source: Source, significance: onepipeline::vocabulary::Significance| Matcher {
+        source: Some(source),
+        fields: onepipeline::vocabulary::MatchFields {
+            significance: Some(significance),
+            ..onepipeline::vocabulary::MatchFields::default()
+        },
+        ..Matcher::default()
+    };
+    let planner = EventFilter {
+        include: vec![
+            Matcher {
                 source: Some(Source::Pipeline),
                 ..Matcher::default()
-            }],
-            exclude: Vec::new(),
-        }
+            },
+            stamped(
+                Source::Vcs,
+                onepipeline::vocabulary::Significance::Milestone,
+            ),
+            stamped(Source::Vcs, onepipeline::vocabulary::Significance::Blocker),
+        ],
+        exclude: vec![stamped(
+            Source::Pipeline,
+            onepipeline::vocabulary::Significance::Progress,
+        )],
+    };
+    assert_eq!(empty.profile("planner").expect("planner ships"), planner);
+    // And it is the profile the read-time profiles paragraph spells, read through
+    // the grammar the paragraph's own spelling is in.
+    let spelled = CONTRACT
+        .split_once("Shipped: `planner` is `")
+        .and_then(|(_, rest)| rest.split_once('`'))
+        .map(|(spec, _)| spec)
+        .expect("the contract spells the shipped planner profile");
+    assert_eq!(
+        EventFilter::parse(&format!("{{{spelled}}}")).expect("the spelling is a filter"),
+        planner,
+        "docs/contract.md spells a planner profile this build does not ship"
+    );
+    // And it is the profile entry 123 records, read through the grammar.
+    assert_eq!(
+        serde_json::from_value::<EventFilter>(divergence_block("123.")["planner_profile"].clone())
+            .expect("entry 123's profile is a filter"),
+        planner
     );
     assert_eq!(
         empty.profile("detailed").expect("detailed ships"),
@@ -674,9 +708,12 @@ fn a_filter_spec_is_refused_by_the_shared_grammars_own_rules() {
         .expect_err("a matcher field the grammar does not have is refused");
     let said = unknown_field.to_string();
     assert!(said.contains("role"), "the refusal names the field: {said}");
+    // Since `onemessagebus` 0.9.1 the core parses a spec with `serde-saphyr`,
+    // which places a refusal by line and column of the spec rather than by the
+    // list's path, so that position is what the refusal is held to.
     assert!(
-        said.contains("include") && said.contains('1'),
-        "the refusal says which list and where in it: {said}"
+        said.contains("line 1, column 14"),
+        "the refusal says where in the spec: {said}"
     );
 
     let stray = EventFilter::parse(r#"{"includes": []}"#)
@@ -697,8 +734,8 @@ fn a_filter_spec_is_refused_by_the_shared_grammars_own_rules() {
     let empty_matcher = EventFilter::parse(r#"{"exclude": [{}]}"#)
         .expect_err("a matcher naming no field matches everything");
     assert!(
-        empty_matcher.to_string().contains("exclude"),
-        "{empty_matcher}"
+        empty_matcher.to_string().contains("exclude[0]"),
+        "the refusal names which list and which position in it: {empty_matcher}"
     );
 
     let empty_field = EventFilter::parse(r#"{"include": [{"kind": ""}]}"#)
@@ -979,7 +1016,7 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), EVENTS_BUNDLE_VERSION);
     assert_eq!(
-        divergence_block("123.")["bundle_versions"]["events"],
+        divergence_block("124.")["bundle_versions"]["events"],
         EVENTS_BUNDLE_VERSION,
         "the scratch bundle version must be the manager's recorded ruling"
     );
@@ -6440,6 +6477,7 @@ fn a_siblings_reserved_labels_source_word_phases_and_matcher_fields_are_this_cra
 
     // 4. Every matcher field, through the wire, in both directions.
     let vcs = onevcs::MatchFields {
+        significance: None,
         phase: Some(onevcs::Phase::Development),
         run_id: Some("R".into()),
         node: Some("build".into()),
@@ -6606,7 +6644,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // undocumented wire; a kind the contract lists and the enum does not carry is
     // a promise nothing keeps. `PIPELINE_KINDS` is what `Journal::emit` accepts,
     // so this is the emitted set and not a second copy of it.
-    assert_eq!(PIPELINE_KINDS.len(), 48, "the closed set changed size");
+    assert_eq!(PIPELINE_KINDS.len(), 54, "the closed set changed size");
     let listed: BTreeSet<String> = backticked()
         .into_iter()
         .filter(|token| {
@@ -6616,7 +6654,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // The kinds the contract does not list are exactly the ones the divergence
     // record proposes, and no others: a kind neither document names fails here.
     let proposed: BTreeSet<String> = [
-        "40.", "47.", "55.", "65.", "70.", "92.", "119.", "121.", "122.", "123.",
+        "40.", "47.", "55.", "65.", "70.", "92.", "119.", "121.", "122.", "123.", "124.",
     ]
     .into_iter()
     .flat_map(|entry| {
@@ -10603,7 +10641,7 @@ fn dispatch_scratch_lifetime_is_the_divergence_surface() {
     use clap::Parser;
     use onepipeline::cli::{Cli, Command, ScratchCommand};
     use onepipeline::event::{EventKind, PipelineKind};
-    let contract = divergence_block("123.");
+    let contract = divergence_block("124.");
     assert_eq!(
         contract["bundle_versions"]["events"],
         onepipeline::vocabulary::EVENTS_BUNDLE_VERSION
@@ -10745,4 +10783,115 @@ fn review_discovery_is_the_recorded_contract_and_registered_payload() {
             serde_json::to_value(&receipt).unwrap()
         );
     }
+}
+
+/// Entry 123's manager landings are this build's own: its six kinds are spelled by
+/// `PipelineKind`, each registered payload document admits the transition the
+/// block records and refuses one missing what it always carries, its three verbs
+/// are the binary's, `landing-progress` is a condition `--until` reads, and every
+/// significance word it names is `onevcs`'s own.
+#[test]
+fn the_manager_landing_contract_is_what_the_divergence_record_names() {
+    use onepipeline::cli::{watch_conditions, WatchUntil};
+    use onepipeline::event::PipelineKind;
+    use onepipeline::payload::{registry, schema_of};
+    let block = divergence_block("123.");
+    let landing = [
+        PipelineKind::LandingRegistered,
+        PipelineKind::LandingDrafting,
+        PipelineKind::LandingStarted,
+        PipelineKind::LandingFinished,
+        PipelineKind::LandingRefused,
+        PipelineKind::LandingDied,
+    ];
+    let kinds: Vec<String> =
+        serde_json::from_value(block["event_kinds"].clone()).expect("entry 123 names its kinds");
+    assert_eq!(kinds, landing.map(|kind| kind.as_str().to_owned()));
+    let terminal: Vec<String> = serde_json::from_value(block["terminal_kinds"].clone())
+        .expect("entry 123 names its terminal kinds");
+    let registry = registry();
+    for kind in landing {
+        let id = schema_of(kind);
+        let carries_status = matches!(
+            kind,
+            PipelineKind::LandingFinished | PipelineKind::LandingRefused
+        );
+        let example = if carries_status {
+            &block["terminal"]
+        } else {
+            &block["transition"]
+        };
+        registry
+            .check(&id, example)
+            .unwrap_or_else(|why| panic!("entry 123's payload is refused as {kind}: {why}"));
+        if carries_status {
+            assert!(terminal.contains(&kind.as_str().to_owned()), "{kind}");
+            let mut unstated = example.clone();
+            unstated
+                .as_object_mut()
+                .expect("a payload")
+                .remove("status");
+            assert!(
+                registry.check(&id, &unstated).is_err(),
+                "a {kind} carrying no status was admitted"
+            );
+        }
+        for key in ["landing_id", "flow_id", "operation", "subjects", "message"] {
+            let mut partial = example.clone();
+            partial.as_object_mut().expect("a payload").remove(key);
+            assert!(
+                registry.check(&id, &partial).is_err(),
+                "a {kind} with no {key} was admitted"
+            );
+        }
+        let mut unknown = example.clone();
+        unknown["operation"] = json!("rebase");
+        assert!(
+            registry.check(&id, &unknown).is_err(),
+            "a {kind} naming an operation no verb is was admitted"
+        );
+    }
+    let verbs: Vec<String> =
+        serde_json::from_value(block["verbs"].clone()).expect("entry 123 names its verbs");
+    let command = Cli::command();
+    for verb in &verbs {
+        assert!(
+            command.find_subcommand(verb).is_some(),
+            "the binary offers no `{verb}`"
+        );
+    }
+    let condition = block["watch_condition"].as_str().expect("a condition");
+    assert_eq!(
+        condition.parse::<WatchUntil>(),
+        Ok(WatchUntil::LandingProgress)
+    );
+    assert!(watch_conditions().contains(&condition));
+    for (kind, word) in block["significance"]
+        .as_object()
+        .expect("entry 123 maps each kind to its significance")
+    {
+        assert!(kinds.contains(kind), "{kind}");
+        serde_json::from_value::<onepipeline::vocabulary::Significance>(word.clone())
+            .unwrap_or_else(|why| panic!("{kind}'s word {word} is not onevcs's: {why}"));
+    }
+    // The bundle that first carried the landings; entry 124's scratch kinds
+    // raised it since, so the compiled-in bundle is that one or a later minor.
+    let release = |text: &str| -> (u64, u64, u64) {
+        let parts: Vec<u64> = text
+            .split('.')
+            .map(|part| part.parse().expect("a numeric version part"))
+            .collect();
+        (parts[0], parts[1], parts[2])
+    };
+    let carried = release(
+        block["bundle_versions"]["events"]
+            .as_str()
+            .expect("entry 123 names its events bundle"),
+    );
+    let compiled = release(onepipeline::vocabulary::EVENTS_BUNDLE_VERSION);
+    assert_eq!(carried, (1, 4, 0));
+    assert!(
+        carried.0 == compiled.0 && carried <= compiled,
+        "{compiled:?}"
+    );
 }
