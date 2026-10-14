@@ -1494,7 +1494,7 @@ dependencies = [
 
 [[package]]
 name = "onepipeline"
-version = "0.70.1"
+version = "0.71.1"
 dependencies = [
  "async-trait",
  "clap",
@@ -1655,9 +1655,9 @@ dependencies = [
 
 [[package]]
 name = "onevcs"
-version = "0.49.0"
+version = "0.50.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6bd51ff3c0cee29e5724a5fdbd7269858aee4ebf01e749f415b06dbd6ca98f28"
+checksum = "f1b68a08a6c75e05920244c65cce35921bf93e99533e018f5302ccb0e6b0d6d7"
 dependencies = [
  "aho-corasick",
  "clap",
@@ -1687,9 +1687,9 @@ dependencies = [
 
 [[package]]
 name = "onevcs-testing"
-version = "0.18.0"
+version = "0.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af0ae7fd437b19c5d28fe06f8237cbb988c628b7dda89fdbac14acd8b90cfb9f"
+checksum = "a404b67d8270ad13c7a2c12f9113118044a23c0828e4c325f1654fcb425f2399"
 dependencies = [
  "onevcs",
  "serde",

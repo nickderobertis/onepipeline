@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.71.1](https://github.com/nickderobertis/onepipeline/compare/v0.71.0...v0.71.1) - 2026-10-13
+
+### Fixed
+
+- *(deps)* link the root-member boundary correction ([#909](https://github.com/nickderobertis/onepipeline/pull/909))
+
+## [0.71.0](https://github.com/nickderobertis/onepipeline/compare/v0.70.1...v0.71.0) - 2026-10-13
+
+### Added
+
+- *(review)* bring review comments into a run with their state read from the host ([#891](https://github.com/nickderobertis/onepipeline/pull/891))
+
+### Fixed
+
+- *(e2e)* stop the Windows e2e journeys failing on timing alone ([#892](https://github.com/nickderobertis/onepipeline/pull/892))
+
 ## [0.70.1](https://github.com/nickderobertis/onepipeline/compare/v0.70.0...v0.70.1) - 2026-10-13
 
 ### Fixed
