@@ -349,10 +349,17 @@ mod platform {
         let me = std::process::id();
         let deadline = std::time::Instant::now() + PATIENCE;
         loop {
+            // llmlint: ignore[changed_behavior_has_e2e] the job's handle is this module's
+            // own and is never closed, so no test can make the kernel refuse to list it;
+            // the error is carried rather than unwrapped for a refusal nothing here causes.
             let members: Vec<u32> = members(job)?.into_iter().filter(|pid| *pid != me).collect();
             if members.is_empty() {
                 return Ok(());
             }
+            // llmlint: ignore[changed_behavior_has_e2e] reaching this needs a job member
+            // that `TerminateProcess` cannot end inside thirty seconds, which a test cannot
+            // make without a driver; the Unix counterpart is proven by
+            // `a_worlds_teardown_names_a_descendant_it_could_not_end_in_time`.
             if std::time::Instant::now() >= deadline {
                 return Err(format!(
                     "pids {members:?} are still in this test's job {}s after they were ended",
