@@ -592,17 +592,21 @@ fn assert_retained(world: &World, run: &str, ending: &str, count: usize) -> serd
     }
     assert_eq!(record["total_bytes"], total);
     let (status, results) = read_views(world, run);
-    let suffix = if ending == "paused" {
-        format!(
-            "kept while paused; discard with onepipeline scratch discard {run} once the run ends"
-        )
-    } else {
-        format!("remove with: onepipeline scratch discard {run}")
-    };
+    if ending == "paused" {
+        // A pause is not an ending: its record is kept, and it waits for one.
+        assert!(status.starts_with(&format!("{run}  PAUSED")), "{status}");
+        for text in [status, results] {
+            assert!(
+                !text.contains("scratch kept:") && !text.contains("scratch discard"),
+                "{text}"
+            );
+        }
+        return record;
+    }
     for text in [status, results] {
         assert!(
             text.contains(&format!(
-                "scratch kept: {} dir(s), 0.0 GiB — {suffix}",
+                "scratch kept: {} dir(s), 0.0 GiB — remove with: onepipeline scratch discard {run}",
                 dirs.len()
             )),
             "{text}"

@@ -802,16 +802,16 @@ fn gib(bytes: u64) -> String {
 
 /// Views read only the latest record; the tree can have changed since it was kept.
 ///
-/// The record speaks only while the run reads as an ending or a pause, each of
-/// which writes its own: a run made live again reads as what it is now, so a kept
-/// notice and its discard instruction, which the verb would refuse, wait for the
-/// next ending.
+/// The record speaks only while the run reads as an ending, each of which writes
+/// its own: a paused run, or one made live again, reads as what it is now, so a
+/// kept notice and its discard instruction, which the verb would refuse, wait for
+/// the next ending.
 pub(crate) fn lines(view: &RunView, cap: Option<usize>) -> String {
     if views::host_shutdown(view) || view.liveness() == views::DriverLiveness::Parked {
         return String::new();
     }
     let reading = views::reading(view);
-    if reading.ending.is_none() && reading.paused.is_none() {
+    if reading.ending.is_none() {
         return String::new();
     }
     let Some(event) = view.events.iter().rev().find(|event| {
@@ -849,21 +849,11 @@ pub(crate) fn lines(view: &RunView, cap: Option<usize>) -> String {
     };
     // llmlint: ignore-end[changed_behavior_has_e2e]
     largest_first(&mut record.dirs);
-    let suffix = if reading.paused.is_some() {
-        format!(
-            "kept while paused; discard with onepipeline scratch discard {} once the run ends",
-            view.paths.run
-        )
-    } else {
-        format!(
-            "remove with: onepipeline scratch discard {}",
-            view.paths.run
-        )
-    };
     let mut out = format!(
-        "  scratch kept: {} dir(s), {} — {suffix}\n",
+        "  scratch kept: {} dir(s), {} — remove with: onepipeline scratch discard {}\n",
         record.dirs.len(),
-        gib(record.total_bytes)
+        gib(record.total_bytes),
+        view.paths.run
     );
     let shown = cap.unwrap_or(record.dirs.len()).min(record.dirs.len());
     for dir in &record.dirs[..shown] {
