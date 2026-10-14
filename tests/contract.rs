@@ -722,8 +722,8 @@ fn a_filter_spec_is_refused_by_the_shared_grammars_own_rules() {
     let empty_matcher = EventFilter::parse(r#"{"exclude": [{}]}"#)
         .expect_err("a matcher naming no field matches everything");
     assert!(
-        empty_matcher.to_string().contains("exclude"),
-        "{empty_matcher}"
+        empty_matcher.to_string().contains("exclude[0]"),
+        "the refusal names which list and which position in it: {empty_matcher}"
     );
 
     let empty_field = EventFilter::parse(r#"{"include": [{"kind": ""}]}"#)

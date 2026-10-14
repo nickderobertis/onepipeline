@@ -194,9 +194,11 @@ impl LandingOperation {
 }
 
 /// An identity a landing names: an absolute local identity, or a normalized
-/// `onevcs` origin — `host/owner/name`, the form `onevcs` keys a hosted identity
-/// by: no scheme, no credentials, no whitespace, no `.git`, and every segment
-/// one that says something and navigates nowhere.
+/// `onevcs` origin — `host/owner/name`, the one spelling `onevcs` keys a hosted
+/// identity by and reads back as itself: no scheme and no `:`, exactly three
+/// segments, a host with a `.` in it, and an owner and a name that say
+/// something. `tests/e2e/manager_landings.rs` registers origins in every spelling
+/// the sibling normalizes and holds each key it answers to this rule.
 fn an_identity<'de, D: serde::Deserializer<'de>>(
     reader: D,
 ) -> std::result::Result<String, D::Error> {
@@ -211,17 +213,45 @@ fn an_identity<'de, D: serde::Deserializer<'de>>(
 
 /// Whether `text` is an origin as `onevcs` normalizes one: `host/owner/name`.
 fn is_normalized_origin(text: &str) -> bool {
-    let segments: Vec<&str> = text.split('/').collect();
-    segments.len() >= 3
-        && !text.contains("://")
-        && !text.contains('@')
-        && !text.ends_with(".git")
-        && segments.iter().all(|segment| {
-            !segment.is_empty()
-                && *segment != "."
-                && *segment != ".."
-                && !segment.chars().any(|c| c.is_whitespace() || c == '\\')
-        })
+    if text.contains("://")
+        || text.contains(':')
+        || text.starts_with('/')
+        || text.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return false;
+    }
+    matches!(
+        text.split('/').collect::<Vec<_>>()[..],
+        [host, owner, name] if host.contains('.')
+            && !owner.is_empty()
+            && !name.is_empty()
+            && ![owner, name].iter().any(|part| *part == "." || *part == "..")
+    )
+}
+
+/// An id a cursor names: the flow-id alphabet, so neither `:` nor `@` nor `/`
+/// can make a printed cursor ambiguous.
+fn an_id<'de, D: serde::Deserializer<'de>>(reader: D) -> std::result::Result<String, D::Error> {
+    let found = String::deserialize(reader)?;
+    if !is_valid_flow_id(&found) {
+        return Err(serde::de::Error::custom(format!(
+            "'{found}' is not an id: an id is letters, digits, `.`, `_` and `-`"
+        )));
+    }
+    Ok(found)
+}
+
+/// The subjects a landing advances: at least one.
+fn some_subjects<'de, D: serde::Deserializer<'de>>(
+    reader: D,
+) -> std::result::Result<Vec<LandingSubject>, D::Error> {
+    let found = Vec::<LandingSubject>::deserialize(reader)?;
+    if found.is_empty() {
+        return Err(serde::de::Error::custom(
+            "a landing advances at least one branch, and this names none",
+        ));
+    }
+    Ok(found)
 }
 
 /// Run ids, each one and each named once.
@@ -273,10 +303,10 @@ pub(crate) struct LandingRequest {
     #[serde(deserialize_with = "this_version")]
     pub(crate) schema_version: u32,
     /// The landing's id, unique within its flow: its directory's name.
-    #[serde(deserialize_with = "said")]
+    #[serde(deserialize_with = "an_id")]
     pub(crate) landing_id: String,
     /// The flow that holds it.
-    #[serde(deserialize_with = "said")]
+    #[serde(deserialize_with = "an_id")]
     pub(crate) flow_id: String,
     /// The session that owns it: the flow's own.
     #[serde(deserialize_with = "said")]
@@ -285,6 +315,7 @@ pub(crate) struct LandingRequest {
     pub(crate) operation: LandingOperation,
     /// Every branch it can advance, resolved before any side effect — a whole
     /// integration train, not only the member being landed.
+    #[serde(deserialize_with = "some_subjects")]
     pub(crate) subjects: Vec<LandingSubject>,
     /// Every originating run whose own record names one of the subjects.
     #[serde(deserialize_with = "unique_runs")]
@@ -310,7 +341,7 @@ pub(crate) struct LandingRequest {
 pub(crate) struct LandingEnding {
     #[serde(deserialize_with = "this_version")]
     pub(crate) schema_version: u32,
-    #[serde(deserialize_with = "said")]
+    #[serde(deserialize_with = "an_id")]
     pub(crate) landing_id: String,
     /// The forwarded command's exit status.
     pub(crate) status: i32,
@@ -1537,6 +1568,9 @@ mod tests {
             ("schema_version", serde_json::json!(2)),
             ("session", serde_json::json!(" ")),
             ("landing_id", serde_json::json!("")),
+            ("landing_id", serde_json::json!("landing:1@2")),
+            ("flow_id", serde_json::json!("a/b")),
+            ("subjects", serde_json::json!([])),
             ("operation", serde_json::json!("rebase")),
             ("runs", serde_json::json!(["build", "build"])),
             ("runs", serde_json::json!(["a/b"])),
@@ -1553,10 +1587,6 @@ mod tests {
             (
                 "subjects",
                 serde_json::json!([{"identity": "https://github.com/o/s", "branch": "a"}]),
-            ),
-            (
-                "subjects",
-                serde_json::json!([{"identity": "github.com/o/s.git", "branch": "a"}]),
             ),
             (
                 "subjects",

@@ -2948,3 +2948,254 @@ fn an_operation_whose_id_cannot_be_kept_forwards_nothing() {
     );
     watch(&world, &flow, &["--timeout", "0"]).ended_on(EXIT_FLOW_FAILED, "flow-failed");
 }
+
+/// A second repository of `world`, seeded and pushed to a bare origin on disk,
+/// registered under `origin` — the spelling a host gave its remote.
+fn spelled_repository(world: &World, alias: &str, origin: &str) -> PathBuf {
+    let bare = world.root.join(format!("{alias}.git"));
+    std::fs::create_dir_all(&bare).expect("a scratch directory");
+    git(world, &bare, &["init", "--bare", "--initial-branch=main"]);
+    git(
+        world,
+        &world.root,
+        &["clone", &bare.to_string_lossy(), alias],
+    );
+    let checkout = world.root.join(alias);
+    std::fs::write(checkout.join("README.md"), format!("{alias}\n")).expect("seeded");
+    git(world, &checkout, &["add", "-A"]);
+    git(world, &checkout, &["commit", "-q", "-m", "chore: seed"]);
+    git(world, &checkout, &["push", "-q", "-u", "origin", "main"]);
+    world.register(&checkout, Some(origin));
+    checkout
+}
+
+/// The identity `onevcs` keys a registered origin by is one a landing's request
+/// is held to, whichever spelling the host gave it — ssh, https with and
+/// without `.git` — so every one registers, and reads back.
+#[test]
+fn every_spelling_of_an_origin_onevcs_normalizes_registers_a_landing() {
+    let world = World::new("ml-spellings");
+    let _repository = world.repository("local-direct", &[]);
+    for (alias, origin) in [
+        ("sshrepo", "ssh://git@github.com/owner/sshrepo.git"),
+        ("httpsrepo", "https://github.com/owner/httpsrepo"),
+        ("dotgit", "https://github.com/owner/dotgit.git"),
+    ] {
+        let checkout = spelled_repository(&world, alias, origin);
+        git(&world, &checkout, &["checkout", "-q", "-b", BRANCH]);
+        std::fs::write(checkout.join("w.txt"), "w\n").expect("work");
+        git(&world, &checkout, &["add", "-A"]);
+        git(&world, &checkout, &["commit", "-q", "-m", "feat: w"]);
+        git(&world, &checkout, &["checkout", "-q", "main"]);
+        world
+            .run(&["publish-branch", BRANCH, "--repo", alias, "--no-draft"])
+            .exited(0);
+    }
+    let identities: Vec<Value> = landings(&world)
+        .iter()
+        .map(|(flow, id)| {
+            sidecar(&world, flow, id, "request.json")["subjects"][0]["identity"].clone()
+        })
+        .collect();
+    for expected in [
+        "github.com/owner/sshrepo",
+        "github.com/owner/httpsrepo",
+        "github.com/owner/dotgit",
+    ] {
+        assert!(identities.contains(&json!(expected)), "{identities:?}");
+    }
+    // Every request read back: nothing is owed, and nothing was unreadable.
+    world
+        .run(&["unwatched", "--session", &world.session])
+        .exited(EXIT_SUCCESS);
+}
+
+/// `integrate` with no manager session runs unowned, as the other two do, and
+/// says so: nothing is registered and the train still lands.
+#[test]
+fn integrate_with_no_manager_session_runs_unowned_and_says_so() {
+    let world = World::new("ml-unowned-train");
+    let repository = world.repository("local-direct", &[]);
+    for branch in TRAIN {
+        branch_with_work(&world, &repository, branch, &format!("{branch}.txt"));
+    }
+    let mut argv = vec!["integrate"];
+    argv.extend(TRAIN);
+    let mut command = world.cmd(&argv);
+    command
+        .env("ONEPIPELINE_LAUNCHER_SESSION", "")
+        .current_dir(&repository.checkout);
+    world
+        .run_on(command, "integrate unowned")
+        .exited(0)
+        .err_has("integrate: no manager session owns this landing")
+        .out_has("Integration train for main:");
+    assert!(!world.runs.join(".flows").exists());
+}
+
+/// A run whose journal cannot be read is said on standard error and left
+/// unassociated, and the landing — still its manager's supervised work — goes
+/// on and ends as it would have.
+#[test]
+fn an_unreadable_run_is_named_and_left_unassociated_while_the_landing_goes_on() {
+    let world = World::new("ml-unread-run");
+    let _repository = world.repository("local-direct", &["false"]);
+    let branch = originating_run(&world, "origin");
+    onepipeline_testfakes::executable(
+        &world.root.join("hooks").join("pre-push"),
+        "#!/bin/sh\nexit 0\n",
+    );
+    // llmlint: ignore-block[tests_mirror_real_usage] a run's journal is made unreadable by
+    // hand because no verb leaves one so; what it stages is the diagnostic and the omitted
+    // association, read back off the compiled binary.
+    let journal = world.run_file("origin", "events.jsonl");
+    std::fs::rename(&journal, world.root.join("aside.jsonl")).expect("set aside");
+    std::fs::create_dir_all(&journal).expect("a directory where the journal was");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let landed = world.run(&["publish-branch", &branch, "--repo", "service", "--no-draft"]);
+    landed
+        .exited(0)
+        .err_has("run 'origin' is not associated with this landing");
+    let (flow, id) = the_landing(&world);
+    assert_eq!(
+        sidecar(&world, &flow, &id, "request.json")["runs"],
+        json!([])
+    );
+    watch(
+        &world,
+        &flow,
+        &[
+            "--timeout",
+            "0",
+            "--cursor",
+            &format!("flow:2:{flow}:{id}@0:"),
+        ],
+    )
+    .ended_on(EXIT_SUCCESS, "landing-progress");
+    assert_eq!(
+        kinds(&world, &flow, &id).last().map(String::as_str),
+        Some("landing-finished")
+    );
+}
+
+/// A landing killed before it prepared any operation — mid-draft — is written
+/// dead with no operation to keep evidence of, and its flow reports the death.
+#[test]
+fn a_landing_killed_before_its_operation_is_written_dead_as_coarse_work() {
+    let world = World::new("ml-killed-drafting");
+    let repository = world.repository("change-open", &[]);
+    branch_with_work(&world, &repository, BRANCH, "widget.txt");
+    world.script("pr-author.body", "## What\nA widget.\n");
+    world.script("pr-author.records-tree", "1");
+    world.script("pr-author.holds", "1");
+    let graph = world.pr_author_graph();
+    let mut landing = Started::spawn(
+        &world,
+        None,
+        &[
+            "publish-branch",
+            BRANCH,
+            "--repo",
+            "service",
+            "--pr-author-graph",
+            &graph,
+        ],
+    );
+    let tree = world.fakes.join("pr-author-tree.jsonl");
+    world.until("the drafting turn to be in flight", |_| {
+        std::fs::read_to_string(&tree).is_ok_and(|said| said.ends_with('\n'))
+    });
+    let (flow, id) = the_landing(&world);
+    landing.kill();
+    let died = watch(&world, &flow, &["--timeout", "0"]);
+    died.ended_on(EXIT_FLOW_FAILED, "flow-failed");
+    assert_eq!(died.record["died"], json!(true));
+    let every = journal(&world, &flow, &id);
+    let death = every
+        .iter()
+        .find(|event| event["kind"] == "landing-died")
+        .expect("the death is written");
+    assert!(
+        death["payload"]["message"]
+            .as_str()
+            .is_some_and(|said| said.contains("no operation was prepared")),
+        "{death}"
+    );
+    std::fs::write(world.fakes.join("pr-author.go"), "go").expect("the drafter is let go");
+}
+
+/// A landing killed mid-operation whose operation stream can no longer be read
+/// is still written dead — the death is what is known — naming that its
+/// operation's events could not be read, rather than claiming they were kept.
+#[test]
+fn a_dead_landings_unreadable_operation_stream_is_named_in_its_death() {
+    let verb = Verb::publish("ml-dead-stream");
+    let world = &verb.world;
+    let mut landing = verb.start();
+    landing.held_at_push(&verb);
+    let (flow, id) = the_landing(world);
+    landing.kill();
+    let operation = sidecar(world, &flow, &id, "operation.json")["operation_id"]
+        .as_str()
+        .expect("an operation id")
+        .to_owned();
+    // llmlint: ignore-block[tests_mirror_real_usage] the operation's stream is given a record
+    // no reader can parse by hand, because `onevcs` only ever appends whole envelopes; what is
+    // staged is what a writer killed mid-append leaves, read back off the binary's watch.
+    let stream = world
+        .onevcs_home()
+        .join("operations")
+        .join(&operation)
+        .join("events.ndjson");
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&stream)
+        .expect("the operation's stream");
+    std::io::Write::write_all(&mut file, b"not a record\n").expect("appended");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    watch(world, &flow, &["--timeout", "0"]).ended_on(EXIT_FLOW_FAILED, "flow-failed");
+    let death = journal(world, &flow, &id)
+        .into_iter()
+        .find(|event| event["kind"] == "landing-died")
+        .expect("the death is written");
+    assert!(
+        death["payload"]["message"]
+            .as_str()
+            .is_some_and(|said| said.contains("could not be read")),
+        "{death}"
+    );
+    verb.held.release();
+}
+
+/// `monitor --flow` ends on a cursor, and a later `monitor --flow --cursor` from it
+/// shows only what was recorded since — never a line it already showed.
+#[test]
+fn monitor_flow_resumes_from_its_own_cursor() {
+    let verb = Verb::publish("ml-monitor-cursor");
+    let world = &verb.world;
+    let landing = verb.start();
+    {
+        let mut landing = landing;
+        landing.held_at_push(&verb);
+        let (flow, _) = the_landing(world);
+        let first = world.run(&["monitor", "--flow", &flow, "--filter", "detailed"]);
+        first.exited(0).out_has("landing-registered");
+        let cursor = first
+            .stdout
+            .lines()
+            .last()
+            .and_then(|line| line.strip_prefix("-- cursor "))
+            .expect("the resume line is last")
+            .to_owned();
+        verb.held.release();
+        let (code, _, said) = landing.ended();
+        assert_eq!(code, 0, "{said}");
+        let later = world.run(&[
+            "monitor", "--flow", &flow, "--filter", "detailed", "--cursor", &cursor,
+        ]);
+        later
+            .exited(0)
+            .out_lacks("landing-registered")
+            .out_has("landing-finished");
+    }
+}

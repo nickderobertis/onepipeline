@@ -1324,7 +1324,7 @@ impl Supervision {
         if let Err(why) = placed {
             let _ = std::fs::remove_dir_all(&staged);
             if holding == Holding::OwnFlow {
-                crate::flow::record_ending(&flow, REGISTRATION_FAILED);
+                crate::flow::record_ending(&flow, SUPERVISION_FAILED);
             }
             return Err(refused(why));
         }
@@ -1334,7 +1334,7 @@ impl Supervision {
             Ok(relay) => relay,
             Err(error) => {
                 if holding == Holding::OwnFlow {
-                    crate::flow::record_ending(&flow, REGISTRATION_FAILED);
+                    crate::flow::record_ending(&flow, SUPERVISION_FAILED);
                 }
                 return Err(refused(error.to_string()));
             }
@@ -1354,9 +1354,9 @@ impl Supervision {
             ),
         ) {
             if supervision.holding == Holding::OwnFlow {
-                crate::flow::record_ending(&supervision.flow, REGISTRATION_FAILED);
+                crate::flow::record_ending(&supervision.flow, SUPERVISION_FAILED);
             }
-            let _ = supervision.record_ending(REGISTRATION_FAILED);
+            let _ = supervision.record_ending(SUPERVISION_FAILED);
             return Err(refused(error.to_string()));
         }
         if supervision.holding == Holding::OwnFlow {
@@ -1511,7 +1511,7 @@ impl Supervision {
             // Fail closed: a landing whose progress or ending could not be kept
             // leaves a flow owed closure even where the verb itself succeeded.
             let flow_status = if status == 0 && (refused || recorded.is_err()) {
-                REGISTRATION_FAILED
+                SUPERVISION_FAILED
             } else {
                 status
             };
@@ -1556,10 +1556,11 @@ enum Holding {
     ParentFlow,
 }
 
-/// The status a landing's flow ends with where registration, relay or the
-/// ending's own record failed though the verb did not: non-zero, so the flow is
-/// owed closure rather than read as a clean success.
-const REGISTRATION_FAILED: i32 = 1;
+/// The status a landing's flow ends with where its supervision failed — its
+/// registration, its relay, or the record of its ending — though the verb did
+/// not: non-zero, so the flow is owed closure rather than read as a clean
+/// success.
+const SUPERVISION_FAILED: i32 = 1;
 
 /// The relay behind its lock, whoever panicked holding it.
 fn lock_relay(relay: &Mutex<Relay>) -> std::sync::MutexGuard<'_, Relay> {
