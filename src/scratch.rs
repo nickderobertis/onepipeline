@@ -385,14 +385,16 @@ fn emit<T: serde::Serialize>(paths: &RunPaths, kind: PipelineKind, value: &T) ->
     Journal::open(paths).emit(kind, journal::labels(&paths.run, None), payload)
 }
 
-/// A record stands until an edit changes its ending or a new dispatch makes
-/// the run live again, including work added while an existing decision waits.
-fn already_recorded(events: &[Envelope]) -> bool {
+/// A record stands for the ending it names until an edit changes the graph's
+/// ending or a new dispatch makes the run live again, including work added while
+/// an existing decision waits. A stop over a paused or failed run is an ending of
+/// its own, so a record of the earlier one does not stand for it.
+fn already_recorded(events: &[Envelope], ending: Option<ScratchEnding>) -> bool {
     let mut state = crate::projection::RunState {
         strict: true,
         ..Default::default()
     };
-    let mut recorded = false;
+    let mut recorded = None;
     for event in events {
         let kind = PipelineKind::from_wire(&event.kind);
         let before = graph_ending(&state);
@@ -400,16 +402,21 @@ fn already_recorded(events: &[Envelope]) -> bool {
         if kind == Some(PipelineKind::NodeDispatched)
             || (kind == Some(PipelineKind::EditCommitted) && before != graph_ending(&state))
         {
-            recorded = false;
+            recorded = None;
         }
-        if matches!(
-            kind,
-            Some(PipelineKind::ScratchRemoved | PipelineKind::ScratchRetained)
-        ) {
-            recorded = true;
+        match kind {
+            Some(PipelineKind::ScratchRemoved) => recorded = Some(None),
+            // The strict fold this runs under has already admitted the payload.
+            Some(PipelineKind::ScratchRetained) => {
+                recorded = Some(
+                    serde_json::from_value::<ScratchRetained>(json!(event.payload))
+                        .map_or(ending, |record| Some(record.ending)),
+                );
+            }
+            _ => {}
         }
     }
-    recorded
+    recorded == Some(ending)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -477,7 +484,7 @@ fn handle_ending(
     state: &crate::projection::RunState,
     events: &[Envelope],
 ) -> crate::Result<()> {
-    if !state.strict || crate::shutdown::begun(paths) || already_recorded(events) {
+    if !state.strict || crate::shutdown::begun(paths) {
         return Ok(());
     }
     let present: std::collections::BTreeSet<_> = state.statuses().values().copied().collect();
@@ -507,6 +514,9 @@ fn handle_ending(
         }
         crate::hooks::Verdict::NotEnded => return Ok(()),
     };
+    if already_recorded(events, ending) {
+        return Ok(());
+    }
     let began = Instant::now();
     let dirs = directories(paths).map_err(|source| crate::Error::Ledger {
         path: paths.dir.join("scratch"),
@@ -856,9 +866,17 @@ pub(crate) fn lines(view: &RunView, cap: Option<usize>) -> String {
         return String::new();
     };
     // llmlint: ignore-end[changed_behavior_has_e2e]
+    // llmlint: ignore-block[changed_behavior_has_e2e] every current producer
+    // records the ending the run reads as (a stop over a pause or a failure
+    // records its own, proven by
+    // scratch::a_stop_over_a_paused_or_failed_run_records_its_stopped_ending), so a
+    // mismatched record is reached only from an earlier build's journal, which
+    // scratch::a_retained_record_for_another_ending_than_the_runs_reading_prints_no_notice
+    // stands in for through the real status and results commands.
     if current != Some(record.ending) {
         return String::new();
     }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
     largest_first(&mut record.dirs);
     let suffix = if record.ending == ScratchEnding::Paused {
         format!(

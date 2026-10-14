@@ -1728,6 +1728,15 @@ fn a_paused_run_dispatches_added_work_and_records_its_next_pause_freshly() {
 
 /// Append a copy of the run's latest `scratch-retained` record naming another
 /// ending, as the next record of its journal's stream.
+// llmlint: ignore-block[tests_mirror_real_usage] no command of this build journals
+// a record for an ending other than the run's reading — a stop over a pause or a
+// failure records its own, proven by
+// a_stop_over_a_paused_or_failed_run_records_its_stopped_ending — so the state the
+// views must refuse is one only a journal from a build before that fix holds, and
+// this valid appended record stands in for that journal.
+// llmlint: ignore-block[changed_behavior_has_e2e] as above: the mismatch is not
+// reachable through a current CLI producer, so the record is appended as it stands
+// in an earlier build's journal.
 fn retain_as(world: &World, run: &str, ending: &str) {
     let journal = world.journal(run);
     let mut record = world
@@ -1742,6 +1751,8 @@ fn retain_as(world: &World, run: &str, ending: &str) {
         .unwrap();
     std::io::Write::write_all(&mut file, format!("{record}\n").as_bytes()).unwrap();
 }
+// llmlint: ignore-end[changed_behavior_has_e2e]
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// A kept record speaks only for the ending it was written at: a `paused` record
 /// on a run that now reads `ENDED failed` gives no paused wording, and a `failed`
@@ -1774,4 +1785,31 @@ fn a_retained_record_for_another_ending_than_the_runs_reading_prints_no_notice()
     // The appended record is one the journal admits strictly: the verb, which
     // refuses a run whose fold is not, removes the failed run's scratch.
     world.run(&["scratch", "discard", &failed]).exited(0);
+}
+
+/// `onepipeline stop` over a run that already ended or paused is a new ending:
+/// it journals its own `scratch-retained`, and the views speak from that record
+/// rather than from the earlier ending's.
+#[test]
+fn a_stop_over_a_paused_or_failed_run_records_its_stopped_ending() {
+    let world = World::new("scratch-stop-over-ending");
+    world.script("failed.fail", "1");
+    world.script("paused.fail", "1");
+    let failed = settle(&world, "failed", vec![agent("failed", &[])]);
+    let paused = settle(
+        &world,
+        "paused",
+        vec![agent("paused", &[]), crate::harness::human("approve", &[])],
+    );
+    for (run, recorded) in [(&failed, "failed"), (&paused, "paused")] {
+        assert_retained(&world, run, recorded, 1);
+        let before = snapshot(&world.run_file(run, "scratch"));
+        world.run(&["stop", run]).exited(0);
+        world
+            .run(&["status", run])
+            .exited(0)
+            .out_has("ENDED stopped");
+        assert_retained(&world, run, "stopped", 2);
+        assert_eq!(snapshot(&world.run_file(run, "scratch")), before);
+    }
 }
