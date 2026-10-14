@@ -299,8 +299,9 @@ impl Maintained {
     fn is_recorded(&self) -> bool {
         match &self.outcome {
             Err(_)
-            | Ok(IdentityOutcome::Claimed { .. })
-            | Ok(IdentityOutcome::MaintenanceUnreadable { .. }) => true,
+            | Ok(IdentityOutcome::Claimed { .. } | IdentityOutcome::MaintenanceUnreadable { .. }) => {
+                true
+            }
             Ok(IdentityOutcome::Slots(slots)) => slots.iter().any(|slot| {
                 matches!(
                     slot.outcome,

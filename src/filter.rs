@@ -961,19 +961,39 @@ impl Filters {
 
 /// The shipped profile of that name, before any launch override.
 ///
-/// `planner` is every pipeline-level event and nothing else — node dispatch,
-/// settlement and failure, decisions, surfaces, edits, attestations, stop and
-/// adopt — with the detailed `agentgraph` and `vcs` activity behind them left
-/// out, because planner attention is the scarce resource. `detailed` is
-/// unfiltered: an observer's whole job is to read the detail.
+/// `planner` is every pipeline-level event — node dispatch, settlement and
+/// failure, decisions, surfaces, edits, attestations, stop and adopt — except
+/// one stamped `significance: progress`, beside every `vcs` event its producer
+/// stamped a `milestone` or a `blocker`; the detailed `agentgraph` activity, and
+/// `vcs` progress, are left out, because planner attention is the scarce
+/// resource. An unstamped pipeline event — every kind this crate wrote before
+/// the stamp — is still in, and an unstamped `vcs` event is still out, because
+/// what each producer's stamp means is that producer's table and an absent one
+/// says nothing new. `detailed` is unfiltered: an observer's whole job is to
+/// read the detail.
 fn shipped_profile(name: &str) -> Option<EventFilter> {
+    let stamped = |source: Source, significance: crate::vocabulary::Significance| Matcher {
+        source: Some(source),
+        fields: crate::vocabulary::MatchFields {
+            significance: Some(significance),
+            ..crate::vocabulary::MatchFields::default()
+        },
+        ..Matcher::default()
+    };
     match name {
         DEFAULT_PROFILE => Some(EventFilter {
-            include: vec![Matcher {
-                source: Some(Source::Pipeline),
-                ..Matcher::default()
-            }],
-            exclude: Vec::new(),
+            include: vec![
+                Matcher {
+                    source: Some(Source::Pipeline),
+                    ..Matcher::default()
+                },
+                stamped(Source::Vcs, crate::vocabulary::Significance::Milestone),
+                stamped(Source::Vcs, crate::vocabulary::Significance::Blocker),
+            ],
+            exclude: vec![stamped(
+                Source::Pipeline,
+                crate::vocabulary::Significance::Progress,
+            )],
         }),
         DETAILED_PROFILE => Some(EventFilter::default()),
         _ => None,
@@ -1062,10 +1082,20 @@ mod tests {
                 include: vec![kind("gate-*"), kind("session-closed")],
                 exclude: Vec::new(),
             }),
+            // The `planner` override as these configs declare it — the profile
+            // that shipped when they were recorded — rather than the one that
+            // ships now: a declared override is the operator's document, and
+            // what the shipped default became since does not move it.
             profiles: [
                 (
                     DEFAULT_PROFILE.to_string(),
-                    shipped_profile(DEFAULT_PROFILE).expect("planner ships"),
+                    EventFilter {
+                        include: vec![Matcher {
+                            source: Some(Source::Pipeline),
+                            ..Matcher::default()
+                        }],
+                        exclude: Vec::new(),
+                    },
                 ),
                 (
                     recorded_override(),
