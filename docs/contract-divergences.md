@@ -11008,8 +11008,13 @@ deferred verdicts
 `a_placement_at_dispatch_*`, `a_continuing_launch_*`, `an_adoption_*`,
 `an_idle_driver_asks_the_host_nothing`); the verb's requested receipt and its refusal
 beside another op (`a_driven_readjust_the_driver_cannot_answer_in_time_*`,
-`a_readjust_beside_another_op_is_refused`); and the amendment's two-root grouping and
-unknown branch (`drafts_on_two_roots_*`, `a_draft_merged_into_an_unknown_branch_*`). The
+`a_readjust_beside_another_op_is_refused`); the amendment's two-root grouping and
+unknown branch (`drafts_on_two_roots_*`, `a_draft_merged_into_an_unknown_branch_*`); a
+branch name read as its own repository's, for an absorption and a recovery
+(`drafts_merged_into_same_named_branches_*`, `drafts_closed_under_same_named_branches_*`);
+an absorption and its absorber's landing found by one read
+(`an_absorption_and_its_absorber_s_landing_*`); and a failed read holding a draft an
+earlier trigger left owed (`a_failed_read_leaves_a_draft_*`). The
 rework and restack journeys of entry 121 read a republication
 `change-review-draft-unchecked` at its push and `change-review-draft` once `readjust`
 reads it green. `tests/contract.rs`'s `the_readjustment_is_what_the_divergence_record_names`

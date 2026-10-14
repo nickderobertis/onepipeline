@@ -3002,3 +3002,219 @@ fn a_readjustment_merges_the_root_in_where_the_policy_merges_only_on_a_conflict(
     let (base, _) = on_host(&world, run, "b");
     assert_eq!(base, "main");
 }
+
+/// The change request the host holds in `repo` for `branch`.
+fn change_in(world: &World, repo: &str, branch: &str) -> Value {
+    world
+        .changes_opened()
+        .into_iter()
+        .find(|change| change["repo"] == repo && change["head"] == branch)
+        .unwrap_or_else(|| panic!("{repo} holds no change request from {branch}"))
+}
+
+/// Over `service` and `other`, `a → b` and `p → q`, with `a` and `p` each pinned to a
+/// branch named `shared` in its own repository.
+fn twin_stacks(world: &World, run: &str) {
+    world.extra_repository("other");
+    for node in ["a", "b", "p", "q"] {
+        world.script(&format!("{node}.work"), &format!("{node}'s change\n"));
+    }
+    let pinned = |id: &str, repo: &str| {
+        let mut node = lifecycle(id, &[]);
+        node["branch"] = json!("shared");
+        node["repo"] = json!(repo);
+        node
+    };
+    let on_other = |id: &str, deps: &[&str]| {
+        let mut node = lifecycle(id, deps);
+        node["repo"] = json!("github.com/owner/other");
+        node
+    };
+    launched(
+        world,
+        run,
+        vec![
+            pinned("a", "service"),
+            lifecycle("b", &["a"]),
+            pinned("p", "github.com/owner/other"),
+            on_other("q", &["p"]),
+        ],
+    );
+    assert_eq!(settled(world, run, "b")["base"], "shared");
+    assert_eq!(settled(world, run, "q")["base"], "shared");
+}
+
+/// A branch name is its own repository's: with `a` in `service` and `p` in `other` both
+/// on a branch named `shared`, a person merges `b` into `a`'s branch and `q` into `p`'s,
+/// and one readjustment says each was absorbed by the node of its own repository.
+#[test]
+fn drafts_merged_into_same_named_branches_of_two_repositories_are_absorbed_by_their_own() {
+    let world = team_world("readjust-twin-absorbed");
+    let run = "twins";
+    twin_stacks(&world, run);
+    let b = change_in(&world, SLUG, &branch_of(&world, run, "b"));
+    let q = change_in(&world, "owner/other", &branch_of(&world, run, "q"));
+    merge(&world, &b["number"], "merge-commit", "kept");
+    person(
+        &world,
+        &[
+            "merge",
+            "owner/other",
+            &q["number"].to_string(),
+            "merge-commit",
+            "kept",
+        ],
+    );
+    readjusted(&world, run);
+
+    let b = record(&world, run, "node-absorbed", "b").expect("b was absorbed");
+    assert_eq!(b["into"], "a", "{b}");
+    let q = record(&world, run, "node-absorbed", "q").expect("q was absorbed");
+    assert_eq!(q["into"], "p", "{q}");
+    assert_eq!(surfaced(&world, run, "stack-merged-out-of-order").len(), 2);
+    assert!(surfaced(&world, run, "change-merged-elsewhere").is_empty());
+}
+
+/// A recovery restores the merged parent of the draft's own repository: `a` and `p`,
+/// each on a branch named `shared`, are squash-merged with their branches deleted
+/// through the refs API, closing `b` and `q`. One readjustment reopens each onto its own
+/// parent's merged head and moves it onto its root, a draft with only its own change.
+#[test]
+fn drafts_closed_under_same_named_branches_of_two_repositories_are_each_recovered() {
+    let world = team_world("readjust-twin-recovered");
+    let run = "twins";
+    twin_stacks(&world, run);
+    let a = change_in(&world, SLUG, "shared");
+    let p = change_in(&world, "owner/other", "shared");
+    merge(&world, &a["number"], "squash", "deleted-close");
+    person(
+        &world,
+        &[
+            "merge",
+            "owner/other",
+            &p["number"].to_string(),
+            "squash",
+            "deleted-close",
+        ],
+    );
+    readjusted(&world, run);
+
+    for (node, repo, origin) in [
+        ("b", SLUG, service(&world).origin),
+        ("q", "owner/other", world.root.join("other.git")),
+    ] {
+        let reopened = record(&world, run, "change-reopened", node)
+            .unwrap_or_else(|| panic!("{node} was not recovered"));
+        assert_eq!(reopened["restored_base"], "shared", "{reopened}");
+        let branch = branch_of(&world, run, node);
+        let change = change_in(&world, repo, &branch);
+        assert_eq!(change["base"], "main", "{change}");
+        assert!(held_as_draft(&world, &change["number"]), "{change}");
+        assert_eq!(settled(&world, run, node)["base"], "main");
+        let changed = git(
+            &world,
+            &origin,
+            &["diff", "--name-only", &format!("main...{branch}")],
+        );
+        assert_eq!(changed.trim(), format!("{node}.md"), "{node}");
+    }
+}
+
+/// An absorption and its absorber's landing read together: in `a ← b ← c` a person
+/// merges `b` into `a`'s branch and then `a` into the root, with no trigger between. One
+/// readjustment absorbs `b`, lands `a`, lands `b` through it, and moves `c` onto the root
+/// with only its own change.
+#[test]
+fn an_absorption_and_its_absorber_s_landing_read_together_land_both() {
+    let world = team_world("readjust-absorbed-and-landed");
+    for node in ["a", "b", "c"] {
+        world.script(&format!("{node}.work"), &format!("{node}'s change\n"));
+    }
+    let run = "together";
+    launched(
+        &world,
+        run,
+        vec![
+            lifecycle("a", &[]),
+            lifecycle("b", &["a"]),
+            lifecycle("c", &["b"]),
+        ],
+    );
+    let c_branch = branch_of(&world, run, "c");
+    merge(&world, &number_of(&world, run, "b"), "merge-commit", "kept");
+    merge(&world, &number_of(&world, run, "a"), "squash", "kept");
+    readjusted(&world, run);
+
+    let absorbed = record(&world, run, "node-absorbed", "b").expect("b was absorbed");
+    assert_eq!(absorbed["into"], "a", "{absorbed}");
+    assert!(record(&world, run, "node-landed", "a").is_some());
+    let landed = record(&world, run, "node-landed", "b").expect("b landed with a");
+    assert_eq!(landed["detected_by"], "absorber-landed", "{landed}");
+    assert_eq!(landed["via"], "a", "{landed}");
+    assert_eq!(settled(&world, run, "c")["base"], "main");
+    let (base, _) = on_host(&world, run, "c");
+    assert_eq!(base, "main");
+    assert_eq!(
+        changed_against(&world, &service(&world), "main", &c_branch),
+        ["c.md"]
+    );
+}
+
+/// A failed read holds a draft an earlier trigger left owed: `a` lands, the host refuses
+/// `b`'s retarget so `b` stays owed, and the next trigger's read of `service` fails.
+/// That trigger moves nothing of `b` — no push, no host write, no record — and the one
+/// after it, its read answered, moves `b` onto the root.
+#[test]
+fn a_failed_read_leaves_a_draft_an_earlier_trigger_left_owed_as_it_was() {
+    let world = team_world("readjust-owed-unread");
+    for node in ["a", "b"] {
+        world.script(&format!("{node}.work"), &format!("{node}'s change\n"));
+    }
+    let run = "owed";
+    launched(
+        &world,
+        run,
+        vec![lifecycle("a", &[]), lifecycle("b", &["a"])],
+    );
+    let a_branch = branch_of(&world, run, "a");
+    let b_branch = branch_of(&world, run, "b");
+    merge(&world, &number_of(&world, run, "a"), "squash", "kept");
+    world.script("gh.retarget-refused", "");
+    readjusted(&world, run);
+    assert!(record(&world, run, "node-readjusted", "b").is_none());
+    std::fs::remove_file(world.fakes.join("gh.retarget-refused")).expect("the host writes again");
+
+    let head = tip(&world, &b_branch);
+    let records = world.journal(run).len();
+    let from = world.invocations().len();
+    world.script("gh.standings-outage.owner.service", "");
+    let (code, receipt) = readjust(&world, run);
+    assert_eq!(code, 1, "a failed host read is not said: {receipt}");
+    let after: Vec<Value> = world.journal(run).into_iter().skip(records).collect();
+    assert!(
+        after.iter().all(|event| event["labels"]["node"] != "b"),
+        "{after:#?}"
+    );
+    assert!(
+        after
+            .iter()
+            .any(|event| event["kind"] == "readjust-read-failed"),
+        "{after:#?}"
+    );
+    assert!(
+        host_calls(&world, from).iter().all(|call| !is_write(call)),
+        "{:#?}",
+        host_calls(&world, from)
+    );
+    assert_eq!(tip(&world, &b_branch), head);
+    let (base, _) = on_host(&world, run, "b");
+    assert_eq!(base, a_branch);
+
+    std::fs::remove_file(world.fakes.join("gh.standings-outage.owner.service"))
+        .expect("the outage ends");
+    readjusted(&world, run);
+    let moved = record(&world, run, "node-readjusted", "b").expect("b was readjusted");
+    assert_eq!(moved["retarget"], "retargeted", "{moved}");
+    let (base, _) = on_host(&world, run, "b");
+    assert_eq!(base, "main");
+}

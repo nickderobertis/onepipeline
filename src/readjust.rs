@@ -216,6 +216,9 @@ pub(crate) struct Detection {
     /// Each draft merged into a branch neither the root nor any node's: nothing is left
     /// on its change request to republish.
     pub(crate) merged_elsewhere: BTreeSet<String>,
+    /// Each draft whose standing this trigger could not read: left exactly as it was, so
+    /// nothing of this trigger moves it, and the next trigger's read decides.
+    pub(crate) unread: BTreeSet<String>,
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
@@ -258,7 +261,11 @@ struct Group {
 
 /// Group `drafts` by normalized repository and root, answering each one that cannot be
 /// grouped as a failure of its repository.
-fn grouped(drafts: Vec<Draft>, failures: &mut Vec<(String, String)>) -> Vec<Group> {
+fn grouped(
+    drafts: Vec<Draft>,
+    failures: &mut Vec<(String, String)>,
+    unread: &mut BTreeSet<String>,
+) -> Vec<Group> {
     let mut identities = BTreeMap::<String, std::result::Result<String, String>>::new();
     let mut groups = BTreeMap::<(String, String), Group>::new();
     for draft in drafts {
@@ -274,6 +281,7 @@ fn grouped(drafts: Vec<Draft>, failures: &mut Vec<(String, String)>) -> Vec<Grou
                 if !failures.iter().any(|(repo, _)| *repo == draft.repo) {
                     failures.push((draft.repo.clone(), detail));
                 }
+                unread.insert(draft.node);
                 continue;
             }
         };
@@ -285,6 +293,7 @@ fn grouped(drafts: Vec<Draft>, failures: &mut Vec<(String, String)>) -> Vec<Grou
                     draft.node
                 ),
             ));
+            unread.insert(draft.node);
             continue;
         };
         groups
@@ -319,7 +328,7 @@ pub(crate) fn detect(
         return Ok(detection);
     }
     let mut failures = Vec::new();
-    let groups = grouped(drafts, &mut failures);
+    let groups = grouped(drafts, &mut failures, &mut detection.unread);
     let mut read: Vec<(Draft, onevcs::ChangeStanding)> = Vec::new();
     for group in groups {
         let urls = group
@@ -387,6 +396,9 @@ pub(crate) fn detect(
                     .first()
                     .map_or_else(|| group.repo.clone(), |draft| draft.repo.clone());
                 failures.push((repo, detail));
+                detection
+                    .unread
+                    .extend(group.drafts.into_iter().map(|draft| draft.node));
             }
         }
     }
@@ -419,12 +431,47 @@ fn take_up(
     read: &[(Draft, onevcs::ChangeStanding)],
     detection: &mut Detection,
 ) -> Result<()> {
-    let mut landed_now: BTreeSet<String> = BTreeSet::new();
+    let mut found = Found::default();
     let mut moved_now: BTreeSet<String> = BTreeSet::new();
-    let by_branch: BTreeMap<&str, &str> = read
+    // A branch name is its repository's own: two repositories may each hold one of a name.
+    let identities = Identities::default();
+    let by_branch: BTreeMap<(String, &str), &str> = read
         .iter()
-        .map(|(draft, standing)| (standing.head_branch.as_str(), draft.node.as_str()))
+        .map(|(draft, standing)| {
+            (
+                (identities.of(&draft.repo), standing.head_branch.as_str()),
+                draft.node.as_str(),
+            )
+        })
         .collect();
+    // Absorptions first, so a landing this same read reports lands what was merged into it.
+    for (draft, standing) in read {
+        let node = draft.node.as_str();
+        let onevcs::ChangeState::Merged {
+            into,
+            commit,
+            landing: false,
+            ..
+        } = &standing.state
+        else {
+            continue;
+        };
+        let absorber = by_branch
+            .get(&(identities.of(&draft.repo), into.as_str()))
+            .map(|node| (*node).to_owned())
+            .or_else(|| branch_owner(state, &identities, &draft.repo, into));
+        match absorber.filter(|absorber| absorber != node) {
+            Some(into_node) => {
+                absorbed(paths, journal, draft, &into_node, &commit.0)?;
+                found.absorbed.insert(node.to_owned(), into_node);
+                moved_now.insert(node.to_owned());
+            }
+            None => {
+                merged_elsewhere(paths, journal, draft, into, &commit.0)?;
+                detection.merged_elsewhere.insert(node.to_owned());
+            }
+        }
+    }
     for (draft, standing) in read {
         let node = draft.node.as_str();
         match &standing.state {
@@ -433,41 +480,20 @@ fn take_up(
                 landing: true,
                 ..
             } => {
-                landed(
-                    paths,
-                    journal,
-                    state,
-                    trigger,
-                    draft,
-                    &commit.0,
-                    &landed_now,
-                )?;
-                landed_now.insert(node.to_owned());
+                landed(paths, journal, state, trigger, draft, &commit.0, &found)?;
+                found.landed.insert(node.to_owned());
                 moved_now.insert(node.to_owned());
             }
-            onevcs::ChangeState::Merged { into, commit, .. } => {
-                let absorber = by_branch
-                    .get(into.as_str())
-                    .map(|node| (*node).to_owned())
-                    .or_else(|| branch_owner(state, into));
-                match absorber.filter(|absorber| absorber != node) {
-                    Some(into_node) => {
-                        absorbed(paths, journal, draft, &into_node, &commit.0)?;
-                        moved_now.insert(node.to_owned());
-                    }
-                    None => {
-                        merged_elsewhere(paths, journal, draft, into, &commit.0)?;
-                        detection.merged_elsewhere.insert(node.to_owned());
-                    }
-                }
-            }
+            onevcs::ChangeState::Merged { .. } => {}
             onevcs::ChangeState::Closed { base_deleted } => {
-                // The merged parent whose branch it was based on: in this read, or recorded
-                // landed by an earlier one, at the head its branch last carried.
+                // The merged parent whose branch it was based on, in its own repository: in
+                // this read, or recorded landed by an earlier one, at the head its branch
+                // last carried.
                 let parent = read
                     .iter()
-                    .find(|(_, parent)| {
-                        parent.head_branch == standing.base
+                    .find(|(parent_draft, parent)| {
+                        identities.same(&parent_draft.repo, &draft.repo)
+                            && parent.head_branch == standing.base
                             && matches!(parent.state, onevcs::ChangeState::Merged { .. })
                     })
                     .map(|(_, parent)| parent.head.clone())
@@ -477,6 +503,8 @@ fn take_up(
                             .iter()
                             .find(|(node, branch)| {
                                 **branch == standing.base
+                                    && repo_of(state, node)
+                                        .is_some_and(|repo| identities.same(repo, &draft.repo))
                                     && state.landings.get(*node) == Some(&Landing::Landed)
                             })
                             .and_then(|(node, _)| state.heads.get(node))
@@ -532,13 +560,59 @@ fn take_up(
     Ok(())
 }
 
-/// The lineage head whose recorded branch is `branch`.
-fn branch_owner(state: &RunState, branch: &str) -> Option<String> {
+/// What one read has landed and absorbed so far, before its records are folded.
+#[derive(Debug, Default)]
+struct Found {
+    /// Each draft it found merged into its root.
+    landed: BTreeSet<String>,
+    /// Each draft it found merged into another node's branch, and that node.
+    absorbed: BTreeMap<String, String>,
+}
+
+/// The lineage head of `repo` whose recorded branch is `branch`.
+fn branch_owner(
+    state: &RunState,
+    identities: &Identities,
+    repo: &str,
+    branch: &str,
+) -> Option<String> {
     state
         .branches
         .iter()
-        .find(|(node, held)| *held == branch && !state.superseded.contains_key(*node))
+        .find(|(node, held)| {
+            *held == branch
+                && repo_of(state, node).is_some_and(|held| identities.same(held, repo))
+                && !state.superseded.contains_key(*node)
+        })
         .map(|(node, _)| node.clone())
+}
+
+/// Each repository the plan names, as the identity `onevcs` resolves it to, asked once
+/// a name: one repository may be named two ways, and two names of it are one place.
+#[derive(Debug, Default)]
+struct Identities(std::cell::RefCell<BTreeMap<String, String>>);
+
+impl Identities {
+    /// `repo`'s identity; a name that resolves to nothing is compared as itself.
+    fn of(&self, repo: &str) -> String {
+        self.0
+            .borrow_mut()
+            .entry(repo.to_owned())
+            .or_insert_with(|| {
+                crate::vcs::repository_identity(repo).unwrap_or_else(|_| repo.to_owned())
+            })
+            .clone()
+    }
+
+    /// Whether `one` and `other` name one repository.
+    fn same(&self, one: &str, other: &str) -> bool {
+        one == other || self.of(one) == self.of(other)
+    }
+}
+
+/// The repository `node` works in, as the plan names it.
+fn repo_of<'a>(state: &'a RunState, node: &str) -> Option<&'a str> {
+    state.graph.get(node).and_then(|node| node.repo.as_deref())
 }
 
 /// Every unlanded draft of `node`'s repository it depends on, directly or not.
@@ -578,7 +652,7 @@ fn landed(
     trigger: ReadjustTrigger,
     draft: &Draft,
     commit: &str,
-    landed_now: &BTreeSet<String>,
+    found: &Found,
 ) -> Result<()> {
     let node = draft.node.as_str();
     emit(
@@ -595,16 +669,17 @@ fn landed(
             via: None,
         },
     )?;
-    // What was absorbed into it lands with it — through every absorption, nearest first,
-    // each saying the node it was merged into.
-    let mut absorbed: Vec<(&String, &String, usize)> = state
-        .absorbed
+    // What was absorbed into it lands with it — through every absorption, recorded or
+    // found by this same read, nearest first, each saying the node it was merged into.
+    let every: BTreeMap<&String, &String> =
+        state.absorbed.iter().chain(found.absorbed.iter()).collect();
+    let mut absorbed: Vec<(&String, &String, usize)> = every
         .iter()
-        .filter_map(|(absorbed, into)| {
+        .filter_map(|(&absorbed, &into)| {
             let mut last = into;
             let mut depth = 1;
             let mut seen = BTreeSet::from([absorbed.as_str()]);
-            while let Some(next) = state.absorbed.get(last) {
+            while let Some(&next) = every.get(last) {
                 if !seen.insert(last.as_str()) {
                     return None;
                 }
@@ -637,7 +712,7 @@ fn landed(
             },
         )?;
     }
-    let carried = unlanded_ancestors(state, node, landed_now);
+    let carried = unlanded_ancestors(state, node, &found.landed);
     if !carried.is_empty() {
         emit(
             paths,
@@ -1011,6 +1086,8 @@ impl Readjuster {
         self.read_this_pass = true;
         self.tried.clear();
         self.tried.extend(detection.unrecovered.iter().cloned());
+        // A draft whose read failed is left as it was, owed or not.
+        self.tried.extend(detection.unread.iter().cloned());
         // A merged draft has no change request left to republish onto: it is never
         // restacked, whether or not its question was answered.
         self.tried
