@@ -3919,7 +3919,7 @@ each change is argued:
   did. The vocabulary is `settled`, `surface`, `nothing-driving`, `node-settled`
   and `node=<ID>`, and it is validated when the command is invoked — see below.
   A fifth word, `run-joined`, is a flow watch's alone (entry 114) and refused on
-  a run's.
+  a run's, and so is a sixth, `landing-progress` (entry 123).
   Given none, the wait returns on `surface` and `node-settled`; given any, those
   named replace that set.
 
@@ -4063,7 +4063,8 @@ but only one that knew which node to name, which a supervisor asking "is anythin
 waiting for a person?" does not.
 
 **`monitor` carries the same cursor, so an observer keeps no file of its own.**
-The surface is `onepipeline monitor <RUN> [--filter NAME|SPEC | --all] [--cursor <CURSOR>]`.
+The surface is `onepipeline monitor <RUN> | --flow <ID> [--filter NAME|SPEC | --all] [--cursor <CURSOR>]`,
+where `--flow` in the place of `<RUN>` reads a flow's landings instead (entry 123).
 `monitor` has no cursor otherwise, so the host's observer persona kept one in two
 files in its working directory, and that directory was a publication checkout: in
 the run that closed `ai-orchestrator` #855 the observer's `monitor.cursor` and
@@ -10529,3 +10530,173 @@ comes from the discovery journey.
 The planner's dependency ruling retains `onevcs` 0.48.1 and `onevcs-testing` 0.17.0:
 those releases already carry this API; testing 0.18.0 requires onevcs 0.49.0 and
 would resolve a second engine under this manifest's unchanged pin.
+
+## 123. A manager's own landing could die or block with nothing holding its session — OPEN
+
+**Proposal, for the planner who owns the contract: supervise every landing a
+manager starts directly — `onepipeline publish-branch`, `repo-recover` and the
+new `onepipeline integrate` — as work of that manager's flow, as the *Manager
+landings* surface of the Flows section states it.** This entry records why it
+exists, what it adds to the contract's declarations, and where it departs from
+the task that specified it.
+
+**What was wrong.** A landing a manager ran by hand was one blocking call the
+manager's watch and stop hook knew nothing about. A required check failing, a
+change opened and held, or the landing process killed mid-push left nothing owed:
+`unwatched` reported no line, the stop guard let the turn end, and an
+`unwatched --acknowledge` or `unpublished --acknowledge` could close the very run
+or branch the live landing was advancing.
+
+**What this build does.** With `ONEPIPELINE_LAUNCHER_SESSION` naming a manager,
+each of the three verbs resolves every subject — an integration train's every
+member — and registers it, before drafting or forwarding anything, as one
+landing of a flow: the live flow of the same session it runs in, or a flow
+registered for that landing alone. Registration writes the additive sidecar
+`landings/<landing_id>/request.json` under the flow, whole and renamed into
+place under the lock a branch acknowledgement takes; one that fails starts no
+work, and a flow of another session is refused. The verb then prepares the
+linked `onevcs` operation handle, keeps its id in `operation.json`, calls the
+matching `*_in_operation` entry point, and relays every event that invocation
+records — into the landing's own `events.jsonl` and every associated originating
+run's journal — while the call runs, draining before it settles. Its own
+transitions are six new pipeline kinds, stamped with the producer's
+`significance` word; the forwarded status is recorded in `ending.json`, and a
+process proved gone with none is written `landing-died` by the reader that proves
+it, never a completion. A flow is live while any of its landings is; `watch
+--flow` gains `--until landing-progress` among its defaults, a `--filter`, and a
+cursor that places each landing; `next --flow` and `monitor --flow` read the
+landings' journals through the same profiles; and the shipped `planner` profile
+now leaves out pipeline progress and lets in `vcs` milestones and blockers.
+
+**Shared declarations this adds.** The sidecars, payloads and words below are
+declared once — the sidecars and payloads in `src/flow.rs`, the CLI in
+`src/cli.rs` — and the block is what `tests/contract.rs` and `src/flow.rs`'s own
+tests drive through those types, so this record and the types cannot drift.
+`onevcs::Significance` is re-exported at `onepipeline::vocabulary::Significance`,
+and `MatchFields` gains the optional `significance` field, first, as `onevcs`'s
+does; it travels among the labels' extras as `onevcs` writes it. The
+`agent.event-filter@1` document gains that one optional property, which admits
+filters the capture refused and refuses none it admitted, so its id stays at `@1`
+and the events bundle advances to `1.4.0`. A matcher naming `significance` is
+refused by `oneagentgraph`, which declares no such field, if it is ever handed
+one at its JSON form; no shipped filter is.
+
+**Breaking for an exhaustive Rust caller, and nothing else.**
+`cli::WatchUntil::LandingProgress`, `cli::Command::Integrate` with its
+`IntegrateArgs`, `cli::MonitorArgs::read` becoming `TargetArgs` (so `monitor` takes
+`--flow`), `watch_conditions()` answering seven words, and the new field on
+`vocabulary::MatchFields`. Every command line and every stored record that read
+before reads unchanged: a flow with no `landings/` holds none, a `flow:1:` cursor
+still resumes, and the launch config's own `planner` override is the operator's.
+
+**Departures from the task's wording, ruled or forced.**
+
+1. *Where operation progress is filed.* "The flow journal" is each landing's
+   own `events.jsonl` under the flow: a flow holds several landings, a death is
+   written by whichever reader proves it, and the landing's directory is the one
+   place both writers and every reader already agree on.
+2. *A failed relay.* A landing whose operation progress could not be relayed is
+   settled `landing-refused` — a blocker — and its own flow ends non-zero, owed
+   closure, while the verb's exit status is still the forwarded one.
+3. *A refused command line.* A command line `onevcs` refuses as it stands is
+   still registered and forwarded, so it is refused in the sibling's words; no
+   operation is prepared for work that never starts.
+4. *The bus.* `onevcs` 0.51.0 requires `onemessagebus` 0.9.1, whose YAML parser
+   places a filter refusal by line and column rather than by list path; the
+   contract's marked copy of the bus grammar is re-decided against it unchanged.
+
+```json
+{
+  "verbs": ["publish-branch", "repo-recover", "integrate"],
+  "event_kinds": [
+    "landing-registered",
+    "landing-drafting",
+    "landing-started",
+    "landing-finished",
+    "landing-refused",
+    "landing-died"
+  ],
+  "significance": {
+    "landing-registered": "progress",
+    "landing-drafting": "progress",
+    "landing-started": "progress",
+    "landing-finished": "milestone",
+    "landing-refused": "blocker",
+    "landing-died": "blocker"
+  },
+  "terminal_kinds": ["landing-finished", "landing-refused", "landing-died"],
+  "bundle_versions": {"events": "1.4.0"},
+  "watch_condition": "landing-progress",
+  "flow_watch_default_until": ["surface", "node-settled", "run-joined", "landing-progress"],
+  "flow_cursor": "flow:2:<flow>:<landing>@<byte>/...:<run>@<byte>/...",
+  "legacy_flow_cursor": "flow:1:<flow>:<run>@<byte>/...",
+  "request": {
+    "schema_version": 1,
+    "landing_id": "landing-0123456789abcdef0000",
+    "flow_id": "integrate",
+    "session": "manager-1",
+    "operation": "integrate",
+    "subjects": [
+      {"identity": "github.com/owner/service", "branch": "a"},
+      {"identity": "github.com/owner/service", "branch": "b"},
+      {"identity": "github.com/owner/service", "branch": "c"}
+    ],
+    "runs": ["build"],
+    "pid": 4242,
+    "host": "builder",
+    "started": "linux-proc-stat:1",
+    "began_at": "2026-10-13T00:00:00.000Z"
+  },
+  "ending": {
+    "schema_version": 1,
+    "landing_id": "landing-0123456789abcdef0000",
+    "status": 0,
+    "at": "2026-10-13T00:01:00.000Z"
+  },
+  "operation": {"schema_version": 1, "operation_id": "o-0123456789abcdef0000"},
+  "transition": {
+    "landing_id": "landing-0123456789abcdef0000",
+    "flow_id": "integrate",
+    "operation": "integrate",
+    "subjects": [{"identity": "github.com/owner/service", "branch": "a"}],
+    "message": "registered for session [0123abcd]"
+  },
+  "terminal": {
+    "landing_id": "landing-0123456789abcdef0000",
+    "flow_id": "integrate",
+    "operation": "integrate",
+    "subjects": [{"identity": "github.com/owner/service", "branch": "a"}],
+    "message": "the forwarded verb finished with status 0",
+    "status": 0
+  },
+  "labels": ["landing_id", "flow_id", "operation_id", "significance"],
+  "planner_profile": {
+    "include": [
+      {"source": "pipeline"},
+      {"source": "vcs", "significance": "milestone"},
+      {"source": "vcs", "significance": "blocker"}
+    ],
+    "exclude": [{"source": "pipeline", "significance": "progress"}]
+  }
+}
+```
+
+**Observation placement, ruled by the manager.** A standalone flow has no graph
+and gains no paid observer: its owning manager watches milestones and blockers,
+and every detail is read with `monitor --flow <ID> --filter detailed` and the
+landing's journal. Where an originating run exists, every operation event is
+mirrored into its journal, which an already-live run observer reading `detailed`
+sees; no settled run is revived and no monitor is started for a flow.
+
+**What would close it.** A ruling adding the *Manager landings* surface to the
+contract's views and channel paragraphs, the six kinds to its kind list, and the
+new `planner` profile to its read-time profiles paragraph.
+
+**How it is held.** `tests/e2e/manager_landings.rs` drives the three verbs through
+the compiled binary over registered disposable repositories and real bare
+origins — ownership before the drafting or operation hook, watch progress and
+cursors, terminal outcomes, deaths by `SIGKILL`, acknowledgement refusals and
+fail-closed Stop decisions. `tests/contract.rs`'s
+`the_manager_landing_contract_is_what_the_divergence_record_names` reads the
+block above, and `src/flow.rs`'s own tests read the same sidecar examples
+through the declared types.

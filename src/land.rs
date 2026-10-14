@@ -17,8 +17,9 @@ use clap::{CommandFactory, Parser};
 
 use crate::controls::NodeControls;
 use crate::error::{Error, Result};
-use crate::event::{Envelope, Labels};
+use crate::event::{Envelope, Labels, PipelineKind};
 use crate::executor::{CancellationToken, DispatchRequest, LocalExecutor, WorkspaceSpec};
+use crate::flow::{Flow, Landing as Registered, LandingOperation, LandingSubject};
 use crate::ledger::RunPaths;
 use crate::lifecycle::{Drafted, Undrafted, PR_AUTHOR_PERSONA};
 
@@ -37,6 +38,8 @@ pub(crate) enum Verb {
     PublishBranch,
     /// `onevcs recover`, which `onepipeline repo-recover` fronts.
     Recover,
+    /// `onevcs integrate`, which `onepipeline integrate` fronts.
+    Integrate,
 }
 
 impl Verb {
@@ -45,6 +48,16 @@ impl Verb {
         match self {
             Self::PublishBranch => "publish-branch",
             Self::Recover => "recover",
+            Self::Integrate => "integrate",
+        }
+    }
+
+    /// The engine verb a supervised landing records it as.
+    const fn operation(self) -> LandingOperation {
+        match self {
+            Self::PublishBranch => LandingOperation::PublishBranch,
+            Self::Recover => LandingOperation::RepoRecover,
+            Self::Integrate => LandingOperation::Integrate,
         }
     }
 }
@@ -72,16 +85,30 @@ enum Drafting {
     Declined,
 }
 
-/// Land one branch through the linked `onevcs` verb, drafting its body first
-/// where one is wanted, and answer with that verb's exit status.
+/// Land through the linked `onevcs` verb — drafting a branch's body first where
+/// one is wanted — and answer with that verb's exit status.
+///
+/// Where `ONEPIPELINE_LAUNCHER_SESSION` names a manager session, the landing is
+/// that session's supervised work: every subject is resolved and its ownership
+/// registered with a flow before anything is drafted or forwarded, and a
+/// registration that fails starts no work. With no session it runs unowned, as
+/// it always did, and says so.
 pub(crate) fn land(verb: Verb, args: Vec<OsString>) -> Result<i32> {
-    let split = split(verb, args)?;
-    let argv = [OsString::from("onevcs"), OsString::from(verb.onevcs())]
+    let split = match verb {
+        // Every argument of `integrate` is the sibling's: nothing to take out.
+        Verb::Integrate => Split {
+            forwarded: args,
+            ..Split::default()
+        },
+        Verb::PublishBranch | Verb::Recover => split(verb, args)?,
+    };
+    let argv: Vec<OsString> = [OsString::from("onevcs"), OsString::from(verb.onevcs())]
         .into_iter()
-        .chain(split.forwarded);
+        .chain(split.forwarded.iter().cloned())
+        .collect();
     // `onevcs`'s own parser, so what may be passed is its list and a refused
     // argument is refused in its words — exactly as its own binary would.
-    let mut cli = match onevcs::cli::Cli::try_parse_from(argv) {
+    let mut cli = match onevcs::cli::Cli::try_parse_from(&argv) {
         Ok(cli) => cli,
         Err(refused) => {
             // llmlint: ignore[cli_output_contract] this is `onevcs`'s own usage
@@ -91,19 +118,205 @@ pub(crate) fn land(verb: Verb, args: Vec<OsString>) -> Result<i32> {
             return Ok(refused.exit_code());
         }
     };
-    if let Some(body) = drafted_for(verb, &cli, &split.graph, split.drafting)? {
+    let root = crate::ledger::runs_root();
+    let Some(session) = launcher_session()? else {
+        eprintln!(
+            "onepipeline: {}: no manager session owns this landing — {} names none — so it runs \
+             unowned, and nothing will hold a session for it",
+            verb.operation().as_str(),
+            crate::sys::LAUNCHER_SESSION_ENV
+        );
+        return forward(verb, &mut cli, &split, &root, None);
+    };
+    // Every subject, resolved before anything is registered, drafted or
+    // forwarded. One the sibling cannot resolve is its own refusal, in its words
+    // and at its code, exactly as the verb would have refused it.
+    let subjects = match subjects_of(&cli.command) {
+        Ok(subjects) => subjects,
+        Err(refused) => {
+            eprintln!("onevcs: {refused}");
+            return Ok(i32::from(onevcs::FailureKind::of(&refused).exit_code()));
+        }
+    };
+    let program: Vec<String> = std::iter::once("onepipeline".to_owned())
+        .chain(std::iter::once(verb.operation().as_str().to_owned()))
+        .chain(
+            split
+                .forwarded
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned()),
+        )
+        .collect();
+    let mut supervision =
+        Supervision::register(&root, &session, verb.operation(), subjects, &program)?;
+    let forwarded = forward(verb, &mut cli, &split, &root, Some(&mut supervision));
+    supervision.settle(forwarded)
+}
+
+/// The manager session `ONEPIPELINE_LAUNCHER_SESSION` names, where it names one.
+///
+/// # Errors
+///
+/// A value that is set and is not text: it may name a manager, so the landing
+/// is refused rather than run unowned.
+fn launcher_session() -> Result<Option<String>> {
+    match std::env::var(crate::sys::LAUNCHER_SESSION_ENV) {
+        Ok(session) => Ok(Some(session).filter(|session| !session.trim().is_empty())),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(Error::Invalid(format!(
+            "{} is set and is not text, so whether a manager owns this landing cannot be said; \
+             nothing was drafted or forwarded",
+            crate::sys::LAUNCHER_SESSION_ENV
+        ))),
+    }
+}
+
+/// Every branch a parsed landing can advance, in the identity it belongs to:
+/// the one branch of a branch-keyed verb, or every member of an integration
+/// train, in the identity of the registered repository the current directory is
+/// in — the identity `onevcs integrate` itself answers for.
+fn subjects_of(command: &onevcs::cli::Command) -> onevcs::Result<Vec<LandingSubject>> {
+    let providers = onevcs::Providers::real();
+    let (repo, branches) = match command {
+        onevcs::cli::Command::PublishBranch(args) => (args.repo.clone(), vec![args.branch.clone()]),
+        onevcs::cli::Command::Recover(args) => (args.repo.clone(), vec![args.branch.clone()]),
+        onevcs::cli::Command::Integrate(args) => (
+            std::env::current_dir().map_err(|error| onevcs::Error::Invalid {
+                reason: format!("cannot read the current directory: {error}"),
+            })?,
+            args.branches.clone(),
+        ),
+        // llmlint: ignore[changed_behavior_has_e2e] unreachable: the command line was parsed
+        // with one of the three verbs' names as its subcommand, so the sibling's parser
+        // answers that variant or refuses.
+        _ => return Ok(Vec::new()),
+    };
+    let identity = onevcs::resolve_repository(&providers, &repo.to_string_lossy())?.identity;
+    Ok(branches
+        .into_iter()
+        .map(|branch| LandingSubject {
+            identity: identity.clone(),
+            branch,
+        })
+        .collect())
+}
+
+/// Draft, entitle and forward a parsed landing, answering the verb's status.
+fn forward(
+    verb: Verb,
+    cli: &mut onevcs::cli::Cli,
+    split: &Split,
+    root: &Path,
+    mut supervision: Option<&mut Supervision>,
+) -> Result<i32> {
+    if verb == Verb::Integrate {
+        if let onevcs::cli::Command::Integrate(args) = &cli.command {
+            let request = onevcs::IntegrateRequest {
+                branches: args.branches.clone(),
+                push: match args.push {
+                    true => onevcs::BasePush::Push,
+                    false => onevcs::BasePush::Keep,
+                },
+                term_scope: args.term_scope.scope(),
+            };
+            return Ok(match supervision {
+                Some(supervision) => {
+                    let identity = supervision.identity();
+                    report_integration(supervision.operate(
+                        onevcs::DirectOperation::Integrate {
+                            repository: identity,
+                        },
+                        |handle| onevcs::integrate_in_operation(&request, handle),
+                    )?)
+                }
+                None => report_integration(onevcs::integrate(&request)),
+            });
+        }
+    }
+    let mut drafting = |branch: &str| -> Result<()> {
+        match supervision.as_deref_mut() {
+            Some(supervision) => supervision.transition(
+                PipelineKind::LandingDrafting,
+                format!("drafting the change request's body for {branch}"),
+            ),
+            None => Ok(()),
+        }
+    };
+    if let Some(body) = drafted_for(verb, cli, &split.graph, split.drafting, &mut drafting)? {
         match &mut cli.command {
             onevcs::cli::Command::PublishBranch(args) => args.body = Some(body),
             onevcs::cli::Command::Recover(args) => args.body = Some(body),
             _ => {}
         }
     }
-    let source = entitle(&mut cli.command, &crate::ledger::runs_root());
+    let source = entitle(&mut cli.command, root);
     if let Some(request) = Landing::of(&cli.command) {
         eprintln!("{}", source.line());
-        return Ok(report(request.land()));
+        return Ok(match supervision {
+            Some(supervision) => {
+                let selector = request.selector(supervision.identity());
+                report(supervision.operate(selector, |handle| request.land_in(handle))?)
+            }
+            None => report(request.land()),
+        });
     }
-    Ok(i32::from(onevcs::run(&cli)))
+    // A command line the verb would refuse as it stands: forwarded to it, so it is
+    // refused in its own words, with no operation prepared for work that never
+    // starts.
+    if let Some(supervision) = supervision {
+        supervision.transition(
+            PipelineKind::LandingStarted,
+            format!("forwarding `onevcs {}`", verb.onevcs()),
+        )?;
+    }
+    Ok(i32::from(onevcs::run(cli)))
+}
+
+/// Render what an integration train answered, exactly as `onevcs integrate`
+/// does, and the code it exits with.
+fn report_integration(integrated: onevcs::Result<onevcs::Integration>) -> i32 {
+    match integrated {
+        Ok(outcome) => {
+            let said = |yes: bool| if yes { "yes" } else { "no" };
+            let mut rendered = format!("Integration train for {}:\n", outcome.base);
+            for branch in &outcome.branches {
+                rendered.push_str(&format!(
+                    "  {}: {}\n",
+                    branch.branch,
+                    branch.status.describe()
+                ));
+            }
+            rendered.push_str(&format!(
+                "Base advanced: {}\nPushed: {}\n",
+                said(outcome.ending.advanced()),
+                said(outcome.ending.pushed())
+            ));
+            // A report its caller could not be handed is the refusal every verb
+            // of this binary answers an unwritable standard output with — said on
+            // standard error, at the refusal's code — so a caller never reads a
+            // train it was not shown as one it was. What the train did is still
+            // the landing's own record: its operation's events say it.
+            use std::io::Write;
+            let mut out = std::io::stdout().lock();
+            match out
+                .write_all(rendered.as_bytes())
+                .and_then(|()| out.flush())
+            {
+                Ok(()) => 0,
+                Err(error) => {
+                    eprintln!(
+                        "onepipeline: integrate could not write its report to standard output: \
+                         {error}"
+                    );
+                    crate::error::EXIT_REFUSED
+                }
+            }
+        }
+        Err(error) => {
+            eprintln!("onevcs: {error}");
+            i32::from(onevcs::FailureKind::of(&error).exit_code())
+        }
+    }
 }
 
 /// Where the subject a landing publishes under came from.
@@ -397,6 +610,35 @@ impl Landing {
             Self::Recover(request) => onevcs::recover(&providers, request),
         }
     }
+
+    /// The same landing, into the one invocation `operation` reserved.
+    fn land_in(
+        &self,
+        operation: &onevcs::OperationHandle,
+    ) -> onevcs::Result<onevcs::PublishOutcome> {
+        let providers = onevcs::Providers::real();
+        match self {
+            Self::PublishBranch(request) => {
+                onevcs::publish_branch_in_operation(&providers, request, operation)
+            }
+            Self::Recover(request) => onevcs::recover_in_operation(&providers, request, operation),
+        }
+    }
+
+    /// The invocation selector a handle for this landing is prepared against, in
+    /// the identity its subjects were resolved to.
+    fn selector(&self, repository: String) -> onevcs::DirectOperation {
+        match self {
+            Self::PublishBranch(request) => onevcs::DirectOperation::PublishBranch {
+                repository,
+                branch: request.branch.clone(),
+            },
+            Self::Recover(request) => onevcs::DirectOperation::Recover {
+                repository,
+                branch: request.branch.clone(),
+            },
+        }
+    }
 }
 
 /// Render what a branch-keyed landing answered, and the exit code it answers with.
@@ -510,6 +752,7 @@ fn drafted_for(
     cli: &onevcs::cli::Cli,
     graph: &Option<OsString>,
     drafting: Drafting,
+    starting: &mut dyn FnMut(&str) -> Result<()>,
 ) -> Result<Option<String>> {
     let (branch, repo, brought, narrowed) = match (&cli.command, verb) {
         (onevcs::cli::Command::PublishBranch(args), Verb::PublishBranch) => (
@@ -554,10 +797,7 @@ fn drafted_for(
             "`onepipeline {}` would draft the change request's body for {branch}, and no graph \
              to draft it with was named: pass {PR_AUTHOR_GRAPH_FLAG} <PATH>, bring a body with \
              --body or --body-file, or pass {NO_DRAFT_FLAG}",
-            match verb {
-                Verb::PublishBranch => "publish-branch",
-                Verb::Recover => "repo-recover",
-            }
+            verb.operation().as_str()
         )));
     };
     let graph = graph.to_str().ok_or_else(|| {
@@ -580,6 +820,9 @@ fn drafted_for(
     } else {
         destination.map(|destination| destination.resolved.publication_checkout)
     };
+    // Said before the turn is paid for, so a manager watching the landing sees
+    // the drafting start rather than only its result.
+    starting(branch)?;
     let drafted = match checkout {
         Ok(checkout) => draft(&graph, &checkout, branch),
         Err(why) => Drafted::Undrafted(Undrafted::Dispatch(format!(
@@ -1002,6 +1245,725 @@ fn git_in<'a>(
         .map_err(|error| format!("{} answered bytes that are not UTF-8: {error}", named()))
 }
 
+/// A manager landing this process registered and is doing: the flow that holds
+/// it, its own record, and the journals its progress goes to.
+pub(crate) struct Supervision {
+    flow: Flow,
+    /// Whose flow it is: one registered for this landing alone, which ends when
+    /// the landing does, or a longer one it is a step of.
+    holding: Holding,
+    /// The landing, as registered.
+    landing: Registered,
+    /// Its journal and every associated run's, behind one lock the relay thread
+    /// shares.
+    relay: Arc<Mutex<Relay>>,
+    /// Why progress could not be relayed, where it could not: a blocker the
+    /// settlement reports rather than a landing that reads as fully supervised.
+    relay_failed: Option<String>,
+}
+
+impl Supervision {
+    /// Register a landing of `session` over `subjects` before any side effect.
+    ///
+    /// Reuses the live flow this process was started in where the same session
+    /// owns it, refuses one another session owns, and otherwise registers a flow
+    /// for this landing alone. The request is written whole and renamed into
+    /// place under the lock a branch acknowledgement takes, so neither can fall
+    /// between the other's check and write.
+    ///
+    /// # Errors
+    ///
+    /// Anything that could not be registered or recorded: the landing then does
+    /// no work at all.
+    fn register(
+        root: &Path,
+        session: &str,
+        operation: LandingOperation,
+        subjects: Vec<LandingSubject>,
+        program: &[String],
+    ) -> Result<Self> {
+        let refused = |why: String| {
+            Error::Refused(format!(
+                "the {} landing could not be registered with its manager session, so nothing \
+                 was drafted or forwarded: {why}",
+                operation.as_str()
+            ))
+        };
+        let runs = associated_runs(root, &subjects).map_err(refused)?;
+        let lock = crate::flow::registration_lock(root).map_err(|e| refused(e.to_string()))?;
+        // The flow this process runs in, where `ONEPIPELINE_FLOW` names one of
+        // this runs root: one that is there and cannot be read is refused rather
+        // than passed over, because a landing registered beside it could be the
+        // second owner of work that flow already supervises. A name with no flow
+        // under this root — another root's, or one long gone — names none.
+        let inherited = match crate::flow::inherited() {
+            Some(id) if crate::flow::paths(root, id.as_str()).dir.exists() => {
+                Some(Flow::open(root, id.as_str()).map_err(|e| refused(e.to_string()))?)
+            }
+            _ => None,
+        };
+        let (flow, holding) = match inherited.filter(Flow::is_live) {
+            Some(parent) if parent.record.session == session => (parent, Holding::ParentFlow),
+            Some(parent) => {
+                return Err(refused(format!(
+                    "this process runs in flow '{}', which belongs to session [{}], not to this \
+                     session; a landing is supervised by the session that owns its flow",
+                    parent.id(),
+                    crate::sys::session_digest(&parent.record.session)
+                )))
+            }
+            None => {
+                let (first, rest) = program.split_first().map_or(
+                    (OsString::from("onepipeline"), Vec::new()),
+                    |(first, rest)| {
+                        (
+                            OsString::from(first),
+                            rest.iter().map(OsString::from).collect(),
+                        )
+                    },
+                );
+                let flow =
+                    crate::flow::register(root, operation.as_str(), session, &first, &rest, None)
+                        .map_err(|e| refused(e.to_string()))?;
+                (flow, Holding::OwnFlow)
+            }
+        };
+        let landing_id = format!("landing-{}", crate::watchers::nonce());
+        let pid = crate::sys::pid();
+        let request = crate::flow::LandingRequest {
+            schema_version: crate::flow::FLOW_SCHEMA_VERSION,
+            landing_id: landing_id.clone(),
+            flow_id: flow.id().to_owned(),
+            session: session.to_owned(),
+            operation,
+            subjects,
+            runs,
+            pid: std::num::NonZeroU32::new(pid).unwrap_or(std::num::NonZeroU32::MIN),
+            host: crate::sys::hostname(),
+            started: crate::sys::process_start_token(pid)
+                .map(|token| token.recorded().to_string())
+                .unwrap_or_default(),
+            began_at: crate::sys::now_rfc3339(),
+        };
+        let landings = flow.paths.dir.join(crate::flow::LANDINGS_DIR);
+        let staged = landings.join(format!(".{landing_id}"));
+        let dir = landings.join(&landing_id);
+        let placed = std::fs::create_dir_all(&staged)
+            .map_err(|e| format!("{}: {e}", staged.display()))
+            .and_then(|()| {
+                crate::ledger::write_json(&staged.join("request.json"), &request)
+                    .map_err(|e| e.to_string())
+            })
+            .and_then(|()| {
+                std::fs::rename(&staged, &dir).map_err(|e| format!("{}: {e}", dir.display()))
+            });
+        if let Err(why) = placed {
+            let _ = std::fs::remove_dir_all(&staged);
+            if holding == Holding::OwnFlow {
+                crate::flow::record_ending(&flow, SUPERVISION_FAILED);
+            }
+            return Err(refused(why));
+        }
+        drop(lock);
+        let landing = Registered { dir, request };
+        let relay = match Relay::open(&flow, &landing, root) {
+            Ok(relay) => relay,
+            Err(error) => {
+                if holding == Holding::OwnFlow {
+                    crate::flow::record_ending(&flow, SUPERVISION_FAILED);
+                }
+                return Err(refused(error.to_string()));
+            }
+        };
+        let mut supervision = Self {
+            flow,
+            holding,
+            landing,
+            relay: Arc::new(Mutex::new(relay)),
+            relay_failed: None,
+        };
+        // llmlint: ignore-block[changed_behavior_has_e2e] the first append is to a file inside
+        // the directory this process created and renamed into place an instant before, so no
+        // journey can stage a write refused there without a failpoint this crate does not
+        // ship; what a refusal does is the same `refused` every placement failure above takes,
+        // which `a_registration_that_cannot_be_kept_starts_no_work` drives, and the ending it
+        // records is the one `a_landing_whose_journal_or_ending_cannot_be_written_fails_closed`
+        // reads back as failed.
+        if let Err(error) = supervision.transition(
+            PipelineKind::LandingRegistered,
+            format!(
+                "registered for session [{}]",
+                crate::sys::session_digest(session)
+            ),
+        ) {
+            if supervision.holding == Holding::OwnFlow {
+                crate::flow::record_ending(&supervision.flow, SUPERVISION_FAILED);
+            }
+            let _ = supervision.record_ending(SUPERVISION_FAILED);
+            return Err(refused(error.to_string()));
+        }
+        // llmlint: ignore-end[changed_behavior_has_e2e]
+        if supervision.holding == Holding::OwnFlow {
+            eprintln!(
+                "flow {id}: watch it with: onepipeline watch --flow {id}",
+                id = supervision.flow.id()
+            );
+        }
+        eprintln!(
+            "landing {} of flow {}: {} registered for this session",
+            supervision.landing.id(),
+            supervision.flow.id(),
+            operation.as_str()
+        );
+        Ok(supervision)
+    }
+
+    /// The identity every subject was resolved to: one per landing.
+    fn identity(&self) -> String {
+        self.landing
+            .request
+            .subjects
+            .first()
+            .map(|subject| subject.identity.clone())
+            .unwrap_or_default()
+    }
+
+    /// Record one transition of this landing in its journal and every
+    /// associated run's.
+    fn transition(&mut self, kind: PipelineKind, message: String) -> Result<()> {
+        let payload = crate::flow::LandingTransition {
+            landing_id: self.landing.id().to_owned(),
+            flow_id: self.flow.id().to_owned(),
+            operation: self.landing.request.operation,
+            subjects: self.landing.request.subjects.clone(),
+            message,
+        };
+        lock_relay(&self.relay).transition(kind, crate::journal::object(&payload)?)
+    }
+
+    /// Prepare the `onevcs` operation `selector` names, persist its id, and make
+    /// `call` into it while its events are relayed as they are recorded.
+    ///
+    /// # Errors
+    ///
+    /// A handle `onevcs` would not prepare, or an id that could not be
+    /// persisted: the landing then forwards nothing rather than doing work no
+    /// reader could reopen.
+    fn operate<T: Send>(
+        &mut self,
+        selector: onevcs::DirectOperation,
+        call: impl FnOnce(&onevcs::OperationHandle) -> T,
+    ) -> Result<T> {
+        let handle = onevcs::OperationHandle::prepare(&selector).map_err(|error| {
+            Error::Refused(format!(
+                "onevcs would not prepare the landing's operation, so nothing was forwarded: \
+                 {error}"
+            ))
+        })?;
+        crate::ledger::write_json(
+            &self.landing.dir.join("operation.json"),
+            &crate::flow::LandingOperationRecord {
+                schema_version: crate::flow::FLOW_SCHEMA_VERSION,
+                operation_id: handle.id().to_owned(),
+            },
+        )?;
+        lock_relay(&self.relay).operation_id = Some(handle.id().to_owned());
+        self.transition(
+            PipelineKind::LandingStarted,
+            format!(
+                "forwarding `onevcs {}` as operation {}",
+                match self.landing.request.operation {
+                    LandingOperation::PublishBranch => "publish-branch",
+                    LandingOperation::RepoRecover => "recover",
+                    LandingOperation::Integrate => "integrate",
+                },
+                handle.id()
+            ),
+        )?;
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let relayed = std::thread::scope(|scope| {
+            let pump = {
+                let handle = handle.clone();
+                let relay = Arc::clone(&self.relay);
+                let stop = Arc::clone(&stop);
+                scope.spawn(move || pump(&handle, &relay, &stop))
+            };
+            let out = call(&handle);
+            stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            let relayed = pump
+                .join()
+                .unwrap_or_else(|_| Err("the relay thread panicked".to_owned()));
+            (out, relayed)
+        });
+        let (out, relayed) = relayed;
+        if let Err(why) = relayed {
+            eprintln!(
+                "onepipeline: landing {}: its operation's progress could not be relayed: {why}",
+                self.landing.id()
+            );
+            self.relay_failed = Some(why);
+        }
+        Ok(out)
+    }
+
+    /// Record how the landing ended and end its flow where it holds one,
+    /// answering what the forwarded verb answered.
+    fn settle(mut self, forwarded: Result<i32>) -> Result<i32> {
+        let status = match &forwarded {
+            Ok(status) => *status,
+            Err(error) => error.exit_code(),
+        };
+        let ending_kept = self.record_ending(status);
+        let refused = status != 0 || self.relay_failed.is_some() || !ending_kept;
+        let message = match (&forwarded, &self.relay_failed) {
+            (Err(error), _) => format!("refused: {}", crate::views::one_line(&error.to_string())),
+            (Ok(_), None) if !ending_kept => format!(
+                "the forwarded verb ended with status {status}, and that ending could not be \
+                 recorded, so the landing reads as died once its process is gone"
+            ),
+            (Ok(_), Some(why)) => format!(
+                "its operation's progress could not be relayed, so it is not fully supervised: \
+                 {why}"
+            ),
+            (Ok(0), None) => "the forwarded verb finished with status 0".to_owned(),
+            (Ok(status), None) => format!("the forwarded verb ended with status {status}"),
+        };
+        let payload = crate::flow::LandingTerminal {
+            transition: crate::flow::LandingTransition {
+                landing_id: self.landing.id().to_owned(),
+                flow_id: self.flow.id().to_owned(),
+                operation: self.landing.request.operation,
+                subjects: self.landing.request.subjects.clone(),
+                message,
+            },
+            status,
+        };
+        let kind = if refused {
+            PipelineKind::LandingRefused
+        } else {
+            PipelineKind::LandingFinished
+        };
+        let recorded = crate::journal::object(&payload)
+            .and_then(|payload| lock_relay(&self.relay).transition(kind, payload));
+        if let Err(error) = &recorded {
+            eprintln!(
+                "onepipeline: landing {}: its ending could not be journalled: {error}",
+                self.landing.id()
+            );
+        }
+        if self.holding == Holding::OwnFlow {
+            // Fail closed: a landing whose progress or ending could not be kept
+            // leaves a flow owed closure even where the verb itself succeeded.
+            let flow_status = if status == 0 && (refused || recorded.is_err()) {
+                SUPERVISION_FAILED
+            } else {
+                status
+            };
+            crate::flow::record_ending(&self.flow, flow_status);
+        }
+        forwarded
+    }
+
+    /// Write `ending.json`, saying on standard error where it could not be, and
+    /// answer whether it was kept: an unrecorded ending reads as a death once
+    /// this process is gone, which is owed closure — never a success nobody
+    /// recorded.
+    fn record_ending(&mut self, status: i32) -> bool {
+        let ending = crate::flow::LandingEnding {
+            schema_version: crate::flow::FLOW_SCHEMA_VERSION,
+            landing_id: self.landing.id().to_owned(),
+            status,
+            at: crate::sys::now_rfc3339(),
+        };
+        match crate::ledger::write_json(&self.landing.dir.join("ending.json"), &ending) {
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!(
+                    "onepipeline: landing {}: its ending (status {status}) could not be recorded, \
+                     so it will read as died: {error}",
+                    self.landing.id()
+                );
+                false
+            }
+        }
+    }
+}
+
+/// Whether a landing's process holds the flow it is supervised in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Holding {
+    /// The flow was registered for this landing alone: its holder is this
+    /// process, and its ending is the landing's.
+    OwnFlow,
+    /// The landing is one step of a longer flow of the same session, which goes
+    /// on when the landing ends.
+    ParentFlow,
+}
+
+/// The status a landing's flow ends with where its supervision failed — its
+/// registration, its relay, or the record of its ending — though the verb did
+/// not: non-zero, so the flow is owed closure rather than read as a clean
+/// success.
+const SUPERVISION_FAILED: i32 = 1;
+
+/// The relay behind its lock, whoever panicked holding it.
+fn lock_relay(relay: &Mutex<Relay>) -> std::sync::MutexGuard<'_, Relay> {
+    relay
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Read the operation's events as `onevcs` records them, relaying each, until
+/// `stop` is set and a read after it finds nothing more — so every complete
+/// record the call wrote is relayed before the landing settles.
+fn pump(
+    handle: &onevcs::OperationHandle,
+    relay: &Mutex<Relay>,
+    stop: &std::sync::atomic::AtomicBool,
+) -> std::result::Result<(), String> {
+    let mut reader = onevcs::OperationEvents::open(handle).map_err(|e| e.to_string())?;
+    loop {
+        let stopping = stop.load(std::sync::atomic::Ordering::SeqCst);
+        let batch = reader.read().map_err(|e| e.to_string())?;
+        let drained = batch.is_empty();
+        for envelope in batch {
+            lock_relay(relay)
+                .vcs(&envelope)
+                .map_err(|e| e.to_string())?;
+        }
+        if stopping && drained {
+            return Ok(());
+        }
+        if drained {
+            std::thread::sleep(RELAY_POLL);
+        }
+    }
+}
+
+/// How often the relay asks the operation's stream for what was appended.
+const RELAY_POLL: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Where one landing's progress is written: its own journal and every
+/// associated run's, each appended through the store's locked writer and never
+/// twice for one record of the operation.
+// llmlint: ignore-block[invalid_states_unrepresentable] the ids are the labels every relayed record carries, as JSON strings on the wire, and each was checked where it was read: the landing and flow ids against the directories their request sits in, the run ids by `LandingRequest`'s own run-id rule, and the operation id by `onevcs::OperationHandle::open`, which refuses one it cannot open. A newtype per id would be a conversion back to the same string at the one place each is used.
+pub(crate) struct Relay {
+    landing_id: String,
+    flow_id: String,
+    /// The operation the landing prepared, once it has.
+    operation_id: Option<String>,
+    journal: LandingJournal,
+    runs: Vec<(String, crate::journal::Journal, Seen)>,
+    seen: Seen,
+}
+
+// llmlint: ignore-end[invalid_states_unrepresentable]
+
+/// The `(stream, seq)` of every operation record a journal already holds.
+type Seen = std::collections::HashSet<(String, u64)>;
+
+impl Relay {
+    /// The journals of `landing` and of every run it names.
+    ///
+    /// # Errors
+    ///
+    /// An operation record that is there and cannot be read: relaying as though
+    /// the landing were legacy coarse-only work would drop the evidence its
+    /// operation recorded.
+    fn open(flow: &Flow, landing: &Registered, root: &Path) -> Result<Self> {
+        let operation_id = landing.operation_id().map_err(Error::Invalid)?;
+        let runs = landing
+            .request
+            .runs
+            .iter()
+            .map(|run| {
+                let paths = RunPaths::under(root, run);
+                let seen = seen_in(&paths.journal(), operation_id.as_deref());
+                (run.clone(), crate::journal::Journal::open(&paths), seen)
+            })
+            .collect();
+        Ok(Self {
+            landing_id: landing.id().to_owned(),
+            flow_id: flow.id().to_owned(),
+            seen: seen_in(&landing.journal(), operation_id.as_deref()),
+            operation_id,
+            journal: LandingJournal::open(landing.journal()),
+            runs,
+        })
+    }
+
+    /// Record one landing transition, stamped with its significance.
+    fn transition(
+        &mut self,
+        kind: PipelineKind,
+        payload: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<()> {
+        let labels = landing_labels(
+            &self.landing_id,
+            &self.flow_id,
+            self.operation_id.as_deref(),
+            crate::flow::landing_significance(kind),
+        );
+        self.journal.emit(kind, labels.clone(), payload.clone())?;
+        for (run, journal, _) in &mut self.runs {
+            let mut labels = labels.clone();
+            labels.run_id = Some(run.clone());
+            journal.emit(kind, labels, payload.clone())?;
+        }
+        Ok(())
+    }
+
+    /// Relay one `onevcs` operation record, as its producer wrote it plus this
+    /// landing's labels, into every journal that does not already hold it.
+    fn vcs(&mut self, envelope: &onevcs::Envelope) -> Result<()> {
+        let mut value = serde_json::to_value(envelope)
+            .map_err(|e| Error::Invalid(format!("an operation event did not serialize: {e}")))?;
+        let key = (envelope.stream.clone(), envelope.seq);
+        // The producer's own `operation_id` and `significance` are kept as it
+        // stamped them; this landing's two labels are added beside them.
+        let ours = landing_labels(&self.landing_id, &self.flow_id, None, None);
+        if let Some(labels) = value.get_mut("labels").and_then(|l| l.as_object_mut()) {
+            labels.extend(ours.extra);
+        }
+        let crossed: Envelope = serde_json::from_value(value).map_err(|e| {
+            Error::Invalid(format!(
+                "an operation event does not cross into this crate's envelope: {e}"
+            ))
+        })?;
+        if self.seen.insert(key.clone()) {
+            self.journal.append(&crossed)?;
+        }
+        for (run, journal, seen) in &mut self.runs {
+            if seen.insert(key.clone()) {
+                let mut copy = crossed.clone();
+                copy.labels.run_id.get_or_insert_with(|| run.clone());
+                journal.relay(&copy)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The labels a landing's records carry beside their own: the landing, its
+/// flow, the operation it prepared once it has, and — on the engine's own
+/// transitions — the significance it stamps. The one place their names are
+/// spelled.
+fn landing_labels(
+    landing: &str,
+    flow: &str,
+    operation: Option<&str>,
+    significance: Option<onevcs::Significance>,
+) -> Labels {
+    let mut labels = Labels::default();
+    labels
+        .extra
+        .insert("landing_id".to_owned(), landing.to_owned().into());
+    labels
+        .extra
+        .insert("flow_id".to_owned(), flow.to_owned().into());
+    if let Some(operation) = operation {
+        labels
+            .extra
+            .insert("operation_id".to_owned(), operation.to_owned().into());
+    }
+    if let Some(significance) = significance {
+        labels.extra.insert(
+            "significance".to_owned(),
+            serde_json::to_value(significance).unwrap_or_default(),
+        );
+    }
+    labels
+}
+
+/// The `(stream, seq)` of every record of `operation` a journal already holds.
+fn seen_in(journal: &Path, operation: Option<&str>) -> Seen {
+    let Some(operation) = operation else {
+        return Seen::new();
+    };
+    crate::ledger::read_lines(journal)
+        .iter()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|record| {
+            record.get("source").and_then(serde_json::Value::as_str) == Some("vcs")
+                && record
+                    .pointer("/labels/operation_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(operation)
+        })
+        .filter_map(|record| {
+            Some((
+                record.get("stream")?.as_str()?.to_owned(),
+                record.get("seq")?.as_u64()?,
+            ))
+        })
+        .collect()
+}
+
+/// A landing's own journal: an append-only store of envelopes, appended under
+/// the store's lock, this process's own records on a stream of its own.
+struct LandingJournal {
+    path: PathBuf,
+    stream: String,
+    next_seq: u64,
+}
+
+impl LandingJournal {
+    fn open(path: PathBuf) -> Self {
+        let stream = format!("{}-{}", crate::sys::hostname(), crate::sys::pid());
+        let next_seq = crate::ledger::read_lines(&path)
+            .iter()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|value| {
+                value.get("stream").and_then(serde_json::Value::as_str) == Some(stream.as_str())
+            })
+            .filter_map(|value| value.get("seq").and_then(serde_json::Value::as_u64))
+            .max()
+            .map_or(0, |max| max + 1);
+        Self {
+            path,
+            stream,
+            next_seq,
+        }
+    }
+
+    fn emit(
+        &mut self,
+        kind: PipelineKind,
+        labels: Labels,
+        payload: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<()> {
+        let envelope = Envelope {
+            v: crate::event::ENVELOPE_VERSION,
+            ts: crate::sys::now_rfc3339(),
+            stream: self.stream.clone(),
+            seq: self.next_seq,
+            source: crate::event::Source::Pipeline,
+            kind: kind.into(),
+            dimensions: Default::default(),
+            labels,
+            payload,
+            artifacts: Vec::new(),
+        };
+        self.next_seq += 1;
+        self.append(&envelope)
+    }
+
+    fn append(&mut self, envelope: &Envelope) -> Result<()> {
+        let line =
+            serde_json::to_string(envelope).map_err(|e| Error::Invalid(format!("event: {e}")))?;
+        crate::ledger::append_line_healed(&self.path, &line).map(|_| ())
+    }
+}
+
+/// Every run under `root` whose own record opened a session on one of
+/// `subjects` — the runs a landing of them came from. Each stays its own
+/// manager's: the association is recorded on the landing, never on the run.
+///
+/// A run whose journal cannot be read is said on standard error and left
+/// unassociated, as the subject derivation beside this leaves it unowned: the
+/// landing itself is still supervised by its flow, and refusing it would cost
+/// the manager the landing over a record nobody can repair from here.
+fn associated_runs(
+    root: &Path,
+    subjects: &[LandingSubject],
+) -> std::result::Result<Vec<String>, String> {
+    let mut runs = Vec::new();
+    for paths in crate::ledger::all_runs(root).runs {
+        let journal = paths.journal();
+        let named = subjects.iter().try_fold(false, |named, subject| {
+            let spelled = serde_json::to_string(&subject.branch).unwrap_or_default();
+            journal_naming(&journal, spelled.trim_matches('"')).map(|this| named || this)
+        });
+        let named = match named {
+            Ok(named) => named,
+            Err(why) => {
+                eprintln!(
+                    "onepipeline: run '{}' is not associated with this landing, because whether \
+                     it names a subject cannot be said: {why}",
+                    paths.run
+                );
+                false
+            }
+        };
+        if !named {
+            continue;
+        }
+        let opened = crate::journal::read(&journal).into_iter().any(|event| {
+            event.source == crate::event::Source::Vcs
+                && crate::vcs::is_session_opened(&event.kind)
+                && crate::vcs::DispatchSession::read_from(&event).is_some_and(|session| {
+                    let identity = event
+                        .payload
+                        .get("identity")
+                        .or_else(|| event.labels.extra.get("identity"))
+                        .and_then(serde_json::Value::as_str);
+                    subjects.iter().any(|subject| {
+                        session.branch().as_str() == subject.branch
+                            && identity.is_none_or(|identity| identity == subject.identity)
+                    })
+                })
+        });
+        if opened {
+            runs.push(paths.run.clone());
+        }
+    }
+    runs.sort();
+    runs.dedup();
+    Ok(runs)
+}
+
+/// Write the death of a landing whose process is proved gone with no ending:
+/// every complete operation record its handle still holds is relayed first,
+/// so the evidence already recorded is kept, then one `landing-died` — once,
+/// whoever proves it, never a completion.
+///
+/// # Errors
+///
+/// A journal that could not be read or written.
+pub(crate) fn settle_death(root: &Path, flow: &Flow, landing: &Registered) -> Result<()> {
+    if !matches!(landing.standing(), Ok(crate::flow::Standing::Died)) {
+        return Ok(());
+    }
+    let lock_path = landing.dir.join("settle.lock");
+    let _lock = crate::sys::open_locked_append(&lock_path).map_err(|source| Error::Ledger {
+        path: lock_path.clone(),
+        source,
+    })?;
+    let ended = crate::journal::read(&landing.journal())
+        .iter()
+        .any(|event| crate::flow::is_terminal_landing_kind(&event.kind.0));
+    if ended {
+        return Ok(());
+    }
+    let mut relay = Relay::open(flow, landing, root)?;
+    let mut evidence = "no operation was prepared".to_owned();
+    if let Some(operation) = relay.operation_id.clone() {
+        evidence = match onevcs::OperationHandle::open(&operation)
+            .and_then(|handle| onevcs::OperationEvents::open(&handle))
+            .and_then(|mut reader| reader.read())
+        {
+            Ok(batch) => {
+                for envelope in &batch {
+                    relay.vcs(envelope)?;
+                }
+                format!("operation {operation}'s recorded events were kept")
+            }
+            Err(error) => format!("operation {operation}'s events could not be read: {error}"),
+        };
+    }
+    let payload = crate::flow::LandingTransition {
+        landing_id: landing.id().to_owned(),
+        flow_id: flow.id().to_owned(),
+        operation: landing.request.operation,
+        subjects: landing.request.subjects.clone(),
+        message: format!(
+            "its process (pid {}) is gone with no ending recorded; {evidence}",
+            landing.request.pid
+        ),
+    };
+    relay.transition(PipelineKind::LandingDied, crate::journal::object(&payload)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1095,6 +2057,41 @@ mod tests {
             !valued.iter().any(|known| known == "--policy"),
             "{valued:?}"
         );
+    }
+
+    /// Entry 123 of `docs/contract-divergences.md` names the labels a landing's
+    /// records carry, and they are exactly the ones this builds.
+    #[test]
+    fn the_landing_labels_are_the_ones_the_divergence_record_names() {
+        let record = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("docs")
+                .join("contract-divergences.md"),
+        )
+        .expect("the divergence record ships");
+        let entry = record
+            .split("\n## ")
+            .find(|entry| entry.starts_with("123."))
+            .expect("entry 123 is recorded");
+        let block: serde_json::Value = serde_json::from_str(
+            entry
+                .split("```json")
+                .nth(1)
+                .and_then(|rest| rest.split("```").next())
+                .expect("entry 123 carries its block"),
+        )
+        .expect("the block is JSON");
+        let built: Vec<String> = landing_labels(
+            "landing-1",
+            "plan",
+            Some("o-1"),
+            Some(onevcs::Significance::Progress),
+        )
+        .extra
+        .keys()
+        .cloned()
+        .collect();
+        assert_eq!(block["labels"], serde_json::json!(built));
     }
 
     /// A death reads as the producer classified it, and a truncated detail says so.

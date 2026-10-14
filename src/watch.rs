@@ -1087,11 +1087,11 @@ impl Selectors {
         for condition in until {
             match condition {
                 WatchUntil::Settled | WatchUntil::NothingDriving => {}
-                WatchUntil::RunJoined => {
+                WatchUntil::RunJoined | WatchUntil::LandingProgress => {
                     return Err(Error::Invalid(format!(
-                        "`--until {condition}` is a flow watch's condition: a run is joined by \
-                         nothing, so watch the flow that launched run '{}' with `onepipeline \
-                         watch --flow <ID>`",
+                        "`--until {condition}` is a flow watch's condition: watch the flow that \
+                         launched run '{}', or that holds the landing, with `onepipeline watch \
+                         --flow <ID>`",
                         view.paths.run
                     )))
                 }
