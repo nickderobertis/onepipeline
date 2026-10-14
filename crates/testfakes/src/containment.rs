@@ -86,11 +86,23 @@ mod platform {
         started: String,
     }
 
-    /// One row of the process table: the process, its parent, and its state.
+    /// One row of the process table: the process, its parent, and whether it
+    /// has ended.
     struct Row {
         process: Found,
         parent: u32,
-        state: String,
+        state: State,
+    }
+
+    /// All a teardown asks of a process's state.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum State {
+        /// Not yet ended, whatever it is doing: running, sleeping, stopped,
+        /// traced, or on its way out.
+        Live,
+        /// Ended and waiting only to be collected (`Z`): it holds nothing any
+        /// more and cannot be ended again.
+        Zombie,
     }
 
     pub fn end_descendants() -> Result<(), String> {
@@ -167,7 +179,7 @@ mod platform {
     fn still_running(found: &Found, table: &[Row]) -> bool {
         table
             .iter()
-            .any(|row| row.process == *found && !row.state.starts_with('Z'))
+            .any(|row| row.process == *found && row.state == State::Live)
     }
 
     /// Send `signal` to one process, by a pid the walk found under this one.
@@ -239,7 +251,7 @@ mod platform {
         }
         found
             .into_iter()
-            .filter(|row| !row.state.starts_with('Z'))
+            .filter(|row| row.state == State::Live)
             .map(|row| row.process.clone())
             .collect()
     }
@@ -261,8 +273,8 @@ mod platform {
     /// Exactly the columns asked for: two ids; a state whose first character
     /// is the one-letter code every `ps` leads it with, in either case — Linux
     /// writes a traced process `t` — and the rest flags (`Ss`, `R+`, `S<l`); and
-    /// the start, which is several words and the rest
-    /// of the row. A pid of `0` is no process this may signal.
+    /// the start, which is several words and the rest of the row. A pid of `0`
+    /// is no process this may signal.
     fn row(line: &str) -> Option<Row> {
         let mut columns = line.split_whitespace();
         let pid = columns.next()?.parse().ok().filter(|pid| *pid != 0)?;
@@ -277,7 +289,11 @@ mod platform {
         (well_formed && !started.is_empty()).then(|| Row {
             process: Found { pid, started },
             parent,
-            state: state.to_owned(),
+            state: if state.starts_with('Z') {
+                State::Zombie
+            } else {
+                State::Live
+            },
         })
     }
 }

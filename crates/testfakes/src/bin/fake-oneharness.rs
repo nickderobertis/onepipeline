@@ -169,9 +169,9 @@ const HELD_AT_EXIT: std::time::Duration = std::time::Duration::from_secs(3);
 /// The descendant `leave-a-descendant <record> hold-at-exit` starts: one that,
 /// once killed, is still on its way out after the double above it has gone.
 ///
-/// It lets any process trace it, and starts one through [`orphan`] that does —
-/// [`hold_at_exit`] — so that tracer is no descendant of the test by the time
-/// it is in place. A kill then stops this process at its exit, still holding
+/// It starts its tracer, [`hold_at_exit`], through [`orphan`] — so that tracer
+/// is no descendant of the test by the time it is in place — and lets that one
+/// process trace it and no other. A kill then stops this process at its exit, still holding
 /// what it inherited, and the double above it, killed beside it, hands it to
 /// `init` while it waits there: out of reach of any walk from the test, but a
 /// process the test started and its teardown found.
@@ -182,37 +182,33 @@ fn linger_held_at_exit(args: &[String]) -> ExitCode {
     let [record, double] = args else {
         return fake::refuse("linger-held-at-exit takes a record path and the double's pid");
     };
-    // SAFETY: `prctl` reads its integer arguments and touches no memory.
-    let allowed = unsafe {
-        libc::prctl(
-            libc::PR_SET_PTRACER,
-            libc::PR_SET_PTRACER_ANY,
-            0_u64,
-            0_u64,
-            0_u64,
-        )
-    };
-    if allowed != 0 {
-        write_record(
-            record,
-            &format!(
-                "refused: no tracer may be let in: {}",
-                std::io::Error::last_os_error()
-            ),
-        );
-        return ExitCode::FAILURE;
-    }
     let me = std::env::current_exe()
         .unwrap_or_else(|error| fake::fail(&format!("this double cannot name itself: {error}")));
     let pid = std::process::id().to_string();
     let started = std::process::Command::new(me)
         .args(["orphan", "hold-at-exit", &pid, double, record])
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status();
-    if !started.is_ok_and(|status| status.success()) {
+        .output();
+    let tracer = started
+        .ok()
+        .filter(|started| started.status.success())
+        .and_then(|started| String::from_utf8(started.stdout).ok())
+        .and_then(|pid| pid.trim().parse::<libc::c_ulong>().ok());
+    let Some(tracer) = tracer else {
         write_record(record, "refused: the tracer did not start");
+        return ExitCode::FAILURE;
+    };
+    // SAFETY: `prctl` reads its integer arguments and touches no memory.
+    let allowed = unsafe { libc::prctl(libc::PR_SET_PTRACER, tracer, 0_u64, 0_u64, 0_u64) };
+    if allowed != 0 {
+        write_record(
+            record,
+            &format!(
+                "refused: the tracer at pid {tracer} may not be let in: {}",
+                std::io::Error::last_os_error()
+            ),
+        );
         return ExitCode::FAILURE;
     }
     linger()
@@ -227,8 +223,9 @@ fn linger_held_at_exit(_: &[String]) -> ExitCode {
 /// until that has exited and no longer once it has.
 const ORPHANED_BY: &str = "FAKE_ONEHARNESS_ORPHANED_BY";
 
-/// Start this double again with `args`, its standard streams on nothing, and
-/// exit without waiting for it, so that what it started belongs to `init`.
+/// Start this double again with `args`, its standard streams on nothing, write
+/// its pid, and exit without waiting for it, so that what it started belongs
+/// to `init`.
 fn orphan(args: &[String]) -> ExitCode {
     let me = std::env::current_exe()
         .unwrap_or_else(|error| fake::fail(&format!("this double cannot name itself: {error}")));
@@ -240,7 +237,10 @@ fn orphan(args: &[String]) -> ExitCode {
         .stderr(std::process::Stdio::null())
         .spawn();
     match started {
-        Ok(_) => ExitCode::SUCCESS,
+        Ok(started) => {
+            println!("{}", started.id());
+            ExitCode::SUCCESS
+        }
         Err(error) => fake::fail(&format!("cannot start {args:?}: {error}")),
     }
 }
@@ -248,6 +248,9 @@ fn orphan(args: &[String]) -> ExitCode {
 /// Trace `<pid>`, record `<double pid> <pid>` once that holds and this process
 /// is an orphan, and keep `<pid>` at its exit for [`HELD_AT_EXIT`] once it is
 /// killed. Ends when `<pid>` does.
+///
+/// The trace is asked for until `<pid>` has let this process in, which it does
+/// only once [`orphan`] has said which process this is.
 ///
 /// Every other stop is let go at once, without the signal that caused it: a
 /// teardown's `SIGSTOP` would otherwise leave `<pid>` stopped rather than
@@ -270,24 +273,27 @@ fn hold_at_exit(args: &[String]) -> ExitCode {
             "hold-at-exit is started through `orphan`, which sets {ORPHANED_BY}"
         ));
     };
-    // SAFETY: `ptrace` reads its integer arguments; `addr` is unused by SEIZE.
-    let seized = unsafe {
-        libc::ptrace(
-            libc::PTRACE_SEIZE,
-            traced,
-            std::ptr::null_mut::<libc::c_void>(),
-            libc::PTRACE_O_TRACEEXIT as usize as *mut libc::c_void,
-        )
-    };
-    if seized != 0 {
-        write_record(
-            record,
-            &format!(
-                "refused: cannot trace {pid}: {}",
-                std::io::Error::last_os_error()
-            ),
-        );
-        return ExitCode::FAILURE;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        // SAFETY: `ptrace` reads its integer arguments; `addr` is unused by
+        // SEIZE.
+        let seized = unsafe {
+            libc::ptrace(
+                libc::PTRACE_SEIZE,
+                traced,
+                std::ptr::null_mut::<libc::c_void>(),
+                libc::PTRACE_O_TRACEEXIT as usize as *mut libc::c_void,
+            )
+        };
+        if seized == 0 {
+            break;
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::EPERM) || std::time::Instant::now() >= deadline {
+            write_record(record, &format!("refused: cannot trace {pid}: {error}"));
+            return ExitCode::FAILURE;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
     }
     // Recorded only once nothing that started this is still running, so that a
     // reader of the record is reading about a tracer outside the test's tree.
@@ -300,8 +306,13 @@ fn hold_at_exit(args: &[String]) -> ExitCode {
         let mut status = 0;
         // SAFETY: `status` outlives the call.
         if unsafe { libc::waitpid(traced, &raw mut status, libc::__WALL) } != traced {
-            return ExitCode::SUCCESS;
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            fake::fail(&format!("hold-at-exit lost {pid}: {error}"));
         }
+        // Exited or killed: what this was holding has gone.
         if !libc::WIFSTOPPED(status) {
             return ExitCode::SUCCESS;
         }
