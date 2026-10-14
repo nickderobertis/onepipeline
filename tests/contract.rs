@@ -6481,7 +6481,6 @@ fn a_siblings_reserved_labels_source_word_phases_and_matcher_fields_are_this_cra
 
     // 4. Every matcher field, through the wire, in both directions.
     let vcs = onevcs::MatchFields {
-        significance: None,
         phase: Some(onevcs::Phase::Development),
         run_id: Some("R".into()),
         node: Some("build".into()),
