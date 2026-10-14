@@ -193,12 +193,9 @@ impl LandingOperation {
     }
 }
 
-/// An identity a landing names: an absolute local identity, or a normalized
-/// `onevcs` origin — `host/owner/name`, the one spelling `onevcs` keys a hosted
-/// identity by and reads back as itself: no scheme and no `:`, exactly three
-/// segments, a host with a `.` in it, and an owner and a name that say
-/// something. `tests/e2e/manager_landings.rs` registers origins in every spelling
-/// the sibling normalizes and holds each key it answers to this rule.
+/// An identity a landing names: an absolute local identity, or the key `onevcs`
+/// gives a hosted origin, held to the structural rule [`is_normalized_origin`]
+/// states.
 fn an_identity<'de, D: serde::Deserializer<'de>>(
     reader: D,
 ) -> std::result::Result<String, D::Error> {
