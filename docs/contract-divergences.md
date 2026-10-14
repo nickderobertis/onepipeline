@@ -10747,6 +10747,17 @@ documents: `schemas/events.json` stays at the unreleased `1.4.0` entry 124 raise
 to and adds the eight kinds and the `readjust` cause; `schemas/planner-channel.json`
 rises from `1.3.0` to `1.4.0` for the op.
 
+**The host double, substituted.** The task names `onevcs-testing`'s remote double for
+these journeys, but that double is an in-process `RemoteHost`, and the compiled binary
+reaches a host only through `onevcs`'s `gh` subprocess (`ONEVCS_GH`), so it cannot drive
+that double. By the manager's ruling on this node, the journeys run on this repository's
+own `ONEVCS_GH` double, `fake-gh`. Every person move is made through its hidden `__person`
+entry: a squash or merge commit written onto the on-disk origin, the head kept or deleted
+with dependants retargeted or closed, a close, a retarget by hand, and a per-head check
+verdict. The host-call bounds are asserted on its recorded `gh` invocations. The review
+journeys keep reading feedback from `onevcs-testing`'s `FileHost` through `fake-gh`'s
+GraphQL adapter.
+
 **A test seam.** The idle journey shortens the idle claim interval through
 `ONEPIPELINE_IDLE_CLAIM_CHECK_SECONDS`, entry 119's seam; nothing an operator
 configures sets it.
