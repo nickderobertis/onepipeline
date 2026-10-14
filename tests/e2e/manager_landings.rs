@@ -3708,3 +3708,396 @@ fn a_launcher_session_that_is_not_text_refuses_the_landing() {
     assert!(world.changes_opened().is_empty());
     assert!(!world.runs.join(".flows").exists());
 }
+
+/// The six required checks every remote landing of the workload journey reports.
+const WORKLOAD_CHECKS: [&str; 6] = [
+    "check-1", "check-2", "check-3", "check-4", "check-5", "check-6",
+];
+
+/// One check sequence step for every workload check, as the host reports it.
+fn workload_rollup(states: &[&str; 6]) -> String {
+    WORKLOAD_CHECKS
+        .iter()
+        .zip(states)
+        .map(|(name, state)| format!("{name} {state} required"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// How many `change-check` records of `name` a landing's journal holds.
+fn check_records(world: &World, flow: &str, landing: &str, name: &str) -> usize {
+    journal(world, flow, landing)
+        .iter()
+        .filter(|event| event["kind"] == "change-check" && event["payload"]["name"] == name)
+        .count()
+}
+
+/// The journal record a watch's return names, by its producer stream and seq.
+fn the_record(world: &World, flow: &str, landing: &str, returned: &Returned) -> Value {
+    journal(world, flow, landing)
+        .into_iter()
+        .find(|event| {
+            event["stream"] == returned.record["stream"] && event["seq"] == returned.record["seq"]
+        })
+        .unwrap_or_else(|| panic!("no journal record is {}", returned.record))
+}
+
+/// Read every event past `cursor` through `--filter detailed`, one return at a
+/// time, until the reader has nothing left: what it consumed, and its cursor.
+fn consume_detail(world: &World, flow: &str, cursor: &str) -> (Vec<Value>, String) {
+    let mut cursor = cursor.to_owned();
+    let mut read = Vec::new();
+    loop {
+        let next = watch(
+            world,
+            flow,
+            &[
+                "--timeout",
+                "0",
+                "--filter",
+                "detailed",
+                "--cursor",
+                &cursor,
+            ],
+        );
+        cursor = next.cursor();
+        match next.record["condition"].as_str() {
+            Some("landing-progress") => read.push(next.record.clone()),
+            Some("elapsed") => return (read, cursor),
+            _ => panic!("the detailed reader returned {}", next.record),
+        }
+    }
+}
+
+/// The workload the supervision exists for, through the real engine and the
+/// linked `onevcs`, only the host doubled: three managers each land one branch
+/// at once, in three sessions, each into its own `change-auto` repository —
+/// `onevcs` watches one publication's checks per identity at a time. Every change
+/// reports six required checks, each moved by the journey through four
+/// transitions — queued, running, re-queued, running again, concluded — and a
+/// transition is made only once every landing's journal shows the last one was
+/// read. While all three are live: each owner's default watch stays armed
+/// through every check's movement, which that owner's detailed reader is handed
+/// once each; each landing's operation is its own, its id and stream disjoint
+/// from the others' and every record it relays labelled with it; and every event
+/// the public `onevcs` operation reader returns reaches the landing's journal
+/// exactly once. Concluding, two landings' checks pass and their owners' watches
+/// wake on that milestone; the third's first check fails and its owner's watch
+/// wakes on that failure — each identified by the record it names, not by when.
+#[test]
+fn three_hosted_landings_at_once_each_relay_their_whole_check_sequence_to_their_owner() {
+    let (world, repository) = hosted("ml-workload", &workload_rollup(&["queued -"; 6]));
+    // One repository per manager: `onevcs` watches one publication's checks per
+    // identity at a time, so three landings live at once land three identities.
+    let repositories = [
+        ("service", repository),
+        ("other-b", world.extra_repository("other-b")),
+        ("other-c", world.extra_repository("other-c")),
+    ];
+    let branches = ["work-a", "work-b", "work-c"];
+    for ((_, repository), branch) in repositories.iter().zip(branches) {
+        branch_with_work(&world, repository, branch, &format!("{branch}.txt"));
+    }
+    let managers: Vec<World> = ["manager-a", "manager-b", "manager-c"]
+        .iter()
+        .map(|session| world.as_session(session))
+        .collect();
+    let started: Vec<Started> = managers
+        .iter()
+        .zip(branches)
+        .zip(&repositories)
+        .map(|((manager, branch), (alias, _))| {
+            Started::spawn(
+                manager,
+                None,
+                &["publish-branch", branch, "--repo", alias, "--no-draft"],
+            )
+        })
+        .collect();
+    world.until("all three landings to register", |world| {
+        landings(world).len() == 3
+    });
+    // Each manager's landing, in session order: (flow, landing, change number).
+    let mut owned: Vec<(String, String)> = Vec::new();
+    for manager in &managers {
+        let (flow, id) = landings(&world)
+            .into_iter()
+            .find(|(flow, id)| {
+                sidecar(&world, flow, id, "request.json")["session"] == json!(manager.session)
+            })
+            .expect("each manager registered one landing");
+        owned.push((flow, id));
+    }
+    let flows: std::collections::BTreeSet<&String> = owned.iter().map(|(flow, _)| flow).collect();
+    assert_eq!(flows.len(), 3, "three flows, one per manager: {owned:?}");
+
+    // Each change opens, as a draft, waking its own owner on both milestones.
+    let mut numbers = Vec::new();
+    let mut armed = Vec::new();
+    let mut detail = Vec::new();
+    for (manager, (flow, id)) in managers.iter().zip(&owned) {
+        let drafted = opened_as_draft(manager, flow);
+        let opened = journal(&world, flow, id)
+            .into_iter()
+            .find(|event| event["kind"] == "change-opened")
+            .expect("the change opened");
+        // The host's number, as the URL it answered ends in it.
+        let number: u64 = opened["payload"]["url"]
+            .as_str()
+            .and_then(|url| url.rsplit('/').next())
+            .and_then(|last| last.parse().ok())
+            .unwrap_or_else(|| panic!("the change names no number: {opened}"));
+        numbers.push(number);
+        for name in WORKLOAD_CHECKS {
+            check_recorded(&world, flow, id, name, "pending");
+        }
+        armed.push(Armed::arm(
+            manager,
+            flow,
+            &["--timeout", "900", "--cursor", &drafted.cursor()],
+        ));
+        detail.push(drafted.cursor());
+    }
+    assert_eq!(
+        numbers
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        3,
+        "{numbers:?}"
+    );
+
+    // Three handshake-controlled transitions every landing waits through.
+    let mut consumed: Vec<Vec<Value>> = vec![Vec::new(); 3];
+    for (step, state) in ["in_progress -", "queued -", "in_progress -"]
+        .into_iter()
+        .enumerate()
+    {
+        for number in &numbers {
+            world.script(
+                &format!("gh.checks.{number}"),
+                &workload_rollup(&[state; 6]),
+            );
+        }
+        for (flow, id) in &owned {
+            world.until(&format!("transition {} to be read", step + 1), |world| {
+                WORKLOAD_CHECKS
+                    .iter()
+                    .all(|name| check_records(world, flow, id, name) == step + 2)
+            });
+        }
+        for (index, ((manager, (flow, _)), watch)) in
+            managers.iter().zip(&owned).zip(&mut armed).enumerate()
+        {
+            let (read, cursor) = consume_detail(manager, flow, &detail[index]);
+            detail[index] = cursor;
+            let checks: Vec<&Value> = read
+                .iter()
+                .filter(|r| r["kind"] == "change-check")
+                .collect();
+            assert!(
+                checks.len() >= WORKLOAD_CHECKS.len(),
+                "step {step}: {read:?}"
+            );
+            for record in &read {
+                assert_eq!(record["significance"], json!("progress"), "{record}");
+            }
+            consumed[index].extend(read);
+            assert!(
+                watch.waiting(),
+                "{flow}: the default watch woke on progress"
+            );
+        }
+    }
+
+    // Operation isolation while all three are live.
+    let mut operations = Vec::new();
+    for ((flow, id), number) in owned.iter().zip(&numbers) {
+        let operation = sidecar(&world, flow, id, "operation.json")["operation_id"]
+            .as_str()
+            .expect("an operation id")
+            .to_owned();
+        for event in journal(&world, flow, id)
+            .iter()
+            .filter(|e| e["source"] == "vcs")
+        {
+            assert_eq!(event["labels"]["operation_id"], json!(operation), "{event}");
+            assert_eq!(event["stream"], json!(operation), "{event}");
+            if event["kind"] == "change-opened" {
+                let url = event["payload"]["url"].as_str().unwrap_or_default();
+                assert!(url.ends_with(&format!("/{number}")), "{event}");
+            }
+        }
+        operations.push(operation);
+    }
+    assert_eq!(
+        operations
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        3,
+        "{operations:?}"
+    );
+    // Every detailed record was handed over once.
+    for read in &consumed {
+        let mut seen = std::collections::BTreeSet::new();
+        for record in read {
+            assert!(
+                seen.insert((record["stream"].to_string(), record["seq"].to_string())),
+                "the detailed reader replayed {record}"
+            );
+        }
+    }
+
+    // The fourth transition concludes every check: green on the first two
+    // changes, the first check red on the third.
+    world.script("gh.merged", "");
+    for (index, number) in numbers.iter().enumerate() {
+        let mut states = ["completed success"; 6];
+        if index == 2 {
+            states[0] = "completed failure";
+        }
+        world.script(&format!("gh.checks.{number}"), &workload_rollup(&states));
+    }
+    let mut woken = Vec::new();
+    for watch in armed {
+        woken.push(watch.returned());
+    }
+    for index in 0..2 {
+        let (flow, id) = &owned[index];
+        woken[index].progressed("checks-settled");
+        assert_eq!(woken[index].record["significance"], json!("milestone"));
+        let record = the_record(&world, flow, id, &woken[index]);
+        assert_eq!(record["kind"], json!("checks-settled"), "{record}");
+        assert_eq!(record["payload"]["verdict"], json!("passed"), "{record}");
+    }
+    let (red_flow, red_id) = &owned[2];
+    woken[2].progressed("change-check");
+    assert_eq!(woken[2].record["significance"], json!("blocker"));
+    let red = the_record(&world, red_flow, red_id, &woken[2]);
+    assert_eq!(red["payload"]["name"], json!("check-1"), "{red}");
+    assert_eq!(red["payload"]["conclusion"], json!("failure"), "{red}");
+
+    // Each then ends under its own owner: the green two cleanly, waking only on
+    // milestones; the red one refused, waking only on blockers.
+    for index in 0..2 {
+        let rest = rearmed_until_ended(&managers[index], &owned[index].0, woken[index].cursor());
+        assert!(
+            rest.iter()
+                .all(|(_, significance)| significance != "progress"),
+            "{rest:?}"
+        );
+    }
+    let mut cursor = woken[2].cursor();
+    loop {
+        let next = watch(
+            &managers[2],
+            red_flow,
+            &["--timeout", "900", "--cursor", &cursor],
+        );
+        if next.record["condition"] == "flow-failed" {
+            next.ended_on(EXIT_FLOW_FAILED, "flow-failed");
+            break;
+        }
+        next.ended_on(EXIT_SUCCESS, "landing-progress");
+        assert_eq!(
+            next.record["significance"],
+            json!("blocker"),
+            "{}",
+            next.record
+        );
+        cursor = next.cursor();
+    }
+    for (index, landing) in started.into_iter().enumerate() {
+        let (code, _, said) = landing.ended();
+        assert_eq!(code == 0, index < 2, "landing {index}: {said}");
+    }
+
+    // The whole sequence, and every event the public operation reader returns,
+    // reached each landing's journal exactly once.
+    for (index, ((flow, id), operation)) in owned.iter().zip(&operations).enumerate() {
+        let every = journal(&world, flow, id);
+        for name in WORKLOAD_CHECKS {
+            let read: Vec<(String, String)> = every
+                .iter()
+                .filter(|e| e["kind"] == "change-check" && e["payload"]["name"] == name)
+                .map(|e| {
+                    (
+                        e["payload"]["status"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_owned(),
+                        e["payload"]["conclusion"].to_string(),
+                    )
+                })
+                .collect();
+            // The four scripted transitions after the first reading, in order. A
+            // green change's host reports one more — the run it starts when the
+            // draft is lifted, at a new start — which is its own record.
+            let concluded = match (index, name) {
+                (2, "check-1") => "\"failure\"",
+                _ => "\"success\"",
+            };
+            let scripted = [
+                ("queued", "null"),
+                ("in_progress", "null"),
+                ("queued", "null"),
+                ("in_progress", "null"),
+                ("completed", concluded),
+            ]
+            .map(|(status, conclusion)| (status.to_owned(), conclusion.to_owned()));
+            assert_eq!(
+                read.get(..5),
+                Some(&scripted[..]),
+                "{flow}: {name} read {read:?}"
+            );
+            assert!(read.len() <= 6, "{flow}: {name} read {read:?}");
+        }
+        let published: Vec<Value> = world.on_onevcs(|| {
+            let handle = onevcs::OperationHandle::open(operation).expect("the operation opens");
+            let mut reader = onevcs::OperationEvents::open(&handle).expect("its reader opens");
+            reader
+                .read()
+                .expect("its events read")
+                .iter()
+                .map(|envelope| serde_json::to_value(envelope).expect("an envelope"))
+                .collect()
+        });
+        let relayed: Vec<&Value> = every.iter().filter(|e| e["source"] == "vcs").collect();
+        assert_eq!(
+            relayed.len(),
+            published.len(),
+            "{flow}: relayed differs from the reader"
+        );
+        for event in &published {
+            let copies = relayed
+                .iter()
+                .filter(|r| {
+                    r["stream"] == event["stream"]
+                        && r["seq"] == event["seq"]
+                        && r["kind"] == event["kind"]
+                        && r["payload"] == event["payload"]
+                        && r["labels"]["significance"] == event["labels"]["significance"]
+                })
+                .count();
+            assert_eq!(copies, 1, "{flow}: {event}");
+        }
+        let steps = relayed
+            .iter()
+            .filter(|e| e["kind"] != "change-check")
+            .count();
+        if index < 2 {
+            assert!(
+                steps >= 12,
+                "{flow}: only {steps} operation steps beside its checks"
+            );
+        }
+        let shown = detailed_monitor(&world, flow);
+        for event in &relayed {
+            assert!(
+                shown.contains(event["kind"].as_str().unwrap_or_default()),
+                "{flow}: {event} is not in the detailed monitor"
+            );
+        }
+    }
+}
