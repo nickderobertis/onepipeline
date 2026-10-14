@@ -2327,10 +2327,11 @@ fn a_landing_is_owed_a_watch_that_wakes_within_the_wake_budget() {
     }
 }
 
-/// Whether a process is waiting on a file lock, as Linux reports its wait.
-fn waiting_on_a_lock(pid: u32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/wchan"))
-        .is_ok_and(|channel| channel.contains("lock"))
+/// Whether `started` has said it is waiting on the landing registration lock —
+/// the notice the binary writes to stderr, on every platform, before it waits.
+fn waiting_on_the_registration_lock(started: &Started) -> bool {
+    std::fs::read_to_string(&started.stderr)
+        .is_ok_and(|said| said.contains("waiting on the landing registration lock"))
 }
 
 /// A branch acknowledgement and a landing's registration are serialized: with
@@ -2394,7 +2395,8 @@ fn a_branch_acknowledgement_and_a_landing_registration_never_interleave() {
         ],
     );
     world.until("both to wait on the registration lock", |_| {
-        waiting_on_a_lock(landing.child.id()) && waiting_on_a_lock(acknowledging.child.id())
+        waiting_on_the_registration_lock(&landing)
+            && waiting_on_the_registration_lock(&acknowledging)
     });
     assert!(
         landings(&world).is_empty(),
@@ -3275,7 +3277,8 @@ fn a_run_acknowledgement_and_a_landing_registration_never_interleave() {
         ],
     );
     world.until("both to wait on the registration lock", |_| {
-        waiting_on_a_lock(landing.child.id()) && waiting_on_a_lock(acknowledging.child.id())
+        waiting_on_the_registration_lock(&landing)
+            && waiting_on_the_registration_lock(&acknowledging)
     });
     let acknowledgements = world.run_file("origin", "acknowledgements");
     assert!(landings(&world).is_empty());

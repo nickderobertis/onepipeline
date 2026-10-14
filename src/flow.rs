@@ -606,6 +606,10 @@ pub(crate) fn every_landing(root: &Path) -> std::result::Result<Vec<(Flow, Landi
 
 /// The lock a landing's registration and a branch acknowledgement both take, so
 /// neither a check nor a write of one can fall between the other's.
+///
+/// Held by another process, it is waited for — and that wait is said on stderr
+/// before it begins, so a caller blocked behind another registration or
+/// acknowledgement is told why it has not moved, on every platform alike.
 pub(crate) fn registration_lock(root: &Path) -> Result<std::fs::File> {
     let flows = root.join(FLOWS_DIR);
     std::fs::create_dir_all(&flows).map_err(|source| Error::Ledger {
@@ -613,8 +617,24 @@ pub(crate) fn registration_lock(root: &Path) -> Result<std::fs::File> {
         source,
     })?;
     let path = flows.join("landings.lock");
-    sys::open_locked_append(&path).map_err(|source| Error::Ledger { path, source })
+    let ledger = |source| Error::Ledger {
+        path: path.clone(),
+        source,
+    };
+    if let Some(file) = sys::try_open_locked_append(&path).map_err(ledger)? {
+        return Ok(file);
+    }
+    eprintln!(
+        "onepipeline: {}: {}",
+        REGISTRATION_LOCK_WAIT,
+        path.display()
+    );
+    sys::open_locked_append(&path).map_err(ledger)
 }
+
+/// What a process says on stderr when another holds the registration lock and
+/// it waits for that one to let go.
+const REGISTRATION_LOCK_WAIT: &str = "waiting on the landing registration lock";
 
 /// Whether a flow id names one flow under the runs root and nothing else: the
 /// alphabet a minted id is spelled in, `[A-Za-z0-9._-]`, and not only dots.
