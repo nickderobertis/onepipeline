@@ -405,6 +405,11 @@ mod platform {
             if members.is_empty() {
                 return Ok(());
             }
+            // llmlint: ignore[changed_behavior_has_e2e] on Windows only a member that
+            // `TerminateProcess` cannot end in time gets here with anything to wait for, and a
+            // test cannot make one without a driver; the Unix journey
+            // `a_worlds_teardown_names_a_killed_descendant_it_could_not_wait_out` proves the
+            // same bound, and the zero-patience journeys prove this report on both platforms.
             if std::time::Instant::now() >= deadline {
                 return Err(format!(
                     "pids {members:?} are still in this test's job {patience:?} after they were \
@@ -412,7 +417,7 @@ mod platform {
                 ));
             }
             for pid in members {
-                end(job, pid, patience);
+                end(job, pid, deadline);
             }
             std::thread::sleep(POLL);
         }
@@ -425,7 +430,7 @@ mod platform {
     /// again whether it is in the job before it is ended: a pid is only a
     /// number, and the handle is what cannot have been reissued to something
     /// else in between.
-    fn end(job: HANDLE, pid: u32, patience: std::time::Duration) {
+    fn end(job: HANDLE, pid: u32, deadline: std::time::Instant) {
         // SAFETY: `OpenProcess` returns null on failure and otherwise a handle
         // closed below.
         let process = unsafe {
@@ -445,9 +450,11 @@ mod platform {
         if asked != 0 && inside != 0 {
             // SAFETY: `process` is live and was opened with the right to end it.
             unsafe { TerminateProcess(process, 1) };
-            // Never `INFINITE`, which is `u32::MAX`: `patience` is bounded well
-            // below it, and a value past it would still be a bounded wait.
-            let millis = u32::try_from(patience.as_millis()).unwrap_or(u32::MAX - 1);
+            // Only what is left of the teardown's bound, so that ending one
+            // member after another cannot wait past it; and never `INFINITE`,
+            // which is `u32::MAX`.
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            let millis = u32::try_from(left.as_millis()).unwrap_or(u32::MAX - 1);
             // Whatever the wait answers, the caller lists the job again: a member
             // still there is ended again, and one that outlasts the bound is
             // named.

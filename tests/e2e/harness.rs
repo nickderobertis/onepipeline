@@ -4126,6 +4126,58 @@ fn a_worlds_teardown_waits_for_a_descendant_still_exiting_after_its_double_is_go
 
 use onepipeline_testfakes::containment::PATIENCE_VARIABLE;
 
+/// A teardown that has killed a descendant and still finds it running when its
+/// patience runs out fails its test and names it, rather than waiting on it
+/// for good or letting the test pass while it holds the test's output.
+///
+/// Held at its exit for longer than the teardown is let wait, so the teardown
+/// has already signalled what it names. Linux only, because the exit stop is
+/// `ptrace`'s.
+#[cfg(target_os = "linux")]
+#[test]
+// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] as for the journey above: the
+// hold is the property under test, and what it proves is `World`'s own teardown.
+fn a_worlds_teardown_names_a_killed_descendant_it_could_not_wait_out() {
+    let world = World::new("teardown-outwaited");
+    let record = world.root.join("descendant.pids");
+    #[expect(
+        clippy::zombie_processes,
+        reason = "the teardown under test is what ends it"
+    )]
+    let _double = world
+        .cmd_on(
+            &double("fake-oneharness"),
+            &[
+                "leave-a-descendant",
+                &record.to_string_lossy(),
+                "hold-at-exit",
+            ],
+        )
+        .spawn()
+        .expect("the double starts");
+    let (_, descendant) = left_descendant(&record);
+
+    let refused = with_variable(PATIENCE_VARIABLE, "1000", move || drop(world))
+        .expect_err("a teardown that could not wait out what it killed let its test pass");
+    let said = panic_text(refused.as_ref());
+    assert!(
+        said.contains("this test's teardown left processes running")
+            && said.contains(&descendant.to_string()),
+        "the teardown's failure does not name pid {descendant}, which it killed and could not \
+         wait out: {said}"
+    );
+    // Its exit finishes once the hold does; waited for here so this test does
+    // not return while it still holds the test's output.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !process_ended(descendant) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "pid {descendant} never finished its exit"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
 /// A teardown that runs out of patience fails its test and names what it left
 /// running, rather than letting the test pass with them still there — and
 /// what it left, it ends once it is given the time.
