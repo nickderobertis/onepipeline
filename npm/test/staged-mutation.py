@@ -50,7 +50,7 @@ elif case in ['schema', 'tag', 'unknown', 'missing', 'field-type', 'target', 'in
     if case == 'inventory-type': record['executables'] = [42]
     if case == 'inventory-unsafe': record['executables'] = ['../escape']
     if case == 'inventory': record['executables'].append('missing-helper')
-elif case in ['wheel-version', 'wheel-arch', 'sbom', 'sbom-object', 'no-sbom', 'macho', 'wheel-duplicate', 'wheel-path', 'wheel-primary', 'no-metadata', 'no-wheel-tags']:
+elif case in ['wheel-version', 'wheel-arch', 'sbom', 'sbom-object', 'no-sbom', 'macho', 'wheel-duplicate', 'wheel-path', 'wheel-primary', 'no-metadata', 'no-wheel-tags', 'wheel-traversal', 'wheel-symlink', 'wheel-dist-info']:
     source = record['wheel']
     target = out / Path(source).name
     with zipfile.ZipFile(source) as original, zipfile.ZipFile(target, 'w') as changed:
@@ -79,6 +79,14 @@ elif case in ['wheel-version', 'wheel-arch', 'sbom', 'sbom-object', 'no-sbom', '
             if case == 'wheel-path' and '.data/scripts/' in entry.filename:
                 entry.filename = entry.filename.replace('/scripts/', '/scripts/nested/')
             changed.writestr(entry, payload)
+            if case == 'wheel-traversal' and entry.filename.endswith('.dist-info/WHEEL'):
+                changed.writestr('../escape', b'outside the install prefix')
+            if case == 'wheel-symlink' and entry.filename.endswith('.dist-info/WHEEL'):
+                link = zipfile.ZipInfo(entry.filename.split('/')[0] + '/link')
+                link.external_attr = (0o120777 << 16)
+                changed.writestr(link, b'/etc/passwd')
+            if case == 'wheel-dist-info' and entry.filename.endswith('.dist-info/WHEEL'):
+                changed.writestr('other-1.0.dist-info/METADATA', b'Name: other\n')
             if case == 'wheel-duplicate' and '.data/scripts/' in entry.filename:
                 changed.writestr('duplicate.data/scripts/' + Path(entry.filename).name, payload)
     record['wheel'] = str(target)

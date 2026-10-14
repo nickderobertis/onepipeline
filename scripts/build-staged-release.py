@@ -64,11 +64,29 @@ def wheel_scripts(bundle, primary):
     return scripts
 
 
+def validate_wheel_members(wheel):
+    """Refuse a wheel pip would install differently from what is verified here."""
+    names = wheel.namelist()
+    if len(set(names)) != len(names):
+        raise ValueError('wheel repeats a member')
+    for info in wheel.infolist():
+        parts = info.filename.rstrip('/').split('/')
+        if (info.filename.startswith('/') or '\\' in info.filename or
+                any(part in ['', '.', '..'] for part in parts) or
+                not parts[0].endswith(('.dist-info', '.data'))):
+            raise ValueError(f'unsafe wheel member: {info.filename}')
+        if not info.is_dir() and (info.external_attr >> 16) & 0o170000 not in (0, 0o100000):
+            raise ValueError(f'wheel member is not a regular file: {info.filename}')
+    if len({name.split('/')[0] for name in names if name.split('/')[0].endswith('.dist-info')}) != 1:
+        raise ValueError('wheel must carry exactly one .dist-info directory')
+
+
 def dist_info_member(wheel, name):
-    for member in wheel.namelist():
-        if member.endswith(f'.dist-info/{name}'):
-            return member
-    raise ValueError(f'wheel is missing its .dist-info/{name}')
+    members = [member for member in wheel.namelist()
+               if member.endswith('.dist-info/' + name) and member.count('/') == 1]
+    if len(members) != 1:
+        raise ValueError(f'wheel is missing its .dist-info/{name}')
+    return members[0]
 
 
 def tar_payload(bundle, name):
@@ -190,6 +208,7 @@ def verify(record, quiet=False):
         raise ValueError('record tag/version mismatch')
     binary_name = 'onepipeline.exe' if 'windows' in target else 'onepipeline'
     with zipfile.ZipFile(record['wheel']) as wheel:
+        validate_wheel_members(wheel)
         scripts = wheel_scripts(wheel, binary_name)
         if sorted(Path(n).name for n in scripts) != sorted(record['executables']):
             raise ValueError('executable inventory differs from wheel')

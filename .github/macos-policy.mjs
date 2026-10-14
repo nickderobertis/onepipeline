@@ -79,7 +79,6 @@ export function classify(
   const required = (reason) => ({ isReleaseOnly: false, macosRequired: true, reason });
   if (automaticNonPullRequestEvents.has(eventName))
     return { isReleaseOnly: false, macosRequired: false, reason: `non-PR event: ${eventName}` };
-  // An event this policy does not know is never assumed safe to run without Mac.
   if (eventName !== "pull_request") return required(`unrecognised event: ${eventName}`);
   try {
     const pr = event.pull_request;
