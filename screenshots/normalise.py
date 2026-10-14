@@ -137,6 +137,14 @@ class Normaliser:
             lambda m: self._ordinal("driver", m.group(0), lambda nth: f"{41000 + nth}"),
             text,
         )
+        # A dispatch's scratch directory is `<driver pid>-<n>` under the run's
+        # `scratch/`, so the scratch notice names that same pid: the same family,
+        # so a view showing both the stream and the directory shows one driver.
+        text = re.sub(
+            r"(?<=/scratch/)\d+(?=-\d+\b)",
+            lambda m: self._ordinal("driver", m.group(0), lambda nth: f"{41000 + nth}"),
+            text,
+        )
         return text
 
 

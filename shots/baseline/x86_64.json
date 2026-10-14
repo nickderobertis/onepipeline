@@ -4,12 +4,12 @@
     {
       "name": "help",
       "toggles": {},
-      "hash": "9d5e36a8f1d5c93fa4f159258eb3bb09f7d4a819c06f149c00d66693a3c6c3ee"
+      "hash": "c789b377f88960fbc281b7c3c36811d3cdc8a4b7648545f79d192c973240ebe2"
     },
     {
       "name": "monitor",
       "toggles": {},
-      "hash": "754a3bb3b76c03f4824dfd8cc65b8903eb0b790d2060db1acf809c0e545c9450"
+      "hash": "e32e94beceb1e48389233ebf44f9835d68cb9b5507ddf465aa38add0f9b57f4c"
     },
     {
       "name": "results",
@@ -24,7 +24,7 @@
     {
       "name": "status",
       "toggles": {},
-      "hash": "79219160efd18ec94d0a5a3ff24c305f759dce39f9bfe20b9c42a23693fbf355"
+      "hash": "e33e93bb438d944e133df828e657edd7d5ecf11b0ea0886e46858bd82807fa41"
     },
     {
       "name": "telemetry",
