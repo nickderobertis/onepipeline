@@ -3199,3 +3199,221 @@ fn monitor_flow_resumes_from_its_own_cursor() {
             .out_has("landing-finished");
     }
 }
+
+/// A run acknowledgement and a landing's registration are serialized as a
+/// branch acknowledgement is: with the registration lock held both wait, and once
+/// it is let go an acknowledgement recorded first is one the landing registered
+/// after, and one asked after the landing registered is refused.
+#[test]
+fn a_run_acknowledgement_and_a_landing_registration_never_interleave() {
+    let world = World::new("ml-run-serialized");
+    let _repository = world.repository("local-direct", &["false"]);
+    let branch = originating_run(&world, "origin");
+    let go = world.root.join("push.go");
+    hold_pushes(&world, &go);
+    // llmlint: ignore-block[tests_mirror_real_usage] the registration lock is taken by this
+    // journey because no command holds it open past its own check and write — which is the
+    // whole of what it promises — so there is no interface to hold the window open through.
+    // Both contenders are the compiled binary, driven as a manager drives it.
+    let flows = world.runs.join(".flows");
+    std::fs::create_dir_all(&flows).expect("the flows directory");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(flows.join("landings.lock"))
+        .expect("the registration lock");
+    {
+        use std::os::unix::io::AsRawFd;
+        // SAFETY: a descriptor this journey just opened and still owns.
+        assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+    }
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let manager = world.as_session("manager-b");
+    let landing = Started::spawn(
+        &manager,
+        None,
+        &["publish-branch", &branch, "--repo", "service", "--no-draft"],
+    );
+    let acknowledging = Started::spawn(
+        &world,
+        None,
+        &[
+            "unwatched",
+            "--session",
+            &world.session,
+            "--acknowledge",
+            "origin",
+            "--reason",
+            "closed by hand",
+        ],
+    );
+    world.until("both to wait on the registration lock", |_| {
+        waiting_on_a_lock(landing.child.id()) && waiting_on_a_lock(acknowledging.child.id())
+    });
+    let acknowledgements = world.run_file("origin", "acknowledgements");
+    assert!(landings(&world).is_empty());
+    assert!(snapshot(&acknowledgements).is_empty());
+    drop(lock);
+
+    let (code, _, said) = acknowledging.ended();
+    let (flow, id) = the_landing(&world);
+    let request = sidecar(&world, &flow, &id, "request.json");
+    assert_eq!(request["runs"], json!(["origin"]));
+    if code == EXIT_SUCCESS {
+        let recorded = snapshot(&acknowledgements);
+        let written: Value = serde_json::from_str(&recorded[0].1).expect("the acknowledgement");
+        let at = written["at"].as_str().expect("an instant");
+        let began = request["began_at"].as_str().expect("an instant");
+        assert!(at[..19] <= began[..19], "{written} {request}");
+    } else {
+        assert_eq!(code, REFUSED, "{said}");
+        assert!(
+            said.contains(&format!("has a live landing, {id}")),
+            "{said}"
+        );
+        assert!(snapshot(&acknowledgements).is_empty());
+    }
+    std::fs::write(&go, "go").expect("released");
+    let _ = landing.ended();
+}
+
+/// A landing's progress competes with the flow's own conditions without either
+/// being lost: a run joining and a waiting surface are reported first, with the
+/// landing's place kept so the next watch reports its event; and a landing's
+/// event comes before a member's settlement, which a later watch still reports.
+#[test]
+fn a_landings_progress_and_the_flows_own_conditions_are_each_reported_once() {
+    let (world, repository, held) = held_world("ml-competing", "change-open");
+    branch_with_work(&world, &repository, BRANCH, "widget.txt");
+    world.script("member.wait", "hold");
+    let plan = world.plan(
+        "member",
+        &crate::harness::plan_of("member", vec![crate::harness::agent("member", &[])]),
+    );
+    let gate = world.root.join("end.go");
+    let script = world.root.join("plan.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "\"$ONEPIPELINE_FAKE_CLI_BIN\" start '{plan}' --detach >/dev/null || exit 70\n\
+             \"$ONEPIPELINE_FAKE_CLI_BIN\" publish-branch {BRANCH} --repo service --no-draft >/dev/null 2>&1 &\n\
+             while [ ! -f '{gate}' ]; do sleep 0.05; done\n",
+            gate = gate.display()
+        ),
+    )
+    .expect("the program is written");
+    let mut parent = world
+        .cmd(&[
+            "flow",
+            "run",
+            "--name",
+            "plan",
+            "--",
+            "sh",
+            script.to_str().expect("a path"),
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("flow run starts");
+    world.until("the landing's push to be held", |_| held.holding());
+    world.until("the member run to dispatch", |world| {
+        !world.events_of("member", "node-dispatched").is_empty()
+    });
+    let (flow, id) = the_landing(&world);
+    assert_eq!(flow, "plan");
+    let held_kinds = kinds(&world, &flow, &id);
+
+    // A run joining is reported first; the landing's events wait for the next.
+    let joined = watch(
+        &world,
+        &flow,
+        &[
+            "--timeout",
+            "0",
+            "--filter",
+            "detailed",
+            "--cursor",
+            "flow:2:plan::",
+        ],
+    );
+    joined.ended_on(onepipeline::error::EXIT_RUN_JOINED, "run-joined");
+    let first = watch(
+        &world,
+        &flow,
+        &[
+            "--timeout",
+            "0",
+            "--filter",
+            "detailed",
+            "--cursor",
+            &joined.cursor(),
+        ],
+    );
+    first.progressed("landing-registered");
+
+    // A waiting surface is reported first too, and the landing's place is kept.
+    world
+        .run(&[
+            "surface",
+            "--flow",
+            &flow,
+            "--kind",
+            "check-in",
+            "--message",
+            "steady",
+        ])
+        .exited(0);
+    let surfaced = watch(
+        &world,
+        &flow,
+        &[
+            "--timeout",
+            "0",
+            "--filter",
+            "detailed",
+            "--cursor",
+            &first.cursor(),
+        ],
+    );
+    surfaced.ended_on(crate::harness::SURFACE_WAITING, "surface");
+    world.run(&["next", "--flow", &flow]).exited(0);
+
+    // The member settles; every landing event left is reported before it, once
+    // each, and then the settlement.
+    world.release("member.go");
+    world.until("the member's node to settle", |world| {
+        !world.events_of("member", "node-settled").is_empty()
+    });
+    let mut cursor = surfaced.cursor();
+    let mut reported = vec!["landing-registered".to_owned()];
+    loop {
+        let next = watch(
+            &world,
+            &flow,
+            &[
+                "--timeout",
+                "0",
+                "--filter",
+                "detailed",
+                "--cursor",
+                &cursor,
+            ],
+        );
+        cursor = next.cursor();
+        match next.record["condition"].as_str() {
+            Some("landing-progress") => {
+                reported.push(next.record["kind"].as_str().unwrap_or_default().to_owned());
+            }
+            Some("node-settled") => break,
+            _ => panic!("{}", next.record),
+        }
+    }
+    assert_eq!(
+        reported, held_kinds,
+        "every landing event once, in order, before the settlement"
+    );
+    held.release();
+    std::fs::write(&gate, "go").expect("the flow ends");
+    let _ = parent.wait();
+}

@@ -232,7 +232,10 @@ impl Acknowledgement {
             });
         }
         // A manager landing that came from this run is live work an
-        // acknowledgement must not hide, whichever session owns the landing.
+        // acknowledgement must not hide, whichever session owns the landing —
+        // checked and written under the lock a registration takes, so a landing
+        // registering at the same moment is either seen here or registers after.
+        let _registering = crate::flow::registration_lock(root)?;
         refuse_live_landings(root, run)?;
         let acknowledged = Self {
             schema_version: ACKNOWLEDGEMENT_SCHEMA_VERSION,

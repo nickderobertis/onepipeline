@@ -1346,6 +1346,13 @@ impl Supervision {
             relay: Arc::new(Mutex::new(relay)),
             relay_failed: None,
         };
+        // llmlint: ignore-block[changed_behavior_has_e2e] the first append is to a file inside
+        // the directory this process created and renamed into place an instant before, so no
+        // journey can stage a write refused there without a failpoint this crate does not
+        // ship; what a refusal does is the same `refused` every placement failure above takes,
+        // which `a_registration_that_cannot_be_kept_starts_no_work` drives, and the ending it
+        // records is the one `a_landing_whose_journal_or_ending_cannot_be_written_fails_closed`
+        // reads back as failed.
         if let Err(error) = supervision.transition(
             PipelineKind::LandingRegistered,
             format!(
@@ -1359,6 +1366,7 @@ impl Supervision {
             let _ = supervision.record_ending(SUPERVISION_FAILED);
             return Err(refused(error.to_string()));
         }
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         if supervision.holding == Holding::OwnFlow {
             eprintln!(
                 "flow {id}: watch it with: onepipeline watch --flow {id}",
