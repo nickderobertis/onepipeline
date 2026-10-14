@@ -199,6 +199,21 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             }
             Ok(receipt.exit_code())
         }
+        Verb::Readjust(args) => {
+            let timeout = reply_timeout_seconds();
+            let receipt = verbs::readjust(
+                &resolve(&args.run)?,
+                &sys::launching_session(),
+                Duration::from_secs(timeout),
+            )?;
+            let rendered = verbs::render_readjust(&receipt, args.json)?;
+            if !args.json && receipt.exit_code() != EXIT_SUCCESS {
+                eprintln!("{rendered}");
+            } else {
+                println!("{rendered}");
+            }
+            Ok(receipt.exit_code())
+        }
         Verb::Reply(args) => {
             let (target, file) =
                 target_and_file(args.run.as_ref(), args.file.as_ref(), args.flow.as_deref())?;
@@ -3796,11 +3811,43 @@ pub(crate) fn submit_envelope(
             }
             engine::Accepted::NothingIsDriving(lock) => {
                 let mut journal = Journal::open(paths);
+                // Applying a `rework` readjusts first, as the loop does: a node its read
+                // finds landed is refused for it, and the replacement is placed on what
+                // has landed. Judged then against the record that read left.
+                let readjusted;
+                let (view, frontier) = if envelope
+                    .commands
+                    .iter()
+                    .any(|command| matches!(command, crate::channel::Command::Rework { .. }))
+                {
+                    let mut projected = crate::checkpoint::Projected::open(paths);
+                    crate::readjust::run(
+                        paths,
+                        &mut journal,
+                        &mut projected,
+                        crate::payload::ReadjustTrigger::Rework,
+                    )?;
+                    readjusted = RunView::open(paths)?;
+                    let frontier = Frontier {
+                        node_validator: readjusted.launch.node_validator().map(str::to_owned),
+                        graph_validation: Some(edits::GraphValidation {
+                            default_graph: oneagentgraph::config::ConfigRef(
+                                readjusted.launch.node_graph.clone(),
+                            ),
+                            launch_node_sets: readjusted.launch.node_sets.clone(),
+                            launch_dir: readjusted.launch.dir.clone(),
+                        }),
+                        ..readjusted.state.frontier()
+                    };
+                    (&readjusted, frontier)
+                } else {
+                    (&view, frontier.clone())
+                };
                 let mut graph = view.state.graph.clone();
                 let mut compiled: Vec<edits::Operation> = Vec::new();
                 // This pass's own copy, walked forward as each command commits, for
                 // the reason the checking pass above holds one.
-                let mut frontier = frontier.clone();
+                let mut frontier = frontier;
                 // The same three phases the reconcile loop runs, and for the same
                 // reason: which writer judged an envelope is an accident of whether
                 // anything was driving the run, so an envelope is all of its commands

@@ -329,6 +329,32 @@ pub enum PipelineKind {
     /// an agent was dispatched to conclude a conflict, and the publication's
     /// `outcome`. The node's ordinary `node-settled` follows.
     NodeRestacked,
+    /// A draft's change request was found merged into its root: `node`, `change_url`,
+    /// the `commit` it reached the root as, `detected_by` — `readjust`, or
+    /// `absorber-landed` with the absorbing node as `via` — and the `trigger` whose
+    /// readjustment found it. The node's landing is `landed` from it on.
+    NodeLanded,
+    /// A draft's change request was merged into another node's branch: `node`, the node
+    /// it merged `into`, `change_url` and `commit`. It lands only with that node.
+    NodeAbsorbed,
+    /// A draft the host closed under its landed parent's deleted branch was reopened on
+    /// that branch, restored: `node`, `change_url`, `restored_base`.
+    ChangeReopened,
+    /// A draft was brought onto its placement after a node it is connected to landed or
+    /// was absorbed: `node`, its placement `from` and `to`, the `cause`, its `head`,
+    /// whether an agent was dispatched, the `retarget` and its `content`. The node's
+    /// ordinary `node-settled` follows.
+    NodeReadjusted,
+    /// A draft merged into the root carrying unlanded ancestors' work: `node`, `carried`.
+    StackLandedOutOfOrder,
+    /// A draft's change request was closed without merging: `node`, `change_url`.
+    ChangeClosed,
+    /// A later read of a draft republished without a check watch: `node`, `head`,
+    /// `verdict`.
+    NodeChecksRead,
+    /// One repository's standings read failed: `repo`, `detail`. Its drafts stay as
+    /// they were.
+    ReadjustReadFailed,
     /// A launch passed another driver's claim on its project with `--take-over`.
     ///
     /// Written by `start --take-over` beside its `run-started`, only where the
@@ -411,6 +437,14 @@ impl PipelineKind {
             Self::TitleUnverified => "title-unverified",
             Self::NodeRestackStarted => "node-restack-started",
             Self::NodeRestacked => "node-restacked",
+            Self::NodeLanded => "node-landed",
+            Self::NodeAbsorbed => "node-absorbed",
+            Self::ChangeReopened => "change-reopened",
+            Self::NodeReadjusted => "node-readjusted",
+            Self::StackLandedOutOfOrder => "stack-landed-out-of-order",
+            Self::ChangeClosed => "change-closed",
+            Self::NodeChecksRead => "node-checks-read",
+            Self::ReadjustReadFailed => "readjust-read-failed",
             Self::DriverTakenOver => "driver-taken-over",
             Self::DriverSuperseded => "driver-superseded",
             Self::LandingRegistered => "landing-registered",
@@ -492,6 +526,14 @@ pub const PIPELINE_KINDS: &[PipelineKind] = &[
     PipelineKind::TitleUnverified,
     PipelineKind::NodeRestackStarted,
     PipelineKind::NodeRestacked,
+    PipelineKind::NodeLanded,
+    PipelineKind::NodeAbsorbed,
+    PipelineKind::ChangeReopened,
+    PipelineKind::NodeReadjusted,
+    PipelineKind::StackLandedOutOfOrder,
+    PipelineKind::ChangeClosed,
+    PipelineKind::NodeChecksRead,
+    PipelineKind::ReadjustReadFailed,
     PipelineKind::DriverTakenOver,
     PipelineKind::DriverSuperseded,
     PipelineKind::LandingRegistered,
