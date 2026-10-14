@@ -1022,6 +1022,9 @@ onevcs-testing = "0.19.2"
 onetaskgraph-core = "=0.7.0"
 onetaskgraph-plugin-api = "=0.7.0"
 onetaskgraph-local-md = "=0.7.0"
+# Test-support only: the budget checker's own library, at exactly the release `justfile`'s
+# `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
+onebudgetspec-core = "=0.1.5"
 # Not engines: two crates both members use, pinned once so they build against one version.
 # `just engines-current` reads only the engines its script names.
 sha2 = "0.10"
@@ -1250,8 +1253,8 @@ onevcs-testing = { workspace = true }
 # TOML they are rather than scanned for a substring that might not be one.
 toml = "1"
 # `tests/budgets.rs` loads `budgets.yaml` and parses the result its command writes through the
-# checker's own library, at exactly the release `justfile`'s `onebudgetspec-version` installs.
-onebudgetspec-core = "=0.1.5"
+# checker's own library; the pin is in `[workspace.dependencies]`.
+onebudgetspec-core = { workspace = true }
 
 [[test]]
 name = "e2e"
