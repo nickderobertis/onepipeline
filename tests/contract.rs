@@ -1229,9 +1229,9 @@ fn the_contract_states_the_planner_channel_documents_path_version_and_source() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), DOCUMENT_VERSION);
     assert_eq!(
-        divergence_block("122.")["bundle_versions"]["planner_channel"],
+        divergence_block("126.")["bundle_versions"]["planner_channel"],
         DOCUMENT_VERSION,
-        "the rework bundle version must be the manager's recorded ruling"
+        "the planner-channel version must be the one the newest entry raising it records"
     );
     assert_eq!(bundle.layouts(), [document()]);
 }
@@ -2199,6 +2199,7 @@ fn op_of(command: &Edit) -> &'static str {
         Edit::Rework { .. } => "rework",
         Edit::Retitle { .. } => "retitle",
         Edit::Review { .. } => "review",
+        Edit::Readjust { .. } => "readjust",
     }
 }
 
@@ -6650,7 +6651,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // undocumented wire; a kind the contract lists and the enum does not carry is
     // a promise nothing keeps. `PIPELINE_KINDS` is what `Journal::emit` accepts,
     // so this is the emitted set and not a second copy of it.
-    assert_eq!(PIPELINE_KINDS.len(), 52, "the closed set changed size");
+    assert_eq!(PIPELINE_KINDS.len(), 60, "the closed set changed size");
     let listed: BTreeSet<String> = backticked()
         .into_iter()
         .filter(|token| {
@@ -6660,7 +6661,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // The kinds the contract does not list are exactly the ones the divergence
     // record proposes, and no others: a kind neither document names fails here.
     let proposed: BTreeSet<String> = [
-        "40.", "47.", "55.", "65.", "70.", "92.", "119.", "121.", "122.", "123.",
+        "40.", "47.", "55.", "65.", "70.", "92.", "119.", "121.", "122.", "123.", "126.",
     ]
     .into_iter()
     .flat_map(|entry| {
@@ -9287,6 +9288,13 @@ fn the_contract_names_every_post_launch_verb_the_sdk_publishes_and_no_other() {
         serde_json::from_value(divergence_block("122.")["sdk_verbs"].clone())
             .expect("entry 122 names its SDK verbs");
     in_contract.extend(review_verbs);
+    let readjust_verbs: Vec<String> =
+        serde_json::from_value(divergence_block("126.")["sdk_verbs"].clone())
+            .expect("entry 126 names its SDK verbs");
+    in_contract.extend(readjust_verbs);
+    let _: fn(&RunPaths, &str, std::time::Duration) -> Result<verbs::ReadjustReceipt> =
+        verbs::readjust;
+    let _: fn(&verbs::ReadjustReceipt, bool) -> Result<String> = verbs::render_readjust;
     let _: fn(&RunPaths, &str, std::time::Duration) -> Result<verbs::ReviewReceipt> = verbs::review;
     let _: fn(&verbs::ReviewReceipt, bool) -> Result<String> = verbs::render_review;
     let _: fn(&Results) -> Result<String> = verbs::render_results_json;
@@ -10641,6 +10649,12 @@ fn review_discovery_is_the_recorded_contract_and_registered_payload() {
         event::PipelineKind,
     };
     let block = divergence_block("122.");
+    let batched = divergence_block("124.");
+    assert_eq!(batched["verb"], block["verb"]);
+    assert_eq!(batched["discovery_read"], "review_standings");
+    assert_eq!(batched["view_read"], "review_comments");
+    assert_eq!(batched["record_kind"], block["record_kind"]);
+    assert_eq!(batched["record_shape_changed"], false);
     assert_eq!(block["verb"], "review");
     assert_eq!(
         serde_json::to_value(Command::Review {}).unwrap(),
@@ -10702,10 +10716,14 @@ fn review_discovery_is_the_recorded_contract_and_registered_payload() {
         read["cost"][field] = json!(0);
     }
     for receipt in [
-        onepipeline::verbs::ReviewReceipt::Performed { error: None },
+        onepipeline::verbs::ReviewReceipt::Performed {
+            error: None,
+            outstanding: Vec::new(),
+        },
         onepipeline::verbs::ReviewReceipt::Requested { request: 4 },
         onepipeline::verbs::ReviewReceipt::Performed {
             error: Some("host failed".into()),
+            outstanding: vec!["b".into()],
         },
     ] {
         let rendered = onepipeline::verbs::render_review(&receipt, true).unwrap();
@@ -10714,6 +10732,172 @@ fn review_discovery_is_the_recorded_contract_and_registered_payload() {
             serde_json::to_value(&receipt).unwrap()
         );
     }
+}
+
+#[test]
+fn deferred_review_republication_is_the_recorded_outcome() {
+    use onepipeline::event::PipelineKind;
+    let block = divergence_block("125.");
+    assert_eq!(block["deferred_outcome"], "change-review-draft-unchecked");
+    assert_eq!(block["status"], "done");
+    assert_eq!(block["landing"], "unlanded");
+    assert_eq!(
+        block["republication"],
+        json!({"defer_checks":true,"adopt":true})
+    );
+    assert_eq!(block["fallback_refusal"], "UnrecordedChangeHead");
+    assert_eq!(block["fallback"], "watched");
+    assert_eq!(block["branch_mismatch"], "refused");
+    onepipeline::payload::registry().check(
+        &onepipeline::payload::schema_of(PipelineKind::NodeSettled),
+        &json!({"node":"draft", "status":"done", "outcome":block["deferred_outcome"], "landing":block["landing"]}),
+    ).unwrap();
+}
+
+/// Entry 126's readjustment is this build's own: `readjust` is an op the planner may
+/// issue and nobody else, deserialized into its own variant and round-tripping
+/// unchanged; each of its eight kinds is spelled by `PipelineKind` and its record is
+/// admitted by the registered document, every closed word the entry names is admitted
+/// and an unnamed one refused; each surface kind is a surface kind; the receipts render
+/// as the entry shows them, `outstanding` left off when empty, and exit as the `review`
+/// verb's do; and both bundles are at the versions it names.
+#[test]
+fn the_readjustment_is_what_the_divergence_record_names() {
+    use onepipeline::channel::layout::DOCUMENT_VERSION;
+    use onepipeline::event::{EventKind, PipelineKind, PIPELINE_KINDS};
+    use onepipeline::payload::{registry, schema_of};
+    use onepipeline::verbs::{render_readjust, render_review, ReadjustReceipt, ReviewReceipt};
+    let block = divergence_block("126.");
+
+    let op = block["verb"]["op"]
+        .as_str()
+        .expect("entry 126 names its op");
+    assert!(!OPS.contains(&op), "`{op}` is on the contract's own list");
+    let edit: Edit = serde_json::from_value(json!({"op": op})).expect("the op deserializes");
+    assert_eq!(op_of(&edit), op);
+    assert_eq!(onepipeline::channel::op_of(&edit), op);
+    assert_eq!(serde_json::to_value(&edit).unwrap(), json!({"op": op}));
+    allows(Author::planner(), &edit).expect("the planner may readjust");
+    assert!(allows(Author::from("monitor"), &edit).is_err());
+    assert!(serde_json::from_value::<Edit>(json!({"op": op, "typo": true})).is_err());
+    let parsed = onepipeline::cli::Cli::try_parse_from([
+        "onepipeline",
+        block["verb"]["name"].as_str().expect("the verb"),
+        "run",
+        block["verb"]["json_flag"].as_str().expect("the flag"),
+    ])
+    .expect("the verb parses");
+    assert!(
+        format!("{parsed:?}").contains("Readjust(ReadjustArgs { run: \"run\", json: true })"),
+        "{parsed:?}"
+    );
+
+    let kinds: Vec<String> =
+        serde_json::from_value(block["event_kinds"].clone()).expect("entry 126 names its kinds");
+    let registry = registry();
+    for kind in &kinds {
+        let emitted = PipelineKind::from_wire(&EventKind(kind.clone()))
+            .unwrap_or_else(|| panic!("{kind} is not a kind this build emits"));
+        assert!(PIPELINE_KINDS.contains(&emitted));
+        registry
+            .check(&schema_of(emitted), &block["records"][kind.as_str()])
+            .unwrap_or_else(|why| panic!("entry 126's {kind} is refused: {why}"));
+    }
+    let landed = schema_of(PipelineKind::NodeLanded);
+    registry
+        .check(&landed, &block["absorbed_landing"])
+        .expect("an absorbed node's landing");
+    // Every closed word the entry names is admitted at its key, and one it does not
+    // name is refused there.
+    for (kind, key, words) in [
+        ("node-landed", "detected_by", "detected_by"),
+        ("node-landed", "trigger", "triggers"),
+        ("node-readjusted", "retarget", "retarget"),
+        ("node-readjusted", "content", "content"),
+        ("node-checks-read", "verdict", "verdicts"),
+    ] {
+        let id = schema_of(PipelineKind::from_wire(&EventKind(kind.into())).expect("a kind"));
+        let mut record = block["records"][kind].clone();
+        for word in block[words].as_array().expect("entry 126 names the words") {
+            record[key] = word.clone();
+            registry
+                .check(&id, &record)
+                .unwrap_or_else(|why| panic!("{kind}'s {key} {word} is refused: {why}"));
+        }
+        record[key] = json!("whim");
+        assert!(
+            registry.check(&id, &record).is_err(),
+            "{kind} took a {key} of whim"
+        );
+    }
+    let started = schema_of(PipelineKind::NodeRestackStarted);
+    registry
+        .check(
+            &started,
+            &json!({"node": "b", "onto": [{"branch": "main", "head": "1f2e3d4c5b6a79881726354453627180918a7b6c"}], "cause": block["restack_cause"]}),
+        )
+        .expect("a restack a readjustment starts");
+    for outcome in block["outcomes"]
+        .as_array()
+        .expect("entry 126 names its outcomes")
+    {
+        registry
+            .check(
+                &schema_of(PipelineKind::NodeSettled),
+                &json!({"status": "done", "outcome": outcome}),
+            )
+            .unwrap_or_else(|why| panic!("{outcome} is refused: {why}"));
+    }
+    for kind in block["surfaces"]
+        .as_object()
+        .expect("entry 126 names its surfaces")
+        .keys()
+    {
+        kind.parse::<SurfaceKind>()
+            .unwrap_or_else(|why| panic!("{kind} is not a surface kind: {why}"));
+    }
+
+    let performed = ReadjustReceipt::Performed {
+        error: block["receipts"]["performed"]["error"]
+            .as_str()
+            .map(str::to_owned),
+        outstanding: vec!["b".into()],
+    };
+    let quiet = ReadjustReceipt::Performed {
+        error: None,
+        outstanding: Vec::new(),
+    };
+    let requested = ReadjustReceipt::Requested { request: 7 };
+    for (receipt, shown, code) in [
+        (&performed, "performed", 1),
+        (&quiet, "quiet", 0),
+        (&requested, "requested", 0),
+    ] {
+        let rendered: Value =
+            serde_json::from_str(&render_readjust(receipt, true).unwrap()).unwrap();
+        assert_eq!(rendered, block["receipts"][shown], "{shown}");
+        assert_eq!(receipt.exit_code(), code, "{shown}");
+    }
+    assert!(render_readjust(&performed, false)
+        .unwrap()
+        .contains("check verdict outstanding: b"));
+    let review = ReviewReceipt::Performed {
+        error: None,
+        outstanding: Vec::new(),
+    };
+    assert_eq!(
+        serde_json::from_str::<Value>(&render_review(&review, true).unwrap()).unwrap(),
+        json!({"state": "performed"})
+    );
+
+    assert_eq!(
+        block["bundle_versions"],
+        json!({"events": onepipeline::vocabulary::EVENTS_BUNDLE_VERSION, "planner_channel": DOCUMENT_VERSION})
+    );
+    assert!(
+        onepipeline::channel::layout::bundle_json().contains(&format!("\"{op}\"")),
+        "the planner-channel bundle does not carry `{op}`"
+    );
 }
 
 /// Entry 123's manager landings are this build's own: its six kinds are spelled by

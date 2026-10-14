@@ -196,6 +196,8 @@ pub enum Command {
     Next(TargetArgs),
     /// Discover review comments on the run’s unlanded drafts.
     Review(ReviewArgs),
+    /// Readjust the run’s drafts onto what has landed on the host.
+    Readjust(ReadjustArgs),
     /// Reply to a surface, with a verdict, graph edits, or both.
     Reply(ReplyArgs),
     /// Raise a surface to the planner.
@@ -1758,6 +1760,16 @@ pub struct TelemetryArgs {
 /// Arguments for an explicit, non-interactive review discovery pass.
 #[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
 pub struct ReviewArgs {
+    /// The recorded run.
+    pub run: String,
+    /// Print the receipt as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Arguments for an explicit, non-interactive readjustment of a run's drafts.
+#[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
+pub struct ReadjustArgs {
     /// The recorded run.
     pub run: String,
     /// Print the receipt as JSON.

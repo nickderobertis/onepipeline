@@ -11,14 +11,14 @@ owns the contract**, and `docs/contract.md` was amended to carry each ruling. Th
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22, 33, 35–40, 46–73, 76, 80, 84–88, 92, 93, 95, 98, 111, 113–115, 117, 119–121 are open**, except **52**, which entry 60
+Entries **10–22, 33, 35–40, 46–73, 76, 80, 84–88, 92, 93, 95, 98, 111, 113–115, 117, 119–126 are open**, except **52**, which entry 60
 supersedes: that proposal added a second manager-note op beside `context`, and 60
 collapses the two into one, so the shape lives in 60 and 52 keeps only the
 history that produced it. Each open entry states what the code does today and the
 proposal it is waiting on. Most are questions for a *producer* rather than for
 this crate, because `oneagentgraph` and `onevcs` are independent tools that expose
 general integration hooks only and nothing in them may know about this one; the
-rest — 36 to 40, 46 to 73, 80, 84 to 88, 92, 93, 95, 98, 111, 113 to 115, 117, 119–121 — are for the planner who owns the contract, and
+rest — 36 to 40, 46 to 73, 80, 84 to 88, 92, 93, 95, 98, 111, 113 to 115, 117, 119–126 — are for the planner who owns the contract, and
 name the sentence in it they would change. Entry 40 is for both: its plan-schema and event-kind
 halves are the contract owner's, and the two things it could not compile are
 `onevcs`'s. Entry 76 is for `onemessagebus` and for a node of this crate's own. An
@@ -10700,3 +10700,325 @@ fail-closed Stop decisions. `tests/contract.rs`'s
 `the_manager_landing_contract_is_what_the_divergence_record_names` reads the
 block above, and `src/flow.rs`'s own tests read the same sidecar examples
 through the declared types.
+
+## 124. Review discovery reads each repository's drafts together — OPEN
+
+**What the contract says.** Entry 122 reads feedback per draft. The approved
+readjustment task replaces those calls in `onepipeline review` with the sibling's
+combined standings and review read; `review-comments-read` keeps its existing
+payload shape.
+
+**Proposal (approved by the readjustment task).** The explicit discovery pass
+uses `onevcs::review_standings` over the drafts of each repository and root,
+passing no review marker so discovery can derive replies and rework state from
+the full feedback. Discovery takes each draft's feedback from that answer and
+journals it with the unchanged registered payload. A repository read that fails
+contributes no feedback from that repository, and the performed receipt reports
+the failure. View reads keep their existing per-draft operation.
+
+```json
+{
+  "verb": "review",
+  "discovery_read": "review_standings",
+  "record_kind": "review-comments-read",
+  "record_shape_changed": false,
+  "view_read": "review_comments"
+}
+```
+
+**What this build does.** `tests/e2e/review.rs` drives the compiled binary,
+real linked onevcs and real git with the GraphQL response delegated to
+onevcs-testing's remote double. The discovery journey asserts one
+`review_standings` ledger entry for two drafts and no `review_comments` entry,
+while retaining the feedback surfaces. The repository-read refusal journey
+asserts an unsuccessful batched read produces neither feedback records nor
+comment surfaces. The mixed-lineage journey holds the requested draft set. Additional journeys
+hold alias/origin normalization, separate roots, successful discovery alongside
+a failed repository, an unregistered host followed by recovery, and retained
+records lacking a root or naming a foreign change request. The adapter journey
+round-trips open, merged and closed states (including a deleted base), body,
+head, draft state and every checks verdict through the real onevcs CLI against
+the remote double's typed standings, and refuses a malformed query.
+`tests/contract.rs` holds the block above and the unchanged payload registration.
+
+## 125. Review draft republications defer their check watch — OPEN
+
+**What the contract says.** A first publication watches its checks. The approved
+readjustment task makes a review draft's republication settle at its push, with
+its verdict held for the next explicit trigger.
+
+**Proposal (approved by the task and its fallback amendment).** A republication
+adopts the recorded change request with `defer_checks`. Its engine outcome is
+`change-review-draft-unchecked`, its status is `done`, and its landing remains
+`unlanded`. A clean restack reads no description and writes none. Reworks and
+conflicted restacks keep their existing drafting. The distinct producer refusal
+`UnrecordedChangeHead` falls back to the existing watched publication on the
+same change request; a record naming a different branch stays a refusal.
+
+```json
+{
+  "deferred_outcome": "change-review-draft-unchecked",
+  "status": "done",
+  "landing": "unlanded",
+  "first_publication": "watched",
+  "republication": {"defer_checks": true, "adopt": true},
+  "fallback_refusal": "UnrecordedChangeHead",
+  "fallback": "watched",
+  "branch_mismatch": "refused",
+  "bundle_versions": {"events": "1.4.0", "planner_channel": "1.4.0"}
+}
+```
+
+**What this build does.** The private publication seam defers a recorded review
+republication, falls back only for the producer's missing-record refusal, and
+names that fallback on stderr. The rework journey drives the real binary and
+onevcs over real git and the fake host: first publications watch checks, while
+its rework and clean restack make no check-watch call. The cold-host journey
+continues from the Markdown store with no change-head record, reworks the
+same branch, observes the fallback, and holds the single original change request
+open as a draft. Unit tests hold the outcome, status and landing classifier;
+`tests/contract.rs` reads the block and the generated events bundle together.
+
+## 126. Nothing kept a stack of drafts true while people merged drafts on the host — OPEN
+
+**Proposal, for the planner who owns the contract: one verb, `onepipeline readjust RUN
+[--json]`, and its planner-channel op `readjust`; eight journal kinds, `node-landed`,
+`node-absorbed`, `change-reopened`, `node-readjusted`, `stack-landed-out-of-order`,
+`change-closed`, `node-checks-read` and `readjust-read-failed`; seven surface kinds;
+two outcome words, `change-review-draft-unchecked` (entry 125) and
+`merged-during-rework`; and a `readjust` restack cause.** A draft's placement was
+decided once, at dispatch, from the landings the run had recorded, and the run asked
+the host again only at its end; so the drafts above one a person merged kept targeting
+a landed branch, showing diffs full of merged work. The rule below is the approved
+design of `authoring:pr-feedback-rework` (node `op-readjust`, which owns it; `op-review`,
+`ui-relink` and `aio-adopt` restate it), and this build implements it.
+
+**Readjustment, run first by every trigger and by nothing else.** Every *draft* of the
+run — each lineage head on a repository with its lineage's change request, not recorded
+landed, absorbed or closed, in any status — is read in **one batched standings read
+per (normalized repository, root) group**: `review_standings` in `onepipeline review`,
+whose discovery then reads each draft's feedback out of that same answer, and
+`change_standings` everywhere else. Each answer is journalled once per change: merged
+into the root `node-landed {node, change_url, commit, detected_by: readjust, trigger}`,
+landing it, and `node-landed {…, detected_by: absorber-landed, via}` for what was
+absorbed into it; merged into another node's branch `node-absorbed {node, into,
+change_url, commit}` with a non-blocking `stack-merged-out-of-order`; merged into the
+root while unlanded ancestors' work rode along, `stack-landed-out-of-order {node,
+carried}` with a surface of that name; closed under a parent the same read reports
+merged, its base deleted, recovered — `reopen_change` restoring the parent's branch at
+its merged head, journalled `change-reopened {node, change_url, restored_base}`, the
+retarget then passing `remove_restored_base`; closed otherwise `change-closed {node,
+change_url}` with a non-blocking `change-closed`; merged into a branch neither the
+root nor any node's, **nothing journalled about the node** and a **blocking**
+`change-merged-elsewhere` question naming it, its change request, the merge commit and
+the branch, the node and everything depending on it readjusted by nothing until it is
+answered. A repository whose read failed journals `readjust-read-failed {repo, detail}`
+and its drafts are left exactly as they were; the trigger goes on with the rest. Every
+unlanded draft connected to a landed or absorbed node by same-repository dependency
+edges, in either direction, is then owed a readjustment, folded from the record.
+
+**Placement and the restack.** Each owed draft waits while it, or a dependency's
+lineage head, is in flight or itself owed one — so each parent's push precedes the
+restack of the draft above it — and is then placed by `stack::placement` over the
+fresh record (a landed dependency dropped, an absorbed one replaced by its absorber) and
+restacked by entry 121's procedure: `node-restack-started` with cause `readjust` — onto
+the root's branch at the landing commit for a draft placed on the root — a session on
+its own branch with the new base merged in at the open, a stack base advanced over the
+root before its remaining parents. Whatever the identity's `base_merge` policy, a
+session that opened clean on a base whose head its branch does not carry has that head
+merged into its worktree by the engine — `onevcs`'s `on-conflict` open merges only on a
+conflict or a host requiring up-to-date branches — and a conflict there is handed to the
+draft's worker exactly as one the open stopped on. A clean merge publishes with `defer_checks` and
+`adopt` and no drafting; a conflict is concluded by the draft's worker. After the push,
+and only then, one `retarget_change` moves the change request and writes its
+description with the Stack block rewritten between its markers from the body the read
+returned (`retarget: unchanged` where the host already targeted the base, and no write
+where the placement did not move); the change request stays a draft. `node-readjusted
+{node, from: {base, stack_parents}, to: {base, stack_parents}, cause, head,
+agent_dispatched, retarget: retargeted | unchanged | none, content: merged | pending}`
+is journalled ahead of the node's ordinary `node-settled`. A draft failed or parked
+holding its change request is retargeted at once with no merge (`content: pending`)
+and a non-blocking `readjust-pending` names `retry`, whose placement merges the base;
+a draft a person retargeted by hand is moved back, its `from` naming the replaced base,
+with `change-base-overridden`. A tree-identical republication that answers
+`NothingToPublish` puts its merge head on the origin with `preserve_branch` onto the
+same change request and settles `change-review-draft-unchecked`; one the origin refuses
+settles `failed`, records no readjustment, and stays owed. A retarget the host refuses
+leaves the pushed draft's settlement saying so, records no readjustment and leaves it
+owed, and the next trigger moves it — the host's base, as the latest read saw it,
+counted beside the record's. A reopen the origin or host refuses is said in the receipt
+(exit 1), records nothing and moves nothing of the still-closed draft until a later
+trigger's read recovers it, from a parent recorded landed when that read no longer
+carries the parent. A closed draft, and one merged into an unknown branch, is never
+restacked; once the question about the latter is answered — claimed and answered on
+the planner's queue, as every decision point is — the drafts above it are readjusted
+again.
+
+**Verdicts.** A republication of a review draft — a readjustment's, a restack's, a
+rework's and a repair's — settles `done` at its push as `change-review-draft-unchecked`
+(entry 125); a first publication still watches its checks. Every later trigger's read
+records `node-checks-read {node, head, verdict: pending | passed | passed-with-skipped
+| failed | none-required}` for each draft whose verdict is owed, and for a settled
+review draft whose head on the host moved past the recorded one — a cold host's case —
+once per head. A green verdict reads as `change-review-draft`; `failed` re-dispatches
+the node onto its same branch with the failed checks as its refusal, as a
+`checks-failed` publication's re-dispatch does; `pending` leaves it outstanding and is
+read again by the next trigger — a moved head read `pending` included, which then reads
+as `change-review-draft-unchecked` until a verdict is reached.
+`status`, `results`, and the `review` and `readjust` receipts name every draft whose
+verdict is outstanding.
+
+**Rework.** Applying a `rework` — by the driver or by a `reply` to a run nothing drives
+— readjusts first, so a node found landed is refused naming `add` and one absorbed is
+refused naming its absorber. The read immediately before a rework's republication
+continues that trigger, batched across the republications ready in one pass: a
+replacement whose change request a person merged after it was dispatched — into the
+root, into another node's branch, or into a branch this run does not know — publishes
+nothing, settles `failed` with `merged-during-rework`, keeps its work on its branch,
+and a non-blocking `merged-during-rework` names what goes on: `add`, the absorbing
+node, or the question about the unknown merge. A deferred republication whose change
+request this host's newest record says carries another branch is refused by `onevcs`
+before anything is pushed; it never falls back to a watched publication, settles the
+replacement `failed` saying so, and raises a non-blocking `finding` to the planner. A replacement placed anywhere
+but where its lineage's change request was drafted is retargeted after its push,
+journalled `node-readjusted` as above.
+
+**Triggers.** `trigger` names the one whose read found it: `review`, `readjust`,
+`rework` (applying one, or its republication), `placement` (a restack, or a placement
+of a lifecycle node on unlanded drafts at dispatch — read once per pass and once per
+node however long it is held) and `continuation` (a continuing launch and an adoption,
+after the store and journal are folded and before the first dispatch). Nothing polls:
+no timer, idle pass or interval flag reads anything, and `start` takes no interval.
+
+**The store.** A restack or readjustment in flight projects as the settlement it
+started from, an outcome as `change-review-draft` whether its verdict is read or not,
+and a clean restack's or readjustment's settlement that left its base and stack
+placement (its parents' branches and stack base) where they were writes no task; a
+landing, an absorption, a moved draft's base and stack, a recovery, a red verdict's
+repair and a rework's own fields are written. A cold host reads a draft's head off its
+branch on the origin and its verdict off its first trigger's read.
+
+**The host's calls, counted.** A readjustment's own calls are one batched standings read
+per group and one `retarget_change` or `reopen_change` call per affected change request,
+none bypassing `onevcs`; a retarget writes the description the driver's own batched
+read returned, which a whole-journal re-fold keeps, and a draft no such read answered is
+left owed rather than read alone. Inside each call the linked `onevcs` 0.51.2 — whose two calls
+are unchanged since 0.49.0 — makes its own: a
+`retarget_change` two single-change standings reads (before and after its write) and
+the repository's visibility read its write guard makes; a `reopen_change` two
+single-change standings reads, the same visibility read and the restore push. The
+restack's session open asks whether the host requires an up-to-date branch
+(`rules/branches/<base>`) and its visibility, as every continued session's base merge
+does.
+
+**The SDK.** `verbs::readjust(paths, session, timeout) -> Result<ReadjustReceipt>`,
+`verbs::render_readjust` and `ReadjustReceipt::exit_code` (the `review` verb's shape,
+exit 1 for a failed host read); `ReviewReceipt::Performed` gains `outstanding:
+Vec<String>`, omitted when empty — a **source-level break** for a consumer that
+constructs or exhaustively destructures it; `cli::Command::Readjust(ReadjustArgs)`;
+`channel::Command::Readjust {}` and `channel::layout::Op::Readjust`. The published
+documents: `schemas/events.json` stays at the unreleased `1.4.0` entry 125 raised it
+to and adds the eight kinds and the `readjust` cause; `schemas/planner-channel.json`
+rises from `1.3.0` to `1.4.0` for the op.
+
+**The host double, substituted.** The task names `onevcs-testing`'s remote double for
+these journeys, but that double is an in-process `RemoteHost`, and the compiled binary
+reaches a host only through `onevcs`'s `gh` subprocess (`ONEVCS_GH`), so it cannot drive
+that double. By the manager's ruling on this node, the journeys run on this repository's
+own `ONEVCS_GH` double, `fake-gh`. Every person move is made through its hidden `__person`
+entry: a squash or merge commit written onto the on-disk origin, the head kept or deleted
+with dependants retargeted or closed, a close, a retarget by hand, and a per-head check
+verdict. The host-call bounds are asserted on its recorded `gh` invocations. The review
+journeys keep reading feedback from `onevcs-testing`'s `FileHost` through `fake-gh`'s
+GraphQL adapter.
+
+**A test seam.** The idle journey shortens the idle claim interval through
+`ONEPIPELINE_IDLE_CLAIM_CHECK_SECONDS`, entry 119's seam; nothing an operator
+configures sets it.
+
+```json
+{
+  "verb": {"name": "readjust", "op": "readjust", "json_flag": "--json"},
+  "sdk_verbs": ["readjust", "render_readjust"],
+  "receipts": {
+    "performed": {"state": "performed", "error": "github.com/owner/other: the standings could not be read", "outstanding": ["b"]},
+    "quiet": {"state": "performed"},
+    "requested": {"state": "requested", "request": 7}
+  },
+  "triggers": ["review", "readjust", "rework", "placement", "continuation"],
+  "event_kinds": ["node-landed", "node-absorbed", "change-reopened", "node-readjusted", "stack-landed-out-of-order", "change-closed", "node-checks-read", "readjust-read-failed"],
+  "records": {
+    "node-landed": {"node": "a", "change_url": "https://github.com/owner/service/pull/1", "commit": "1f2e3d4c5b6a79881726354453627180918a7b6c", "detected_by": "readjust", "trigger": "readjust"},
+    "node-absorbed": {"node": "b", "into": "a", "change_url": "https://github.com/owner/service/pull/2", "commit": "2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d"},
+    "change-reopened": {"node": "b", "change_url": "https://github.com/owner/service/pull/2", "restored_base": "me/run/a"},
+    "node-readjusted": {"node": "b", "from": {"base": "me/run/a", "stack_parents": ["a"]}, "to": {"base": "main", "stack_parents": []}, "cause": ["a"], "head": "3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e", "agent_dispatched": false, "retarget": "retargeted", "content": "merged"},
+    "stack-landed-out-of-order": {"node": "b", "carried": ["a"]},
+    "change-closed": {"node": "a", "change_url": "https://github.com/owner/service/pull/1"},
+    "node-checks-read": {"node": "b", "head": "3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e", "verdict": "passed"},
+    "readjust-read-failed": {"repo": "github.com/owner/other", "detail": "the standings could not be read"}
+  },
+  "absorbed_landing": {"node": "b", "change_url": "https://github.com/owner/service/pull/2", "commit": "1f2e3d4c5b6a79881726354453627180918a7b6c", "detected_by": "absorber-landed", "trigger": "readjust", "via": "a"},
+  "detected_by": ["readjust", "absorber-landed"],
+  "retarget": ["retargeted", "unchanged", "none"],
+  "content": ["merged", "pending"],
+  "verdicts": ["pending", "passed", "passed-with-skipped", "failed", "none-required"],
+  "surfaces": {
+    "change-closed": false,
+    "stack-merged-out-of-order": false,
+    "stack-landed-out-of-order": false,
+    "readjust-pending": false,
+    "change-base-overridden": false,
+    "merged-during-rework": false,
+    "change-merged-elsewhere": true
+  },
+  "outcomes": ["change-review-draft-unchecked", "merged-during-rework"],
+  "restack_cause": "readjust",
+  "test_seam": "ONEPIPELINE_IDLE_CLAIM_CHECK_SECONDS",
+  "bundle_versions": {"events": "1.4.0", "planner_channel": "1.4.0"}
+}
+```
+
+**What this build does.** `tests/e2e/readjust.rs` drives every rule through the compiled
+binary and the real linked `onevcs` over a real origin on disk, with GitHub at
+`onevcs`'s `ONEVCS_GH` seam: the `fake-gh` double answers the batched standings read,
+the retarget and the reopen out of the change requests it holds, and a person's moves —
+a squash or merge commit written onto the origin, a head kept or deleted with the host
+retargeting or closing what was based on it, a close, a retarget by hand, a verdict on a
+head — are made through its hidden `__person` entry, which validates every argument
+before it writes and is recorded on no ledger. The journeys: case 1 with the head kept,
+deleted and retargeted, and deleted and closed (`a_parent_merged_*`); case 2
+(`one_of_several_parents_landing_*`); case 3 (`a_whole_lower_stack_landing_*`); a
+failed read, undriven and driven (`a_repository_whose_read_failed_*`,
+`a_driven_readjust_whose_read_fails_says_so`); the landings around a rework
+(`a_rework_after_a_landing_*`, `a_landing_during_a_rework_*`,
+`a_change_merged_during_its_own_rework_*`, `a_change_absorbed_during_its_own_rework_*`,
+`a_change_merged_elsewhere_during_its_own_rework_*`, `a_rework_of_a_node_merged_since_*`);
+the out-of-order merges (`a_draft_merged_into_its_parent_s_branch_*`,
+`a_draft_above_two_absorptions_*`, `a_draft_merged_into_the_root_ahead_*`,
+`a_failed_draft_is_retargeted_*`, `a_draft_retargeted_by_hand_*`,
+`a_draft_closed_unmerged_*`); the refusals (`a_refused_reopen_*`, `a_refused_retarget_*`,
+`a_tree_identical_republication_the_origin_refuses_*`,
+`a_republication_onto_a_draft_recorded_as_another_branch_s_*`) and a conflicted
+readjustment (`a_conflicted_readjustment_*`) and one under `base_merge: on-conflict`
+over a host not requiring up-to-date branches
+(`a_readjustment_merges_the_root_in_where_the_policy_merges_only_on_a_conflict`);
+deferred verdicts
+(`deferred_republications_*`, `every_deferred_verdict_word_*`,
+`a_cold_host_reads_a_moved_heads_pending_verdict_*`); store writes
+(`the_store_is_written_only_*`); a journey per trigger and the idle driver
+(`review_readjusts_before_discovery`, `a_restack_readjusts_before_it_starts`,
+`a_placement_at_dispatch_*`, `a_continuing_launch_*`, `an_adoption_*`,
+`an_idle_driver_asks_the_host_nothing`); the verb's requested receipt and its refusal
+beside another op (`a_driven_readjust_the_driver_cannot_answer_in_time_*`,
+`a_readjust_beside_another_op_is_refused`); the amendment's two-root grouping and
+unknown branch (`drafts_on_two_roots_*`, `a_draft_merged_into_an_unknown_branch_*`); a
+branch name read as its own repository's, for an absorption and a recovery
+(`drafts_merged_into_same_named_branches_*`, `drafts_closed_under_same_named_branches_*`);
+an absorption and its absorber's landing found by one read
+(`an_absorption_and_its_absorber_s_landing_*`); and a failed read holding a draft an
+earlier trigger left owed (`a_failed_read_leaves_a_draft_*`). The
+rework and restack journeys of entry 121 read a republication
+`change-review-draft-unchecked` at its push and `change-review-draft` once `readjust`
+reads it green. `tests/contract.rs`'s `the_readjustment_is_what_the_divergence_record_names`
+holds the block above against the public types, the registered documents and the
+published bundles.
