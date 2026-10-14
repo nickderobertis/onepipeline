@@ -1861,6 +1861,22 @@ mod tests {
     use super::*;
     use crate::plan::{Goal, PLAN_SCHEMA_VERSION};
 
+    /// An override that makes the graph one its schema refuses is refused naming the key path
+    /// of the field at fault, as the overridden document carries no line to name instead.
+    #[test]
+    fn an_override_the_graph_schema_refuses_is_named_by_its_key_path() {
+        let graph = concat!(env!("CARGO_MANIFEST_DIR"), "/graphs/dag-scope.yaml");
+        let sets = ["members.check-in.kind=nonsense".to_owned()];
+        let said = validate_graph_sets(graph, &sets, "dag-scope")
+            .expect_err("a member kind the schema does not have is refused")
+            .to_string();
+        assert!(said.contains(graph), "{said}");
+        assert!(
+            said.contains("members.check-in.kind: unknown variant `nonsense`"),
+            "{said}"
+        );
+    }
+
     /// A node identity is what a node has, and nothing else can be made into
     /// one.
     ///

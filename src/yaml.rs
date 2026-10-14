@@ -213,4 +213,50 @@ mod tests {
             );
         }
     }
+
+    /// Each loader's refusal of `text`, as the loader says it, beside the file it read.
+    fn refusals(dir: &Path, text: &str) -> Vec<(PathBuf, String)> {
+        let refused = |path: PathBuf, error: Option<crate::error::Error>| {
+            let said = error
+                .unwrap_or_else(|| panic!("{} is read: {text:?}", path.display()))
+                .to_string();
+            (path, said)
+        };
+        let rules = written(&dir.join("rules"), "executors.yaml", text);
+        let launch = written(&dir.join("launch"), "launch.yaml", text);
+        let maintenance = written(&dir.join("maintenance"), "maintenance.yaml", text);
+        let templates = written(&dir.join("templates"), "templates.yaml", text);
+        vec![
+            refused(rules.clone(), ExecutorRules::load(&rules).err()),
+            refused(launch.clone(), LaunchConfig::load(&launch).err()),
+            refused(
+                maintenance.clone(),
+                MaintenanceConfig::load("--maintenance-config", &maintenance).err(),
+            ),
+            refused(
+                templates,
+                crate::templates::Registry::load(Some(&dir.join("templates"))).err(),
+            ),
+        ]
+    }
+
+    /// A document refused for its syntax, before any key exists, is refused naming the file,
+    /// what was wrong and the line and column it went wrong at; one carrying an unknown key
+    /// names the file and the key.
+    #[test]
+    fn a_malformed_or_unknown_key_document_is_refused_naming_the_file_and_where() {
+        let scratch =
+            std::env::temp_dir().join(format!("onepipeline-yaml-refusals-{}", crate::sys::pid()));
+        let _ = std::fs::remove_dir_all(&scratch);
+        for (path, said) in refusals(&scratch.join("syntax"), "[\n") {
+            assert!(said.contains(&path.display().to_string()), "{said}");
+            assert!(said.contains("at line 1, column 1"), "{said}");
+            assert!(said.contains("unclosed bracket"), "{said}");
+        }
+        for (path, said) in refusals(&scratch.join("unknown"), "mx_load1: 8\n") {
+            assert!(said.contains(&path.display().to_string()), "{said}");
+            assert!(said.contains("unknown field `mx_load1`"), "{said}");
+        }
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
 }
