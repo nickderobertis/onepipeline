@@ -1007,9 +1007,12 @@ onevcs-testing = "0.19.2"
 # **0.6.1 reads and writes the store's YAML through `serde-saphyr`**, the reader
 # the run's write-back shadow documents (`src/writeback.rs`) are read back and
 # edited by.
-onetaskgraph-core = "=0.6.1"
-onetaskgraph-plugin-api = "=0.6.1"
-onetaskgraph-local-md = "=0.6.1"
+#
+# **0.7.0 caches every vouched project and document read**, a breaking minor of
+# the plugin API whose `SourceName` `src/plan.rs` exposes.
+onetaskgraph-core = "=0.7.0"
+onetaskgraph-plugin-api = "=0.7.0"
+onetaskgraph-local-md = "=0.7.0"
 # Not engines: two crates both members use, pinned once so they build against one version.
 # `just engines-current` reads only the engines its script names.
 sha2 = "0.10"
