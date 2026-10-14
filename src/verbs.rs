@@ -1750,13 +1750,13 @@ pub enum ReviewReceipt {
     },
 }
 
-impl From<crate::review::Answered> for ReviewReceipt {
-    fn from(answered: crate::review::Answered) -> Self {
+impl From<crate::trigger::Answered> for ReviewReceipt {
+    fn from(answered: crate::trigger::Answered) -> Self {
         match answered {
-            crate::review::Answered::Performed { error, outstanding } => {
+            crate::trigger::Answered::Performed { error, outstanding } => {
                 Self::Performed { error, outstanding }
             }
-            crate::review::Answered::Requested(request) => Self::Requested { request },
+            crate::trigger::Answered::Requested(request) => Self::Requested { request },
         }
     }
 }
@@ -1777,7 +1777,7 @@ pub fn review(
     session: &str,
     timeout: std::time::Duration,
 ) -> Result<ReviewReceipt> {
-    crate::review::requested(paths, session, timeout, crate::review::Asked::Review)
+    crate::trigger::requested(paths, session, timeout, crate::trigger::Asked::Review)
         .map(ReviewReceipt::from)
 }
 
@@ -1842,13 +1842,13 @@ pub enum ReadjustReceipt {
     },
 }
 
-impl From<crate::review::Answered> for ReadjustReceipt {
-    fn from(answered: crate::review::Answered) -> Self {
+impl From<crate::trigger::Answered> for ReadjustReceipt {
+    fn from(answered: crate::trigger::Answered) -> Self {
         match answered {
-            crate::review::Answered::Performed { error, outstanding } => {
+            crate::trigger::Answered::Performed { error, outstanding } => {
                 Self::Performed { error, outstanding }
             }
-            crate::review::Answered::Requested(request) => Self::Requested { request },
+            crate::trigger::Answered::Requested(request) => Self::Requested { request },
         }
     }
 }
@@ -1869,7 +1869,7 @@ pub fn readjust(
     session: &str,
     timeout: std::time::Duration,
 ) -> Result<ReadjustReceipt> {
-    crate::review::requested(paths, session, timeout, crate::review::Asked::Readjust)
+    crate::trigger::requested(paths, session, timeout, crate::trigger::Asked::Readjust)
         .map(ReadjustReceipt::from)
 }
 

@@ -114,6 +114,7 @@ mod summary;
 mod supersession;
 mod sys;
 mod taskgraph;
+mod trigger;
 mod unpublished;
 mod unwatched;
 mod vcs;
