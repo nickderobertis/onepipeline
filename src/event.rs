@@ -345,6 +345,22 @@ pub enum PipelineKind {
     /// it the driver dispatches and publishes nothing, and ends once its
     /// dispatches in flight have settled unpublished. Entry 119 records it.
     DriverSuperseded,
+    /// A manager landing registered its ownership and subjects with its flow,
+    /// before it drafted, forwarded or touched anything. Kept in the landing's
+    /// own journal, and mirrored into every run it was associated with.
+    LandingRegistered,
+    /// A manager landing started drafting its change request's body.
+    LandingDrafting,
+    /// A manager landing started the linked `onevcs` verb it forwards.
+    LandingStarted,
+    /// A manager landing's forwarded verb ended with status `0`.
+    LandingFinished,
+    /// A manager landing's forwarded verb ended non-zero, or its progress could
+    /// not be relayed.
+    LandingRefused,
+    /// A manager landing's process was proved gone with no ending recorded,
+    /// written by the reader that proved it.
+    LandingDied,
 }
 
 impl PipelineKind {
@@ -397,6 +413,12 @@ impl PipelineKind {
             Self::NodeRestacked => "node-restacked",
             Self::DriverTakenOver => "driver-taken-over",
             Self::DriverSuperseded => "driver-superseded",
+            Self::LandingRegistered => "landing-registered",
+            Self::LandingDrafting => "landing-drafting",
+            Self::LandingStarted => "landing-started",
+            Self::LandingFinished => "landing-finished",
+            Self::LandingRefused => "landing-refused",
+            Self::LandingDied => "landing-died",
         }
     }
 
@@ -472,6 +494,12 @@ pub const PIPELINE_KINDS: &[PipelineKind] = &[
     PipelineKind::NodeRestacked,
     PipelineKind::DriverTakenOver,
     PipelineKind::DriverSuperseded,
+    PipelineKind::LandingRegistered,
+    PipelineKind::LandingDrafting,
+    PipelineKind::LandingStarted,
+    PipelineKind::LandingFinished,
+    PipelineKind::LandingRefused,
+    PipelineKind::LandingDied,
 ];
 
 /// The id of a stored artifact.

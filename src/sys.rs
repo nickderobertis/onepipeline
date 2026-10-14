@@ -1581,6 +1581,67 @@ pub fn open_locked_append(path: &std::path::Path) -> std::io::Result<std::fs::Fi
     platform_open_locked_append(path)
 }
 
+/// [`open_locked_append`] without the wait: `None` while another appender holds
+/// the file, so a caller can say it is about to wait before it does.
+pub fn try_open_locked_append(path: &std::path::Path) -> std::io::Result<Option<std::fs::File>> {
+    platform_try_open_locked_append(path)
+}
+
+// llmlint: ignore-block[changed_behavior_has_e2e] the contended answer of both arms is
+// what `tests/e2e/manager_landings.rs`'s two registration-lock journeys drive, by holding
+// the lock while the compiled binary asks for it. What has no journey is an open or lock
+// that fails outright, a host condition no portable journey stages, and the Windows arm's
+// contention, for the reason the blocking Windows arm below gives: the holder that
+// journey needs can only be written on Unix, and this host cannot link the Windows target
+// to see a Windows journey pass or fail.
+#[cfg(unix)]
+fn platform_try_open_locked_append(
+    path: &std::path::Path,
+) -> std::io::Result<Option<std::fs::File>> {
+    use std::os::unix::io::AsRawFd;
+
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .read(true)
+        .open(path)?;
+    // SAFETY: the descriptor is one this function just opened and still owns, and
+    // `flock` borrows no memory. A non-blocking request does not wait, so it has
+    // no wait for a signal to interrupt.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        return Ok(Some(file));
+    }
+    let failed = std::io::Error::last_os_error();
+    if failed.kind() == std::io::ErrorKind::WouldBlock {
+        return Ok(None);
+    }
+    Err(failed)
+}
+
+/// One attempt at the share-mode exclusion the waiting arm below retries: a
+/// sharing violation is another appender holding the file.
+#[cfg(windows)]
+fn platform_try_open_locked_append(
+    path: &std::path::Path,
+) -> std::io::Result<Option<std::fs::File>> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION;
+    use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(path)
+    {
+        Ok(file) => Ok(Some(file)),
+        Err(e) if e.raw_os_error() == Some(ERROR_SHARING_VIOLATION as i32) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+// llmlint: ignore-end[changed_behavior_has_e2e]
+
 /// `flock(2)`: an advisory exclusive lock, released when the description closes
 /// — including when the process holding it dies, which is the case that matters
 /// here, since a writer dying mid-record is what leaves the fragment.
