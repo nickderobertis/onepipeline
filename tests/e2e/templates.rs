@@ -513,6 +513,12 @@ fn the_host_root_is_the_flag_then_the_variable_then_the_schema_12_key_and_adopt_
             "schema_version: 12\nrequire_rendered:\n",
             "`require_rendered` is present and names nothing",
         ),
+        // Only `true` and `false` are booleans: a YAML 1.1 `yes` is a string, refused where it
+        // stands rather than read as true.
+        (
+            "schema_version: 12\nrequire_rendered: yes\n",
+            "invalid type: string \"yes\", expected true or false at line 2, column 1",
+        ),
     ] {
         write(&world.root.join("refused.yaml"), document);
         world

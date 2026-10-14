@@ -1,7 +1,11 @@
 # A redacted copy of a real host file: this host's template registration
 # (`templates/templates.yaml`), read by `src/yaml.rs`'s real-document test.
 # It held no employer, workplace, private repository, path, host, user, email or internal
-# URL to replace, so every byte below this header is the host's.
+# URL to replace, so every byte below this header is the host's: its comments describe that
+# host's own scripts and suites, not this repository, and are kept as written.
+# llmlint: ignore-file[comments_earn_their_place] the comments below this header are the
+# host file's own, copied byte for byte because the fixture is the real document its test
+# reads; rewriting them would make it a document no host holds.
 # This host's own template names, registered for `onepipeline template`. The host root is
 # this directory: `scripts/onepipeline.sh` and `scripts/dispatch-env.sh` export it as
 # `ONEPIPELINE_TEMPLATE_ROOT`. `plan-task` is the engine's own and is pre-registered, so it

@@ -1,6 +1,8 @@
 //! YAML read and written as the engine reads and writes it: the same `serde-saphyr` options
 //! as its own crate-private reader, so a document a test or a double writes, and one it reads
-//! back out of a run, reads here exactly as it reads in the code under test.
+//! back out of a run, reads here exactly as it reads in the code under test. The engine's
+//! `src/yaml.rs` holds this copy to its own in
+//! `the_test_support_reader_and_writer_are_the_engines`.
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;

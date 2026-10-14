@@ -75,7 +75,6 @@ mod tests {
         blocks
     }
 
-    /// A directory of this test's own, holding `file` as `text`.
     fn written(dir: &Path, file: &str, text: &str) -> PathBuf {
         std::fs::create_dir_all(dir).expect("a scratch directory");
         let path = dir.join(file);
@@ -258,5 +257,33 @@ mod tests {
             assert!(said.contains("unknown field `mx_load1`"), "{said}");
         }
         let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// `onepipeline-testfakes` reads and writes YAML for the tests and the doubles with its own
+    /// copy of these options, as the engine's are private to it. Each input below is one an
+    /// option decides — a YAML 1.1 boolean word, a `<<` key, a syntax error's one-line refusal,
+    /// a string past the folding width — so a copy that drifted reads or writes one of them
+    /// differently, and fails here.
+    #[test]
+    fn the_test_support_reader_and_writer_are_the_engines() {
+        for text in ["on: yes\nflag: true\n", "<<: {a: 1}\nb: 2\n", "[\n"] {
+            assert_eq!(
+                onepipeline_testfakes::yaml::from_str::<Value>(text),
+                super::from_str::<Value>(text),
+                "the test support reads {text:?} differently"
+            );
+        }
+        assert_eq!(
+            super::from_str::<Value>("on: yes\nflag: true\n<<: {a: 1}\n"),
+            Ok(json!({"on": "yes", "flag": true, "<<": {"a": 1}}))
+        );
+        let long = json!({"title": "a title well past the width a folding writer folds at, \
+                                    which stays on the one line it was written on"});
+        let written = super::to_string(&long).expect("it writes");
+        assert_eq!(
+            onepipeline_testfakes::yaml::to_string(&long),
+            Ok(written.clone())
+        );
+        assert_eq!(written.lines().count(), 1, "{written}");
     }
 }
