@@ -2616,6 +2616,14 @@ pub(crate) fn status_reporting(view: &RunView, providers: Providers) -> String {
                 out.push_str(&format!("  {}: {reworked}\n", one_line(node)));
             }
         }
+        // What people merging drafts on the host did to the stack, and what the run
+        // did about it: how each landing was found, what was absorbed into another
+        // draft, where each draft was readjusted onto, and whose verdict is owed.
+        for id in statuses.keys() {
+            for said in readjust_phrases(&view.state, id) {
+                out.push_str(&format!("  {id}: {said}\n"));
+            }
+        }
         for (id, node_status) in &statuses {
             if *node_status != NodeStatus::Done {
                 continue;
@@ -4389,6 +4397,9 @@ pub fn results(view: &RunView) -> String {
         if let Some(restacked) = restack_phrase(&view.state, &node.id) {
             out.push_str(&format!(" — {restacked}"));
         }
+        for said in readjust_phrases(&view.state, &node.id) {
+            out.push_str(&format!(" — {said}"));
+        }
         out.push('\n');
         if let Some(title) = unverified_title_phrase(&view.state, &node.id) {
             out.push_str(&format!("      {title}\n"));
@@ -4522,6 +4533,76 @@ fn rework_phrase(state: &RunState, id: &str) -> Option<String> {
         one_line(&rework.replacement),
         one_line(&rework.reason)
     ))
+}
+
+/// What readjustment found and did about a node, each a phrase both views print:
+/// how its landing was found, the draft it was absorbed into, where its last
+/// readjustment moved it and why, and a check verdict still owed.
+fn readjust_phrases(state: &RunState, id: &str) -> Vec<String> {
+    let mut said = Vec::new();
+    if let Some(landed) = state.landed_how.get(id) {
+        said.push(match (&landed.detected_by, &landed.via) {
+            (crate::payload::LandingDetection::AbsorberLanded, Some(via)) => format!(
+                "landed with {} at {}, which it was merged into",
+                one_line(via),
+                one_line(&landed.commit)
+            ),
+            _ => format!(
+                "landed at {}, found merged on the host by a readjustment",
+                one_line(&landed.commit)
+            ),
+        });
+    }
+    if let Some(into) = state.absorbed.get(id) {
+        if !state.landed_how.contains_key(id) {
+            said.push(format!(
+                "merged into {}'s branch, and lands only with it",
+                one_line(into)
+            ));
+        }
+    }
+    if let Some(readjusted) = state.readjusted.get(id) {
+        let onto = if readjusted.to.stack_parents.is_empty() {
+            format!("the root {}", one_line(&readjusted.to.base))
+        } else {
+            format!(
+                "{} ({})",
+                one_line(&readjusted.to.base),
+                readjusted
+                    .to
+                    .stack_parents
+                    .iter()
+                    .map(|parent| one_line(parent))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        let content = match readjusted.content {
+            crate::payload::ReadjustContent::Merged => "",
+            crate::payload::ReadjustContent::Pending => ", nothing merged yet: `retry` merges it",
+        };
+        said.push(format!(
+            "readjusted onto {onto} from {} after {} landed or merged, change request {}{content}",
+            one_line(&readjusted.from.base),
+            readjusted
+                .cause
+                .iter()
+                .map(|cause| one_line(cause))
+                .collect::<Vec<_>>()
+                .join(", "),
+            match readjusted.retarget {
+                crate::payload::RetargetWord::Retargeted => "retargeted",
+                crate::payload::RetargetWord::Unchanged => "already on it",
+                crate::payload::RetargetWord::None => "not moved",
+            }
+        ));
+    }
+    if state.outcomes.get(id).map(String::as_str) == Some(crate::vcs::REVIEW_DRAFTED_UNCHECKED)
+        && !state.superseded.contains_key(id)
+    {
+        said.push("check verdict outstanding until the next trigger reads it".to_owned());
+    }
+    said
 }
 
 /// What the last restack a node published did — the parent it was brought onto,

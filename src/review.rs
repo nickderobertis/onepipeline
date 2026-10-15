@@ -181,7 +181,21 @@ fn location(comment: &ReviewComment) -> String {
     }
 }
 
-pub(crate) fn pass(paths: &RunPaths, state: &RunState, journal: &mut Journal) -> Result<()> {
+/// The pass `onepipeline review`: a readjustment first, whose one batched read per
+/// repository and root carries every draft's review feedback, and then discovery from
+/// those reads.
+pub(crate) fn pass(
+    paths: &RunPaths,
+    projected: &mut crate::checkpoint::Projected,
+    journal: &mut Journal,
+) -> Result<()> {
+    let detection = crate::readjust::run(
+        paths,
+        journal,
+        projected,
+        crate::payload::ReadjustTrigger::Review,
+    )?;
+    let state: &RunState = projected;
     let channel = ChannelState::new(paths);
     // Include the queue log: a crash after push and before the journal append must
     // not send the same revision a second time.
@@ -212,12 +226,29 @@ pub(crate) fn pass(paths: &RunPaths, state: &RunState, journal: &mut Journal) ->
             }
         }
     }
-    let mut failures = Vec::new();
-    for (node, url) in drafts(state) {
-        let read = match crate::vcs::review_comments(&url) {
+    // A repository whose drafts could not even be grouped for a read failed with no
+    // draft's read to carry it; every other failure is said per draft below.
+    let mut failures: Vec<String> = detection
+        .failures
+        .iter()
+        .filter(|(repo, _)| {
+            !detection.reviews.iter().any(|(node, _, read)| {
+                read.is_err()
+                    && state.graph.get(node).and_then(|node| node.repo.as_deref())
+                        == Some(repo.as_str())
+            })
+        })
+        .map(|(repo, detail)| format!("{repo}: {detail}"))
+        .collect();
+    for (node, url, read) in detection.reviews {
+        let node = node.as_str();
+        let read = match read {
             Ok(read) => read,
             Err(error) => {
-                failures.push(format!("{node} ({url}): {error}"));
+                let said = format!("{node} ({url}): {error}");
+                if !failures.contains(&said) {
+                    failures.push(said);
+                }
                 continue;
             }
         };
@@ -284,84 +315,6 @@ pub(crate) fn lines(comments: &BTreeMap<String, Vec<Comment>>) -> String {
         }
     }
     text
-}
-
-pub(crate) fn requested(
-    paths: &RunPaths,
-    session: &str,
-    timeout: std::time::Duration,
-) -> Result<crate::verbs::ReviewReceipt> {
-    let view = crate::views::RunView::open(paths)?;
-    let driven = matches!(
-        view.liveness(),
-        crate::views::DriverLiveness::Driving | crate::views::DriverLiveness::Parked
-    );
-    if !driven {
-        if !view.launch.owned_by(session) {
-            return Err(Error::NotOwned {
-                run: paths.run.clone(),
-                owner: view.launch.owner_label(session),
-            });
-        }
-        let _lock = crate::ledger::OwnershipLock::acquire(paths, "review")?;
-        let state = crate::checkpoint::fold_and_checkpoint(paths);
-        return match pass(paths, &state, &mut Journal::open(paths)) {
-            Ok(()) => Ok(crate::verbs::ReviewReceipt::Performed { error: None }),
-            Err(Error::Sibling { message, .. }) => Ok(crate::verbs::ReviewReceipt::Performed {
-                error: Some(message),
-            }),
-            Err(error) => Err(error),
-        };
-    }
-    let deadline = || {
-        std::time::Instant::now()
-            .checked_add(timeout)
-            .ok_or_else(|| {
-                Error::Invalid("review reply timeout is too large for this host's clock".to_owned())
-            })
-    };
-    deadline()?;
-    failpoint("before-submit")?;
-    let channel = ChannelState::new(paths);
-    let id = match crate::engine::accept_as(
-        paths,
-        &channel,
-        crate::channel::Author::planner(),
-        &[crate::channel::Command::Review {}],
-        "review",
-    )? {
-        crate::engine::Accepted::Queued(id) => id,
-        crate::engine::Accepted::NothingIsDriving(_lock) => {
-            // The driver may have ended between the liveness read and submission.
-            if !view.launch.owned_by(session) {
-                return Err(Error::NotOwned {
-                    run: paths.run.clone(),
-                    owner: view.launch.owner_label(session),
-                });
-            }
-            let state = crate::checkpoint::fold_and_checkpoint(paths);
-            return match pass(paths, &state, &mut Journal::open(paths)) {
-                Ok(()) => Ok(crate::verbs::ReviewReceipt::Performed { error: None }),
-                Err(Error::Sibling { message, .. }) => Ok(crate::verbs::ReviewReceipt::Performed {
-                    error: Some(message),
-                }),
-                Err(error) => Err(error),
-            };
-        }
-    };
-    let deadline = deadline()?;
-    loop {
-        if let Some(outcome) = channel.outcome_of(id) {
-            return Ok(crate::verbs::ReviewReceipt::Performed {
-                error: (!outcome.applied)
-                    .then(|| outcome.reason.unwrap_or_else(|| "review failed".to_owned())),
-            });
-        }
-        if std::time::Instant::now() >= deadline {
-            return Ok(crate::verbs::ReviewReceipt::Requested { request: id });
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
 }
 
 /// Test-only crash seam compiled into the debug binary driven by the journeys.

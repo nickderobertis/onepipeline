@@ -558,6 +558,10 @@ pub struct Frontier {
     /// the run's record says: what a `rework` is refused over beside
     /// [`in_flight`](Self::in_flight), which only the loop knows.
     pub restacking: BTreeSet<String>,
+    /// Each node whose change request was merged into another node's branch, and that
+    /// node: a `rework` of one is refused naming it.
+    // llmlint: ignore[invalid_states_unrepresentable] both are node ids, the plain `String` every neighbouring map of this struct keys by — `landings`, `branches`, `superseded` — validated where the graph took the node and copied from `RunState::absorbed`, which folds them off `node-absorbed`; a node-id newtype on this one field would disagree with each of them.
+    pub absorbed: BTreeMap<String, String>,
 }
 
 /// What an edit's overrides are checked against, read off the launch record
@@ -1471,6 +1475,9 @@ fn compile_into(
         Command::Review { .. } => Err(refuse(
             "review discovery must be requested alone".to_owned(),
         )),
+        Command::Readjust { .. } => {
+            Err(refuse("a readjustment must be requested alone".to_owned()))
+        }
         Command::Add { node } => compile_add(graph, node),
         Command::Drop {
             id,
@@ -2622,6 +2629,12 @@ fn compile_rework(
         return Err(refuse(format!(
             "rework: node '{id}''s change landed, so there is no open change request to rework; \
              build on the landed work with `add`"
+        )));
+    }
+    if let Some(into) = frontier.absorbed.get(id) {
+        return Err(refuse(format!(
+            "rework: node '{id}''s change request was merged into the branch of '{into}', so its \
+             work is in '{into}''s draft now; rework '{into}' instead"
         )));
     }
     let Some(branch) = frontier.branches.get(id).cloned() else {

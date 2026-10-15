@@ -4,12 +4,12 @@
     {
       "name": "help",
       "toggles": {},
-      "hash": "5b091fe443fd25a0512c61102d9c07a941dadf91429a7df00502ad7d8d3eefae"
+      "hash": "e5b87c0e57bf97c54ca73c0dd99a858e671d143e06d02114b5c3a3186fe189b3"
     },
     {
       "name": "monitor",
       "toggles": {},
-      "hash": "2ecab6b5153af6be643599f3012854f2f55ad772a00d992ddbdff4064d8ef5ff"
+      "hash": "d0d98965da1979d3986c5ccaa861ea3cae35292d1e1200fc71211d70f97a4387"
     },
     {
       "name": "results",

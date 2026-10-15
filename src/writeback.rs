@@ -1150,12 +1150,28 @@ fn snapshot_of(
     let Ok(project) = launch.project.parse() else {
         return None;
     };
+    // A draft being restacked or readjusted is projected as the settlement it started
+    // from, and a deferred verdict as the review draft it will read as: neither its
+    // merge's head, its session nor its unread verdict is the board's to hold, so a
+    // clean restack, a clean readjustment and a verdict read write no task.
+    let mut statuses = statuses.clone();
+    for node in state.restacking.keys() {
+        statuses.insert(node.clone(), NodeStatus::Done);
+    }
+    let mut outcomes = state.outcomes.clone();
+    for outcome in outcomes.values_mut() {
+        if outcome == crate::vcs::REVIEW_DRAFTED_UNCHECKED {
+            crate::vcs::REVIEW_DRAFTED.clone_into(outcome);
+        }
+    }
+    let mut dispatches = dispatches(paths, state);
+    dispatches.retain(|node, _| !state.restacking.contains_key(node));
     Some(Snapshot {
         project,
         dir: paths.dir.join("writeback"),
         nodes: all_nodes(paths, state),
-        statuses: statuses.clone(),
-        outcomes: state.outcomes.clone(),
+        statuses,
+        outcomes,
         landings: state.landings.clone(),
         landing_commits: state.landing_commits.clone(),
         change_urls: state.change_urls.clone(),
@@ -1190,7 +1206,7 @@ fn snapshot_of(
             })
             .unwrap_or_default(),
         claim,
-        dispatches: dispatches(paths, state),
+        dispatches,
         driver,
         term_scope: crate::boundary::of_run(&crate::boundary::plan_now(state)).scope,
     })
@@ -4062,20 +4078,65 @@ fn all_nodes(paths: &RunPaths, state: &RunState) -> BTreeMap<String, Node> {
 }
 
 fn settlements(paths: &RunPaths) -> BTreeMap<String, Value> {
-    let mut found = BTreeMap::new();
+    let mut found: BTreeMap<String, Value> = BTreeMap::new();
+    // The nodes whose next settlement ends a restack or a readjustment no agent turn
+    // was spent on: their content did not change.
+    let mut clean: BTreeSet<String> = BTreeSet::new();
     for event in crate::journal::read(&paths.journal()) {
-        if event.source == Source::Pipeline
-            && event.kind.0 == crate::journal::PipelineKind::NodeSettled.as_str()
-        {
-            if let Some(node) = event.labels.node.as_ref() {
-                // The settlement as the node reached it: which launch read it back from the
-                // store is this run's record, and the board's settlement is what the next
-                // launch continues — the same fields, whoever carried them.
-                let mut settlement = event.payload;
-                settlement.remove("continued");
-                found.insert(node.clone(), Value::Object(settlement));
-            }
+        if event.source != Source::Pipeline {
+            continue;
         }
+        let Some(node) = event.labels.node.as_ref() else {
+            continue;
+        };
+        let kind = event.kind.0.as_str();
+        if kind == crate::journal::PipelineKind::NodeRestacked.as_str()
+            || kind == crate::journal::PipelineKind::NodeReadjusted.as_str()
+        {
+            if event.payload.get("agent_dispatched") == Some(&Value::Bool(false)) {
+                clean.insert(node.clone());
+            }
+            continue;
+        }
+        if kind != crate::journal::PipelineKind::NodeSettled.as_str() {
+            continue;
+        }
+        // The settlement as the node reached it: which launch read it back from the
+        // store is this run's record, and the board's settlement is what the next
+        // launch continues — the same fields, whoever carried them.
+        let mut settlement = event.payload;
+        settlement.remove("continued");
+        // A clean restack or readjustment that left the draft where it was moves only
+        // its head and its unread verdict, and neither is the board's to hold: a cold
+        // host reads the head off the branch on the origin and the verdict off the next
+        // batched read, so the task is not written for it. One that moved the draft's
+        // base or stack is.
+        let placed = |settled: &Map<String, Value>| {
+            settled.get("stack").map(|stack| {
+                let mut stack = stack.clone();
+                if let Some(parents) = stack.get_mut("parents").and_then(Value::as_array_mut) {
+                    for parent in parents {
+                        // Where it stands is its branch: a parent's head moves with every
+                        // push, and its node with every rework of that same branch.
+                        if let Some(parent) = parent.as_object_mut() {
+                            parent.remove("head");
+                            parent.remove("node");
+                        }
+                    }
+                }
+                stack
+            })
+        };
+        let unmoved = |before: &Value| {
+            ["base", "status", "branch", "change_url", "landing"]
+                .iter()
+                .all(|key| before.get(*key) == settlement.get(*key))
+                && before.as_object().map(placed) == Some(placed(&settlement))
+        };
+        if clean.remove(node) && found.get(node).is_some_and(unmoved) {
+            continue;
+        }
+        found.insert(node.clone(), Value::Object(settlement));
     }
     found
 }
