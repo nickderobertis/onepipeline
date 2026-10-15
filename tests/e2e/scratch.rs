@@ -679,6 +679,7 @@ fn retry_retains_a_new_ending_then_undriven_success_removes_the_tree() {
 
 /// A run made live again reads as what it is now: the kept notice and its discard
 /// instruction, which the verb would refuse, wait for the run's next ending.
+#[cfg(unix)]
 #[test]
 fn a_run_made_live_again_shows_no_scratch_notice_until_it_ends_again() {
     for partly_discarded in [false, true] {
@@ -686,6 +687,7 @@ fn a_run_made_live_again_shows_no_scratch_notice_until_it_ends_again() {
     }
 }
 
+#[cfg(unix)]
 fn made_live_again_after(partly_discarded: bool) {
     use std::os::unix::fs::PermissionsExt;
     let world = World::new(if partly_discarded {
@@ -748,6 +750,7 @@ fn made_live_again_after(partly_discarded: bool) {
     assert_eq!(latest["dirs"].as_array().unwrap().len(), 2);
 }
 
+#[cfg(unix)]
 fn partly_discard(world: &World, run: &str, blocked: &std::path::Path) {
     use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(blocked).unwrap();
