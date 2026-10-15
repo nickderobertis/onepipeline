@@ -1099,8 +1099,14 @@ impl World {
 
     /// Read this world's project tasks back through the store the engine links.
     pub fn store_tasks(&self, project: &str) -> Vec<Value> {
+        self.store_tasks_with(&[], project)
+    }
+
+    /// The same, with `settings` layered over this world's own as
+    /// [`World::store_call_with`] layers them — for a source whose credential is not one.
+    pub fn store_tasks_with(&self, settings: &[(&str, &str)], project: &str) -> Vec<Value> {
         let id = global(project);
-        self.store_call(|engine| async move {
+        self.store_call_with(settings, |engine| async move {
             let mut items = Vec::new();
             let mut token = None;
             let mut seen = std::collections::HashSet::new();

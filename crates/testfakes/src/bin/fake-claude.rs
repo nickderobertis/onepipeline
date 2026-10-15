@@ -310,7 +310,14 @@ fn turn(args: &[String], dir: &std::path::Path) -> ExitCode {
     }
     if !observing {
         if let Some(body) = fake::node_script(dir, "harness", "work") {
-            let path = cwd.join(WORK_FILE);
+            // `harness.work-file` names another file, for a turn that must change something
+            // its node's earlier turns did not touch — a rework a draft stacked on it then
+            // restacks over without a conflict.
+            let file = fake::node_script(dir, "harness", "work-file")
+                .map(|file| file.trim().to_owned())
+                .filter(|file| !file.is_empty())
+                .unwrap_or_else(|| WORK_FILE.to_owned());
+            let path = cwd.join(file);
             // `harness.work-per-task` adds the line the task opens its `## What` with, so
             // each node of a plan writes something its parent's branch does not already
             // carry: one body for every turn leaves a node stacked on another with nothing
@@ -657,11 +664,20 @@ fn login_refusal() -> serde_json::Value {
 
 /// The validated answer a structured-output run is asked for.
 ///
-/// One shape, because one dispatch in this stack asks for one: the change
+/// Two shapes, because two dispatches in this stack ask for one: a review
+/// comment's reply drafting, answered with its replies, and otherwise the change
 /// request body, which the schema its graph names requires. Scripted with
 /// `harness.body` where a journey wants to read its own words back out of the
 /// change request.
 fn structured(prompt: &str, dir: &std::path::Path) -> serde_json::Value {
+    // A review comment's reply drafting asks for the replies instead, composed from its
+    // task as the graph double composes them; the harness may set text before the task.
+    let drafting = prompt
+        .find("Draft one terse reply to each review comment")
+        .map(|at| &prompt[at..]);
+    if let Some(answer) = drafting.and_then(|task| fake::replied_answer(task, dir)) {
+        return answer;
+    }
     let body = fake::node_script(dir, "harness", "body").unwrap_or_else(|| {
         format!(
             "## What\nWhat the diff did.\n\n## Why\n{}",

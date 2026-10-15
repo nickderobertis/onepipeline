@@ -301,6 +301,7 @@ jobs:
         env:
           HAS_CREDENTIAL: ${{ secrets.RELEASE_PLZ_TOKEN != '' }}
           HAS_SMOKE_REPO: ${{ secrets.ONEPIPELINE_SMOKE_REPO != '' }}
+          HAS_BOARD_TOKEN: ${{ secrets.GH_PROJECTS_TOKEN != '' }}
         run: |
           if [ "$HAS_CREDENTIAL" != "true" ]; then
             echo "::error::the real-everything smoke needs the RELEASE_PLZ_TOKEN secret, passed as GH_TOKEN. Set it to a PAT that can push to, open a pull request on, and merge in the scratch repository. This job never skips and never falls back to a fake." >&2
@@ -308,6 +309,10 @@ jobs:
           fi
           if [ "$HAS_SMOKE_REPO" != "true" ]; then
             echo "::error::the real-everything smoke needs the ONEPIPELINE_SMOKE_REPO secret: the scratch repository it publishes to, as owner/name with a name ending in -smoke. This job never skips and never guesses a repository." >&2
+            exit 1
+          fi
+          if [ "$HAS_BOARD_TOKEN" != "true" ]; then
+            echo "::error::the review journey needs the GH_PROJECTS_TOKEN secret: a token that writes onetaskgraph's live-lane board (nickderobertis Projects #1) and its issues in nickderobertis/onetaskgraph-live-scratch. This job never skips and never falls back to a local store." >&2
             exit 1
           fi
       - name: Real onevcs, real git, real GitHub
@@ -332,6 +337,13 @@ jobs:
           # never a default in the tree, and a secret rather than a variable so
           # its name is masked in the log. Unset, the journey fails naming it.
           ONEPIPELINE_SMOKE_REPO: ${{ secrets.ONEPIPELINE_SMOKE_REPO }}
+          # onetaskgraph's live-lane board, which the review journey stores its project
+          # on (`tests/smoke/review.rs`): the credential is a secret, and the board it
+          # names is the one that lane already writes, so it is spelled here.
+          GH_PROJECTS_TOKEN: ${{ secrets.GH_PROJECTS_TOKEN }}
+          GH_PROJECTS_OWNER: nickderobertis
+          GH_PROJECTS_NUMBER: "1"
+          GH_PROJECTS_REPOSITORY: nickderobertis/onetaskgraph-live-scratch
 
   # The 0.28.2 channel compatibility tier: a channel this build writes, read by
   # the pinned `onepipeline-cli` 0.28.2 wheel, and the other way round. Its own job

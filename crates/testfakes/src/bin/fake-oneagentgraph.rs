@@ -569,7 +569,7 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     // its work, its commits, its publication — are this dispatch's. Scripted under
     // `review-reply.*` alone: `review-reply.wait` holds it until `review-reply.go`,
     // `review-reply.fail` fails it with that exit code, and its answer is
-    // `review-reply.result` or one composed from its task (see [`replied_answer`]).
+    // `review-reply.result` or one composed from its task (see [`fake::replied_answer`]).
     if persona.as_deref() == Some("review-reply") {
         if dir.join("review-reply.wait").exists() {
             fake::wait_for(&dir.join("review-reply.go"));
@@ -3196,7 +3196,7 @@ fn report_of(
     verdicts: Vec<serde_json::Value>,
     judged: &[oneagentgraph::event::JudgeDecided],
 ) -> serde_json::Value {
-    if let Some(answer) = replied_answer(task, &fake::script_dir()) {
+    if let Some(answer) = fake::replied_answer(task, &fake::script_dir()) {
         // Validated against the reply graph's own schema, as the producer validates.
         let schema_valid = drafting_schema(args).validate(&answer).is_ok();
         return serde_json::json!({
@@ -3365,52 +3365,6 @@ fn report_of(
         report[key.as_str()] = decisions.clone();
     }
     report
-}
-
-/// The answer a `review-reply` dispatch gives: `review-reply.result`, a JSON value
-/// written verbatim, where a journey scripted one; otherwise one reply per comment the
-/// task's `## Comments` names — `answered`, linking the first commit `## Commits`
-/// lists, where it lists one, and `declined` with the reason's first line otherwise.
-/// `None` for any task that is not a reply drafting's.
-fn replied_answer(task: &str, dir: &std::path::Path) -> Option<serde_json::Value> {
-    if !task.starts_with("Draft one terse reply to each review comment") {
-        return None;
-    }
-    if let Some(scripted) = fake::node_script(dir, "review-reply", "result") {
-        return Some(serde_json::from_str(&scripted).unwrap_or_else(|error| {
-            fake::fail(&format!("review-reply.result is not JSON: {error}"))
-        }));
-    }
-    let section = |name: &str| -> String {
-        task.split(&format!("\n## {name}\n"))
-            .nth(1)
-            .map(|rest| rest.split("\n## ").next().unwrap_or_default().to_owned())
-            .unwrap_or_default()
-    };
-    let comments: Vec<String> = section("Comments")
-        .lines()
-        .filter_map(|line| line.strip_prefix("### ").map(str::to_owned))
-        .collect();
-    let commit = section("Commits")
-        .lines()
-        .filter_map(|line| line.strip_prefix("- "))
-        .find_map(|line| line.split_whitespace().last().map(str::to_owned));
-    let reason = section("Reason")
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("out of scope")
-        .chars()
-        .take(400)
-        .collect::<String>();
-    Some(
-        serde_json::json!({"replies": comments.iter().map(|comment| match &commit {
-        Some(url) => serde_json::json!({"comment": comment, "disposition": "answered",
-            "body": format!("Addressed in {url}.")}),
-        None => serde_json::json!({"comment": comment, "disposition": "declined",
-            "body": format!("Left as it is: {reason}")}),
-    }).collect::<Vec<_>>()}),
-    )
 }
 
 /// What a `pr-author` dispatch's turn answered with.
