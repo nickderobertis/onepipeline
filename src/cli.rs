@@ -504,6 +504,15 @@ pub struct StartArgs {
     /// or with none. Given here it overrides the launch config's own field.
     #[arg(long, value_name = "REF")]
     pub pr_author_graph: Option<String>,
+    /// The agent graph a review comment's reply is drafted by.
+    ///
+    /// Named, `onepipeline review` drafts and posts the reply every rework owes
+    /// the comments it answers, and a `decline` posts its own; its drafter runs
+    /// as the reserved persona `review-reply`. Naming none is the shipped
+    /// default: every rework's reply stays owed and surfaced, and a `decline` is
+    /// refused. Given here it overrides the launch config's `review_reply_graph`.
+    #[arg(long, value_name = "REF")]
+    pub review_reply_graph: Option<String>,
     /// The command every op that introduces or changes a node's task is offered
     /// to before it is applied.
     ///

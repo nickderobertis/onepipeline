@@ -540,6 +540,29 @@ fn results(document: &Value) -> impl Iterator<Item = &Value> {
         .flatten()
 }
 
+/// What a reply drafting's retained reports answered: the first result that
+/// conformed to its schema, as it is held at `results[].structured`, or whether a
+/// schema refused every answer. A result the schema refused is never read.
+pub(crate) fn structured(reports: &[Value]) -> std::result::Result<Value, &'static str> {
+    let mut refused = false;
+    for result in reports.iter().flat_map(results) {
+        match result.get("schema_valid").and_then(Value::as_bool) {
+            Some(true) => {
+                if let Some(answer) = result.get("structured").filter(|answer| !answer.is_null()) {
+                    return Ok(answer.clone());
+                }
+            }
+            Some(false) => refused = true,
+            None => {}
+        }
+    }
+    Err(if refused {
+        "the drafter's every answer was refused by its schema"
+    } else {
+        "the drafter answered nothing its schema accepted"
+    })
+}
+
 /// What a drafting dispatch's retained reports answered with.
 ///
 /// Three readings rather than a body or nothing, because the two endings that

@@ -33,9 +33,13 @@ use crate::taskgraph::{QualifiedId, Read, Store, DISPATCH_KEY, DRIVER_KEY, SETTL
 #[serde(deny_unknown_fields)]
 pub(crate) struct StoredRework {
     pub(crate) replaces: String,
-    reason: String,
-    instruction: String,
+    pub(crate) reason: String,
+    pub(crate) instruction: String,
     pub(crate) comments: Vec<crate::channel::ReworkComment>,
+    /// The superseded node's settled head, absent from a record written before it
+    /// was carried (entry 127).
+    #[serde(default)]
+    pub(crate) replaces_head: Option<String>,
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
@@ -57,6 +61,15 @@ pub(crate) fn rework_provenance(value: &Value) -> Result<StoredRework> {
     }) {
         return Err(Error::Invalid(
             "invalid comment in rework provenance".to_owned(),
+        ));
+    }
+    if stored
+        .replaces_head
+        .as_deref()
+        .is_some_and(|head| crate::vcs::usable(head).is_none())
+    {
+        return Err(Error::Invalid(
+            "rework provenance names a superseded head no line can carry".to_owned(),
         ));
     }
     Ok(stored)
@@ -426,7 +439,10 @@ pub(crate) fn continuation_of(read: &Read, claim: Option<&DriverClaim>) -> Resul
                     from["rework"] = json!(crate::payload::ContinuedRework {
                         replacement: replacement.to_owned(),
                         replaces: stored.replaces,
-                        comments: stored.comments
+                        comments: stored.comments,
+                        reason: stored.reason,
+                        instruction: stored.instruction,
+                        replaces_head: stored.replaces_head,
                     });
                 }
             }

@@ -55,10 +55,10 @@ impl Drop for Held {
     }
 }
 
-const AT: &str = "2026-10-10T18:34:13Z";
+pub(crate) const AT: &str = "2026-10-10T18:34:13Z";
 
 // llmlint: ignore-block[e2e_not_mocked] The task explicitly requires onevcs-testing’s remote double at GitHub’s boundary. The binary calls real linked onevcs, which sends GraphQL to fake-gh; no review intake or state derivation is mocked. Node op-review owns the real GitHub and board onepipeline-smoke journey.
-fn host(world: &World, run: &str, nodes: &[&str]) -> FileHost {
+pub(crate) fn host(world: &World, run: &str, nodes: &[&str]) -> FileHost {
     let mut state = HostState::default();
     for (offset, node) in nodes.iter().enumerate() {
         let settlement = settled(world, run, node);
@@ -92,12 +92,12 @@ fn comment(id: &str, kind: CommentKind, number: u32) -> HostComment {
     }
 }
 
-fn add(host: &FileHost, number: u32, comment: HostComment) {
+pub(crate) fn add(host: &FileHost, number: u32, comment: HostComment) {
     host.add_comment(&ChangeId(number.to_string()), comment)
         .expect("reviewer posts feedback");
 }
 
-fn surfaces(world: &World, run: &str) -> Vec<Value> {
+pub(crate) fn surfaces(world: &World, run: &str) -> Vec<Value> {
     std::fs::read_to_string(world.run_file(run, "channel/surfaces.jsonl"))
         .unwrap_or_default()
         .lines()
@@ -106,7 +106,7 @@ fn surfaces(world: &World, run: &str) -> Vec<Value> {
         .collect()
 }
 
-fn review(world: &World, run: &str) -> crate::harness::Run {
+pub(crate) fn review(world: &World, run: &str) -> crate::harness::Run {
     let output = world.run_with_stdin(&["review", run, "--json"], "this is deliberately not JSON");
     assert_eq!(output.code, 0, "{}\n{}", output.stdout, output.stderr);
     assert_eq!(
@@ -121,7 +121,7 @@ fn launched(world: &World, run: &str) -> String {
 }
 
 // llmlint: ignore-block[e2e_not_mocked] The plan deliberately chooses scripted agent subprocesses and the onevcs-testing remote double for this node’s offline journeys. Draft creation still runs the compiled CLI, actual oneagentgraph and onevcs, and real git. Node op-review owns live agents/GitHub/board onepipeline-smoke; this setup mocks none of the review layer under test.
-fn launched_with(world: &World, run: &str, extra: &[&str]) -> String {
+pub(crate) fn launched_with(world: &World, run: &str, extra: &[&str]) -> String {
     world.script("a.work", "first draft\n");
     world.script("b.work", "second draft\n");
     let mut plan = plan_of(run, vec![lifecycle("a", &[]), lifecycle("b", &[])]);
@@ -135,7 +135,7 @@ fn launched_with(world: &World, run: &str, extra: &[&str]) -> String {
 }
 // llmlint: ignore-end[e2e_not_mocked]
 
-fn reply(world: &World, run: &str, commands: Value) -> crate::harness::Run {
+pub(crate) fn reply(world: &World, run: &str, commands: Value) -> crate::harness::Run {
     world.run_with_stdin(
         &["reply", run],
         &json!({"version": 3, "commands": commands}).to_string(),
@@ -757,9 +757,9 @@ fn state_comes_from_current_host_replies_and_rework_provenance() {
     let output = world.run(&["results", run, "--json"]);
     assert_eq!(output.code, 0, "{}", output.stderr);
     let results: Value = serde_json::from_str(&output.stdout).unwrap();
-    assert_eq!(results["schema_version"], 1);
+    assert_eq!(results["schema_version"], 2);
     let golden: Value =
-        serde_json::from_str(include_str!("../golden/review-results-v1.json")).unwrap();
+        serde_json::from_str(include_str!("../golden/review-results-v2.json")).unwrap();
     let mut selected = results.clone();
     selected["nodes"]
         .as_array_mut()

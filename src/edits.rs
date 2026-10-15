@@ -342,6 +342,21 @@ pub enum Operation {
         /// Why.
         reason: String,
     },
+    /// Review comments on a node's draft were declined: a reply saying why was
+    /// posted in each one's thread, labelled `declined` in its marker, before this
+    /// was committed. The replies are the decline's whole record.
+    DeclineApplied {
+        /// The node whose draft carries the comments.
+        node: String,
+        /// The comments declined.
+        comments: Vec<crate::channel::ReworkComment>,
+        /// Why they were left.
+        reason: String,
+        /// Where each comment's reply is read, in the order `comments` names them —
+        /// empty in the compile that judged the op, and filled in by the posting.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        replies: Vec<String>,
+    },
     // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
@@ -400,6 +415,7 @@ impl Operation {
             | Self::TaskAmended { .. }
             | Self::ReworkRequested { .. }
             | Self::Retitled { .. }
+            | Self::DeclineApplied { .. }
             // llmlint: ignore-block[names_match_behavior] both are `true` for
             // every disposition on purpose, though only `ContextAdded`'s
             // `Deferred` and `NoteDelivered`'s `Carried` move anything a fold
@@ -452,6 +468,7 @@ pub(crate) fn every_operation_kind() -> Vec<String> {
         "note-delivered",
         "rework-requested",
         "retitled",
+        "decline-applied",
     ]
     .into_iter()
     .map(str::to_owned)
@@ -1562,6 +1579,11 @@ fn compile_into(
         Command::Retitle { id, title, reason } => {
             compile_retitle(graph, frontier, id, title, reason)
         }
+        Command::Decline {
+            id,
+            comments,
+            reason,
+        } => compile_decline(graph, frontier, id, comments, reason),
     }
 }
 
@@ -2895,6 +2917,73 @@ fn compile_retitle(
     }])
 }
 
+/// Validate one `decline`: a lifecycle node whose draft is open on the run's
+/// record, at least one comment, each named once by a usable id and URL, and a
+/// reason. Whether each comment was read for the node, and whether a reply
+/// already answers it, are the delivery's to judge against the run's record and
+/// the host; the posting fills in the replies.
+fn compile_decline(
+    graph: &mut Graph,
+    frontier: &Frontier,
+    id: &str,
+    comments: &[crate::channel::ReworkComment],
+    reason: &str,
+) -> Result<Vec<Operation>> {
+    let Some(node) = graph.get(id) else {
+        return Err(refuse(format!("decline: no node '{id}'")));
+    };
+    if node.repo.is_none() {
+        return Err(refuse(format!(
+            "decline: node '{id}' is not a lifecycle node: it names no repo, so it has no \
+             draft to carry review comments"
+        )));
+    }
+    if !frontier.change_urls.contains_key(id)
+        || frontier.landings.get(id) == Some(&crate::graph::Landing::Landed)
+    {
+        return Err(refuse(format!(
+            "decline: node '{id}' has no open change request on the run's record"
+        )));
+    }
+    if reason.trim().is_empty() {
+        return Err(crate::channel::Refusal::BlankReason {
+            node: id.to_owned(),
+        }
+        .into());
+    }
+    if comments.is_empty() {
+        return Err(refuse(format!(
+            "decline: node '{id}': name at least one comment to decline"
+        )));
+    }
+    let mut named = BTreeSet::new();
+    for comment in comments {
+        if comment.id.trim().is_empty()
+            || comment.id.chars().any(char::is_control)
+            || !onevcs::Url::parse(&comment.url)
+                .is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
+        {
+            return Err(refuse(format!(
+                "decline: node '{id}': {:?} at {:?} is not a comment's id and URL",
+                comment.id, comment.url
+            )));
+        }
+        if !named.insert(comment.id.as_str()) {
+            return Err(refuse(format!(
+                "decline: node '{id}' names comment {} twice",
+                comment.id
+            )));
+        }
+    }
+    Ok(vec![Operation::DeclineApplied {
+        node: id.to_owned(),
+        comments: comments.to_vec(),
+        // Byte-for-byte: it is what the reply drafter is handed as the decline's reason.
+        reason: reason.to_owned(),
+        replies: Vec::new(),
+    }])
+}
+
 /// Fold one recorded operation back onto a graph.
 ///
 /// This is replay's half of [`compile`]: the reconciler validated and mutated,
@@ -3047,7 +3136,8 @@ pub fn apply(graph: &mut Graph, operation: &Operation) {
         | Operation::CompletionRequested { .. }
         | Operation::FindingRaised { .. }
         | Operation::RetryRequested { .. }
-        | Operation::ReworkRequested { .. } => {}
+        | Operation::ReworkRequested { .. }
+        | Operation::DeclineApplied { .. } => {}
     }
 }
 

@@ -3686,6 +3686,11 @@ struct ReworkProjected {
     instruction: String,
     // llmlint: ignore-end[invalid_states_unrepresentable]
     comments: Vec<crate::channel::ReworkComment>,
+    /// The superseded node's settled head, so a host continuing the lineage can tell
+    /// the commits the rework added from the ones before it (entry 127). Omitted where
+    /// the run's record holds none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    replaces_head: Option<String>,
 }
 
 /// The `onepipeline.rework` record of each rework's replacement, keyed by the
@@ -3702,6 +3707,7 @@ fn reworks_of(state: &RunState) -> BTreeMap<String, ReworkProjected> {
                     reason: rework.reason.clone(),
                     instruction: rework.instruction.clone(),
                     comments: rework.comments.clone(),
+                    replaces_head: crate::reply::replaces_head(state, replaces),
                 },
             )
         })

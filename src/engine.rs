@@ -3630,7 +3630,7 @@ enum Effect {
     Applied(usize),
     /// Its commands were refused, each recorded as sent with the reason its
     /// submitter was owed, in the order they were recorded.
-    Refused(Vec<(Value, String)>),
+    Refused(Vec<(Value, RecordedRefusal)>),
 }
 
 /// Every record of the run's journal that names the command envelope it came
@@ -3685,7 +3685,7 @@ enum Evidence {
     Rejected {
         envelope: u64,
         command: Value,
-        reason: String,
+        reason: RecordedRefusal,
     },
 }
 
@@ -3729,7 +3729,10 @@ impl Evidence {
                 Some(Self::Rejected {
                     envelope: rejected.envelope?,
                     command: Value::Object(rejected.command),
-                    reason: rejected.reason,
+                    reason: RecordedRefusal {
+                        reason: rejected.reason,
+                        refusal: rejected.refusal,
+                    },
                 })
             }
             _ => None,
@@ -3744,9 +3747,9 @@ impl Evidence {
 fn refused_again(
     id: u64,
     commands: &[Command],
-    mut rejections: Vec<(Value, String)>,
+    mut rejections: Vec<(Value, RecordedRefusal)>,
 ) -> CommandOutcome {
-    let evaluated: Vec<std::result::Result<Staged, String>> = commands
+    let evaluated: Vec<std::result::Result<Staged, RecordedRefusal>> = commands
         .iter()
         .map(|command| {
             let sent = json!(command);
@@ -4353,6 +4356,7 @@ fn applied_envelope(id: u64, commands: &[Command]) -> CommandOutcome {
                 op: crate::channel::op_of(command).to_string(),
                 outcome: crate::channel::CommandVerdict::Applied,
                 reason: None,
+                refusal: None,
             })
             .collect(),
     }
@@ -4403,7 +4407,52 @@ fn all_or_each_ruling<T>(
 /// refused, which is the one a manager must not resend blind. The envelope's own
 /// `reason` names the first refusal, which is what a reader of only that field
 /// has always had.
-fn refused_envelope<T: Unapplied, E: std::fmt::Display>(
+/// A refusal journalled as `edit-rejected`: the reason recorded, and the refusal by
+/// kind where it was one.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RecordedRefusal {
+    reason: String,
+    refusal: Option<crate::channel::Refusal>,
+}
+
+impl From<String> for RecordedRefusal {
+    fn from(reason: String) -> Self {
+        Self {
+            reason,
+            refusal: None,
+        }
+    }
+}
+
+impl std::fmt::Display for RecordedRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.reason)
+    }
+}
+
+/// A refusal an outcome answers a command with: its text, and its kind where it
+/// names one.
+pub(crate) trait Refused: std::fmt::Display {
+    /// The refusal by kind, where this is one.
+    fn refusal(&self) -> Option<crate::channel::Refusal>;
+}
+
+impl Refused for Error {
+    fn refusal(&self) -> Option<crate::channel::Refusal> {
+        match self {
+            Error::Rejected(refusal) => Some(refusal.clone()),
+            _ => None,
+        }
+    }
+}
+
+impl Refused for RecordedRefusal {
+    fn refusal(&self) -> Option<crate::channel::Refusal> {
+        self.refusal.clone()
+    }
+}
+
+fn refused_envelope<T: Unapplied, E: Refused>(
     id: u64,
     commands: &[Command],
     evaluated: &[std::result::Result<T, E>],
@@ -4454,6 +4503,7 @@ fn refused_envelope<T: Unapplied, E: std::fmt::Display>(
                         Ok(_) => blamed(outcome),
                         Err(error) => error.to_string(),
                     }),
+                    refusal: ruling.as_ref().err().and_then(Refused::refusal),
                 }
             })
             .collect(),
@@ -4480,6 +4530,9 @@ pub(crate) enum Staged {
     /// delivery phase — the other command whose record a write outside the run
     /// decides, since what it replaced is what the host held.
     Retitle(Box<ValidatedRetitle>),
+    /// A `decline` whose replies the delivery phase drafts and posts: what it
+    /// commits names the replies the host took.
+    Decline(Box<crate::reply::ValidatedDecline>),
 }
 
 /// A `retitle`, judged and not yet written: the one operation it compiled to, and
@@ -4594,6 +4647,7 @@ impl Staged {
             Self::Compiled(operations) => operations,
             Self::Note(_) => &[],
             Self::Retitle(retitle) => &retitle.compiled,
+            Self::Decline(decline) => &decline.compiled,
         }
     }
 }
@@ -4626,6 +4680,9 @@ pub(crate) fn commits_of(step: Staged) -> Result<Vec<edits::Operation>> {
         // is_left_unverified_until_a_retitle_sets_one`, and the all-or-nothing journalling by
         // `record_delivered`'s note journeys, the same path.
         Staged::Retitle(retitle) => retitle_change(&retitle),
+        // Posting is applying it: the replies are the decline's record, so a decline
+        // whose posting fails commits nothing and leaves on the host what was posted.
+        Staged::Decline(decline) => crate::reply::decline(&decline),
     }
 }
 
@@ -5037,7 +5094,7 @@ impl NoteDeliveries {
             .iter()
             .filter_map(|step| match step {
                 Staged::Note(note) => Some(note.node.clone()),
-                Staged::Compiled(_) | Staged::Retitle(_) => None,
+                Staged::Compiled(_) | Staged::Retitle(_) | Staged::Decline(_) => None,
             })
             .collect();
         if nodes.is_empty() {
@@ -5288,6 +5345,9 @@ fn validate_command(
         let scope = crate::boundary::of_run(&crate::boundary::plan_now(state)).term_scope();
         return Ok(staged_retitle(operations, state.sessions.get(id), scope));
     }
+    if let Command::Decline { .. } = command {
+        return crate::reply::staged_decline(paths, state, launch.review_reply_graph(), operations);
+    }
     let Command::Note {
         id,
         addressee,
@@ -5498,6 +5558,9 @@ pub(crate) fn record_rejection(
     ]);
     if let Some(envelope) = envelope {
         payload.insert("envelope".into(), json!(envelope));
+    }
+    if let Some(refusal) = error.refusal() {
+        payload.insert("refusal".into(), json!(refusal));
     }
     journal.emit(
         journal::PipelineKind::EditRejected,
@@ -9473,6 +9536,28 @@ pub(crate) fn record_operation_facts(
                     by: crate::payload::RetitledBy::Retitle,
                 })?,
             )?,
+            // Each reply a `decline` posted, under the kind every posted reply is
+            // recorded as, after the commit that the posting was.
+            edits::Operation::DeclineApplied {
+                node,
+                comments,
+                replies,
+                ..
+            } => {
+                for (comment, url) in comments.iter().zip(replies) {
+                    journal.emit(
+                        journal::PipelineKind::ReviewReplyPosted,
+                        journal::labels(&paths.run, Some(node)),
+                        payload_of(&crate::payload::ReviewReplyPosted {
+                            node: node.clone(),
+                            comment: comment.id.clone(),
+                            disposition: crate::payload::ReplyDisposition::Declined,
+                            url: url.clone(),
+                            commits: Vec::new(),
+                        })?,
+                    )?;
+                }
+            }
             // A note no turn took is owed to the node's next dispatch: the commit
             // just journalled says so, and the bus's carry store is what hands it
             // over when that dispatch is composed.
@@ -10243,10 +10328,13 @@ mod tests {
             7,
             &commands,
             vec![
-                (json!(cancel("build")), "refused: the first copy".to_owned()),
                 (
                     json!(cancel("build")),
-                    "refused: the second copy".to_owned(),
+                    "refused: the first copy".to_owned().into(),
+                ),
+                (
+                    json!(cancel("build")),
+                    "refused: the second copy".to_owned().into(),
                 ),
             ],
         );
@@ -13331,6 +13419,7 @@ mod tests {
             observer_ending: String::new(),
             node_graph: String::new(),
             pr_author_graph: String::new(),
+            review_reply_graph: String::new(),
             node_validator: String::new(),
             envelope_reviewer: String::new(),
             launcher: launcher.into(),

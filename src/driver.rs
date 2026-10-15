@@ -1235,6 +1235,19 @@ fn start(args: &StartArgs) -> Result<i32> {
         Some(reference) => Some(resolve_graph(reference, &launch_dir)?),
         None => None,
     }; // llmlint: ignore-end[invalid_states_unrepresentable]
+       // The reply drafter's graph, read on exactly the drafting graph's terms: the flag over
+       // the config, a blank rung naming none, and the reference resolved against the launch
+       // directory so a driver started anywhere else replays what this launch named.
+       // llmlint: ignore-block[invalid_states_unrepresentable] the `String` `LaunchRecord`'s schema declares, for the reason `pr_author_graph_ref` above gives.
+    let review_reply_graph_ref: Option<String> = match args
+        .review_reply_graph
+        .as_deref()
+        .or(declared.review_reply_graph.as_deref())
+        .filter(|reference| !reference.trim().is_empty())
+    {
+        Some(reference) => Some(resolve_graph(reference, &launch_dir)?),
+        None => None,
+    }; // llmlint: ignore-end[invalid_states_unrepresentable]
 
     // llmlint: ignore-block[invalid_states_unrepresentable] the resolved command stays the
     // `String` `LaunchRecord`'s schema declares, exactly as `pr_author_graph_ref` above
@@ -1517,6 +1530,7 @@ fn start(args: &StartArgs) -> Result<i32> {
         observer_ending: String::new(),
         node_graph: node_graph_ref,
         pr_author_graph: pr_author_graph_ref.unwrap_or_default(),
+        review_reply_graph: review_reply_graph_ref.unwrap_or_default(),
         node_validator: node_validator.unwrap_or_default(),
         envelope_reviewer: envelope_reviewer.unwrap_or_default(),
         envelope_reviewer_bar: envelope_reviewer_bar.unwrap_or_default(),
@@ -4220,6 +4234,10 @@ fn validate_here(
             scope,
         ));
     }
+    if let Command::Decline { .. } = command {
+        let launch: crate::ledger::LaunchRecord = crate::ledger::read_json(&paths.launch())?;
+        return crate::reply::staged_decline(paths, state, launch.review_reply_graph(), operations);
+    }
     let Command::Note {
         id,
         addressee,
@@ -4467,6 +4485,7 @@ mod tests {
             observer_ending: String::new(),
             node_graph: "graphs/node-scope.yaml".into(),
             pr_author_graph: String::new(),
+            review_reply_graph: String::new(),
             node_validator: String::new(),
             envelope_reviewer: String::new(),
             launcher: "e2e".into(),

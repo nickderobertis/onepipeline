@@ -106,6 +106,11 @@ pub(crate) fn repository_identity(repo: &str) -> Result<String> {
         .map_err(refusal)
 }
 
+/// Answer one review comment on the host, as `onevcs`'s `reply_to_comment` does.
+pub(crate) fn reply_to_comment(request: &onevcs::ReplyRequest) -> Result<onevcs::PostedReply> {
+    onevcs::reply_to_comment(&providers(), request).map_err(refusal)
+}
+
 /// A full host snapshot, by URL, including on a host with no local session.
 pub(crate) fn review_comments(change_url: &str) -> Result<onevcs::ReviewRead> {
     onevcs::review_comments(

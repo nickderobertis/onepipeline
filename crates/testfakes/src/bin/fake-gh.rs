@@ -147,6 +147,9 @@ fn main() -> ExitCode {
         args.get(1).map(String::as_str),
     ) {
         (Some("api"), Some("user")) => user(&args),
+        (Some("api"), Some(path)) if reply_route(path) => {
+            holding_the_records(&dir, || post_reply(&args, &dir, path))
+        }
         (Some("api"), Some(path))
             if path.starts_with("repos/")
                 && path.contains("/pulls/")
@@ -2451,6 +2454,197 @@ fn standings_wire(
     }
     repository["branchProtectionRules"] = page(protections);
     json!({"data": {"rateLimit": {"cost": cost.graphql_points}, "repository": repository}})
+}
+
+/// Whether `path` is one of the two routes `onevcs` posts a review reply to: a review
+/// thread's `pulls/<n>/comments/<id>/replies`, or the conversation's
+/// `issues/<n>/comments`.
+fn reply_route(path: &str) -> bool {
+    let parts: Vec<&str> = path.split('/').collect();
+    matches!(
+        parts.as_slice(),
+        ["repos", _, _, "pulls", _, "comments", _, "replies"]
+            | ["repos", _, _, "issues", _, "comments"]
+    )
+}
+
+/// The kind and database id a GitHub comment node id names, as GitHub hands one out:
+/// `PRRC_`, `IC_` or `PRR_` and the URL-safe base64 of the MessagePack array
+/// `[0, repository, object]`.
+fn comment_node(id: &str) -> Option<(&'static str, u64)> {
+    let (prefix, payload) = id.split_once('_')?;
+    let kind = match prefix {
+        "PRRC" => "thread",
+        "IC" => "issue",
+        "PRR" => "review",
+        _ => return None,
+    };
+    let (mut word, mut held, mut bytes) = (0u32, 0, Vec::new());
+    for symbol in payload.trim_end_matches('=').bytes() {
+        let value = match symbol {
+            b'A'..=b'Z' => symbol - b'A',
+            b'a'..=b'z' => symbol - b'a' + 26,
+            b'0'..=b'9' => symbol - b'0' + 52,
+            b'-' | b'+' => 62,
+            b'_' | b'/' => 63,
+            _ => return None,
+        };
+        word = (word << 6) | u32::from(value);
+        held += 6;
+        if held >= 8 {
+            held -= 8;
+            bytes.push(u8::try_from((word >> held) & 0xff).ok()?);
+        }
+    }
+    let (&marker, mut rest) = bytes.split_first()?;
+    if marker != 0x93 {
+        return None;
+    }
+    let mut numbers = Vec::new();
+    while let Some((&first, tail)) = rest.split_first() {
+        let width = match first {
+            small @ 0x00..=0x7f => {
+                numbers.push(u64::from(small));
+                rest = tail;
+                continue;
+            }
+            0xcc => 1,
+            0xcd => 2,
+            0xce => 4,
+            0xcf => 8,
+            _ => return None,
+        };
+        let number = tail.get(..width)?;
+        numbers.push(
+            number
+                .iter()
+                .fold(0u64, |acc, byte| (acc << 8) | u64::from(*byte)),
+        );
+        rest = tail.get(width..)?;
+    }
+    match numbers.as_slice() {
+        [0, _repository, object] => Some((kind, *object)),
+        _ => None,
+    }
+}
+
+/// `gh api <route> --method POST -f body=<text>`: one reply, posted through the
+/// sibling's remote double so its ledger records the call and its state holds the
+/// reply — in the comment's thread where it has one, and as a conversation comment
+/// linking it otherwise, exactly as `onevcs` addresses the two.
+///
+/// `gh.reply.fail` refuses every post with what it holds, and `gh.reply.fail-after`
+/// holding a count refuses every post after that many were accepted.
+fn post_reply(args: &[String], dir: &Path, path: &str) -> ExitCode {
+    use onevcs::RemoteHost;
+    let [_, _, method, post, field, body] = args else {
+        return fake::refuse(&format!(
+            "gh api {path} was not given exactly --method POST -f body=…"
+        ));
+    };
+    if method != "--method" || post != "POST" || field != "-f" {
+        return fake::refuse(&format!("gh api {path} was not a POST of one field"));
+    }
+    let Some(text) = body.strip_prefix("body=") else {
+        return fake::refuse(&format!("gh api {path} posted no body field"));
+    };
+    if let Some(said) = fake::node_script(dir, "gh", "reply.fail") {
+        eprintln!("{said}");
+        return ExitCode::from(1);
+    }
+    if let Some(after) = fake::node_script(dir, "gh", "reply.fail-after") {
+        let Ok(after) = after.parse::<usize>() else {
+            return fake::refuse("gh.reply.fail-after is not a count");
+        };
+        let accepted = std::fs::read_to_string(dir.join("gh.reply.accepted.calls"))
+            .ok()
+            .and_then(|count| count.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        if accepted >= after {
+            eprintln!("HTTP 502: the host would not take the reply");
+            return ExitCode::from(1);
+        }
+    }
+    let parts: Vec<&str> = path.split('/').collect();
+    let (owner, name, number) = (parts[1], parts[2], parts[4]);
+    let (wanted, database, text) = if parts[3] == "pulls" {
+        let Ok(database) = parts[6].parse::<u64>() else {
+            return fake::refuse("a thread reply's route names no comment");
+        };
+        ("thread", database, text.to_owned())
+    } else {
+        let Some((first, rest)) = text.split_once("\n\n") else {
+            return fake::refuse("a conversation reply carries no `Re:` line");
+        };
+        let Some((kind, database)) = first
+            .rsplit_once("#issuecomment-")
+            .map(|(_, id)| ("issue", id))
+            .or_else(|| {
+                first
+                    .rsplit_once("#pullrequestreview-")
+                    .map(|(_, id)| ("review", id))
+            })
+        else {
+            return fake::refuse("a conversation reply's `Re:` line links no comment");
+        };
+        let Ok(database) = database.parse::<u64>() else {
+            return fake::refuse("a conversation reply's `Re:` line links no comment id");
+        };
+        (kind, database, rest.to_owned())
+    };
+    let Some(key) = text
+        .rsplit_once("<!-- onevcs:reply ")
+        .and_then(|(_, marker)| {
+            marker
+                .split_whitespace()
+                .find_map(|word| word.strip_prefix("key="))
+        })
+        .map(str::to_owned)
+    else {
+        return fake::refuse("a reply carries no onevcs reply marker");
+    };
+    let repository_host = dir.join(format!(
+        "review-host.{}.{}.json",
+        fake::segment(owner),
+        fake::segment(name)
+    ));
+    let at = if repository_host.is_file() {
+        repository_host
+    } else {
+        dir.join("review-host.json")
+    };
+    let host = match onevcs_testing::FileHost::create(&at) {
+        Ok(host) => host,
+        Err(error) => return fake::refuse(&error.to_string()),
+    };
+    let change = onevcs::ChangeId(number.to_owned());
+    let held = match host.state() {
+        Ok(state) => state
+            .review_comments
+            .get(&change)
+            .cloned()
+            .unwrap_or_default(),
+        Err(error) => return fake::refuse(&error.to_string()),
+    };
+    let Some(comment) = held
+        .iter()
+        .find(|comment| comment_node(&comment.id.0) == Some((wanted, database)))
+        .map(|comment| comment.id.clone())
+    else {
+        eprintln!("HTTP 404: no comment {database} on pull request {number}");
+        return ExitCode::from(1);
+    };
+    match host.reply_to_comment(&change, &comment, &text, &key) {
+        Ok(posted) => {
+            fake::count(dir, "gh.reply.accepted");
+            println!(
+                "{}",
+                serde_json::json!({"node_id": posted.id.0, "html_url": posted.url})
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => fake::refuse(&error.to_string()),
+    }
 }
 
 /// The hidden first argument that makes an invocation a person's move on the host.

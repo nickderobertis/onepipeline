@@ -2196,6 +2196,7 @@ fn op_of(command: &Edit) -> &'static str {
         Edit::Retitle { .. } => "retitle",
         Edit::Review { .. } => "review",
         Edit::Readjust { .. } => "readjust",
+        Edit::Decline { .. } => "decline",
     }
 }
 
