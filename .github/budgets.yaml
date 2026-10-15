@@ -1,7 +1,5 @@
 schema_version: 1
 budgets:
-  # Do not fold this into the other macOS budget: the brief explicitly requests both a jobs/run
-  # and a Mac-spending runs/change bound, and the manager approved both scheduling constraints.
   - id: onepipeline-macos-jobs-per-run
     measure: reported
     command: [bash, -c, "cd .. && exec node .github/macos-budget.mjs --metric jobs-per-run --telemetry .github/.telemetry/macos-policy.json"]
@@ -13,9 +11,8 @@ budgets:
       reusable calls, across the single-push lifecycle and opted-in manual diagnostic.
       inner_measure_reason: one run can occupy several shared Mac slots even when the
       lifecycle run count stays within its bound. Separate ceilings constrain both slot occupancy
-      and lifecycle fan-out. Telemetry only; no host label.
-  # Do not fold this into the other macOS budget: the brief explicitly requests both a jobs/run
-  # and a Mac-spending runs/change bound, and the manager approved both scheduling constraints.
+      and lifecycle fan-out. Telemetry only; no host label. The brief asks for both a
+      per-run and a per-change ceiling, and the manager approved keeping them as separate budgets.
   - id: onepipeline-macos-runs-per-change
     measure: reported
     command: [bash, -c, "cd .. && exec node .github/macos-budget.mjs --metric runs-per-change --telemetry .github/.telemetry/macos-policy.json"]
@@ -28,4 +25,5 @@ budgets:
       Twelve event classes, three diff classes, same-repository/fork ownership and all publish
       combinations. The lifecycle ceiling is separate from jobs/run because several sequential
       workflows can each occupy only one slot and still exceed the lifecycle allowance.
-      Explicit manual diagnostics excluded. Telemetry only; no host label.
+      Explicit manual diagnostics excluded. Telemetry only; no host label. The brief asks for both a
+      per-run and a per-change ceiling, and the manager approved keeping them as separate budgets.
