@@ -139,7 +139,6 @@ impl Drafting {
         }
     }
 
-    /// Whether this drafting is a decline's.
     pub(crate) fn is_decline(&self) -> bool {
         matches!(self.answering, Answering::Decline)
     }
@@ -531,7 +530,6 @@ fn origin_url(repo: &str) -> Result<String> {
     Ok(url.trim().to_owned())
 }
 
-/// Run git in `dir`, answering its stdout or refusing with what it said.
 fn git(dir: &std::path::Path, args: &[&str]) -> Result<String> {
     let output = std::process::Command::new("git")
         .arg("-C")

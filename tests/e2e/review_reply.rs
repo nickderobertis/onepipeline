@@ -9,8 +9,8 @@
 // remote double and fake agents, because no check may spend the shared account: GitHub is
 // substituted at `onevcs`'s own `ONEVCS_GH` override and the drafter at `oneagentgraph`'s
 // subprocess boundary, while the compiled binary, the real linked `onevcs` and real git run
-// every reply, decline and recovery. The same journey against real GitHub, a real board and
-// the real `oneagentgraph` is the live tier's `tests/smoke/review.rs`.
+// every reply, decline and recovery. The same journey against real GitHub pull-request
+// comments and the real `oneagentgraph` is the live tier's `tests/smoke/review.rs`.
 
 use crate::harness::World;
 use crate::review::{add, host, launched_with, reply, review, surfaces};

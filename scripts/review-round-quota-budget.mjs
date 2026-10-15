@@ -134,7 +134,6 @@ function readRecord() {
   return held;
 }
 
-/** Sum each charged call's points and requests, by `key`. */
 function tally(calls, key) {
   const by = new Map();
   for (const call of calls) {
