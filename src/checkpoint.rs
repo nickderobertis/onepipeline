@@ -457,6 +457,9 @@ pub(crate) struct Projected {
     /// construction. Persisting it beside the seal would be one fact twice, with an
     /// edit to either making the pair disagree.
     digested_bytes: u128,
+    /// What this driver's latest readjustment read, kept for the rest of its trigger.
+    /// In memory only: a fresh driver reads again at its first trigger.
+    pub(crate) readjust: crate::readjust::Readjuster,
 }
 
 impl std::ops::Deref for Projected {
@@ -488,6 +491,7 @@ impl Projected {
                 covered: checkpoint.state,
                 coverage: checkpoint.coverage,
                 took: 0,
+                readjust: crate::readjust::Readjuster::default(),
                 digested_bytes,
             },
             None => Self::empty(),
@@ -502,7 +506,11 @@ impl Projected {
         let journal = paths.journal();
         let mut grown = journal::finished_records_after(&journal, self.coverage.bytes);
         if length_of(&journal) < self.coverage.bytes || !self.coverage.sorts_in_front_of(&grown) {
+            // What this driver read and planned is not folded from the journal, so the
+            // whole-store fold below cannot put it back: it is kept across it.
+            let readjust = std::mem::take(&mut self.readjust);
             *self = Self::empty();
+            self.readjust = readjust;
             grown = journal::finished_records_after(&journal, 0);
         }
         self.took = grown.len() as u64;
@@ -542,6 +550,7 @@ impl Projected {
             covered: empty,
             coverage: Coverage::default(),
             took: 0,
+            readjust: crate::readjust::Readjuster::default(),
             digested_bytes: NOTHING_DIGESTED,
         }
     }
@@ -1941,6 +1950,37 @@ mod tests {
             !paths.checkpoint().exists(),
             "a run with no store was given a checkpoint of it"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A re-fold of the whole store, which a record the merge order moves in front of
+    /// what the loop had folded forces, keeps what the driver read and planned: that is
+    /// not folded from the journal, so nothing the re-fold takes in could put it back.
+    #[test]
+    fn a_whole_store_refold_keeps_the_drivers_readjustment() {
+        let root = scratch("refold-keeps-readjust");
+        let paths = a_recorded_run(&root, "r-refold-readjust");
+        settle(&paths, "build", "done");
+        let mut projected = Projected::open(&paths);
+        projected
+            .readjust
+            .bodies
+            .insert("build".into(), "a reviewer's note".into());
+        projected.readjust.tried.insert("ship".into());
+
+        relayed(&paths, "graph-0", 0, "1999-01-01T00:00:00.000Z", "build");
+        projected.refresh(&paths);
+        assert_eq!(
+            folded_as(&projected),
+            without_a_checkpoint(&paths),
+            "the loop's state and a full fold's disagree"
+        );
+        assert_eq!(
+            projected.readjust.bodies.get("build").map(String::as_str),
+            Some("a reviewer's note"),
+            "the re-fold forgot the description the driver read"
+        );
+        assert!(projected.readjust.tried.contains("ship"));
         let _ = std::fs::remove_dir_all(&root);
     }
 
