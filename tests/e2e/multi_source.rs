@@ -201,12 +201,21 @@ fn words(world: &World, home: &str) -> BTreeMap<String, String> {
     words_of(plan_tasks(world, home))
 }
 
-/// [`words`] as a wait beside a live driver reads them: `None` for a read the store could not
-/// answer, which is not yet an answer. The driver's routed copy rewrites the home's project
-/// file whole, and `local-md` writes a whole file in place rather than through a rename, so a
-/// read that lands inside that write meets a file with no front matter yet.
+/// What `local-md` says of a file whose front matter is not whole: an empty file, or one cut
+/// off before its closing `---`.
+const TORN_FILE: &str = "expected YAML front matter delimited by ---";
+
+/// [`words`] as a wait beside a live driver reads them: `None` for a read that met a file
+/// still being written, which is not yet an answer. The driver's routed copy rewrites the
+/// home's project file whole, and `local-md` writes a whole file in place rather than through
+/// a rename, so a read that lands inside that write meets a file with no front matter yet.
+/// Any other failure is the store's answer, and fails the journey.
 fn landed_words(world: &World, home: &str) -> Option<BTreeMap<String, String>> {
-    read_plan_tasks(world, home).ok().map(words_of)
+    match read_plan_tasks(world, home) {
+        Ok(tasks) => Some(words_of(tasks)),
+        Err(why) if why.contains(TORN_FILE) => None,
+        Err(why) => panic!("{why}"),
+    }
 }
 
 fn words_of(tasks: BTreeMap<String, Value>) -> BTreeMap<String, String> {
