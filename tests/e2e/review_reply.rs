@@ -5,6 +5,13 @@
 //! drafter is the scripted `oneagentgraph` double answering a `review-reply`
 //! dispatch; nothing of the engine under test is stood in for.
 
+// llmlint: ignore-file[e2e_not_mocked] the task states these journeys over onevcs-testing's
+// remote double and fake agents, because no check may spend the shared account: GitHub is
+// substituted at `onevcs`'s own `ONEVCS_GH` override and the drafter at `oneagentgraph`'s
+// subprocess boundary, while the compiled binary, the real linked `onevcs` and real git run
+// every reply, decline and recovery. The same journey against real GitHub, a real board and
+// the real `oneagentgraph` is the live tier's `tests/smoke/review.rs`.
+
 use crate::harness::World;
 use crate::review::{add, host, launched_with, reply, review, surfaces};
 use crate::stacked_drafts::{settled, team_world};
