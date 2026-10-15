@@ -91,7 +91,10 @@ leak-timeout = { period = "100ms", result = "fail" }
 # One journey gets ten periods, 600s, on the cross-platform legs instead of six.
 # On the Windows leg it takes 150-250s even alone, so under the whole suite's load
 # it crossed 360s twice in run 38675577984 and fail-fast threw away the leg. Its
-# cost is real work, not a hang: the harness's teardown spends 19ms of it on Linux.
+# cost is real work, not a hang: on Linux, at a load average of 30-60, the
+# harness's teardown spent 52-206ms of a 86-129s run, and the test ran no slower
+# than on d8d674f1, before the teardown existed (median 103s against 122s, five
+# interleaved pairs).
 # A profile's own overrides are read before `default`'s, so this one takes effect
 # and the test still joins the `e2e` group below. `tests/nextest_runs.rs` holds
 # this override and checks that no other test's limit moves.
