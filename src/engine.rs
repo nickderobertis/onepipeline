@@ -12574,6 +12574,12 @@ mod tests {
                 to: "fix: after".into(),
                 reason: "the title was unverified".into(),
             },
+            edits::Operation::DeclineApplied {
+                node: node(),
+                comments: vec![],
+                reason: "out of scope".into(),
+                replies: vec![],
+            },
         ];
         assert_eq!(
             every.iter().map(edits::Operation::kind).collect::<Vec<_>>(),

@@ -282,7 +282,6 @@ pub(crate) fn draft(
     drafting: &Drafting,
     relay: &mut dyn FnMut(Envelope),
 ) -> std::result::Result<Vec<Drafted>, NotDrafted> {
-    failpoint("before-drafting").map_err(|error| NotDrafted::failed(error.to_string()))?;
     let workspace = paths
         .dir
         .join("review-replies")
@@ -947,7 +946,7 @@ mod tests {
 
     fn comment(id: &str) -> ReviewComment {
         serde_json::from_value(json!({
-            "id": id, "kind": {"kind": "conversation"}, "author": "reviewer",
+            "id": id, "kind": {"type": "conversation"}, "author": "reviewer",
             "body": format!("fix {id}"), "url": format!("https://github.com/o/r/pull/1#issuecomment-{id}"),
             "created_at": "2026-10-10T00:00:00Z", "updated_at": "2026-10-10T00:00:00Z",
             "ours": false
@@ -982,7 +981,7 @@ mod tests {
     fn the_task_carries_each_section_in_order_and_the_reason_verbatim() {
         let task = drafting(false).task();
         let at = |section: &str| {
-            task.find(section)
+            task.find(&format!("\n{section}\n"))
                 .unwrap_or_else(|| panic!("{section} missing:\n{task}"))
         };
         assert!(task.starts_with(PREAMBLE));
@@ -1067,6 +1066,119 @@ mod tests {
             {"comment": "c2", "disposition": "declined", "body": "out of scope"},
         ]});
         assert!(validated(&drafting(true), &exact).is_ok());
+    }
+
+    /// Entry 127's block, out of the divergence record this build ships.
+    fn entry_127() -> Value {
+        include_str!("../docs/contract-divergences.md")
+            .split("\n## ")
+            .find(|entry| entry.starts_with("127."))
+            .and_then(|entry| entry.split("```json").nth(1))
+            .and_then(|rest| rest.split("```").next())
+            .map(|block| serde_json::from_str(block).expect("entry 127's block is JSON"))
+            .expect("the record carries entry 127's block")
+    }
+
+    /// What entry 127 states of the drafter, the reply and the records behind them is
+    /// what the private types read and write.
+    #[test]
+    fn the_drafter_the_reply_and_the_records_are_entry_127s() {
+        let block = entry_127();
+        assert_eq!(block["persona"], PERSONA);
+        assert_eq!(block["body_limit"], json!(BODY_LIMIT));
+        assert_eq!(block["declined_label"], DECLINED);
+        assert_eq!(block["no_transcript"], NO_TRANSCRIPT);
+        let task = drafting(false).task();
+        let mut at = 0;
+        for section in block["task_sections"].as_array().expect("the sections") {
+            let section = section.as_str().expect("a heading");
+            let found = task[at..]
+                .find(&format!("\n{section}\n"))
+                .unwrap_or_else(|| panic!("{section} is not after the one before it:\n{task}"));
+            at += found + 1;
+        }
+        // The block's result, held to the rules over a drafting naming its comments and
+        // supplying the commit its answer links.
+        let named: Vec<ReviewComment> = block["result"]["replies"]
+            .as_array()
+            .expect("the replies")
+            .iter()
+            .map(|reply| {
+                let mut held = comment("x");
+                held.id = onevcs::CommentId(reply["comment"].as_str().unwrap().to_owned());
+                held
+            })
+            .collect();
+        let sha = "1f2e3d4c5b6a79881726354453627180918a7b6c";
+        let supplied = Drafting {
+            comments: named,
+            commits: vec![Commit {
+                sha: sha.to_owned(),
+                subject: "fix: retry".to_owned(),
+                url: format!("https://github.com/owner/service/commit/{sha}"),
+                at: 0,
+            }],
+            ..drafting(false)
+        };
+        let drafted = validated(&supplied, &block["result"]).expect("the block's result is valid");
+        let dispositions: Vec<Value> = drafted
+            .iter()
+            .map(|reply| serde_json::to_value(reply.disposition).unwrap())
+            .collect();
+        assert_eq!(Value::Array(dispositions), block["dispositions"]);
+        let endings: Vec<Value> = [
+            NotDrafted::unconfigured().ending,
+            ReplyNotDraftedEnding::Failed,
+            ReplyNotDraftedEnding::Invalid,
+        ]
+        .iter()
+        .map(|ending| serde_json::to_value(ending).unwrap())
+        .collect();
+        assert_eq!(Value::Array(endings), block["endings"]);
+        let stored = crate::continuation::rework_provenance(&block["rework_metadata"])
+            .expect("the store's provenance, with its superseded head, reads");
+        assert_eq!(
+            stored.replaces_head.as_deref(),
+            block["rework_metadata"]["replaces_head"].as_str()
+        );
+        let mut older = block["rework_metadata"].clone();
+        older.as_object_mut().unwrap().remove("replaces_head");
+        assert_eq!(
+            crate::continuation::rework_provenance(&older)
+                .expect("a record without it reads")
+                .replaces_head,
+            None
+        );
+        assert_eq!(
+            block["checkpoint_schema_version"],
+            json!(crate::checkpoint::CHECKPOINT_SCHEMA_VERSION)
+        );
+        assert_eq!(
+            block["results_schema_version"],
+            json!(crate::review::RESULTS_SCHEMA_VERSION)
+        );
+        let operation: crate::edits::Operation = serde_json::from_value({
+            let mut applied = block["decline_applied"].clone();
+            applied["kind"] = json!("decline-applied");
+            applied
+        })
+        .expect("the block's decline-applied is an operation");
+        assert_eq!(block["operation_kinds"], json!([operation.kind()]));
+        assert!(operation.commits_a_change());
+        for (kind, record) in block["records"].as_object().expect("the records") {
+            let read = match kind.as_str() {
+                "review-reply-posted" => {
+                    serde_json::from_value::<crate::payload::ReviewReplyPosted>(record.clone())
+                        .map(|_| ())
+                }
+                "review-reply-not-drafted" => {
+                    serde_json::from_value::<crate::payload::ReviewReplyNotDrafted>(record.clone())
+                        .map(|_| ())
+                }
+                other => panic!("entry 127 records {other}, which no payload here is"),
+            };
+            read.unwrap_or_else(|why| panic!("{kind}: {why}"));
+        }
     }
 
     #[test]

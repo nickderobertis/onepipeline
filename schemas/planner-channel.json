@@ -1,5 +1,5 @@
 {
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "The planner-channel layout onepipeline publishes for a host's onemessagebus to link.",
   "schemas": [
     {
@@ -297,6 +297,17 @@
                   "null"
                 ],
                 "description": "Why it refused, or what refused around it, when either happened."
+              },
+              "refusal": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Refusal"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The refusal by kind, where the reconciler refused this command for a\nreason it names as one — `reason` is then its text. Omitted otherwise, so\nevery outcome written before it existed reads unchanged."
               }
             },
             "required": [
@@ -330,6 +341,115 @@
               }
             ],
             "description": "The four things that can become of one command of an envelope.\n\nOne field rather than a boolean and a sentence, because \"not applied\" was two\nfacts wearing one word: a command that was wrong and a command that was fine.\nA reader that cannot tell them apart resends the wrong one and fixes the right\none."
+          },
+          "Refusal": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "node": {
+                    "type": "string",
+                    "description": "The node the decline named."
+                  },
+                  "comment": {
+                    "type": "string",
+                    "description": "The comment no read found there."
+                  },
+                  "kind": {
+                    "type": "string",
+                    "const": "comment-not-read"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "node",
+                  "comment"
+                ],
+                "description": "The comment was never read for the node: no `onepipeline review` of this\nrun found it on the node's draft."
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "node": {
+                    "type": "string",
+                    "description": "The node the decline named."
+                  },
+                  "kind": {
+                    "type": "string",
+                    "const": "blank-reason"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "node"
+                ],
+                "description": "The decline's reason was blank."
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "node": {
+                    "type": "string",
+                    "description": "The node the decline named."
+                  },
+                  "comment": {
+                    "type": "string",
+                    "description": "The comment already answered."
+                  },
+                  "url": {
+                    "type": "string",
+                    "description": "Where that reply is read."
+                  },
+                  "kind": {
+                    "type": "string",
+                    "const": "already-answered"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "node",
+                  "comment",
+                  "url"
+                ],
+                "description": "A marked reply already answers the comment's current revision, so there is\nnothing to post."
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "node": {
+                    "type": "string",
+                    "description": "The node the decline named."
+                  },
+                  "comments": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "The comments it named."
+                  },
+                  "detail": {
+                    "type": "string",
+                    "description": "What failed."
+                  },
+                  "kind": {
+                    "type": "string",
+                    "const": "decline-not-posted"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "node",
+                  "comments",
+                  "detail"
+                ],
+                "description": "The decline's replies could not all be drafted or posted. Any posted before\nthe failure stay on the host, and sending the decline again posts only the\nrest."
+              }
+            ],
+            "description": "Why the reconciler refused a [`Command::Decline`], by kind.\n\nIts [`Display`](std::fmt::Display) is the refusal's `reason` on the command's\noutcome. The kinds are the ones a planner acts on differently: a comment no\nread of the node found is named again once `onepipeline review` has read it, a\nblank reason is restated, a comment a reply already answers needs nothing, and\na decline whose replies did not all reach the host is sent again, posting only\nthe ones still missing. See `docs/contract-divergences.md` entry 127."
           }
         }
       }
@@ -630,7 +750,8 @@
         "rework",
         "retitle",
         "review",
-        "readjust"
+        "readjust",
+        "decline"
       ],
       "authors": {
         "planner": {

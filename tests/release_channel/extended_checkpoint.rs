@@ -2,9 +2,9 @@
 //! read by the last release before this build began extending it.
 //!
 //! A reader that has proved a run ended covers its trailing records in
-//! `checkpoint.json`. Review intake advances the fold schema to 12, so the
-//! preceding release must discard that checkpoint and recover the same answers
-//! from the journal, writing its own schema-11 checkpoint. This drives that
+//! `checkpoint.json`. Review intake advanced the fold schema to 12, and review
+//! replies to 13, so the preceding release must discard that checkpoint and recover
+//! the same answers from the journal, writing its own schema-11 checkpoint. This drives that
 //! release's `status`, `host` and `results` over the extended checkpoint.
 
 use std::path::{Path, PathBuf};
@@ -122,7 +122,7 @@ fn a_checkpoint_the_host_view_extended_is_refolded_by_the_preceding_release() {
         Some(journal_len()),
         "this build's view did not extend the ended run's checkpoint"
     );
-    assert_eq!(extended["schema_version"], 12);
+    assert_eq!(extended["schema_version"], 13);
 
     let status = world.run(&["status", run]).exited(0).stdout.clone();
     let results = world.run(&["results", run]).exited(0).stdout.clone();

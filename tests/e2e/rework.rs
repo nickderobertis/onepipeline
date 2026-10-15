@@ -324,6 +324,9 @@ fn a_draft_in_review_is_reworked_on_its_own_branch_and_change_request() {
             "reason": "a reviewer asked for it on the draft",
             "instruction": "say what the review asked in a.md",
             "comments": [{"id": "101", "url": COMMENT_URL}],
+            // Where the rework's own commits begin, so a host continuing the lineage can
+            // tell them from the original worker's (entry 127).
+            "replaces_head": a_head,
         }),
         "{projected}"
     );
@@ -1721,6 +1724,7 @@ fn only_the_planner_may_rework_or_retitle() {
                 op,
                 onepipeline::channel::layout::Op::Rework
                     | onepipeline::channel::layout::Op::Retitle
+                    | onepipeline::channel::layout::Op::Decline
             )
         })
         .map(onepipeline::channel::layout::Op::word)
@@ -1761,6 +1765,11 @@ fn only_the_planner_may_rework_or_retitle() {
         (
             json!({"op": "retitle", "id": "a", "title": "fix: the sentinel's", "reason": "why"}),
             "retitle",
+        ),
+        (
+            json!({"op": "decline", "id": "a", "reason": "why",
+                   "comments": [{"id": "IC_kwABzgAAAfU", "url": "https://github.com/owner/service/pull/1#issuecomment-501"}]}),
+            "decline",
         ),
     ] {
         as_sentinel(command)
