@@ -11130,11 +11130,13 @@ variants, and `Scope::ALL` four long; `channel::Command::Decline` and
 `channel::layout::Op::Decline` new variants; `CommandResult::refusal` a new field;
 `event::PipelineKind` two new variants. `Error` is `#[non_exhaustive]` already.
 
-**Test seams.** Debug binaries stop at two more `ONEPIPELINE_REVIEW_FAILPOINT` stages
+**Test seams.** Debug binaries stop at three more `ONEPIPELINE_REVIEW_FAILPOINT` stages
 (entry 122's seam): `after-reply-post`, after the host took a rework's reply and before
-`review-reply-posted` is journalled, and `after-decline-post`, after a decline's
-replies were posted and before `decline-applied` is journalled. Release binaries ignore
-them; neither is a public interface or a launch setting.
+`review-reply-posted` is journalled; `after-decline-post`, after a decline's replies
+were posted and before `decline-applied` is journalled; and `after-edit-rejected`, after
+a driven reconciler journalled an envelope's `edit-rejected` records and before it
+answered the envelope. Release binaries ignore them; none is a public interface or a
+launch setting.
 
 ```json
 {
@@ -11210,7 +11212,7 @@ them; neither is a public interface or a launch setting.
   "results_schema_version": 2,
   "results_golden": "tests/golden/review-results-v2.json",
   "checkpoint_schema_version": 13,
-  "test_seams": ["after-reply-post", "after-decline-post"],
+  "test_seams": ["after-reply-post", "after-decline-post", "after-edit-rejected"],
   "bundle_versions": {"events": "1.5.0", "planner_channel": "1.5.0"}
 }
 ```
@@ -11253,8 +11255,9 @@ and `both_views_on_both_hosts_name_the_rework_and_commits_that_answered_and_the_
 `a_decline_whose_drafting_cannot_start_or_be_given_a_directory_posts_once_it_can`;
 `a_rework_whose_commits_cannot_be_read_surfaces_its_replies_and_posts_once_they_can`;
 `a_decline_the_plan_refuses_names_why_and_posts_nothing`;
-and `a_rework_s_drafter_may_decline_one_comment_while_it_answers_another`.
-`tests/e2e/agents.rs`'s `a_reply_drafting_is_its_own_scope_in_history_and_takes_none_of_the_node_s_sets`
+`a_rework_s_drafter_may_decline_one_comment_while_it_answers_another`;
+and `a_typed_refusal_a_lost_driver_never_answered_is_answered_from_the_journal_by_kind`,
+stopped at `after-edit-rejected`. `tests/e2e/agents.rs`'s `a_reply_drafting_is_its_own_scope_in_history_and_takes_none_of_the_node_s_sets`
 runs the drafter through the real `oneagentgraph` and reads its history scope.
 `tests/e2e/plan.rs` holds the reserved persona's refusal. `src/reply.rs` holds the
 task, the rules and the commit links over its own types, and `tests/contract.rs`'s

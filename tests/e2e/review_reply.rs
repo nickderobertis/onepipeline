@@ -2174,3 +2174,100 @@ fn a_rework_s_drafter_may_decline_one_comment_while_it_answers_another() {
     assert_eq!(posts(&world).len(), before);
     assert_eq!(drafter_tasks(&world).len(), 1);
 }
+
+/// A driver lost after it journalled a decline's typed refusal and before it answered
+/// the envelope leaves the next driver to answer it from the journal: the outcome carries
+/// the refusal by kind beside its text, and the refusal is not journalled a second time.
+#[test]
+fn a_typed_refusal_a_lost_driver_never_answered_is_answered_from_the_journal_by_kind() {
+    let world = team_world("decline-refusal-recovered");
+    let run = "recovered";
+    world.script("a.work", "first draft\n");
+    world.script("b.work", "second draft\n");
+    world.script("hold.wait", "");
+    let graph = world.review_reply_graph();
+    let mut plan = crate::harness::plan_of(
+        run,
+        vec![
+            crate::harness::lifecycle("a", &[]),
+            crate::harness::lifecycle("b", &[]),
+            crate::harness::agent("hold", &["b"]),
+        ],
+    );
+    plan["concurrency"] = json!(1);
+    let project = world.plan(run, &plan);
+    let seam = world.root.join("reply-crash-after-edit-rejected");
+    std::fs::create_dir_all(&seam).unwrap();
+    std::fs::write(seam.join("after-edit-rejected"), "").unwrap();
+    let mut lost = world
+        .cmd(&[
+            "start",
+            &project,
+            "--attach",
+            "--review-reply-graph",
+            &graph,
+        ])
+        .current_dir(&world.project)
+        .env("ONEPIPELINE_REVIEW_FAILPOINT", &seam)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(crate::review::Held)
+        .unwrap();
+    world.until("both drafts to settle", |world| {
+        ["a", "b"].iter().all(|node| {
+            world
+                .events_of(run, "node-settled")
+                .iter()
+                .any(|event| event["labels"]["node"] == *node)
+        })
+    });
+    let left = conversation(1211, 1);
+    let mut sending = world.cmd(&["reply", run]);
+    sending.env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1");
+    world.run_with_stdin_on(
+        sending,
+        &json!({"version": 3, "commands": [{"op": "decline", "id": "a",
+            "comments": [named(&left)], "reason": "   "}]})
+        .to_string(),
+    );
+    world.until("the refusal to be journalled and the driver held", |_| {
+        seam.join("after-edit-rejected.reached").is_file()
+    });
+    lost.0.kill().unwrap();
+    lost.0.wait().unwrap();
+    assert_eq!(world.events_of(run, "edit-rejected").len(), 1);
+    let answered = || {
+        std::fs::read_to_string(world.run_file(run, "channel/command-outcomes.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .any(|outcome| outcome["results"][0]["op"] == "decline")
+    };
+    assert!(!answered(), "the lost driver answered the envelope");
+
+    let mut next = world
+        .cmd(&["adopt", run])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    world.until("the next driver to answer the envelope", |_| answered());
+    let outcome = last_outcome(&world, run);
+    assert_eq!(outcome["applied"], false, "{outcome}");
+    let result = &outcome["results"][0];
+    assert_eq!(result["outcome"], "refused", "{outcome}");
+    assert_eq!(
+        result["refusal"],
+        json!({"kind": "blank-reason", "node": "a"}),
+        "{outcome}"
+    );
+    assert_eq!(
+        result["reason"], "refused: decline: node 'a': the reason cannot be blank",
+        "{outcome}"
+    );
+    assert_eq!(world.events_of(run, "edit-rejected").len(), 1);
+    world.script("hold.go", "");
+    let ended = next.wait().expect("the next driver ends");
+    assert!(ended.success(), "{ended:?}");
+}

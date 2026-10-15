@@ -3871,6 +3871,7 @@ fn reconcile_envelope(
                     )?;
                 }
             }
+            crate::review::failpoint("after-edit-rejected")?;
             channel.answer_commands(&refused_envelope(envelope.id, commands, &evaluated))?;
             return Ok(false);
         }
@@ -4142,6 +4143,7 @@ fn record_delivered(
                     )?;
                 }
             }
+            crate::review::failpoint("after-edit-rejected")?;
             channel.answer_commands(&refused_envelope(envelope.id, commands, &evaluated))?;
             return Ok(false);
         }
