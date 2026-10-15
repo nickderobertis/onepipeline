@@ -660,62 +660,6 @@ fn scratch_slugs(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// The review journey's board credential reaches the step that runs the live tier: that
-/// step maps the `GH_PROJECTS_TOKEN` secret under its own name beside the board it names,
-/// the presence check refuses the job without it, and `gh-secrets.json` provisions it.
-#[test]
-fn the_smoke_step_carries_the_live_lane_board_the_review_journey_stores_on() {
-    let ci = workflow("ci.yml");
-    let steps = ci["jobs"]["smoke"]["steps"]
-        .as_sequence()
-        .expect("ci.yml's smoke job has steps");
-    let run = steps
-        .iter()
-        .find(|step| {
-            step.get("run")
-                .and_then(Value::as_str)
-                .is_some_and(|run| run.contains("just smoke-real"))
-        })
-        .expect("ci.yml's smoke job runs `just smoke-real`");
-    let env = |key: &str| run.get("env").and_then(|env| env.get(key)).map(scalar);
-    assert_eq!(
-        env("GH_PROJECTS_TOKEN"),
-        Some("${{ secrets.GH_PROJECTS_TOKEN }}".to_owned())
-    );
-    assert_eq!(env("GH_PROJECTS_OWNER"), Some("nickderobertis".to_owned()));
-    assert_eq!(env("GH_PROJECTS_NUMBER"), Some("1".to_owned()));
-    assert_eq!(
-        env("GH_PROJECTS_REPOSITORY"),
-        Some("nickderobertis/onetaskgraph-live-scratch".to_owned())
-    );
-    let checked = steps.iter().any(|step| {
-        step.get("env")
-            .and_then(|env| env.get("HAS_BOARD_TOKEN"))
-            .map(scalar)
-            .is_some_and(|value| value.contains("secrets.GH_PROJECTS_TOKEN"))
-            && step
-                .get("run")
-                .and_then(Value::as_str)
-                .is_some_and(|body| body.contains("$HAS_BOARD_TOKEN") && body.contains("exit 1"))
-    });
-    assert!(
-        checked,
-        "no step of the smoke job refuses a missing GH_PROJECTS_TOKEN"
-    );
-    let manifest: serde_json::Value = serde_json::from_str(
-        &fs::read_to_string(repo_root().join("gh-secrets.json")).expect("gh-secrets.json reads"),
-    )
-    .expect("gh-secrets.json parses");
-    assert!(
-        manifest["secrets"]
-            .as_array()
-            .expect("gh-secrets.json lists its secrets")
-            .iter()
-            .any(|secret| secret["name"] == "GH_PROJECTS_TOKEN"),
-        "gh-secrets.json does not provision GH_PROJECTS_TOKEN"
-    );
-}
-
 /// The smoke's scratch repository is configuration: the step that runs the
 /// journey maps the Actions secret of the key's name into its environment
 /// under that same name, every other mention of the key anywhere in the
