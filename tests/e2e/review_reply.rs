@@ -127,7 +127,7 @@ pub(crate) fn worker_dispatches(world: &World, node: &str) -> usize {
                         && (pair[1] == "onepipeline.persona=pr-author"
                             || pair[1] == "onepipeline.persona=review-reply")
                 })
-                && args.iter().any(|arg| *arg == "--task")
+                && args.contains(&"--task")
         })
         .count()
 }
@@ -370,7 +370,7 @@ pub(crate) fn last_outcome(world: &World, run: &str) -> Value {
         .unwrap_or_default()
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .last()
+        .next_back()
         .unwrap_or_else(|| panic!("run {run} has no command outcome"))
 }
 
@@ -485,7 +485,7 @@ fn a_decline_posts_one_declined_reply_and_is_the_whole_of_its_record_on_every_ho
     );
     assert_eq!(applied[0]["payload"]["operations"][0]["reason"], reason);
     // Posted before the edit committed: the host's stamp is no later than the record's.
-    assert!(posted.created_at <= applied[0]["ts"].as_str().unwrap().to_owned());
+    assert!(posted.created_at.as_str() <= applied[0]["ts"].as_str().unwrap());
     let recorded = world.events_of(run, "review-reply-posted");
     assert_eq!(recorded.len(), 1);
     assert_eq!(recorded[0]["payload"]["disposition"], "declined");

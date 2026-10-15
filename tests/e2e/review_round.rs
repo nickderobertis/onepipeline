@@ -21,7 +21,9 @@
 use crate::draft_lifecycle::{team_repository, GREEN};
 use crate::harness::{lifecycle, plan_of, World};
 use crate::review_reply::{conversation, drafter_tasks, key, named, the_reply_to};
-use crate::stacked_drafts::{change_from, changed_against, held_as_draft, service, settled, PREFIX};
+use crate::stacked_drafts::{
+    change_from, changed_against, held_as_draft, service, settled, PREFIX,
+};
 use onevcs::{ChangeId, CommentId, CommentKind};
 use onevcs_testing::{FileHost, HostComment, HostState};
 use serde_json::{json, Value};
@@ -80,7 +82,9 @@ fn unledgered(args: &[String]) -> Option<Value> {
     let second = args.get(1).map(String::as_str).unwrap_or_default();
     // Answered by the remote double, whose ledger already charges them: every GraphQL read,
     // every reply POST and every PATCH it is handed.
-    if first == "api" && (second == "graphql" || args.iter().any(|arg| arg == "POST" || arg == "PATCH")) {
+    if first == "api"
+        && (second == "graphql" || args.iter().any(|arg| arg == "POST" || arg == "PATCH"))
+    {
         return None;
     }
     let endpoint = if first == "api" {
@@ -94,7 +98,14 @@ fn unledgered(args: &[String]) -> Option<Value> {
 }
 
 /// What one phase of the round spent, out of what each source recorded during it.
-fn phase(world: &World, host: &FileHost, run: &str, name: &str, from: &Marks, wall_ms: u128) -> Value {
+fn phase(
+    world: &World,
+    host: &FileHost,
+    run: &str,
+    name: &str,
+    from: &Marks,
+    wall_ms: u128,
+) -> Value {
     let ledger: Vec<Value> = host.ledger().expect("the double's ledger")[from.ledger..]
         .iter()
         .map(|call| {
@@ -117,7 +128,15 @@ fn phase(world: &World, host: &FileHost, run: &str, name: &str, from: &Marks, wa
         .iter()
         .filter(|call| call["tool"] == crate::harness::SCRIPTED_KEY)
         .filter_map(|call| call["args"][0].as_str())
-        .filter(|method| ["get_project", "query_tasks", "get_task", "task_dependencies"].contains(method))
+        .filter(|method| {
+            [
+                "get_project",
+                "query_tasks",
+                "get_task",
+                "task_dependencies",
+            ]
+            .contains(method)
+        })
         .map(|method| json!(method))
         .collect();
     let writes: Vec<Value> = projection_lines(world, run)[from.projections..]
@@ -144,8 +163,12 @@ fn phase(world: &World, host: &FileHost, run: &str, name: &str, from: &Marks, wa
         .iter()
         .filter(|call| call["tool"] == "oneagentgraph")
         .filter_map(|call| {
-            let args: Vec<&str> = call["args"].as_array()?.iter().filter_map(Value::as_str).collect();
-            args.iter().any(|arg| *arg == "--task").then(|| {
+            let args: Vec<&str> = call["args"]
+                .as_array()?
+                .iter()
+                .filter_map(Value::as_str)
+                .collect();
+            args.contains(&"--task").then(|| {
                 args.iter()
                     .find_map(|arg| arg.strip_prefix("onepipeline.persona="))
                     .map_or("worker", |persona| match persona {
@@ -273,7 +296,10 @@ fn seeded(world: &World, run: &str) -> FileHost {
             host.add_comment(&ChangeId(number.to_string()), earlier.clone())
                 .expect("an earlier comment");
             let reply = HostComment {
-                id: CommentId(crate::review_reply::node_id("IC", 20_000 + at as u64 * 100 + nth)),
+                id: CommentId(crate::review_reply::node_id(
+                    "IC",
+                    20_000 + at as u64 * 100 + nth,
+                )),
                 kind: CommentKind::Conversation,
                 author: "onepipeline-e2e".to_owned(),
                 body: format!(
@@ -299,7 +325,11 @@ fn seeded(world: &World, run: &str) -> FileHost {
 }
 
 fn passed(output: &crate::harness::Run, what: &str) {
-    assert_eq!(output.code, 0, "{what}:\n{}\n{}", output.stdout, output.stderr);
+    assert_eq!(
+        output.code, 0,
+        "{what}:\n{}\n{}",
+        output.stdout, output.stderr
+    );
 }
 
 /// What `scripts/review-round-quota-budget.sh` reports over `record`, run from `cwd`.
@@ -334,7 +364,13 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
     let project = world.plan(run, &plan);
     let launched = world.run_from(
         &world.project,
-        &["start", &project, "--attach", "--review-reply-graph", &graph],
+        &[
+            "start",
+            &project,
+            "--attach",
+            "--review-reply-graph",
+            &graph,
+        ],
     );
     passed(&launched, "the stack settles");
     let host = seeded(&world, run);
@@ -350,12 +386,15 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
     let on_h: Vec<HostComment> = (0..2).map(|nth| conversation(610 + nth, n7)).collect();
     let left = conversation(620, n1);
     for comment in &on_b {
-        host.add_comment(&ChangeId(n3.to_string()), comment.clone()).unwrap();
+        host.add_comment(&ChangeId(n3.to_string()), comment.clone())
+            .unwrap();
     }
     for comment in &on_h {
-        host.add_comment(&ChangeId(n7.to_string()), comment.clone()).unwrap();
+        host.add_comment(&ChangeId(n7.to_string()), comment.clone())
+            .unwrap();
     }
-    host.add_comment(&ChangeId(n1.to_string()), left.clone()).unwrap();
+    host.add_comment(&ChangeId(n1.to_string()), left.clone())
+        .unwrap();
 
     let mut phases = Vec::new();
     timed(&world, &host, run, "pass-1", &mut phases, || {
@@ -376,7 +415,10 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
         ("rework-b", "n3", &on_b, "n3"),
         ("rework-h", "n7", &on_h, "n7"),
     ] {
-        world.script(&format!("{node}-rework-1.work"), &format!("{node}, as the review asked\n"));
+        world.script(
+            &format!("{node}-rework-1.work"),
+            &format!("{node}, as the review asked\n"),
+        );
         world.script(&format!("{node}-rework-1.work-file"), file);
         timed(&world, &host, run, name, &mut phases, || {
             passed(
@@ -394,11 +436,22 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
     }
     // The bottom draft merged by a person mid-round, its branch kept — no call of the run's.
     let person = std::process::Command::new(crate::harness::double("fake-gh"))
-        .args(["__person", "merge", "owner/service", &n1.to_string(), "squash", "kept"])
+        .args([
+            "__person",
+            "merge",
+            "owner/service",
+            &n1.to_string(),
+            "squash",
+            "kept",
+        ])
         .env(onepipeline_testfakes::SCRIPT_DIR_ENV, &world.fakes)
         .output()
         .expect("the host double runs");
-    assert!(person.status.success(), "{}", String::from_utf8_lossy(&person.stderr));
+    assert!(
+        person.status.success(),
+        "{}",
+        String::from_utf8_lossy(&person.stderr)
+    );
     timed(&world, &host, run, "readjust", &mut phases, || {
         passed(&world.run(&["readjust", run]), "the readjustment");
     });
@@ -408,14 +461,23 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
 
     // Every comment answered or declined exactly once.
     for comment in on_b.iter().chain(&on_h) {
-        let number = comment.url.split("/pull/").nth(1).and_then(|rest| rest.split('#').next()).unwrap();
+        let number = comment
+            .url
+            .split("/pull/")
+            .nth(1)
+            .and_then(|rest| rest.split('#').next())
+            .unwrap();
         let reply = the_reply_to(&host, number.parse().unwrap(), comment);
         assert!(reply.body.contains("/commit/"), "{}", reply.body);
         assert!(!reply.body.contains("label=declined"));
     }
     let declined = the_reply_to(&host, n1, &left);
     assert!(declined.body.contains("label=declined"));
-    assert_eq!(drafter_tasks(&world).len(), 3, "a decline and a drafting per rework");
+    assert_eq!(
+        drafter_tasks(&world).len(),
+        3,
+        "a decline and a drafting per rework"
+    );
 
     // Every remaining draft a draft, on the root or its nearest unlanded ancestors, showing
     // only its own change.
@@ -435,9 +497,15 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
         let settlement = settled(&world, run, node);
         let branch = settlement["branch"].as_str().unwrap().to_owned();
         let change = change_from(&world, &branch);
-        assert!(held_as_draft(&world, &change["number"]), "{node} is no longer a draft");
+        assert!(
+            held_as_draft(&world, &change["number"]),
+            "{node} is no longer a draft"
+        );
         let base = change["base"].as_str().unwrap().to_owned();
-        let landed_parent = settled(&world, run, "n1")["branch"].as_str().unwrap().to_owned();
+        let landed_parent = settled(&world, run, "n1")["branch"]
+            .as_str()
+            .unwrap()
+            .to_owned();
         assert_ne!(base, landed_parent, "{node} is still on the landed draft");
         if ["n2", "n7-rework-1"].contains(&node) {
             assert_eq!(base, "main", "{node} is not on the root");
@@ -466,8 +534,14 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
     .unwrap();
     let mut expected = 0u64;
     for phase in record["phases"].as_array().unwrap() {
-        for call in phase["ledger"].as_array().unwrap().iter().chain(phase["gh"].as_array().unwrap()) {
-            expected += call["graphql_points"].as_u64().unwrap() + call["rest_requests"].as_u64().unwrap();
+        for call in phase["ledger"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(phase["gh"].as_array().unwrap())
+        {
+            expected +=
+                call["graphql_points"].as_u64().unwrap() + call["rest_requests"].as_u64().unwrap();
         }
         expected += 2 * phase["store_writes"].as_array().unwrap().len() as u64;
         expected += phase["store_reads"].as_array().unwrap().len() as u64;
@@ -482,7 +556,11 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
     assert_eq!(replies, 6, "each reply one POST on the double's ledger");
     let result_file = world.root.join("budget-result.json");
     let reported = budget_report(Path::new(env!("CARGO_MANIFEST_DIR")), &result_file);
-    assert!(reported.status.success(), "{}", String::from_utf8_lossy(&reported.stderr));
+    assert!(
+        reported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reported.stderr)
+    );
     let result: Value = serde_json::from_slice(&std::fs::read(&result_file).unwrap()).unwrap();
     assert_eq!(result["value"], json!(expected), "{result}");
     let detail = result["detail"].as_str().unwrap();
@@ -537,7 +615,11 @@ fn the_round_quota_reporter_refuses_missing_and_malformed_records() {
     )
     .unwrap();
     let output = budget_report(&world.root, &result);
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let reported: Value = serde_json::from_slice(&std::fs::read(&result).unwrap()).unwrap();
     assert_eq!(reported["value"], json!(6 + 1 + 1 + 2));
     let missing_env = std::process::Command::new("bash")

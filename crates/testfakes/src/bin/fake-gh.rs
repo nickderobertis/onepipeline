@@ -2896,7 +2896,10 @@ fn own_standing_list(
             .iter()
             .find(|held| held.repo == repo && held.number.to_string() == change.0)
         else {
-            return Err(fake::refuse(&format!("no pull request {} in {repo}", change.0)));
+            return Err(fake::refuse(&format!(
+                "no pull request {} in {repo}",
+                change.0
+            )));
         };
         let id = change_key(dir, held);
         let state = state_of_opened(dir, held);
@@ -3022,14 +3025,15 @@ fn patch_pull(args: &[String], dir: &Path, path: &str) -> ExitCode {
     if dir.join("gh.standings-own").exists() && dir.join("review-host.json").is_file() {
         use onevcs::RemoteHost;
         let change = onevcs::ChangeId(number.to_string());
-        let mirrored = onevcs_testing::FileHost::create(dir.join("review-host.json")).and_then(
-            |host| match fields.get("state") {
-                Some(_) => host.reopen_change(&change).map(|_| ()),
-                None => host
-                    .retarget_change(&change, &now.base, fields.get("body").copied())
-                    .map(|_| ()),
-            },
-        );
+        let mirrored =
+            onevcs_testing::FileHost::create(dir.join("review-host.json")).and_then(|host| {
+                match fields.get("state") {
+                    Some(_) => host.reopen_change(&change).map(|_| ()),
+                    None => host
+                        .retarget_change(&change, &now.base, fields.get("body").copied())
+                        .map(|_| ()),
+                }
+            });
         if let Err(error) = mirrored {
             return fake::refuse(&format!("the remote double refused the write: {error}"));
         }

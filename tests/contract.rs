@@ -9698,7 +9698,7 @@ fn the_task_templates_are_what_the_contract_names() {
         assert_eq!(rung["config_schema_version"], json!(CONFIG_SCHEMA_VERSION));
     }
     // The version the template keys arrived at, which every later one still reads.
-    assert!(CONFIG_SCHEMA_VERSION <= LAUNCH_CONFIG_SCHEMA_VERSION);
+    const { assert!(CONFIG_SCHEMA_VERSION <= LAUNCH_CONFIG_SCHEMA_VERSION) };
     assert!(
         onepipeline::filter::LAUNCH_CONFIG_SCHEMA_VERSIONS_READ.contains(&CONFIG_SCHEMA_VERSION)
     );
@@ -10769,7 +10769,6 @@ fn deferred_review_republication_is_the_recorded_outcome() {
 /// verb's do; and both bundles are at the versions it names.
 #[test]
 fn the_readjustment_is_what_the_divergence_record_names() {
-    use onepipeline::channel::layout::DOCUMENT_VERSION;
     use onepipeline::event::{EventKind, PipelineKind, PIPELINE_KINDS};
     use onepipeline::payload::{registry, schema_of};
     use onepipeline::verbs::{render_readjust, render_review, ReadjustReceipt, ReviewReceipt};
