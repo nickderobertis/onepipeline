@@ -233,8 +233,8 @@ struct AnsweredReply {
 /// The drafter's structured result, held to the rules: every comment the drafting
 /// named exactly once and nothing else, every body non-empty and at most
 /// [`BODY_LIMIT`] characters, an `answered` body carrying at least one supplied
-/// commit URL, and a `declined` one carrying none — and, for a decline, every
-/// reply `declined` and no commit URL at all.
+/// commit URL, and a `declined` one carrying no commit URL at all — and, for a
+/// decline, every reply `declined`.
 pub(crate) fn validated(
     drafting: &Drafting,
     answer: &Value,
@@ -297,9 +297,7 @@ pub(crate) fn validated(
             ReplyDisposition::Declined if links_supplied => {
                 return Err(format!("the `declined` reply to {comment} links a commit"))
             }
-            ReplyDisposition::Declined
-                if drafting.is_decline() && !linked_commits(body).is_empty() =>
-            {
+            ReplyDisposition::Declined if !linked_commits(body).is_empty() => {
                 return Err(format!(
                     "the declining reply to {comment} carries a commit URL"
                 ))
@@ -1184,6 +1182,14 @@ mod tests {
         refused(
             json!({"replies": [{"comment": "c1", "disposition": "declined", "body": "see https://github.com/o/r/commit/abcdef0"}]}),
             true,
+            "carries a commit URL",
+        );
+        refused(
+            json!({"replies": [
+                {"comment": "c1", "disposition": "answered", "body": format!("Fixed in {LINK}")},
+                {"comment": "c2", "disposition": "declined", "body": "see https://github.com/o/r/commit/abcdef0"},
+            ]}),
+            false,
             "carries a commit URL",
         );
         let exact = json!({"replies": [
