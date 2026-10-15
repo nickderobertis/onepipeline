@@ -3867,8 +3867,6 @@ fn a_dispatched_codex_turn_starts_with_plugins_off_unless_its_config_opts_in() {
     };
     let base =
         "run_mode = \"fallback\"\nharnesses = [\"codex\"]\nserver_overloaded_max_retries = 0\n";
-    // Any later token that would turn plugins back on: a `-c` override of the
-    // same key to anything but `false`, or Codex's own `--enable plugins`.
     let reenabled = |argv: &[String], from: usize| {
         argv.windows(2).skip(from).any(|pair| {
             (pair[0] == "-c"
@@ -3973,8 +3971,6 @@ fn a_judged_codex_turn_starts_with_plugins_off_unless_its_config_opts_in() {
     };
     let base =
         "run_mode = \"fallback\"\nharnesses = [\"codex\"]\nserver_overloaded_max_retries = 0\n";
-    // Any later token that would turn plugins back on: a `-c` override of the
-    // same key to anything but `false`, or Codex's own `--enable plugins`.
     let reenabled = |argv: &[String], from: usize| {
         argv.windows(2).skip(from).any(|pair| {
             (pair[0] == "-c"

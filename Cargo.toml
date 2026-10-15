@@ -752,14 +752,9 @@ resolver = "2"
 # it. It requires `onejudge` 0.19.0, which `^0.17.1` admits no version of, so the
 # two requirements move as one.
 #
-# `oneagentgraph` 0.5.10 is the floor because it relinks onto the
-# `oneharness-core` 0.26.0 below, which starts Codex with plugins off unless a
-# config opts in, so every single-sided turn a dispatch runs on Codex stops
-# downloading its remote plugin catalog. Nothing here reads anything new from it;
-# it requires `oneharness-core` `^0.26.0`, which `^0.24.1` admits no version of,
-# and `onejudge` `^0.19.2`, so the three move as one. `tests/e2e/dispatch.rs`'s
-# `a_dispatched_codex_turn_starts_with_plugins_off_unless_its_config_opts_in`
-# reads the argv the linked core starts Codex with.
+# `oneagentgraph` 0.5.10 is the floor because it relinks onto the plugins-off
+# `oneharness-core` 0.26.0 (see that pin). It requires `^0.26.0` and `onejudge`
+# `^0.19.2`, so the three move as one.
 #
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
@@ -986,18 +981,14 @@ onejudge = "0.19.2"
 # (oneharness #1403), which the run views draw a turn's activity through. Inside
 # `^0.24.0`, so `oneagentgraph` and `onejudge` resolve this one copy with it.
 #
-# **0.26.0 starts Codex with plugins off**: every `codex exec` and `app-server`
-# launch carries `-c features.plugins=false` unless the resolved config says
-# `plugins = true` (oneharness #1457), so a dispatch stops downloading Codex's
-# remote plugin catalog with no configuration of the host's own. The minors since
-# 0.24 are **breaking** in their release notes and none touches an item this
-# crate builds; `crates/testfakes`'s `fake-codex`
-# takes the `-c` override in its argv grammar, and `tests/e2e/dispatch.rs`'s
-# `a_dispatched_codex_turn_starts_with_plugins_off_unless_its_config_opts_in`
-# reads the argv it records under each config. A **requirement** for the same
-# pre-1.0 reason as every raise above: `^0.24` admits no 0.26.x. `oneagentgraph`
-# 0.5.10 and `onejudge` 0.19.2 each require `^0.26.0`, so the three move together
-# or the lock resolves the core twice.
+# **0.26.0 starts Codex with plugins off** unless the resolved config opts in
+# (oneharness #1457), so a dispatch stops downloading Codex's remote plugin
+# catalog with no configuration of the host's own; `tests/e2e/dispatch.rs`'s
+# `plugins_off` journeys hold it. The minors since 0.24 are **breaking** in their
+# release notes and none touches an item this crate builds. A **requirement**
+# for the same pre-1.0 reason as every raise above: `^0.24` admits no 0.26.x.
+# `oneagentgraph` 0.5.10 and `onejudge` 0.19.2 each require `^0.26.0`, so the
+# three move together or the lock resolves the core twice.
 oneharness-core = "0.26.0"
 # The sibling's own test-support crate, from the **same** revision as the library
 # it implements — here by resolving both from the registry at the releases cut
