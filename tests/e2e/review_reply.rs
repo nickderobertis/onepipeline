@@ -581,7 +581,9 @@ fn a_command_asks_a_repositorys_visibility_once_and_again_only_where_the_host_di
     add(&host, 1, second.clone());
     review(&world, run);
 
-    // The host refuses the read: nothing is kept, so it is asked again.
+    // The host refuses the read, which `onevcs` answers as an `unknown` visibility —
+    // recorded so, and returned rather than raised. An unknown answer is never kept, so
+    // the command asks again each time its boundary resolves.
     world.script("gh.visibility", "unsayable");
     let from = world.invocations().len();
     let output = decline(&world, run, "a", &[&first], "Out of scope here.");
