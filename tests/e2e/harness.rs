@@ -3841,12 +3841,6 @@ impl World {
 impl Drop for World {
     fn drop(&mut self) {
         self.stop_the_runs_it_can();
-        if std::thread::panicking() {
-            if let Some(keep) = std::env::var_os("S_FD05_KEEP") {
-                let to = std::path::Path::new(&keep).join(format!("{}-{}", std::process::id(), self.root.file_name().unwrap().to_string_lossy()));
-                let _ = std::process::Command::new("cp").arg("-a").arg(&self.root).arg(&to).status();
-            }
-        }
         // A host [`on_host`](World::on_host) made removes only what is its own: the world it
         // was made from still has runs to stop and a root to remove.
         let removed = match &self.home {
