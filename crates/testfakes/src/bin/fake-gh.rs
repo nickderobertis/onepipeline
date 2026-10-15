@@ -2354,6 +2354,37 @@ fn standings_read(query: &str, owner: &str, name: &str, dir: &Path) -> ExitCode 
         Ok(host) => host,
         Err(error) => return fake::refuse(&error.to_string()),
     };
+    // `gh.standings-own`: where each change stands is this host's own record of it — the
+    // change requests `pr create` opened, the commits a person's merge wrote onto the origin
+    // — while the remote double answers the feedback read with it and charges the read on
+    // its ledger, as one aliased query of the real host is one call with one charge.
+    if dir.join("gh.standings-own").exists() {
+        let charged = if query.contains("reviewThreads(") {
+            host.review_standings(
+                "main",
+                &changes
+                    .iter()
+                    .cloned()
+                    .map(|change| (change, None))
+                    .collect::<Vec<_>>(),
+            )
+            .map(|answer| (answer.reads, answer.cost))
+        } else {
+            host.change_standings("main", &changes)
+                .map(|answer| (Vec::new(), answer.cost))
+        };
+        let (reads, cost) = match charged {
+            Ok(charged) => charged,
+            Err(error) => return fake::refuse(&error.to_string()),
+        };
+        return match own_standing_list(owner, name, &changes, dir) {
+            Ok(standings) => {
+                println!("{}", standings_wire(&standings, &reads, cost));
+                ExitCode::SUCCESS
+            }
+            Err(refused) => refused,
+        };
+    }
     // The root is used only to classify landings in the double. GitHub's wire
     // carries the merged base and the real reader classifies against its request.
     let answer = if query.contains("reviewThreads(") {
@@ -2824,6 +2855,39 @@ fn own_standings(
             "the standings of {owner}/{name} could not be read"
         ));
     }
+    let standings = match own_standing_list(owner, name, changes, dir) {
+        Ok(standings) => standings,
+        Err(refused) => return refused,
+    };
+    let reads: Vec<onevcs::ReviewRead> = if query.contains("reviewThreads(") {
+        standings
+            .iter()
+            .map(|standing| onevcs::ReviewRead {
+                change_url: standing.url.to_string(),
+                comments: Vec::new(),
+                marker: onevcs::ReadMarker(WRITTEN_AT.to_owned()),
+                unchanged: false,
+                cost: onevcs::ReadCost::default(),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let cost = onevcs::ReadCost {
+        graphql_points: 1,
+        rest_requests: 0,
+    };
+    println!("{}", standings_wire(&standings, &reads, cost));
+    ExitCode::SUCCESS
+}
+
+/// Where each of `changes` stands, by this host's own records of them.
+fn own_standing_list(
+    owner: &str,
+    name: &str,
+    changes: &[onevcs::ChangeId],
+    dir: &Path,
+) -> Result<Vec<onevcs::ChangeStanding>, ExitCode> {
     let repo = format!("{owner}/{name}");
     let opened = opened_changes(dir);
     let mut standings = Vec::new();
@@ -2832,7 +2896,7 @@ fn own_standings(
             .iter()
             .find(|held| held.repo == repo && held.number.to_string() == change.0)
         else {
-            return fake::refuse(&format!("no pull request {} in {repo}", change.0));
+            return Err(fake::refuse(&format!("no pull request {} in {repo}", change.0)));
         };
         let id = change_key(dir, held);
         let state = state_of_opened(dir, held);
@@ -2876,26 +2940,7 @@ fn own_standings(
             checks: head_verdict(dir, &head),
         });
     }
-    let reads: Vec<onevcs::ReviewRead> = if query.contains("reviewThreads(") {
-        standings
-            .iter()
-            .map(|standing| onevcs::ReviewRead {
-                change_url: standing.url.to_string(),
-                comments: Vec::new(),
-                marker: onevcs::ReadMarker(WRITTEN_AT.to_owned()),
-                unchanged: false,
-                cost: onevcs::ReadCost::default(),
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
-    let cost = onevcs::ReadCost {
-        graphql_points: 1,
-        rest_requests: 0,
-    };
-    println!("{}", standings_wire(&standings, &reads, cost));
-    ExitCode::SUCCESS
+    Ok(standings)
 }
 
 /// `gh api repos/O/N/pulls/<n> --method PATCH -f base=B [-f body=…]` and
@@ -2972,6 +3017,23 @@ fn patch_pull(args: &[String], dir: &Path, path: &str) -> ExitCode {
         .into_iter()
         .find(|held| held.repo == repo && held.number == number)
         .unwrap_or_else(|| fake::fail("the record just written is gone"));
+    // In `gh.standings-own` the remote double keeps the ledger of every call it would
+    // answer, so the write is put to it too: its state follows, and its ledger charges it.
+    if dir.join("gh.standings-own").exists() && dir.join("review-host.json").is_file() {
+        use onevcs::RemoteHost;
+        let change = onevcs::ChangeId(number.to_string());
+        let mirrored = onevcs_testing::FileHost::create(dir.join("review-host.json")).and_then(
+            |host| match fields.get("state") {
+                Some(_) => host.reopen_change(&change).map(|_| ()),
+                None => host
+                    .retarget_change(&change, &now.base, fields.get("body").copied())
+                    .map(|_| ()),
+            },
+        );
+        if let Err(error) = mirrored {
+            return fake::refuse(&format!("the remote double refused the write: {error}"));
+        }
+    }
     let state = state_of_opened(dir, &now);
     println!(
         "{}",
