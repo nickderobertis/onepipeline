@@ -640,15 +640,7 @@ fn an_adoption_with_no_baseline_reads_a_member_task_by_its_id_in_its_own_source(
 fn a_home_whose_member_list_breaks_the_stores_rule_is_not_launched() {
     let world = a_routed_world("multi-source-malformed");
     let name = "malformed";
-    // A node naming no repository: nothing but the private draft could make it private, so
-    // the store's boundary needs no repository policy to classify it.
-    let home = world.on_onevcs(|| {
-        filed(
-            &world,
-            name,
-            &plan_of(name, vec![crate::harness::agent("core", &[])]),
-        )
-    });
+    let home = filed(&world, name, &plan_of(name, vec![on(HOME, "core", &[])]));
     let document = world
         .store()
         .join("projects")

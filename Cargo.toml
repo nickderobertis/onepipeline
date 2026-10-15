@@ -1006,9 +1006,9 @@ onevcs-testing = "0.19.2"
 # adds public Task and Comment fields and CopyLink, making this a breaking link.
 # `justfile`'s `onetaskgraph-version` moves with this release.
 #
-# **0.7.1 finds a copied document's home through a private source's own copy link**:
-# a copy out of a source declared private records no origin on the public board, and
-# the document copy now files the plan's documents under the board's copied plan anyway.
+# **No earlier release than 0.7.1**: a plan drafted in a private source reaches the
+# board with no origin recorded, and only 0.7.1's document copy still files its
+# documents under the board's plan. `tests/e2e/multi_source.rs` fails on 0.7.0.
 onetaskgraph-core = "=0.7.1"
 onetaskgraph-plugin-api = "=0.7.1"
 onetaskgraph-local-md = "=0.7.1"
