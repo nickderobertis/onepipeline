@@ -952,6 +952,10 @@ fn a_failed_or_timed_out_command_an_unmaintainable_identity_and_an_unlistable_ho
             "{SERVICE_IDENTITY} (every 1s): slot 1 ran — failed (exit 3) in"
         ));
     release(&world, "failing");
+    // That run's driver tried the slot again each time `every` came round until
+    // it was let go, so how many markers it left is the host's pace, not this
+    // journey's: what the later sections hold is that none of them adds one.
+    let attempted = marker_lines(&world);
 
     // A command that timed out under the identity's own bound: a hold nothing
     // releases, bounded at a second.
@@ -970,7 +974,7 @@ fn a_failed_or_timed_out_command_an_unmaintainable_identity_and_an_unlistable_ho
     );
     assert_eq!(
         marker_lines(&world),
-        1,
+        attempted,
         "a timed-out command wrote its marker"
     );
     world
@@ -1030,7 +1034,11 @@ fn a_failed_or_timed_out_command_an_unmaintainable_identity_and_an_unlistable_ho
             .is_some_and(|reason| !reason.is_empty()),
         "{unreadable}"
     );
-    assert_eq!(marker_lines(&world), 1, "an unreadable configuration ran");
+    assert_eq!(
+        marker_lines(&world),
+        attempted,
+        "an unreadable configuration ran"
+    );
     world
         .run(&["results", "unreadable"])
         .exited(0)
