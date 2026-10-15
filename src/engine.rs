@@ -504,6 +504,9 @@ pub struct Settlement {
     /// What a restack of the node did, on the settlement that ends one: the
     /// `node-restacked` the loop records ahead of it.
     pub(crate) restacked: Option<Restacked>,
+    /// What a readjusted draft's retarget after its push answered, on the settlement
+    /// that ends one: the word its `node-readjusted` records, or why it was not moved.
+    pub(crate) readjusted: Option<std::result::Result<crate::payload::RetargetWord, String>>,
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
@@ -534,6 +537,7 @@ impl Settlement {
             base: None,
             stack: None,
             restacked: None,
+            readjusted: None,
         }
     }
 }
@@ -578,8 +582,13 @@ pub(crate) enum Message {
     /// A lifecycle dispatch is ready to publish, and waits for the pass that reads the
     /// project's claim to say whether it may. See [`publication_cleared`].
     PublicationDue(Box<PublicationDue>),
+    /// A rework's republication is ready, and waits for the pass that reads its change
+    /// request's standing to say whether it is still open. See [`merged_during_rework`].
+    ReworkDue(Box<ReworkDue>),
     /// A rework's publication wrote a new title onto its change request.
     ChangeRetitled(Box<crate::payload::ChangeRetitled>),
+    /// A dispatch has something to tell the planner that its settlement does not say.
+    Raise(Box<Surface>),
     /// A rework's publication left its change request's title unverified.
     TitleUnverified(Box<UnverifiedTitle>),
 }
@@ -637,6 +646,52 @@ pub(crate) enum PublicationVerdict {
     Publish,
     /// Another run has taken the project over: keep the work, publish nothing.
     Withhold,
+}
+
+/// One rework republication waiting on the next pass's standings read.
+pub(crate) struct ReworkDue {
+    // llmlint: ignore-block[invalid_states_unrepresentable] the node and the change request
+    // are the run's own strings — a graph-validated id and the URL `known_change_url` parsed
+    // — and are only compared against the record the read folds.
+    pub(crate) node: String,
+    pub(crate) change: String,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
+    pub(crate) answer: Sender<ReworkVerdict>,
+}
+
+/// What the read continuing a rework's trigger answers its republication.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReworkVerdict {
+    /// The change request is still open: publish onto it.
+    Republish,
+    /// A person merged it after the rework was dispatched: publish nothing.
+    MergedDuringRework,
+}
+
+/// Ask the loop whether the change request a rework's replacement is about to republish
+/// onto was merged since the rework was dispatched, and wait for its answer.
+///
+/// The read is the continuation of the rework's own trigger: the pass that receives this
+/// reads once for every republication ready in it, readjusts on what that read reports,
+/// and answers each. A loop that has gone answers nothing that could refuse, so the
+/// republication goes ahead.
+pub(crate) fn merged_during_rework(tx: &Sender<Message>, node: &str, change: &str) -> bool {
+    let (answer, answered) = mpsc::channel();
+    // llmlint: ignore-block[changed_behavior_has_e2e] a send the loop refuses and an answer it
+    // drops are each a loop that has already gone, which no journey can arrange while a dispatch
+    // is waiting on it — `publication_cleared` beside this says why.
+    if tx
+        .send(Message::ReworkDue(Box::new(ReworkDue {
+            node: node.to_owned(),
+            change: change.to_owned(),
+            answer,
+        })))
+        .is_err()
+    {
+        return false;
+    }
+    answered.recv().unwrap_or(ReworkVerdict::Republish) == ReworkVerdict::MergedDuringRework
+    // llmlint: ignore-end[changed_behavior_has_e2e]
 }
 
 /// Ask the loop whether a lifecycle node may publish now, and wait for its answer.
@@ -957,7 +1012,21 @@ pub fn claim(paths: &RunPaths) -> Result<OwnershipLock> {
 /// the channel — a decision point cleared while the loop is still running
 /// resumes the subtree it held, without any external driver action.
 pub fn drive_holding(paths: &RunPaths, lock: OwnershipLock) -> Result<Driven> {
-    exiting_from(paths, lock, driving)
+    exiting_from(paths, lock, |paths, held, answered_from| {
+        driving(paths, held, answered_from, None)
+    })
+}
+
+/// [`drive_holding`], for an explicit trigger that already made its readjustment's read
+/// under the lock: the loop starts from what that read kept rather than reading again.
+pub(crate) fn drive_after_readjust(
+    paths: &RunPaths,
+    lock: OwnershipLock,
+    readjuster: crate::readjust::Readjuster,
+) -> Result<Driven> {
+    exiting_from(paths, lock, |paths, held, answered_from| {
+        driving(paths, held, answered_from, Some(readjuster))
+    })
 }
 
 /// Run a driver's `body` over the lock, and journal how it ended when it
@@ -1033,6 +1102,7 @@ fn driving(
     paths: &RunPaths,
     held: &mut Option<OwnershipLock>,
     answered_from: usize,
+    readjuster: Option<crate::readjust::Readjuster>,
 ) -> Result<Driven> {
     let launch: LaunchRecord = ledger::read_json(&paths.launch())?;
     // llmlint: ignore-block[boundary_inputs_validated] graph-reference syntax and
@@ -1054,6 +1124,12 @@ fn driving(
     // [`crate::checkpoint`].
     let mut state = Projected::open(paths);
     report_unreadable_records(paths, &state);
+    // A driver's first pass readjusts — a continuing launch's and an adoption's trigger —
+    // unless the explicit trigger it is driving for already read.
+    match readjuster {
+        Some(readjuster) => state.readjust = readjuster,
+        None => state.readjust.due = Some(crate::payload::ReadjustTrigger::Continuation),
+    }
 
     let mut outcome = converge(paths, &mut journal, &mut state, &launch)?;
     record_result(paths, &state, outcome)?;
@@ -1389,6 +1465,8 @@ fn converge(
     // dispatches and publishes nothing more, and ends once what it had in flight settles.
     let mut superseded_by: Option<crate::payload::DriverClaim> = None;
     let mut publications: Vec<PublicationDue> = Vec::new();
+    // Rework republications waiting on the standings read that continues their trigger.
+    let mut reworks_due: Vec<ReworkDue> = Vec::new();
     let channel = ChannelState::of_run(paths, launch);
     let rules = executor_rules()?;
     let (tx, rx): (Sender<Message>, Receiver<Message>) = mpsc::channel();
@@ -1492,6 +1570,7 @@ fn converge(
 
     loop {
         crate::loopstats::pass();
+        state.readjust.read_this_pass = false;
         // A node that landed since the last pass — a settlement, a `settle`, a
         // relayed `merge-completed` — tells `onevcs` which earlier attempts on
         // other branches it superseded. Nothing it answers moves the run.
@@ -1521,6 +1600,15 @@ fn converge(
             derived = None;
             unpublished = true;
             moved = true;
+        }
+        // A trigger's readjustment owed on this pass — a continuing launch's or an
+        // adoption's, before its first dispatch — reads where every draft stands now.
+        if let Some(trigger) = state.readjust.due.take() {
+            if superseded_by.is_none() && !state.readjust.read_this_pass {
+                crate::readjust::run(paths, journal, state, trigger)?;
+                derived = None;
+                unpublished = true;
+            }
         }
 
         // Another run's ledger is the only thing that can answer a cross-DAG
@@ -1654,6 +1742,68 @@ fn converge(
                 PublicationVerdict::Publish
             });
         }
+        // Every rework republication ready on this pass is answered by one read, which
+        // readjusts first on what it reports.
+        if !reworks_due.is_empty() {
+            if !state.readjust.read_this_pass {
+                crate::readjust::run(
+                    paths,
+                    journal,
+                    state,
+                    crate::payload::ReadjustTrigger::Rework,
+                )?;
+                derived = None;
+                unpublished = true;
+            }
+            for due in reworks_due.drain(..) {
+                // Merged anywhere: into the root, or into another node's branch.
+                let landed = state
+                    .landed_how
+                    .values()
+                    .any(|landed| landed.change_url == due.change);
+                let absorbed_into = state
+                    .absorbed
+                    .iter()
+                    .find(|(node, _)| {
+                        crate::readjust::lineage_change(state, node).as_deref()
+                            == Some(due.change.as_str())
+                    })
+                    .map(|(_, into)| into.clone());
+                let elsewhere = state.readjust.merged_elsewhere.contains(&due.node);
+                let merged = landed || absorbed_into.is_some() || elsewhere;
+                if merged {
+                    let next = match &absorbed_into {
+                        None if elsewhere => "the question raised about that merge says how \
+                                              the run goes on with it"
+                            .to_owned(),
+                        Some(into) => format!(
+                            "its work now sits in '{into}''s draft; rework '{into}', or build on it \
+                             with an `add` naming what is still to do"
+                        ),
+                        None => "build on the landed work with an `add` naming what is still to do"
+                            .to_owned(),
+                    };
+                    crate::readjust::notify(
+                        paths,
+                        journal,
+                        crate::readjust::MERGED_DURING_REWORK,
+                        &due.node,
+                        format!(
+                            "node '{node}''s change request {change} was merged while its rework \
+                             ran, so the rework published nothing and opened no change request; \
+                             its work is kept on its branch, and {next}.",
+                            node = due.node,
+                            change = due.change
+                        ),
+                    )?;
+                }
+                let _ = due.answer.send(if merged {
+                    ReworkVerdict::MergedDuringRework
+                } else {
+                    ReworkVerdict::Republish
+                });
+            }
+        }
         if !claimed {
             claimed = true;
             if let Some(writeback) = writeback.as_ref().filter(|_| superseded_by.is_none()) {
@@ -1681,6 +1831,20 @@ fn converge(
                 }
                 found.is_none()
             };
+            // A placement at dispatch, and a restack, read their stack parents' standings
+            // first: once a pass, and once for each node however long it is held.
+            if !state.readjust.read_this_pass
+                && claim_placement_reads(state, &statuses, &in_flight, &paused)
+            {
+                crate::readjust::run(
+                    paths,
+                    journal,
+                    state,
+                    crate::payload::ReadjustTrigger::Placement,
+                )?;
+                derived = None;
+            }
+            let statuses = statuses_of(&mut derived, state);
             let started = start_ready(
                 paths,
                 journal,
@@ -1718,7 +1882,22 @@ fn converge(
                 &notes_in_flight,
                 &mut admit,
             )?;
-            started || restacked
+            let statuses = statuses_of(&mut derived, state);
+            let readjusted = start_readjustments(
+                paths,
+                journal,
+                state,
+                &statuses,
+                &rules,
+                launch,
+                &tx,
+                &mut in_flight,
+                &paused,
+                &releases,
+                &notes_in_flight,
+                &mut admit,
+            )?;
+            started || restacked || readjusted
         };
         if let Some(by) = found {
             supersede(paths, journal, writeback.as_ref(), &by)?;
@@ -2212,13 +2391,50 @@ fn converge(
                 }
                 // Answered by the next pass's claim check, which this arrival is what wakes.
                 Message::PublicationDue(due) => publications.push(*due),
+                Message::ReworkDue(due) => reworks_due.push(*due),
+                Message::Raise(surface) => raise(paths, journal, *surface)?,
                 Message::Settled(settled) => {
                     let settlement = &settled.settlement;
                     in_flight.remove(&settlement.node);
                     // A restack says what it did ahead of the node's ordinary
                     // settlement, which follows it as any settlement does.
+                    let readjusting = state.readjust.plans.remove(&settlement.node);
+                    // A readjustment's restack is recorded as the readjustment it is.
+                    let restacked = settlement.restacked.filter(|_| readjusting.is_none());
+                    if let Some(plan) = readjusting {
+                        // A readjustment says what it did ahead of the settlement: only once
+                        // its push and its retarget both answered, so a draft whose change
+                        // request was not moved stays owed one.
+                        let word = match &settlement.readjusted {
+                            Some(Ok(word)) => Some(*word),
+                            None => Some(crate::payload::RetargetWord::None),
+                            Some(Err(_)) => None,
+                        };
+                        if let (NodeStatus::Done, Some(word)) = (settlement.status, word) {
+                            journal.emit(
+                                journal::PipelineKind::NodeReadjusted,
+                                journal::labels(&paths.run, Some(&settlement.node)),
+                                payload_of(&crate::payload::NodeReadjusted {
+                                    node: settlement.node.clone(),
+                                    from: plan.from,
+                                    to: plan.to,
+                                    cause: plan.cause,
+                                    head: settlement
+                                        .head
+                                        .clone()
+                                        .or_else(|| state.heads.get(&settlement.node).cloned())
+                                        .unwrap_or_default(),
+                                    agent_dispatched: settlement
+                                        .restacked
+                                        .is_some_and(|restacked| restacked.agent_dispatched),
+                                    retarget: word,
+                                    content: crate::payload::ReadjustContent::Merged,
+                                })?,
+                            )?;
+                        }
+                    }
                     // llmlint: ignore[names_match_behavior] `node-restacked` and its `outcome` are the plan's agreed record (entry 121): it ends every restack, a failed one included, and `outcome` says which; renaming it is a contract change, not this site's, and `a_restack_whose_worker_fails_its_merge_settles_the_draft_failed` holds the failed case.
-                    if let Some(restacked) = settlement.restacked {
+                    if let Some(restacked) = restacked {
                         journal.emit(
                             journal::PipelineKind::NodeRestacked,
                             journal::labels(&paths.run, Some(&settlement.node)),
@@ -3568,6 +3784,50 @@ fn reconcile_envelope(
     deliveries: Option<&mut NoteDeliveries>,
     envelope: crate::channel::QueuedCommands,
 ) -> Result<bool> {
+    if envelope.commands == [Command::Readjust {}] {
+        let result = channel
+            .allows(envelope.author.clone(), &Command::Readjust {})
+            .and_then(|()| {
+                crate::readjust::run(
+                    paths,
+                    journal,
+                    state,
+                    crate::payload::ReadjustTrigger::Readjust,
+                )
+            })
+            .and_then(|detection| {
+                crate::review::failpoint("after-readjust")?;
+                match detection.failed() {
+                    Some(failed) => Err(Error::Sibling {
+                        tool: "onevcs",
+                        message: failed,
+                    }),
+                    None => Ok(()),
+                }
+            });
+        channel.answer_commands(&CommandOutcome {
+            id: envelope.id,
+            applied: result.is_ok(),
+            reason: result.err().map(|error| error.to_string()),
+            results: Vec::new(),
+        })?;
+        return Ok(true);
+    }
+    // Applying a `rework` readjusts first, so a node found landed is refused for it and
+    // its replacement is placed on what has landed.
+    if envelope
+        .commands
+        .iter()
+        .any(|command| matches!(command, Command::Rework { .. }))
+        && !state.readjust.read_this_pass
+    {
+        crate::readjust::run(
+            paths,
+            journal,
+            state,
+            crate::payload::ReadjustTrigger::Rework,
+        )?;
+    }
     if envelope.commands == [Command::Review {}] {
         let result = channel
             .allows(envelope.author.clone(), &Command::Review {})
@@ -6081,6 +6341,10 @@ fn start_ready(
         if let Some(stack) = &stack {
             node.base_branch = Some(stack.base().to_owned());
         }
+        // A rework's replacement republishes onto its lineage's change request: placed
+        // anywhere but where that change request was drafted, it is moved there after
+        // its push, as a readjustment moves a draft.
+        let readjusting = rework_readjusting(state, &node, stack.as_ref());
 
         // A lifecycle node is asked for only where its identity has room for
         // the session it would open. Held, it is **skipped** rather than broken
@@ -6239,6 +6503,8 @@ fn start_ready(
             resume,
             notes_in_flight,
             dispatching,
+            review_change_for(state, &node.id),
+            readjusting,
         )?;
         let now = Instant::now();
         in_flight.insert(
@@ -6303,7 +6569,9 @@ fn start_restacks(
     }
     let concurrency = state.graph.concurrency as usize;
     let owed = crate::stack::restacks_owed(state, statuses, &|node| {
-        in_flight.contains_key(node) || paused.contains(node)
+        in_flight.contains_key(node)
+            || paused.contains(node)
+            || state.readjust_owed.contains_key(node)
     });
     let mut started = false;
     for owed in owed {
@@ -6377,6 +6645,8 @@ fn start_restacks(
             None,
             notes_in_flight,
             dispatching,
+            review_change_for(state, &node.id),
+            None,
         )?;
         let now = Instant::now();
         in_flight.insert(
@@ -6505,6 +6775,626 @@ enum Coursed {
     Restack,
 }
 
+/// The recorded review draft this node, or its reworked predecessor, republishes.
+fn review_change_for(state: &Projected, node: &str) -> Option<String> {
+    let recorded = state
+        .reworks
+        .iter()
+        .find_map(|(predecessor, rework)| {
+            (rework.replacement == node).then_some(predecessor.as_str())
+        })
+        .unwrap_or(node);
+    matches!(
+        state.outcomes.get(recorded).map(String::as_str),
+        Some(crate::vcs::REVIEW_DRAFTED | crate::vcs::REVIEW_DRAFTED_UNCHECKED)
+    )
+    .then(|| state.known_change_url(recorded))
+    .flatten()
+}
+
+/// Claim the standings read owed by this pass's placements on unlanded drafts and its
+/// restacks, for each node not read for yet, once per node however many passes it is
+/// held across: marks those nodes read for, and answers whether any were.
+fn claim_placement_reads(
+    state: &mut Projected,
+    statuses: &BTreeMap<String, NodeStatus>,
+    in_flight: &BTreeMap<String, Dispatch>,
+    paused: &BTreeSet<String>,
+) -> bool {
+    let mut wanted: Vec<String> = state
+        .graph
+        .iter()
+        .filter(|node| statuses.get(&node.id) == Some(&NodeStatus::Ready))
+        .filter(|node| node.repo.is_some() && node.kind != NodeKind::Human)
+        .filter(|node| !in_flight.contains_key(&node.id) && !paused.contains(&node.id))
+        .filter(|node| {
+            node.deps.iter().any(|dep| {
+                state.landings.get(dep) == Some(&Landing::Unlanded)
+                    && state.change_urls.contains_key(dep)
+            })
+        })
+        .map(|node| node.id.clone())
+        .collect();
+    wanted.extend(
+        crate::stack::restacks_owed(state, statuses, &|node| {
+            in_flight.contains_key(node)
+                || paused.contains(node)
+                || state.readjust_owed.contains_key(node)
+        })
+        .into_iter()
+        .map(|owed| {
+            let heads: Vec<String> = owed
+                .onto()
+                .as_slice()
+                .iter()
+                .map(|onto| onto.head.clone())
+                .collect();
+            format!("{}@{}", owed.node, heads.join(","))
+        }),
+    );
+    let fresh: Vec<String> = wanted
+        .into_iter()
+        .filter(|key| !state.readjust.placed.contains(key))
+        .collect();
+    if fresh.is_empty() {
+        return false;
+    }
+    state.readjust.placed.extend(fresh);
+    true
+}
+
+/// Where `node` stands on the record now: the base its change request was drafted
+/// against, and its stack parents.
+fn recorded_placement(state: &RunState, node: &str) -> Option<crate::payload::Placement> {
+    Some(crate::payload::Placement {
+        base: state.bases.get(node)?.clone(),
+        stack_parents: state
+            .stacks
+            .get(node)
+            .map(|stack| {
+                stack
+                    .parents
+                    .iter()
+                    .map(|parent| parent.node.clone())
+                    .collect()
+            })
+            .unwrap_or_default(),
+    })
+}
+
+/// Where a draft goes: the placement `stack` names, or `root` with no stack parent.
+fn placement_on(stack: Option<&crate::stack::Stack>, root: &str) -> crate::payload::Placement {
+    match stack {
+        Some(stack) => crate::payload::Placement {
+            base: stack.base().to_owned(),
+            stack_parents: stack
+                .parents()
+                .iter()
+                .map(|parent| parent.node.clone())
+                .collect(),
+        },
+        None => crate::payload::Placement {
+            base: root.to_owned(),
+            stack_parents: Vec::new(),
+        },
+    }
+}
+
+/// The Stack block a draft placed on `stack`, or on `root` with none, carries.
+fn block_on(stack: Option<&crate::stack::Stack>, root: &str) -> String {
+    stack.map_or_else(
+        || crate::readjust::root_block(root),
+        crate::stack::Stack::block,
+    )
+}
+
+/// The retarget a rework's replacement owes after its push: where its lineage's change
+/// request was drafted is not where the replacement is placed now — a parent landed
+/// since, or was absorbed.
+fn rework_readjusting(
+    state: &mut Projected,
+    node: &Node,
+    stack: Option<&crate::stack::Stack>,
+) -> Option<Box<crate::readjust::Retarget>> {
+    let predecessor = state
+        .reworks
+        .iter()
+        .find(|(_, rework)| rework.replacement == node.id)
+        .map(|(predecessor, _)| predecessor.clone())?;
+    let from = recorded_placement(state, &predecessor)?;
+    let root = node
+        .base_branch
+        .clone()
+        .or_else(|| crate::stack::root_of(state, &predecessor, &mut BTreeSet::new()))?;
+    let root = match stack {
+        Some(crate::stack::Stack::OnStackBase { root, .. }) => root.clone(),
+        _ if stack.is_some() => {
+            crate::stack::root_of(state, &predecessor, &mut BTreeSet::new()).unwrap_or(root)
+        }
+        _ => root,
+    };
+    let to = placement_on(stack, &root);
+    if to == from {
+        return None;
+    }
+    let cause: Vec<String> = state
+        .readjust_owed
+        .get(&predecessor)
+        .map(|cause| cause.iter().cloned().collect())
+        .unwrap_or_default();
+    state.readjust.plans.insert(
+        node.id.clone(),
+        crate::readjust::Plan {
+            from,
+            to: to.clone(),
+            cause,
+        },
+    );
+    Some(Box::new(crate::readjust::Retarget {
+        repo: node.repo.clone()?,
+        change: crate::readjust::lineage_change(state, &node.id)?,
+        base: to.base,
+        block: block_on(stack, &root),
+        // Every read since the rework was applied holds the description under the
+        // replacement, the lineage head; one made before it, under the node it replaced.
+        body: state
+            .readjust
+            .bodies
+            .get(&node.id)
+            .or_else(|| state.readjust.bodies.get(&predecessor))
+            .cloned(),
+        remove_restored_base: state.reopened.contains_key(&predecessor),
+    }))
+}
+
+/// Re-dispatch every draft whose deferred verdict a trigger read red onto its same
+/// branch, carrying the failed checks as its refusal — the run repairing its own red
+/// publication, exactly as a `checks-failed` publication's re-dispatch does, and never
+/// work a comment started. Its republication defers its checks again, so the next
+/// trigger reads the repair's verdict.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the reconcile loop's borrowed state, as `start_restacks` takes it"
+)]
+fn repair_red_verdicts(
+    paths: &RunPaths,
+    journal: &mut Journal,
+    state: &mut Projected,
+    statuses: &BTreeMap<String, NodeStatus>,
+    rules: &ExecutorRules,
+    launch: &LaunchRecord,
+    tx: &Sender<Message>,
+    in_flight: &mut BTreeMap<String, Dispatch>,
+    paused: &BTreeSet<String>,
+    releases: &crate::release::Watch,
+    notes_in_flight: &DeliveriesInFlight,
+    admit: &mut dyn FnMut() -> bool,
+) -> Result<bool> {
+    let red: Vec<(String, crate::readjust::Red)> = state
+        .readjust
+        .red
+        .iter()
+        .map(|(node, red)| (node.clone(), red.clone()))
+        .collect();
+    let mut moved = false;
+    for (id, red) in red {
+        if in_flight.contains_key(&id) || paused.contains(&id) {
+            continue;
+        }
+        if statuses.get(&id) != Some(&NodeStatus::Done) || state.superseded.contains_key(&id) {
+            state.readjust.red.remove(&id);
+            continue;
+        }
+        if in_flight.len() >= state.graph.concurrency as usize {
+            break;
+        }
+        let (Some(node), Some(branch)) = (
+            state.graph.get(&id).cloned(),
+            state.branches.get(&id).cloned(),
+        ) else {
+            state.readjust.red.remove(&id);
+            continue;
+        };
+        let now = crate::boundary::plan_now(state);
+        let Ok(dispatching) = crate::boundary::dispatching(
+            &crate::boundary::of_run(&now),
+            &now,
+            &node,
+            &state.branches,
+            &state.heads,
+            &state.superseded,
+        ) else {
+            continue;
+        };
+        if !admit() {
+            break;
+        }
+        state.readjust.red.remove(&id);
+        // On the placement it was published on, so its session opens on that base.
+        let stack = state.stacks.get(&id).and_then(|_| {
+            crate::stack::placement(
+                state,
+                statuses,
+                &node,
+                &state
+                    .plan
+                    .as_ref()
+                    .and_then(|plan| plan.name.clone())
+                    .unwrap_or_else(|| paths.run.clone()),
+                &same_identity,
+            )
+            .ok()
+            .flatten()
+        });
+        let mut based = node.clone();
+        based.base_branch = stack
+            .as_ref()
+            .map(|stack| stack.base().to_owned())
+            .or_else(|| state.bases.get(&id).cloned());
+        let continuation =
+            crate::lifecycle::Continuation::red_verdict(&based, &branch, &red.head, &red.failed);
+        journal.emit(
+            journal::PipelineKind::NodeDispatched,
+            journal::labels(&paths.run, Some(&id)),
+            redispatch_payload(&continuation.redispatch()),
+        )?;
+        let dispatched = continuation.node.clone();
+        let cancel = CancellationToken::new();
+        let references = releases.references(&dispatched);
+        spawn(
+            paths,
+            rules,
+            launch,
+            &dispatched,
+            &references,
+            stack,
+            Coursed::Work,
+            cancel.clone(),
+            tx.clone(),
+            Some(Box::new(continuation)),
+            notes_in_flight,
+            dispatching,
+            review_change_for(state, &id),
+            None,
+        )?;
+        let now = Instant::now();
+        in_flight.insert(
+            id.clone(),
+            Dispatch {
+                node: dispatched,
+                cancel,
+                started: now,
+                last_progress: now,
+                reported_quiet: false,
+                control: None,
+                presentations: crate::note::Presentations::default(),
+            },
+        );
+        moved = true;
+    }
+    Ok(moved)
+}
+
+/// Start the readjustment every owed draft is ready for, bounded by `concurrency`
+/// beside the dispatches already running.
+///
+/// A draft is owed one once a node it is connected to landed or was absorbed, or once a
+/// person moved its change request off its base. It waits while it, or a stack parent
+/// of its new placement, is in flight or itself owed one — so every parent's push is
+/// on the origin before the draft above it is brought onto it. A draft settled `done`
+/// is restacked onto its placement and retargeted after its push; one that failed or
+/// was parked holding its change request is retargeted at once with no merge, which a
+/// `retry` brings up to date. Nothing starts once the run's shutdown has begun, and
+/// nothing a decision point holds, or an unanswered question about a merge into an
+/// unknown branch, is readjusted.
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "the reconcile loop's borrowed state, as `start_restacks` takes it"
+)]
+fn start_readjustments(
+    paths: &RunPaths,
+    journal: &mut Journal,
+    state: &mut Projected,
+    statuses: &BTreeMap<String, NodeStatus>,
+    rules: &ExecutorRules,
+    launch: &LaunchRecord,
+    tx: &Sender<Message>,
+    in_flight: &mut BTreeMap<String, Dispatch>,
+    paused: &BTreeSet<String>,
+    releases: &crate::release::Watch,
+    notes_in_flight: &DeliveriesInFlight,
+    admit: &mut dyn FnMut() -> bool,
+) -> Result<bool> {
+    if crate::shutdown::begun(paths) {
+        return Ok(false);
+    }
+    let mut moved = repair_red_verdicts(
+        paths,
+        journal,
+        state,
+        statuses,
+        rules,
+        launch,
+        tx,
+        in_flight,
+        paused,
+        releases,
+        notes_in_flight,
+        admit,
+    )?;
+    let owed: Vec<String> = state
+        .graph
+        .iter()
+        .map(|node| node.id.clone())
+        .filter(|id| {
+            state.readjust_owed.contains_key(id) || state.readjust.overridden.contains_key(id)
+        })
+        .filter(|id| !state.superseded.contains_key(id) && !state.closed_changes.contains(id))
+        .collect();
+    if owed.is_empty() {
+        if moved {
+            state.refresh(paths);
+        }
+        return Ok(moved);
+    }
+    let held = crate::readjust::held_elsewhere(paths, state);
+    let concurrency = state.graph.concurrency as usize;
+    let plan_name = state
+        .plan
+        .as_ref()
+        .and_then(|plan| plan.name.clone())
+        .unwrap_or_else(|| paths.run.clone());
+    for id in owed {
+        if in_flight.contains_key(&id)
+            || paused.contains(&id)
+            || held.contains(&id)
+            || state.readjust.tried.contains(&id)
+        {
+            continue;
+        }
+        let Some(mut node) = state.graph.get(&id).cloned() else {
+            continue;
+        };
+        let (Some(repo), Some(branch), Some(change)) = (
+            node.repo.clone(),
+            state.branches.get(&id).cloned(),
+            crate::readjust::lineage_change(state, &id),
+        ) else {
+            continue;
+        };
+        // Its stack parents' pushes first: a parent owed a readjustment, or in flight,
+        // is not yet where this draft is brought onto.
+        // A parent merged into a branch this run does not know never moves again, so it
+        // holds nothing up once its question is answered.
+        let waiting = node.deps.iter().any(|dep| {
+            let dep = crate::readjust::head_of(state, dep);
+            in_flight.contains_key(&dep)
+                || (state.readjust_owed.contains_key(&dep)
+                    && !state.readjust.merged_elsewhere.contains(&dep))
+        });
+        if waiting {
+            continue;
+        }
+        let stack =
+            match crate::stack::placement(state, statuses, &node, &plan_name, &same_identity) {
+                Ok(stack) => stack,
+                // llmlint: ignore[changed_behavior_has_e2e] `stack::placement`'s two refusals are
+                // of records this build never writes; its own suppression says which.
+                Err(_) => continue,
+            };
+        let Some(root) = node
+            .base_branch
+            .clone()
+            .or_else(|| crate::stack::root_of(state, &id, &mut BTreeSet::new()))
+        else {
+            continue;
+        };
+        let root = match &stack {
+            Some(crate::stack::Stack::OnStackBase { root, .. }) => root.clone(),
+            _ => root,
+        };
+        let recorded = recorded_placement(state, &id).unwrap_or_else(|| placement_on(None, &root));
+        let to = placement_on(stack.as_ref(), &root);
+        // Where the host has the change request now, where the latest read saw it
+        // somewhere other than where it goes: a person's own move, or a write the host
+        // refused earlier.
+        let host_base = state.readjust.overridden.get(&id).cloned().or_else(|| {
+            state
+                .readjust
+                .host_bases
+                .get(&id)
+                .filter(|base| **base != to.base && **base != recorded.base)
+                .cloned()
+        });
+        let from = crate::payload::Placement {
+            base: host_base.clone().unwrap_or_else(|| recorded.base.clone()),
+            stack_parents: recorded.stack_parents.clone(),
+        };
+        let cause: Vec<String> = state
+            .readjust_owed
+            .get(&id)
+            .map(|cause| cause.iter().cloned().collect())
+            .unwrap_or_default();
+        let retarget = (to != recorded || host_base.is_some()).then(|| crate::readjust::Retarget {
+            repo: repo.clone(),
+            change: change.clone(),
+            base: to.base.clone(),
+            block: block_on(stack.as_ref(), &root),
+            body: state.readjust.bodies.get(&id).cloned(),
+            remove_restored_base: state.reopened.contains_key(&id),
+        });
+        let by_hand = state.readjust.overridden.get(&id).cloned();
+        let overridden = |journal: &mut Journal| match &by_hand {
+            Some(base) => crate::readjust::notify(
+                paths,
+                journal,
+                crate::readjust::CHANGE_BASE_OVERRIDDEN,
+                &id,
+                format!(
+                    "node '{id}''s change request {change} was moved by hand onto `{base}`; it \
+                     is moved back onto `{}`, its computed base.",
+                    to.base
+                ),
+            ),
+            None => Ok(()),
+        };
+        match statuses.get(&id) {
+            Some(NodeStatus::Done) => {}
+            Some(NodeStatus::Failed | NodeStatus::Parked | NodeStatus::Cancelled) => {
+                state.readjust.tried.insert(id.clone());
+                overridden(journal)?;
+                // Held, not done: its change request is moved where it belongs with no
+                // merge, and a `retry` — whose placement merges the base — brings it up
+                // to date.
+                let word = match &retarget {
+                    Some(retarget) => match crate::readjust::retarget(retarget) {
+                        Ok(word) => word,
+                        Err(error) => {
+                            eprintln!(
+                                "onepipeline: node '{id}': its change request was not moved \
+                                 onto {}: {error}",
+                                to.base
+                            );
+                            continue;
+                        }
+                    },
+                    None => crate::payload::RetargetWord::None,
+                };
+                journal.emit(
+                    journal::PipelineKind::NodeReadjusted,
+                    journal::labels(&paths.run, Some(&id)),
+                    payload_of(&crate::payload::NodeReadjusted {
+                        node: id.clone(),
+                        from,
+                        to: to.clone(),
+                        cause,
+                        head: state.heads.get(&id).cloned().unwrap_or_default(),
+                        agent_dispatched: false,
+                        retarget: word,
+                        content: crate::payload::ReadjustContent::Pending,
+                    })?,
+                )?;
+                crate::readjust::notify(
+                    paths,
+                    journal,
+                    crate::readjust::READJUST_PENDING,
+                    &id,
+                    format!(
+                        "node '{id}' is not done, and its change request {change} now targets \
+                         `{}` with nothing merged into its branch. Answer with a `retry` of \
+                         '{id}': its replacement is placed on `{}` and merges it.",
+                        to.base, to.base
+                    ),
+                )?;
+                state.readjust.overridden.remove(&id);
+                moved = true;
+                continue;
+            }
+            _ => continue,
+        }
+        if in_flight.len() >= concurrency {
+            break;
+        }
+        node.branch = Some(branch.clone());
+        node.base_branch = Some(to.base.clone());
+        node.resume = None;
+        state.readjust.tried.insert(id.clone());
+        overridden(journal)?;
+        let now = crate::boundary::plan_now(state);
+        let Ok(dispatching) = crate::boundary::dispatching(
+            &crate::boundary::of_run(&now),
+            &now,
+            &node,
+            &state.branches,
+            &state.heads,
+            &state.superseded,
+        ) else {
+            continue;
+        };
+        if !admit() {
+            break;
+        }
+        let onto: Vec<crate::payload::RestackOnto> = match &stack {
+            Some(stack) => stack
+                .parents()
+                .iter()
+                .map(|parent| crate::payload::RestackOnto {
+                    branch: parent.branch.clone(),
+                    head: state
+                        .branch_heads
+                        .get(&parent.branch)
+                        .cloned()
+                        .unwrap_or_else(|| parent.head.clone()),
+                })
+                .collect(),
+            None => vec![crate::payload::RestackOnto {
+                branch: root.clone(),
+                head: cause
+                    .iter()
+                    .rev()
+                    .find_map(|landed| state.landed_how.get(landed))
+                    .map(|landed| landed.commit.clone())
+                    .or_else(|| state.heads.get(&id).cloned())
+                    .unwrap_or_default(),
+            }],
+        };
+        let Ok(onto) = crate::payload::Onto::try_from(onto) else {
+            continue;
+        };
+        journal.emit(
+            journal::PipelineKind::NodeRestackStarted,
+            journal::labels(&paths.run, Some(&id)),
+            payload_of(&crate::payload::NodeRestackStarted {
+                node: id.clone(),
+                onto,
+                cause: crate::payload::RestackCause::Readjust,
+            })?,
+        )?;
+        state
+            .readjust
+            .plans
+            .insert(id.clone(), crate::readjust::Plan { from, to, cause });
+        state.readjust.overridden.remove(&id);
+        let cancel = CancellationToken::new();
+        let references = releases.references(&node);
+        spawn(
+            paths,
+            rules,
+            launch,
+            &node,
+            &references,
+            stack,
+            Coursed::Restack,
+            cancel.clone(),
+            tx.clone(),
+            None,
+            notes_in_flight,
+            dispatching,
+            review_change_for(state, &id),
+            retarget.map(Box::new),
+        )?;
+        let now = Instant::now();
+        in_flight.insert(
+            id.clone(),
+            Dispatch {
+                node,
+                cancel,
+                started: now,
+                last_progress: now,
+                reported_quiet: false,
+                control: None,
+                presentations: crate::note::Presentations::default(),
+            },
+        );
+        moved = true;
+    }
+    if moved {
+        state.refresh(paths);
+    }
+    Ok(moved)
+}
+
 /// Run one node's dispatch on a thread, reporting back to the single writer.
 #[allow(
     clippy::too_many_arguments,
@@ -6525,6 +7415,8 @@ fn spawn(
     resume: Option<Box<crate::lifecycle::Continuation>>,
     notes_in_flight: &DeliveriesInFlight,
     boundary: crate::boundary::Dispatching,
+    review_change: Option<String>,
+    readjusting: Option<Box<crate::readjust::Retarget>>,
 ) -> Result<()> {
     // The labels a `node_label` rule selects on. An executor is chosen once per
     // node, before its steps run, so a node's own labels are what exists here.
@@ -6567,6 +7459,8 @@ fn spawn(
             .project
             .parse::<crate::taskgraph::QualifiedId>()
             .is_ok(),
+        review_change,
+        readjusting,
         boundary,
     };
     std::thread::Builder::new()
@@ -9055,10 +9949,13 @@ fn record_result(paths: &RunPaths, state: &RunState, settled: GraphState) -> Res
 /// nothing.
 fn landings_after_asking_again(state: &RunState) -> BTreeMap<String, Landing> {
     let mut landings = state.landings.clone();
+    // A draft merged into another node's branch lands only with that node: its own
+    // merged change request says nothing about the root.
     let unlanded: Vec<String> = landings
         .iter()
         .filter(|(_, landing)| **landing == Landing::Unlanded)
         .map(|(node, _)| node.clone())
+        .filter(|node| !state.absorbed.contains_key(node))
         .collect();
     for node in unlanded {
         let Some(branch) = state.branches.get(&node) else {
