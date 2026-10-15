@@ -1018,6 +1018,8 @@ onetaskgraph-local-md = "=0.7.0"
 # `just engines-current` reads only the engines its script names.
 sha2 = "0.10"
 tokio = "1"
+# Windows only, and for the same reason: each member names the features it calls.
+windows-sys = "0.61"
 
 [package]
 name = "onepipeline"
@@ -1186,7 +1188,7 @@ async-trait = "0.1"
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = [
+windows-sys = { workspace = true, features = [
   "Win32_Foundation",
   "Win32_Storage_FileSystem",
   "Win32_System_Console",
