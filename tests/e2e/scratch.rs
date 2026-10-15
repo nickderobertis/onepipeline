@@ -1665,8 +1665,8 @@ fn a_success_ending_refuses_a_symlink_scratch_root_and_preserves_its_target() {
     assert!(log.contains("is a symlink; nothing was deleted"), "{log}");
 }
 
-// APFS refuses a name that is not UTF-8 (`EILSEQ`), so on macOS no scratch
-// directory can carry one and the journey has no tree to build.
+// A filesystem that admits a name that is not UTF-8 is where such a scratch
+// directory can exist; macOS's half is `apfs_refuses_a_non_utf8_scratch_name_and_the_run_ends_as_usual`.
 #[cfg(all(unix, not(target_os = "macos")))]
 #[test]
 fn non_utf8_dispatch_names_are_refused_before_any_scratch_is_deleted() {
@@ -1723,6 +1723,57 @@ fn non_utf8_dispatch_names_are_refused_before_any_scratch_is_deleted() {
             .events_of("invalid-name", "scratch-removed")
             .is_empty());
     }
+}
+
+/// APFS refuses a name that is not UTF-8 with `EILSEQ`, so on macOS the case the
+/// journey above proves cannot arise: the attempt creates nothing, leaves the
+/// dispatch's scratch as it was, and the run's success ending removes it as usual.
+#[cfg(target_os = "macos")]
+#[test]
+fn apfs_refuses_a_non_utf8_scratch_name_and_the_run_ends_as_usual() {
+    use std::os::unix::ffi::OsStringExt;
+    /// `EILSEQ` in macOS's `<sys/errno.h>`.
+    const EILSEQ: i32 = 92;
+    let world = World::new("scratch-invalid-name-apfs");
+    world.script("build.wait", "hold");
+    world.script("build.turn-open", "");
+    let plan = world.plan(
+        "invalid-name",
+        &plan_of("invalid-name", vec![agent("build", &[])]),
+    );
+    world.run(&["start", &plan, "--detach"]).exited(0);
+    world.until("the writing dispatch", |world| {
+        !world.events_of("invalid-name", "turn-started").is_empty()
+    });
+    let dirs = scratch_dirs(&world, "invalid-name");
+    let before: Vec<_> = dirs.iter().map(|dir| snapshot(dir)).collect();
+    let invalid = world
+        .run_file("invalid-name", "scratch")
+        .join(std::ffi::OsString::from_vec(vec![b'x', 0xff]));
+
+    let refused = std::fs::create_dir(&invalid).expect_err("APFS admitted a non-UTF-8 name");
+    assert_eq!(refused.raw_os_error(), Some(EILSEQ), "{refused:?}");
+    assert_eq!(
+        std::fs::symlink_metadata(&invalid).unwrap_err().kind(),
+        std::io::ErrorKind::NotFound
+    );
+    assert_eq!(scratch_dirs(&world, "invalid-name"), dirs);
+    let after: Vec<_> = dirs.iter().map(|dir| snapshot(dir)).collect();
+    assert_eq!(after, before);
+
+    world.release("build.go");
+    world.until("the driver exits", |world| {
+        world.run_file("invalid-name", "result.json").is_file()
+            && !world.run_file("invalid-name", "owner.lock").exists()
+    });
+    assert!(!world.run_file("invalid-name", "scratch").exists());
+    let removed = world.events_of("invalid-name", "scratch-removed");
+    assert_eq!(removed.len(), 1);
+    assert_eq!(removed[0]["payload"]["trigger"], "success");
+    assert_eq!(removed[0]["payload"]["dirs"], dirs.len());
+    assert!(removed[0]["payload"]["failed"]
+        .as_array()
+        .is_none_or(Vec::is_empty));
 }
 
 #[test]
