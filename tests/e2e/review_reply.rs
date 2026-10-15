@@ -888,6 +888,19 @@ fn a_rework_s_drafting_that_fails_or_answers_against_the_rules_posts_nothing_unt
             "links a commit",
         ),
         (
+            "an answered body whose only link extends a commit's URL",
+            json!({"replies": [reply_to(&first, "answered", &format!("Done in {link}/files")),
+                answered(&second)]}),
+            "links none",
+        ),
+        (
+            "an answered body carrying a commit's URL inside another URL",
+            json!({"replies": [
+                reply_to(&first, "answered", &format!("Done in https://example.invalid/{link}")),
+                answered(&second)]}),
+            "links none",
+        ),
+        (
             "a reply to a comment the drafting did not name",
             json!({"replies": [answered(&first), answered(&second),
                 {"comment": "IC_never_named", "disposition": "answered",
@@ -1983,4 +1996,103 @@ fn a_rework_whose_commits_cannot_be_read_surfaces_its_replies_and_posts_once_the
     review(&world, run);
     assert!(the_reply_to(&host, 1, &left).body.contains("/commit/"));
     assert_eq!(drafter_tasks(&world).len(), 1);
+}
+
+/// A `decline` the plan's own terms refuse is refused naming why, with nothing drafted
+/// or posted: a node the run has none of, a node with no repository, a lifecycle node
+/// with no open change request, no comment named, a comment named by a blank id, an id
+/// carrying a control character or a URL no web address is, and one comment named twice.
+#[test]
+fn a_decline_the_plan_refuses_names_why_and_posts_nothing() {
+    let world = team_world("decline-plan-refusals");
+    let run = "planrefusals";
+    world.script("a.work", "first draft\n");
+    world.script("d.fail", "1");
+    let graph = world.review_reply_graph();
+    let plan = crate::harness::plan_of(
+        run,
+        vec![
+            crate::harness::lifecycle("a", &[]),
+            crate::harness::agent("c", &[]),
+            crate::harness::lifecycle("d", &[]),
+        ],
+    );
+    let project = world.plan(run, &plan);
+    world.run_from(
+        &world.project,
+        &[
+            "start",
+            &project,
+            "--attach",
+            "--review-reply-graph",
+            &graph,
+        ],
+    );
+    let host = host(&world, run, &["a"]);
+    let left = conversation(1181, 1);
+    add(&host, 1, left.clone());
+    review(&world, run);
+    let comment = |id: &str, url: &str| json!({"id": id, "url": url});
+    let cases = [
+        (
+            "a node the run has none of",
+            "zz",
+            json!([named(&left)]),
+            "no node 'zz'",
+        ),
+        (
+            "a node with no repository",
+            "c",
+            json!([named(&left)]),
+            "is not a lifecycle node",
+        ),
+        (
+            "a lifecycle node with no open change request",
+            "d",
+            json!([named(&left)]),
+            "has no open change request",
+        ),
+        ("no comment", "a", json!([]), "name at least one comment"),
+        (
+            "a blank comment id",
+            "a",
+            json!([comment(" ", &left.url)]),
+            "is not a comment's id and URL",
+        ),
+        (
+            "a comment id carrying a control character",
+            "a",
+            json!([comment("IC_\u{7}", &left.url)]),
+            "is not a comment's id and URL",
+        ),
+        (
+            "a URL no web address is",
+            "a",
+            json!([comment(&left.id.0, "ftp://example.invalid/1")]),
+            "is not a comment's id and URL",
+        ),
+        (
+            "one comment named twice",
+            "a",
+            json!([named(&left), named(&left)]),
+            "twice",
+        ),
+    ];
+    for (case, node, comments, says) in cases {
+        let output = reply(
+            &world,
+            run,
+            json!([{"op": "decline", "id": node, "comments": comments,
+                    "reason": "out of scope"}]),
+        );
+        assert_eq!(
+            output.code, 2,
+            "{case}: {}\n{}",
+            output.stdout, output.stderr
+        );
+        assert!(output.stderr.contains(says), "{case}: {}", output.stderr);
+    }
+    assert!(drafter_tasks(&world).is_empty());
+    assert!(posts(&world).is_empty());
+    assert!(replies(&host, 1).is_empty());
 }

@@ -11249,7 +11249,10 @@ and `both_views_on_both_hosts_name_the_rework_and_commits_that_answered_and_the_
 `a_rework_s_reply_the_host_refuses_is_posted_by_the_next_pass_and_the_one_it_took_is_not_again`;
 `a_stored_rework_record_naming_no_superseded_head_drafts_from_the_replacement_s_head_alone`;
 `a_decline_whose_read_of_the_change_request_fails_posts_nothing_and_posts_once_it_reads`;
-and `a_decline_of_a_comment_a_rework_answered_is_refused_already_answered_and_posts_nothing`.
+`a_decline_of_a_comment_a_rework_answered_is_refused_already_answered_and_posts_nothing`;
+`a_decline_whose_drafting_cannot_start_or_be_given_a_directory_posts_once_it_can`;
+`a_rework_whose_commits_cannot_be_read_surfaces_its_replies_and_posts_once_they_can`;
+and `a_decline_the_plan_refuses_names_why_and_posts_nothing`.
 `tests/e2e/plan.rs` holds the reserved persona's refusal. `src/reply.rs` holds the
 task, the rules and the commit links over its own types, and `tests/contract.rs`'s
 `the_review_reply_surface_is_what_the_divergence_record_names` holds the block above
