@@ -4,13 +4,13 @@
     {
       "name": "help",
       "toggles": {},
-      "hash": "38e6201632ed146a8a18c7ce85685fc4c9e5060ce8cab1457cfc82ae386badbe",
+      "hash": "389ed45c2146a75a43cc4df021d9f52fffece07d7ad45b578b3ce0feb16dd8b4",
       "image": "help.svg"
     },
     {
       "name": "monitor",
       "toggles": {},
-      "hash": "43c4966e57bf22f7a205aee73333885335de0e5c5dba71768493f3e40cd2e290",
+      "hash": "833ea2e5bd138ea262abb81eeafc0d445bd85dd95414b44646d1c78db5555e47",
       "image": "monitor.svg"
     },
     {
