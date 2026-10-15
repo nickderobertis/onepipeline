@@ -2096,3 +2096,81 @@ fn a_decline_the_plan_refuses_names_why_and_posts_nothing() {
     assert!(posts(&world).is_empty());
     assert!(replies(&host, 1).is_empty());
 }
+
+/// A rework's drafter may decline one comment it names while it answers another: the
+/// declined reply carries no commit and is labelled `declined`, it is journalled with that
+/// disposition and no commits, the views read it declined, and no later pass posts again.
+#[test]
+fn a_rework_s_drafter_may_decline_one_comment_while_it_answers_another() {
+    let world = team_world("reply-rework-declines");
+    let run = "partly";
+    let (_, host) = launched_with_replies(&world, run);
+    let first = conversation(1191, 1);
+    let second = conversation(1192, 1);
+    add(&host, 1, first.clone());
+    add(&host, 1, second.clone());
+    review(&world, run);
+    rework(&world, run, &[&first, &second]);
+    let from = settled(&world, run, "a")["head"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let to = settled(&world, run, "a-rework-1")["head"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let sha = commits_between(&world, &from, &to)[0].clone();
+    let link = format!("https://github.com/owner/service/commit/{sha}");
+    world.script(
+        "review-reply.result",
+        &json!({"replies": [
+            {"comment": first.id.0, "disposition": "answered", "body": format!("Done in {link}")},
+            {"comment": second.id.0, "disposition": "declined",
+             "body": "Left as it is: that module is a change of its own."},
+        ]})
+        .to_string(),
+    );
+    review(&world, run);
+    let answered = the_reply_to(&host, 1, &first);
+    assert!(answered.body.contains(&link), "{}", answered.body);
+    assert!(
+        !answered.body.contains("label=declined"),
+        "{}",
+        answered.body
+    );
+    let declined = the_reply_to(&host, 1, &second);
+    assert!(!declined.body.contains("/commit/"), "{}", declined.body);
+    assert!(
+        declined.body.contains("label=declined"),
+        "{}",
+        declined.body
+    );
+    let posted = world.events_of(run, "review-reply-posted");
+    assert_eq!(posted.len(), 2, "{posted:#?}");
+    let record = |comment: &HostComment| {
+        posted
+            .iter()
+            .find(|event| event["payload"]["comment"] == comment.id.0)
+            .expect("journalled")["payload"]
+            .clone()
+    };
+    assert_eq!(record(&first)["disposition"], "answered");
+    assert_eq!(record(&first)["commits"], json!([sha]));
+    assert_eq!(record(&second)["disposition"], "declined");
+    assert_eq!(record(&second)["commits"], json!([]));
+    let status = world.run(&["status", run]);
+    assert_eq!(status.code, 0, "{}", status.stderr);
+    assert!(
+        status.stdout.contains(&format!(
+            "review {}: declined: {}",
+            second.id.0, declined.url
+        )),
+        "{}",
+        status.stdout
+    );
+    world.unscript("review-reply.result");
+    let before = posts(&world).len();
+    review(&world, run);
+    assert_eq!(posts(&world).len(), before);
+    assert_eq!(drafter_tasks(&world).len(), 1);
+}

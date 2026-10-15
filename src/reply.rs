@@ -16,6 +16,7 @@ use crate::{
     payload::{ReplyDisposition, ReplyNotDraftedEnding},
 };
 use onevcs::{CommentKind, ReviewComment};
+use serde::Deserialize;
 use serde_json::Value;
 use std::collections::BTreeSet;
 
@@ -210,6 +211,25 @@ pub(crate) fn links(body: &str, url: &str) -> bool {
     false
 }
 
+/// The drafter's structured result in the shape entry 127 states it: `replies` and
+/// nothing else, whatever the graph's own schema admits beside it.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Answer {
+    replies: Vec<AnsweredReply>,
+}
+
+/// One reply of [`Answer`]: its comment, its disposition and its body, and nothing else.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AnsweredReply {
+    // llmlint: ignore-block[invalid_states_unrepresentable] the drafter's words as it answered them, which `validated` holds to the drafting's comments, the two dispositions and the body rules before anything is posted.
+    comment: String,
+    disposition: String,
+    body: String,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
+}
+
 /// The drafter's structured result, held to the rules: every comment the drafting
 /// named exactly once and nothing else, every body non-empty and at most
 /// [`BODY_LIMIT`] characters, an `answered` body carrying at least one supplied
@@ -219,9 +239,8 @@ pub(crate) fn validated(
     drafting: &Drafting,
     answer: &Value,
 ) -> std::result::Result<Vec<Drafted>, String> {
-    let Some(replies) = answer.get("replies").and_then(Value::as_array) else {
-        return Err("the result carries no `replies` list".to_owned());
-    };
+    let Answer { replies } = Answer::deserialize(answer)
+        .map_err(|error| format!("the result is not the replies shape: {error}"))?;
     let named: Vec<String> = drafting.comment_ids();
     let supplied: Vec<&str> = drafting
         .commits()
@@ -230,11 +249,13 @@ pub(crate) fn validated(
         .collect();
     let mut seen = BTreeSet::new();
     let mut drafted = Vec::new();
-    for reply in replies {
-        let comment = reply
-            .get("comment")
-            .and_then(Value::as_str)
-            .ok_or_else(|| format!("a reply names no `comment`: {reply}"))?;
+    for AnsweredReply {
+        comment,
+        disposition,
+        body,
+    } in &replies
+    {
+        let (comment, body) = (comment.as_str(), body.as_str());
         if !named.iter().any(|id| id == comment) {
             return Err(format!(
                 "a reply answers comment {comment}, which the drafting did not name"
@@ -243,19 +264,15 @@ pub(crate) fn validated(
         if !seen.insert(comment.to_owned()) {
             return Err(format!("comment {comment} is answered twice"));
         }
-        let disposition = match reply.get("disposition").and_then(Value::as_str) {
-            Some("answered") => ReplyDisposition::Answered,
-            Some("declined") => ReplyDisposition::Declined,
+        let disposition = match disposition.as_str() {
+            "answered" => ReplyDisposition::Answered,
+            "declined" => ReplyDisposition::Declined,
             other => {
                 return Err(format!(
                     "the reply to {comment} has disposition {other:?}, neither `answered` nor `declined`"
                 ))
             }
         };
-        let body = reply
-            .get("body")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
         if body.trim().is_empty() {
             return Err(format!("the reply to {comment} is empty"));
         }
@@ -1099,7 +1116,23 @@ mod tests {
             let why = validated(&drafting(decline), &answer).expect_err("refused");
             assert!(why.contains(said), "{why}");
         };
-        refused(json!({}), false, "no `replies`");
+        refused(json!({}), false, "missing field `replies`");
+        refused(
+            json!({"replies": [], "note": "and something else"}),
+            false,
+            "unknown field `note`",
+        );
+        refused(
+            json!({"replies": [{"comment": "c1", "disposition": "answered", "body": LINK,
+                "mood": "tired"}]}),
+            false,
+            "unknown field `mood`",
+        );
+        refused(
+            json!({"replies": [{"comment": "c1", "disposition": "answered"}]}),
+            false,
+            "missing field `body`",
+        );
         refused(
             json!({"replies": [{"comment": "c1", "disposition": "answered", "body": LINK}]}),
             false,
