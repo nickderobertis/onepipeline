@@ -1264,7 +1264,10 @@ mod tests {
     fn an_instant_is_read_only_whole_and_as_the_calendar_has_it() {
         assert_eq!(epoch_seconds("1970-01-01T00:00:00Z"), Some(0));
         assert_eq!(epoch_seconds("2026-10-10T18:34:13Z"), Some(1_791_657_253));
-        assert_eq!(epoch_seconds("2026-10-10T18:34:13.250Z"), Some(1_791_657_253));
+        assert_eq!(
+            epoch_seconds("2026-10-10T18:34:13.250Z"),
+            Some(1_791_657_253)
+        );
         assert_eq!(epoch_seconds("2024-02-29T00:00:00Z"), Some(1_709_164_800));
         for refused in [
             "2026-10-10T18:34:13",
