@@ -887,6 +887,13 @@ fn a_rework_s_drafting_that_fails_or_answers_against_the_rules_posts_nothing_unt
             json!({"replies": [reply_to(&first, "declined", &format!("Not this: {link}")), answered(&second)]}),
             "links a commit",
         ),
+        (
+            "a reply to a comment the drafting did not name",
+            json!({"replies": [answered(&first), answered(&second),
+                {"comment": "IC_never_named", "disposition": "answered",
+                 "body": format!("Done in {link}")}]}),
+            "did not name",
+        ),
     ];
     let mut journalled = 0;
     for (case, result, says) in cases {
@@ -1881,4 +1888,99 @@ fn a_decline_of_a_comment_a_rework_answered_is_refused_already_answered_and_post
     assert_eq!(drafter_tasks(&world).len(), drafted);
     assert_eq!(posts(&world).len(), posted);
     assert_eq!(the_reply_to(&host, 1, &left).url, answered.url);
+}
+
+/// A decline whose drafting cannot start — no drafter binary to run — or cannot be given
+/// a directory is refused `decline-not-posted` saying which, with nothing dispatched or
+/// posted, and posts once the drafting can run.
+#[test]
+fn a_decline_whose_drafting_cannot_start_or_be_given_a_directory_posts_once_it_can() {
+    let world = team_world("decline-drafting-unstartable");
+    let run = "unstartable";
+    let (_, host) = launched_with_replies(&world, run);
+    let left = conversation(1161, 1);
+    add(&host, 1, left.clone());
+    review(&world, run);
+    let envelope = json!({"version": 3, "commands": [{"op": "decline", "id": "a",
+        "comments": [named(&left)], "reason": "out of scope"}]})
+    .to_string();
+
+    let mut command = world.cmd(&["reply", run]);
+    command.env(
+        "ONEPIPELINE_ONEAGENTGRAPH_BIN",
+        world.root.join("no-such-oneagentgraph"),
+    );
+    let refusal = rejected(&world, run, &world.run_with_stdin_on(command, &envelope));
+    assert_eq!(refusal["kind"], "decline-not-posted", "{refusal}");
+    assert!(
+        refusal["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("could not start")),
+        "{refusal}"
+    );
+
+    // The run's `review-replies` a file, so no drafting's directory can be made in it.
+    let blocked = world.run_file(run, "review-replies");
+    let _ = std::fs::remove_dir_all(&blocked);
+    std::fs::write(&blocked, "").expect("the blocking file is written");
+    let refusal = rejected(
+        &world,
+        run,
+        &world.run_with_stdin(&["reply", run], &envelope),
+    );
+    assert_eq!(refusal["kind"], "decline-not-posted", "{refusal}");
+    assert!(
+        refusal["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("could not be made")),
+        "{refusal}"
+    );
+    assert!(drafter_tasks(&world).is_empty());
+    assert!(posts(&world).is_empty());
+
+    std::fs::remove_file(&blocked).expect("the blocking file is removed");
+    let output = world.run_with_stdin(&["reply", run], &envelope);
+    assert_eq!(output.code, 0, "{}\n{}", output.stdout, output.stderr);
+    assert!(the_reply_to(&host, 1, &left)
+        .body
+        .contains("label=declined"));
+    assert_eq!(drafter_tasks(&world).len(), 1);
+    assert_eq!(posts(&world).len(), 1);
+}
+
+/// A rework whose commits cannot be read posts nothing: the pass journals
+/// `review-reply-not-drafted` as a failed drafting and surfaces the replies pending,
+/// with no drafter dispatched, and the next pass that can read them posts the reply.
+#[test]
+fn a_rework_whose_commits_cannot_be_read_surfaces_its_replies_and_posts_once_they_can() {
+    let world = team_world("reply-commits-unread");
+    let run = "unreadcommits";
+    let (_, host) = launched_with_replies(&world, run);
+    let left = conversation(1171, 1);
+    add(&host, 1, left.clone());
+    review(&world, run);
+    rework(&world, run, &[&left]);
+    // The run's `review-replies` a file, so the cache the commits are read through
+    // cannot be made.
+    let blocked = world.run_file(run, "review-replies");
+    let _ = std::fs::remove_dir_all(&blocked);
+    std::fs::write(&blocked, "").expect("the blocking file is written");
+    review(&world, run);
+    let records = world.events_of(run, "review-reply-not-drafted");
+    let record = &records.last().expect("the drafting is journalled")["payload"];
+    assert_eq!(record["ending"], "failed", "{record}");
+    assert!(
+        record["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("commits could not be read")),
+        "{record}"
+    );
+    assert!(!pending_replies(&world, run).is_empty());
+    assert!(drafter_tasks(&world).is_empty());
+    assert!(replies(&host, 1).is_empty());
+
+    std::fs::remove_file(&blocked).expect("the blocking file is removed");
+    review(&world, run);
+    assert!(the_reply_to(&host, 1, &left).body.contains("/commit/"));
+    assert_eq!(drafter_tasks(&world).len(), 1);
 }

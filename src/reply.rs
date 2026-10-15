@@ -179,13 +179,20 @@ pub(crate) fn linked_commits(body: &str) -> Vec<String> {
     found
 }
 
-/// Whether `body` links `url` itself: an occurrence that ends where the URL does — at the
-/// end of the body, at whitespace, or at punctuation closing a sentence or a bracket —
-/// rather than one a longer URL extends with more of a path, a query or a fragment.
+/// Whether `body` links `url` itself: an occurrence that begins and ends where the URL
+/// does — after the start of the body, whitespace or an opening bracket or quote, and
+/// before the end of the body, whitespace, or punctuation closing a sentence or a bracket
+/// — rather than one inside a longer URL that carries it in its path, or extends it with
+/// more of a path, a query or a fragment.
 pub(crate) fn links(body: &str, url: &str) -> bool {
     let mut from = 0;
     while let Some(at) = body[from..].find(url) {
-        let end = from + at + url.len();
+        let start = from + at;
+        let end = start + url.len();
+        // And begins where it does: not inside another URL that carries it in its path.
+        let begins = body[..start].chars().next_back().is_none_or(|before| {
+            before.is_whitespace() || matches!(before, '(' | '[' | '<' | '"' | '\'' | '`' | '*')
+        });
         let mut after = body[end..].chars();
         let ends = match after.next() {
             None => true,
@@ -195,7 +202,7 @@ pub(crate) fn links(body: &str, url: &str) -> bool {
             Some('.' | ':') => after.next().is_none_or(char::is_whitespace),
             Some(_) => false,
         };
-        if ends {
+        if begins && ends {
             return true;
         }
         from = end;
@@ -382,11 +389,12 @@ pub(crate) fn draft(
                     .trim()
             )))
         }
+        // llmlint: ignore-block[changed_behavior_has_e2e] waiting on a child this process spawned fails only for an OS fault in `waitpid` itself, which no journey can induce through the binary without substituting the executor under test; it ends in the same `failed` drafting the failed-start and failed-drafting journeys drive.
         Err(error) => {
             return Err(NotDrafted::failed(format!(
                 "the reply drafting could not be waited on: {error}"
             )))
-        }
+        } // llmlint: ignore-end[changed_behavior_has_e2e]
     }
     let kept: Vec<Value> = retained
         .iter()
@@ -725,6 +733,7 @@ pub(crate) fn owed(
     if candidates.is_empty() {
         return Ok(None);
     }
+    // llmlint: ignore-block[changed_behavior_has_e2e] only a lifecycle node that settled as a review draft owes a drafting, and that settlement records its repository, branch and head, so no run the binary writes reaches this; it is a run record read back inconsistent, refused as a failed drafting rather than read as no commits.
     let (Some(repo), Some(branch), Some(head)) = (
         state.graph.get(node).and_then(|node| node.repo.clone()),
         state.branches.get(node).cloned(),
@@ -735,6 +744,7 @@ pub(crate) fn owed(
              rework's commits from"
         )));
     };
+    // llmlint: ignore-end[changed_behavior_has_e2e]
     let commits = commits(
         paths,
         &repo,
@@ -1282,9 +1292,13 @@ mod tests {
             format!("Fixed in {LINK}#diff-1"),
             format!("Fixed in {LINK}?w=1"),
             format!("Fixed in {LINK}.patch"),
+            format!("Fixed in https://example.invalid/{LINK}"),
+            format!("Fixed in x{LINK}"),
         ] {
             assert!(!links(&body, LINK), "{body}");
         }
+        assert!(links(&format!("Fixed in ({LINK})"), LINK));
+        assert!(links(&format!("{LINK} fixes it"), LINK));
         let extended = json!({"replies": [
             {"comment": "c1", "disposition": "answered", "body": format!("Fixed in {LINK}/files")},
             {"comment": "c2", "disposition": "declined", "body": "Left as is."},
