@@ -1005,9 +1005,13 @@ onevcs-testing = "0.19.2"
 # reads remain unpinned, including settlement write-back reads. The plugin API
 # adds public Task and Comment fields and CopyLink, making this a breaking link.
 # `justfile`'s `onetaskgraph-version` moves with this release.
-onetaskgraph-core = "=0.6.0"
-onetaskgraph-plugin-api = "=0.6.0"
-onetaskgraph-local-md = "=0.6.0"
+#
+# **0.7.1 finds a copied document's home through a private source's own copy link**:
+# a copy out of a source declared private records no origin on the public board, and
+# the document copy now files the plan's documents under the board's copied plan anyway.
+onetaskgraph-core = "=0.7.1"
+onetaskgraph-plugin-api = "=0.7.1"
+onetaskgraph-local-md = "=0.7.1"
 # Not engines: two crates both members use, pinned once so they build against one version.
 # `just engines-current` reads only the engines its script names.
 sha2 = "0.10"
