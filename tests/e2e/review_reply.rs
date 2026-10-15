@@ -1520,3 +1520,365 @@ fn both_views_on_both_hosts_name_the_rework_and_commits_that_answered_and_the_de
     let cold = continued_cold(&world, &project, "cold-views");
     check(&cold, "a");
 }
+
+/// The refusal an undriven `decline` was journalled with, as `edit-rejected` carries it.
+fn rejected(world: &World, run: &str, output: &crate::harness::Run) -> Value {
+    assert_eq!(output.code, 2, "{}\n{}", output.stdout, output.stderr);
+    world
+        .events_of(run, "edit-rejected")
+        .last()
+        .expect("the decline was rejected")["payload"]["refusal"]
+        .clone()
+}
+
+/// The graph a reply-drafter dispatch ran, resolved.
+fn drafter_graphs(world: &World) -> Vec<std::path::PathBuf> {
+    world
+        .invocations()
+        .iter()
+        .filter(|call| {
+            call["tool"] == "oneagentgraph"
+                && call["args"].as_array().is_some_and(|args| {
+                    args.iter()
+                        .any(|arg| arg == "onepipeline.persona=review-reply")
+                })
+        })
+        .filter_map(|call| call["args"][1].as_str())
+        .map(|graph| std::fs::canonicalize(graph).expect("the dispatched graph resolves"))
+        .collect()
+}
+
+/// The reply drafter is named by the launch config's `review_reply_graph` on the
+/// drafting graph's terms: a reference relative to the launch directory, recorded
+/// resolved; `--review-reply-graph` over the config; and a blank rung — the key or the
+/// flag — naming none, so a decline is refused `decline-not-posted` and posts nothing.
+#[test]
+fn the_launch_config_names_the_reply_drafter_the_flag_overrides_it_and_a_blank_names_none() {
+    let version = onepipeline::filter::LAUNCH_CONFIG_SCHEMA_VERSION;
+    let declined = |name: &str, key: &str, extra: &[&str]| {
+        let world = team_world(name);
+        let declared = std::path::PathBuf::from(world.review_reply_graph());
+        let overriding = world.graphs().join("review-reply-override.yaml");
+        std::fs::copy(&declared, &overriding).expect("the overriding graph is written");
+        let config = world.root.join("launch.yaml");
+        std::fs::write(&config, format!("schema_version: {version}\n{key}"))
+            .expect("the launch config is written");
+        let config = config.to_string_lossy().into_owned();
+        let mut args = vec!["--launch-config", config.as_str()];
+        args.extend_from_slice(extra);
+        // Launched from the project directory, which `../graphs` is written against.
+        launched_with(&world, "graphs", &args);
+        let host = host(&world, "graphs", &["a", "b"]);
+        let left = conversation(1101, 1);
+        add(&host, 1, left.clone());
+        review(&world, "graphs");
+        let output = decline(&world, "graphs", "a", &[&left], "out of scope here");
+        let recorded = world.run_json("graphs", "launch.json")["review_reply_graph"].clone();
+        (world, host, left, output, recorded, declared, overriding)
+    };
+    let resolved = |recorded: &Value| {
+        std::fs::canonicalize(recorded.as_str().expect("a recorded graph"))
+            .expect("the recorded graph resolves")
+    };
+
+    let configured = "review_reply_graph: ../graphs/review-reply.yaml\n";
+    let (world, host, left, output, recorded, declared, _) =
+        declined("reply-graph-config", configured, &[]);
+    assert_eq!(output.code, 0, "{}\n{}", output.stdout, output.stderr);
+    assert!(
+        recorded.as_str().is_some_and(|path| path.starts_with('/')),
+        "{recorded}"
+    );
+    let declared = std::fs::canonicalize(declared).unwrap();
+    assert_eq!(resolved(&recorded), declared);
+    assert_eq!(drafter_graphs(&world), [declared]);
+    assert!(the_reply_to(&host, 1, &left)
+        .body
+        .contains("label=declined"));
+
+    let (world, host, left, output, recorded, _, overriding) = declined(
+        "reply-graph-flag",
+        configured,
+        &[
+            "--review-reply-graph",
+            "../graphs/review-reply-override.yaml",
+        ],
+    );
+    assert_eq!(output.code, 0, "{}\n{}", output.stdout, output.stderr);
+    let overriding = std::fs::canonicalize(overriding).unwrap();
+    assert_eq!(resolved(&recorded), overriding);
+    assert_eq!(drafter_graphs(&world), [overriding]);
+    the_reply_to(&host, 1, &left);
+
+    for (name, key, extra) in [
+        (
+            "reply-graph-blank-flag",
+            configured,
+            &["--review-reply-graph", ""][..],
+        ),
+        (
+            "reply-graph-blank-key",
+            "review_reply_graph: \"\"\n",
+            &[][..],
+        ),
+    ] {
+        let (world, host, _, output, recorded, _, _) = declined(name, key, extra);
+        assert!(recorded.is_null(), "{name}: {recorded}");
+        let refusal = rejected(&world, "graphs", &output);
+        assert_eq!(refusal["kind"], "decline-not-posted", "{name}: {refusal}");
+        assert!(drafter_graphs(&world).is_empty(), "{name}");
+        assert!(posts(&world).is_empty(), "{name}");
+        assert!(replies(&host, 1).is_empty(), "{name}");
+    }
+}
+
+/// A drafter answer its graph's schema refuses is never read: a decline whose every
+/// answer the schema refused, or whose drafter answered nothing structured, is refused
+/// `decline-not-posted` saying which, with nothing posted; and one whose first harness's
+/// answer the schema refused posts the answer after it.
+#[test]
+fn a_drafter_answer_its_schema_refuses_is_never_read_and_the_one_after_it_is() {
+    let world = team_world("reply-schema");
+    let run = "schema";
+    let (_, host) = launched_with_replies(&world, run);
+    let left = conversation(1111, 1);
+    add(&host, 1, left.clone());
+    review(&world, run);
+    let refused_by_schema = json!({"replies": [{"comment": left.id.0,
+        "disposition": "declined", "body": "FIRST-NEVER-READ", "mood": "tired"}]})
+    .to_string();
+
+    world.script("review-reply.result", &refused_by_schema);
+    let refusal = rejected(
+        &world,
+        run,
+        &decline(&world, run, "a", &[&left], "out of scope"),
+    );
+    assert_eq!(refusal["kind"], "decline-not-posted", "{refusal}");
+    assert!(
+        refusal["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("refused by its schema")),
+        "{refusal}"
+    );
+    world.unscript("review-reply.result");
+
+    world.script("review-reply.unanswered", "");
+    let refusal = rejected(
+        &world,
+        run,
+        &decline(&world, run, "a", &[&left], "out of scope"),
+    );
+    assert_eq!(refusal["kind"], "decline-not-posted", "{refusal}");
+    assert!(
+        refusal["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("answered nothing its schema accepted")),
+        "{refusal}"
+    );
+    world.unscript("review-reply.unanswered");
+    assert!(posts(&world).is_empty());
+    assert!(replies(&host, 1).is_empty());
+
+    world.script("review-reply.refused-first", &refused_by_schema);
+    let output = decline(&world, run, "a", &[&left], "out of scope");
+    assert_eq!(output.code, 0, "{}\n{}", output.stdout, output.stderr);
+    let reply = the_reply_to(&host, 1, &left);
+    assert!(!reply.body.contains("FIRST-NEVER-READ"), "{}", reply.body);
+    assert!(
+        reply.body.contains("Left as it is: out of scope"),
+        "{}",
+        reply.body
+    );
+    assert_eq!(drafter_tasks(&world).len(), 3);
+}
+
+/// A rework's reply the host refuses is left owed: the pass fails naming it, the reply
+/// the host took before it stays and is never posted again, and the next pass drafts and
+/// posts only the one refused.
+#[test]
+fn a_rework_s_reply_the_host_refuses_is_posted_by_the_next_pass_and_the_one_it_took_is_not_again() {
+    let world = team_world("reply-post-refused");
+    let run = "refusedpost";
+    let (_, host) = launched_with_replies(&world, run);
+    let first = conversation(1121, 1);
+    let second = conversation(1122, 1);
+    add(&host, 1, first.clone());
+    add(&host, 1, second.clone());
+    review(&world, run);
+    world.script("gh.reply.fail-after", "1");
+    rework(&world, run, &[&first, &second]);
+    let pass = world.run(&["review", run]);
+    assert_ne!(pass.code, 0, "{}\n{}", pass.stdout, pass.stderr);
+    assert!(
+        pass.stderr
+            .contains(&format!("the reply to {} was not posted", second.id.0)),
+        "{}",
+        pass.stderr
+    );
+    the_reply_to(&host, 1, &first);
+    let marker = format!("in-reply-to={}", second.id.0);
+    assert!(replies(&host, 1)
+        .iter()
+        .all(|reply| !reply.body.contains(&marker)));
+    assert_eq!(world.events_of(run, "review-reply-posted").len(), 1);
+
+    world.unscript("gh.reply.fail-after");
+    review(&world, run);
+    the_reply_to(&host, 1, &first);
+    the_reply_to(&host, 1, &second);
+    let tasks = drafter_tasks(&world);
+    assert_eq!(tasks.len(), 2, "{tasks:#?}");
+    let comments = section(&tasks[1], "Comments");
+    assert!(
+        comments.contains(&format!("### {}", second.id.0)),
+        "{comments}"
+    );
+    assert!(
+        !comments.contains(&format!("### {}", first.id.0)),
+        "{comments}"
+    );
+    assert_eq!(world.events_of(run, "review-reply-posted").len(), 2);
+}
+
+/// Drop `onepipeline.rework`'s `replaces_head` from every document of `world`'s store
+/// carrying it — the record as a build before the key wrote it.
+fn as_an_older_build_wrote_it(world: &World) {
+    let mut pending = vec![world.store()];
+    let mut rewritten = 0;
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).expect("the store reads") {
+            let path = entry.expect("a store entry").path();
+            if path.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("a store document reads");
+            if !text.contains("replaces_head") {
+                continue;
+            }
+            let rest = text.strip_prefix("---\n").expect("front matter");
+            let (front, body) = rest.split_once("\n---\n").expect("front matter ends");
+            let mut front: Value = serde_norway::from_str(front).expect("front matter parses");
+            let record = front["metadata"]["onepipeline.rework"]
+                .as_object_mut()
+                .expect("a rework record");
+            assert!(record.remove("replaces_head").is_some());
+            let front = serde_norway::to_string(&front).expect("front matter renders");
+            std::fs::write(&path, format!("---\n{front}---\n{body}"))
+                .expect("the document is written");
+            rewritten += 1;
+        }
+    }
+    assert_eq!(rewritten, 1, "one rework record carries the key");
+}
+
+/// A cold host continuing from a stored rework record that names no superseded head —
+/// one a build before the key wrote — drafts the reply owed with the replacement's
+/// settled head as the only commit, and posts it linking that commit.
+#[test]
+fn a_stored_rework_record_naming_no_superseded_head_drafts_from_the_replacement_s_head_alone() {
+    let world = team_world("reply-older-record");
+    let run = "older";
+    let project = launched_with(&world, run, &[]);
+    let host = host(&world, run, &["a", "b"]);
+    let left = conversation(1131, 1);
+    add(&host, 1, left.clone());
+    review(&world, run);
+    rework(&world, run, &[&left]);
+    let branch = settled(&world, run, "a-rework-1")["branch"]
+        .as_str()
+        .expect("a branch")
+        .to_owned();
+    let head = origin_head(&world, &branch);
+    world.until_store("the rework's record to reach the store", |world| {
+        world
+            .store_tasks(&project)
+            .iter()
+            .any(|task| task["item"]["metadata"]["onepipeline.rework"]["replaces_head"].is_string())
+    });
+    as_an_older_build_wrote_it(&world);
+    assert!(world.store_tasks(&project).iter().all(|task| {
+        task["item"]["metadata"]["onepipeline.rework"]
+            .get("replaces_head")
+            .is_none()
+    }));
+    assert!(drafter_tasks(&world).is_empty());
+
+    let cold = continued_cold(&world, &project, "cold-older");
+    review(&cold, run);
+    let tasks = drafter_tasks(&cold);
+    assert_eq!(tasks.len(), 1, "{tasks:#?}");
+    let listed: Vec<&str> = section(&tasks[0], "Commits")
+        .lines()
+        .filter(|line| line.starts_with("- "))
+        .collect();
+    assert_eq!(listed.len(), 1, "{listed:#?}");
+    assert!(listed[0].starts_with(&format!("- {head} ")), "{listed:#?}");
+    assert!(the_reply_to(&host, 1, &left)
+        .body
+        .contains(&format!("/commit/{head}")));
+}
+
+/// A decline whose own read of the change request fails is refused
+/// `decline-not-posted` saying so, drafts and posts nothing, and posts once it reads.
+#[test]
+fn a_decline_whose_read_of_the_change_request_fails_posts_nothing_and_posts_once_it_reads() {
+    let world = team_world("decline-read-fails");
+    let run = "unread";
+    let (_, host) = launched_with_replies(&world, run);
+    let left = conversation(1141, 1);
+    add(&host, 1, left.clone());
+    review(&world, run);
+    world.script("gh.outage", "");
+    let refusal = rejected(
+        &world,
+        run,
+        &decline(&world, run, "a", &[&left], "out of scope"),
+    );
+    assert_eq!(refusal["kind"], "decline-not-posted", "{refusal}");
+    assert!(
+        refusal["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("could not be read")),
+        "{refusal}"
+    );
+    assert!(drafter_tasks(&world).is_empty());
+    assert!(posts(&world).is_empty());
+    world.unscript("gh.outage");
+    let output = decline(&world, run, "a", &[&left], "out of scope");
+    assert_eq!(output.code, 0, "{}\n{}", output.stdout, output.stderr);
+    assert!(the_reply_to(&host, 1, &left)
+        .body
+        .contains("label=declined"));
+}
+
+/// A decline of a comment a rework's reply already answers is refused
+/// `already-answered` naming that reply, with nothing drafted or posted.
+#[test]
+fn a_decline_of_a_comment_a_rework_answered_is_refused_already_answered_and_posts_nothing() {
+    let world = team_world("decline-after-rework");
+    let run = "answered";
+    let (_, host) = launched_with_replies(&world, run);
+    let left = conversation(1151, 1);
+    add(&host, 1, left.clone());
+    review(&world, run);
+    rework(&world, run, &[&left]);
+    review(&world, run);
+    let answered = the_reply_to(&host, 1, &left);
+    assert!(answered.body.contains("/commit/"), "{}", answered.body);
+    let (drafted, posted) = (drafter_tasks(&world).len(), posts(&world).len());
+    let refusal = rejected(
+        &world,
+        run,
+        &decline(&world, run, "a-rework-1", &[&left], "never mind"),
+    );
+    assert_eq!(
+        refusal,
+        json!({"kind": "already-answered", "node": "a-rework-1", "comment": left.id.0,
+               "url": answered.url})
+    );
+    assert_eq!(drafter_tasks(&world).len(), drafted);
+    assert_eq!(posts(&world).len(), posted);
+    assert_eq!(the_reply_to(&host, 1, &left).url, answered.url);
+}

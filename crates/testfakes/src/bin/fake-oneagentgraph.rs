@@ -569,7 +569,9 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     // its work, its commits, its publication — are this dispatch's. Scripted under
     // `review-reply.*` alone: `review-reply.wait` holds it until `review-reply.go`,
     // `review-reply.fail` fails it with that exit code, and its answer is
-    // `review-reply.result` or one composed from its task (see [`fake::replied_answer`]).
+    // `review-reply.result` or one composed from its task (see [`fake::replied_answer`]),
+    // after `review-reply.refused-first` where scripted, or none at all under
+    // `review-reply.unanswered`.
     if persona.as_deref() == Some("review-reply") {
         if dir.join("review-reply.wait").exists() {
             fake::wait_for(&dir.join("review-reply.go"));
@@ -3198,14 +3200,37 @@ fn report_of(
 ) -> serde_json::Value {
     if let Some(answer) = fake::replied_answer(task, &fake::script_dir()) {
         // Validated against the reply graph's own schema, as the producer validates.
-        let schema_valid = drafting_schema(args).validate(&answer).is_ok();
+        let schema = drafting_schema(args);
+        let dir = fake::script_dir();
+        let mut results = Vec::new();
+        // `review-reply.refused-first`: a first harness's answer, held to the same schema,
+        // ahead of the one composed — the result a reader must step past when it refuses.
+        if let Some(first) = fake::node_script(&dir, "review-reply", "refused-first") {
+            let first: serde_json::Value = serde_json::from_str(&first).unwrap_or_else(|error| {
+                fake::fail(&format!("review-reply.refused-first is not JSON: {error}"))
+            });
+            results.push(serde_json::json!({
+                "harness": "codex", "status": "ok", "text": "Drafted something else.",
+                "schema_valid": schema.validate(&first).is_ok(), "structured": first,
+            }));
+        }
+        // `review-reply.unanswered`: the turn ended without a structured answer at all.
+        results.push(
+            if fake::node_script(&dir, "review-reply", "unanswered").is_some() {
+                serde_json::json!({
+                    "harness": "claude-code", "status": "ok", "text": "I could not draft.",
+                    "structured": null, "schema_valid": null,
+                })
+            } else {
+                serde_json::json!({
+                    "harness": "claude-code", "status": "ok", "text": "Drafted the replies.",
+                    "schema_valid": schema.validate(&answer).is_ok(), "structured": answer,
+                })
+            },
+        );
         return serde_json::json!({
             "schema_version": "0.6",
-            "results": [{
-                "harness": "claude-code", "status": "ok",
-                "text": "Drafted the replies.",
-                "structured": answer, "schema_valid": schema_valid,
-            }],
+            "results": results,
             "usage": {"input_tokens": 30, "output_tokens": 15, "cost_usd": 0.01},
         });
     }
