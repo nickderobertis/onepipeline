@@ -13,7 +13,7 @@ use std::process::{Child, Output, Stdio};
 
 // Every held subprocess belongs to this test and is reaped even on an assertion
 // failure. The captured Child identifies it; no process pattern is signalled.
-struct Held(Child);
+pub(crate) struct Held(pub(crate) Child);
 impl Held {
     fn output(&mut self) -> Output {
         let mut stdout = Vec::new();

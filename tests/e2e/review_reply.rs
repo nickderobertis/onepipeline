@@ -543,10 +543,17 @@ fn a_decline_posts_one_declined_reply_and_is_the_whole_of_its_record_on_every_ho
     );
 }
 
-/// A run of `a` and `b` settled as drafts while `hold`, depending on both, is held
+/// A run of `a` and `b` settled as drafts while `hold`, after them, is held
 /// open — so a driver is live and every command goes through its queue, and is
-/// answered in the outcome document.
-fn driven(world: &World, run: &str, extra: &[&str]) -> (std::process::Child, FileHost) {
+/// answered in the outcome document. At `concurrency` above one the two drafts may
+/// open in either order, so the host double is seeded by each one's own number,
+/// answered beside it.
+fn driven(
+    world: &World,
+    run: &str,
+    extra: &[&str],
+    concurrency: u64,
+) -> (std::process::Child, FileHost, u32) {
     world.script("a.work", "first draft\n");
     world.script("b.work", "second draft\n");
     world.script("hold.wait", "");
@@ -554,12 +561,13 @@ fn driven(world: &World, run: &str, extra: &[&str]) -> (std::process::Child, Fil
         run,
         vec![
             crate::harness::lifecycle("a", &[]),
-            crate::harness::lifecycle("b", &["a"]),
-            crate::harness::agent("hold", &["a", "b"]),
+            crate::harness::lifecycle("b", &[]),
+            // On `b` alone, so `a` has no dependent in flight and may be reworked;
+            // at a concurrency of one, in plan order, it starts after both drafts.
+            crate::harness::agent("hold", &["b"]),
         ],
     );
-    plan["concurrency"] = json!(1);
-    plan["tasks"][1]["deps"] = json!([]);
+    plan["concurrency"] = json!(concurrency);
     let project = world.plan(run, &plan);
     let mut args = vec!["start", project.as_str(), "--attach"];
     args.extend_from_slice(extra);
@@ -577,8 +585,30 @@ fn driven(world: &World, run: &str, extra: &[&str]) -> (std::process::Child, Fil
                 .any(|event| event["labels"]["node"] == *node)
         })
     });
-    let host = host(world, run, &["a", "b"]);
-    (driver, host)
+    let number = |node: &str| -> u32 {
+        settled(world, run, node)["change_url"]
+            .as_str()
+            .and_then(|url| url.rsplit('/').next())
+            .and_then(|number| number.parse().ok())
+            .expect("a draft's change request number")
+    };
+    let mut state = onevcs_testing::HostState::default();
+    for node in ["a", "b"] {
+        let settlement = settled(world, run, node);
+        state.changes.push(
+            serde_json::from_value(json!({
+                "id": number(node).to_string(), "url": settlement["change_url"],
+                "head_sha": settlement["head"], "base": settlement["base"],
+            }))
+            .expect("the real publication supplied this change request"),
+        );
+        state.heads.insert(
+            ChangeId(number(node).to_string()),
+            settlement["branch"].as_str().unwrap().to_owned(),
+        );
+    }
+    let host = FileHost::seeded(world.fakes.join("review-host.json"), state).expect("host seeded");
+    (driver, host, number("a"))
 }
 
 /// Let the held node finish, and wait for the driver to end the run.
@@ -610,7 +640,7 @@ fn every_decline_refusal_reaches_the_outcome_by_kind_and_posts_nothing_it_should
     let world = team_world("decline-refusals");
     let run = "refusals";
     let graph = world.review_reply_graph();
-    let (driver, host) = driven(&world, run, &["--review-reply-graph", &graph]);
+    let (driver, host, _) = driven(&world, run, &["--review-reply-graph", &graph], 1);
     let first = conversation(701, 1);
     let second = conversation(702, 1);
     add(&host, 1, first.clone());
@@ -1020,4 +1050,368 @@ fn an_edit_after_its_reply_is_pending_again_and_a_rework_naming_it_answers_the_n
     assert!(commits_between(&world, &from, &to)
         .iter()
         .any(|sha| answered[1].body.contains(sha.as_str())));
+}
+
+/// Every branch the origin holds.
+pub(crate) fn origin_branches(world: &World) -> Vec<String> {
+    let listed = std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(world.root.join("origin.git"))
+        .args(["for-each-ref", "--format=%(refname:short)", "refs/heads"])
+        .output()
+        .expect("git runs");
+    String::from_utf8_lossy(&listed.stdout)
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Delete every record this host keeps — its runs root and `ONEVCS_HOME` — and
+/// continue the project from its store on a fresh host, launched with the reply
+/// drafter.
+pub(crate) fn continued_cold(world: &World, project: &str, host: &str) -> World {
+    let cold = world.on_host(host);
+    std::fs::remove_dir_all(&world.runs).unwrap();
+    std::fs::remove_dir_all(world.onevcs_home()).unwrap();
+    let graph = world.review_reply_graph();
+    let continued = cold.run_from(
+        &cold.project,
+        &["start", project, "--attach", "--review-reply-graph", &graph],
+    );
+    assert_eq!(
+        continued.code, 0,
+        "{}\n{}",
+        continued.stdout, continued.stderr
+    );
+    cold
+}
+
+#[test]
+fn a_cold_host_reworks_a_stack_on_its_existing_branch_and_change_request_and_replies() {
+    let world = team_world("reply-cold-stack");
+    let run = "cold-stack";
+    let graph = world.review_reply_graph();
+    world.script("a.work", "first draft\n");
+    world.script("b.work", "second draft, stacked\n");
+    let mut plan = crate::harness::plan_of(
+        run,
+        vec![
+            crate::harness::lifecycle("a", &[]),
+            crate::harness::lifecycle("b", &["a"]),
+        ],
+    );
+    plan["concurrency"] = json!(1);
+    let project = world.plan(run, &plan);
+    let launched = world.run_from(
+        &world.project,
+        &[
+            "start",
+            &project,
+            "--attach",
+            "--review-reply-graph",
+            &graph,
+        ],
+    );
+    assert_eq!(launched.code, 0, "{}\n{}", launched.stdout, launched.stderr);
+    let host = host(&world, run, &["a", "b"]);
+    let comment = conversation(541, 1);
+    add(&host, 1, comment.clone());
+    let opened = world.changes_opened().len();
+    assert_eq!(opened, 2);
+    let branches = origin_branches(&world);
+    let original_head = settled(&world, run, "a")["head"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let cold = continued_cold(&world, &project, "cold-stack-host");
+    review(&cold, run);
+    let found = surfaces(&cold, run);
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert!(found[0]["correlation"]
+        .as_str()
+        .unwrap()
+        .contains(&comment.id.0));
+    let b_workers = worker_dispatches(&cold, "b");
+    rework(&cold, run, &[&comment]);
+    let restacked = cold.events_of(run, "node-restacked");
+    let b = restacked
+        .iter()
+        .find(|event| event["payload"]["node"] == "b")
+        .unwrap_or_else(|| panic!("b was not restacked: {restacked:#?}"));
+    assert_eq!(b["payload"]["agent_dispatched"], false);
+    assert_eq!(
+        worker_dispatches(&cold, "b"),
+        b_workers,
+        "the restack dispatched b's worker"
+    );
+    review(&cold, run);
+
+    let reply = the_reply_to(&host, 1, &comment);
+    assert!(reply
+        .body
+        .contains(&key("a", &comment.id.0, &comment.updated_at)));
+    let reworked = settled(&cold, run, "a-rework-1")["head"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let added = commits_between(&world, &original_head, &reworked);
+    assert!(!added.is_empty());
+    assert!(
+        added.iter().any(|sha| reply.body.contains(sha.as_str())),
+        "{}",
+        reply.body
+    );
+    assert_eq!(drafter_tasks(&cold).len(), 1);
+    // The original run's two change requests and branches, and nothing beyond them.
+    assert_eq!(cold.changes_opened().len(), opened);
+    assert_eq!(origin_branches(&world), branches);
+    assert_eq!(
+        settled(&cold, run, "a-rework-1")["change_url"],
+        settled(&cold, run, "a")["change_url"]
+    );
+}
+
+/// The crash seam a debug binary stops at: `stage` reached, the process killed.
+fn crashed_at(world: &World, args: &[&str], stdin: Option<&str>, stage: &str) {
+    let seam = world.root.join(format!("reply-crash-{stage}"));
+    std::fs::create_dir_all(&seam).unwrap();
+    std::fs::write(seam.join(stage), "").unwrap();
+    let mut process = world
+        .cmd(args)
+        .env("ONEPIPELINE_REVIEW_FAILPOINT", &seam)
+        .stdin(if stdin.is_some() {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::null()
+        })
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(crate::review::Held)
+        .unwrap();
+    if let Some(text) = stdin {
+        use std::io::Write;
+        process
+            .0
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(text.as_bytes())
+            .unwrap();
+    }
+    world.until("the crash boundary", |_| {
+        seam.join(format!("{stage}.reached")).is_file()
+    });
+    process.0.kill().unwrap();
+    process.0.wait().unwrap();
+}
+
+#[test]
+fn a_host_lost_after_the_rework_settled_leaves_its_replies_to_the_next_host() {
+    let world = team_world("reply-lost-before-drafting");
+    let run = "lost";
+    let (project, host) = launched_with_replies(&world, run);
+    let first = conversation(551, 1);
+    let second = conversation(552, 1);
+    add(&host, 1, first.clone());
+    add(&host, 1, second.clone());
+    review(&world, run);
+    // Two commits — the worker's own, and the one its publication makes of what it
+    // left — so only the superseded head the store carries tells them from the
+    // original worker's.
+    world.script(
+        "a-rework-1.commit-saying",
+        "fix: change what the review named",
+    );
+    world.script("a-rework-1.work-anew", "and what it named next");
+    rework(&world, run, &[&first, &second]);
+    assert!(drafter_tasks(&world).is_empty());
+    let from = settled(&world, run, "a")["head"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let to = settled(&world, run, "a-rework-1")["head"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let added = commits_between(&world, &from, &to);
+    assert_eq!(added.len(), 2, "{added:?}");
+
+    let cold = continued_cold(&world, &project, "cold-before-drafting");
+    review(&cold, run);
+    review(&cold, run);
+    let tasks = drafter_tasks(&cold);
+    assert_eq!(tasks.len(), 1, "{tasks:#?}");
+    assert!(section(&tasks[0], "Worker transcript").contains(NO_TRANSCRIPT));
+    assert!(reason_of(&tasks[0]).starts_with("the review asked for it"));
+    let commits = section(&tasks[0], "Commits");
+    for sha in &added {
+        assert!(
+            commits.contains(sha.as_str()),
+            "{sha} is not in:\n{commits}"
+        );
+    }
+    assert!(
+        !commits.contains(&from),
+        "the superseded head is not the rework's:\n{commits}"
+    );
+    for comment in [&first, &second] {
+        the_reply_to(&host, 1, comment);
+    }
+    assert_eq!(worker_dispatches(&cold, "a-rework-1"), 1);
+    assert_eq!(worker_dispatches(&cold, "a"), 1);
+    assert!(
+        surfaces(&cold, run).is_empty(),
+        "{:#?}",
+        surfaces(&cold, run)
+    );
+}
+
+#[test]
+fn a_host_lost_after_the_host_took_a_reply_leaves_nothing_to_post_again() {
+    let world = team_world("reply-lost-after-post");
+    let run = "lost";
+    let (project, host) = launched_with_replies(&world, run);
+    let comment = conversation(561, 1);
+    add(&host, 1, comment.clone());
+    review(&world, run);
+    rework(&world, run, &[&comment]);
+    crashed_at(&world, &["review", run], None, "after-reply-post");
+    let posted = the_reply_to(&host, 1, &comment);
+    assert!(world.events_of(run, "review-reply-posted").is_empty());
+
+    let cold = continued_cold(&world, &project, "cold-after-post");
+    review(&cold, run);
+    assert_eq!(drafter_tasks(&cold).len(), 1, "the cold host drafted again");
+    assert_eq!(posts(&cold).len(), 1, "the cold host posted again");
+    assert_eq!(the_reply_to(&host, 1, &comment), posted);
+    let status = cold.run(&["status", run]);
+    assert!(
+        status
+            .stdout
+            .contains(&format!("review {}: answered by a-rework-1", comment.id.0)),
+        "{}",
+        status.stdout
+    );
+    assert_eq!(worker_dispatches(&cold, "a-rework-1"), 1);
+    assert!(
+        surfaces(&cold, run).is_empty(),
+        "{:#?}",
+        surfaces(&cold, run)
+    );
+}
+
+#[test]
+fn a_host_lost_after_a_decline_posted_leaves_the_decline_answered_on_the_next_host() {
+    let world = team_world("reply-lost-decline");
+    let run = "lost";
+    let (project, host) = launched_with_replies(&world, run);
+    let comment = conversation(571, 1);
+    add(&host, 1, comment.clone());
+    review(&world, run);
+    let envelope = json!({"version": 3, "commands": [{"op": "decline", "id": "a",
+        "comments": [named(&comment)], "reason": "out of scope"}]})
+    .to_string();
+    crashed_at(
+        &world,
+        &["reply", run],
+        Some(&envelope),
+        "after-decline-post",
+    );
+    let posted = the_reply_to(&host, 1, &comment);
+    assert!(posted.body.contains("label=declined"));
+    assert!(world
+        .events_of(run, "edit-committed")
+        .iter()
+        .all(|event| event["payload"]["operation_kinds"] != json!(["decline-applied"])));
+
+    let cold = continued_cold(&world, &project, "cold-after-decline");
+    review(&cold, run);
+    assert_eq!(drafter_tasks(&cold).len(), 1, "the cold host drafted again");
+    assert_eq!(posts(&cold).len(), 1, "the cold host posted again");
+    let status = cold.run(&["status", run]);
+    assert!(
+        status.stdout.contains(&format!("declined: {}", posted.url)),
+        "{}",
+        status.stdout
+    );
+    let again = decline(&cold, run, &[&comment], "out of scope");
+    assert_eq!(again.code, 2, "{}\n{}", again.stdout, again.stderr);
+    assert!(
+        again
+            .stderr
+            .contains(&format!("already answered by {}", posted.url)),
+        "{}",
+        again.stderr
+    );
+    assert_eq!(the_reply_to(&host, 1, &comment), posted);
+    assert!(
+        surfaces(&cold, run).is_empty(),
+        "{:#?}",
+        surfaces(&cold, run)
+    );
+}
+
+#[test]
+fn a_driven_review_still_drafting_at_the_reply_timeout_returns_requested_and_posts_after() {
+    let world = team_world("reply-driven");
+    let run = "driven";
+    let graph = world.review_reply_graph();
+    let (driver, host, number) = driven(&world, run, &["--review-reply-graph", &graph], 2);
+    let first = conversation(581, number);
+    let second = conversation(582, number);
+    add(&host, number, first.clone());
+    add(&host, number, second.clone());
+    review(&world, run);
+    world.script("a-rework-1.work", "reworked as the review asked\n");
+    let output = reply(
+        &world,
+        run,
+        json!([{"op": "rework", "id": "a", "reason": "the review asked for it",
+                "instruction": "Change what the comments name",
+                "comments": [named(&first), named(&second)]}]),
+    );
+    assert_eq!(output.code, 0, "{}\n{}", output.stdout, output.stderr);
+    world.until("the rework to settle", |world| {
+        world
+            .events_of(run, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "a-rework-1")
+    });
+    world.script("review-reply.wait", "");
+    let reads = host
+        .ledger()
+        .unwrap()
+        .iter()
+        .filter(|call| call.method == "review_standings")
+        .count();
+    let receipt = world
+        .cmd(&["review", run, "--json"])
+        .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("review runs");
+    assert!(receipt.status.success(), "{receipt:?}");
+    let receipt: Value = serde_json::from_slice(&receipt.stdout).unwrap();
+    assert_eq!(receipt["state"], "requested", "{receipt}");
+    assert!(posts(&world).is_empty());
+    world.script("review-reply.go", "");
+    world.until("the driver to post both replies", |world| {
+        world.events_of(run, "review-reply-posted").len() == 2
+    });
+    for comment in [&first, &second] {
+        the_reply_to(&host, number, comment);
+    }
+    assert_eq!(drafter_tasks(&world).len(), 1);
+    assert_eq!(
+        host.ledger()
+            .unwrap()
+            .iter()
+            .filter(|call| call.method == "review_standings")
+            .count(),
+        reads + 1,
+        "a second pass read the host"
+    );
+    released(&world, driver);
 }
