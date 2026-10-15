@@ -1579,7 +1579,7 @@ fn activity(dir: &Path, opened: Option<&Opened>, kind: Kind) -> Vec<Activity> {
 ///
 /// The workflow runs on one commit, in GitHub's shape: `total_count` beside every
 /// `workflow_runs` entry, each carrying its own `head_sha`, `status`, and a
-/// `conclusion` that is `null` until it completes. `onevcs` 0.48.1 asks it before it
+/// `conclusion` that is `null` until it completes. `onevcs` asks it, from 0.48.1 on, before it
 /// lifts a draft whose checks show nothing still running, and holds the draft while
 /// a run on its head is not `completed`. Unscripted, it is the commit no workflow ran
 /// on.

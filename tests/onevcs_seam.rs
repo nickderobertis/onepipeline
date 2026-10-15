@@ -538,7 +538,7 @@ fn the_draft_lifecycle_answers_what_a_node_settles_on(root: &std::path::Path) {
     // has run: the one with no run yet is pending, not passed, so the watch does
     // not settle — the publication ends `checks-unsettled`, naming the check
     // nothing has vouched for, and no `checks-settled` is recorded. Before the
-    // linked `onevcs` 0.43.1 the reported check alone read as the whole set.
+    // `onevcs` 0.43.1 the reported check alone read as the whole set.
     let host = MemoryHost::seeded(HostState {
         checks: [(first.clone(), vec![check("lint", "success", "ready")])].into(),
         required_checks: Some(onevcs::RequiredChecks {
