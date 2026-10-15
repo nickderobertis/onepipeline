@@ -5205,58 +5205,10 @@ pub fn reaped_pid() -> u32 {
 /// and then still has its closeout to write, so the last file it touches is not a
 /// signal that it has finished touching them.
 ///
-/// A process that has ended but not yet been reaped counts as ended, because the
-/// question is whether it can still write, and a zombie cannot. Every other answer
-/// this host cannot give reads as still running, so a wait on this outlives the
-/// process rather than stopping short of it.
-///
-/// The state is asked of `ps` rather than read from `/proc`, which macOS does
-/// not have: there, a double a teardown killed and nothing reaped read as still
-/// running, and every teardown journey failed on the macOS leg alone. `ps`
-/// leads a zombie's state with `Z` on every Unix, so Linux runs this path too.
-#[cfg(unix)]
+/// [`onepipeline_testfakes::containment::process_ended`] says what counts as
+/// ended, and why it asks `ps` rather than `/proc`.
 pub fn process_ended(pid: u32) -> bool {
-    let Ok(raw) = i32::try_from(pid) else {
-        return false;
-    };
-    // SAFETY: signal 0 delivers nothing and touches no memory this call owns.
-    if unsafe { libc::kill(raw, 0) } != 0 {
-        return std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
-    }
-    Command::new("ps")
-        .args(["-o", "stat=", "-p", &pid.to_string()])
-        .env("LC_ALL", "C")
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .is_ok_and(|listed| {
-            String::from_utf8_lossy(&listed.stdout)
-                .trim_start()
-                .starts_with('Z')
-        })
-}
-
-/// The same question on Windows, where a process handle is signalled once — and
-/// only once — the process has terminated.
-#[cfg(windows)]
-pub fn process_ended(pid: u32) -> bool {
-    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, WAIT_OBJECT_0};
-    use windows_sys::Win32::System::Threading::{
-        OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
-    };
-    // SAFETY: `OpenProcess` returns null on failure and otherwise a handle closed
-    // below; no borrowed memory crosses the boundary.
-    let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
-    if handle.is_null() {
-        // No such process any more: its pid names nothing this host can open.
-        return std::io::Error::last_os_error().raw_os_error()
-            == Some(ERROR_INVALID_PARAMETER as i32);
-    }
-    // SAFETY: `handle` is live, and a zero timeout returns at once.
-    let waited = unsafe { WaitForSingleObject(handle, 0) };
-    // SAFETY: the handle came from `OpenProcess` above and is closed once.
-    unsafe { CloseHandle(handle) };
-    waited == WAIT_OBJECT_0
+    onepipeline_testfakes::containment::process_ended(pid)
 }
 
 /// End one process this suite is entitled to end, and wait until it is gone.

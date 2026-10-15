@@ -105,11 +105,47 @@ pub fn end_descendants() -> Result<(), String> {
     platform::end_descendants(patience()?)
 }
 
+/// Whether this host can show that `pid` has ended.
+///
+/// A process that has ended but not yet been reaped counts as ended, because the
+/// question is whether it can still write or hold a handle, and a zombie cannot.
+/// Every other answer this host cannot give reads as still running, so a wait on
+/// this outlives the process rather than stopping short of it.
+pub fn process_ended(pid: u32) -> bool {
+    platform::process_ended(pid)
+}
+
 #[cfg(unix)]
 mod platform {
     use super::POLL;
 
     pub fn enrol() {}
+
+    /// The state is asked of `ps` rather than read from `/proc`, which macOS
+    /// does not have: there, a double a teardown killed and nothing reaped read
+    /// as still running, and every teardown journey failed on the macOS leg
+    /// alone. `ps` leads a zombie's state with `Z` on every Unix, so Linux runs
+    /// this path too.
+    pub fn process_ended(pid: u32) -> bool {
+        let Ok(raw) = libc::pid_t::try_from(pid) else {
+            return false;
+        };
+        // SAFETY: signal 0 delivers nothing and touches no memory this call owns.
+        if unsafe { libc::kill(raw, 0) } != 0 {
+            return std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+        }
+        std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .env("LC_ALL", "C")
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .is_ok_and(|listed| {
+                String::from_utf8_lossy(&listed.stdout)
+                    .trim_start()
+                    .starts_with('Z')
+            })
+    }
 
     /// The id of exactly one process: positive, and within what `kill` takes,
     /// which reads zero and below as a group or a broadcast.
@@ -372,6 +408,25 @@ mod platform {
     /// to be shareable between threads; it is only ever read back as the handle
     /// it was.
     static JOB: OnceLock<usize> = OnceLock::new();
+
+    /// A process handle is signalled once — and only once — the process has
+    /// terminated.
+    pub fn process_ended(pid: u32) -> bool {
+        use windows_sys::Win32::Foundation::{ERROR_INVALID_PARAMETER, WAIT_OBJECT_0};
+        // SAFETY: `OpenProcess` returns null on failure and otherwise a handle
+        // closed below; no borrowed memory crosses the boundary.
+        let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+        if handle.is_null() {
+            // No such process any more: its pid names nothing this host can open.
+            return std::io::Error::last_os_error().raw_os_error()
+                == Some(ERROR_INVALID_PARAMETER as i32);
+        }
+        // SAFETY: `handle` is live, and a zero timeout returns at once.
+        let waited = unsafe { WaitForSingleObject(handle, 0) };
+        // SAFETY: the handle came from `OpenProcess` above and is closed once.
+        unsafe { CloseHandle(handle) };
+        waited == WAIT_OBJECT_0
+    }
 
     pub fn enrol() {
         JOB.get_or_init(|| {

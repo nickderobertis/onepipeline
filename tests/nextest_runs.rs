@@ -392,9 +392,14 @@ fn a_run_ended_with_tests_unrun_and_no_reason_is_named_by_nextests_exit_status()
     );
 }
 
+/// Where each process the fixture's tests start writes its pid, one empty file
+/// named for it, under the fixture's root.
+const LINGERERS: &str = "lingerers";
+
 /// One test that returns while a process it started still holds its output, one
 /// that waits for what it started, and the program both start: this binary
-/// again, which sleeps when told it is the one started.
+/// again, which records its pid under [`LINGERERS`] and sleeps when told it is
+/// the one started.
 const LEAKING_E2E: &str = r#"
 fn start_the_lingerer() -> std::process::Child {
     std::process::Command::new(std::env::current_exe().unwrap())
@@ -406,6 +411,9 @@ fn start_the_lingerer() -> std::process::Child {
 #[test]
 fn lingers_when_started_by_another_test() {
     if std::env::var_os("FIXTURE_LINGER").is_some() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lingerers");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(std::process::id().to_string()), "").unwrap();
         std::thread::sleep(std::time::Duration::from_secs(3));
     }
 }
@@ -434,10 +442,43 @@ fn leaking_fixture(case: &str) -> Fixture {
     )
 }
 
+/// The pids the fixture's started processes recorded under [`LINGERERS`] that
+/// have not ended by `patience` from now, waited for together.
+///
+/// Every one of them is a deliberate leak of an inner run, and on Windows each
+/// inherits every inheritable handle in its chain of ancestors — this test's own
+/// output among them, which `cargo nextest` reads it through. One still running
+/// when this test returns holds that output past its end, and the outer run
+/// marks this test `LEAK`. So it waits them out rather than returning first.
+fn lingerers_outliving(fixture: &Fixture, patience: std::time::Duration) -> (usize, Vec<u32>) {
+    let pids: Vec<u32> = fs::read_dir(fixture.path(LINGERERS))
+        .expect("the fixture's started processes recorded their pids")
+        .map(|entry| {
+            let name = entry.expect("a recorded pid reads").file_name();
+            name.to_str()
+                .and_then(|pid| pid.parse().ok())
+                .unwrap_or_else(|| panic!("{name:?} names no pid"))
+        })
+        .collect();
+    let deadline = std::time::Instant::now() + patience;
+    loop {
+        let running: Vec<u32> = pids
+            .iter()
+            .copied()
+            .filter(|pid| !onepipeline_testfakes::containment::process_ended(*pid))
+            .collect();
+        if running.is_empty() || std::time::Instant::now() >= deadline {
+            return (pids.len(), running);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
 /// Under the profile CI's cross-platform legs run, a test that returns while a
 /// process it started still holds its output fails the run and is named for it,
 /// and `rerun-failed` reads that as the failure it is. Under the default profile
-/// the same test is still a leaky pass.
+/// the same test is still a leaky pass. Every process those runs leak has ended,
+/// by its pid, before this test returns, so this test leaks nothing itself.
 #[test]
 fn a_test_leaving_a_process_holding_its_output_fails_the_ci_profile_by_name() {
     let fixture = leaking_fixture("leak-fails");
@@ -488,6 +529,16 @@ fn a_test_leaving_a_process_holding_its_output_fails_the_ci_profile_by_name() {
             "  {leaker}: failed {times} of {times} re-runs; fails every time"
         ))),
         "the leak is not re-run as the failure it is:\n{text}"
+    );
+
+    let (recorded, running) = lingerers_outliving(&fixture, std::time::Duration::from_secs(60));
+    assert!(
+        recorded >= 2 + times,
+        "only {recorded} started processes recorded their pids, fewer than the runs leaked"
+    );
+    assert!(
+        running.is_empty(),
+        "pids {running:?} the inner runs leaked were still running when this test returned"
     );
 }
 
