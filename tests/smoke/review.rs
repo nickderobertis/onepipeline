@@ -116,7 +116,19 @@ fn board_gh(settings: &[(&'static str, String)], args: &[&str]) -> Result<String
     }
 }
 
-/// The board issues carrying `stamp` in their titles, open or closed, by number.
+/// One issue of the board's repository, as the REST listing gives it: a pull request is
+/// listed there too, and told apart by the key it alone carries.
+#[derive(serde::Deserialize)]
+struct Listed {
+    number: u64,
+    title: String,
+    #[serde(default)]
+    pull_request: Option<Value>,
+}
+
+/// The board issues carrying `stamp` in their titles, open or closed, by number — read
+/// through every page of the repository's issues, and refused whole where any page or
+/// entry does not read.
 fn stamped_issues(settings: &[(&'static str, String)], stamp: &str) -> Result<Vec<u64>, String> {
     let repository = &settings
         .iter()
@@ -126,24 +138,19 @@ fn stamped_issues(settings: &[(&'static str, String)], stamp: &str) -> Result<Ve
     let listed = board_gh(
         settings,
         &[
-            "issue",
-            "list",
-            "--repo",
-            repository,
-            "--state",
-            "all",
-            "--limit",
-            "200",
-            "--json",
-            "number,title",
+            "api",
+            "--paginate",
+            "--slurp",
+            &format!("repos/{repository}/issues?state=all&per_page=100"),
         ],
     )?;
-    let issues: Vec<Value> =
-        serde_json::from_str(&listed).map_err(|why| format!("{why}: {listed}"))?;
-    Ok(issues
-        .iter()
-        .filter(|issue| issue["title"].as_str().is_some_and(|t| t.contains(stamp)))
-        .filter_map(|issue| issue["number"].as_u64())
+    let pages: Vec<Vec<Listed>> =
+        serde_json::from_str(&listed).map_err(|why| format!("the issue listing: {why}"))?;
+    Ok(pages
+        .into_iter()
+        .flatten()
+        .filter(|issue| issue.pull_request.is_none() && issue.title.contains(stamp))
+        .map(|issue| issue.number)
         .collect())
 }
 
@@ -353,19 +360,27 @@ fn comment_views(world: &World, run: &str) -> Vec<(String, Value)> {
     views
 }
 
-/// The marked replies on pull request `number`'s conversation answering `comment`.
+/// One comment of a pull request's conversation, as the REST listing gives it.
+#[derive(serde::Deserialize)]
+struct Commented {
+    body: String,
+}
+
+/// The marked replies on pull request `number`'s conversation answering `comment`, read
+/// through every page; a page or a comment that does not read fails the journey.
 fn replies_to(slug: &str, number: u64, comment: &str) -> Vec<String> {
     let listed = gh(&[
         "api",
         "--paginate",
-        &format!("repos/{slug}/issues/{number}/comments"),
-        "--jq",
-        "[.[] | .body]",
+        "--slurp",
+        &format!("repos/{slug}/issues/{number}/comments?per_page=100"),
     ]);
-    let bodies: Vec<String> = listed
-        .lines()
-        .filter_map(|page| serde_json::from_str::<Vec<String>>(page).ok())
+    let pages: Vec<Vec<Commented>> = serde_json::from_str(&listed)
+        .unwrap_or_else(|why| panic!("reading #{number}'s conversation: {why}: {listed}"));
+    let bodies: Vec<String> = pages
+        .into_iter()
         .flatten()
+        .map(|comment| comment.body)
         .collect();
     let marker = format!("in-reply-to={comment} ");
     bodies
@@ -477,12 +492,16 @@ fn review_comments_found_on_one_host_are_reworked_and_declined_on_a_cold_one_fro
     as_todo(&first);
     let project = copied_to_board(&first, &settings, &local);
     println!("smoke: the plan is on the live-lane board as {project}");
-    // A board task's branches are cut under its issue's number.
-    residue.prefixes = stamped_issues(&settings, &stamp)
-        .unwrap_or_else(|why| panic!("reading the board's issues: {why}"))
-        .iter()
-        .map(|number| format!("{number}/"))
-        .collect();
+    // A board task's branches are cut under its issue's number. The repository's
+    // listing lags the copy, so it is read until it holds the project and both tasks.
+    let issues = || {
+        stamped_issues(&settings, &stamp)
+            .unwrap_or_else(|why| panic!("reading the board's issues: {why}"))
+    };
+    crate::continuation::until("the listing to hold the copy's three issues", || {
+        issues().len() == 3
+    });
+    residue.prefixes = issues().iter().map(|number| format!("{number}/")).collect();
     crate::continuation::until("the board to read back both tasks", || {
         first
             .store_tasks_with(&board_token(&settings), &project)
