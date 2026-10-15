@@ -95,7 +95,10 @@ function readRecord() {
   if (Object.keys(held.workload).length !== Object.keys(WORKLOAD).length) {
     fail("workload names more than the busy round states");
   }
-  if (!Array.isArray(held.phases) || held.phases.map((phase) => phase?.phase).join() !== PHASES.join()) {
+  if (
+    !Array.isArray(held.phases) ||
+    held.phases.map((phase) => phase?.phase).join() !== PHASES.join()
+  ) {
     fail(`phases must be the round's steps, in order: ${PHASES.join(", ")}`);
   }
   held.phases.forEach((phase, n) => {
@@ -104,7 +107,9 @@ function readRecord() {
     count(phase.wall_ms, `${at}.wall_ms`);
     for (const list of ["ledger", "gh"]) {
       if (!Array.isArray(phase[list])) fail(`${at}.${list} must be a list`);
-      phase[list].forEach((call, m) => charged(call, `${at}.${list}[${m}]`));
+      phase[list].forEach((call, m) => {
+        charged(call, `${at}.${list}[${m}]`);
+      });
     }
     phase.ledger.forEach((call, m) => {
       if (typeof call.method !== "string" || call.method === "") {
@@ -178,7 +183,9 @@ function measure(held) {
     );
   });
   const categories = tally(calls, (call) =>
-    call.method ? (CATEGORY[call.method] ?? `other (${call.method})`) : "publications and other host calls",
+    call.method
+      ? (CATEGORY[call.method] ?? `other (${call.method})`)
+      : "publications and other host calls",
   );
   const endpoints = tally(calls, (call) => call.method ?? call.endpoint);
   const detail = [
@@ -203,7 +210,8 @@ function main() {
       "'onebudgetspec check budgets.yaml --id review-round-github-quota'";
     const { value, detail } = measure(held);
     if (!report(value, detail)) {
-      next = "invoke this command through 'onebudgetspec check budgets.yaml --id review-round-github-quota'";
+      next =
+        "invoke this command through 'onebudgetspec check budgets.yaml --id review-round-github-quota'";
       throw new Error("ONEBUDGETSPEC_RESULT is missing; invoke through onebudgetspec");
     }
   } catch (error) {
