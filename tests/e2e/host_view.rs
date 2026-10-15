@@ -1611,7 +1611,7 @@ fn an_adoption_racing_the_view_loses_no_record_and_its_dispatch_is_never_gone() 
 
     // The derived documents are each a valid prefix of the journal as it stands.
     let checkpoint = read_json(&world.run_file(run, "checkpoint.json"));
-    assert_eq!(checkpoint["schema_version"], 12);
+    assert_eq!(checkpoint["schema_version"], 13);
     assert_eq!(
         records_in(
             &bytes,
