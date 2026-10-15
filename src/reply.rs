@@ -152,6 +152,30 @@ pub(crate) fn linked_commits(body: &str) -> Vec<String> {
     found
 }
 
+/// Whether `body` links `url` itself: an occurrence that ends where the URL does — at the
+/// end of the body, at whitespace, or at punctuation closing a sentence or a bracket —
+/// rather than one a longer URL extends with more of a path, a query or a fragment.
+pub(crate) fn links(body: &str, url: &str) -> bool {
+    let mut from = 0;
+    while let Some(at) = body[from..].find(url) {
+        let end = from + at + url.len();
+        let mut after = body[end..].chars();
+        let ends = match after.next() {
+            None => true,
+            Some(next) if next.is_whitespace() => true,
+            Some(')' | ']' | '>' | '"' | '\'' | ',' | ';' | '!' | '*' | '`') => true,
+            // A sentence's full stop or colon, which no URL path here continues with.
+            Some('.' | ':') => after.next().is_none_or(char::is_whitespace),
+            Some(_) => false,
+        };
+        if ends {
+            return true;
+        }
+        from = end;
+    }
+    false
+}
+
 /// The drafter's structured result, held to the rules: every comment the drafting
 /// named exactly once and nothing else, every body non-empty and at most
 /// [`BODY_LIMIT`] characters, an `answered` body carrying at least one supplied
@@ -207,7 +231,7 @@ pub(crate) fn validated(
                 "the reply to {comment} is {length} characters, over the {BODY_LIMIT} a reply may be"
             ));
         }
-        let links_supplied = supplied.iter().any(|url| body.contains(url));
+        let links_supplied = supplied.iter().any(|url| links(body, url));
         match disposition {
             ReplyDisposition::Answered if drafting.decline => {
                 return Err(format!(
@@ -560,15 +584,43 @@ impl Provenance {
 }
 
 /// Seconds since the epoch of an RFC 3339 instant in UTC — `YYYY-MM-DDThh:mm:ss`,
-/// an optional fraction and `Z` — or `None` for anything else.
+/// an optional fraction of digits and `Z` — or `None` for anything else: a field of
+/// the wrong width or not all digits, a component too many, or a date or a time of day
+/// the calendar and the clock do not have.
 pub(crate) fn epoch_seconds(at: &str) -> Option<i64> {
     let (date, time) = at.strip_suffix('Z')?.split_once('T')?;
-    let mut date = date.split('-').map(|part| part.parse::<i64>().ok());
-    let (year, month, day) = (date.next()??, date.next()??, date.next()??);
-    let time = time.split('.').next()?;
-    let mut time = time.split(':').map(|part| part.parse::<i64>().ok());
-    let (hour, minute, second) = (time.next()??, time.next()??, time.next()??);
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+    let (clock, fraction) = time.split_once('.').unwrap_or((time, "0"));
+    if fraction.is_empty() || !fraction.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let fields = |text: &str, separator: char, widths: &[usize]| -> Option<Vec<i64>> {
+        let parts: Vec<&str> = text.split(separator).collect();
+        if parts.len() != widths.len() {
+            return None;
+        }
+        parts
+            .iter()
+            .zip(widths)
+            .map(|(part, width)| {
+                (part.len() == *width && part.bytes().all(|byte| byte.is_ascii_digit()))
+                    .then(|| part.parse::<i64>().ok())
+                    .flatten()
+            })
+            .collect()
+    };
+    let date = fields(date, '-', &[4, 2, 2])?;
+    let clock = fields(clock, ':', &[2, 2, 2])?;
+    let (year, month, day) = (date[0], date[1], date[2]);
+    let (hour, minute, second) = (clock[0], clock[1], clock[2]);
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days_in_month = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return None,
+    };
+    if !(1..=days_in_month).contains(&day) || hour > 23 || minute > 59 || second > 59 {
         return None;
     }
     // Days from the civil date (Howard Hinnant's algorithm).
@@ -1178,6 +1230,61 @@ mod tests {
                 other => panic!("entry 127 records {other}, which no payload here is"),
             };
             read.unwrap_or_else(|why| panic!("{kind}: {why}"));
+        }
+    }
+
+    #[test]
+    fn a_body_links_a_supplied_url_only_where_that_url_ends() {
+        for body in [
+            format!("Fixed in {LINK}"),
+            format!("Fixed in {LINK}."),
+            format!("Fixed ({LINK}), thanks"),
+            format!("See {LINK}: the rename"),
+        ] {
+            assert!(links(&body, LINK), "{body}");
+        }
+        for body in [
+            format!("Fixed in {LINK}0"),
+            format!("Fixed in {LINK}/files"),
+            format!("Fixed in {LINK}#diff-1"),
+            format!("Fixed in {LINK}?w=1"),
+            format!("Fixed in {LINK}.patch"),
+        ] {
+            assert!(!links(&body, LINK), "{body}");
+        }
+        let extended = json!({"replies": [
+            {"comment": "c1", "disposition": "answered", "body": format!("Fixed in {LINK}/files")},
+            {"comment": "c2", "disposition": "declined", "body": "Left as is."},
+        ]});
+        let why = validated(&drafting(false), &extended).expect_err("refused");
+        assert!(why.contains("links none of the rework's commits"), "{why}");
+    }
+
+    #[test]
+    fn an_instant_is_read_only_whole_and_as_the_calendar_has_it() {
+        assert_eq!(epoch_seconds("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(epoch_seconds("2026-10-10T18:34:13Z"), Some(1_791_657_253));
+        assert_eq!(epoch_seconds("2026-10-10T18:34:13.250Z"), Some(1_791_657_253));
+        assert_eq!(epoch_seconds("2024-02-29T00:00:00Z"), Some(1_709_164_800));
+        for refused in [
+            "2026-10-10T18:34:13",
+            "2026-10-10 18:34:13Z",
+            "2026-02-30T00:00:00Z",
+            "2025-02-29T00:00:00Z",
+            "2026-13-01T00:00:00Z",
+            "2026-10-10T24:00:00Z",
+            "2026-10-10T18:60:00Z",
+            "2026-10-10T18:34:60Z",
+            "2026-10-10T18:34:13.Z",
+            "2026-10-10T18:34:13.2xZ",
+            "2026-10-10T18:34:13:01Z",
+            "2026-10-10-01T18:34:13Z",
+            "26-10-10T18:34:13Z",
+            "2026-1-10T18:34:13Z",
+            "+026-10-10T18:34:13Z",
+            "99999999999999999999-10-10T18:34:13Z",
+        ] {
+            assert_eq!(epoch_seconds(refused), None, "{refused}");
         }
     }
 
