@@ -1,8 +1,7 @@
 schema_version: 1
 budgets:
-  # Kept separate from the other macOS budget on purpose: the brief explicitly requests both a
-  # jobs/run bound and a Mac-spending runs/change bound, and the manager approved both
-  # scheduling constraints as distinct budgets.
+  # Do not fold this into the other macOS budget: the brief explicitly requests both a jobs/run
+  # and a Mac-spending runs/change bound, and the manager approved both scheduling constraints.
   - id: onepipeline-macos-jobs-per-run
     measure: reported
     command: [bash, -c, "cd .. && exec node .github/macos-budget.mjs --metric jobs-per-run --telemetry .github/.telemetry/macos-policy.json"]
@@ -15,9 +14,8 @@ budgets:
       inner_measure_reason: one run can occupy several shared Mac slots even when the
       lifecycle run count stays within its bound. Separate ceilings constrain both slot occupancy
       and lifecycle fan-out. Telemetry only; no host label.
-  # Kept separate from the other macOS budget on purpose: the brief explicitly requests both a
-  # jobs/run bound and a Mac-spending runs/change bound, and the manager approved both
-  # scheduling constraints as distinct budgets.
+  # Do not fold this into the other macOS budget: the brief explicitly requests both a jobs/run
+  # and a Mac-spending runs/change bound, and the manager approved both scheduling constraints.
   - id: onepipeline-macos-runs-per-change
     measure: reported
     command: [bash, -c, "cd .. && exec node .github/macos-budget.mjs --metric runs-per-change --telemetry .github/.telemetry/macos-policy.json"]
