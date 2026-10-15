@@ -775,3 +775,249 @@ fn a_decline_with_no_reply_drafter_is_refused_and_posts_nothing() {
         status.stdout
     );
 }
+
+/// Every `review-reply-pending` surface the run raised.
+pub(crate) fn pending_replies(world: &World, run: &str) -> Vec<Value> {
+    std::fs::read_to_string(world.run_file(run, "channel/surfaces.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|surface| surface["kind"] == "review-reply-pending")
+        .collect()
+}
+
+#[test]
+fn a_rework_s_drafting_that_fails_or_answers_against_the_rules_posts_nothing_until_it_drafts() {
+    let world = team_world("reply-refused");
+    let run = "refused";
+    let (_, host) = launched_with_replies(&world, run);
+    let first = conversation(511, 1);
+    let second = conversation(512, 1);
+    add(&host, 1, first.clone());
+    add(&host, 1, second.clone());
+    review(&world, run);
+    rework(&world, run, &[&first, &second]);
+    let from = settled(&world, run, "a")["head"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let to = settled(&world, run, "a-rework-1")["head"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let link = format!(
+        "https://github.com/owner/service/commit/{}",
+        commits_between(&world, &from, &to)[0]
+    );
+    let reply_to = |comment: &HostComment, disposition: &str, body: &str| json!({"comment": comment.id.0, "disposition": disposition, "body": body});
+    let answered =
+        |comment: &HostComment| reply_to(comment, "answered", &format!("Done in {link}"));
+    let cases = [
+        (
+            "a named comment missing",
+            json!({"replies": [answered(&first)]}),
+            "has no reply",
+        ),
+        (
+            "a comment answered twice",
+            json!({"replies": [answered(&first), answered(&first), answered(&second)]}),
+            "answered twice",
+        ),
+        (
+            "an empty body",
+            json!({"replies": [reply_to(&first, "answered", " "), answered(&second)]}),
+            "is empty",
+        ),
+        (
+            "a body over 500 characters",
+            json!({"replies": [
+                reply_to(&first, "answered", &format!("{link} {}", "x".repeat(500))),
+                answered(&second)]}),
+            "over the 500",
+        ),
+        (
+            "an answered body linking none of the commits",
+            json!({"replies": [reply_to(&first, "answered", "Done."), answered(&second)]}),
+            "links none",
+        ),
+        (
+            "a declined body linking a commit",
+            json!({"replies": [reply_to(&first, "declined", &format!("Not this: {link}")), answered(&second)]}),
+            "links a commit",
+        ),
+    ];
+    let mut journalled = 0;
+    for (case, result, says) in cases {
+        world.script("review-reply.result", &result.to_string());
+        review(&world, run);
+        journalled += 1;
+        let records = world.events_of(run, "review-reply-not-drafted");
+        assert_eq!(records.len(), journalled, "{case}: {records:#?}");
+        let record = &records.last().unwrap()["payload"];
+        assert_eq!(record["node"], "a-rework-1", "{case}");
+        assert_eq!(record["ending"], "invalid", "{case}");
+        assert_eq!(
+            record["comments"],
+            json!([first.id.0, second.id.0]),
+            "{case}"
+        );
+        assert!(
+            record["detail"].as_str().unwrap().contains(says),
+            "{case}: {record}"
+        );
+        assert!(posts(&world).is_empty(), "{case}: something was posted");
+        assert!(
+            !pending_replies(&world, run).is_empty(),
+            "{case}: nothing was surfaced"
+        );
+    }
+    world.unscript("review-reply.result");
+    world.script("review-reply.fail", "1");
+    review(&world, run);
+    let records = world.events_of(run, "review-reply-not-drafted");
+    assert_eq!(records.last().unwrap()["payload"]["ending"], "failed");
+    assert!(posts(&world).is_empty());
+    let surfaced = pending_replies(&world, run);
+    assert_eq!(
+        surfaced.len(),
+        2,
+        "one per ending, not one per pass: {surfaced:#?}"
+    );
+    assert!(surfaced.iter().all(|surface| surface["blocking"] == false));
+    assert!(surfaced[0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("onepipeline review"));
+
+    // Drafting succeeds, and the next pass posts both.
+    world.unscript("review-reply.fail");
+    review(&world, run);
+    assert_eq!(posts(&world).len(), 2);
+    for comment in [&first, &second] {
+        assert!(the_reply_to(&host, 1, comment).body.contains(&link));
+    }
+    assert_eq!(world.events_of(run, "review-reply-posted").len(), 2);
+}
+
+#[test]
+fn with_no_reply_drafter_a_rework_s_replies_stay_owed_and_surfaced() {
+    let world = team_world("reply-unconfigured");
+    let run = "unconfigured";
+    launched_with(&world, run, &[]);
+    let host = host(&world, run, &["a", "b"]);
+    let comment = conversation(521, 1);
+    add(&host, 1, comment.clone());
+    review(&world, run);
+    rework(&world, run, &[&comment]);
+    review(&world, run);
+    review(&world, run);
+    let records = world.events_of(run, "review-reply-not-drafted");
+    assert_eq!(records.len(), 2, "{records:#?}");
+    assert!(records
+        .iter()
+        .all(|record| record["payload"]["ending"] == "unconfigured"));
+    assert_eq!(pending_replies(&world, run).len(), 1);
+    assert!(posts(&world).is_empty());
+    assert!(drafter_tasks(&world).is_empty());
+    let status = world.run(&["status", run]);
+    assert!(
+        status.stdout.contains(&format!(
+            "review {}: being reworked by a-rework-1",
+            comment.id.0
+        )),
+        "{}",
+        status.stdout
+    );
+}
+
+#[test]
+fn an_edit_after_its_reply_is_pending_again_and_a_rework_naming_it_answers_the_new_revision() {
+    let world = team_world("reply-edited");
+    let run = "edited";
+    let (_, host) = launched_with_replies(&world, run);
+    let comment = conversation(531, 1);
+    add(&host, 1, comment.clone());
+    review(&world, run);
+    rework(&world, run, &[&comment]);
+    review(&world, run);
+    let first = the_reply_to(&host, 1, &comment);
+    assert!(first
+        .body
+        .contains(&key("a", &comment.id.0, &comment.updated_at)));
+
+    // Second granularity is what a commit's own clock keeps: the edit lands a whole
+    // second after the rework's commits, and the next rework's a second after it.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    host.edit_comment(
+        &ChangeId("1".into()),
+        &comment.id,
+        "Please change 531 another way",
+    )
+    .expect("the reviewer edits the comment");
+    let revised = host.state().unwrap().review_comments[&ChangeId("1".into())]
+        .iter()
+        .find(|held| held.id == comment.id)
+        .unwrap()
+        .updated_at
+        .clone();
+    review(&world, run);
+    let surfaced = surfaces(&world, run);
+    assert_eq!(surfaced.len(), 2, "{surfaced:#?}");
+    assert!(surfaced[1]["correlation"]
+        .as_str()
+        .unwrap()
+        .ends_with(&revised));
+    assert_eq!(
+        posts(&world).len(),
+        1,
+        "the earlier rework answered an edit it never saw"
+    );
+    let status = world.run(&["status", run]);
+    assert!(
+        status
+            .stdout
+            .contains(&format!("review {}: pending", comment.id.0)),
+        "{}",
+        status.stdout
+    );
+
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    world.script("a-rework-2.work", "reworked again, as the edit asked\n");
+    let output = reply(
+        &world,
+        run,
+        json!([{"op": "rework", "id": "a-rework-1", "reason": "the comment was edited",
+                "instruction": "Change it another way", "comments": [named(&comment)]}]),
+    );
+    assert_eq!(output.code, 0, "{}\n{}", output.stdout, output.stderr);
+    assert_eq!(world.run(&["adopt", run]).code, 0);
+    review(&world, run);
+    let answered: Vec<HostComment> = replies(&host, 1)
+        .into_iter()
+        .filter(|reply| {
+            reply
+                .body
+                .contains(&format!("in-reply-to={}", comment.id.0))
+        })
+        .collect();
+    assert_eq!(answered.len(), 2, "{answered:#?}");
+    assert_eq!(answered[0], first, "the first reply was changed");
+    assert!(
+        answered[1]
+            .body
+            .contains(&key("a", &comment.id.0, &revised)),
+        "{}",
+        answered[1].body
+    );
+    let from = settled(&world, run, "a-rework-1")["head"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let to = settled(&world, run, "a-rework-2")["head"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(commits_between(&world, &from, &to)
+        .iter()
+        .any(|sha| answered[1].body.contains(sha.as_str())));
+}
