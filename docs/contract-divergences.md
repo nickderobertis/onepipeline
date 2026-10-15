@@ -11254,6 +11254,8 @@ and `both_views_on_both_hosts_name_the_rework_and_commits_that_answered_and_the_
 `a_rework_whose_commits_cannot_be_read_surfaces_its_replies_and_posts_once_they_can`;
 `a_decline_the_plan_refuses_names_why_and_posts_nothing`;
 and `a_rework_s_drafter_may_decline_one_comment_while_it_answers_another`.
+`tests/e2e/agents.rs`'s `a_reply_drafting_is_its_own_scope_in_history_and_takes_none_of_the_node_s_sets`
+runs the drafter through the real `oneagentgraph` and reads its history scope.
 `tests/e2e/plan.rs` holds the reserved persona's refusal. `src/reply.rs` holds the
 task, the rules and the commit links over its own types, and `tests/contract.rs`'s
 `the_review_reply_surface_is_what_the_divergence_record_names` holds the block above
