@@ -5980,3 +5980,89 @@ fn a_queued_edit_the_run_refuses_is_refused_to_the_reply_that_took_the_run_over(
     assert_eq!(answers[1]["applied"], json!(false), "{answers:?}");
 }
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
+/// An attached launch streams each record of its run exactly once: the records the run
+/// journals after the stream has already printed some — a held dispatch let go, and every
+/// record its settlement brings — reach the operator one line each, none skipped and none
+/// repeated, in whatever order the merged store interleaves them.
+#[test]
+fn an_attached_launch_streams_every_record_of_its_run_once() {
+    use std::io::BufRead;
+    use std::process::Stdio;
+
+    let world = World::new("attach-every-record");
+    let meeting = world.rendezvous("build");
+    let run = "streamed";
+    let path = world.plan(
+        run,
+        &plan_of(run, vec![agent("build", &[]), agent("ship", &["build"])]),
+    );
+    let mut attached = world
+        .cmd(&["start", &path, "--attach"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the attached launch starts");
+    let (said, heard) = std::sync::mpsc::channel();
+    let stderr = attached.stderr.take().expect("the launch's stderr");
+    let reader = std::thread::spawn(move || {
+        let mut lines = Vec::new();
+        for line in std::io::BufReader::new(stderr).lines() {
+            let line = line.expect("the launch's stderr reads");
+            let _ = said.send(line.clone());
+            lines.push(line);
+        }
+        lines
+    });
+    let held = meeting.arrived();
+    let mut streamed_dispatch = false;
+    world.until("the stream to print the held dispatch", |_| {
+        streamed_dispatch |= heard
+            .try_iter()
+            .any(|line| line.contains("graph:build") && line.contains("node-dispatched"));
+        streamed_dispatch
+    });
+    held.release();
+    let status = attached.wait().expect("the launch ends");
+    let lines = reader.join().expect("the launch's stderr was read");
+    assert!(status.success(), "{status:?}\n{}", lines.join("\n"));
+
+    // Each record as the stream begins its line: its time, then who said it.
+    let begins = |event: &Value| -> String {
+        let ts = event["ts"].as_str().expect("a record's time");
+        let stream = event["stream"].as_str().expect("a record's stream");
+        let who = match event["source"].as_str().expect("a record's source") {
+            "pipeline" => format!("graph:{}", event["labels"]["node"].as_str().unwrap_or("-")),
+            "agentgraph" => format!("agent:{stream}"),
+            "vcs" => format!("vcs:{stream}"),
+            other => panic!("a record from {other}"),
+        };
+        let kind = event["kind"].as_str().expect("a record's kind");
+        format!("{ts}  {who:<28} {kind}")
+    };
+    let mut journalled: Vec<String> = world.journal(run).iter().map(begins).collect();
+    let mut printed: Vec<String> = lines
+        .iter()
+        .filter(|line| {
+            journalled
+                .iter()
+                .any(|record| line.starts_with(record.as_str()))
+        })
+        .map(|line| {
+            journalled
+                .iter()
+                .filter(|record| line.starts_with(record.as_str()))
+                .max_by_key(|record| record.len())
+                .expect("matched above")
+                .clone()
+        })
+        .collect();
+    journalled.sort();
+    printed.sort();
+    assert_eq!(
+        printed,
+        journalled,
+        "the stream did not print each record of the run once:\n{}",
+        lines.join("\n")
+    );
+}
