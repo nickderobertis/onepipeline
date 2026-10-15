@@ -2927,6 +2927,11 @@ pub(crate) fn stop_run(
     // and no stop is recorded on that path: a run whose registry cannot be read
     // is one nobody can say is idle, and writing "stopped" over it would be the
     // same false completion this verb refuses everywhere else.
+    //
+    // The write-back is held still first, and stays held until the release below has read
+    // what landed: a driver ended between an item landing and its baseline saying so leaves
+    // that item claimed with nothing left to release it.
+    let landing = crate::writeback::hold_landing(paths, &record);
     let teardown = terminate(paths, &record).map_err(|why| {
         Error::Refused(format!(
             "run '{}' was not stopped: this build cannot establish what it is running — {why}. \
@@ -2967,6 +2972,7 @@ pub(crate) fn stop_run(
     // signal ended took no closeout of its own. Best effort: it changes neither this
     // verb's answer nor its status.
     crate::writeback::release_stopped(paths, &record);
+    drop(landing);
     // Only a clean teardown reaches here, after `run-stopped` is journaled, so a
     // hook changes neither this verb's answer nor its status.
     crate::hooks::at_stop(paths);

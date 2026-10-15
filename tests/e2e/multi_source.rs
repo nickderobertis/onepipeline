@@ -115,6 +115,11 @@ fn filed(world: &World, name: &str, plan: &Value) -> String {
 /// The home's tasks and its members', each by the node id it carries, read with the store's
 /// own members read.
 fn plan_tasks(world: &World, home: &str) -> BTreeMap<String, Value> {
+    read_plan_tasks(world, home).unwrap_or_else(|why| panic!("{why}"))
+}
+
+/// [`plan_tasks`], or why the store could not answer it.
+fn read_plan_tasks(world: &World, home: &str) -> Result<BTreeMap<String, Value>, String> {
     let id = global(home);
     world.store_call(|engine| async move {
         let answer = engine
@@ -133,10 +138,12 @@ fn plan_tasks(world: &World, home: &str) -> BTreeMap<String, Value> {
                 },
             })
             .await
-            .unwrap_or_else(|error| panic!("the store reads the plan {id}: {error}"));
-        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+            .map_err(|error| format!("the store reads the plan {id}: {error}"))?;
+        if !answer.errors.is_empty() {
+            return Err(format!("{:?}", answer.errors));
+        }
         assert!(answer.next.is_none(), "one page holds this plan");
-        answer
+        Ok(answer
             .items
             .iter()
             .map(|task| {
@@ -149,7 +156,7 @@ fn plan_tasks(world: &World, home: &str) -> BTreeMap<String, Value> {
                     task,
                 )
             })
-            .collect()
+            .collect())
     })
 }
 
@@ -191,7 +198,19 @@ fn source_nodes(world: &World, source: &str) -> BTreeMap<String, Value> {
 }
 
 fn words(world: &World, home: &str) -> BTreeMap<String, String> {
-    plan_tasks(world, home)
+    words_of(plan_tasks(world, home))
+}
+
+/// [`words`] as a wait beside a live driver reads them: `None` for a read the store could not
+/// answer, which is not yet an answer. The driver's routed copy rewrites the home's project
+/// file whole, and `local-md` writes a whole file in place rather than through a rename, so a
+/// read that lands inside that write meets a file with no front matter yet.
+fn landed_words(world: &World, home: &str) -> Option<BTreeMap<String, String>> {
+    read_plan_tasks(world, home).ok().map(words_of)
+}
+
+fn words_of(tasks: BTreeMap<String, Value>) -> BTreeMap<String, String> {
+    tasks
         .into_iter()
         .map(|(node, task)| {
             let word = task["item"]["status"]["name"]
@@ -310,7 +329,7 @@ fn a_plan_spanning_two_sources_runs_as_one_graph_and_settles_each_task_where_it_
     );
 
     world.until_store("every item to read done where it lives", |world| {
-        words(world, &home).values().all(|word| word == "done")
+        landed_words(world, &home).is_some_and(|board| board.values().all(|word| word == "done"))
     });
     let tasks = plan_tasks(&world, &home);
     for (node, task) in &tasks {
@@ -368,7 +387,8 @@ fn a_live_add_routed_to_the_second_source_lands_in_a_member_project_created_for_
         )
         .exited(0);
     world.until_store("the added task to land in the second source", |world| {
-        words(world, &home).get("adopt").map(String::as_str) == Some("queued")
+        landed_words(world, &home)
+            .is_some_and(|board| board.get("adopt").map(String::as_str) == Some("queued"))
     });
     // A stop reads the landed baseline back in a process of its own. The added item is in a
     // source the launch read no task from, so only the home's member list, which now names the
@@ -398,7 +418,10 @@ fn a_live_add_routed_to_the_second_source_lands_in_a_member_project_created_for_
 
     world.until_store(
         "the added task's settlement to land where it lives",
-        |world| words(world, &home).get("adopt").map(String::as_str) == Some("done"),
+        |world| {
+            landed_words(world, &home)
+                .is_some_and(|board| board.get("adopt").map(String::as_str) == Some("done"))
+        },
     );
     let member = read_home(&world)["metadata"]["onetaskgraph.members"].clone();
     let member = member
@@ -427,6 +450,122 @@ fn a_live_add_routed_to_the_second_source_lands_in_a_member_project_created_for_
     );
 }
 
+/// A stop made while the routed copy of a live `add` has landed its item and the landed
+/// baseline does not say so yet — the window in which a stop's release, which reads only that
+/// baseline, could not find the item — waits for the attempt to be recorded before it ends the
+/// driver, and releases the item where it lives.
+#[test]
+fn a_stop_while_an_added_item_is_landing_waits_for_it_and_releases_the_item() {
+    use std::io::{BufRead, Write};
+    use std::process::Stdio;
+
+    let world = a_routed_world("multi-source-add-landing");
+    let gate = std::net::TcpListener::bind("127.0.0.1:0").expect("the landing peer listens");
+    gate.set_nonblocking(true).expect("the gate can be checked");
+    // llmlint: ignore-block[tests_mirror_real_usage] the window is the instant between the
+    // store answering the copy and the baseline's save, which no hold of the doubles reaches;
+    // the ordering gate holds the real worker there. The add, the stop and every assertion go
+    // through the compiled binary and the real store.
+    let world = world.with_env(
+        "ONEPIPELINE_TEST_PROJECTION_LANDED_GATE",
+        &gate.local_addr().expect("the gate address").to_string(),
+    );
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let _service = world.repository("local-direct", &[]);
+    let _engine = world.extra_repository("engine");
+    world.script("core.work", "core wrote this\n");
+    world.script("core.wait", "hold");
+    let name = "landing";
+    let home = filed(
+        &world,
+        name,
+        &plan_of(
+            name,
+            vec![on(HOME, "core", &[]), on(HOME, "ship", &["core"])],
+        ),
+    );
+    world.run(&["start", &home, "--detach"]).exited(0);
+    world.until("the held node to be dispatched", |world| {
+        world.events_of(name, "node-dispatched").len() == 1
+    });
+    world
+        .run_with_stdin(
+            &["reply", name],
+            &json!({"version": 2, "commands": [
+                {"op": "add", "node": on(ROUTED, "adopt", &["core"])},
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+    let mut held = None;
+    world.until(
+        "the driver to hold the added item's landed copy",
+        |_| match gate.accept() {
+            Ok((stream, _)) => {
+                held = Some(stream);
+                true
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => false,
+            Err(error) => panic!("the landing peer cannot accept the driver: {error}"),
+        },
+    );
+    assert_eq!(
+        words(&world, &home).get("adopt").map(String::as_str),
+        Some("queued"),
+        "the held copy had not landed the added item"
+    );
+    let baseline = world.run_json(name, "writeback-landed.json");
+    assert!(
+        baseline["items"].get("adopt").is_none(),
+        "the baseline already named the added item, so the window was not held: {baseline}"
+    );
+
+    let mut stopping = world
+        .cmd(&["stop", name])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the stop starts");
+    let (said, heard) = std::sync::mpsc::channel();
+    let stderr = stopping.stderr.take().expect("the stop's stderr");
+    let reader = std::thread::spawn(move || {
+        let mut all = String::new();
+        for line in std::io::BufReader::new(stderr).lines() {
+            let line = line.expect("the stop's stderr reads");
+            let _ = said.send(line.clone());
+            all.push_str(&line);
+            all.push('\n');
+        }
+        all
+    });
+    let mut waiting = false;
+    world.until("the stop to wait for the landing, or to end", |_| {
+        waiting |= heard
+            .try_iter()
+            .any(|line| line.contains("projection in flight to land"));
+        waiting || stopping.try_wait().expect("the stop is there").is_some()
+    });
+    // llmlint: ignore-block[tests_mirror_real_usage] the held worker is let go only once the
+    // real stop has said it is waiting for it, so the stop cannot have ended the driver inside
+    // the window first.
+    if let Some(mut stream) = held {
+        let _ = stream.write_all(b"go");
+    }
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let status = stopping.wait().expect("the stop ends");
+    let stderr = reader.join().expect("the stop's stderr was read");
+    assert!(status.success(), "the stop failed: {status:?}\n{stderr}");
+    assert_eq!(
+        words(&world, &home).get("adopt").map(String::as_str),
+        Some("todo"),
+        "the stop did not release the added item in the member's source: {stderr}"
+    );
+    assert!(
+        waiting,
+        "the stop ended the driver inside the landing: {stderr}"
+    );
+}
+
 /// A stop releases every item of the plan the run never started, in whichever source it lives,
 /// and an adopting driver — a process of its own, reading the run's landed baseline back with
 /// items in both sources — claims them there again.
@@ -451,7 +590,9 @@ fn a_stop_releases_and_an_adoption_reclaims_the_unstarted_items_of_both_sources(
     );
     world.run(&["start", &home, "--detach"]).exited(0);
     world.until_store("the run's claim to reach both sources", |world| {
-        let board = words(world, &home);
+        let Some(board) = landed_words(world, &home) else {
+            return false;
+        };
         board.get("adopt").map(String::as_str) == Some("queued")
             && board.get("ship").map(String::as_str) == Some("queued")
     });
@@ -475,7 +616,9 @@ fn a_stop_releases_and_an_adoption_reclaims_the_unstarted_items_of_both_sources(
     world.until_store(
         "the adopted driver's claim to reach both sources",
         |world| {
-            let board = words(world, &home);
+            let Some(board) = landed_words(world, &home) else {
+                return false;
+            };
             board.get("adopt").map(String::as_str) == Some("queued")
                 && board.get("ship").map(String::as_str) == Some("queued")
         },
@@ -514,7 +657,8 @@ fn a_baseline_item_in_a_routed_source_with_no_member_there_is_refused() {
     );
     world.run(&["start", &home, "--detach"]).exited(0);
     world.until_store("the run's claim to reach the board", |world| {
-        words(world, &home).get("ship").map(String::as_str) == Some("queued")
+        landed_words(world, &home)
+            .is_some_and(|board| board.get("ship").map(String::as_str) == Some("queued"))
     });
     world.run(&["stop", name]).exited(0);
     assert!(
@@ -579,7 +723,9 @@ fn an_adoption_with_no_baseline_reads_a_member_task_by_its_id_in_its_own_source(
     );
     world.run(&["start", &home, "--detach"]).exited(0);
     world.until_store("the run's claim to reach both sources", |world| {
-        let board = words(world, &home);
+        let Some(board) = landed_words(world, &home) else {
+            return false;
+        };
         board.get("adopt").map(String::as_str) == Some("queued")
             && board.get("ship").map(String::as_str) == Some("queued")
     });
@@ -609,7 +755,9 @@ fn an_adoption_with_no_baseline_reads_a_member_task_by_its_id_in_its_own_source(
     world.until_store(
         "the adopted driver's claim to reach both sources, and its record",
         |world| {
-            let board = words(world, &home);
+            let Some(board) = landed_words(world, &home) else {
+                return false;
+            };
             seen = records(world, name);
             board.get("adopt").map(String::as_str) == Some("queued")
                 && board.get("ship").map(String::as_str) == Some("queued")
