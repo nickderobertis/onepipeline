@@ -2499,15 +2499,26 @@ fn reply_route(path: &str) -> bool {
     )
 }
 
+/// Which of GitHub's three comment objects a node id names, by its prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NodeKind {
+    /// `PRRC_`: a comment in a review thread.
+    Thread,
+    /// `IC_`: a comment on the pull request's conversation.
+    Issue,
+    /// `PRR_`: a review, whose summary is the comment.
+    Review,
+}
+
 /// The kind and database id a GitHub comment node id names, as GitHub hands one out:
 /// `PRRC_`, `IC_` or `PRR_` and the URL-safe base64 of the MessagePack array
 /// `[0, repository, object]`.
-fn comment_node(id: &str) -> Option<(&'static str, u64)> {
+fn comment_node(id: &str) -> Option<(NodeKind, u64)> {
     let (prefix, payload) = id.split_once('_')?;
     let kind = match prefix {
-        "PRRC" => "thread",
-        "IC" => "issue",
-        "PRR" => "review",
+        "PRRC" => NodeKind::Thread,
+        "IC" => NodeKind::Issue,
+        "PRR" => NodeKind::Review,
         _ => return None,
     };
     let (mut word, mut held, mut bytes) = (0u32, 0, Vec::new());
@@ -2602,18 +2613,18 @@ fn post_reply(args: &[String], dir: &Path, path: &str) -> ExitCode {
         let Ok(database) = parts[6].parse::<u64>() else {
             return fake::refuse("a thread reply's route names no comment");
         };
-        ("thread", database, text.to_owned())
+        (NodeKind::Thread, database, text.to_owned())
     } else {
         let Some((first, rest)) = text.split_once("\n\n") else {
             return fake::refuse("a conversation reply carries no `Re:` line");
         };
         let Some((kind, database)) = first
             .rsplit_once("#issuecomment-")
-            .map(|(_, id)| ("issue", id))
+            .map(|(_, id)| (NodeKind::Issue, id))
             .or_else(|| {
                 first
                     .rsplit_once("#pullrequestreview-")
-                    .map(|(_, id)| ("review", id))
+                    .map(|(_, id)| (NodeKind::Review, id))
             })
         else {
             return fake::refuse("a conversation reply's `Re:` line links no comment");

@@ -3689,6 +3689,7 @@ struct ReworkProjected {
     /// The superseded node's settled head, so a host continuing the lineage can tell
     /// the commits the rework added from the ones before it (entry 127). Omitted where
     /// the run's record holds none.
+    // llmlint: ignore[invalid_states_unrepresentable] copied from the run's own record, whose `heads` hold every node's settled head as the `String` the settlement carries — the crate has no commit-id type to hold it as — and the one reader of it, `continuation::rework_provenance`, refuses anything but a full commit id at the store's boundary.
     #[serde(skip_serializing_if = "Option::is_none")]
     replaces_head: Option<String>,
 }

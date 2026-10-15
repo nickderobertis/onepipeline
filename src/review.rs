@@ -447,7 +447,7 @@ fn answer_owed(
                     url: posted.url,
                     commits: owed
                         .drafting
-                        .commits
+                        .commits()
                         .iter()
                         .filter(|commit| {
                             linked

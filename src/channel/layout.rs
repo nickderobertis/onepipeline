@@ -448,6 +448,7 @@ pub struct CommandResult {
     /// The refusal by kind, where the reconciler refused this command for a
     /// reason it names as one — `reason` is then its text. Omitted otherwise, so
     /// every outcome written before it existed reads unchanged.
+    // llmlint: ignore[invalid_states_unrepresentable] the manager's ruling on this node fixes the wire shape: an optional `refusal` beside `reason`, `reason` its display text, every existing outcome reading unchanged — so it cannot fold into the verdict or replace `reason` without changing bytes this layout reads and writes; the reconciler sets both from one refusal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refusal: Option<crate::channel::Refusal>,
 }

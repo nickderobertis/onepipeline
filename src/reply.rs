@@ -62,10 +62,21 @@ pub(crate) struct Drafting {
     pub(crate) reason: String,
     // llmlint: ignore-end[invalid_states_unrepresentable]
     pub(crate) comments: Vec<ReviewComment>,
-    pub(crate) commits: Vec<Commit>,
-    pub(crate) transcript: Option<std::path::PathBuf>,
-    /// A decline: every reply is `declined` and carries no commit URL.
-    pub(crate) decline: bool,
+    pub(crate) answering: Answering,
+}
+
+/// What a drafting answers the comments with.
+#[derive(Debug, Clone)]
+pub(crate) enum Answering {
+    /// A rework's replies: the commits it added, and where its worker's transcript is on
+    /// this host, where the journal holds one.
+    Rework {
+        commits: Vec<Commit>,
+        transcript: Option<std::path::PathBuf>,
+    },
+    /// A decline: every reply is `declined`, carries no commit URL, and is drafted with
+    /// no commits and no transcript.
+    Decline,
 }
 
 /// Where a comment sits on its change request, as the task names it.
@@ -99,7 +110,7 @@ impl Drafting {
             ));
         }
         task.push_str("\n## Commits\n\n");
-        for commit in &self.commits {
+        for commit in self.commits() {
             task.push_str(&format!(
                 "- {} {} {}\n",
                 commit.sha, commit.subject, commit.url
@@ -109,11 +120,27 @@ impl Drafting {
             "\n## Reason\n\n{}\n\n## Worker transcript\n\n",
             self.reason
         ));
-        match &self.transcript {
-            Some(path) => task.push_str(&format!("{}\n", path.display())),
-            None => task.push_str(&format!("{NO_TRANSCRIPT}\n")),
+        match &self.answering {
+            Answering::Rework {
+                transcript: Some(path),
+                ..
+            } => task.push_str(&format!("{}\n", path.display())),
+            _ => task.push_str(&format!("{NO_TRANSCRIPT}\n")),
         }
         task
+    }
+
+    /// The commits a rework added; none for a decline.
+    pub(crate) fn commits(&self) -> &[Commit] {
+        match &self.answering {
+            Answering::Rework { commits, .. } => commits,
+            Answering::Decline => &[],
+        }
+    }
+
+    /// Whether this drafting is a decline's.
+    pub(crate) fn is_decline(&self) -> bool {
+        matches!(self.answering, Answering::Decline)
     }
 
     /// The comments' ids, in the order the task names them.
@@ -190,7 +217,7 @@ pub(crate) fn validated(
     };
     let named: Vec<String> = drafting.comment_ids();
     let supplied: Vec<&str> = drafting
-        .commits
+        .commits()
         .iter()
         .map(|commit| commit.url.as_str())
         .collect();
@@ -233,7 +260,7 @@ pub(crate) fn validated(
         }
         let links_supplied = supplied.iter().any(|url| links(body, url));
         match disposition {
-            ReplyDisposition::Answered if drafting.decline => {
+            ReplyDisposition::Answered if drafting.is_decline() => {
                 return Err(format!(
                     "comment {comment} is declined, and its reply was drafted as `answered`"
                 ))
@@ -246,7 +273,9 @@ pub(crate) fn validated(
             ReplyDisposition::Declined if links_supplied => {
                 return Err(format!("the `declined` reply to {comment} links a commit"))
             }
-            ReplyDisposition::Declined if drafting.decline && !linked_commits(body).is_empty() => {
+            ReplyDisposition::Declined
+                if drafting.is_decline() && !linked_commits(body).is_empty() =>
+            {
                 return Err(format!(
                     "the declining reply to {comment} carries a commit URL"
                 ))
@@ -738,9 +767,10 @@ pub(crate) fn owed(
             change_url: change_url.to_owned(),
             reason: provenance.reason_section(),
             comments,
-            commits,
-            transcript: transcript(paths, &provenance.rework),
-            decline: false,
+            answering: Answering::Rework {
+                commits,
+                transcript: transcript(paths, &provenance.rework),
+            },
         },
     }))
 }
@@ -951,9 +981,7 @@ pub(crate) fn decline(validated: &ValidatedDecline) -> Result<Vec<crate::edits::
         change_url: validated.change_url.clone(),
         reason: reason.clone(),
         comments: to_post.iter().map(|(comment, _)| comment.clone()).collect(),
-        commits: Vec::new(),
-        transcript: None,
-        decline: true,
+        answering: Answering::Decline,
     };
     let drafted = draft(&validated.paths, graph, node, &drafting, &mut |_| {})
         .map_err(|why| not_posted(why.detail))?;
@@ -1011,19 +1039,21 @@ mod tests {
             change_url: "https://github.com/o/r/pull/1".to_owned(),
             reason: "  the reason, verbatim  ".to_owned(),
             comments: vec![comment("c1"), comment("c2")],
-            commits: if decline {
-                Vec::new()
+            answering: if decline {
+                Answering::Decline
             } else {
-                vec![Commit {
-                    sha: "1234567890abcdef1234567890abcdef12345678".to_owned(),
-                    subject: "fix: the thing".to_owned(),
-                    url: "https://github.com/o/r/commit/1234567890abcdef1234567890abcdef12345678"
-                        .to_owned(),
-                    at: 0,
-                }]
+                Answering::Rework {
+                    commits: vec![Commit {
+                        sha: "1234567890abcdef1234567890abcdef12345678".to_owned(),
+                        subject: "fix: the thing".to_owned(),
+                        url:
+                            "https://github.com/o/r/commit/1234567890abcdef1234567890abcdef12345678"
+                                .to_owned(),
+                        at: 0,
+                    }],
+                    transcript: None,
+                }
             },
-            transcript: None,
-            decline,
         }
     }
 
@@ -1164,12 +1194,15 @@ mod tests {
         let sha = "1f2e3d4c5b6a79881726354453627180918a7b6c";
         let supplied = Drafting {
             comments: named,
-            commits: vec![Commit {
-                sha: sha.to_owned(),
-                subject: "fix: retry".to_owned(),
-                url: format!("https://github.com/owner/service/commit/{sha}"),
-                at: 0,
-            }],
+            answering: Answering::Rework {
+                commits: vec![Commit {
+                    sha: sha.to_owned(),
+                    subject: "fix: retry".to_owned(),
+                    url: format!("https://github.com/owner/service/commit/{sha}"),
+                    at: 0,
+                }],
+                transcript: None,
+            },
             ..drafting(false)
         };
         let drafted = validated(&supplied, &block["result"]).expect("the block's result is valid");

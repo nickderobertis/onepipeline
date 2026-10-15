@@ -3729,9 +3729,9 @@ impl Evidence {
                 Some(Self::Rejected {
                     envelope: rejected.envelope?,
                     command: Value::Object(rejected.command),
-                    reason: RecordedRefusal {
-                        reason: rejected.reason,
-                        refusal: rejected.refusal,
+                    reason: match rejected.refusal {
+                        Some(refusal) => RecordedRefusal::Typed(refusal),
+                        None => RecordedRefusal::Text(rejected.reason),
                     },
                 })
             }
@@ -4407,26 +4407,29 @@ fn all_or_each_ruling<T>(
 /// refused, which is the one a manager must not resend blind. The envelope's own
 /// `reason` names the first refusal, which is what a reader of only that field
 /// has always had.
-/// A refusal journalled as `edit-rejected`: the reason recorded, and the refusal by
-/// kind where it was one.
+/// A refusal journalled as `edit-rejected`: the refusal by kind where it was one, whose
+/// text is the one [`Error::Rejected`] gives it — the text [`record_rejection`] journals
+/// beside it — and otherwise the reason recorded.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct RecordedRefusal {
-    reason: String,
-    refusal: Option<crate::channel::Refusal>,
+pub(crate) enum RecordedRefusal {
+    /// Refused for a reason no kind names, in the words recorded.
+    Text(String),
+    /// Refused for a reason the reconciler names by kind.
+    Typed(crate::channel::Refusal),
 }
 
 impl From<String> for RecordedRefusal {
     fn from(reason: String) -> Self {
-        Self {
-            reason,
-            refusal: None,
-        }
+        Self::Text(reason)
     }
 }
 
 impl std::fmt::Display for RecordedRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.reason)
+        match self {
+            Self::Text(reason) => f.write_str(reason),
+            Self::Typed(refusal) => write!(f, "{}", Error::Rejected(refusal.clone())),
+        }
     }
 }
 
@@ -4448,7 +4451,10 @@ impl Refused for Error {
 
 impl Refused for RecordedRefusal {
     fn refusal(&self) -> Option<crate::channel::Refusal> {
-        self.refusal.clone()
+        match self {
+            Self::Text(_) => None,
+            Self::Typed(refusal) => Some(refusal.clone()),
+        }
     }
 }
 
