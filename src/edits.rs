@@ -2918,10 +2918,11 @@ fn compile_retitle(
 }
 
 /// Validate one `decline`: a lifecycle node whose draft is open on the run's
-/// record, at least one comment, each named once by a usable id and URL, and a
-/// reason. Whether each comment was read for the node, and whether a reply
-/// already answers it, are the delivery's to judge against the run's record and
-/// the host; the posting fills in the replies.
+/// record, and at least one comment, each named once by a usable id and URL.
+/// Whether its reason is blank and each comment was read for the node are judged by
+/// the reconciler against the run's record (`reply::staged_decline`), so each
+/// refusal reaches the command's outcome by kind; whether a reply already answers
+/// a comment is the delivery's, against the host.
 fn compile_decline(
     graph: &mut Graph,
     frontier: &Frontier,
@@ -2944,12 +2945,6 @@ fn compile_decline(
         return Err(refuse(format!(
             "decline: node '{id}' has no open change request on the run's record"
         )));
-    }
-    if reason.trim().is_empty() {
-        return Err(crate::channel::Refusal::BlankReason {
-            node: id.to_owned(),
-        }
-        .into());
     }
     if comments.is_empty() {
         return Err(refuse(format!(

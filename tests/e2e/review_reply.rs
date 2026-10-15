@@ -363,3 +363,415 @@ fn a_rework_s_replies_are_drafted_once_and_posted_one_post_each_in_their_threads
         assert_eq!(comment["rework"], "a-rework-1", "{comment}");
     }
 }
+
+/// The newest answer the run's driver wrote to its command queue.
+pub(crate) fn last_outcome(world: &World, run: &str) -> Value {
+    std::fs::read_to_string(world.run_file(run, "channel/command-outcomes.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .last()
+        .unwrap_or_else(|| panic!("run {run} has no command outcome"))
+}
+
+/// A `decline` of `comments` on `a`, sent on the planner's channel.
+pub(crate) fn decline(
+    world: &World,
+    run: &str,
+    comments: &[&HostComment],
+    reason: &str,
+) -> crate::harness::Run {
+    reply(
+        world,
+        run,
+        json!([{"op": "decline", "id": "a",
+                "comments": comments.iter().map(|comment| named(comment)).collect::<Vec<_>>(),
+                "reason": reason}]),
+    )
+}
+
+/// The head `branch` stands at on the origin.
+pub(crate) fn origin_head(world: &World, branch: &str) -> String {
+    let read = std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(world.root.join("origin.git"))
+        .args(["rev-parse", &format!("refs/heads/{branch}")])
+        .output()
+        .expect("git runs");
+    String::from_utf8_lossy(&read.stdout).trim().to_owned()
+}
+
+/// What `## Reason` holds, exactly: the text between its heading and the next.
+pub(crate) fn reason_of(task: &str) -> &str {
+    task.split("\n## Reason\n\n")
+        .nth(1)
+        .and_then(|rest| rest.split("\n\n## Worker transcript\n").next())
+        .unwrap_or_else(|| panic!("the task has no `## Reason`:\n{task}"))
+}
+
+/// The body a reply carries above `onevcs`'s marker, without a conversation reply's
+/// `Re:` line.
+pub(crate) fn said(reply: &HostComment) -> String {
+    let body = reply
+        .body
+        .split("<!-- onevcs:reply ")
+        .next()
+        .unwrap_or_default();
+    let body = match body.strip_prefix("Re: ") {
+        Some(rest) => rest.split_once("\n\n").map_or("", |(_, said)| said),
+        None => body,
+    };
+    body.trim_end().to_owned()
+}
+
+#[test]
+fn a_decline_posts_one_declined_reply_and_is_the_whole_of_its_record_on_every_host() {
+    let world = team_world("decline");
+    let run = "declined";
+    let (project, host) = launched_with_replies(&world, run);
+    let left = threaded(801, 1, "a.md");
+    add(&host, 1, left.clone());
+    review(&world, run);
+    assert_eq!(surfaces(&world, run).len(), 1);
+    let branch = settled(&world, run, "a")["branch"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let head = origin_head(&world, &branch);
+    let workers = worker_dispatches(&world, "a");
+    let before = projections(&world, run);
+    let tasks_before = world.store_tasks(&project);
+    let reason = "Out of scope for this change:  the cache is tracked in #42.\n";
+
+    let output = decline(&world, run, &[&left], reason);
+    assert_eq!(output.code, 0, "{}\n{}", output.stdout, output.stderr);
+
+    let tasks = drafter_tasks(&world);
+    assert_eq!(tasks.len(), 1, "{tasks:#?}");
+    assert_eq!(section(&tasks[0], "Commits").trim(), "", "{}", tasks[0]);
+    assert_eq!(
+        reason_of(&tasks[0]),
+        reason,
+        "the reason was not handed over byte-for-byte"
+    );
+    assert!(section(&tasks[0], "Worker transcript").contains(NO_TRANSCRIPT));
+    let posted = the_reply_to(&host, 1, &left);
+    assert_eq!(
+        posted.in_reply_to,
+        Some(left.id.clone()),
+        "not in the comment's thread"
+    );
+    let text = said(&posted);
+    assert!(!text.is_empty() && text.chars().count() <= 500, "{text}");
+    assert!(!text.contains("/commit/"), "{text}");
+    assert!(
+        posted.body.contains(&format!(
+            "key={} label=declined",
+            key("a", &left.id.0, &left.updated_at)
+        )),
+        "{}",
+        posted.body
+    );
+    let applied = world
+        .events_of(run, "edit-committed")
+        .into_iter()
+        .filter(|event| event["payload"]["operation_kinds"] == json!(["decline-applied"]))
+        .collect::<Vec<_>>();
+    assert_eq!(applied.len(), 1, "{applied:#?}");
+    assert_eq!(
+        applied[0]["payload"]["operations"][0]["replies"],
+        json!([posted.url])
+    );
+    assert_eq!(applied[0]["payload"]["operations"][0]["reason"], reason);
+    // Posted before the edit committed: the host's stamp is no later than the record's.
+    assert!(posted.created_at <= applied[0]["ts"].as_str().unwrap().to_owned());
+    let recorded = world.events_of(run, "review-reply-posted");
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0]["payload"]["disposition"], "declined");
+    assert_eq!(recorded[0]["payload"]["commits"], json!([]));
+    // No worker, no branch moved, nothing written to the store, no thread resolved.
+    assert_eq!(worker_dispatches(&world, "a"), workers);
+    assert_eq!(origin_head(&world, &branch), head);
+    assert_eq!(projections(&world, run), before);
+    assert_eq!(world.store_tasks(&project), tasks_before);
+    assert!(host.state().unwrap().review_comments[&ChangeId("1".into())]
+        .iter()
+        .all(|comment| !matches!(
+            comment.kind,
+            CommentKind::ReviewThread { resolved: true, .. }
+        )));
+
+    // The identical decline again: refused by kind, naming the reply, with nothing posted.
+    let again = decline(&world, run, &[&left], reason);
+    assert_eq!(again.code, 2, "{}\n{}", again.stdout, again.stderr);
+    assert!(
+        again
+            .stderr
+            .contains(&format!("already answered by {}", posted.url)),
+        "{}",
+        again.stderr
+    );
+    let rejected = world.events_of(run, "edit-rejected");
+    let refusal = &rejected.last().expect("the refusal is journalled")["payload"]["refusal"];
+    assert_eq!(refusal["kind"], "already-answered", "{refusal}");
+    assert_eq!(refusal["url"], posted.url);
+    assert_eq!(posts(&world).len(), 1);
+    assert_eq!(drafter_tasks(&world).len(), 1);
+
+    let status = world.run(&["status", run]);
+    assert!(
+        status.stdout.contains(&format!("declined: {}", posted.url)),
+        "{}",
+        status.stdout
+    );
+
+    // And a cold host, every local record deleted, reads it declined off the host alone.
+    let cold = world.on_host("cold-decline-host");
+    std::fs::remove_dir_all(&world.runs).unwrap();
+    std::fs::remove_dir_all(world.onevcs_home()).unwrap();
+    let continued = cold.run_from(&cold.project, &["start", &project, "--attach"]);
+    assert_eq!(
+        continued.code, 0,
+        "{}\n{}",
+        continued.stdout, continued.stderr
+    );
+    let status = cold.run(&["status", run]);
+    assert!(
+        status.stdout.contains(&format!("declined: {}", posted.url)),
+        "{}",
+        status.stdout
+    );
+}
+
+/// A run of `a` and `b` settled as drafts while `hold`, depending on both, is held
+/// open — so a driver is live and every command goes through its queue, and is
+/// answered in the outcome document.
+fn driven(world: &World, run: &str, extra: &[&str]) -> (std::process::Child, FileHost) {
+    world.script("a.work", "first draft\n");
+    world.script("b.work", "second draft\n");
+    world.script("hold.wait", "");
+    let mut plan = crate::harness::plan_of(
+        run,
+        vec![
+            crate::harness::lifecycle("a", &[]),
+            crate::harness::lifecycle("b", &["a"]),
+            crate::harness::agent("hold", &["a", "b"]),
+        ],
+    );
+    plan["concurrency"] = json!(1);
+    plan["tasks"][1]["deps"] = json!([]);
+    let project = world.plan(run, &plan);
+    let mut args = vec!["start", project.as_str(), "--attach"];
+    args.extend_from_slice(extra);
+    let mut driving = world.cmd(&args);
+    driving
+        .current_dir(&world.project)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let driver = driving.spawn().expect("the driver starts");
+    world.until("both drafts to settle", |world| {
+        ["a", "b"].iter().all(|node| {
+            world
+                .events_of(run, "node-settled")
+                .iter()
+                .any(|event| event["labels"]["node"] == *node)
+        })
+    });
+    let host = host(world, run, &["a", "b"]);
+    (driver, host)
+}
+
+/// Let the held node finish, and wait for the driver to end the run.
+fn released(world: &World, mut driver: std::process::Child) {
+    world.script("hold.go", "");
+    let ended = driver.wait().expect("the driver ends");
+    assert!(ended.success(), "{ended:?}");
+}
+
+/// The refusal a decline's outcome carries, its reason, and the run's posts after it.
+fn refused(world: &World, run: &str, output: &crate::harness::Run) -> (Value, String) {
+    assert_eq!(output.code, 2, "{}\n{}", output.stdout, output.stderr);
+    let outcome = last_outcome(world, run);
+    assert_eq!(outcome["applied"], false, "{outcome}");
+    let result = &outcome["results"][0];
+    assert_eq!(result["op"], "decline");
+    assert_eq!(result["outcome"], "refused");
+    let reason = result["reason"].as_str().expect("a reason").to_owned();
+    assert!(
+        output.stderr.contains(&reason),
+        "{}\n{reason}",
+        output.stderr
+    );
+    (result["refusal"].clone(), reason)
+}
+
+#[test]
+fn every_decline_refusal_reaches_the_outcome_by_kind_and_posts_nothing_it_should_not() {
+    let world = team_world("decline-refusals");
+    let run = "refusals";
+    let graph = world.review_reply_graph();
+    let (driver, host) = driven(&world, run, &["--review-reply-graph", &graph]);
+    let first = conversation(701, 1);
+    let second = conversation(702, 1);
+    add(&host, 1, first.clone());
+    add(&host, 1, second.clone());
+    review(&world, run);
+    assert_eq!(surfaces(&world, run).len(), 2);
+    let unread = conversation(703, 1);
+    add(&host, 1, unread.clone());
+    let pending = |world: &World| {
+        let status = world.run(&["status", run]);
+        for comment in [&first, &second] {
+            assert!(
+                status
+                    .stdout
+                    .contains(&format!("review {}: pending", comment.id.0)),
+                "{}",
+                status.stdout
+            );
+        }
+    };
+
+    let (refusal, reason) = refused(&world, run, &decline(&world, run, &[&unread], "not ours"));
+    assert_eq!(
+        refusal,
+        json!({"kind": "comment-not-read", "node": "a", "comment": unread.id.0}),
+        "{reason}"
+    );
+    let (refusal, _) = refused(&world, run, &decline(&world, run, &[&first], "   "));
+    assert_eq!(refusal, json!({"kind": "blank-reason", "node": "a"}));
+    assert!(
+        drafter_tasks(&world).is_empty(),
+        "a refused decline was drafted"
+    );
+
+    // A drafting that fails, and each result the rules refuse: nothing is posted.
+    world.script("review-reply.fail", "1");
+    let (refusal, _) = refused(
+        &world,
+        run,
+        &decline(&world, run, &[&first], "out of scope"),
+    );
+    assert_eq!(refusal["kind"], "decline-not-posted", "{refusal}");
+    assert_eq!(refusal["node"], "a");
+    assert_eq!(refusal["comments"], json!([first.id.0]));
+    world.unscript("review-reply.fail");
+    let one = |disposition: &str, body: String| {
+        json!({"replies": [{"comment": first.id.0, "disposition": disposition, "body": body}]})
+            .to_string()
+    };
+    for (result, says) in [
+        (json!({"replies": []}).to_string(), "has no reply"),
+        (one("declined", "   ".to_owned()), "is empty"),
+        (one("declined", "x".repeat(501)), "over the 500"),
+        (
+            one(
+                "declined",
+                "see https://github.com/owner/service/commit/0123456789abcdef".to_owned(),
+            ),
+            "carries a commit URL",
+        ),
+        (one("answered", "fixed".to_owned()), "drafted as `answered`"),
+    ] {
+        world.script("review-reply.result", &result);
+        let (refusal, reason) = refused(
+            &world,
+            run,
+            &decline(&world, run, &[&first], "out of scope"),
+        );
+        assert_eq!(refusal["kind"], "decline-not-posted", "{refusal}");
+        assert!(
+            refusal["detail"].as_str().unwrap().contains(says),
+            "{refusal}"
+        );
+        assert!(reason.contains(says), "{reason}");
+        pending(&world);
+    }
+    world.unscript("review-reply.result");
+    assert!(posts(&world).is_empty(), "{:#?}", posts(&world));
+    assert_eq!(surfaces(&world, run).len(), 2);
+
+    // Two comments, the second post refused: the first reply stays, and the same
+    // decline again posts only the second.
+    world.script("gh.reply.fail-after", "1");
+    let (refusal, _) = refused(
+        &world,
+        run,
+        &decline(&world, run, &[&first, &second], "both out of scope"),
+    );
+    assert_eq!(refusal["kind"], "decline-not-posted", "{refusal}");
+    assert_eq!(refusal["comments"], json!([first.id.0, second.id.0]));
+    assert_eq!(
+        posts(&world).len(),
+        2,
+        "the first post, and the refused second"
+    );
+    let kept = the_reply_to(&host, 1, &first);
+    assert!(replies(&host, 1)
+        .iter()
+        .all(|reply| !reply.body.contains(&format!("in-reply-to={}", second.id.0))));
+    world.unscript("gh.reply.fail-after");
+    let resent = decline(&world, run, &[&first, &second], "both out of scope");
+    assert_eq!(resent.code, 0, "{}\n{}", resent.stdout, resent.stderr);
+    assert_eq!(posts(&world).len(), 3, "only the second was posted again");
+    let completed = the_reply_to(&host, 1, &second);
+    assert_eq!(the_reply_to(&host, 1, &first).url, kept.url);
+    let applied = world
+        .events_of(run, "edit-committed")
+        .into_iter()
+        .filter(|event| event["payload"]["operation_kinds"] == json!(["decline-applied"]))
+        .collect::<Vec<_>>();
+    assert_eq!(applied.len(), 1);
+    assert_eq!(
+        applied[0]["payload"]["operations"][0]["replies"],
+        json!([kept.url, completed.url])
+    );
+    assert_eq!(
+        last_outcome(&world, run)["results"][0]["refusal"],
+        Value::Null
+    );
+
+    // Sent once more, every comment is declined already.
+    let (refusal, _) = refused(
+        &world,
+        run,
+        &decline(&world, run, &[&first, &second], "both out of scope"),
+    );
+    assert_eq!(
+        refusal,
+        json!({"kind": "already-answered", "node": "a", "comment": first.id.0, "url": kept.url})
+    );
+    assert_eq!(posts(&world).len(), 3);
+    released(&world, driver);
+}
+
+#[test]
+fn a_decline_with_no_reply_drafter_is_refused_and_posts_nothing() {
+    let world = team_world("decline-undrafted");
+    let run = "undrafted";
+    launched_with(&world, run, &[]);
+    let host = host(&world, run, &["a", "b"]);
+    let left = conversation(901, 1);
+    add(&host, 1, left.clone());
+    review(&world, run);
+    let output = decline(&world, run, &[&left], "out of scope");
+    assert_eq!(output.code, 2, "{}\n{}", output.stdout, output.stderr);
+    assert!(
+        output.stderr.contains("no reply drafter is configured"),
+        "{}",
+        output.stderr
+    );
+    let rejected = world.events_of(run, "edit-rejected");
+    let refusal = &rejected.last().unwrap()["payload"]["refusal"];
+    assert_eq!(refusal["kind"], "decline-not-posted", "{refusal}");
+    assert!(posts(&world).is_empty());
+    assert!(drafter_tasks(&world).is_empty());
+    let status = world.run(&["status", run]);
+    assert!(
+        status
+            .stdout
+            .contains(&format!("review {}: pending", left.id.0)),
+        "{}",
+        status.stdout
+    );
+}

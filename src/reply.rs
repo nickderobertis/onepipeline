@@ -769,9 +769,18 @@ pub(crate) fn staged_decline(
         Ok(other) => return Ok(crate::engine::Staged::Compiled(other.into())),
         Err(other) => return Ok(crate::engine::Staged::Compiled(other)),
     };
-    let [crate::edits::Operation::DeclineApplied { node, comments, .. }] = &one else {
+    let [crate::edits::Operation::DeclineApplied {
+        node,
+        comments,
+        reason,
+        ..
+    }] = &one
+    else {
         return Ok(crate::engine::Staged::Compiled(one.into()));
     };
+    if reason.trim().is_empty() {
+        return Err(crate::channel::Refusal::BlankReason { node: node.clone() }.into());
+    }
     let read = read_for(paths, state, node);
     if let Some(unread) = comments.iter().find(|comment| !read.contains(&comment.id)) {
         return Err(crate::channel::Refusal::CommentNotRead {
