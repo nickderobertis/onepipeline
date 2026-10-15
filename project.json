@@ -130,6 +130,7 @@
         "e2eSource",
         "{workspaceRoot}/budgets.yaml",
         "{workspaceRoot}/scripts/stacked-spikes-budget.mjs",
+        "{workspaceRoot}/scripts/review-round-quota-budget.*",
         "{workspaceRoot}/package-lock.json",
         "{workspaceRoot}/scripts/linear-writeback-budget.sh",
         "{workspaceRoot}/scripts/settlement-latency-budget.sh",

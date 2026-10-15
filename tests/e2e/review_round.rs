@@ -328,8 +328,9 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
             lifecycle(node, deps)
         })
         .collect();
-    let mut plan = plan_of(run, nodes);
-    plan["concurrency"] = json!(1);
+    // At the plan's own concurrency: the round reads each draft's number off its
+    // settlement, so nothing needs the host to number them in plan order.
+    let plan = plan_of(run, nodes);
     let project = world.plan(run, &plan);
     let launched = world.run_from(
         &world.project,
