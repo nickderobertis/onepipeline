@@ -551,6 +551,58 @@ fn a_decline_posts_one_declined_reply_and_is_the_whole_of_its_record_on_every_ho
     );
 }
 
+/// How many times `gh` was asked a repository's own record — its visibility — since
+/// the `from`th invocation.
+fn visibility_probes(world: &World, from: usize) -> usize {
+    world.invocations()[from..]
+        .iter()
+        .filter(|call| call["tool"] == "gh")
+        .filter(|call| {
+            let args: Vec<&str> = call["args"]
+                .as_array()
+                .map(|args| args.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            args.len() == 2 && args[0] == "api" && args[1].split('/').count() == 3
+        })
+        .count()
+}
+
+/// A command asks the host a repository's visibility once however often its boundary
+/// resolves — and, where the host would not say, asks it again at each resolution rather
+/// than keeping a refusal as an answer.
+#[test]
+fn a_command_asks_a_repositorys_visibility_once_and_again_only_where_the_host_did_not_say() {
+    let world = team_world("visibility-probed");
+    let run = "probed";
+    let (_, host) = launched_with_replies(&world, run);
+    let first = threaded(811, 1, "a.md");
+    let second = threaded(812, 1, "a.md");
+    add(&host, 1, first.clone());
+    add(&host, 1, second.clone());
+    review(&world, run);
+
+    // The host refuses the read: nothing is kept, so it is asked again.
+    world.script("gh.visibility", "unsayable");
+    let from = world.invocations().len();
+    let output = decline(&world, run, "a", &[&first], "Out of scope here.");
+    assert_eq!(output.code, 0, "{}\n{}", output.stdout, output.stderr);
+    let refused = visibility_probes(&world, from);
+    assert!(
+        refused > 2,
+        "a refused visibility was kept: asked {refused} times"
+    );
+
+    // The host answers: the decline's command asks once, and `onevcs`'s guard on the
+    // reply it posts once.
+    world.script("gh.visibility", "private");
+    let from = world.invocations().len();
+    let output = decline(&world, run, "a", &[&second], "Out of scope here.");
+    assert_eq!(output.code, 0, "{}\n{}", output.stdout, output.stderr);
+    assert_eq!(visibility_probes(&world, from), 2);
+    the_reply_to(&host, 1, &first);
+    the_reply_to(&host, 1, &second);
+}
+
 /// A run of `a` and `b` settled as drafts while `hold`, after them, is held
 /// open — so a driver is live and every command goes through its queue, and is
 /// answered in the outcome document. At `concurrency` above one the two drafts may

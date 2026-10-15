@@ -158,6 +158,12 @@ fn probed_with(
     now: std::time::Instant,
     probe: impl FnOnce(&str) -> std::result::Result<onevcs::Visibility, String>,
 ) -> std::result::Result<onevcs::Visibility, String> {
+    // llmlint: ignore[changed_behavior_has_e2e] the window's expiry is observable end to end
+    // only by keeping one process alive past `PROBED_FOR` between two boundary resolutions,
+    // a minute of idle driver per run; reuse inside it and the re-ask after a refusal are
+    // driven by `review_reply::a_command_asks_a_repositorys_visibility_once_and_again_only_where_the_host_did_not_say`,
+    // and this module's `a_visibility_is_probed_once_a_window_and_only_an_answer_is_kept`
+    // holds the expiry itself on an injected clock.
     if let Some((at, visibility)) = cache.lock().ok().and_then(|held| held.get(repo).copied()) {
         if now.saturating_duration_since(at) < PROBED_FOR {
             return Ok(visibility);
