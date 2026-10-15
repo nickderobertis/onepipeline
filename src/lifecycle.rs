@@ -1251,7 +1251,8 @@ fn with_stack(task: String, stack: Option<&crate::stack::Stack>) -> String {
 
 /// Write `stack`'s block onto the change request the session holds: appended
 /// where its description holds none, in place of the one it holds otherwise, and
-/// nothing else in the description touched.
+/// nothing else in the description touched. `known` is that change request as the
+/// closeout already read or wrote it; only where it holds none is the host asked.
 ///
 /// Through `onevcs`'s `describe_change` with no title, so the title stands as the
 /// publication left it. A session holding no change request — a publication that
@@ -1262,6 +1263,7 @@ fn with_stack(task: String, stack: Option<&crate::stack::Stack>) -> String {
 fn write_stack_block(
     node: &Node,
     token: &onevcs::SessionToken,
+    known: Option<onevcs::SessionChange>,
     stack: &crate::stack::Stack,
     term_scope: &onevcs::TermScope,
 ) {
@@ -1272,7 +1274,10 @@ fn write_stack_block(
     // fail this one call and answer the publication just before it, and the fake host's
     // outage counts calls from the run's start. The write's refusal beside it is driven by
     // `a_stack_block_the_host_will_not_take_leaves_the_publication_as_it_settled`.
-    let change = match crate::vcs::session_change(token) {
+    let change = match known.map_or_else(
+        || crate::vcs::session_change(token),
+        |known| Ok(Some(known)),
+    ) {
         Ok(Some(change)) => change,
         Ok(None) => return,
         Err(error) => {
@@ -1963,10 +1968,17 @@ fn publish(
         (Some(change), None, Some(Titled::Changed { .. })) => Some((change, change.body.as_str())),
         _ => None,
     };
+    // The change request as this closeout last read or wrote it, which the Stack block
+    // below is spliced into rather than read a third time: a publication adopting a change
+    // request it did not open writes nothing onto its description.
+    let mut known = held.clone();
     let (described, undescribed) = match rewritten {
         Some((change, written)) => {
             match crate::vcs::describe_change(token, title, written, &launch.boundary.term_scope) {
-                Ok(_) => (body.is_some(), None),
+                Ok(after) => {
+                    known = Some(after);
+                    (body.is_some(), None)
+                }
                 Err(error) => {
                     let why = format!(
                         "the drafted description was not written onto {}: {error}",
@@ -2039,7 +2051,7 @@ fn publish(
     // change request outlives the attempt and a re-dispatch publishes onto it.
     if publication.answered.is_ok() && !clean_republication {
         if let Some(stack) = stack {
-            write_stack_block(node, token, stack, &launch.boundary.term_scope);
+            write_stack_block(node, token, known, stack, &launch.boundary.term_scope);
         }
     }
     match publication.answered {
