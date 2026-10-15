@@ -542,42 +542,60 @@ fn a_test_leaving_a_process_holding_its_output_fails_the_ci_profile_by_name() {
     );
 }
 
-/// The journey the `ci` profile gives longer, under the name its filter matches;
-/// one beside it in the same module, and one under the same name in another
-/// binary, whose limits it must not move. Each runs for `SECONDS`, which the
-/// fixture writes as [`LONG_JOURNEY_SECONDS`].
+/// The journey the `ci` profile gives longer, under the name its filter matches,
+/// and one beside it in the same module. The fixture puts both in the `e2e` and
+/// `note` binaries, so the same name in another binary is one the store journey's
+/// filter does not reach. `STORE` and `BESIDE` are milliseconds, which the fixture
+/// writes as [`STORE_MILLIS`] and [`BESIDE_MILLIS`].
 const LONG_JOURNEY_E2E: &str = r#"
 mod readjust {
     #[test]
     fn the_store_is_written_only_for_what_its_projection_holds_changed() {
-        std::thread::sleep(std::time::Duration::from_secs(SECONDS));
+        std::thread::sleep(std::time::Duration::from_millis(STORE));
     }
     #[test]
     fn beside_it() {
-        std::thread::sleep(std::time::Duration::from_secs(SECONDS));
+        std::thread::sleep(std::time::Duration::from_millis(BESIDE));
     }
 }
 "#;
 
-/// The fixture's journeys' run time, against the 2s periods [`long_journey_fixture`]
-/// scales the configuration's to: past six periods by two of them, and short of
-/// ten by two.
-const LONG_JOURNEY_SECONDS: u64 = 16;
-const _: () = assert!(LONG_JOURNEY_SECONDS > 2 * 6 && LONG_JOURNEY_SECONDS < 2 * 10);
+/// The period [`long_journey_fixture`] scales the configuration's 60s to, so a
+/// run proves which test is given how many periods without waiting ten minutes.
+const SCALED_PERIOD_MILLIS: u64 = 4_000;
 
-/// The repository's configuration, with every `slow-timeout` period scaled from
-/// 60s to 2s and nothing else changed, so a run proves which test is given how
-/// many periods without waiting ten minutes to do it.
-fn long_journey_fixture() -> Fixture {
-    let config = repository_config();
+/// Past the nine periods Windows gives every test, and short of the store
+/// journey's ten, by two seconds each way. Only ten periods pass it.
+const STORE_MILLIS: u64 = 38_000;
+const _: () =
+    assert!(STORE_MILLIS > SCALED_PERIOD_MILLIS * 9 && STORE_MILLIS < SCALED_PERIOD_MILLIS * 10);
+
+/// Past six periods and short of nine, by six seconds each way. Only the
+/// Windows bound passes it.
+const BESIDE_MILLIS: u64 = 30_000;
+const _: () =
+    assert!(BESIDE_MILLIS > SCALED_PERIOD_MILLIS * 6 && BESIDE_MILLIS < SCALED_PERIOD_MILLIS * 9);
+
+/// The ci profile's override that scopes a bound to Windows, as the
+/// configuration spells it.
+const WINDOWS_ONLY: &str = "platform = 'cfg(windows)'";
+
+/// `config` with every `slow-timeout` period scaled from 60s to
+/// [`SCALED_PERIOD_MILLIS`] and nothing else changed.
+fn long_journey_fixture(name: &str, config: &str) -> Fixture {
     assert!(
-        config.matches("period = \"60s\"").count() >= 2,
-        "the default limit and the ci override are no longer in 60s periods:\n{config}"
+        config.matches("period = \"60s\"").count() >= 3,
+        "the default limit and the ci overrides are no longer in 60s periods:\n{config}"
     );
-    let scaled = config.replace("period = \"60s\"", "period = \"2s\"");
-    let journeys = LONG_JOURNEY_E2E.replace("SECONDS", &LONG_JOURNEY_SECONDS.to_string());
+    let scaled = config.replace(
+        "period = \"60s\"",
+        &format!("period = \"{SCALED_PERIOD_MILLIS}ms\""),
+    );
+    let journeys = LONG_JOURNEY_E2E
+        .replace("STORE", &STORE_MILLIS.to_string())
+        .replace("BESIDE", &BESIDE_MILLIS.to_string());
     Fixture::new(
-        "long-journey",
+        name,
         SCHEDULING_MANIFEST,
         &[
             ("src/lib.rs", ""),
@@ -590,10 +608,46 @@ fn long_journey_fixture() -> Fixture {
     )
 }
 
+/// Run `config`'s long journeys under the ci profile, and hold what each is
+/// given. The store journey passes on its own ten periods on every platform.
+/// The same name in the `note` binary is outside that filter and times out under
+/// both six and nine. The journeys beside it pass when the bound is raised,
+/// which is nine periods, and time out when it is not, which is six.
+fn holds_the_ci_limits(name: &str, config: &str, raised: bool) {
+    let fixture = long_journey_fixture(name, config);
+    let (output, log) = fixture.nextest_run(&["--no-fail-fast", "--profile", "ci"]);
+    assert!(!output.status.success(), "{log}");
+    let journey = "readjust::the_store_is_written_only_for_what_its_projection_holds_changed";
+    let ended = |status: &str, test: &str| {
+        log.lines()
+            .any(|line| line.trim_start().starts_with(status) && line.ends_with(test))
+    };
+    assert!(
+        ended("PASS ", &format!("e2e {journey}")),
+        "the store journey was not given ten periods under the ci profile:\n{log}"
+    );
+    assert!(
+        ended("TIMEOUT ", &format!("note {journey}")),
+        "note {journey} was given the store journey's ten periods under the ci profile:\n{log}"
+    );
+    let (status, given) = if raised {
+        ("PASS ", "was not given the raised bound")
+    } else {
+        ("TIMEOUT ", "was given more than six periods")
+    };
+    for other in ["e2e readjust::beside_it", "note readjust::beside_it"] {
+        assert!(
+            ended(status, other),
+            "{other} {given} under the ci profile:\n{log}"
+        );
+    }
+}
+
 /// Under the profile CI's cross-platform legs run, the one journey
 /// `.config/nextest.toml` names is given ten periods, 600s, before nextest ends
-/// it, and every other test keeps the six it had: the same module's other test,
-/// and a test of the same name in another binary, are ended at six.
+/// it. Every other test keeps the six it had here, unless this host is Windows,
+/// where it is given nine: the same module's other test, and a test of the same
+/// name in another binary, are ended at whichever applies.
 #[test]
 fn the_ci_profile_gives_the_store_journey_ten_periods_and_no_other_test_more() {
     let config: toml::Value = toml::from_str(&repository_config()).expect("the config parses");
@@ -619,28 +673,63 @@ fn the_ci_profile_gives_the_store_journey_ten_periods_and_no_other_test_more() {
         Some(10),
         "the store journey is given 600s: {override_}"
     );
-    let fixture = long_journey_fixture();
-    let (output, log) = fixture.nextest_run(&["--no-fail-fast", "--profile", "ci"]);
-    assert!(!output.status.success(), "{log}");
-    let journey = "readjust::the_store_is_written_only_for_what_its_projection_holds_changed";
-    let ended = |status: &str, test: &str| {
-        log.lines()
-            .any(|line| line.trim_start().starts_with(status) && line.ends_with(test))
-    };
-    assert!(
-        ended("PASS ", &format!("e2e {journey}")),
-        "the store journey was not given ten periods under the ci profile:\n{log}"
+    holds_the_ci_limits("long-journey", &repository_config(), cfg!(windows));
+}
+
+/// On Windows alone, the ci profile gives every test but the store journey nine
+/// periods, 540s, for the runner image's slowdown; Linux and macOS keep six.
+///
+/// The test above runs the configuration as written on this host; this one runs
+/// it with the Windows condition inverted. Between them this host is on each side
+/// of that condition, whatever platform it is, so it sees both the raised bound
+/// and the unraised one.
+#[test]
+fn the_ci_profile_gives_every_other_test_nine_periods_on_windows_alone() {
+    let text = repository_config();
+    let config: toml::Value = toml::from_str(&text).expect("the config parses");
+    let overrides = config["profile"]["ci"]["overrides"]
+        .as_array()
+        .expect("the ci profile has overrides");
+    let windows: Vec<_> = overrides
+        .iter()
+        .filter(|entry| entry.get("platform").is_some())
+        .collect();
+    assert_eq!(
+        windows.len(),
+        1,
+        "the ci profile scopes one override, and only one, by platform: {overrides:?}"
     );
-    for other in [
-        "e2e readjust::beside_it".to_owned(),
-        format!("note {journey}"),
-        "note readjust::beside_it".to_owned(),
-    ] {
-        assert!(
-            ended("TIMEOUT ", &other),
-            "{other} was given more than six periods under the ci profile:\n{log}"
-        );
-    }
+    let windows = windows[0];
+    assert_eq!(
+        windows["platform"].as_str(),
+        Some("cfg(windows)"),
+        "{windows}"
+    );
+    assert!(
+        windows.get("filter").is_none(),
+        "the Windows bound reaches every test, not a filter's: {windows}"
+    );
+    assert_eq!(
+        windows["slow-timeout"]["period"].as_str(),
+        Some("60s"),
+        "{windows}"
+    );
+    assert_eq!(
+        windows["slow-timeout"]["terminate-after"].as_integer(),
+        Some(9),
+        "every test on Windows is given 540s: {windows}"
+    );
+    assert_eq!(
+        text.matches(WINDOWS_ONLY).count(),
+        1,
+        "the Windows condition is not spelled as this test inverts it:\n{text}"
+    );
+
+    holds_the_ci_limits(
+        "windows-bound-inverted",
+        &text.replace(WINDOWS_ONLY, "platform = 'cfg(not(windows))'"),
+        !cfg!(windows),
+    );
 }
 
 const RERUN_MANIFEST: &str =
