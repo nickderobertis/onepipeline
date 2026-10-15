@@ -11248,3 +11248,12 @@ and `both_views_on_both_hosts_name_the_rework_and_commits_that_answered_and_the_
 task, the rules and the commit links over its own types, and `tests/contract.rs`'s
 `the_review_reply_surface_is_what_the_divergence_record_names` holds the block above
 against the public types, the registered documents and both bundles.
+`tests/e2e/review_round.rs`'s
+`the_busy_review_round_ends_answered_and_true_and_records_what_it_spent` runs the busy
+round `review-round-github-quota` states and records its telemetry, which
+`scripts/review-round-quota-budget.sh` charges for that budget in the root `budgets.yaml`.
+The live tier's `tests/smoke/review.rs`,
+`review_comments_found_on_one_host_are_reworked_and_declined_on_a_cold_one_from_the_board`,
+drives the same rework and decline against onetaskgraph's live-lane board and the
+scratch repository, its drafter the real `oneagentgraph` over the paid-turn stand-in,
+which answers a drafting's turn from its task as the graph double does.
