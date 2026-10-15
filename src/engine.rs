@@ -1170,11 +1170,12 @@ fn driving(
         // And then the run itself, let go of under the handover: the empty check
         // and the release are one section, so an edit accepted after this driver
         // stopped claiming is an edit accepted from a run that is free. Its
-        // `driver-exited` is written inside that section, after the last outcome
-        // line and before the release, so it is this driver's last word.
+        // scratch record and then its `driver-exited` are written inside that
+        // section, after the last outcome line and before the release, so
+        // `driver-exited` is this driver's last word.
         let exiting = || {
-            record_exit(paths, settlement.into(), None, answered_from);
             crate::scratch::at_writer_ending(paths, &state);
+            record_exit(paths, settlement.into(), None, answered_from);
         };
         match let_go_of_saying(paths, lock, exiting) {
             LettingGo::Released => break (settlement, Departure::Released),
