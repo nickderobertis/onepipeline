@@ -542,6 +542,107 @@ fn a_test_leaving_a_process_holding_its_output_fails_the_ci_profile_by_name() {
     );
 }
 
+/// The journey the `ci` profile gives longer, under the name its filter matches;
+/// one beside it in the same module, and one under the same name in another
+/// binary, whose limits it must not move. Each runs for `SECONDS`, which the
+/// fixture writes as [`LONG_JOURNEY_SECONDS`].
+const LONG_JOURNEY_E2E: &str = r#"
+mod readjust {
+    #[test]
+    fn the_store_is_written_only_for_what_its_projection_holds_changed() {
+        std::thread::sleep(std::time::Duration::from_secs(SECONDS));
+    }
+    #[test]
+    fn beside_it() {
+        std::thread::sleep(std::time::Duration::from_secs(SECONDS));
+    }
+}
+"#;
+
+/// The fixture's journeys' run time, against the 2s periods [`long_journey_fixture`]
+/// scales the configuration's to: past six periods by two of them, and short of
+/// ten by two.
+const LONG_JOURNEY_SECONDS: u64 = 16;
+const _: () = assert!(LONG_JOURNEY_SECONDS > 2 * 6 && LONG_JOURNEY_SECONDS < 2 * 10);
+
+/// The repository's configuration, with every `slow-timeout` period scaled from
+/// 60s to 2s and nothing else changed, so a run proves which test is given how
+/// many periods without waiting ten minutes to do it.
+fn long_journey_fixture() -> Fixture {
+    let config = repository_config();
+    assert!(
+        config.matches("period = \"60s\"").count() >= 2,
+        "the default limit and the ci override are no longer in 60s periods:\n{config}"
+    );
+    let scaled = config.replace("period = \"60s\"", "period = \"2s\"");
+    let journeys = LONG_JOURNEY_E2E.replace("SECONDS", &LONG_JOURNEY_SECONDS.to_string());
+    Fixture::new(
+        "long-journey",
+        SCHEDULING_MANIFEST,
+        &[
+            ("src/lib.rs", ""),
+            (".config/nextest.toml", &scaled),
+            ("tests/e2e.rs", &journeys),
+            ("tests/note.rs", &journeys),
+            ("tests/release_channel.rs", "#[test]\nfn one() {}\n"),
+            ("tests/oneagentgraph_liveness.rs", "#[test]\nfn one() {}\n"),
+        ],
+    )
+}
+
+/// Under the profile CI's cross-platform legs run, the one journey
+/// `.config/nextest.toml` names is given ten periods, 600s, before nextest ends
+/// it, and every other test keeps the six it had: the same module's other test,
+/// and a test of the same name in another binary, are ended at six.
+#[test]
+fn the_ci_profile_gives_the_store_journey_ten_periods_and_no_other_test_more() {
+    let config: toml::Value = toml::from_str(&repository_config()).expect("the config parses");
+    let override_ = config["profile"]["ci"]["overrides"]
+        .as_array()
+        .and_then(|overrides| {
+            overrides.iter().find(|entry| {
+                entry["filter"].as_str().is_some_and(|filter| {
+                    filter.contains(
+                        "readjust::the_store_is_written_only_for_what_its_projection_holds_changed",
+                    )
+                })
+            })
+        })
+        .expect("the ci profile overrides the store journey's limit");
+    assert_eq!(
+        override_["slow-timeout"]["period"].as_str(),
+        Some("60s"),
+        "{override_}"
+    );
+    assert_eq!(
+        override_["slow-timeout"]["terminate-after"].as_integer(),
+        Some(10),
+        "the store journey is given 600s: {override_}"
+    );
+    let fixture = long_journey_fixture();
+    let (output, log) = fixture.nextest_run(&["--no-fail-fast", "--profile", "ci"]);
+    assert!(!output.status.success(), "{log}");
+    let journey = "readjust::the_store_is_written_only_for_what_its_projection_holds_changed";
+    let ended = |status: &str, test: &str| {
+        log.lines()
+            .any(|line| line.trim_start().starts_with(status) && line.ends_with(test))
+    };
+    assert!(
+        ended("PASS ", &format!("e2e {journey}")),
+        "the store journey was not given ten periods under the ci profile:\n{log}"
+    );
+    for other in [
+        "e2e readjust::beside_it".to_owned(),
+        format!("note {journey}"),
+        "note readjust::beside_it".to_owned(),
+    ] {
+        assert!(
+            ended("TIMEOUT ", &other),
+            "{other} was given more than six periods under the ci profile:\n{log}"
+        );
+    }
+}
+
 const RERUN_MANIFEST: &str =
     "[package]\nname = \"rerun-fixture\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[workspace]\n";
 

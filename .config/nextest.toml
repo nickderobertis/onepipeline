@@ -85,6 +85,21 @@ status-level = "pass"
 # still holding the output past it is a leak rather than a slow exit.
 leak-timeout = { period = "100ms", result = "fail" }
 
+# llmlint: ignore-block[comments_earn_their_place] the run and the timings below
+# are the measurement that sets the one number on the line beneath them, and the
+# next person to move it has nothing else to move it against.
+# One journey gets ten periods, 600s, on the cross-platform legs instead of six.
+# On the Windows leg it takes 150-250s even alone, so under the whole suite's load
+# it crossed 360s twice in run 38675577984 and fail-fast threw away the leg. Its
+# cost is real work, not a hang: the harness's teardown spends 19ms of it on Linux.
+# A profile's own overrides are read before `default`'s, so this one takes effect
+# and the test still joins the `e2e` group below. `tests/nextest_runs.rs` holds
+# this override and checks that no other test's limit moves.
+[[profile.ci.overrides]]
+filter = 'binary(e2e) and test(=readjust::the_store_is_written_only_for_what_its_projection_holds_changed)'
+slow-timeout = { period = "60s", terminate-after = 10 }
+# llmlint: ignore-end[comments_earn_their_place]
+
 # The two host-sized journeys take the **whole** group while they run.
 #
 # Each assembles four hundred run roots and grows their journals to ten gibibytes,
