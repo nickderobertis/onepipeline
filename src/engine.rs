@@ -4397,16 +4397,6 @@ fn all_or_each_ruling<T>(
     Ok(evaluated.into_iter().flatten().collect())
 }
 
-/// What each command of a refused envelope is told.
-///
-/// Every command has its own entry, and the words tell apart the facts a single
-/// boolean could not: a command that **refused**, with what it said; one that
-/// **validated** and went down with it, which nothing was wrong with and which a
-/// manager resends unchanged; and — for the one window a conversation's own
-/// refusal leaves open — a note that was already **delivered** when a later one
-/// refused, which is the one a manager must not resend blind. The envelope's own
-/// `reason` names the first refusal, which is what a reader of only that field
-/// has always had.
 /// A refusal journalled as `edit-rejected`: the refusal by kind where it was one, whose
 /// text is the one [`Error::Rejected`] gives it — the text [`record_rejection`] journals
 /// beside it — and otherwise the reason recorded.
@@ -4458,6 +4448,16 @@ impl Refused for RecordedRefusal {
     }
 }
 
+/// What each command of a refused envelope is told.
+///
+/// Every command has its own entry, and the words tell apart the facts a single
+/// boolean could not: a command that **refused**, with what it said; one that
+/// **validated** and went down with it, which nothing was wrong with and which a
+/// manager resends unchanged; and — for the one window a conversation's own
+/// refusal leaves open — a note that was already **delivered** when a later one
+/// refused, which is the one a manager must not resend blind. The envelope's own
+/// `reason` names the first refusal, which is what a reader of only that field
+/// has always had.
 fn refused_envelope<T: Unapplied, E: Refused>(
     id: u64,
     commands: &[Command],
