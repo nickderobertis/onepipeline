@@ -374,17 +374,18 @@ pub(crate) fn last_outcome(world: &World, run: &str) -> Value {
         .unwrap_or_else(|| panic!("run {run} has no command outcome"))
 }
 
-/// A `decline` of `comments` on `a`, sent on the planner's channel.
+/// A `decline` of `comments` on `node`'s draft, sent on the planner's channel.
 pub(crate) fn decline(
     world: &World,
     run: &str,
+    node: &str,
     comments: &[&HostComment],
     reason: &str,
 ) -> crate::harness::Run {
     reply(
         world,
         run,
-        json!([{"op": "decline", "id": "a",
+        json!([{"op": "decline", "id": node,
                 "comments": comments.iter().map(|comment| named(comment)).collect::<Vec<_>>(),
                 "reason": reason}]),
     )
@@ -443,7 +444,7 @@ fn a_decline_posts_one_declined_reply_and_is_the_whole_of_its_record_on_every_ho
     let tasks_before = world.store_tasks(&project);
     let reason = "Out of scope for this change:  the cache is tracked in #42.\n";
 
-    let output = decline(&world, run, &[&left], reason);
+    let output = decline(&world, run, "a", &[&left], reason);
     assert_eq!(output.code, 0, "{}\n{}", output.stdout, output.stderr);
 
     let tasks = drafter_tasks(&world);
@@ -502,7 +503,7 @@ fn a_decline_posts_one_declined_reply_and_is_the_whole_of_its_record_on_every_ho
         )));
 
     // The identical decline again: refused by kind, naming the reply, with nothing posted.
-    let again = decline(&world, run, &[&left], reason);
+    let again = decline(&world, run, "a", &[&left], reason);
     assert_eq!(again.code, 2, "{}\n{}", again.stdout, again.stderr);
     assert!(
         again
@@ -662,13 +663,17 @@ fn every_decline_refusal_reaches_the_outcome_by_kind_and_posts_nothing_it_should
         }
     };
 
-    let (refusal, reason) = refused(&world, run, &decline(&world, run, &[&unread], "not ours"));
+    let (refusal, reason) = refused(
+        &world,
+        run,
+        &decline(&world, run, "a", &[&unread], "not ours"),
+    );
     assert_eq!(
         refusal,
         json!({"kind": "comment-not-read", "node": "a", "comment": unread.id.0}),
         "{reason}"
     );
-    let (refusal, _) = refused(&world, run, &decline(&world, run, &[&first], "   "));
+    let (refusal, _) = refused(&world, run, &decline(&world, run, "a", &[&first], "   "));
     assert_eq!(refusal, json!({"kind": "blank-reason", "node": "a"}));
     assert!(
         drafter_tasks(&world).is_empty(),
@@ -680,7 +685,7 @@ fn every_decline_refusal_reaches_the_outcome_by_kind_and_posts_nothing_it_should
     let (refusal, _) = refused(
         &world,
         run,
-        &decline(&world, run, &[&first], "out of scope"),
+        &decline(&world, run, "a", &[&first], "out of scope"),
     );
     assert_eq!(refusal["kind"], "decline-not-posted", "{refusal}");
     assert_eq!(refusal["node"], "a");
@@ -707,7 +712,7 @@ fn every_decline_refusal_reaches_the_outcome_by_kind_and_posts_nothing_it_should
         let (refusal, reason) = refused(
             &world,
             run,
-            &decline(&world, run, &[&first], "out of scope"),
+            &decline(&world, run, "a", &[&first], "out of scope"),
         );
         assert_eq!(refusal["kind"], "decline-not-posted", "{refusal}");
         assert!(
@@ -727,7 +732,7 @@ fn every_decline_refusal_reaches_the_outcome_by_kind_and_posts_nothing_it_should
     let (refusal, _) = refused(
         &world,
         run,
-        &decline(&world, run, &[&first, &second], "both out of scope"),
+        &decline(&world, run, "a", &[&first, &second], "both out of scope"),
     );
     assert_eq!(refusal["kind"], "decline-not-posted", "{refusal}");
     assert_eq!(refusal["comments"], json!([first.id.0, second.id.0]));
@@ -741,7 +746,7 @@ fn every_decline_refusal_reaches_the_outcome_by_kind_and_posts_nothing_it_should
         .iter()
         .all(|reply| !reply.body.contains(&format!("in-reply-to={}", second.id.0))));
     world.unscript("gh.reply.fail-after");
-    let resent = decline(&world, run, &[&first, &second], "both out of scope");
+    let resent = decline(&world, run, "a", &[&first, &second], "both out of scope");
     assert_eq!(resent.code, 0, "{}\n{}", resent.stdout, resent.stderr);
     assert_eq!(posts(&world).len(), 3, "only the second was posted again");
     let completed = the_reply_to(&host, 1, &second);
@@ -765,7 +770,7 @@ fn every_decline_refusal_reaches_the_outcome_by_kind_and_posts_nothing_it_should
     let (refusal, _) = refused(
         &world,
         run,
-        &decline(&world, run, &[&first, &second], "both out of scope"),
+        &decline(&world, run, "a", &[&first, &second], "both out of scope"),
     );
     assert_eq!(
         refusal,
@@ -784,7 +789,7 @@ fn a_decline_with_no_reply_drafter_is_refused_and_posts_nothing() {
     let left = conversation(901, 1);
     add(&host, 1, left.clone());
     review(&world, run);
-    let output = decline(&world, run, &[&left], "out of scope");
+    let output = decline(&world, run, "a", &[&left], "out of scope");
     assert_eq!(output.code, 2, "{}\n{}", output.stdout, output.stderr);
     assert!(
         output.stderr.contains("no reply drafter is configured"),
@@ -1336,7 +1341,7 @@ fn a_host_lost_after_a_decline_posted_leaves_the_decline_answered_on_the_next_ho
         "{}",
         status.stdout
     );
-    let again = decline(&cold, run, &[&comment], "out of scope");
+    let again = decline(&cold, run, "a", &[&comment], "out of scope");
     assert_eq!(again.code, 2, "{}\n{}", again.stdout, again.stderr);
     assert!(
         again
@@ -1414,4 +1419,97 @@ fn a_driven_review_still_drafting_at_the_reply_timeout_returns_requested_and_pos
         "a second pass read the host"
     );
     released(&world, driver);
+}
+
+#[test]
+fn both_views_on_both_hosts_name_the_rework_and_commits_that_answered_and_the_decline() {
+    let world = team_world("reply-views");
+    let run = "views";
+    let (project, host) = launched_with_replies(&world, run);
+    let first = conversation(591, 1);
+    let second = threaded(592, 1, "a.md");
+    let third = conversation(593, 1);
+    for comment in [&first, &second, &third] {
+        add(&host, 1, comment.clone());
+    }
+    review(&world, run);
+    rework(&world, run, &[&first, &second]);
+    review(&world, run);
+    let left = decline(&world, run, "a-rework-1", &[&third], "out of scope here");
+    assert_eq!(left.code, 0, "{}\n{}", left.stdout, left.stderr);
+    let linked = |comment: &HostComment| -> Vec<String> {
+        let body = the_reply_to(&host, 1, comment).body;
+        body.split("/commit/")
+            .skip(1)
+            .map(|rest| rest.chars().take(7).collect())
+            .collect()
+    };
+    let declined = the_reply_to(&host, 1, &third).url;
+
+    let check = |world: &World, node: &str| {
+        for verb in ["status", "results"] {
+            let output = world.run(&[verb, run]);
+            assert_eq!(output.code, 0, "{verb}: {}", output.stderr);
+            for comment in [&first, &second] {
+                let shas = linked(comment);
+                assert!(!shas.is_empty());
+                let line = format!(
+                    "{node} review {}: answered by a-rework-1 ({}): ",
+                    comment.id.0,
+                    shas.join(", ")
+                );
+                assert!(
+                    output.stdout.contains(&line),
+                    "{verb} lacks {line:?}:\n{}",
+                    output.stdout
+                );
+            }
+            assert!(
+                output.stdout.contains(&format!(
+                    "{node} review {}: declined: {declined}",
+                    third.id.0
+                )),
+                "{verb}:\n{}",
+                output.stdout
+            );
+            assert!(
+                !output.stdout.contains(": pending"),
+                "{verb}:\n{}",
+                output.stdout
+            );
+        }
+        let json = world.run(&["results", run, "--json"]);
+        assert_eq!(json.code, 0, "{}", json.stderr);
+        let json: Value = serde_json::from_str(&json.stdout).unwrap();
+        assert_eq!(json["schema_version"], 2);
+        let comments = json["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["id"] == node)
+            .unwrap()["comments"]
+            .clone();
+        for comment in [&first, &second] {
+            let entry = comments
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["id"] == comment.id.0)
+                .unwrap();
+            assert_eq!(entry["state"], "answered", "{entry}");
+            assert_eq!(entry["rework"], "a-rework-1", "{entry}");
+            assert_eq!(entry["commits"], json!(linked(comment)), "{entry}");
+        }
+        let entry = comments
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["id"] == third.id.0)
+            .unwrap();
+        assert_eq!(entry["state"], "declined");
+        assert_eq!(entry["reply_url"], declined);
+    };
+    check(&world, "a-rework-1");
+    let cold = continued_cold(&world, &project, "cold-views");
+    check(&cold, "a");
 }
