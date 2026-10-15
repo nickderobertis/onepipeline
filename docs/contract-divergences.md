@@ -10188,7 +10188,7 @@ Warm and cold are the design targets; the 10x bound is a temporary relaxation fr
 its 0.5 s design target, by the user's ruling of 2026-10-11 to land now, and a
 later gap-closing run owns the remaining 10x warm cost. Each was last measured on
 onevcs 0.48.0, whose decision read reads only the sessions the launcher label
-selects (onevcs #356, first released in 0.45.0); this build links 0.51.2, on which
+selects (onevcs #356, first released in 0.45.0); this build links 0.51.3, on which
 none was re-measured.
 
 ```json
@@ -10557,7 +10557,7 @@ comes from the discovery journey.
 The planner's dependency ruling retained `onevcs` 0.48.1 and `onevcs-testing` 0.17.0
 for this change: those releases already carry this API; testing 0.18.0 requires
 onevcs 0.49.0 and would have resolved a second engine under the manifest's pin of the
-time. The link has since moved to `onevcs` 0.51.2 and `onevcs-testing` 0.19.2.
+time. The link has since moved to `onevcs` 0.51.3 and `onevcs-testing` 0.19.3.
 
 ## 123. A manager's own landing could die or block with nothing holding its session — OPEN
 
@@ -10930,7 +10930,7 @@ branch on the origin and its verdict off its first trigger's read.
 per group and one `retarget_change` or `reopen_change` call per affected change request,
 none bypassing `onevcs`; a retarget writes the description the driver's own batched
 read returned, which a whole-journal re-fold keeps, and a draft no such read answered is
-left owed rather than read alone. Inside each call the linked `onevcs` 0.51.2 — whose two calls
+left owed rather than read alone. Inside each call the linked `onevcs` 0.51.3 — whose two calls
 are unchanged since 0.49.0 — makes its own: a
 `retarget_change` two single-change standings reads (before and after its write) and
 the repository's visibility read its write guard makes; a `reopen_change` two

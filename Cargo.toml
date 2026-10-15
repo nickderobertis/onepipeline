@@ -717,8 +717,11 @@ resolver = "2"
 # `src/maintenance.rs` matches `IdentityOutcome::MaintenanceUnreadable` and reads
 # `SlotOutcome::Ran`'s `disk`, neither of which an earlier release defines.
 #
-# `onevcs` 0.51.2 is the floor because it is the release the operation-progress
-# producer supplied for this crate's manager landings; it carries the
+# `onevcs` 0.51.3 is the floor because it is the release the declared-maintenance
+# producer supplied for this crate's idle pool maintenance, the `onevcs.toml`
+# reading 0.50.0 brought, released again with no change to the library's source.
+# 0.51.2 below it is the release the operation-progress producer supplied for
+# this crate's manager landings; it carries the
 # **operation handle** of 0.51.1 below, and narrows which package names its
 # workspace boundary takes for conventional test and tooling ones (onevcs #407).
 # 0.51.1 carries the **operation handle** a
@@ -732,7 +735,7 @@ resolver = "2"
 # is itself a member (onevcs boundary-root-members), the library this crate's
 # manager publication and worker closeout run. It requires the bus at `^0.9.1`,
 # which the bus pin below admits. A **requirement**, because `^0.50` admits no
-# 0.51.x; `onevcs-testing` 0.19.2 requires exactly `=0.51.2`, so the pair moves as
+# 0.51.x; `onevcs-testing` 0.19.3 requires exactly `=0.51.3`, so the pair moves as
 # one.
 #
 # `oneagentgraph` 0.5.4 is the floor because it relays a turn's `message` and
@@ -778,7 +781,7 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 oneagentgraph = "0.5.6"
-onevcs = "0.51.2"
+onevcs = "0.51.3"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is
@@ -988,7 +991,7 @@ oneharness-core = "0.24.1"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.19.2"
+onevcs-testing = "0.19.3"
 # The store, linked: `src/taskgraph.rs` says how the engine calls it. `-plugin-api` is
 # named for the values the store answers with, and `-local-md` for the plugin
 # `crates/testfakes` hosts in process.
