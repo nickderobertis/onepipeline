@@ -1665,7 +1665,9 @@ fn a_success_ending_refuses_a_symlink_scratch_root_and_preserves_its_target() {
     assert!(log.contains("is a symlink; nothing was deleted"), "{log}");
 }
 
-#[cfg(unix)]
+// APFS refuses a name that is not UTF-8 (`EILSEQ`), so on macOS no scratch
+// directory can carry one and the journey has no tree to build.
+#[cfg(all(unix, not(target_os = "macos")))]
 #[test]
 fn non_utf8_dispatch_names_are_refused_before_any_scratch_is_deleted() {
     use std::os::unix::ffi::OsStringExt;
