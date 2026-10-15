@@ -1004,10 +1004,16 @@ onevcs-testing = "0.19.2"
 # **0.6.0 carries comments across copies and adds per-source caches**. Engine
 # reads remain unpinned, including settlement write-back reads. The plugin API
 # adds public Task and Comment fields and CopyLink, making this a breaking link.
+#
+# **0.7.0 caches project and document reads**, adding version fields to the public
+# Project and Document and `forward_edges` to VersionCoverage: breaking again. Its GitHub
+# token moves from gh2 to gh3, which never orders a gh2 value, so a task version
+# recorded before this release costs one more read and is never served from cache; the
+# engine keeps versions opaque and translates nothing.
 # `justfile`'s `onetaskgraph-version` moves with this release.
-onetaskgraph-core = "=0.6.0"
-onetaskgraph-plugin-api = "=0.6.0"
-onetaskgraph-local-md = "=0.6.0"
+onetaskgraph-core = "=0.7.0"
+onetaskgraph-plugin-api = "=0.7.0"
+onetaskgraph-local-md = "=0.7.0"
 # Not engines: two crates both members use, pinned once so they build against one version.
 # `just engines-current` reads only the engines its script names.
 sha2 = "0.10"
