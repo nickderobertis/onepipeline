@@ -32,11 +32,19 @@ function hostTarget() {
   return target;
 }
 
+// The staged release builds compile the crate for an explicit `--target`, which
+// takes minutes from cold. In the shared `target/` they would hold its build lock
+// all that time, and a test elsewhere in the gate building into `target/debug`
+// (`tests/build_config.rs`) timed out waiting behind them. Their own directory
+// keeps them out of that lock and still reuses its build on the next run.
+const STAGED_TARGET_DIR = join(REPO_ROOT, "target", "npm-staged");
+
 function run(command, args, options = {}) {
   return execFileSync(command, args, {
     cwd: REPO_ROOT,
     encoding: "utf8",
     ...options,
+    env: { ...process.env, CARGO_TARGET_DIR: STAGED_TARGET_DIR, ...options.env },
   });
 }
 
