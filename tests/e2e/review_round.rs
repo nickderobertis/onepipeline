@@ -580,24 +580,73 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
     }
 }
 
+/// A whole round's record, as the journey writes one, with `replies` reply posts on its
+/// last pass's ledger and every other figure the smallest a phase can carry.
+fn whole_round(replies: usize) -> Value {
+    let phase = |name: &str| {
+        json!({"phase": name, "wall_ms": 1, "ledger": [], "gh": [], "store_reads": [],
+               "store_writes": [], "dispatches": []})
+    };
+    let mut phases: Vec<Value> = [
+        "pass-1", "decline", "rework-b", "rework-h", "readjust", "pass-2",
+    ]
+    .into_iter()
+    .map(phase)
+    .collect();
+    phases[0]["ledger"] = json!([{"method": "review_standings", "changes": 10,
+                                  "graphql_points": 6, "rest_requests": 0}]);
+    phases[0]["gh"] = json!([{"endpoint": "gh pr view", "graphql_points": 1, "rest_requests": 0}]);
+    phases[0]["store_reads"] = json!(["get_project"]);
+    phases[0]["store_writes"] = json!(["task-update"]);
+    phases[0]["pass"] = json!({"readjust_ms": 1, "discovery_ms": 0, "replies_ms": 0});
+    phases[5]["ledger"] = json!((0..replies)
+        .map(|_| json!({"method": "reply_to_comment", "changes": 1,
+                        "graphql_points": 0, "rest_requests": 1}))
+        .collect::<Vec<_>>());
+    phases[5]["dispatches"] = json!(["review-reply"]);
+    json!({
+        "schema_version": 1,
+        "workload": {"drafts": 10, "earlier_comments_per_draft": 30, "new_comments": 6,
+                     "passes": 2, "reworks": 2, "declines": 1, "landed": 1, "replies": 6},
+        "phases": phases,
+    })
+}
+
 #[test]
 fn the_round_quota_reporter_refuses_missing_and_malformed_records() {
     let world = World::new("review-round-reporter");
     let result = world.root.join("result.json");
     let record = world.root.join(RECORD);
     std::fs::create_dir_all(record.parent().unwrap()).unwrap();
-    for body in [
+    let mut short_of_a_draft = whole_round(6);
+    short_of_a_draft["workload"]["drafts"] = json!(9);
+    let mut more_than_the_round = whole_round(6);
+    more_than_the_round["workload"]["extra"] = json!(1);
+    let mut a_phase_missing = whole_round(6);
+    a_phase_missing["phases"].as_array_mut().unwrap().remove(1);
+    let mut out_of_order = whole_round(6);
+    out_of_order["phases"].as_array_mut().unwrap().swap(0, 5);
+    let mut negative = whole_round(6);
+    negative["phases"][0]["ledger"][0]["graphql_points"] = json!(-1);
+    let refused = [
         None,
-        Some("{"),
-        Some("{}"),
-        Some(r#"{"schema_version":2,"workload":{},"phases":[]}"#),
-        Some(r#"{"schema_version":1,"workload":{},"phases":[]}"#),
-        Some(r#"{"schema_version":1,"workload":{},"phases":[{"phase":"pass-1"}]}"#),
+        Some("{".to_owned()),
+        Some("{}".to_owned()),
+        Some(r#"{"schema_version":2,"workload":{},"phases":[]}"#.to_owned()),
+        Some(r#"{"schema_version":1,"workload":{},"phases":[]}"#.to_owned()),
         Some(
-            r#"{"schema_version":1,"workload":{},"phases":[{"phase":"pass-1","wall_ms":1,"ledger":[{"method":"review_standings","changes":1,"graphql_points":-1,"rest_requests":0}],"gh":[],"store_reads":[],"store_writes":[],"dispatches":[]}]}"#,
+            r#"{"schema_version":1,"workload":{"drafts":10},"phases":[{"phase":"pass-1"}]}"#
+                .to_owned(),
         ),
-    ] {
-        if let Some(body) = body {
+        Some(short_of_a_draft.to_string()),
+        Some(more_than_the_round.to_string()),
+        Some(a_phase_missing.to_string()),
+        Some(out_of_order.to_string()),
+        Some(whole_round(5).to_string()),
+        Some(negative.to_string()),
+    ];
+    for body in refused {
+        if let Some(body) = &body {
             std::fs::write(&record, body).unwrap();
         }
         let output = budget_report(&world.root, &result);
@@ -609,11 +658,7 @@ fn the_round_quota_reporter_refuses_missing_and_malformed_records() {
             "{stderr}"
         );
     }
-    std::fs::write(
-        &record,
-        r#"{"schema_version":1,"workload":{"drafts":10},"phases":[{"phase":"pass-1","wall_ms":1,"ledger":[{"method":"review_standings","changes":10,"graphql_points":6,"rest_requests":0}],"gh":[{"endpoint":"gh pr view","graphql_points":1,"rest_requests":0}],"store_reads":["get_project"],"store_writes":["task-update"],"dispatches":["review-reply"]}]}"#,
-    )
-    .unwrap();
+    std::fs::write(&record, whole_round(6).to_string()).unwrap();
     let output = budget_report(&world.root, &result);
     assert!(
         output.status.success(),
@@ -621,7 +666,7 @@ fn the_round_quota_reporter_refuses_missing_and_malformed_records() {
         String::from_utf8_lossy(&output.stderr)
     );
     let reported: Value = serde_json::from_slice(&std::fs::read(&result).unwrap()).unwrap();
-    assert_eq!(reported["value"], json!(6 + 1 + 1 + 2));
+    assert_eq!(reported["value"], json!(6 + 1 + 6 + 2 + 1));
     let missing_env = std::process::Command::new("bash")
         .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/review-round-quota-budget.sh"))
         .current_dir(&world.root)

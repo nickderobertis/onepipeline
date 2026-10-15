@@ -31,6 +31,19 @@ const CATEGORY = {
   reopen_change: "retargets and recoveries",
   reply_to_comment: "replies",
 };
+/** The busy round the budget states, which a record must be the whole of to be charged. */
+const WORKLOAD = {
+  drafts: 10,
+  earlier_comments_per_draft: 30,
+  new_comments: 6,
+  passes: 2,
+  reworks: 2,
+  declines: 1,
+  landed: 1,
+  replies: 6,
+};
+/** Its steps, in the order the journey runs them. */
+const PHASES = ["pass-1", "decline", "rework-b", "rework-h", "readjust", "pass-2"];
 let next =
   "run just test-e2e 'test(=review_round::the_busy_review_round_ends_answered_and_true_and_records_what_it_spent)' " +
   "to record the round, then run 'onebudgetspec check budgets.yaml --id review-round-github-quota'";
@@ -74,8 +87,16 @@ function readRecord() {
   if (held === null || typeof held !== "object" || held.schema_version !== 1) {
     fail("schema_version must be 1");
   }
-  if (!Array.isArray(held.phases) || held.phases.length === 0) {
-    fail("phases must be a nonempty list: the round has at least one phase");
+  for (const [key, wanted] of Object.entries(WORKLOAD)) {
+    if (held.workload?.[key] !== wanted) {
+      fail(`workload.${key} must be ${wanted}: the record is not the busy round the budget states`);
+    }
+  }
+  if (Object.keys(held.workload).length !== Object.keys(WORKLOAD).length) {
+    fail("workload names more than the busy round states");
+  }
+  if (!Array.isArray(held.phases) || held.phases.map((phase) => phase?.phase).join() !== PHASES.join()) {
+    fail(`phases must be the round's steps, in order: ${PHASES.join(", ")}`);
   }
   held.phases.forEach((phase, n) => {
     const at = `phases[${n}]`;
@@ -104,6 +125,12 @@ function readRecord() {
       }
     }
   });
+  const posted = held.phases
+    .flatMap((phase) => phase.ledger)
+    .filter((call) => call.method === "reply_to_comment").length;
+  if (posted !== WORKLOAD.replies) {
+    fail(`the ledger records ${posted} reply posts, not the round's ${WORKLOAD.replies}`);
+  }
   return held;
 }
 
