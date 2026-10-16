@@ -1462,7 +1462,9 @@ fn a_takeover_while_the_displaced_driver_publishes_starts_once_the_publication_h
     let world = World::new("takeover-publishing")
         .with_env("ONEVCS_BRANCH_PREFIX", PREFIX)
         .with_env(CLAIM_INTERVAL_ENV, &interval.to_string())
-        .with_env(crate::harness::CANCEL_GRACE_ENV, "1");
+        // A grace long enough that the publication can be held past the lease's lapse and
+        // still finish well inside the takeover's wait.
+        .with_env(crate::harness::CANCEL_GRACE_ENV, "20");
     let go = world.fakes.join("push.go");
     let held = held_publication(&world, &go);
     world.repository("change-open", &held.argv());
@@ -1486,10 +1488,24 @@ fn a_takeover_while_the_displaced_driver_publishes_starts_once_the_publication_h
     world.until("the displaced driver to read the takeover", |world| {
         !world.events_of(run, "driver-superseded").is_empty()
     });
+    let noticed = std::time::Instant::now();
     superseded_by(&world, run, &claim);
-    // An interval more, and the publication is still under way: nothing is acknowledged,
-    // and the adopter has started nothing.
-    std::thread::sleep(std::time::Duration::from_secs(interval));
+    // Past the lease's lapse — two intervals and a read's deadline after the last read that
+    // found the project its own, an interval before this one — the publication is still under
+    // way: the watchdog leaves a publication running, nothing is acknowledged, and the
+    // adopter has started nothing.
+    let lapsed = std::time::Duration::from_secs(interval + 20 + 3);
+    std::thread::sleep(lapsed.saturating_sub(noticed.elapsed()));
+    assert!(
+        held.holding(),
+        "the publication was ended at the lease's lapse"
+    );
+    assert!(
+        !std::fs::read_to_string(world.run_file(run, "driver.log"))
+            .unwrap_or_default()
+            .contains("ends its dispatches in progress"),
+        "the watchdog ended a publication under way"
+    );
     assert!(
         successor.run_file(run, "launch.json").metadata().is_err(),
         "the adopter minted its run while the displaced driver was publishing"

@@ -989,8 +989,7 @@ pub(crate) fn hand_over(
         })?;
     let written = Instant::now();
     let wait = takeover_wait(interval);
-    let every =
-        (interval / TAKEOVER_POLLS_PER_INTERVAL).clamp(TAKEOVER_POLL_MIN, TAKEOVER_POLL_MAX);
+    let every = takeover_poll(interval);
     let whom = displaced.map_or_else(
         || "the driver its claim named".to_owned(),
         |claim| format!("run '{}' on host '{}'", claim.run, claim.host),
@@ -1140,6 +1139,13 @@ fn claim_interval_of(setting: Option<&str>) -> Duration {
         .unwrap_or(CLAIM_INTERVAL)
 }
 
+/// How often a takeover reads the claim while it waits: a tenth of the interval, at least
+/// a second and at most thirty apart.
+// llmlint: ignore[changed_behavior_has_e2e] the thirty-second cap binds only on an interval over five minutes, whose takeover wait is over ten; every takeover journey polls at its short interval's floor end to end, and `a_takeover_polls_a_tenth_of_its_interval_at_least_a_second_and_at_most_thirty_apart` holds both ends of the clamp.
+fn takeover_poll(interval: Duration) -> Duration {
+    (interval / TAKEOVER_POLLS_PER_INTERVAL).clamp(TAKEOVER_POLL_MIN, TAKEOVER_POLL_MAX)
+}
+
 /// How long an adopter waits for a displaced driver that does not acknowledge it, from the
 /// moment its own claim landed.
 ///
@@ -1240,6 +1246,20 @@ mod tests {
             "a lapsed lease left its dispatch running"
         );
         lease.close();
+    }
+
+    #[test]
+    fn a_takeover_polls_a_tenth_of_its_interval_at_least_a_second_and_at_most_thirty_apart() {
+        assert_eq!(
+            takeover_poll(Duration::from_secs(5)),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            takeover_poll(Duration::from_secs(60)),
+            Duration::from_secs(6)
+        );
+        assert_eq!(takeover_poll(CLAIM_INTERVAL), Duration::from_secs(30));
+        assert_eq!(takeover_poll(MAX_CLAIM_INTERVAL), Duration::from_secs(30));
     }
 
     /// The adopter's wait outlasts the displaced driver's lease — two intervals and the read
