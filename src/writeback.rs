@@ -1468,25 +1468,30 @@ pub(crate) fn hold_landing(paths: &RunPaths, launch: &LaunchRecord) -> Option<st
             return None;
         } // llmlint: ignore-end[changed_behavior_has_e2e]
     };
-    let bound = Deadline::Write {
-        per_item: per_item_budget(launch),
-        items: crate::checkpoint::Projected::open(paths).statuses().len(),
-    }
-    .within();
-    let until = Instant::now() + bound;
-    let mut said = false;
+    // The bound is sized only once an attempt is found holding the lock. Sizing it folds the
+    // run's journal, and a stop of a run nothing is landing for — every run a teardown of a
+    // host-sized root stops — takes the lock at once and must read nothing more than it did
+    // before the lock existed.
+    let mut waiting: Option<(Duration, Instant)> = None;
     loop {
         match file.try_lock() {
             Ok(()) => return Some(file),
-            Err(std::fs::TryLockError::WouldBlock) if Instant::now() < until => {
-                if !said {
+            Err(std::fs::TryLockError::WouldBlock)
+                if waiting.is_none_or(|(_, until)| Instant::now() < until) =>
+            {
+                if waiting.is_none() {
+                    let bound = Deadline::Write {
+                        per_item: per_item_budget(launch),
+                        items: crate::checkpoint::Projected::open(paths).statuses().len(),
+                    }
+                    .within();
                     eprintln!(
                         "onepipeline: run '{}': waiting up to {} seconds for the write-back's \
                          projection in flight to land before its driver is stopped",
                         paths.run,
                         bound.as_secs()
                     );
-                    said = true;
+                    waiting = Some((bound, Instant::now() + bound));
                 }
                 std::thread::sleep(LANDING_POLL);
             }
@@ -1496,11 +1501,10 @@ pub(crate) fn hold_landing(paths: &RunPaths, launch: &LaunchRecord) -> Option<st
             // floor: the cancellation `writeback_budget` already drives.
             Err(error) => {
                 eprintln!(
-                    "onepipeline: run '{}': the write-back's projection in flight did not \
-                     land within {} seconds ({error}); its driver is stopped anyway, and an \
-                     item it was creating may be left claimed",
-                    paths.run,
-                    bound.as_secs()
+                    "onepipeline: run '{}': the write-back's projection in flight could not be \
+                     waited out ({error}); its driver is stopped anyway, and an item it was \
+                     creating may be left claimed",
+                    paths.run
                 );
                 return None;
             } // llmlint: ignore-end[changed_behavior_has_e2e]
