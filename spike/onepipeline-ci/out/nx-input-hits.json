@@ -1,0 +1,1902 @@
+{
+ "per_pr": {
+  "293": {
+   "current_shape": false,
+   "files": 67,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": true,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "301": {
+   "current_shape": false,
+   "files": 19,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": true,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "310": {
+   "current_shape": false,
+   "files": 12,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": true,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "311": {
+   "current_shape": false,
+   "files": 8,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "314": {
+   "current_shape": false,
+   "files": 2,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "318": {
+   "current_shape": false,
+   "files": 15,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "319": {
+   "current_shape": false,
+   "files": 2,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "334": {
+   "current_shape": false,
+   "files": 1,
+   "touches": {
+    "contractSource": false,
+    "crateTestSource": false,
+    "e2eSource": false,
+    "noteJourneySource": false,
+    "npm project (npm/** + sharedGlobals)": true,
+    "rustBuild": false,
+    "visualDocsSource": false
+   }
+  },
+  "336": {
+   "current_shape": false,
+   "files": 3,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "340": {
+   "current_shape": false,
+   "files": 1,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "346": {
+   "current_shape": false,
+   "files": 39,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "350": {
+   "current_shape": false,
+   "files": 35,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "353": {
+   "current_shape": false,
+   "files": 8,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "358": {
+   "current_shape": false,
+   "files": 26,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "385": {
+   "current_shape": false,
+   "files": 13,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "386": {
+   "current_shape": false,
+   "files": 3,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "389": {
+   "current_shape": false,
+   "files": 8,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": true,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "390": {
+   "current_shape": false,
+   "files": 13,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "394": {
+   "current_shape": false,
+   "files": 12,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "401": {
+   "current_shape": false,
+   "files": 27,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": true,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "402": {
+   "current_shape": false,
+   "files": 25,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "405": {
+   "current_shape": false,
+   "files": 27,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "414": {
+   "current_shape": false,
+   "files": 25,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "422": {
+   "current_shape": false,
+   "files": 2,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "433": {
+   "current_shape": false,
+   "files": 7,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "434": {
+   "current_shape": false,
+   "files": 10,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "435": {
+   "current_shape": false,
+   "files": 21,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "437": {
+   "current_shape": false,
+   "files": 19,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "439": {
+   "current_shape": false,
+   "files": 33,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": true,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "443": {
+   "current_shape": false,
+   "files": 1,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "445": {
+   "current_shape": false,
+   "files": 28,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": true,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "448": {
+   "current_shape": false,
+   "files": 13,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "452": {
+   "current_shape": false,
+   "files": 2,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "469": {
+   "current_shape": false,
+   "files": 7,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "470": {
+   "current_shape": false,
+   "files": 3,
+   "touches": {
+    "contractSource": false,
+    "crateTestSource": true,
+    "e2eSource": false,
+    "noteJourneySource": false,
+    "npm project (npm/** + sharedGlobals)": true,
+    "rustBuild": false,
+    "visualDocsSource": false
+   }
+  },
+  "472": {
+   "current_shape": false,
+   "files": 10,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "473": {
+   "current_shape": false,
+   "files": 2,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "477": {
+   "current_shape": false,
+   "files": 1,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "479": {
+   "current_shape": false,
+   "files": 2,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": true,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "482": {
+   "current_shape": false,
+   "files": 7,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "486": {
+   "current_shape": false,
+   "files": 36,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": true,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "490": {
+   "current_shape": false,
+   "files": 44,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": true,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "492": {
+   "current_shape": false,
+   "files": 7,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "494": {
+   "current_shape": false,
+   "files": 3,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "495": {
+   "current_shape": false,
+   "files": 26,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "497": {
+   "current_shape": false,
+   "files": 19,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "502": {
+   "current_shape": false,
+   "files": 22,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "511": {
+   "current_shape": false,
+   "files": 11,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "517": {
+   "current_shape": false,
+   "files": 6,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "519": {
+   "current_shape": false,
+   "files": 8,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "532": {
+   "current_shape": false,
+   "files": 38,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": true,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "537": {
+   "current_shape": false,
+   "files": 3,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "541": {
+   "current_shape": false,
+   "files": 33,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "542": {
+   "current_shape": false,
+   "files": 41,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": true,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "543": {
+   "current_shape": false,
+   "files": 24,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "546": {
+   "current_shape": false,
+   "files": 3,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "550": {
+   "current_shape": false,
+   "files": 6,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": true,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "553": {
+   "current_shape": false,
+   "files": 4,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "554": {
+   "current_shape": false,
+   "files": 33,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": true,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "556": {
+   "current_shape": false,
+   "files": 17,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "559": {
+   "current_shape": false,
+   "files": 20,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": true,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "569": {
+   "current_shape": false,
+   "files": 2,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "570": {
+   "current_shape": false,
+   "files": 3,
+   "touches": {
+    "contractSource": false,
+    "crateTestSource": true,
+    "e2eSource": false,
+    "noteJourneySource": false,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": false,
+    "visualDocsSource": false
+   }
+  },
+  "573": {
+   "current_shape": false,
+   "files": 3,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "574": {
+   "current_shape": false,
+   "files": 11,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "575": {
+   "current_shape": false,
+   "files": 5,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": true,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "580": {
+   "current_shape": false,
+   "files": 3,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": true,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "591": {
+   "current_shape": false,
+   "files": 9,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "592": {
+   "current_shape": false,
+   "files": 27,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "595": {
+   "current_shape": false,
+   "files": 11,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "598": {
+   "current_shape": false,
+   "files": 7,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": true,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "599": {
+   "current_shape": false,
+   "files": 20,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "600": {
+   "current_shape": false,
+   "files": 3,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "604": {
+   "current_shape": false,
+   "files": 13,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "605": {
+   "current_shape": false,
+   "files": 12,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "608": {
+   "current_shape": false,
+   "files": 1,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "611": {
+   "current_shape": false,
+   "files": 2,
+   "touches": {
+    "contractSource": false,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": false,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": false,
+    "visualDocsSource": false
+   }
+  },
+  "612": {
+   "current_shape": false,
+   "files": 23,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "613": {
+   "current_shape": false,
+   "files": 6,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": true,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "614": {
+   "current_shape": false,
+   "files": 5,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "634": {
+   "current_shape": false,
+   "files": 12,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "651": {
+   "current_shape": false,
+   "files": 3,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": true,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "653": {
+   "current_shape": false,
+   "files": 20,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "667": {
+   "current_shape": false,
+   "files": 5,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "670": {
+   "current_shape": false,
+   "files": 8,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": true,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "673": {
+   "current_shape": false,
+   "files": 6,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "683": {
+   "current_shape": false,
+   "files": 2,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "685": {
+   "current_shape": false,
+   "files": 10,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "691": {
+   "current_shape": false,
+   "files": 19,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "694": {
+   "current_shape": false,
+   "files": 25,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": true,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "699": {
+   "current_shape": false,
+   "files": 8,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "701": {
+   "current_shape": false,
+   "files": 15,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "702": {
+   "current_shape": false,
+   "files": 3,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "703": {
+   "current_shape": false,
+   "files": 15,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": true,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "709": {
+   "current_shape": false,
+   "files": 7,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "711": {
+   "current_shape": false,
+   "files": 1,
+   "touches": {
+    "contractSource": false,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": false,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": false,
+    "visualDocsSource": false
+   }
+  },
+  "714": {
+   "current_shape": false,
+   "files": 2,
+   "touches": {
+    "contractSource": false,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": false,
+    "visualDocsSource": false
+   }
+  },
+  "716": {
+   "current_shape": false,
+   "files": 1,
+   "touches": {
+    "contractSource": false,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": false,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": false,
+    "visualDocsSource": false
+   }
+  },
+  "717": {
+   "current_shape": false,
+   "files": 12,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "723": {
+   "current_shape": false,
+   "files": 3,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "724": {
+   "current_shape": false,
+   "files": 7,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": true,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "725": {
+   "current_shape": false,
+   "files": 5,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "726": {
+   "current_shape": false,
+   "files": 9,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "731": {
+   "current_shape": false,
+   "files": 8,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "738": {
+   "current_shape": false,
+   "files": 2,
+   "touches": {
+    "contractSource": false,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": false,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": false,
+    "visualDocsSource": false
+   }
+  },
+  "755": {
+   "current_shape": false,
+   "files": 23,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "757": {
+   "current_shape": false,
+   "files": 20,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "772": {
+   "current_shape": false,
+   "files": 1,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": false,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": false,
+    "visualDocsSource": true
+   }
+  },
+  "775": {
+   "current_shape": false,
+   "files": 24,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": true,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "776": {
+   "current_shape": false,
+   "files": 14,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": true,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "777": {
+   "current_shape": false,
+   "files": 8,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "778": {
+   "current_shape": false,
+   "files": 9,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": true,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "781": {
+   "current_shape": false,
+   "files": 8,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": true,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "783": {
+   "current_shape": true,
+   "files": 21,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": true,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "793": {
+   "current_shape": true,
+   "files": 7,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": true,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "806": {
+   "current_shape": true,
+   "files": 4,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": true,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "810": {
+   "current_shape": true,
+   "files": 3,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": true,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "813": {
+   "current_shape": true,
+   "files": 2,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "819": {
+   "current_shape": true,
+   "files": 4,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "827": {
+   "current_shape": true,
+   "files": 18,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": true,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "828": {
+   "current_shape": true,
+   "files": 39,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": true,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "833": {
+   "current_shape": true,
+   "files": 4,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": true,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "840": {
+   "current_shape": true,
+   "files": 6,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "848": {
+   "current_shape": true,
+   "files": 7,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": true,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "849": {
+   "current_shape": true,
+   "files": 30,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "852": {
+   "current_shape": true,
+   "files": 43,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "853": {
+   "current_shape": true,
+   "files": 28,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "861": {
+   "current_shape": true,
+   "files": 31,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": true,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "862": {
+   "current_shape": true,
+   "files": 33,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "865": {
+   "current_shape": true,
+   "files": 39,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "866": {
+   "current_shape": true,
+   "files": 13,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "868": {
+   "current_shape": true,
+   "files": 11,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": true,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "875": {
+   "current_shape": true,
+   "files": 5,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "878": {
+   "current_shape": true,
+   "files": 2,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "884": {
+   "current_shape": true,
+   "files": 7,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": true,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "886": {
+   "current_shape": true,
+   "files": 6,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "887": {
+   "current_shape": true,
+   "files": 13,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": true,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "891": {
+   "current_shape": true,
+   "files": 38,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "892": {
+   "current_shape": true,
+   "files": 24,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": true,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "909": {
+   "current_shape": true,
+   "files": 4,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "914": {
+   "current_shape": true,
+   "files": 37,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": true,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "916": {
+   "current_shape": true,
+   "files": 37,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "922": {
+   "current_shape": true,
+   "files": 12,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": false,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  },
+  "942": {
+   "current_shape": true,
+   "files": 4,
+   "touches": {
+    "contractSource": true,
+    "crateTestSource": true,
+    "e2eSource": true,
+    "noteJourneySource": true,
+    "npm project (npm/** + sharedGlobals)": true,
+    "rustBuild": true,
+    "visualDocsSource": true
+   }
+  }
+ },
+ "summary": {
+  "current_shape": {
+   "feature_prs": 31,
+   "touching": {
+    "contractSource": 31,
+    "crateTestSource": 31,
+    "e2eSource": 31,
+    "noteJourneySource": 31,
+    "npm project (npm/** + sharedGlobals)": 15,
+    "rustBuild": 31,
+    "visualDocsSource": 31
+   }
+  },
+  "window": {
+   "feature_prs": 144,
+   "touching": {
+    "contractSource": 136,
+    "crateTestSource": 143,
+    "e2eSource": 141,
+    "noteJourneySource": 136,
+    "npm project (npm/** + sharedGlobals)": 45,
+    "rustBuild": 135,
+    "visualDocsSource": 136
+   }
+  }
+ }
+}

@@ -59,7 +59,7 @@ def summarize(runs, start, end, status, label, lb, la, mode, recipe, up_before, 
     wall = (end - start) / 1000
     uptime = float(up_after) - float(up_before)
     print(json.dumps({"label": label, "recipe": recipe, "mode": mode, "commit": commit, "exit": int(status),
-                      "wall_s": wall, "uptime_s": round(uptime, 2),
+                      "start_ms": start, "end_ms": end, "wall_s": wall, "uptime_s": round(uptime, 2),
                       # A VM pause advances the wall clock and not the uptime clock.
                       "paused": abs(wall - uptime) > 30,
                       "loadavg_before": lb, "loadavg_after": la,
