@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import gzip
 import json
 import math
 import sys
@@ -65,10 +66,10 @@ def family_seconds(jobs):
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("figures", type=open)
+    ap.add_argument("figures", help="actions_spike.py output, plain or .gz")
     ap.add_argument("--since", default="")
     args = ap.parse_args()
-    d = json.load(args.figures)
+    d = json.load(gzip.open(args.figures) if args.figures.endswith(".gz") else open(args.figures))
     runs = d["per_run"]
     prs = [p for p in d["per_pr"].values() if p["merged_at"] and p["merged_at"] >= args.since]
     feature = [p for p in prs if not p["release_pr"]]
@@ -144,6 +145,25 @@ def main() -> int:
                                          "waited_from_run_created_s": j["queue_from_run_created_s"],
                                          "gate_s": gate["duration_s"]})
     phase_keys = sorted({k for r in release for k in r["phases"]})
+    # Per job, over the runs these PRs and releases started: head commits, merge
+    # pushes, release-PR head commits and CD runs.
+    run_ids = {s["run_id"] for p in prs for s in p["head_runs"]}
+    run_ids |= {r["run_id"] for p in feature for r in p.get("merge_push_runs", [])}
+    run_ids |= {rid for r in rels for rid in r["run_ids"]}
+    groups = {}
+    for rid in run_ids:
+        run = runs[str(rid)]
+        for j in run["jobs"]:
+            groups.setdefault(f"{j['workflow']} :: {j['name']}", []).append(j)
+    per_job = {}
+    for key, jobs in sorted(groups.items()):
+        ok = [j for j in jobs if j["conclusion"] == "success"]
+        per_job[key] = {"runs": len(jobs), "success": len(ok),
+                        "failed": sum(j["conclusion"] in ("failure", "timed_out") for j in jobs),
+                        "cancelled": sum(j["conclusion"] == "cancelled" for j in jobs),
+                        "duration_success_s": stats([j["duration_s"] for j in ok]),
+                        "queue_from_run_created_success_s": stats([j["queue_from_run_created_s"] for j in ok]),
+                        "queue_from_job_created_success_s": stats([j["queue_from_job_created_s"] for j in ok])}
     out = {
         "since": args.since or d["since"],
         "feature_changes": len(change), "releases": len(release),
@@ -174,6 +194,7 @@ def main() -> int:
             leg: {"started_after_gate_end_s": stats([w["started_after_gate_end_s"] for w in install_wait if w["leg"] == leg]),
                   "waited_from_run_created_s": stats([w["waited_from_run_created_s"] for w in install_wait if w["leg"] == leg])}
             for leg in sorted({w["leg"] for w in install_wait})},
+        "per_job": per_job,
         "families": list(FAMILIES),
         "rows": {"changes": change, "releases": release},
     }

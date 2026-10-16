@@ -1,0 +1,5276 @@
+{
+ "ci_install_waits_on_gate": {
+  "install (macos-latest)": {
+   "started_after_gate_end_s": {
+    "max": 22814.0,
+    "median": 2332.0,
+    "n": 31,
+    "p90": 13414.0
+   },
+   "waited_from_run_created_s": {
+    "max": 25890.0,
+    "median": 5843.0,
+    "n": 31,
+    "p90": 17215.0
+   }
+  },
+  "install (ubuntu-latest)": {
+   "started_after_gate_end_s": {
+    "max": 227.0,
+    "median": 3.0,
+    "n": 31,
+    "p90": 31.0
+   },
+   "waited_from_run_created_s": {
+    "max": 14834.0,
+    "median": 3529.0,
+    "n": 31,
+    "p90": 4803.0
+   }
+  },
+  "install (windows-latest)": {
+   "started_after_gate_end_s": {
+    "max": 140.0,
+    "median": 3.0,
+    "n": 31,
+    "p90": 41.0
+   },
+   "waited_from_run_created_s": {
+    "max": 14831.0,
+    "median": 3527.0,
+    "n": 31,
+    "p90": 4803.0
+   }
+  }
+ },
+ "families": [
+  "just check (gate / release-sweep / release test)",
+  "cross legs (check-cross)",
+  "smoke-published.sh legs",
+  "release-mode builds of the 5 targets",
+  "visual-docs capture",
+  "msrv / deny / release-compat / smoke"
+ ],
+ "feature_changes": 31,
+ "per_change": {
+  "ci_head_run_wall_s": {
+   "max": 28625.0,
+   "median": 8758.0,
+   "n": 31,
+   "p90": 20833.0
+  },
+  "head_family_seconds": {
+   "cross legs (check-cross)": {
+    "max": 14825.0,
+    "median": 10007.0,
+    "n": 31,
+    "p90": 11614.0
+   },
+   "just check (gate / release-sweep / release test)": {
+    "max": 5034.0,
+    "median": 3428.0,
+    "n": 31,
+    "p90": 4315.0
+   },
+   "msrv / deny / release-compat / smoke": {
+    "max": 1111.0,
+    "median": 669.0,
+    "n": 31,
+    "p90": 873.0
+   },
+   "release-mode builds of the 5 targets": {
+    "max": 0.0,
+    "median": 0.0,
+    "n": 31,
+    "p90": 0.0
+   },
+   "smoke-published.sh legs": {
+    "max": 17676.0,
+    "median": 4087.0,
+    "n": 31,
+    "p90": 5740.0
+   },
+   "visual-docs capture": {
+    "max": 1185.0,
+    "median": 873.0,
+    "n": 31,
+    "p90": 1107.0
+   }
+  },
+  "head_job_seconds": {
+   "max": 34132.0,
+   "median": 19386.0,
+   "n": 31,
+   "p90": 21930.0
+  },
+  "merge_push_family_seconds": {
+   "cross legs (check-cross)": {
+    "max": 17397.0,
+    "median": 9416.0,
+    "n": 31,
+    "p90": 11820.0
+   },
+   "just check (gate / release-sweep / release test)": {
+    "max": 4636.0,
+    "median": 3492.0,
+    "n": 31,
+    "p90": 4237.0
+   },
+   "msrv / deny / release-compat / smoke": {
+    "max": 651.0,
+    "median": 267.0,
+    "n": 31,
+    "p90": 523.0
+   },
+   "release-mode builds of the 5 targets": {
+    "max": 0.0,
+    "median": 0.0,
+    "n": 31,
+    "p90": 0.0
+   },
+   "smoke-published.sh legs": {
+    "max": 19051.0,
+    "median": 4680.0,
+    "n": 31,
+    "p90": 5641.0
+   },
+   "visual-docs capture": {
+    "max": 1005.0,
+    "median": 0.0,
+    "n": 31,
+    "p90": 869.0
+   }
+  },
+  "merge_push_job_seconds": {
+   "max": 41059.0,
+   "median": 17964.0,
+   "n": 31,
+   "p90": 20499.0
+  }
+ },
+ "per_job": {
+  "ci.yml :: changes": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 22.0,
+    "median": 13.0,
+    "n": 103,
+    "p90": 17.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 672.0,
+    "median": 2.0,
+    "n": 103,
+    "p90": 4.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 673.0,
+    "median": 3.0,
+    "n": 103,
+    "p90": 80.0
+   },
+   "runs": 103,
+   "success": 103
+  },
+  "ci.yml :: cross (macos-latest)": {
+   "cancelled": 8,
+   "duration_success_s": {
+    "max": 5670.0,
+    "median": 3941.0,
+    "n": 83,
+    "p90": 4731.0
+   },
+   "failed": 12,
+   "queue_from_job_created_success_s": {
+    "max": 24290.0,
+    "median": 1172.0,
+    "n": 83,
+    "p90": 12419.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 24305.0,
+    "median": 2230.0,
+    "n": 83,
+    "p90": 12460.0
+   },
+   "runs": 103,
+   "success": 83
+  },
+  "ci.yml :: cross (windows-latest)": {
+   "cancelled": 11,
+   "duration_success_s": {
+    "max": 9155.0,
+    "median": 5873.0,
+    "n": 77,
+    "p90": 7281.0
+   },
+   "failed": 15,
+   "queue_from_job_created_success_s": {
+    "max": 220.0,
+    "median": 2.0,
+    "n": 77,
+    "p90": 42.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 34824.0,
+    "median": 19.0,
+    "n": 77,
+    "p90": 237.0
+   },
+   "runs": 103,
+   "success": 77
+  },
+  "ci.yml :: deny": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 49.0,
+    "median": 35.5,
+    "n": 102,
+    "p90": 39.0
+   },
+   "failed": 1,
+   "queue_from_job_created_success_s": {
+    "max": 352.0,
+    "median": 2.0,
+    "n": 102,
+    "p90": 44.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 1039.0,
+    "median": 19.0,
+    "n": 102,
+    "p90": 173.0
+   },
+   "runs": 103,
+   "success": 102
+  },
+  "ci.yml :: gate": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 5034.0,
+    "median": 3440.0,
+    "n": 97,
+    "p90": 4237.0
+   },
+   "failed": 6,
+   "queue_from_job_created_success_s": {
+    "max": 396.0,
+    "median": 2.0,
+    "n": 97,
+    "p90": 6.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 11947.0,
+    "median": 3.0,
+    "n": 97,
+    "p90": 165.0
+   },
+   "runs": 103,
+   "success": 97
+  },
+  "ci.yml :: install (macos-latest)": {
+   "cancelled": 7,
+   "duration_success_s": {
+    "max": 825.0,
+    "median": 564.0,
+    "n": 90,
+    "p90": 753.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 22814.0,
+    "median": 1390.0,
+    "n": 90,
+    "p90": 13101.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 25890.0,
+    "median": 5020.5,
+    "n": 90,
+    "p90": 17156.0
+   },
+   "runs": 97,
+   "success": 90
+  },
+  "ci.yml :: install (ubuntu-latest)": {
+   "cancelled": 1,
+   "duration_success_s": {
+    "max": 647.0,
+    "median": 387.0,
+    "n": 96,
+    "p90": 591.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 227.0,
+    "median": 2.0,
+    "n": 96,
+    "p90": 10.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 14834.0,
+    "median": 3493.5,
+    "n": 96,
+    "p90": 4456.0
+   },
+   "runs": 97,
+   "success": 96
+  },
+  "ci.yml :: install (windows-latest)": {
+   "cancelled": 2,
+   "duration_success_s": {
+    "max": 1149.0,
+    "median": 646.0,
+    "n": 95,
+    "p90": 998.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 140.0,
+    "median": 2.0,
+    "n": 95,
+    "p90": 6.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 14831.0,
+    "median": 3467.0,
+    "n": 95,
+    "p90": 4430.0
+   },
+   "runs": 97,
+   "success": 95
+  },
+  "ci.yml :: install-documented (macos-latest)": {
+   "cancelled": 4,
+   "duration_success_s": {
+    "max": 1171.0,
+    "median": 609.0,
+    "n": 99,
+    "p90": 817.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 22943.0,
+    "median": 566.0,
+    "n": 99,
+    "p90": 8847.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 22944.0,
+    "median": 1119.0,
+    "n": 99,
+    "p90": 8943.0
+   },
+   "runs": 103,
+   "success": 99
+  },
+  "ci.yml :: install-documented (ubuntu-latest)": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 623.0,
+    "median": 483.0,
+    "n": 103,
+    "p90": 581.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 647.0,
+    "median": 2.0,
+    "n": 103,
+    "p90": 6.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 648.0,
+    "median": 3.0,
+    "n": 103,
+    "p90": 82.0
+   },
+   "runs": 103,
+   "success": 103
+  },
+  "ci.yml :: install-documented (windows-latest)": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 1200.0,
+    "median": 861.0,
+    "n": 103,
+    "p90": 1059.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 774.0,
+    "median": 2.0,
+    "n": 103,
+    "p90": 6.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 775.0,
+    "median": 3.0,
+    "n": 103,
+    "p90": 80.0
+   },
+   "runs": 103,
+   "success": 103
+  },
+  "ci.yml :: llmlint": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 525.0,
+    "median": 205.0,
+    "n": 52,
+    "p90": 320.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 366.0,
+    "median": 2.0,
+    "n": 52,
+    "p90": 33.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 367.0,
+    "median": 3.0,
+    "n": 52,
+    "p90": 85.0
+   },
+   "runs": 52,
+   "success": 52
+  },
+  "ci.yml :: msrv": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 282.0,
+    "median": 79.0,
+    "n": 103,
+    "p90": 246.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 351.0,
+    "median": 2.0,
+    "n": 103,
+    "p90": 38.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 901.0,
+    "median": 19.0,
+    "n": 103,
+    "p90": 103.0
+   },
+   "runs": 103,
+   "success": 103
+  },
+  "ci.yml :: pr-title": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 7.0,
+    "median": 4.0,
+    "n": 52,
+    "p90": 5.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 365.0,
+    "median": 2.0,
+    "n": 52,
+    "p90": 18.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 366.0,
+    "median": 3.0,
+    "n": 52,
+    "p90": 84.0
+   },
+   "runs": 52,
+   "success": 52
+  },
+  "ci.yml :: release-compat": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 382.0,
+    "median": 152.0,
+    "n": 103,
+    "p90": 345.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 414.0,
+    "median": 2.0,
+    "n": 103,
+    "p90": 39.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 915.0,
+    "median": 19.0,
+    "n": 103,
+    "p90": 109.0
+   },
+   "runs": 103,
+   "success": 103
+  },
+  "ci.yml :: smoke": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 493.0,
+    "median": 398.0,
+    "n": 52,
+    "p90": 464.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 354.0,
+    "median": 2.0,
+    "n": 52,
+    "p90": 38.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 7549.0,
+    "median": 19.5,
+    "n": 52,
+    "p90": 275.0
+   },
+   "runs": 52,
+   "success": 52
+  },
+  "ci.yml :: wheel": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 706.0,
+    "median": 529.0,
+    "n": 103,
+    "p90": 602.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 424.0,
+    "median": 2.0,
+    "n": 103,
+    "p90": 44.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 1063.0,
+    "median": 19.0,
+    "n": 103,
+    "p90": 175.0
+   },
+   "runs": 103,
+   "success": 103
+  },
+  "ci.yml :: wheel (aarch64-unknown-linux-gnu)": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 558.0,
+    "median": 458.0,
+    "n": 103,
+    "p90": 513.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 195.0,
+    "median": 4.0,
+    "n": 103,
+    "p90": 18.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 835.0,
+    "median": 21.0,
+    "n": 103,
+    "p90": 107.0
+   },
+   "runs": 103,
+   "success": 103
+  },
+  "engine-currency.yml :: engines-current": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 10.0,
+    "median": 8.0,
+    "n": 47,
+    "p90": 9.0
+   },
+   "failed": 26,
+   "queue_from_job_created_success_s": {
+    "max": 158.0,
+    "median": 2.0,
+    "n": 47,
+    "p90": 3.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 159.0,
+    "median": 3.0,
+    "n": 47,
+    "p90": 4.0
+   },
+   "runs": 73,
+   "success": 47
+  },
+  "notignored.yml :: suppressions": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 37.0,
+    "median": 10.0,
+    "n": 51,
+    "p90": 12.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 221.0,
+    "median": 2.0,
+    "n": 51,
+    "p90": 7.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 222.0,
+    "median": 3.0,
+    "n": 51,
+    "p90": 8.0
+   },
+   "runs": 51,
+   "success": 51
+  },
+  "published-smoke.yml :: npm (macos-15-intel)": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 41.0,
+    "median": 18.0,
+    "n": 20,
+    "p90": 28.0
+   },
+   "failed": 4,
+   "queue_from_job_created_success_s": {
+    "max": 4872.0,
+    "median": 19.0,
+    "n": 20,
+    "p90": 2115.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 4872.0,
+    "median": 20.0,
+    "n": 20,
+    "p90": 2115.0
+   },
+   "runs": 24,
+   "success": 20
+  },
+  "published-smoke.yml :: npm (macos-latest)": {
+   "cancelled": 1,
+   "duration_success_s": {
+    "max": 28.0,
+    "median": 11.0,
+    "n": 20,
+    "p90": 14.0
+   },
+   "failed": 3,
+   "queue_from_job_created_success_s": {
+    "max": 4429.0,
+    "median": 23.0,
+    "n": 20,
+    "p90": 2327.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 4429.0,
+    "median": 24.0,
+    "n": 20,
+    "p90": 2327.0
+   },
+   "runs": 24,
+   "success": 20
+  },
+  "published-smoke.yml :: npm (ubuntu-latest)": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 23.0,
+    "median": 8.0,
+    "n": 20,
+    "p90": 12.0
+   },
+   "failed": 4,
+   "queue_from_job_created_success_s": {
+    "max": 3.0,
+    "median": 2.0,
+    "n": 20,
+    "p90": 3.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 4.0,
+    "median": 3.0,
+    "n": 20,
+    "p90": 3.0
+   },
+   "runs": 24,
+   "success": 20
+  },
+  "published-smoke.yml :: npm (windows-latest)": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 86.0,
+    "median": 26.0,
+    "n": 20,
+    "p90": 32.0
+   },
+   "failed": 4,
+   "queue_from_job_created_success_s": {
+    "max": 4.0,
+    "median": 2.0,
+    "n": 20,
+    "p90": 3.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 5.0,
+    "median": 3.0,
+    "n": 20,
+    "p90": 4.0
+   },
+   "runs": 24,
+   "success": 20
+  },
+  "published-smoke.yml :: pypi (macos-15-intel)": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 36.0,
+    "median": 15.5,
+    "n": 20,
+    "p90": 24.0
+   },
+   "failed": 4,
+   "queue_from_job_created_success_s": {
+    "max": 6449.0,
+    "median": 18.0,
+    "n": 20,
+    "p90": 3256.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 6449.0,
+    "median": 19.0,
+    "n": 20,
+    "p90": 3257.0
+   },
+   "runs": 24,
+   "success": 20
+  },
+  "published-smoke.yml :: pypi (macos-latest)": {
+   "cancelled": 1,
+   "duration_success_s": {
+    "max": 15.0,
+    "median": 11.0,
+    "n": 21,
+    "p90": 13.0
+   },
+   "failed": 2,
+   "queue_from_job_created_success_s": {
+    "max": 7409.0,
+    "median": 30.0,
+    "n": 21,
+    "p90": 3906.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 7409.0,
+    "median": 30.0,
+    "n": 21,
+    "p90": 3906.0
+   },
+   "runs": 24,
+   "success": 21
+  },
+  "published-smoke.yml :: pypi (ubuntu-latest)": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 20.0,
+    "median": 9.0,
+    "n": 21,
+    "p90": 12.0
+   },
+   "failed": 3,
+   "queue_from_job_created_success_s": {
+    "max": 3.0,
+    "median": 2.0,
+    "n": 21,
+    "p90": 3.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 3.0,
+    "median": 3.0,
+    "n": 21,
+    "p90": 3.0
+   },
+   "runs": 24,
+   "success": 21
+  },
+  "published-smoke.yml :: pypi (windows-latest)": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 29.0,
+    "median": 22.0,
+    "n": 21,
+    "p90": 27.0
+   },
+   "failed": 3,
+   "queue_from_job_created_success_s": {
+    "max": 4.0,
+    "median": 2.0,
+    "n": 21,
+    "p90": 3.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 5.0,
+    "median": 3.0,
+    "n": 21,
+    "p90": 4.0
+   },
+   "runs": 24,
+   "success": 21
+  },
+  "published-smoke.yml :: report a failure": {
+   "cancelled": 1,
+   "duration_success_s": {
+    "max": 12.0,
+    "median": 8.0,
+    "n": 4,
+    "p90": 12.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 3.0,
+    "median": 2.0,
+    "n": 4,
+    "p90": 3.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 14618.0,
+    "median": 9377.5,
+    "n": 4,
+    "p90": 14618.0
+   },
+   "runs": 5,
+   "success": 4
+  },
+  "release-plz.yml :: guard": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 5.0,
+    "median": 3.0,
+    "n": 21,
+    "p90": 4.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 3.0,
+    "median": 2.0,
+    "n": 21,
+    "p90": 3.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 4.0,
+    "median": 3.0,
+    "n": 21,
+    "p90": 3.0
+   },
+   "runs": 21,
+   "success": 21
+  },
+  "release-plz.yml :: release-plz": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 46.0,
+    "median": 39.0,
+    "n": 21,
+    "p90": 41.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 152.0,
+    "median": 2.0,
+    "n": 21,
+    "p90": 27.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 159.0,
+    "median": 9.0,
+    "n": 21,
+    "p90": 34.0
+   },
+   "runs": 21,
+   "success": 21
+  },
+  "release-sweep.yml :: release-sweep": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 5173.0,
+    "median": 3954.0,
+    "n": 19,
+    "p90": 4912.0
+   },
+   "failed": 1,
+   "queue_from_job_created_success_s": {
+    "max": 167.0,
+    "median": 2.0,
+    "n": 19,
+    "p90": 167.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 168.0,
+    "median": 3.0,
+    "n": 19,
+    "p90": 168.0
+   },
+   "runs": 20,
+   "success": 19
+  },
+  "release.yml :: build-npm (aarch64-apple-darwin)": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 849.0,
+    "median": 601.0,
+    "n": 21,
+    "p90": 741.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 24692.0,
+    "median": 3612.0,
+    "n": 21,
+    "p90": 10987.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 28525.0,
+    "median": 7385.0,
+    "n": 21,
+    "p90": 16392.0
+   },
+   "runs": 21,
+   "success": 21
+  },
+  "release.yml :: build-npm (aarch64-unknown-linux-gnu)": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 514.0,
+    "median": 426.0,
+    "n": 21,
+    "p90": 483.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 127.0,
+    "median": 4.0,
+    "n": 21,
+    "p90": 5.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 10621.0,
+    "median": 3777.0,
+    "n": 21,
+    "p90": 7360.0
+   },
+   "runs": 21,
+   "success": 21
+  },
+  "release.yml :: build-npm (x86_64-apple-darwin)": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 872.0,
+    "median": 589.0,
+    "n": 21,
+    "p90": 824.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 23674.0,
+    "median": 1761.0,
+    "n": 21,
+    "p90": 11233.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 27507.0,
+    "median": 6939.0,
+    "n": 21,
+    "p90": 16776.0
+   },
+   "runs": 21,
+   "success": 21
+  },
+  "release.yml :: build-npm (x86_64-pc-windows-msvc)": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 1141.0,
+    "median": 890.0,
+    "n": 21,
+    "p90": 1012.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 137.0,
+    "median": 2.0,
+    "n": 21,
+    "p90": 11.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 10619.0,
+    "median": 3775.0,
+    "n": 21,
+    "p90": 7357.0
+   },
+   "runs": 21,
+   "success": 21
+  },
+  "release.yml :: build-npm (x86_64-unknown-linux-gnu)": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 620.0,
+    "median": 485.0,
+    "n": 21,
+    "p90": 576.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 35.0,
+    "median": 2.0,
+    "n": 21,
+    "p90": 3.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 10619.0,
+    "median": 3774.0,
+    "n": 21,
+    "p90": 7357.0
+   },
+   "runs": 21,
+   "success": 21
+  },
+  "release.yml :: build-wheels (aarch64-apple-darwin)": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 1027.0,
+    "median": 653.0,
+    "n": 21,
+    "p90": 847.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 16686.0,
+    "median": 2581.0,
+    "n": 21,
+    "p90": 12114.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 22766.0,
+    "median": 6354.0,
+    "n": 21,
+    "p90": 15855.0
+   },
+   "runs": 21,
+   "success": 21
+  },
+  "release.yml :: build-wheels (aarch64-unknown-linux-gnu)": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 512.0,
+    "median": 457.0,
+    "n": 21,
+    "p90": 484.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 39.0,
+    "median": 4.0,
+    "n": 21,
+    "p90": 5.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 10621.0,
+    "median": 3777.0,
+    "n": 21,
+    "p90": 7360.0
+   },
+   "runs": 21,
+   "success": 21
+  },
+  "release.yml :: build-wheels (x86_64-apple-darwin)": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 907.0,
+    "median": 650.0,
+    "n": 21,
+    "p90": 809.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 17714.0,
+    "median": 3057.0,
+    "n": 21,
+    "p90": 8789.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 21547.0,
+    "median": 7290.0,
+    "n": 21,
+    "p90": 18955.0
+   },
+   "runs": 21,
+   "success": 21
+  },
+  "release.yml :: build-wheels (x86_64-pc-windows-msvc)": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 1077.0,
+    "median": 838.0,
+    "n": 21,
+    "p90": 910.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 142.0,
+    "median": 2.0,
+    "n": 21,
+    "p90": 3.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 10619.0,
+    "median": 3775.0,
+    "n": 21,
+    "p90": 7357.0
+   },
+   "runs": 21,
+   "success": 21
+  },
+  "release.yml :: build-wheels (x86_64-unknown-linux-gnu)": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 667.0,
+    "median": 503.0,
+    "n": 21,
+    "p90": 606.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 71.0,
+    "median": 2.0,
+    "n": 21,
+    "p90": 3.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 10619.0,
+    "median": 3774.0,
+    "n": 21,
+    "p90": 7357.0
+   },
+   "runs": 21,
+   "success": 21
+  },
+  "release.yml :: guard": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 4.0,
+    "median": 3.0,
+    "n": 21,
+    "p90": 4.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 14.0,
+    "median": 2.0,
+    "n": 21,
+    "p90": 3.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 44.0,
+    "median": 3.0,
+    "n": 21,
+    "p90": 11.0
+   },
+   "runs": 21,
+   "success": 21
+  },
+  "release.yml :: linked-engines": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 12.0,
+    "median": 9.0,
+    "n": 21,
+    "p90": 11.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 24.0,
+    "median": 2.0,
+    "n": 21,
+    "p90": 4.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 25.0,
+    "median": 3.0,
+    "n": 21,
+    "p90": 11.0
+   },
+   "runs": 21,
+   "success": 21
+  },
+  "release.yml :: publish-crate": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 239.0,
+    "median": 218.0,
+    "n": 21,
+    "p90": 232.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 46.0,
+    "median": 2.0,
+    "n": 21,
+    "p90": 3.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 10619.0,
+    "median": 3774.0,
+    "n": 21,
+    "p90": 7357.0
+   },
+   "runs": 21,
+   "success": 21
+  },
+  "release.yml :: publish-npm": {
+   "cancelled": 1,
+   "duration_success_s": {
+    "max": 1634.0,
+    "median": 817.5,
+    "n": 16,
+    "p90": 1250.0
+   },
+   "failed": 4,
+   "queue_from_job_created_success_s": {
+    "max": 2.0,
+    "median": 2.0,
+    "n": 16,
+    "p90": 2.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 21283.0,
+    "median": 8222.5,
+    "n": 16,
+    "p90": 17040.0
+   },
+   "runs": 21,
+   "success": 16
+  },
+  "release.yml :: publish-pypi": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 49.0,
+    "median": 33.0,
+    "n": 21,
+    "p90": 42.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 7.0,
+    "median": 2.0,
+    "n": 21,
+    "p90": 3.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 23626.0,
+    "median": 7889.0,
+    "n": 21,
+    "p90": 21584.0
+   },
+   "runs": 21,
+   "success": 21
+  },
+  "release.yml :: record the release outcome": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 17.0,
+    "median": 9.0,
+    "n": 20,
+    "p90": 14.0
+   },
+   "failed": 1,
+   "queue_from_job_created_success_s": {
+    "max": 106.0,
+    "median": 2.0,
+    "n": 20,
+    "p90": 3.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 28654.0,
+    "median": 11227.5,
+    "n": 20,
+    "p90": 27558.0
+   },
+   "runs": 21,
+   "success": 20
+  },
+  "release.yml :: test": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 5058.0,
+    "median": 3738.0,
+    "n": 21,
+    "p90": 4663.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 34.0,
+    "median": 2.0,
+    "n": 21,
+    "p90": 3.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 5827.0,
+    "median": 3.0,
+    "n": 21,
+    "p90": 4495.0
+   },
+   "runs": 21,
+   "success": 21
+  },
+  "release.yml :: upload (aarch64-apple-darwin)": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 824.0,
+    "median": 683.0,
+    "n": 21,
+    "p90": 770.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 23592.0,
+    "median": 3847.0,
+    "n": 21,
+    "p90": 11480.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 27425.0,
+    "median": 8234.0,
+    "n": 21,
+    "p90": 16674.0
+   },
+   "runs": 21,
+   "success": 21
+  },
+  "release.yml :: upload (aarch64-unknown-linux-gnu)": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 489.0,
+    "median": 417.0,
+    "n": 21,
+    "p90": 460.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 5.0,
+    "median": 5.0,
+    "n": 21,
+    "p90": 5.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 10621.0,
+    "median": 3777.0,
+    "n": 21,
+    "p90": 7360.0
+   },
+   "runs": 21,
+   "success": 21
+  },
+  "release.yml :: upload (x86_64-apple-darwin)": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 949.0,
+    "median": 550.0,
+    "n": 21,
+    "p90": 772.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 15197.0,
+    "median": 2121.0,
+    "n": 21,
+    "p90": 14405.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 23632.0,
+    "median": 7051.0,
+    "n": 21,
+    "p90": 18238.0
+   },
+   "runs": 21,
+   "success": 21
+  },
+  "release.yml :: upload (x86_64-pc-windows-msvc)": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 1073.0,
+    "median": 895.0,
+    "n": 21,
+    "p90": 1013.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 92.0,
+    "median": 2.0,
+    "n": 21,
+    "p90": 3.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 10619.0,
+    "median": 3776.0,
+    "n": 21,
+    "p90": 7358.0
+   },
+   "runs": 21,
+   "success": 21
+  },
+  "release.yml :: upload (x86_64-unknown-linux-gnu)": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 592.0,
+    "median": 492.0,
+    "n": 21,
+    "p90": 566.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 135.0,
+    "median": 2.0,
+    "n": 21,
+    "p90": 4.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 10619.0,
+    "median": 3775.0,
+    "n": 21,
+    "p90": 7358.0
+   },
+   "runs": 21,
+   "success": 21
+  },
+  "release.yml :: verify-crate": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 635.0,
+    "median": 482.0,
+    "n": 21,
+    "p90": 569.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 50.0,
+    "median": 2.0,
+    "n": 21,
+    "p90": 3.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 10849.0,
+    "median": 4009.0,
+    "n": 21,
+    "p90": 7612.0
+   },
+   "runs": 21,
+   "success": 21
+  },
+  "release.yml :: verify-npm (${{ matrix.os }})": {
+   "cancelled": 1,
+   "duration_success_s": null,
+   "failed": 0,
+   "queue_from_job_created_success_s": null,
+   "queue_from_run_created_success_s": null,
+   "runs": 1,
+   "success": 0
+  },
+  "release.yml :: verify-npm (macos-15-intel)": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 27.0,
+    "median": 17.5,
+    "n": 16,
+    "p90": 27.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 2297.0,
+    "median": 81.5,
+    "n": 16,
+    "p90": 1959.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 22298.0,
+    "median": 10835.0,
+    "n": 16,
+    "p90": 17943.0
+   },
+   "runs": 16,
+   "success": 16
+  },
+  "release.yml :: verify-npm (macos-latest)": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 31.0,
+    "median": 11.0,
+    "n": 16,
+    "p90": 15.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 11638.0,
+    "median": 142.5,
+    "n": 16,
+    "p90": 5723.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 28620.0,
+    "median": 11155.0,
+    "n": 16,
+    "p90": 27833.0
+   },
+   "runs": 16,
+   "success": 16
+  },
+  "release.yml :: verify-npm (ubuntu-24.04-arm)": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 14.0,
+    "median": 9.5,
+    "n": 16,
+    "p90": 12.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 55.0,
+    "median": 4.5,
+    "n": 16,
+    "p90": 30.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 22114.0,
+    "median": 9453.0,
+    "n": 16,
+    "p90": 17684.0
+   },
+   "runs": 16,
+   "success": 16
+  },
+  "release.yml :: verify-npm (ubuntu-latest)": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 13.0,
+    "median": 8.5,
+    "n": 16,
+    "p90": 12.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 204.0,
+    "median": 2.0,
+    "n": 16,
+    "p90": 83.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 22112.0,
+    "median": 9450.0,
+    "n": 16,
+    "p90": 17682.0
+   },
+   "runs": 16,
+   "success": 16
+  },
+  "release.yml :: verify-npm (windows-latest)": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 52.0,
+    "median": 25.0,
+    "n": 16,
+    "p90": 36.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 66.0,
+    "median": 2.0,
+    "n": 16,
+    "p90": 29.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 22115.0,
+    "median": 9450.5,
+    "n": 16,
+    "p90": 17682.0
+   },
+   "runs": 16,
+   "success": 16
+  },
+  "release.yml :: verify-pypi (macos-15-intel)": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 122.0,
+    "median": 18.5,
+    "n": 20,
+    "p90": 36.0
+   },
+   "failed": 1,
+   "queue_from_job_created_success_s": {
+    "max": 2972.0,
+    "median": 539.0,
+    "n": 20,
+    "p90": 2302.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 26648.0,
+    "median": 9691.5,
+    "n": 20,
+    "p90": 22424.0
+   },
+   "runs": 21,
+   "success": 20
+  },
+  "release.yml :: verify-pypi (macos-latest)": {
+   "cancelled": 1,
+   "duration_success_s": {
+    "max": 20.0,
+    "median": 11.0,
+    "n": 20,
+    "p90": 16.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 6381.0,
+    "median": 2205.5,
+    "n": 20,
+    "p90": 5865.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 28625.0,
+    "median": 10081.0,
+    "n": 20,
+    "p90": 26146.0
+   },
+   "runs": 21,
+   "success": 20
+  },
+  "release.yml :: verify-pypi (ubuntu-latest)": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 28.0,
+    "median": 15.0,
+    "n": 21,
+    "p90": 27.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 103.0,
+    "median": 2.0,
+    "n": 21,
+    "p90": 3.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 23678.0,
+    "median": 7922.0,
+    "n": 21,
+    "p90": 21713.0
+   },
+   "runs": 21,
+   "success": 21
+  },
+  "release.yml :: verify-pypi (windows-latest)": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 42.0,
+    "median": 27.0,
+    "n": 21,
+    "p90": 34.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 46.0,
+    "median": 2.0,
+    "n": 21,
+    "p90": 4.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 23678.0,
+    "median": 7922.0,
+    "n": 21,
+    "p90": 21656.0
+   },
+   "runs": 21,
+   "success": 21
+  },
+  "visual-docs.yml :: visual-docs / aggregate-comment": {
+   "cancelled": 32,
+   "duration_success_s": null,
+   "failed": 0,
+   "queue_from_job_created_success_s": null,
+   "queue_from_run_created_success_s": null,
+   "runs": 32,
+   "success": 0
+  },
+  "visual-docs.yml :: visual-docs / arches": {
+   "cancelled": 29,
+   "duration_success_s": {
+    "max": 9.0,
+    "median": 7.0,
+    "n": 73,
+    "p90": 8.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 259.0,
+    "median": 2.0,
+    "n": 73,
+    "p90": 30.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 359.0,
+    "median": 10.0,
+    "n": 73,
+    "p90": 77.0
+   },
+   "runs": 102,
+   "success": 73
+  },
+  "visual-docs.yml :: visual-docs / capture": {
+   "cancelled": 29,
+   "duration_success_s": null,
+   "failed": 0,
+   "queue_from_job_created_success_s": null,
+   "queue_from_run_created_success_s": null,
+   "runs": 29,
+   "success": 0
+  },
+  "visual-docs.yml :: visual-docs / capture (x86_64, shots/current, shots/verify, Visual docs)": {
+   "cancelled": 3,
+   "duration_success_s": {
+    "max": 1185.0,
+    "median": 856.0,
+    "n": 70,
+    "p90": 1081.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 365.0,
+    "median": 2.0,
+    "n": 70,
+    "p90": 46.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 699.0,
+    "median": 21.0,
+    "n": 70,
+    "p90": 136.0
+   },
+   "runs": 73,
+   "success": 70
+  },
+  "visual-docs.yml :: visual-docs / cleanup-preview": {
+   "cancelled": 29,
+   "duration_success_s": null,
+   "failed": 0,
+   "queue_from_job_created_success_s": null,
+   "queue_from_run_created_success_s": null,
+   "runs": 29,
+   "success": 0
+  },
+  "visual-docs.yml :: visual-docs / deploy-pages": {
+   "cancelled": 32,
+   "duration_success_s": {
+    "max": 177.0,
+    "median": 31.0,
+    "n": 70,
+    "p90": 70.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 372.0,
+    "median": 2.0,
+    "n": 70,
+    "p90": 4.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 1777.0,
+    "median": 911.0,
+    "n": 70,
+    "p90": 1223.0
+   },
+   "runs": 102,
+   "success": 70
+  },
+  "visual-docs.yml :: visual-docs / pages-preflight": {
+   "cancelled": 31,
+   "duration_success_s": {
+    "max": 6.0,
+    "median": 3.0,
+    "n": 73,
+    "p90": 4.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 270.0,
+    "median": 3.0,
+    "n": 73,
+    "p90": 41.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 270.0,
+    "median": 3.0,
+    "n": 73,
+    "p90": 44.0
+   },
+   "runs": 104,
+   "success": 73
+  },
+  "visual-docs.yml :: visual-docs / prune-history": {
+   "cancelled": 29,
+   "duration_success_s": null,
+   "failed": 0,
+   "queue_from_job_created_success_s": null,
+   "queue_from_run_created_success_s": null,
+   "runs": 29,
+   "success": 0
+  },
+  "visual-docs.yml :: visual-docs / report": {
+   "cancelled": 32,
+   "duration_success_s": null,
+   "failed": 0,
+   "queue_from_job_created_success_s": null,
+   "queue_from_run_created_success_s": null,
+   "runs": 32,
+   "success": 0
+  },
+  "visual-docs.yml :: visual-docs / report (x86_64, shots/current, shots/verify, Visual docs)": {
+   "cancelled": 0,
+   "duration_success_s": {
+    "max": 24.0,
+    "median": 13.0,
+    "n": 70,
+    "p90": 18.0
+   },
+   "failed": 0,
+   "queue_from_job_created_success_s": {
+    "max": 418.0,
+    "median": 2.0,
+    "n": 70,
+    "p90": 5.0
+   },
+   "queue_from_run_created_success_s": {
+    "max": 1626.0,
+    "median": 894.0,
+    "n": 70,
+    "p90": 1205.0
+   },
+   "runs": 70,
+   "success": 70
+  }
+ },
+ "per_release": {
+  "cd_family_seconds": {
+   "cross legs (check-cross)": {
+    "max": 13346.0,
+    "median": 9573.0,
+    "n": 21,
+    "p90": 12507.0
+   },
+   "just check (gate / release-sweep / release test)": {
+    "max": 9240.0,
+    "median": 6846.0,
+    "n": 21,
+    "p90": 8489.0
+   },
+   "msrv / deny / release-compat / smoke": {
+    "max": 666.0,
+    "median": 562.0,
+    "n": 21,
+    "p90": 658.0
+   },
+   "release-mode builds of the 5 targets": {
+    "max": 10299.0,
+    "median": 9054.0,
+    "n": 21,
+    "p90": 9942.0
+   },
+   "smoke-published.sh legs": {
+    "max": 21015.0,
+    "median": 4981.0,
+    "n": 21,
+    "p90": 12492.0
+   },
+   "visual-docs capture": {
+    "max": 940.0,
+    "median": 379.0,
+    "n": 21,
+    "p90": 904.0
+   }
+  },
+  "cd_job_seconds": {
+   "max": 52413.0,
+   "median": 32163.0,
+   "n": 21,
+   "p90": 43589.0
+  },
+  "last_cd_run": {
+   "published-smoke.yml:workflow_run": 21
+  },
+  "merge_to_last_cd_job_s": {
+   "max": 38746.0,
+   "median": 21290.0,
+   "n": 21,
+   "p90": 38478.0
+  },
+  "phase_created_after_merge_s": {
+   "ci.yml:push": {
+    "max": 6.0,
+    "median": 3.0,
+    "n": 21,
+    "p90": 3.0
+   },
+   "engine-currency.yml:push": {
+    "max": 6.0,
+    "median": 3.0,
+    "n": 21,
+    "p90": 4.0
+   },
+   "published-smoke.yml:workflow_run": {
+    "max": 38690.0,
+    "median": 18352.0,
+    "n": 21,
+    "p90": 32883.0
+   },
+   "release-plz.yml:push": {
+    "max": 6.0,
+    "median": 3.0,
+    "n": 21,
+    "p90": 3.0
+   },
+   "release.yml:release": {
+    "max": 194.0,
+    "median": 43.0,
+    "n": 21,
+    "p90": 75.0
+   },
+   "visual-docs.yml:push": {
+    "max": 6.0,
+    "median": 3.0,
+    "n": 21,
+    "p90": 4.0
+   }
+  },
+  "phase_wall_s": {
+   "ci.yml:push": {
+    "max": 22348.0,
+    "median": 6251.0,
+    "n": 21,
+    "p90": 16842.0
+   },
+   "engine-currency.yml:push": {
+    "max": 13.0,
+    "median": 11.0,
+    "n": 21,
+    "p90": 12.0
+   },
+   "published-smoke.yml:workflow_run": {
+    "max": 12368.0,
+    "median": 72.0,
+    "n": 21,
+    "p90": 7159.0
+   },
+   "release-plz.yml:push": {
+    "max": 191.0,
+    "median": 48.0,
+    "n": 21,
+    "p90": 74.0
+   },
+   "release.yml:release": {
+    "max": 29600.0,
+    "median": 11282.0,
+    "n": 21,
+    "p90": 28648.0
+   },
+   "visual-docs.yml:push": {
+    "max": 1155.0,
+    "median": 409.0,
+    "n": 21,
+    "p90": 994.0
+   }
+  },
+  "prs_carried": {
+   "max": 5,
+   "median": 1,
+   "n": 21,
+   "p90": 2
+  },
+  "release_pr_checks_s": {
+   "max": 42029.0,
+   "median": 8302.0,
+   "n": 21,
+   "p90": 23839.0
+  },
+  "release_pr_family_seconds": {
+   "cross legs (check-cross)": {
+    "max": 16148.0,
+    "median": 9797.0,
+    "n": 21,
+    "p90": 11979.0
+   },
+   "just check (gate / release-sweep / release test)": {
+    "max": 8931.0,
+    "median": 7305.0,
+    "n": 21,
+    "p90": 8462.0
+   },
+   "msrv / deny / release-compat / smoke": {
+    "max": 1027.0,
+    "median": 647.0,
+    "n": 21,
+    "p90": 916.0
+   },
+   "release-mode builds of the 5 targets": {
+    "max": 0.0,
+    "median": 0.0,
+    "n": 21,
+    "p90": 0.0
+   },
+   "smoke-published.sh legs": {
+    "max": 10330.0,
+    "median": 4271.0,
+    "n": 21,
+    "p90": 5226.0
+   },
+   "visual-docs capture": {
+    "max": 1183.0,
+    "median": 847.0,
+    "n": 21,
+    "p90": 1081.0
+   }
+  },
+  "release_pr_job_seconds": {
+   "max": 35911.0,
+   "median": 23017.0,
+   "n": 21,
+   "p90": 27437.0
+  },
+  "release_yml_first_build_after_test_end_s": {
+   "max": 3.0,
+   "median": 2.0,
+   "n": 21,
+   "p90": 3.0
+  },
+  "release_yml_longest_build_s": {
+   "max": 1141.0,
+   "median": 926.0,
+   "n": 21,
+   "p90": 1038.0
+  },
+  "release_yml_test_s": {
+   "max": 5058.0,
+   "median": 3738.0,
+   "n": 21,
+   "p90": 4663.0
+  },
+  "release_yml_wall_s": {
+   "max": 29600.0,
+   "median": 11282.0,
+   "n": 21,
+   "p90": 28648.0
+  }
+ },
+ "releases": 21,
+ "rows": {
+  "changes": [
+   {
+    "ci_wall_s": 7700.0,
+    "head": {
+     "cross legs (check-cross)": 8981.0,
+     "just check (gate / release-sweep / release test)": 2926.0,
+     "msrv / deny / release-compat / smoke": 385.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 4015.0,
+     "visual-docs capture": 594.0
+    },
+    "head_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "head_job_seconds": 17255.0,
+    "merge_push": {
+     "cross legs (check-cross)": 9565.0,
+     "just check (gate / release-sweep / release test)": 3002.0,
+     "msrv / deny / release-compat / smoke": 234.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 2493.0,
+     "visual-docs capture": 620.0
+    },
+    "merge_push_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 5,
+     "visual-docs capture": 1
+    },
+    "merge_push_job_seconds": 15960.0,
+    "pr": 783
+   },
+   {
+    "ci_wall_s": 5091.0,
+    "head": {
+     "cross legs (check-cross)": 8287.0,
+     "just check (gate / release-sweep / release test)": 3514.0,
+     "msrv / deny / release-compat / smoke": 1004.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 4951.0,
+     "visual-docs capture": 835.0
+    },
+    "head_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "head_job_seconds": 19092.0,
+    "merge_push": {
+     "cross legs (check-cross)": 9241.0,
+     "just check (gate / release-sweep / release test)": 3386.0,
+     "msrv / deny / release-compat / smoke": 362.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 2973.0,
+     "visual-docs capture": 869.0
+    },
+    "merge_push_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 5,
+     "visual-docs capture": 1
+    },
+    "merge_push_job_seconds": 16879.0,
+    "pr": 793
+   },
+   {
+    "ci_wall_s": 9911.0,
+    "head": {
+     "cross legs (check-cross)": 9208.0,
+     "just check (gate / release-sweep / release test)": 3428.0,
+     "msrv / deny / release-compat / smoke": 873.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 4416.0,
+     "visual-docs capture": 855.0
+    },
+    "head_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "head_job_seconds": 19103.0,
+    "merge_push": {
+     "cross legs (check-cross)": 9553.0,
+     "just check (gate / release-sweep / release test)": 3492.0,
+     "msrv / deny / release-compat / smoke": 401.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 2954.0,
+     "visual-docs capture": 0.0
+    },
+    "merge_push_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 5,
+     "visual-docs capture": 0
+    },
+    "merge_push_job_seconds": 16409.0,
+    "pr": 806
+   },
+   {
+    "ci_wall_s": 5205.0,
+    "head": {
+     "cross legs (check-cross)": 9215.0,
+     "just check (gate / release-sweep / release test)": 3523.0,
+     "msrv / deny / release-compat / smoke": 618.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 4813.0,
+     "visual-docs capture": 829.0
+    },
+    "head_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "head_job_seconds": 19386.0,
+    "merge_push": {
+     "cross legs (check-cross)": 9416.0,
+     "just check (gate / release-sweep / release test)": 2770.0,
+     "msrv / deny / release-compat / smoke": 238.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 4304.0,
+     "visual-docs capture": 845.0
+    },
+    "merge_push_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "merge_push_job_seconds": 17612.0,
+    "pr": 810
+   },
+   {
+    "ci_wall_s": 4984.0,
+    "head": {
+     "cross legs (check-cross)": 8719.0,
+     "just check (gate / release-sweep / release test)": 3038.0,
+     "msrv / deny / release-compat / smoke": 630.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 3510.0,
+     "visual-docs capture": 676.0
+    },
+    "head_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "head_job_seconds": 16772.0,
+    "merge_push": {
+     "cross legs (check-cross)": 9909.0,
+     "just check (gate / release-sweep / release test)": 3197.0,
+     "msrv / deny / release-compat / smoke": 267.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 3653.0,
+     "visual-docs capture": 0.0
+    },
+    "merge_push_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 0
+    },
+    "merge_push_job_seconds": 17037.0,
+    "pr": 813
+   },
+   {
+    "ci_wall_s": 6021.0,
+    "head": {
+     "cross legs (check-cross)": 9527.0,
+     "just check (gate / release-sweep / release test)": 3022.0,
+     "msrv / deny / release-compat / smoke": 391.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 4087.0,
+     "visual-docs capture": 637.0
+    },
+    "head_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "head_job_seconds": 17939.0,
+    "merge_push": {
+     "cross legs (check-cross)": 8585.0,
+     "just check (gate / release-sweep / release test)": 3026.0,
+     "msrv / deny / release-compat / smoke": 243.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 3981.0,
+     "visual-docs capture": 0.0
+    },
+    "merge_push_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 0
+    },
+    "merge_push_job_seconds": 15842.0,
+    "pr": 819
+   },
+   {
+    "ci_wall_s": 5577.0,
+    "head": {
+     "cross legs (check-cross)": 9418.0,
+     "just check (gate / release-sweep / release test)": 3578.0,
+     "msrv / deny / release-compat / smoke": 392.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 2582.0,
+     "visual-docs capture": 907.0
+    },
+    "head_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "head_job_seconds": 17174.0,
+    "merge_push": {
+     "cross legs (check-cross)": 8296.0,
+     "just check (gate / release-sweep / release test)": 3451.0,
+     "msrv / deny / release-compat / smoke": 502.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 4813.0,
+     "visual-docs capture": 0.0
+    },
+    "merge_push_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 0
+    },
+    "merge_push_job_seconds": 17071.0,
+    "pr": 827
+   },
+   {
+    "ci_wall_s": 21610.0,
+    "head": {
+     "cross legs (check-cross)": 10144.0,
+     "just check (gate / release-sweep / release test)": 3748.0,
+     "msrv / deny / release-compat / smoke": 1111.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 3661.0,
+     "visual-docs capture": 971.0
+    },
+    "head_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "head_job_seconds": 20029.0,
+    "merge_push": {
+     "cross legs (check-cross)": 10590.0,
+     "just check (gate / release-sweep / release test)": 3993.0,
+     "msrv / deny / release-compat / smoke": 240.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 4846.0,
+     "visual-docs capture": 0.0
+    },
+    "merge_push_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 0
+    },
+    "merge_push_job_seconds": 19679.0,
+    "pr": 828
+   },
+   {
+    "ci_wall_s": 4911.0,
+    "head": {
+     "cross legs (check-cross)": 8409.0,
+     "just check (gate / release-sweep / release test)": 2936.0,
+     "msrv / deny / release-compat / smoke": 673.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 2832.0,
+     "visual-docs capture": 903.0
+    },
+    "head_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "head_job_seconds": 16022.0,
+    "merge_push": {
+     "cross legs (check-cross)": 7826.0,
+     "just check (gate / release-sweep / release test)": 3440.0,
+     "msrv / deny / release-compat / smoke": 271.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 4463.0,
+     "visual-docs capture": 857.0
+    },
+    "merge_push_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "merge_push_job_seconds": 16898.0,
+    "pr": 833
+   },
+   {
+    "ci_wall_s": 5841.0,
+    "head": {
+     "cross legs (check-cross)": 9341.0,
+     "just check (gate / release-sweep / release test)": 3147.0,
+     "msrv / deny / release-compat / smoke": 669.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 4036.0,
+     "visual-docs capture": 873.0
+    },
+    "head_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "head_job_seconds": 18355.0,
+    "merge_push": {
+     "cross legs (check-cross)": 6640.0,
+     "just check (gate / release-sweep / release test)": 3612.0,
+     "msrv / deny / release-compat / smoke": 251.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 3975.0,
+     "visual-docs capture": 680.0
+    },
+    "merge_push_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "merge_push_job_seconds": 15207.0,
+    "pr": 840
+   },
+   {
+    "ci_wall_s": 8758.0,
+    "head": {
+     "cross legs (check-cross)": 9037.0,
+     "just check (gate / release-sweep / release test)": 3146.0,
+     "msrv / deny / release-compat / smoke": 688.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 2761.0,
+     "visual-docs capture": 595.0
+    },
+    "head_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "head_job_seconds": 16573.0,
+    "merge_push": {
+     "cross legs (check-cross)": 9560.0,
+     "just check (gate / release-sweep / release test)": 3173.0,
+     "msrv / deny / release-compat / smoke": 240.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 4713.0,
+     "visual-docs capture": 0.0
+    },
+    "merge_push_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 0
+    },
+    "merge_push_job_seconds": 17696.0,
+    "pr": 848
+   },
+   {
+    "ci_wall_s": 9446.0,
+    "head": {
+     "cross legs (check-cross)": 8831.0,
+     "just check (gate / release-sweep / release test)": 3310.0,
+     "msrv / deny / release-compat / smoke": 763.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 4419.0,
+     "visual-docs capture": 647.0
+    },
+    "head_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "head_job_seconds": 18238.0,
+    "merge_push": {
+     "cross legs (check-cross)": 8704.0,
+     "just check (gate / release-sweep / release test)": 3694.0,
+     "msrv / deny / release-compat / smoke": 458.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 4680.0,
+     "visual-docs capture": 0.0
+    },
+    "merge_push_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 0
+    },
+    "merge_push_job_seconds": 17549.0,
+    "pr": 849
+   },
+   {
+    "ci_wall_s": 8892.0,
+    "head": {
+     "cross legs (check-cross)": 10015.0,
+     "just check (gate / release-sweep / release test)": 2827.0,
+     "msrv / deny / release-compat / smoke": 544.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 3323.0,
+     "visual-docs capture": 811.0
+    },
+    "head_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "head_job_seconds": 17833.0,
+    "merge_push": {
+     "cross legs (check-cross)": 9117.0,
+     "just check (gate / release-sweep / release test)": 3824.0,
+     "msrv / deny / release-compat / smoke": 611.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 4537.0,
+     "visual-docs capture": 0.0
+    },
+    "merge_push_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 0
+    },
+    "merge_push_job_seconds": 18101.0,
+    "pr": 852
+   },
+   {
+    "ci_wall_s": 7452.0,
+    "head": {
+     "cross legs (check-cross)": 9597.0,
+     "just check (gate / release-sweep / release test)": 3000.0,
+     "msrv / deny / release-compat / smoke": 631.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 3752.0,
+     "visual-docs capture": 919.0
+    },
+    "head_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "head_job_seconds": 18300.0,
+    "merge_push": {
+     "cross legs (check-cross)": 10246.0,
+     "just check (gate / release-sweep / release test)": 3141.0,
+     "msrv / deny / release-compat / smoke": 364.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 4824.0,
+     "visual-docs capture": 899.0
+    },
+    "merge_push_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "merge_push_job_seconds": 19536.0,
+    "pr": 853
+   },
+   {
+    "ci_wall_s": 17964.0,
+    "head": {
+     "cross legs (check-cross)": 10321.0,
+     "just check (gate / release-sweep / release test)": 2877.0,
+     "msrv / deny / release-compat / smoke": 625.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 4031.0,
+     "visual-docs capture": 808.0
+    },
+    "head_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "head_job_seconds": 19067.0,
+    "merge_push": {
+     "cross legs (check-cross)": 11820.0,
+     "just check (gate / release-sweep / release test)": 2877.0,
+     "msrv / deny / release-compat / smoke": 523.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 5267.0,
+     "visual-docs capture": 0.0
+    },
+    "merge_push_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 0
+    },
+    "merge_push_job_seconds": 20499.0,
+    "pr": 861
+   },
+   {
+    "ci_wall_s": 14358.0,
+    "head": {
+     "cross legs (check-cross)": 10061.0,
+     "just check (gate / release-sweep / release test)": 3532.0,
+     "msrv / deny / release-compat / smoke": 731.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 4113.0,
+     "visual-docs capture": 973.0
+    },
+    "head_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "head_job_seconds": 19716.0,
+    "merge_push": {
+     "cross legs (check-cross)": 10695.0,
+     "just check (gate / release-sweep / release test)": 3294.0,
+     "msrv / deny / release-compat / smoke": 245.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 5543.0,
+     "visual-docs capture": 0.0
+    },
+    "merge_push_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 0
+    },
+    "merge_push_job_seconds": 19785.0,
+    "pr": 862
+   },
+   {
+    "ci_wall_s": 28625.0,
+    "head": {
+     "cross legs (check-cross)": 11614.0,
+     "just check (gate / release-sweep / release test)": 3073.0,
+     "msrv / deny / release-compat / smoke": 670.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 4190.0,
+     "visual-docs capture": 788.0
+    },
+    "head_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "head_job_seconds": 20698.0,
+    "merge_push": {
+     "cross legs (check-cross)": 7469.0,
+     "just check (gate / release-sweep / release test)": 3697.0,
+     "msrv / deny / release-compat / smoke": 237.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 3686.0,
+     "visual-docs capture": 1005.0
+    },
+    "merge_push_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "merge_push_job_seconds": 16138.0,
+    "pr": 865
+   },
+   {
+    "ci_wall_s": 6948.0,
+    "head": {
+     "cross legs (check-cross)": 10697.0,
+     "just check (gate / release-sweep / release test)": 3376.0,
+     "msrv / deny / release-compat / smoke": 696.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 4230.0,
+     "visual-docs capture": 684.0
+    },
+    "head_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "head_job_seconds": 20019.0,
+    "merge_push": {
+     "cross legs (check-cross)": 8402.0,
+     "just check (gate / release-sweep / release test)": 3062.0,
+     "msrv / deny / release-compat / smoke": 300.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 4602.0,
+     "visual-docs capture": 81.0
+    },
+    "merge_push_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "merge_push_job_seconds": 16465.0,
+    "pr": 866
+   },
+   {
+    "ci_wall_s": 6488.0,
+    "head": {
+     "cross legs (check-cross)": 10437.0,
+     "just check (gate / release-sweep / release test)": 3784.0,
+     "msrv / deny / release-compat / smoke": 562.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 2372.0,
+     "visual-docs capture": 781.0
+    },
+    "head_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "head_job_seconds": 18319.0,
+    "merge_push": {
+     "cross legs (check-cross)": 10120.0,
+     "just check (gate / release-sweep / release test)": 3212.0,
+     "msrv / deny / release-compat / smoke": 231.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 4887.0,
+     "visual-docs capture": 0.0
+    },
+    "merge_push_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 0
+    },
+    "merge_push_job_seconds": 18459.0,
+    "pr": 868
+   },
+   {
+    "ci_wall_s": 8635.0,
+    "head": {
+     "cross legs (check-cross)": 12214.0,
+     "just check (gate / release-sweep / release test)": 3382.0,
+     "msrv / deny / release-compat / smoke": 462.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 3276.0,
+     "visual-docs capture": 724.0
+    },
+    "head_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "head_job_seconds": 20355.0,
+    "merge_push": {
+     "cross legs (check-cross)": 11810.0,
+     "just check (gate / release-sweep / release test)": 3553.0,
+     "msrv / deny / release-compat / smoke": 206.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 4895.0,
+     "visual-docs capture": 0.0
+    },
+    "merge_push_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 0
+    },
+    "merge_push_job_seconds": 20472.0,
+    "pr": 875
+   },
+   {
+    "ci_wall_s": 3836.0,
+    "head": {
+     "cross legs (check-cross)": 7525.0,
+     "just check (gate / release-sweep / release test)": 3612.0,
+     "msrv / deny / release-compat / smoke": 779.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 6312.0,
+     "visual-docs capture": 965.0
+    },
+    "head_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "head_job_seconds": 19433.0,
+    "merge_push": {
+     "cross legs (check-cross)": 11568.0,
+     "just check (gate / release-sweep / release test)": 3706.0,
+     "msrv / deny / release-compat / smoke": 523.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 4318.0,
+     "visual-docs capture": 0.0
+    },
+    "merge_push_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 0
+    },
+    "merge_push_job_seconds": 20125.0,
+    "pr": 878
+   },
+   {
+    "ci_wall_s": 21084.0,
+    "head": {
+     "cross legs (check-cross)": 10703.0,
+     "just check (gate / release-sweep / release test)": 3074.0,
+     "msrv / deny / release-compat / smoke": 649.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 3860.0,
+     "visual-docs capture": 767.0
+    },
+    "head_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "head_job_seconds": 19470.0,
+    "merge_push": {
+     "cross legs (check-cross)": 9743.0,
+     "just check (gate / release-sweep / release test)": 3006.0,
+     "msrv / deny / release-compat / smoke": 253.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 4309.0,
+     "visual-docs capture": 778.0
+    },
+    "merge_push_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "merge_push_job_seconds": 18302.0,
+    "pr": 884
+   },
+   {
+    "ci_wall_s": 10096.0,
+    "head": {
+     "cross legs (check-cross)": 10487.0,
+     "just check (gate / release-sweep / release test)": 3922.0,
+     "msrv / deny / release-compat / smoke": 705.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 4985.0,
+     "visual-docs capture": 934.0
+    },
+    "head_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "head_job_seconds": 21359.0,
+    "merge_push": {
+     "cross legs (check-cross)": 8941.0,
+     "just check (gate / release-sweep / release test)": 3929.0,
+     "msrv / deny / release-compat / smoke": 278.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 5048.0,
+     "visual-docs capture": 0.0
+    },
+    "merge_push_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 0
+    },
+    "merge_push_job_seconds": 18212.0,
+    "pr": 886
+   },
+   {
+    "ci_wall_s": 20833.0,
+    "head": {
+     "cross legs (check-cross)": 11019.0,
+     "just check (gate / release-sweep / release test)": 3730.0,
+     "msrv / deny / release-compat / smoke": 658.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 3185.0,
+     "visual-docs capture": 963.0
+    },
+    "head_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "head_job_seconds": 19865.0,
+    "merge_push": {
+     "cross legs (check-cross)": 12049.0,
+     "just check (gate / release-sweep / release test)": 3801.0,
+     "msrv / deny / release-compat / smoke": 233.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 3633.0,
+     "visual-docs capture": 0.0
+    },
+    "merge_push_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 0
+    },
+    "merge_push_job_seconds": 19730.0,
+    "pr": 887
+   },
+   {
+    "ci_wall_s": 12723.0,
+    "head": {
+     "cross legs (check-cross)": 12891.0,
+     "just check (gate / release-sweep / release test)": 3966.0,
+     "msrv / deny / release-compat / smoke": 717.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 2868.0,
+     "visual-docs capture": 1098.0
+    },
+    "head_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "head_job_seconds": 21930.0,
+    "merge_push": {
+     "cross legs (check-cross)": 5338.0,
+     "just check (gate / release-sweep / release test)": 4237.0,
+     "msrv / deny / release-compat / smoke": 251.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 5904.0,
+     "visual-docs capture": 0.0
+    },
+    "merge_push_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 0
+    },
+    "merge_push_job_seconds": 15829.0,
+    "pr": 891
+   },
+   {
+    "ci_wall_s": 17514.0,
+    "head": {
+     "cross legs (check-cross)": 10007.0,
+     "just check (gate / release-sweep / release test)": 4038.0,
+     "msrv / deny / release-compat / smoke": 672.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 17676.0,
+     "visual-docs capture": 1107.0
+    },
+    "head_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "head_job_seconds": 34132.0,
+    "merge_push": {
+     "cross legs (check-cross)": 17397.0,
+     "just check (gate / release-sweep / release test)": 3947.0,
+     "msrv / deny / release-compat / smoke": 651.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 19051.0,
+     "visual-docs capture": 0.0
+    },
+    "merge_push_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 0
+    },
+    "merge_push_job_seconds": 41059.0,
+    "pr": 892
+   },
+   {
+    "ci_wall_s": 11049.0,
+    "head": {
+     "cross legs (check-cross)": 11472.0,
+     "just check (gate / release-sweep / release test)": 3380.0,
+     "msrv / deny / release-compat / smoke": 665.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 4635.0,
+     "visual-docs capture": 877.0
+    },
+    "head_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "head_job_seconds": 21452.0,
+    "merge_push": {
+     "cross legs (check-cross)": 8581.0,
+     "just check (gate / release-sweep / release test)": 4094.0,
+     "msrv / deny / release-compat / smoke": 276.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 5032.0,
+     "visual-docs capture": 0.0
+    },
+    "merge_push_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 0
+    },
+    "merge_push_job_seconds": 17996.0,
+    "pr": 909
+   },
+   {
+    "ci_wall_s": 9770.0,
+    "head": {
+     "cross legs (check-cross)": 6913.0,
+     "just check (gate / release-sweep / release test)": 4799.0,
+     "msrv / deny / release-compat / smoke": 1089.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 4321.0,
+     "visual-docs capture": 1185.0
+    },
+    "head_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "head_job_seconds": 18750.0,
+    "merge_push": {
+     "cross legs (check-cross)": 12358.0,
+     "just check (gate / release-sweep / release test)": 4636.0,
+     "msrv / deny / release-compat / smoke": 649.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 5641.0,
+     "visual-docs capture": 0.0
+    },
+    "merge_push_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 0
+    },
+    "merge_push_job_seconds": 23302.0,
+    "pr": 914
+   },
+   {
+    "ci_wall_s": 8381.0,
+    "head": {
+     "cross legs (check-cross)": 9666.0,
+     "just check (gate / release-sweep / release test)": 4315.0,
+     "msrv / deny / release-compat / smoke": 650.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 4108.0,
+     "visual-docs capture": 1175.0
+    },
+    "head_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "head_job_seconds": 20401.0,
+    "merge_push": {
+     "cross legs (check-cross)": 8515.0,
+     "just check (gate / release-sweep / release test)": 4512.0,
+     "msrv / deny / release-compat / smoke": 470.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 12759.0,
+     "visual-docs capture": 0.0
+    },
+    "merge_push_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 0
+    },
+    "merge_push_job_seconds": 26265.0,
+    "pr": 916
+   },
+   {
+    "ci_wall_s": 9174.0,
+    "head": {
+     "cross legs (check-cross)": 14825.0,
+     "just check (gate / release-sweep / release test)": 4842.0,
+     "msrv / deny / release-compat / smoke": 702.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 5875.0,
+     "visual-docs capture": 1185.0
+    },
+    "head_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "head_job_seconds": 27842.0,
+    "merge_push": {
+     "cross legs (check-cross)": 0.0,
+     "just check (gate / release-sweep / release test)": 0.0,
+     "msrv / deny / release-compat / smoke": 0.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 0.0,
+     "visual-docs capture": 0.0
+    },
+    "merge_push_count": {
+     "cross legs (check-cross)": 0,
+     "just check (gate / release-sweep / release test)": 0,
+     "msrv / deny / release-compat / smoke": 0,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 0,
+     "visual-docs capture": 0
+    },
+    "merge_push_job_seconds": 0,
+    "pr": 922
+   },
+   {
+    "ci_wall_s": 7844.0,
+    "head": {
+     "cross legs (check-cross)": 10912.0,
+     "just check (gate / release-sweep / release test)": 5034.0,
+     "msrv / deny / release-compat / smoke": 652.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 5740.0,
+     "visual-docs capture": 940.0
+    },
+    "head_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "head_job_seconds": 23591.0,
+    "merge_push": {
+     "cross legs (check-cross)": 6716.0,
+     "just check (gate / release-sweep / release test)": 4426.0,
+     "msrv / deny / release-compat / smoke": 265.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 5523.0,
+     "visual-docs capture": 960.0
+    },
+    "merge_push_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "merge_push_job_seconds": 17964.0,
+    "pr": 942
+   }
+  ],
+  "releases": [
+   {
+    "cd": {
+     "cross legs (check-cross)": 6720.0,
+     "just check (gate / release-sweep / release test)": 5818.0,
+     "msrv / deny / release-compat / smoke": 314.0,
+     "release-mode builds of the 5 targets": 8389.0,
+     "smoke-published.sh legs": 6633.0,
+     "visual-docs capture": 868.0
+    },
+    "cd_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 2,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 15,
+     "smoke-published.sh legs": 34,
+     "visual-docs capture": 1
+    },
+    "cd_job_seconds": 29847.0,
+    "merge_to_last_cd_job_s": 21290.0,
+    "phases": {
+     "ci.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 3671.0,
+       "name": "cross (macos-latest)"
+      },
+      "wall_s": 7044.0
+     },
+     "engine-currency.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 8.0,
+       "name": "engines-current"
+      },
+      "wall_s": 11.0
+     },
+     "published-smoke.yml:workflow_run": {
+      "created_after_merge_s": 18352.0,
+      "longest": {
+       "duration_s": 29.0,
+       "name": "npm (windows-latest)"
+      },
+      "wall_s": 2938.0
+     },
+     "release-plz.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 36.0,
+       "name": "release-plz"
+      },
+      "wall_s": 43.0
+     },
+     "release.yml:release": {
+      "created_after_merge_s": 38.0,
+      "longest": {
+       "duration_s": 2859.0,
+       "name": "test"
+      },
+      "wall_s": 18311.0
+     },
+     "visual-docs.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 868.0,
+       "name": "visual-docs / capture (x86_64, shots/current, shots/verify, Visual docs)"
+      },
+      "wall_s": 986.0
+     }
+    },
+    "prs_carried": 1,
+    "release_pr": {
+     "cross legs (check-cross)": 7689.0,
+     "just check (gate / release-sweep / release test)": 2522.0,
+     "msrv / deny / release-compat / smoke": 650.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 3054.0,
+     "visual-docs capture": 698.0
+    },
+    "release_pr_checks_s": 24598.0,
+    "release_pr_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 1,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "release_pr_job_seconds": 14808.0,
+    "release_yml_serialization": {
+     "first_build_started_after_test_end_s": 3.0,
+     "longest_build_s": 812.0,
+     "release_run_wall_s": 18311.0,
+     "test_s": 2859.0
+    },
+    "tag": "v0.63.0"
+   },
+   {
+    "cd": {
+     "cross legs (check-cross)": 9037.0,
+     "just check (gate / release-sweep / release test)": 6078.0,
+     "msrv / deny / release-compat / smoke": 562.0,
+     "release-mode builds of the 5 targets": 8212.0,
+     "smoke-published.sh legs": 3322.0,
+     "visual-docs capture": 848.0
+    },
+    "cd_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 2,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 15,
+     "smoke-published.sh legs": 18,
+     "visual-docs capture": 1
+    },
+    "cd_job_seconds": 29078.0,
+    "merge_to_last_cd_job_s": 6393.0,
+    "phases": {
+     "ci.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 5426.0,
+       "name": "cross (windows-latest)"
+      },
+      "wall_s": 5445.0
+     },
+     "engine-currency.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 8.0,
+       "name": "engines-current"
+      },
+      "wall_s": 10.0
+     },
+     "published-smoke.yml:workflow_run": {
+      "created_after_merge_s": 5968.0,
+      "longest": {
+       "duration_s": 27.0,
+       "name": "pypi (macos-15-intel)"
+      },
+      "wall_s": 425.0
+     },
+     "release-plz.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 36.0,
+       "name": "release-plz"
+      },
+      "wall_s": 43.0
+     },
+     "release.yml:release": {
+      "created_after_merge_s": 39.0,
+      "longest": {
+       "duration_s": 3209.0,
+       "name": "test"
+      },
+      "wall_s": 5926.0
+     },
+     "visual-docs.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 848.0,
+       "name": "visual-docs / capture (x86_64, shots/current, shots/verify, Visual docs)"
+      },
+      "wall_s": 901.0
+     }
+    },
+    "prs_carried": 2,
+    "release_pr": {
+     "cross legs (check-cross)": 9836.0,
+     "just check (gate / release-sweep / release test)": 6341.0,
+     "msrv / deny / release-compat / smoke": 763.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 4928.0,
+     "visual-docs capture": 603.0
+    },
+    "release_pr_checks_s": 9759.0,
+    "release_pr_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 2,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "release_pr_job_seconds": 22689.0,
+    "release_yml_serialization": {
+     "first_build_started_after_test_end_s": 2.0,
+     "longest_build_s": 815.0,
+     "release_run_wall_s": 5926.0,
+     "test_s": 3209.0
+    },
+    "tag": "v0.63.1"
+   },
+   {
+    "cd": {
+     "cross legs (check-cross)": 8621.0,
+     "just check (gate / release-sweep / release test)": 6612.0,
+     "msrv / deny / release-compat / smoke": 658.0,
+     "release-mode builds of the 5 targets": 8566.0,
+     "smoke-published.sh legs": 4123.0,
+     "visual-docs capture": 0.0
+    },
+    "cd_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 2,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 15,
+     "smoke-published.sh legs": 47,
+     "visual-docs capture": 0
+    },
+    "cd_job_seconds": 29978.0,
+    "merge_to_last_cd_job_s": 32914.0,
+    "phases": {
+     "ci.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 4690.0,
+       "name": "cross (windows-latest)"
+      },
+      "wall_s": 4710.0
+     },
+     "engine-currency.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 9.0,
+       "name": "engines-current"
+      },
+      "wall_s": 12.0
+     },
+     "published-smoke.yml:workflow_run": {
+      "created_after_merge_s": 32883.0,
+      "longest": {
+       "duration_s": 27.0,
+       "name": "npm (windows-latest)"
+      },
+      "wall_s": 31.0
+     },
+     "release-plz.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 41.0,
+       "name": "release-plz"
+      },
+      "wall_s": 62.0
+     },
+     "release.yml:release": {
+      "created_after_merge_s": 55.0,
+      "longest": {
+       "duration_s": 3490.0,
+       "name": "test"
+      },
+      "wall_s": 11282.0
+     },
+     "visual-docs.yml:push": {
+      "created_after_merge_s": 4.0,
+      "longest": {
+       "duration_s": 2.0,
+       "name": "visual-docs / pages-preflight"
+      },
+      "wall_s": 3.0
+     }
+    },
+    "prs_carried": 1,
+    "release_pr": {
+     "cross legs (check-cross)": 8780.0,
+     "just check (gate / release-sweep / release test)": 6930.0,
+     "msrv / deny / release-compat / smoke": 875.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 4949.0,
+     "visual-docs capture": 607.0
+    },
+    "release_pr_checks_s": 9406.0,
+    "release_pr_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 2,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "release_pr_job_seconds": 22442.0,
+    "release_yml_serialization": {
+     "first_build_started_after_test_end_s": 2.0,
+     "longest_build_s": 883.0,
+     "release_run_wall_s": 11282.0,
+     "test_s": 3490.0
+    },
+    "tag": "v0.63.2"
+   },
+   {
+    "cd": {
+     "cross legs (check-cross)": 9883.0,
+     "just check (gate / release-sweep / release test)": 5758.0,
+     "msrv / deny / release-compat / smoke": 615.0,
+     "release-mode builds of the 5 targets": 7756.0,
+     "smoke-published.sh legs": 4550.0,
+     "visual-docs capture": 0.0
+    },
+    "cd_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 2,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 15,
+     "smoke-published.sh legs": 34,
+     "visual-docs capture": 0
+    },
+    "cd_job_seconds": 29600.0,
+    "merge_to_last_cd_job_s": 17954.0,
+    "phases": {
+     "ci.yml:push": {
+      "created_after_merge_s": 2.0,
+      "longest": {
+       "duration_s": 5990.0,
+       "name": "cross (windows-latest)"
+      },
+      "wall_s": 6008.0
+     },
+     "engine-currency.yml:push": {
+      "created_after_merge_s": 2.0,
+      "longest": {
+       "duration_s": 9.0,
+       "name": "engines-current"
+      },
+      "wall_s": 12.0
+     },
+     "published-smoke.yml:workflow_run": {
+      "created_after_merge_s": 17910.0,
+      "longest": {
+       "duration_s": 23.0,
+       "name": "pypi (windows-latest)"
+      },
+      "wall_s": 44.0
+     },
+     "release-plz.yml:push": {
+      "created_after_merge_s": 2.0,
+      "longest": {
+       "duration_s": 39.0,
+       "name": "release-plz"
+      },
+      "wall_s": 47.0
+     },
+     "release.yml:release": {
+      "created_after_merge_s": 40.0,
+      "longest": {
+       "duration_s": 3266.0,
+       "name": "test"
+      },
+      "wall_s": 5070.0
+     },
+     "visual-docs.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 1.0,
+       "name": "visual-docs / pages-preflight"
+      },
+      "wall_s": 2.0
+     }
+    },
+    "prs_carried": 1,
+    "release_pr": {
+     "cross legs (check-cross)": 9225.0,
+     "just check (gate / release-sweep / release test)": 6463.0,
+     "msrv / deny / release-compat / smoke": 558.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 3865.0,
+     "visual-docs capture": 847.0
+    },
+    "release_pr_checks_s": 5541.0,
+    "release_pr_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 2,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "release_pr_job_seconds": 21205.0,
+    "release_yml_serialization": {
+     "first_build_started_after_test_end_s": 2.0,
+     "longest_build_s": 886.0,
+     "release_run_wall_s": 5070.0,
+     "test_s": 3266.0
+    },
+    "tag": "v0.63.3"
+   },
+   {
+    "cd": {
+     "cross legs (check-cross)": 8684.0,
+     "just check (gate / release-sweep / release test)": 6603.0,
+     "msrv / deny / release-compat / smoke": 611.0,
+     "release-mode builds of the 5 targets": 7734.0,
+     "smoke-published.sh legs": 4037.0,
+     "visual-docs capture": 0.0
+    },
+    "cd_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 2,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 15,
+     "smoke-published.sh legs": 26,
+     "visual-docs capture": 0
+    },
+    "cd_job_seconds": 28584.0,
+    "merge_to_last_cd_job_s": 5809.0,
+    "phases": {
+     "ci.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 5335.0,
+       "name": "cross (windows-latest)"
+      },
+      "wall_s": 5355.0
+     },
+     "engine-currency.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 7.0,
+       "name": "engines-current"
+      },
+      "wall_s": 10.0
+     },
+     "published-smoke.yml:workflow_run": {
+      "created_after_merge_s": 5765.0,
+      "longest": {
+       "duration_s": 23.0,
+       "name": "pypi (windows-latest)"
+      },
+      "wall_s": 44.0
+     },
+     "release-plz.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 39.0,
+       "name": "release-plz"
+      },
+      "wall_s": 49.0
+     },
+     "release.yml:release": {
+      "created_after_merge_s": 43.0,
+      "longest": {
+       "duration_s": 3521.0,
+       "name": "test"
+      },
+      "wall_s": 5719.0
+     },
+     "visual-docs.yml:push": {
+      "created_after_merge_s": 4.0,
+      "longest": {
+       "duration_s": 0.0,
+       "name": "visual-docs / pages-preflight"
+      },
+      "wall_s": 1.0
+     }
+    },
+    "prs_carried": 1,
+    "release_pr": {
+     "cross legs (check-cross)": 9564.0,
+     "just check (gate / release-sweep / release test)": 6656.0,
+     "msrv / deny / release-compat / smoke": 640.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 3809.0,
+     "visual-docs capture": 837.0
+    },
+    "release_pr_checks_s": 5788.0,
+    "release_pr_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 2,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "release_pr_job_seconds": 21734.0,
+    "release_yml_serialization": {
+     "first_build_started_after_test_end_s": 2.0,
+     "longest_build_s": 847.0,
+     "release_run_wall_s": 5719.0,
+     "test_s": 3521.0
+    },
+    "tag": "v0.63.4"
+   },
+   {
+    "cd": {
+     "cross legs (check-cross)": 7118.0,
+     "just check (gate / release-sweep / release test)": 6641.0,
+     "msrv / deny / release-compat / smoke": 224.0,
+     "release-mode builds of the 5 targets": 8741.0,
+     "smoke-published.sh legs": 4748.0,
+     "visual-docs capture": 676.0
+    },
+    "cd_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 2,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 15,
+     "smoke-published.sh legs": 34,
+     "visual-docs capture": 1
+    },
+    "cd_job_seconds": 29198.0,
+    "merge_to_last_cd_job_s": 24860.0,
+    "phases": {
+     "ci.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 4215.0,
+       "name": "cross (windows-latest)"
+      },
+      "wall_s": 4232.0
+     },
+     "engine-currency.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 8.0,
+       "name": "engines-current"
+      },
+      "wall_s": 11.0
+     },
+     "published-smoke.yml:workflow_run": {
+      "created_after_merge_s": 24822.0,
+      "longest": {
+       "duration_s": 31.0,
+       "name": "npm (windows-latest)"
+      },
+      "wall_s": 38.0
+     },
+     "release-plz.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 35.0,
+       "name": "release-plz"
+      },
+      "wall_s": 43.0
+     },
+     "release.yml:release": {
+      "created_after_merge_s": 45.0,
+      "longest": {
+       "duration_s": 3564.0,
+       "name": "test"
+      },
+      "wall_s": 5564.0
+     },
+     "visual-docs.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 676.0,
+       "name": "visual-docs / capture (x86_64, shots/current, shots/verify, Visual docs)"
+      },
+      "wall_s": 740.0
+     }
+    },
+    "prs_carried": 1,
+    "release_pr": {
+     "cross legs (check-cross)": 9480.0,
+     "just check (gate / release-sweep / release test)": 6322.0,
+     "msrv / deny / release-compat / smoke": 615.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 3900.0,
+     "visual-docs capture": 873.0
+    },
+    "release_pr_checks_s": 5628.0,
+    "release_pr_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 2,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "release_pr_job_seconds": 21407.0,
+    "release_yml_serialization": {
+     "first_build_started_after_test_end_s": 2.0,
+     "longest_build_s": 894.0,
+     "release_run_wall_s": 5564.0,
+     "test_s": 3564.0
+    },
+    "tag": "v0.63.5"
+   },
+   {
+    "cd": {
+     "cross legs (check-cross)": 9627.0,
+     "just check (gate / release-sweep / release test)": 6980.0,
+     "msrv / deny / release-compat / smoke": 604.0,
+     "release-mode builds of the 5 targets": 8232.0,
+     "smoke-published.sh legs": 3474.0,
+     "visual-docs capture": 717.0
+    },
+    "cd_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 2,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 15,
+     "smoke-published.sh legs": 23,
+     "visual-docs capture": 1
+    },
+    "cd_job_seconds": 30774.0,
+    "merge_to_last_cd_job_s": 5618.0,
+    "phases": {
+     "ci.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 5443.0,
+       "name": "cross (windows-latest)"
+      },
+      "wall_s": 5463.0
+     },
+     "engine-currency.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 9.0,
+       "name": "engines-current"
+      },
+      "wall_s": 12.0
+     },
+     "published-smoke.yml:workflow_run": {
+      "created_after_merge_s": 5580.0,
+      "longest": {
+       "duration_s": 31.0,
+       "name": "npm (windows-latest)"
+      },
+      "wall_s": 38.0
+     },
+     "release-plz.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 40.0,
+       "name": "release-plz"
+      },
+      "wall_s": 48.0
+     },
+     "release.yml:release": {
+      "created_after_merge_s": 43.0,
+      "longest": {
+       "duration_s": 3753.0,
+       "name": "test"
+      },
+      "wall_s": 5535.0
+     },
+     "visual-docs.yml:push": {
+      "created_after_merge_s": 4.0,
+      "longest": {
+       "duration_s": 717.0,
+       "name": "visual-docs / capture (x86_64, shots/current, shots/verify, Visual docs)"
+      },
+      "wall_s": 773.0
+     }
+    },
+    "prs_carried": 1,
+    "release_pr": {
+     "cross legs (check-cross)": 9797.0,
+     "just check (gate / release-sweep / release test)": 7392.0,
+     "msrv / deny / release-compat / smoke": 647.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 4928.0,
+     "visual-docs capture": 709.0
+    },
+    "release_pr_checks_s": 5953.0,
+    "release_pr_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 2,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "release_pr_job_seconds": 23826.0,
+    "release_yml_serialization": {
+     "first_build_started_after_test_end_s": 3.0,
+     "longest_build_s": 926.0,
+     "release_run_wall_s": 5535.0,
+     "test_s": 3753.0
+    },
+    "tag": "v0.63.6"
+   },
+   {
+    "cd": {
+     "cross legs (check-cross)": 7300.0,
+     "just check (gate / release-sweep / release test)": 6811.0,
+     "msrv / deny / release-compat / smoke": 661.0,
+     "release-mode builds of the 5 targets": 8402.0,
+     "smoke-published.sh legs": 4750.0,
+     "visual-docs capture": 0.0
+    },
+    "cd_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 2,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 15,
+     "smoke-published.sh legs": 21,
+     "visual-docs capture": 0
+    },
+    "cd_job_seconds": 28889.0,
+    "merge_to_last_cd_job_s": 5609.0,
+    "phases": {
+     "ci.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 5389.0,
+       "name": "cross (windows-latest)"
+      },
+      "wall_s": 5403.0
+     },
+     "engine-currency.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 9.0,
+       "name": "engines-current"
+      },
+      "wall_s": 11.0
+     },
+     "published-smoke.yml:workflow_run": {
+      "created_after_merge_s": 5568.0,
+      "longest": {
+       "duration_s": 33.0,
+       "name": "npm (macos-15-intel)"
+      },
+      "wall_s": 41.0
+     },
+     "release-plz.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 38.0,
+       "name": "release-plz"
+      },
+      "wall_s": 44.0
+     },
+     "release.yml:release": {
+      "created_after_merge_s": 39.0,
+      "longest": {
+       "duration_s": 3714.0,
+       "name": "test"
+      },
+      "wall_s": 5526.0
+     },
+     "visual-docs.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 0.0,
+       "name": "visual-docs / pages-preflight"
+      },
+      "wall_s": 2.0
+     }
+    },
+    "prs_carried": 1,
+    "release_pr": {
+     "cross legs (check-cross)": 9131.0,
+     "just check (gate / release-sweep / release test)": 7447.0,
+     "msrv / deny / release-compat / smoke": 642.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 4271.0,
+     "visual-docs capture": 617.0
+    },
+    "release_pr_checks_s": 9201.0,
+    "release_pr_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 2,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "release_pr_job_seconds": 22347.0,
+    "release_yml_serialization": {
+     "first_build_started_after_test_end_s": 2.0,
+     "longest_build_s": 902.0,
+     "release_run_wall_s": 5526.0,
+     "test_s": 3714.0
+    },
+    "tag": "v0.63.7"
+   },
+   {
+    "cd": {
+     "cross legs (check-cross)": 9402.0,
+     "just check (gate / release-sweep / release test)": 6737.0,
+     "msrv / deny / release-compat / smoke": 362.0,
+     "release-mode builds of the 5 targets": 8717.0,
+     "smoke-published.sh legs": 5802.0,
+     "visual-docs capture": 0.0
+    },
+    "cd_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 2,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 15,
+     "smoke-published.sh legs": 34,
+     "visual-docs capture": 0
+    },
+    "cd_job_seconds": 32163.0,
+    "merge_to_last_cd_job_s": 38478.0,
+    "phases": {
+     "ci.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 5578.0,
+       "name": "cross (windows-latest)"
+      },
+      "wall_s": 6041.0
+     },
+     "engine-currency.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 8.0,
+       "name": "engines-current"
+      },
+      "wall_s": 10.0
+     },
+     "published-smoke.yml:workflow_run": {
+      "created_after_merge_s": 38431.0,
+      "longest": {
+       "duration_s": 26.0,
+       "name": "npm (macos-15-intel)"
+      },
+      "wall_s": 47.0
+     },
+     "release-plz.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 36.0,
+       "name": "release-plz"
+      },
+      "wall_s": 44.0
+     },
+     "release.yml:release": {
+      "created_after_merge_s": 39.0,
+      "longest": {
+       "duration_s": 3768.0,
+       "name": "test"
+      },
+      "wall_s": 10766.0
+     },
+     "visual-docs.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 1.0,
+       "name": "visual-docs / pages-preflight"
+      },
+      "wall_s": 2.0
+     }
+    },
+    "prs_carried": 1,
+    "release_pr": {
+     "cross legs (check-cross)": 8448.0,
+     "just check (gate / release-sweep / release test)": 7530.0,
+     "msrv / deny / release-compat / smoke": 566.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 3980.0,
+     "visual-docs capture": 877.0
+    },
+    "release_pr_checks_s": 9958.0,
+    "release_pr_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 2,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "release_pr_job_seconds": 21627.0,
+    "release_yml_serialization": {
+     "first_build_started_after_test_end_s": 2.0,
+     "longest_build_s": 899.0,
+     "release_run_wall_s": 10766.0,
+     "test_s": 3768.0
+    },
+    "tag": "v0.64.0"
+   },
+   {
+    "cd": {
+     "cross legs (check-cross)": 7095.0,
+     "just check (gate / release-sweep / release test)": 6609.0,
+     "msrv / deny / release-compat / smoke": 587.0,
+     "release-mode builds of the 5 targets": 9025.0,
+     "smoke-published.sh legs": 4981.0,
+     "visual-docs capture": 904.0
+    },
+    "cd_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 2,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 15,
+     "smoke-published.sh legs": 34,
+     "visual-docs capture": 1
+    },
+    "cd_job_seconds": 30715.0,
+    "merge_to_last_cd_job_s": 38746.0,
+    "phases": {
+     "ci.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 5487.0,
+       "name": "cross (windows-latest)"
+      },
+      "wall_s": 5504.0
+     },
+     "engine-currency.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 8.0,
+       "name": "engines-current"
+      },
+      "wall_s": 10.0
+     },
+     "published-smoke.yml:workflow_run": {
+      "created_after_merge_s": 38690.0,
+      "longest": {
+       "duration_s": 28.0,
+       "name": "npm (macos-15-intel)"
+      },
+      "wall_s": 56.0
+     },
+     "release-plz.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 32.0,
+       "name": "release-plz"
+      },
+      "wall_s": 40.0
+     },
+     "release.yml:release": {
+      "created_after_merge_s": 36.0,
+      "longest": {
+       "duration_s": 3512.0,
+       "name": "test"
+      },
+      "wall_s": 11495.0
+     },
+     "visual-docs.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 904.0,
+       "name": "visual-docs / capture (x86_64, shots/current, shots/verify, Visual docs)"
+      },
+      "wall_s": 965.0
+     }
+    },
+    "prs_carried": 1,
+    "release_pr": {
+     "cross legs (check-cross)": 9612.0,
+     "just check (gate / release-sweep / release test)": 7077.0,
+     "msrv / deny / release-compat / smoke": 533.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 4604.0,
+     "visual-docs capture": 876.0
+    },
+    "release_pr_checks_s": 6176.0,
+    "release_pr_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 2,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "release_pr_job_seconds": 22930.0,
+    "release_yml_serialization": {
+     "first_build_started_after_test_end_s": 2.0,
+     "longest_build_s": 892.0,
+     "release_run_wall_s": 11495.0,
+     "test_s": 3512.0
+    },
+    "tag": "v0.65.0"
+   },
+   {
+    "cd": {
+     "cross legs (check-cross)": 8323.0,
+     "just check (gate / release-sweep / release test)": 6846.0,
+     "msrv / deny / release-compat / smoke": 603.0,
+     "release-mode builds of the 5 targets": 9356.0,
+     "smoke-published.sh legs": 5611.0,
+     "visual-docs capture": 912.0
+    },
+    "cd_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 2,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 15,
+     "smoke-published.sh legs": 26,
+     "visual-docs capture": 1
+    },
+    "cd_job_seconds": 32853.0,
+    "merge_to_last_cd_job_s": 6628.0,
+    "phases": {
+     "ci.yml:push": {
+      "created_after_merge_s": 6.0,
+      "longest": {
+       "duration_s": 6233.0,
+       "name": "cross (windows-latest)"
+      },
+      "wall_s": 6251.0
+     },
+     "engine-currency.yml:push": {
+      "created_after_merge_s": 6.0,
+      "longest": {
+       "duration_s": 8.0,
+       "name": "engines-current"
+      },
+      "wall_s": 11.0
+     },
+     "published-smoke.yml:workflow_run": {
+      "created_after_merge_s": 6572.0,
+      "longest": {
+       "duration_s": 28.0,
+       "name": "npm (macos-15-intel)"
+      },
+      "wall_s": 56.0
+     },
+     "release-plz.yml:push": {
+      "created_after_merge_s": 6.0,
+      "longest": {
+       "duration_s": 40.0,
+       "name": "release-plz"
+      },
+      "wall_s": 49.0
+     },
+     "release.yml:release": {
+      "created_after_merge_s": 47.0,
+      "longest": {
+       "duration_s": 3738.0,
+       "name": "test"
+      },
+      "wall_s": 6522.0
+     },
+     "visual-docs.yml:push": {
+      "created_after_merge_s": 6.0,
+      "longest": {
+       "duration_s": 912.0,
+       "name": "visual-docs / capture (x86_64, shots/current, shots/verify, Visual docs)"
+      },
+      "wall_s": 994.0
+     }
+    },
+    "prs_carried": 1,
+    "release_pr": {
+     "cross legs (check-cross)": 9409.0,
+     "just check (gate / release-sweep / release test)": 6855.0,
+     "msrv / deny / release-compat / smoke": 821.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 3986.0,
+     "visual-docs capture": 918.0
+    },
+    "release_pr_checks_s": 7842.0,
+    "release_pr_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 2,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "release_pr_job_seconds": 22249.0,
+    "release_yml_serialization": {
+     "first_build_started_after_test_end_s": 2.0,
+     "longest_build_s": 927.0,
+     "release_run_wall_s": 6522.0,
+     "test_s": 3738.0
+    },
+    "tag": "v0.66.0"
+   },
+   {
+    "cd": {
+     "cross legs (check-cross)": 9573.0,
+     "just check (gate / release-sweep / release test)": 6311.0,
+     "msrv / deny / release-compat / smoke": 666.0,
+     "release-mode builds of the 5 targets": 9054.0,
+     "smoke-published.sh legs": 4898.0,
+     "visual-docs capture": 0.0
+    },
+    "cd_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 2,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 15,
+     "smoke-published.sh legs": 26,
+     "visual-docs capture": 0
+    },
+    "cd_job_seconds": 31764.0,
+    "merge_to_last_cd_job_s": 18660.0,
+    "phases": {
+     "ci.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 5802.0,
+       "name": "cross (windows-latest)"
+      },
+      "wall_s": 5821.0
+     },
+     "engine-currency.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 8.0,
+       "name": "engines-current"
+      },
+      "wall_s": 11.0
+     },
+     "published-smoke.yml:workflow_run": {
+      "created_after_merge_s": 11239.0,
+      "longest": {
+       "duration_s": 32.0,
+       "name": "npm (windows-latest)"
+      },
+      "wall_s": 7421.0
+     },
+     "release-plz.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 39.0,
+       "name": "release-plz"
+      },
+      "wall_s": 47.0
+     },
+     "release.yml:release": {
+      "created_after_merge_s": 43.0,
+      "longest": {
+       "duration_s": 3309.0,
+       "name": "test"
+      },
+      "wall_s": 11193.0
+     },
+     "visual-docs.yml:push": {
+      "created_after_merge_s": 4.0,
+      "longest": {
+       "duration_s": 1.0,
+       "name": "visual-docs / pages-preflight"
+      },
+      "wall_s": 1.0
+     }
+    },
+    "prs_carried": 1,
+    "release_pr": {
+     "cross legs (check-cross)": 11125.0,
+     "just check (gate / release-sweep / release test)": 7352.0,
+     "msrv / deny / release-compat / smoke": 632.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 4122.0,
+     "visual-docs capture": 838.0
+    },
+    "release_pr_checks_s": 7159.0,
+    "release_pr_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 2,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "release_pr_job_seconds": 24336.0,
+    "release_yml_serialization": {
+     "first_build_started_after_test_end_s": 2.0,
+     "longest_build_s": 895.0,
+     "release_run_wall_s": 11193.0,
+     "test_s": 3309.0
+    },
+    "tag": "v0.67.0"
+   },
+   {
+    "cd": {
+     "cross legs (check-cross)": 11808.0,
+     "just check (gate / release-sweep / release test)": 7006.0,
+     "msrv / deny / release-compat / smoke": 230.0,
+     "release-mode builds of the 5 targets": 9334.0,
+     "smoke-published.sh legs": 4964.0,
+     "visual-docs capture": 0.0
+    },
+    "cd_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 2,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 15,
+     "smoke-published.sh legs": 26,
+     "visual-docs capture": 0
+    },
+    "cd_job_seconds": 35334.0,
+    "merge_to_last_cd_job_s": 17007.0,
+    "phases": {
+     "ci.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 7762.0,
+       "name": "cross (windows-latest)"
+      },
+      "wall_s": 7779.0
+     },
+     "engine-currency.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 8.0,
+       "name": "engines-current"
+      },
+      "wall_s": 11.0
+     },
+     "published-smoke.yml:workflow_run": {
+      "created_after_merge_s": 13352.0,
+      "longest": {
+       "duration_s": 24.0,
+       "name": "pypi (windows-latest)"
+      },
+      "wall_s": 3655.0
+     },
+     "release-plz.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 39.0,
+       "name": "release-plz"
+      },
+      "wall_s": 48.0
+     },
+     "release.yml:release": {
+      "created_after_merge_s": 43.0,
+      "longest": {
+       "duration_s": 3787.0,
+       "name": "test"
+      },
+      "wall_s": 13307.0
+     },
+     "visual-docs.yml:push": {
+      "created_after_merge_s": 4.0,
+      "longest": {
+       "duration_s": 1.0,
+       "name": "visual-docs / pages-preflight"
+      },
+      "wall_s": 2.0
+     }
+    },
+    "prs_carried": 1,
+    "release_pr": {
+     "cross legs (check-cross)": 10358.0,
+     "just check (gate / release-sweep / release test)": 7130.0,
+     "msrv / deny / release-compat / smoke": 635.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 3907.0,
+     "visual-docs capture": 734.0
+    },
+    "release_pr_checks_s": 7004.0,
+    "release_pr_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 2,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "release_pr_job_seconds": 23017.0,
+    "release_yml_serialization": {
+     "first_build_started_after_test_end_s": 2.0,
+     "longest_build_s": 977.0,
+     "release_run_wall_s": 13307.0,
+     "test_s": 3787.0
+    },
+    "tag": "v0.68.0"
+   },
+   {
+    "cd": {
+     "cross legs (check-cross)": 10444.0,
+     "just check (gate / release-sweep / release test)": 7191.0,
+     "msrv / deny / release-compat / smoke": 317.0,
+     "release-mode builds of the 5 targets": 9650.0,
+     "smoke-published.sh legs": 4635.0,
+     "visual-docs capture": 940.0
+    },
+    "cd_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 2,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 15,
+     "smoke-published.sh legs": 34,
+     "visual-docs capture": 1
+    },
+    "cd_job_seconds": 34734.0,
+    "merge_to_last_cd_job_s": 23107.0,
+    "phases": {
+     "ci.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 5719.0,
+       "name": "cross (windows-latest)"
+      },
+      "wall_s": 9849.0
+     },
+     "engine-currency.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 8.0,
+       "name": "engines-current"
+      },
+      "wall_s": 11.0
+     },
+     "published-smoke.yml:workflow_run": {
+      "created_after_merge_s": 19456.0,
+      "longest": {
+       "duration_s": 38.0,
+       "name": "npm (windows-latest)"
+      },
+      "wall_s": 3651.0
+     },
+     "release-plz.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 32.0,
+       "name": "release-plz"
+      },
+      "wall_s": 191.0
+     },
+     "release.yml:release": {
+      "created_after_merge_s": 194.0,
+      "longest": {
+       "duration_s": 3872.0,
+       "name": "test"
+      },
+      "wall_s": 19259.0
+     },
+     "visual-docs.yml:push": {
+      "created_after_merge_s": 4.0,
+      "longest": {
+       "duration_s": 940.0,
+       "name": "visual-docs / capture (x86_64, shots/current, shots/verify, Visual docs)"
+      },
+      "wall_s": 1155.0
+     }
+    },
+    "prs_carried": 2,
+    "release_pr": {
+     "cross legs (check-cross)": 9430.0,
+     "just check (gate / release-sweep / release test)": 7305.0,
+     "msrv / deny / release-compat / smoke": 651.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 4778.0,
+     "visual-docs capture": 698.0
+    },
+    "release_pr_checks_s": 8302.0,
+    "release_pr_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 2,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "release_pr_job_seconds": 23087.0,
+    "release_yml_serialization": {
+     "first_build_started_after_test_end_s": 2.0,
+     "longest_build_s": 996.0,
+     "release_run_wall_s": 19259.0,
+     "test_s": 3872.0
+    },
+    "tag": "v0.68.1"
+   },
+   {
+    "cd": {
+     "cross legs (check-cross)": 8178.0,
+     "just check (gate / release-sweep / release test)": 7011.0,
+     "msrv / deny / release-compat / smoke": 560.0,
+     "release-mode builds of the 5 targets": 9664.0,
+     "smoke-published.sh legs": 5359.0,
+     "visual-docs capture": 684.0
+    },
+    "cd_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 2,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 15,
+     "smoke-published.sh legs": 21,
+     "visual-docs capture": 1
+    },
+    "cd_job_seconds": 32603.0,
+    "merge_to_last_cd_job_s": 38579.0,
+    "phases": {
+     "ci.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 4110.0,
+       "name": "cross (macos-latest)"
+      },
+      "wall_s": 22348.0
+     },
+     "engine-currency.yml:push": {
+      "created_after_merge_s": 4.0,
+      "longest": {
+       "duration_s": 8.0,
+       "name": "engines-current"
+      },
+      "wall_s": 10.0
+     },
+     "published-smoke.yml:workflow_run": {
+      "created_after_merge_s": 26211.0,
+      "longest": {
+       "duration_s": 21.0,
+       "name": "npm (windows-latest)"
+      },
+      "wall_s": 12368.0
+     },
+     "release-plz.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 37.0,
+       "name": "release-plz"
+      },
+      "wall_s": 46.0
+     },
+     "release.yml:release": {
+      "created_after_merge_s": 41.0,
+      "longest": {
+       "duration_s": 3738.0,
+       "name": "test"
+      },
+      "wall_s": 26168.0
+     },
+     "visual-docs.yml:push": {
+      "created_after_merge_s": 4.0,
+      "longest": {
+       "duration_s": 684.0,
+       "name": "visual-docs / capture (x86_64, shots/current, shots/verify, Visual docs)"
+      },
+      "wall_s": 742.0
+     }
+    },
+    "prs_carried": 3,
+    "release_pr": {
+     "cross legs (check-cross)": 11305.0,
+     "just check (gate / release-sweep / release test)": 7690.0,
+     "msrv / deny / release-compat / smoke": 916.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 4083.0,
+     "visual-docs capture": 752.0
+    },
+    "release_pr_checks_s": 14208.0,
+    "release_pr_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 2,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "release_pr_job_seconds": 24992.0,
+    "release_yml_serialization": {
+     "first_build_started_after_test_end_s": 2.0,
+     "longest_build_s": 950.0,
+     "release_run_wall_s": 26168.0,
+     "test_s": 3738.0
+    },
+    "tag": "v0.69.0"
+   },
+   {
+    "cd": {
+     "cross legs (check-cross)": 11023.0,
+     "just check (gate / release-sweep / release test)": 8218.0,
+     "msrv / deny / release-compat / smoke": 315.0,
+     "release-mode builds of the 5 targets": 9893.0,
+     "smoke-published.sh legs": 21015.0,
+     "visual-docs capture": 379.0
+    },
+    "cd_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 2,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 15,
+     "smoke-published.sh legs": 26,
+     "visual-docs capture": 1
+    },
+    "cd_job_seconds": 52094.0,
+    "merge_to_last_cd_job_s": 35877.0,
+    "phases": {
+     "ci.yml:push": {
+      "created_after_merge_s": 2.0,
+      "longest": {
+       "duration_s": 6833.0,
+       "name": "cross (windows-latest)"
+      },
+      "wall_s": 12903.0
+     },
+     "engine-currency.yml:push": {
+      "created_after_merge_s": 2.0,
+      "longest": {
+       "duration_s": 10.0,
+       "name": "engines-current"
+      },
+      "wall_s": 13.0
+     },
+     "published-smoke.yml:workflow_run": {
+      "created_after_merge_s": 28718.0,
+      "longest": {
+       "duration_s": 7158.0,
+       "name": "npm (macos-latest)"
+      },
+      "wall_s": 7159.0
+     },
+     "release-plz.yml:push": {
+      "created_after_merge_s": 2.0,
+      "longest": {
+       "duration_s": 46.0,
+       "name": "release-plz"
+      },
+      "wall_s": 55.0
+     },
+     "release.yml:release": {
+      "created_after_merge_s": 47.0,
+      "longest": {
+       "duration_s": 4548.0,
+       "name": "test"
+      },
+      "wall_s": 28668.0
+     },
+     "visual-docs.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 379.0,
+       "name": "visual-docs / capture (x86_64, shots/current, shots/verify, Visual docs)"
+      },
+      "wall_s": 409.0
+     }
+    },
+    "prs_carried": 5,
+    "release_pr": {
+     "cross legs (check-cross)": 11867.0,
+     "just check (gate / release-sweep / release test)": 7969.0,
+     "msrv / deny / release-compat / smoke": 443.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 3822.0,
+     "visual-docs capture": 993.0
+    },
+    "release_pr_checks_s": 23839.0,
+    "release_pr_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 2,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "release_pr_job_seconds": 25342.0,
+    "release_yml_serialization": {
+     "first_build_started_after_test_end_s": 2.0,
+     "longest_build_s": 1038.0,
+     "release_run_wall_s": 28668.0,
+     "test_s": 4548.0
+    },
+    "tag": "v0.70.0"
+   },
+   {
+    "cd": {
+     "cross legs (check-cross)": 12507.0,
+     "just check (gate / release-sweep / release test)": 8035.0,
+     "msrv / deny / release-compat / smoke": 584.0,
+     "release-mode builds of the 5 targets": 10299.0,
+     "smoke-published.sh legs": 18936.0,
+     "visual-docs capture": 719.0
+    },
+    "cd_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 2,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 15,
+     "smoke-published.sh legs": 21,
+     "visual-docs capture": 1
+    },
+    "cd_job_seconds": 52413.0,
+    "merge_to_last_cd_job_s": 27621.0,
+    "phases": {
+     "ci.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 7829.0,
+       "name": "cross (windows-latest)"
+      },
+      "wall_s": 16842.0
+     },
+     "engine-currency.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 9.0,
+       "name": "engines-current"
+      },
+      "wall_s": 11.0
+     },
+     "published-smoke.yml:workflow_run": {
+      "created_after_merge_s": 20462.0,
+      "longest": {
+       "duration_s": 7158.0,
+       "name": "npm (macos-latest)"
+      },
+      "wall_s": 7159.0
+     },
+     "release-plz.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 40.0,
+       "name": "release-plz"
+      },
+      "wall_s": 53.0
+     },
+     "release.yml:release": {
+      "created_after_merge_s": 47.0,
+      "longest": {
+       "duration_s": 4214.0,
+       "name": "test"
+      },
+      "wall_s": 27570.0
+     },
+     "visual-docs.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 719.0,
+       "name": "visual-docs / capture (x86_64, shots/current, shots/verify, Visual docs)"
+      },
+      "wall_s": 1153.0
+     }
+    },
+    "prs_carried": 1,
+    "release_pr": {
+     "cross legs (check-cross)": 11979.0,
+     "just check (gate / release-sweep / release test)": 8462.0,
+     "msrv / deny / release-compat / smoke": 588.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 5109.0,
+     "visual-docs capture": 1054.0
+    },
+    "release_pr_checks_s": 7592.0,
+    "release_pr_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 2,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "release_pr_job_seconds": 27437.0,
+    "release_yml_serialization": {
+     "first_build_started_after_test_end_s": 3.0,
+     "longest_build_s": 1004.0,
+     "release_run_wall_s": 27570.0,
+     "test_s": 4214.0
+    },
+    "tag": "v0.70.1"
+   },
+   {
+    "cd": {
+     "cross legs (check-cross)": 12085.0,
+     "just check (gate / release-sweep / release test)": 7701.0,
+     "msrv / deny / release-compat / smoke": 422.0,
+     "release-mode builds of the 5 targets": 9824.0,
+     "smoke-published.sh legs": 12492.0,
+     "visual-docs capture": 0.0
+    },
+    "cd_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 2,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 15,
+     "smoke-published.sh legs": 22,
+     "visual-docs capture": 0
+    },
+    "cd_job_seconds": 43589.0,
+    "merge_to_last_cd_job_s": 36052.0,
+    "phases": {
+     "ci.yml:push": {
+      "created_after_merge_s": 4.0,
+      "longest": {
+       "duration_s": 7499.0,
+       "name": "cross (windows-latest)"
+      },
+      "wall_s": 9324.0
+     },
+     "engine-currency.yml:push": {
+      "created_after_merge_s": 4.0,
+      "longest": {
+       "duration_s": 9.0,
+       "name": "engines-current"
+      },
+      "wall_s": 12.0
+     },
+     "published-smoke.yml:workflow_run": {
+      "created_after_merge_s": 29649.0,
+      "longest": {
+       "duration_s": 29.0,
+       "name": "npm (windows-latest)"
+      },
+      "wall_s": 6403.0
+     },
+     "release-plz.yml:push": {
+      "created_after_merge_s": 4.0,
+      "longest": {
+       "duration_s": 43.0,
+       "name": "release-plz"
+      },
+      "wall_s": 52.0
+     },
+     "release.yml:release": {
+      "created_after_merge_s": 46.0,
+      "longest": {
+       "duration_s": 7103.0,
+       "name": "verify-pypi (macos-latest)"
+      },
+      "wall_s": 29600.0
+     },
+     "visual-docs.yml:push": {
+      "created_after_merge_s": 4.0,
+      "longest": {
+       "duration_s": 1.0,
+       "name": "visual-docs / pages-preflight"
+      },
+      "wall_s": 2.0
+     }
+    },
+    "prs_carried": 2,
+    "release_pr": {
+     "cross legs (check-cross)": 15585.0,
+     "just check (gate / release-sweep / release test)": 7587.0,
+     "msrv / deny / release-compat / smoke": 1027.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 10330.0,
+     "visual-docs capture": 1098.0
+    },
+    "release_pr_checks_s": 9500.0,
+    "release_pr_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 2,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "release_pr_job_seconds": 35911.0,
+    "release_yml_serialization": {
+     "first_build_started_after_test_end_s": 2.0,
+     "longest_build_s": 1027.0,
+     "release_run_wall_s": 29600.0,
+     "test_s": 3830.0
+    },
+    "tag": "v0.71.0"
+   },
+   {
+    "cd": {
+     "cross legs (check-cross)": 10670.0,
+     "just check (gate / release-sweep / release test)": 8489.0,
+     "msrv / deny / release-compat / smoke": 563.0,
+     "release-mode builds of the 5 targets": 9313.0,
+     "smoke-published.sh legs": 6479.0,
+     "visual-docs capture": 0.0
+    },
+    "cd_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 2,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 15,
+     "smoke-published.sh legs": 34,
+     "visual-docs capture": 0
+    },
+    "cd_job_seconds": 36455.0,
+    "merge_to_last_cd_job_s": 18130.0,
+    "phases": {
+     "ci.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 7828.0,
+       "name": "cross (windows-latest)"
+      },
+      "wall_s": 11524.0
+     },
+     "engine-currency.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 8.0,
+       "name": "engines-current"
+      },
+      "wall_s": 11.0
+     },
+     "published-smoke.yml:workflow_run": {
+      "created_after_merge_s": 18058.0,
+      "longest": {
+       "duration_s": 30.0,
+       "name": "npm (windows-latest)"
+      },
+      "wall_s": 72.0
+     },
+     "release-plz.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 41.0,
+       "name": "release-plz"
+      },
+      "wall_s": 83.0
+     },
+     "release.yml:release": {
+      "created_after_merge_s": 77.0,
+      "longest": {
+       "duration_s": 4663.0,
+       "name": "test"
+      },
+      "wall_s": 17976.0
+     },
+     "visual-docs.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 0.0,
+       "name": "visual-docs / pages-preflight"
+      },
+      "wall_s": 1.0
+     }
+    },
+    "prs_carried": 1,
+    "release_pr": {
+     "cross legs (check-cross)": 16148.0,
+     "just check (gate / release-sweep / release test)": 8931.0,
+     "msrv / deny / release-compat / smoke": 683.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 8712.0,
+     "visual-docs capture": 1081.0
+    },
+    "release_pr_checks_s": 9380.0,
+    "release_pr_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 2,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "release_pr_job_seconds": 35882.0,
+    "release_yml_serialization": {
+     "first_build_started_after_test_end_s": 2.0,
+     "longest_build_s": 1033.0,
+     "release_run_wall_s": 17976.0,
+     "test_s": 4663.0
+    },
+    "tag": "v0.71.1"
+   },
+   {
+    "cd": {
+     "cross legs (check-cross)": 13346.0,
+     "just check (gate / release-sweep / release test)": 9240.0,
+     "msrv / deny / release-compat / smoke": 457.0,
+     "release-mode builds of the 5 targets": 10286.0,
+     "smoke-published.sh legs": 6796.0,
+     "visual-docs capture": 0.0
+    },
+    "cd_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 2,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 15,
+     "smoke-published.sh legs": 34,
+     "visual-docs capture": 0
+    },
+    "cd_job_seconds": 41323.0,
+    "merge_to_last_cd_job_s": 31026.0,
+    "phases": {
+     "ci.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 7886.0,
+       "name": "cross (windows-latest)"
+      },
+      "wall_s": 17894.0
+     },
+     "engine-currency.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 9.0,
+       "name": "engines-current"
+      },
+      "wall_s": 11.0
+     },
+     "published-smoke.yml:workflow_run": {
+      "created_after_merge_s": 28726.0,
+      "longest": {
+       "duration_s": 25.0,
+       "name": "npm (windows-latest)"
+      },
+      "wall_s": 2300.0
+     },
+     "release-plz.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 40.0,
+       "name": "release-plz"
+      },
+      "wall_s": 74.0
+     },
+     "release.yml:release": {
+      "created_after_merge_s": 75.0,
+      "longest": {
+       "duration_s": 4789.0,
+       "name": "test"
+      },
+      "wall_s": 28648.0
+     },
+     "visual-docs.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 0.0,
+       "name": "visual-docs / pages-preflight"
+      },
+      "wall_s": 2.0
+     }
+    },
+    "prs_carried": 2,
+    "release_pr": {
+     "cross legs (check-cross)": 10409.0,
+     "just check (gate / release-sweep / release test)": 8892.0,
+     "msrv / deny / release-compat / smoke": 1019.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 5226.0,
+     "visual-docs capture": 966.0
+    },
+    "release_pr_checks_s": 42029.0,
+    "release_pr_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 2,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "release_pr_job_seconds": 26838.0,
+    "release_yml_serialization": {
+     "first_build_started_after_test_end_s": 3.0,
+     "longest_build_s": 1141.0,
+     "release_run_wall_s": 28648.0,
+     "test_s": 4789.0
+    },
+    "tag": "v0.72.0"
+   },
+   {
+    "cd": {
+     "cross legs (check-cross)": 12891.0,
+     "just check (gate / release-sweep / release test)": 8772.0,
+     "msrv / deny / release-compat / smoke": 218.0,
+     "release-mode builds of the 5 targets": 9942.0,
+     "smoke-published.sh legs": 5163.0,
+     "visual-docs capture": 456.0
+    },
+    "cd_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 2,
+     "msrv / deny / release-compat / smoke": 3,
+     "release-mode builds of the 5 targets": 15,
+     "smoke-published.sh legs": 26,
+     "visual-docs capture": 1
+    },
+    "cd_job_seconds": 39037.0,
+    "merge_to_last_cd_job_s": 7920.0,
+    "phases": {
+     "ci.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 7777.0,
+       "name": "cross (windows-latest)"
+      },
+      "wall_s": 7794.0
+     },
+     "engine-currency.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 9.0,
+       "name": "engines-current"
+      },
+      "wall_s": 12.0
+     },
+     "published-smoke.yml:workflow_run": {
+      "created_after_merge_s": 7892.0,
+      "longest": {
+       "duration_s": 25.0,
+       "name": "npm (windows-latest)"
+      },
+      "wall_s": 28.0
+     },
+     "release-plz.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 32.0,
+       "name": "release-plz"
+      },
+      "wall_s": 39.0
+     },
+     "release.yml:release": {
+      "created_after_merge_s": 41.0,
+      "longest": {
+       "duration_s": 5058.0,
+       "name": "test"
+      },
+      "wall_s": 7848.0
+     },
+     "visual-docs.yml:push": {
+      "created_after_merge_s": 3.0,
+      "longest": {
+       "duration_s": 456.0,
+       "name": "visual-docs / capture (x86_64, shots/current, shots/verify, Visual docs)"
+      },
+      "wall_s": 490.0
+     }
+    },
+    "prs_carried": 1,
+    "release_pr": {
+     "cross legs (check-cross)": 10713.0,
+     "just check (gate / release-sweep / release test)": 7302.0,
+     "msrv / deny / release-compat / smoke": 849.0,
+     "release-mode builds of the 5 targets": 0.0,
+     "smoke-published.sh legs": 5031.0,
+     "visual-docs capture": 1183.0
+    },
+    "release_pr_checks_s": 5411.0,
+    "release_pr_count": {
+     "cross legs (check-cross)": 2,
+     "just check (gate / release-sweep / release test)": 2,
+     "msrv / deny / release-compat / smoke": 4,
+     "release-mode builds of the 5 targets": 0,
+     "smoke-published.sh legs": 8,
+     "visual-docs capture": 1
+    },
+    "release_pr_job_seconds": 25321.0,
+    "release_yml_serialization": {
+     "first_build_started_after_test_end_s": 2.0,
+     "longest_build_s": 1077.0,
+     "release_run_wall_s": 7848.0,
+     "test_s": 5058.0
+    },
+    "tag": "v0.73.0"
+   }
+  ]
+ },
+ "since": "2026-10-07T10:35:42Z"
+}
