@@ -11102,7 +11102,11 @@ RFC 3339 instant. It is written once, bounded at 20 seconds, and not written ins
 wait the store asked for; what could not be written is said on standard error. A claim
 carrying it reads as the claim it was everywhere a claim is read, so it refuses a launch
 and admits a `--take-over` exactly as one without it; an `acknowledged` that is not that
-shape refuses the claim as entry 119's keys do. The next projection of the driver that
+shape refuses the claim as entry 119's keys do. A run that lets go of the project — at its
+closeout, or at a `stop` whose teardown was clean — has nothing of its own in progress
+either: where the read its release makes first finds another run's claim nothing has
+acknowledged, it writes that acknowledgement instead of releasing, so a takeover waiting
+on a driver that ended before it ever read the takeover starts then. The next projection of the driver that
 took over writes its claim without it.
 
 ### The lease a claim states
@@ -11220,7 +11224,10 @@ journey sets it:
   with the displaced driver given a longer interval and cancel grace than the adopter, so
   the adopter's own terms would have let it start — and asserts that the adopter mints
   nothing while it is held, says what it waits on, starts once the publication has
-  finished, and that no dispatch or publication of the two overlapped;
+  finished, and that no dispatch or publication of the two overlapped; and
+  `a_takeover_over_a_claim_stating_no_lease_starts_only_on_an_acknowledgement` holds a
+  takeover over a claim stating no lease past the wait its own terms would give, and starts
+  it on the displaced driver's acknowledgement;
 - the four interleavings, each asserting from both drivers' records that every dispatch of
   the displaced driver — and so the publication it made — had settled before the adopter's
   first dispatch, that the displaced driver started none after it read the takeover, that no
@@ -11245,7 +11252,7 @@ journey sets it:
   `a_superseded_driver_notices_within_one_interval_and_publishes_nothing` and
   `a_withheld_publication_puts_its_branch_on_the_origin_when_nothing_else_has`, each
   takeover now waited on in the background; `a_successors_claim_survives_the_closeout_and_the_stop_of_the_run_it_took_over`
-  stops a driver its successor waits on; `an_adoption_whose_claim_read_is_not_answered_starts_nothing_until_a_read_answers`
+  stops a driver its successor waits on, whose stop acknowledges the successor's claim; `an_adoption_whose_claim_read_is_not_answered_starts_nothing_until_a_read_answers`
   replaces entry 119's journey of an adoption that went on driving past an unanswered read; and
   `a_claim_of_this_hosts_own_run_refuses_a_launch_naming_adopt_live_or_gone` takes a gone
   run of this host over without waiting, as `tests/e2e/bus_config.rs`'s two takeovers now

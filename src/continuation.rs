@@ -33,8 +33,8 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Map, Value};
 
 use crate::error::{Error, Result};
-use crate::payload::DriverClaim;
 use crate::payload::ClaimLease;
+use crate::payload::DriverClaim;
 use crate::taskgraph::{
     QualifiedId, Read, Store, DISPATCH_KEY, DRIVER_KEY, PUBLISHING_KEY, SETTLEMENT_KEY,
 };
@@ -174,7 +174,10 @@ pub(crate) fn publishing_of(
             "{project}: `{PUBLISHING_KEY}` is not a driver's publications: {why}"
         ))
     };
-    let Some(stored) = metadata.get(PUBLISHING_KEY).filter(|stored| !stored.is_null()) else {
+    let Some(stored) = metadata
+        .get(PUBLISHING_KEY)
+        .filter(|stored| !stored.is_null())
+    else {
         return Ok(None);
     };
     let read: Publishing =
@@ -182,7 +185,10 @@ pub(crate) fn publishing_of(
     if crate::vcs::usable(&read.run).is_none()
         || crate::vcs::usable(&read.host).is_none()
         || read.nodes.is_empty()
-        || read.nodes.iter().any(|node| crate::vcs::usable(node).is_none())
+        || read
+            .nodes
+            .iter()
+            .any(|node| crate::vcs::usable(node).is_none())
         || crate::projection::millis_of(&read.at).is_none()
     {
         return Err(refused(format!(
@@ -1265,7 +1271,11 @@ pub(crate) fn hand_over(
     let mut said: Option<std::result::Result<Publishing, String>> = None;
     loop {
         let left = wait.map_or(every, |wait| wait.saturating_sub(written.elapsed()));
-        std::thread::sleep(if left.is_zero() { every } else { every.min(left) });
+        std::thread::sleep(if left.is_zero() {
+            every
+        } else {
+            every.min(left)
+        });
         let read = store
             .project_metadata_within(project, CLAIM_READ_DEADLINE)
             .and_then(|metadata| {
@@ -1315,9 +1325,8 @@ pub(crate) fn hand_over(
         // way, and one this read cannot make out could be hiding one.
         let standing = match publishing {
             Ok(Some(publishing))
-                if displaced.is_some_and(|claim| {
-                    claim.names(&publishing.run, &publishing.host)
-                }) =>
+                if displaced
+                    .is_some_and(|claim| claim.names(&publishing.run, &publishing.host)) =>
             {
                 Some(Ok(publishing))
             }
@@ -1620,7 +1629,10 @@ mod tests {
         }
         // A claim without one is a claim a build that kept no lease wrote.
         let bare = BTreeMap::from([(DRIVER_KEY.to_owned(), claim("a", "h"))]);
-        assert_eq!(claim_of("p", &bare).expect("reads").expect("held").lease, None);
+        assert_eq!(
+            claim_of("p", &bare).expect("reads").expect("held").lease,
+            None
+        );
 
         let fence = |value: Value| BTreeMap::from([(PUBLISHING_KEY.to_owned(), value)]);
         assert_eq!(publishing_of("p", &BTreeMap::new()).expect("absent"), None);

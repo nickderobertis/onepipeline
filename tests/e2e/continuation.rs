@@ -1607,7 +1607,10 @@ fn a_publication_held_past_the_whole_takeover_wait_holds_the_takeover_until_it_h
     // Held past the whole wait — the displaced driver's, longer than the adopter's own — and
     // a few polls more: the adopter has minted nothing, and the publication is still held.
     std::thread::sleep(theirs + std::time::Duration::from_secs(8));
-    assert!(held.holding(), "the publication was ended while it was held");
+    assert!(
+        held.holding(),
+        "the publication was ended while it was held"
+    );
     assert!(
         successor.run_file(run, "launch.json").metadata().is_err(),
         "the adopter minted its run {:?} after its claim landed, while the displaced \
@@ -2534,8 +2537,8 @@ fn a_settlement_dispatch_or_claim_that_is_not_one_refuses_the_launch() {
     );
     let mut taking = taking;
     taking.kill().expect("the waiting takeover is ended");
-    let said = String::from_utf8_lossy(&taking.wait_with_output().expect("it ends").stderr)
-        .into_owned();
+    let said =
+        String::from_utf8_lossy(&taking.wait_with_output().expect("it ends").stderr).into_owned();
     assert!(
         said.contains("--take-over passes a claim that is not one"),
         "{said}"

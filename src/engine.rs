@@ -2105,9 +2105,10 @@ fn converge(
                 .filter(|_| superseded_by.is_none())
                 .map_or(Duration::MAX, crate::continuation::ClaimWatch::until_read),
             // And when it next writes the publications under way the store last refused.
-            claims
-                .as_ref()
-                .map_or(Duration::MAX, crate::continuation::ClaimWatch::until_fence_retry),
+            claims.as_ref().map_or(
+                Duration::MAX,
+                crate::continuation::ClaimWatch::until_fence_retry,
+            ),
         ];
         let deadline = if moved {
             Duration::ZERO
