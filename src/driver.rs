@@ -2554,7 +2554,15 @@ fn attach(
     let beside = watch.gate();
     let engine = std::thread::Builder::new()
         .name(format!("engine-{}", paths.run))
-        .spawn(move || engine::drive_holding(&driving, lock, &beside))
+        .spawn(move || {
+            let driven = engine::drive_holding(&driving, lock, &beside);
+            // The same window as a detached driver's, held where a journey asks:
+            // the run is let go of and the loop below is still watching it.
+            if let Err(error) = crate::ordering::meet("ONEPIPELINE_TEST_LET_GO_GATE") {
+                eprintln!("onepipeline: {error}");
+            }
+            driven
+        })
         .map_err(|e| Error::Invalid(format!("cannot start the engine loop: {e}")))?;
 
     loop {

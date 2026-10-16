@@ -625,6 +625,7 @@ fn make_node_scratch_dir(labels: &Labels) -> Result<PathBuf> {
             // dispatch runs in. Plain, never Windows' verbatim `\\?\` spelling:
             // the run's `scratch-retained` record spells each directory plainly,
             // and that record has to name the directory this dispatch was given.
+            // llmlint: ignore[changed_behavior_has_e2e] the two spellings differ only on Windows, and the journey that compares them through the binary is `scratch::a_paused_run_dispatches_added_work_and_records_its_next_pause_freshly`, which the `cross (windows-latest)` leg runs and which failed there without this; on this host `executor::tests` holds the same contract and its Windows-only twin names the verbatim spelling.
             Ok(()) => {
                 return std::fs::canonicalize(&at)
                     .map(crate::templates::plain)
