@@ -225,7 +225,6 @@ test("the workload models every trigger the workflows declare and every event th
       .sort(),
   );
 });
-// The required contexts, read from the one list tests/ci_workflows.rs holds.
 const required = [
   ...readFileSync("tests/ci_workflows.rs", "utf8")
     .match(/const REQUIRED: &\[&str\] = &\[([\s\S]*?)\];/)[1]
@@ -520,8 +519,6 @@ test("an ordinary pull request emits every required context once, whatever the d
         }
       }
 });
-// The Linux jobs that report a required matrix context: the job display name,
-// the proof job it reads and the leg whose verdict it carries.
 function pathCarriers() {
   const jobs = workflows()["ci.yml"].jobs;
   return Object.entries(jobs)
@@ -1173,7 +1170,7 @@ test("unrecognized workflow/job/step fields are refused before budget interpreta
   }
 });
 
-test("policy CLI rejects incomplete, duplicate and extra argument invocations", () => {
+test("policy CLI rejects unknown or missing modes and incomplete, duplicate and extra argument invocations", () => {
   for (const args of [
     ["classify"],
     ["classify", "--event", eventPath, "--base", base],
@@ -1189,6 +1186,9 @@ test("policy CLI rejects incomplete, duplicate and extra argument invocations", 
       heads.version,
     ],
     ["carrier", "unexpected"],
+    ["path-carrier", "unexpected"],
+    ["unknown-mode"],
+    [],
   ]) {
     const result = spawnSync("node", [".github/macos-policy.mjs", ...args], {
       encoding: "utf8",
@@ -1202,7 +1202,7 @@ test("policy CLI rejects incomplete, duplicate and extra argument invocations", 
       },
     });
     assert.equal(result.status, 1);
-    assert.match(result.stderr, /usage|duplicate/);
+    assert.match(result.stderr, /usage|duplicate|expected classify, carrier or path-carrier/);
     assert.equal(result.stdout, "");
   }
 });
