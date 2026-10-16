@@ -53,8 +53,10 @@ The package name is not optional: `cargo install --git` searches the whole
 repository, and this one also carries the `onepipeline-testfakes` test harness,
 so an unqualified command fails with `multiple packages with binaries found`.
 
-Prebuilt archives for Linux (x86-64, arm64), macOS (Intel, Apple silicon), and
-Windows (x86-64) are attached to every release, with `sha256` checksums.
+Prebuilt archives for Linux (x86-64, arm64), macOS (Apple silicon), and Windows
+(x86-64) are attached to every release, with `sha256` checksums. Intel macOS
+builds are discontinued: on an Intel Mac, build from source with the command
+above.
 
 ## How the npm launcher is published
 

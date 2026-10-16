@@ -34,7 +34,7 @@ what = "The standalone `onepipeline` binary as maturin `bin`-bindings wheels, in
 published_by = ".github/workflows/release.yml — the `publish-pypi` job's pypa/gh-action-pypi-publish step, from pyproject.toml's [project] name."
 manifest = "pyproject.toml"
 
-# The five per-platform packages `scripts/npm-build.mjs` builds are `covers`
+# The four per-platform packages `scripts/npm-build.mjs` builds are `covers`
 # entries rather than targets of their own: nobody depends on
 # `onepipeline-cli-linux-x64`, because the launcher resolves exactly one of them
 # at its own exact version through `optionalDependencies`.
@@ -47,12 +47,14 @@ manifest = "npm/onepipeline-cli/package.json"
 covers = [
   "npm:onepipeline-cli-linux-x64",
   "npm:onepipeline-cli-linux-arm64",
-  "npm:onepipeline-cli-darwin-x64",
   "npm:onepipeline-cli-darwin-arm64",
   "npm:onepipeline-cli-win32-x64",
 ]
 
 # Entries of neither kind: `crates/testfakes` carries `publish = false` and
 # reaches no registry, and the `onepipeline-<triple>` GitHub Release archives are
-# manual downloads no `<registry>:<name>` names. No `[[retired]]` — nothing
-# published here has been withdrawn.
+# manual downloads no `<registry>:<name>` names.
+
+[[retired]]
+id = "npm:onepipeline-cli-darwin-x64"
+why = "Intel macOS builds are discontinued: releases ship macOS binaries for Apple silicon only, and the launcher refuses Intel macOS with that message. Build from source on an Intel Mac with `cargo install onepipeline --locked`."
