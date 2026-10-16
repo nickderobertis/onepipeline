@@ -291,6 +291,7 @@ fn the_dispatch_request_carries_every_field_the_contract_declares() {
             overflow: None,
             labels: Default::default(),
             refuse_conflicts: false,
+            caller_merges_base: false,
         }),
         cancel: CancellationToken::new(),
         attempt: NonZeroU32::new(2).expect("two is an attempt"),
@@ -1016,9 +1017,9 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), EVENTS_BUNDLE_VERSION);
     assert_eq!(
-        divergence_block("123.")["bundle_versions"]["events"],
+        divergence_block("127.")["bundle_versions"]["events"],
         EVENTS_BUNDLE_VERSION,
-        "the events bundle version must be the one the landing entry records"
+        "the scratch bundle version must be the manager's recorded ruling"
     );
     let carried: Vec<String> = bundle
         .schemas()
@@ -3238,6 +3239,7 @@ fn the_branch_name_template_is_what_the_contract_names() {
         overflow: None,
         labels: Default::default(),
         refuse_conflicts: false,
+        caller_merges_base: false,
     })
     .expect("a request serializes");
     let field = block["session_request_field"]
@@ -6645,7 +6647,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // undocumented wire; a kind the contract lists and the enum does not carry is
     // a promise nothing keeps. `PIPELINE_KINDS` is what `Journal::emit` accepts,
     // so this is the emitted set and not a second copy of it.
-    assert_eq!(PIPELINE_KINDS.len(), 60, "the closed set changed size");
+    assert_eq!(PIPELINE_KINDS.len(), 62, "the closed set changed size");
     let listed: BTreeSet<String> = backticked()
         .into_iter()
         .filter(|token| {
@@ -6655,7 +6657,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // The kinds the contract does not list are exactly the ones the divergence
     // record proposes, and no others: a kind neither document names fails here.
     let proposed: BTreeSet<String> = [
-        "40.", "47.", "55.", "65.", "70.", "92.", "119.", "121.", "122.", "123.", "126.",
+        "40.", "47.", "55.", "65.", "70.", "92.", "119.", "121.", "122.", "123.", "126.", "127.",
     ]
     .into_iter()
     .flat_map(|entry| {
@@ -9172,6 +9174,12 @@ fn verb_functions_in_source() -> BTreeSet<String> {
 fn verb_functions_in_contract() -> BTreeSet<String> {
     backticked_in(verbs_paragraph())
         .into_iter()
+        .chain(backticked_in(
+            include_str!("../docs/contract-divergences.md")
+                .split("## 123.")
+                .nth(1)
+                .expect("scratch proposal"),
+        ))
         .filter_map(|span| {
             let name: String = span
                 .chars()
@@ -9218,6 +9226,9 @@ fn the_contract_names_every_post_launch_verb_the_sdk_publishes_and_no_other() {
     let _: fn(&Host) -> String = verbs::render_host;
     let _: fn(&Path, Option<&str>) -> Result<Goals> = verbs::goals;
     let _: fn(&Goals) -> String = verbs::render_goals;
+    let _: fn(&Path, &str) -> Result<verbs::ScratchDiscard> = verbs::scratch_discard;
+    let _: fn(&verbs::ScratchDiscard) -> String = verbs::render_scratch_discard;
+    let _: fn(&verbs::ScratchDiscard) -> String = verbs::render_scratch_discard_errors;
     let _: fn(&RunPaths) -> Result<Results> = verbs::results;
     let _: fn(&Results) -> String = verbs::render_results;
     let _: fn(&RunPaths, Option<&str>) -> Result<Transcript> = verbs::transcript;
@@ -10634,6 +10645,74 @@ fn the_publication_boundary_block_is_the_schema_and_the_guidance_the_binary_prin
     );
 }
 
+/// Scratch reclamation is the additive event vocabulary the manager approved.
+#[test]
+fn dispatch_scratch_lifetime_is_the_divergence_surface() {
+    use clap::Parser;
+    use onepipeline::cli::{Cli, Command, ScratchCommand};
+    use onepipeline::event::{EventKind, PipelineKind};
+    let contract = divergence_block("127.");
+    assert_eq!(
+        contract["bundle_versions"]["events"],
+        onepipeline::vocabulary::EVENTS_BUNDLE_VERSION
+    );
+    assert!(
+        matches!(Cli::try_parse_from(["onepipeline", "scratch", "discard", "example"]).unwrap().command, Command::Scratch(ScratchCommand::Discard { run }) if run == "example")
+    );
+    for (word, kind) in [
+        ("scratch-removed", PipelineKind::ScratchRemoved),
+        ("scratch-retained", PipelineKind::ScratchRetained),
+    ] {
+        assert_eq!(PipelineKind::from_wire(&EventKind(word.into())), Some(kind));
+        assert_eq!(kind.as_str(), word);
+        onepipeline::payload::registry()
+            .check(&onepipeline::payload::schema_of(kind), &contract[word])
+            .expect("the approved scratch payload validates against its registered document");
+    }
+}
+
+#[test]
+fn scratch_payloads_reject_relative_paths_and_empty_errors_at_the_registered_boundary() {
+    use onepipeline::event::PipelineKind;
+    use onepipeline::payload::{registry, schema_of};
+    let registry = registry();
+    for path in [
+        "/absolute/scratch/dispatch",
+        r"C:\scratch\dispatch",
+        r"\\server\share\dispatch",
+    ] {
+        let retained =
+            json!({"ending":"failed", "dirs":[{"path":path,"bytes":4096}], "total_bytes":4096});
+        registry
+            .check(&schema_of(PipelineKind::ScratchRetained), &retained)
+            .unwrap();
+    }
+    for path in [
+        "relative/dispatch",
+        r"\\\server\share",
+        r"\\server\\share",
+        r"\\server\",
+    ] {
+        let invalid =
+            json!({"ending":"failed", "dirs":[{"path":path,"bytes":4096}], "total_bytes":4096});
+        assert!(
+            registry
+                .check(&schema_of(PipelineKind::ScratchRetained), &invalid)
+                .is_err(),
+            "accepted {path:?}"
+        );
+    }
+    for failure in [
+        json!({"path":"relative/dispatch","error":"denied"}),
+        json!({"path":"/absolute/dispatch","error":""}),
+    ] {
+        let removed = json!({"trigger":"discard", "dirs":0, "bytes":0, "failed":[failure]});
+        assert!(registry
+            .check(&schema_of(PipelineKind::ScratchRemoved), &removed)
+            .is_err());
+    }
+}
+
 #[test]
 fn review_discovery_is_the_recorded_contract_and_registered_payload() {
     use onepipeline::{
@@ -10882,9 +10961,11 @@ fn the_readjustment_is_what_the_divergence_record_names() {
         json!({"state": "performed"})
     );
 
+    // The events bundle that first carried the readjustment; entry 127's scratch
+    // kinds raised the compiled-in one since, which that entry's own test pins.
     assert_eq!(
         block["bundle_versions"],
-        json!({"events": onepipeline::vocabulary::EVENTS_BUNDLE_VERSION, "planner_channel": DOCUMENT_VERSION})
+        json!({"events": "1.4.0", "planner_channel": DOCUMENT_VERSION})
     );
     assert!(
         onepipeline::channel::layout::bundle_json().contains(&format!("\"{op}\"")),
@@ -10981,8 +11062,24 @@ fn the_manager_landing_contract_is_what_the_divergence_record_names() {
         serde_json::from_value::<onepipeline::vocabulary::Significance>(word.clone())
             .unwrap_or_else(|why| panic!("{kind}'s word {word} is not onevcs's: {why}"));
     }
-    assert_eq!(
-        block["bundle_versions"]["events"],
-        onepipeline::vocabulary::EVENTS_BUNDLE_VERSION
+    // The bundle that first carried the landings; entry 127's scratch kinds
+    // raised it since, so the compiled-in bundle is that one or a later minor.
+    let release = |text: &str| -> (u64, u64, u64) {
+        let parts: Vec<u64> = text
+            .split('.')
+            .map(|part| part.parse().expect("a numeric version part"))
+            .collect();
+        (parts[0], parts[1], parts[2])
+    };
+    let carried = release(
+        block["bundle_versions"]["events"]
+            .as_str()
+            .expect("entry 123 names its events bundle"),
+    );
+    let compiled = release(onepipeline::vocabulary::EVENTS_BUNDLE_VERSION);
+    assert_eq!(carried, (1, 4, 0));
+    assert!(
+        carried.0 == compiled.0 && carried <= compiled,
+        "{compiled:?}"
     );
 }

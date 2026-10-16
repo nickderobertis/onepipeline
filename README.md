@@ -424,13 +424,18 @@ run's observer graph alike, whether the run was launched attached or detached.
 It fails nothing: a node settles on the death exactly as above, and the observer
 is restarted as it always is.
 
+Scratch is removed when every node is done (`SETTLED`). Other endings and pauses
+keep it for inspection or retry; `status` and `results` list its recorded disk
+usage. Remove an ended run’s scratch with `onepipeline scratch discard <run-id>`.
+The journal, reports and launch record stay.
+
 Every node dispatch carries `ONEPIPELINE_NODE_SCRATCH_DIR` in its own
 environment: an absolute path to a directory that exists and is writable before
 the dispatch's first turn, unique to that dispatch — a retry, a requeue and a
 resumed pin of the same node each get their own — and never removed while that
 dispatch runs. Nothing beyond that is promised, and the spelling of the path least
 of all: no consumer may derive one path from another. Not in the approved contract
-yet either: open divergence 48.
+yet either: open divergence 48, whose scratch lifetime divergence 127 revises.
 
 The planner supervises over the channel:
 
@@ -619,10 +624,13 @@ nothing and has capacity to spare, the driver runs `onevcs pool maintain` over e
 registered identity with that identity's `every`, paced in memory by
 `ONEPIPELINE_MAINTENANCE_PACE_SECONDS` (ten minutes by default). The sibling's
 recorded stamp decides what is due, so nothing is kept here, nothing runs twice, two
-drivers on one host are safe, and between runs nothing runs. A sweep that ran a
-slot's command — or met another run inside an identity, or failed — journals one
-`pool-maintenance` record; `status` names a sweep in progress and `results` the last
-record. A driver closing out mid-sweep finishes the identity in progress and begins
+drivers on one host are safe, and between runs nothing runs. The command a slot
+runs is the one its repository declares in its own `onevcs.toml`, else the host's
+`maintain`. A sweep that ran a slot's command — or met another run inside an
+identity, found a repository's `onevcs.toml` unreadable, or failed — journals one
+`pool-maintenance` record carrying `onevcs`'s report, each slot's `disk` before and
+after its command among it; `status` names a sweep in progress and `results` the last
+record, with how much it freed and any declaration it could not read. A driver closing out mid-sweep finishes the identity in progress and begins
 no other, so a settled run is not held behind the rest; its records carry
 `cut_short` naming the identities it did not reach, which another driver's idle pass
 or the host's own sweep picks up. Naming no schedule runs no maintenance at all.

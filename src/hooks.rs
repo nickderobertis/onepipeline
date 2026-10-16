@@ -339,6 +339,7 @@ pub(crate) fn at_let_go(paths: &RunPaths, relay: Relay) {
 /// driver — the driver is what it ended — so it journals the way the stop itself
 /// did, from outside the lock.
 pub(crate) fn at_stop(paths: &RunPaths) {
+    crate::scratch::at_ending(paths);
     let Some(view) = judged_view(paths) else {
         return;
     };

@@ -7756,6 +7756,11 @@ pass a closing driver stopped at an identity boundary.
 **A node pinned to a branch a pass retired still dispatches**: `onevcs` cuts the named
 branch fresh from the base.
 
+**The maintenance record beside it.** The `pool-maintenance` record the same sweep journals
+for its maintenance pass is written on entry 97's condition, which since `onevcs` 0.50.0
+also covers an identity answered `maintenance-unreadable`, and its per-identity payload is
+that library's report unchanged, each `ran` slot carrying its `disk`.
+
 Driven end to end by `tests/e2e/retirement.rs` against the linked `onevcs` over real git
 and a bare origin: the recording on each of the three landing paths, with the first
 attempt's branch then classified `superseded-with-changes` by that library while it still
@@ -8081,6 +8086,28 @@ maintenance pass was cut short, `branches-retired` is written with empty `retire
 and every enumerated identity unreached; where the identities could not be enumerated, the
 `error` record is written with no `cut_short`. `results` renders the cut on the
 `pool-maintenance` lines it prints. Reversing this costs one optional key on two documents.
+
+**Since `onevcs` 0.50.0: one more record condition, and the freed bytes.** A proposal to
+the planner who owns the contract, carried by the plan that linked that release;
+`docs/contract.md`'s record clause is unchanged until that ruling. That release runs the
+maintenance command a repository declares in its own `onevcs.toml`, read from its
+publication checkout's base, before the host's `maintain`; a declaration it cannot read runs
+nothing and answers `IdentityOutcome::MaintenanceUnreadable`. So a `pool-maintenance` record
+is journalled when some slot `ran`, is `unavailable` or is `broken`, or some identity was
+`claimed`, failed, or answered `maintenance-unreadable` — the last because that repository's
+cleanup has stopped and nothing else would say so. A pass in which nothing ran and nothing
+went wrong still writes nothing. The per-identity payload is still the sibling's own
+`IdentityOutcome` as it serializes it, so the new outcome reads
+`{"maintenance-unreadable": {"reason": …}}` and every `ran` slot carries `disk`,
+`{"before_bytes", "after_bytes"}` — its worktree's allocated bytes immediately before and
+after the command — or `null` where a measure failed. `outcome` was already that library's
+JSON, so `agent.pipeline.pool-maintenance@2` keeps its version. `results` prints, directly
+under the sweep's header, `pool maintenance: freed <X.X> GiB across <n> slot(s) (<name> <X.X>
+GiB, …)` for a pass in which some slot's `before_bytes` exceeds its `after_bytes` — counting
+only those slots, naming each identity by its key's last path segment with its slots summed,
+largest first — and `<identity> — maintenance unreadable: <reason>` among the per-identity
+lines. `tests/e2e/maintenance.rs` drives each condition, the freed line, a slot that grew and
+one whose `disk` is `null` over real pooled slots.
 
 **Where it is held.** `tests/e2e/maintenance.rs`'s
 `a_closing_driver_stops_its_sweep_after_the_identity_in_progress` settles a run inside the
@@ -10161,7 +10188,7 @@ Warm and cold are the design targets; the 10x bound is a temporary relaxation fr
 its 0.5 s design target, by the user's ruling of 2026-10-11 to land now, and a
 later gap-closing run owns the remaining 10x warm cost. Each was last measured on
 onevcs 0.48.0, whose decision read reads only the sessions the launcher label
-selects (onevcs #356, first released in 0.45.0); this build links 0.48.1, on which
+selects (onevcs #356, first released in 0.45.0); this build links 0.52.0, on which
 none was re-measured.
 
 ```json
@@ -10527,9 +10554,10 @@ and JSON results renderer to their SDK calls. `tests/contract.rs`'s
 above, and the recorded `review-comments-read` in `tests/recorded/pipeline-kinds.jsonl`
 comes from the discovery journey.
 
-The planner's dependency ruling retains `onevcs` 0.48.1 and `onevcs-testing` 0.17.0:
-those releases already carry this API; testing 0.18.0 requires onevcs 0.49.0 and
-would resolve a second engine under this manifest's unchanged pin.
+The planner's dependency ruling retained `onevcs` 0.48.1 and `onevcs-testing` 0.17.0
+for this change: those releases already carry this API; testing 0.18.0 requires
+onevcs 0.49.0 and would have resolved a second engine under the manifest's pin of the
+time. The link has since moved to `onevcs` 0.52.0 and `onevcs-testing` 0.19.4.
 
 ## 123. A manager's own landing could die or block with nothing holding its session — OPEN
 
@@ -10902,7 +10930,7 @@ branch on the origin and its verdict off its first trigger's read.
 per group and one `retarget_change` or `reopen_change` call per affected change request,
 none bypassing `onevcs`; a retarget writes the description the driver's own batched
 read returned, which a whole-journal re-fold keeps, and a draft no such read answered is
-left owed rather than read alone. Inside each call the linked `onevcs` 0.51.2 — whose two calls
+left owed rather than read alone. Inside each call the linked `onevcs` 0.52.0 — whose two calls
 are unchanged since 0.49.0 — makes its own: a
 `retarget_change` two single-change standings reads (before and after its write) and
 the repository's visibility read its write guard makes; a `reopen_change` two
@@ -11022,3 +11050,107 @@ rework and restack journeys of entry 121 read a republication
 reads it green. `tests/contract.rs`'s `the_readjustment_is_what_the_divergence_record_names`
 holds the block above against the public types, the registered documents and the
 published bundles.
+
+## 127. Dispatch scratch accumulated for the lifetime of the run directory — OPEN
+
+**Departure.** Divergence 48 says dispatch scratch is thrown away with the run.
+Run directories retain journals and reports indefinitely, so scratch never ended.
+
+**Proposal, approved for the scratch-reclamation plan.** A run reaching
+`SETTLED` removes every directory beneath its `scratch/`, then that root. At
+`ENDED failed`, `ENDED unfinished`, `ENDED stopped` and `PAUSED`, it measures and
+keeps scratch. The first ending producer journals exactly one account: the driver
+letting go, stop after `run-stopped`, or a reply applying an edit to an undriven
+run. This is independent of run-end hooks. A run made live and ending again gets
+a fresh record. `HOST SHUTDOWN` and run-level `PARKED` get none.
+
+The two new `PipelineKind`s register at `agent.pipeline.<kind>@2`:
+
+```json
+{
+  "event_kinds": ["scratch-removed", "scratch-retained"],
+  "scratch-removed": {"trigger": "success", "dirs": 3, "bytes": 4096, "failed": []},
+  "scratch-retained": {"ending": "failed", "dirs": [{"path": "/absolute/run/scratch/dispatch", "bytes": 4096}], "total_bytes": 4096},
+  "bundle_versions": {"events": "1.5.0"}
+}
+```
+
+Removal's `trigger` is `success` or `discard`; each `failed` item is an absolute
+`path` and nonempty `error`. Retention's `ending` is `failed`, `unfinished`,
+`stopped` or `paused`. Bytes are allocated disk usage, measured in one walk at
+that ending or removal, never by a view. Existing journal envelopes stay at 2;
+the additive published events bundle rises to 1.5.0 and is regenerated.
+
+`status RUN` beside free space and `results RUN` after hooks and maintenance read
+the latest scratch record. A retained record prints:
+
+```text
+  scratch kept: <N> dir(s), <X.X> GiB — remove with: onepipeline scratch discard <run-id>
+    <absolute dir>  <X.X> GiB
+```
+
+Directories are largest first. Status lists five, then
+`    … and <k> more, <X.X> GiB — full list: onepipeline results <run-id>`;
+results lists all. While paused the header ends
+`— kept while paused; discard with onepipeline scratch discard <run-id> once the run ends`.
+A partial removal prints in both views
+`  scratch: <k> dir(s) could not be removed: <first path>: <error>`.
+A run whose reading is neither an ending nor a pause (`ACTIVE`, `PARKED`,
+`DRIVER DEAD`, `HOST SHUTDOWN`), including one made live again after an ending,
+prints neither line until its next ending writes a fresh record.
+Neither view walks scratch. `RunReading` and planner surfaces do not change.
+
+`onepipeline scratch discard RUN` resolves exactly one id under the runs root,
+admitting only undriven `SETTLED` or `ENDED failed|unfinished|stopped`, including
+old runs without scratch records. It refuses all other states, unknown and
+path-like ids, and a symlink scratch root, with exit 2 and nothing deleted.
+Links within scratch are removed as links. No journal, report, launch record or
+other run file is removed. Complete removal (including nothing) exits 0;
+partial filesystem failure exits 1 and names every failure on stderr.
+
+Stdout is `removed <N> scratch dir(s) of run <run-id>, <X.X> GiB freed:`, then
+`  <absolute dir>  <X.X> GiB` per removed directory, largest first. With nothing:
+`removed 0 scratch dir(s) of run <run-id>, 0.0 GiB freed` without a list.
+Stderr refusals are `onepipeline scratch discard: run <run-id> is <WORD>, not ended; its scratch is kept and nothing was deleted`,
+`onepipeline scratch discard: <run dir>/scratch is a symlink; nothing was deleted`,
+or `onepipeline scratch discard: no run named '<arg>' under the runs root; deleted nothing`.
+Each filesystem failure is `onepipeline scratch discard: could not remove <absolute dir>: <error>`.
+
+**Manager ruling.** The plan fixes this behavior, revoking divergence 48's lifetime
+restatement. The manager approved the next free entry, then 123 (114 and 122 were
+occupied), and the events bundle's next minor, then 1.4.0 (1.3.0 is entry 122's), with
+new payloads at 2. Entry 123 and bundle 1.4.0 were then taken on `main` by the manager
+landings, so merging `main` moved this record to 124 and the bundle to 1.5.0 under that
+same next-free ruling; a later merge of `main`, whose review readjustment took 124
+through 126 at bundle 1.4.0, moved this record to 127, its bundle staying 1.5.0. Public `verbs::` functions keep CLI parity:
+`scratch_discard(root: &Path, run: &str) -> Result<ScratchDiscard>`,
+`ScratchDiscard::exit_code()`, `render_scratch_discard` for stdout and
+`render_scratch_discard_errors` for stderr. `cli::ScratchCommand::Discard { run }`
+is parsing over that call. Land's temporary drafting scratch and historical
+automatic cleanup are outside this proposal.
+
+The manager also ruled that `summary.json` and `checkpoint.json` may refresh as
+normal derived caches when discard appends or reads; all other files outside
+scratch retain their bytes, including the prior journal as an unchanged prefix.
+
+Driver handling uses its own settlement fold, inside the final handover before
+releasing ownership, rather than inferring an ending from its still-live pid.
+The manager directed this after the released-driver liveness investigation.
+
+The manager approved the conservative unreadable-journal guard: a non-strict
+fold cannot prove its displayed ending. Discard refuses it with exit 2 and the
+existing known-run refusal line naming that displayed word; automatic handling
+keeps scratch untouched. No new word, field or planner surface is introduced.
+The driver and an undriven replying writer record scratch inside their final
+handover before releasing ownership, using their own settlement fold.
+
+For partial removal the manager ruled that the public `scratch-removed.dirs` and
+`bytes` count only fully removed dispatch directories, agreeing with stdout.
+Failed directories remain named in `failed`; private workload telemetry separately
+accounts for every entry, directory and byte walked.
+
+The manager approved prevalidating every top-level dispatch path before any
+walk or deletion. A non-UTF-8 path cannot be represented by the fixed payload:
+automatic handling keeps scratch with a diagnostic, and discard refuses with
+exit 2 naming `scratch path is not UTF-8`, leaving scratch and journal unchanged.
+This is the same invalid-filesystem-input class as symlink and unreadable roots.

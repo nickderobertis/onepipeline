@@ -32,13 +32,18 @@ set positional-arguments := true
 # release into this clone's own build directory, never onto `PATH`, and
 # `tests/linked_engines.rs` fails if this line ever names a release other than the one
 # the lock links.
-onetaskgraph-version := "0.7.0"
+onetaskgraph-version := "0.7.1"
 onetaskgraph-root := justfile_directory() / "target" / "tools" / ("onetaskgraph-" + onetaskgraph-version)
 
 # The budget checker `budgets.yaml` is measured with (`just budgets`), installed at this
 # release into this clone's own build directory, never onto `PATH`, as `onetaskgraph` is above.
 onebudgetspec-version := "0.1.1"
 onebudgetspec-root := justfile_directory() / "target" / "tools" / ("onebudgetspec-" + onebudgetspec-version)
+
+# The pruner `just pool-maintenance` runs, installed onto `PATH` by `bootstrap` (the
+# `pool-maintenance` project's) at this release and no other: onevcs runs that recipe in
+# an idle warm-pool slot (`onevcs.toml`), outside any build directory of this clone.
+prune-superseded-version := "0.1.1"
 
 # The renderer the visual-docs capture draws each scene with (`just screenshots`).
 # NOT part of `check`, `gate` or `bootstrap`: screenshots are informational, and
@@ -135,6 +140,13 @@ _ensure-onebudgetspec:
       || cargo install onebudgetspec --locked --quiet --version {{onebudgetspec-version}} --root "{{onebudgetspec-root}}" \
       || { echo "onebudgetspec {{onebudgetspec-version}} could not be installed into {{onebudgetspec-root}}; 'just budgets' refuses without it" >&2; exit 1; }
 # llmlint: ignore-end[changed_behavior_has_e2e]
+
+# The released `cargo-prune-superseded` `just pool-maintenance` runs, skipped when that
+# release is already the one on `PATH`. Network, so only `bootstrap` installs it.
+_ensure-prune-superseded:
+    @[ "$(cargo-prune-superseded --version 2>/dev/null)" = "cargo-prune-superseded {{prune-superseded-version}}" ] \
+      || cargo install --locked cargo-prune-superseded --version {{prune-superseded-version}} --quiet \
+      || { echo "cargo-prune-superseded {{prune-superseded-version}} could not be installed; 'just pool-maintenance' refuses without it" >&2; exit 1; }
 
 # These are test runners, not rules: their version cannot change the gate's
 # verdict, so both here and CI take the latest rather than keeping two pins that
@@ -244,7 +256,10 @@ _crate-lint:
 # name rather than by `#[ignore]` so neither journey is ever a skipped test.
 # `stop_verdict` is offline but in none of the four either: it times the release
 # binary rather than the instrumented one, so its project
-# (`onepipeline-stop-verdict`) runs it through `just stop-verdict-journeys`.
+# (`onepipeline-stop-verdict`) runs it through `just stop-verdict-journeys`. Nor
+# are `pool_workload` and `scratch_workload`: each measures a whole host-shaped
+# workload, so its project (`onepipeline-pool-workload`,
+# `onepipeline-scratch-workload`) runs it only through `just workload`.
 #
 # `rest-tier` is spelled as the complement of every other binary, so a test
 # binary added later lands in the crate's tier rather than in none.
@@ -260,7 +275,7 @@ _crate-lint:
 # so no change could ever select one without the other, and running the two as
 # separate nextest processes would put eight process trees on the machine where
 # `.config/nextest.toml`'s one group allows four.
-rest-tier := "not binary(smoke) and not binary(release_channel) and not binary(note) and not binary(e2e) and not binary(contract) and not binary(stop_verdict)"
+rest-tier := "not binary(smoke) and not binary(release_channel) and not binary(note) and not binary(e2e) and not binary(contract) and not binary(stop_verdict) and not binary(pool_workload) and not binary(scratch_workload)"
 e2e-tier := "binary(e2e)"
 contract-tier := "binary(contract)"
 note-tier := "binary(note) and not test(/^harness::/)"
@@ -499,6 +514,27 @@ _stop-verdict-run:
     @ONEPIPELINE_BUDGET_BINARY="$PWD/target/release/onepipeline" RUSTFLAGS="-D warnings" cargo nextest run --locked -E 'binary(stop_verdict)' --no-tests=fail
     @node --test scripts/stop-guard-unpublished-budget.test.mjs
 
+# Outside `check` and `gate`: each runs a whole host-shaped workload journey to
+# measure it, which no per-change selection should pay for. Every project's
+# `workload` target is uncached and reached by no `check`, `test`, coverage or
+# `budgets` target; `release-sweep.yml` runs this after its quality gate.
+# Run every workload journey and check the budgets each one records.
+workload:
+    @bash scripts/nx.sh run-many -t workload
+
+# The `onepipeline-pool-workload` project's `workload` target: the journey writes
+# `target/budget-records/pool-maintenance.json`, which the project's own budgets
+# file reads. `harness::` is the shared harness's own self-tests, which the e2e
+# tier already runs.
+_pool-workload-run:
+    @just _ensure-node-modules
+    @RUSTFLAGS="-D warnings" cargo nextest run --locked -E 'binary(pool_workload) and not test(/^harness::/)' --no-tests=fail
+    @node_modules/.bin/onebudgetspec check tests/pool_workload/budgets.yaml
+
+_scratch-workload-run:
+    @RUSTFLAGS="-D warnings" cargo nextest run --locked --test scratch_workload --test-threads 1 -E 'not test(/^harness::/)' --no-tests=fail
+    @cd tests/scratch_workload && ../../node_modules/.bin/onebudgetspec check budgets.yaml
+
 # Drives the compiled binary — never an in-process `main()`.
 # The end-to-end binary journeys in isolation (also run by `test`/`check`),
 # narrowed to the journeys a nextest filter names when one is given.
@@ -577,6 +613,28 @@ host-view-budget binary built_by="":
     @just _ensure-node-modules
     @ONEPIPELINE_HOST_VIEW_BUILT_BY="$2" node scripts/host-view-measure.mjs "$1"
     @node_modules/.bin/onebudgetspec check budgets.yaml --id host-view-time
+
+# What onevcs runs in each idle warm-pool slot of this repository (`onevcs.toml`). `target`
+# is every directory this clone's cargo builds write to: `.cargo/config.toml` sets it, and
+# the pruner finds the nested ones (`target/llvm-cov-target`, `target/wheel-*`) inside it.
+# Each unit's newest build, and every build modified within the window, is kept.
+# Remove this clone's superseded cargo builds older than 2 days.
+pool-maintenance:
+    @command -v cargo-prune-superseded >/dev/null 2>&1 \
+      || { echo "cargo-prune-superseded is not on PATH: run 'just bootstrap' (or 'just _ensure-prune-superseded'), then re-run" >&2; exit 1; }
+    @cargo-prune-superseded --keep-within 2d target
+
+# Outside `check` and `gate`: the one host budget, `pool-maintenance/budgets.yaml`'s, builds
+# this clone twice to stage what it times. `release-sweep.yml` runs it after its gate.
+# Measure every project's host-labelled budgets against their thresholds.
+budgets-host:
+    @bash scripts/nx.sh run-many -t budgets-host
+
+# The `pool-maintenance` project's `budgets-host` target.
+_pool-maintenance-budgets:
+    @[ -x "{{onebudgetspec-root}}/bin/onebudgetspec" ] || [ -x "{{onebudgetspec-root}}/bin/onebudgetspec.exe" ] \
+      || { echo "onebudgetspec {{onebudgetspec-version}} is not installed: run 'just bootstrap' (or 'just _ensure-onebudgetspec'), then re-run" >&2; exit 1; }
+    @"{{onebudgetspec-root}}/bin/onebudgetspec" check pool-maintenance/budgets.yaml --label host
 
 # Both are outside `check` for the reason `deps-check` is: they read the
 # crates.io index, and the deterministic gate stays offline. The split half of
@@ -690,3 +748,4 @@ lint-llm-validate *args:
 # llmlint scoped to the files this branch changed since it forked from main.
 lint-llm-diff base="origin/main" *options:
     @bash scripts/llmlint-diff.sh "$@"
+
