@@ -423,6 +423,8 @@ def main() -> int:
     ap.add_argument("--run", type=int, action="append", default=[], help="only these runs (skips enumeration)")
     ap.add_argument("--jobs-for", default="ci.yml,release-sweep.yml,release-plz.yml,release.yml,published-smoke.yml,engine-currency.yml,notignored.yml,visual-docs.yml",
                     help="workflows whose every in-window run has its jobs read for the per-job figures")
+    ap.add_argument("--newest-first", action="store_true", help="read PRs and releases newest first")
+    ap.add_argument("--shape-since", help="also summarize PRs merged and releases published on or after this instant")
     ap.add_argument("--floor", type=int, default=2500)
     ap.add_argument("--cap", type=int, default=3000)
     ap.add_argument("--check-every", type=int, default=10)
@@ -453,8 +455,12 @@ def main() -> int:
                 runs_by_wf[wf] = workflow_runs(store, wf, args.since)
             closed = paged(store, f"repos/{store.repo}/pulls?state=closed&sort=updated&direction=desc", None,
                            stop=lambda b: (b[-1].get("updated_at") or "") < args.since)
-            prs = sorted(p["number"] for p in closed if (p.get("merged_at") or "") >= args.since)
-        result["run_counts"] = {wf: {"runs": len(rs), "by_event": _count(rs, "event"),
+            prs = sorted((p["number"] for p in closed if (p.get("merged_at") or "") >= args.since),
+                         reverse=args.newest_first)
+            result["prs_in_window"] = len(prs)
+            result["releases_in_window"] = len(in_window_rels)
+        result["run_counts"] = {wf: {"runs": len(rs), "first_created_at": min((r["created_at"] for r in rs), default=None),
+                                     "by_event": _count(rs, "event"),
                                      "by_conclusion": _count(rs, "conclusion")} for wf, rs in runs_by_wf.items()}
         for number in prs:
             try:
@@ -466,7 +472,7 @@ def main() -> int:
             for s in fig["head_runs"]:
                 add_run(s)
         if not focused:
-            for rel in in_window_rels:
+            for rel in sorted(in_window_rels, key=lambda r: r["published_at"], reverse=args.newest_first):
                 if rel["tag_name"] not in cd_cache:
                     try:
                         cd_cache[rel["tag_name"]] = cd_runs(store, rel)
@@ -498,7 +504,11 @@ def main() -> int:
         cycles = [p["cycle_s"] for p in carried if p["cycle_s"] is not None]
         rel["prs_carried"] = sorted(p["number"] for p in carried)
         rel["release_cycle_s"] = max(cycles) if cycles else None
-    result["summary"] = summarize(result)
+    result["summary"] = summarize(result["per_pr"], result["per_release"])
+    if args.shape_since:
+        result["summary_shape"] = {"since": args.shape_since} | summarize(
+            {k: p for k, p in result["per_pr"].items() if (p["merged_at"] or "") >= args.shape_since},
+            {k: r for k, r in result["per_release"].items() if (r["published_at"] or "") >= args.shape_since})
     result["requests"] = {"this_invocation": store.made, "all_invocations": store._total(),
                           "raw_files_read": len(set(store.reads))}
     args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -515,10 +525,10 @@ def _count(items: list, key: str) -> dict:
     return out
 
 
-def summarize(result: dict) -> dict:
-    prs = [p for p in result["per_pr"].values() if p["merged_at"]]
+def summarize(per_pr: dict, per_release: dict) -> dict:
+    prs = [p for p in per_pr.values() if p["merged_at"]]
     feature = [p for p in prs if not p["release_pr"]]
-    rels = [r for r in result["per_release"].values() if r["has_release_run"]]
+    rels = [r for r in per_release.values() if r["has_release_run"]]
 
     def ci_runs(group):
         return [s for p in group for s in p["head_runs"] if s["workflow"] == "ci.yml"]
