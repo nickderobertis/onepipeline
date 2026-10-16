@@ -169,6 +169,12 @@
    "n": 144,
    "p90": 19433.0
   },
+  "head_macos_job_seconds": {
+   "max": 17336.0,
+   "median": 3799.5,
+   "n": 144,
+   "p90": 5005.0
+  },
   "merge_push_family_seconds": {
    "cross legs (check-cross)": {
     "max": 17397.0,
@@ -212,6 +218,12 @@
    "median": 12694.0,
    "n": 144,
    "p90": 18101.0
+  },
+  "merge_push_macos_job_seconds": {
+   "max": 25220.0,
+   "median": 3525.0,
+   "n": 144,
+   "p90": 5214.0
   }
  },
  "per_job": {
@@ -1980,6 +1992,12 @@
    "n": 80,
    "p90": 32853.0
   },
+  "cd_macos_job_seconds": {
+   "max": 24308.0,
+   "median": 6634.0,
+   "n": 80,
+   "p90": 9463.0
+  },
   "last_cd_run": {
    "published-smoke.yml:workflow_run": 79,
    "release.yml:release": 1
@@ -2122,6 +2140,12 @@
    "n": 80,
    "p90": 23826.0
   },
+  "release_pr_macos_job_seconds": {
+   "max": 15987.0,
+   "median": 3885.0,
+   "n": 80,
+   "p90": 5051.0
+  },
   "release_yml_first_build_after_test_end_s": {
    "max": 18.0,
    "median": 2.0,
@@ -2169,6 +2193,7 @@
      "visual-docs capture": 0
     },
     "head_job_seconds": 8922.0,
+    "head_macos_s": 2777.0,
     "merge_push": {
      "cross legs (check-cross)": 4449.0,
      "just check (gate / release-sweep / release test)": 1446.0,
@@ -2186,6 +2211,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 8070.0,
+    "merge_push_macos_s": 2595.0,
     "pr": 293
    },
    {
@@ -2207,6 +2233,7 @@
      "visual-docs capture": 0
     },
     "head_job_seconds": 9111.0,
+    "head_macos_s": 2540.0,
     "merge_push": {
      "cross legs (check-cross)": 4359.0,
      "just check (gate / release-sweep / release test)": 1498.0,
@@ -2224,6 +2251,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 7992.0,
+    "merge_push_macos_s": 2698.0,
     "pr": 301
    },
    {
@@ -2245,6 +2273,7 @@
      "visual-docs capture": 0
     },
     "head_job_seconds": 8408.0,
+    "head_macos_s": 2217.0,
     "merge_push": {
      "cross legs (check-cross)": 4116.0,
      "just check (gate / release-sweep / release test)": 1831.0,
@@ -2262,6 +2291,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 8409.0,
+    "merge_push_macos_s": 2895.0,
     "pr": 310
    },
    {
@@ -2283,6 +2313,7 @@
      "visual-docs capture": 0
     },
     "head_job_seconds": 9639.0,
+    "head_macos_s": 2594.0,
     "merge_push": {
      "cross legs (check-cross)": 5260.0,
      "just check (gate / release-sweep / release test)": 1502.0,
@@ -2300,6 +2331,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 8956.0,
+    "merge_push_macos_s": 2685.0,
     "pr": 311
    },
    {
@@ -2321,6 +2353,7 @@
      "visual-docs capture": 0
     },
     "head_job_seconds": 8709.0,
+    "head_macos_s": 2778.0,
     "merge_push": {
      "cross legs (check-cross)": 5818.0,
      "just check (gate / release-sweep / release test)": 1017.0,
@@ -2338,6 +2371,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 8364.0,
+    "merge_push_macos_s": 2786.0,
     "pr": 314
    },
    {
@@ -2359,6 +2393,7 @@
      "visual-docs capture": 0
     },
     "head_job_seconds": 9623.0,
+    "head_macos_s": 2937.0,
     "merge_push": {
      "cross legs (check-cross)": 5657.0,
      "just check (gate / release-sweep / release test)": 1473.0,
@@ -2376,6 +2411,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 9509.0,
+    "merge_push_macos_s": 2877.0,
     "pr": 318
    },
    {
@@ -2397,6 +2433,7 @@
      "visual-docs capture": 0
     },
     "head_job_seconds": 8823.0,
+    "head_macos_s": 2680.0,
     "merge_push": {
      "cross legs (check-cross)": 4911.0,
      "just check (gate / release-sweep / release test)": 1833.0,
@@ -2414,6 +2451,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 9268.0,
+    "merge_push_macos_s": 3173.0,
     "pr": 319
    },
    {
@@ -2435,6 +2473,7 @@
      "visual-docs capture": 0
     },
     "head_job_seconds": 9535.0,
+    "head_macos_s": 2863.0,
     "merge_push": {
      "cross legs (check-cross)": 5317.0,
      "just check (gate / release-sweep / release test)": 1589.0,
@@ -2452,6 +2491,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 9176.0,
+    "merge_push_macos_s": 3389.0,
     "pr": 334
    },
    {
@@ -2473,6 +2513,7 @@
      "visual-docs capture": 0
     },
     "head_job_seconds": 8151.0,
+    "head_macos_s": 2497.0,
     "merge_push": {
      "cross legs (check-cross)": 4751.0,
      "just check (gate / release-sweep / release test)": 2088.0,
@@ -2490,6 +2531,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 8899.0,
+    "merge_push_macos_s": 2823.0,
     "pr": 336
    },
    {
@@ -2511,6 +2553,7 @@
      "visual-docs capture": 0
     },
     "head_job_seconds": 9141.0,
+    "head_macos_s": 2627.0,
     "merge_push": {
      "cross legs (check-cross)": 4554.0,
      "just check (gate / release-sweep / release test)": 1543.0,
@@ -2528,6 +2571,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 8069.0,
+    "merge_push_macos_s": 2585.0,
     "pr": 340
    },
    {
@@ -2549,6 +2593,7 @@
      "visual-docs capture": 0
     },
     "head_job_seconds": 9700.0,
+    "head_macos_s": 2842.0,
     "merge_push": {
      "cross legs (check-cross)": 5531.0,
      "just check (gate / release-sweep / release test)": 1870.0,
@@ -2566,6 +2611,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 10204.0,
+    "merge_push_macos_s": 2862.0,
     "pr": 346
    },
    {
@@ -2587,6 +2633,7 @@
      "visual-docs capture": 0
     },
     "head_job_seconds": 9163.0,
+    "head_macos_s": 2715.0,
     "merge_push": {
      "cross legs (check-cross)": 5233.0,
      "just check (gate / release-sweep / release test)": 1615.0,
@@ -2604,6 +2651,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 8901.0,
+    "merge_push_macos_s": 2872.0,
     "pr": 350
    },
    {
@@ -2625,6 +2673,7 @@
      "visual-docs capture": 0
     },
     "head_job_seconds": 9914.0,
+    "head_macos_s": 3059.0,
     "merge_push": {
      "cross legs (check-cross)": 5591.0,
      "just check (gate / release-sweep / release test)": 1639.0,
@@ -2642,6 +2691,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 9717.0,
+    "merge_push_macos_s": 2783.0,
     "pr": 353
    },
    {
@@ -2663,6 +2713,7 @@
      "visual-docs capture": 0
     },
     "head_job_seconds": 9896.0,
+    "head_macos_s": 2641.0,
     "merge_push": {
      "cross legs (check-cross)": 5640.0,
      "just check (gate / release-sweep / release test)": 1658.0,
@@ -2680,6 +2731,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 9416.0,
+    "merge_push_macos_s": 2592.0,
     "pr": 358
    },
    {
@@ -2701,6 +2753,7 @@
      "visual-docs capture": 0
     },
     "head_job_seconds": 8942.0,
+    "head_macos_s": 2512.0,
     "merge_push": {
      "cross legs (check-cross)": 3148.0,
      "just check (gate / release-sweep / release test)": 1698.0,
@@ -2718,6 +2771,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 6656.0,
+    "merge_push_macos_s": 1877.0,
     "pr": 385
    },
    {
@@ -2739,6 +2793,7 @@
      "visual-docs capture": 0
     },
     "head_job_seconds": 9518.0,
+    "head_macos_s": 2973.0,
     "merge_push": {
      "cross legs (check-cross)": 5712.0,
      "just check (gate / release-sweep / release test)": 1637.0,
@@ -2756,6 +2811,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 9524.0,
+    "merge_push_macos_s": 2774.0,
     "pr": 386
    },
    {
@@ -2777,6 +2833,7 @@
      "visual-docs capture": 0
     },
     "head_job_seconds": 9477.0,
+    "head_macos_s": 2621.0,
     "merge_push": {
      "cross legs (check-cross)": 4818.0,
      "just check (gate / release-sweep / release test)": 1653.0,
@@ -2794,6 +2851,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 8642.0,
+    "merge_push_macos_s": 2756.0,
     "pr": 389
    },
    {
@@ -2815,6 +2873,7 @@
      "visual-docs capture": 0
     },
     "head_job_seconds": 9258.0,
+    "head_macos_s": 2892.0,
     "merge_push": {
      "cross legs (check-cross)": 4987.0,
      "just check (gate / release-sweep / release test)": 1507.0,
@@ -2832,6 +2891,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 8813.0,
+    "merge_push_macos_s": 2691.0,
     "pr": 390
    },
    {
@@ -2853,6 +2913,7 @@
      "visual-docs capture": 0
     },
     "head_job_seconds": 8819.0,
+    "head_macos_s": 2486.0,
     "merge_push": {
      "cross legs (check-cross)": 6676.0,
      "just check (gate / release-sweep / release test)": 2136.0,
@@ -2870,6 +2931,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 11388.0,
+    "merge_push_macos_s": 3891.0,
     "pr": 394
    },
    {
@@ -2891,6 +2953,7 @@
      "visual-docs capture": 0
     },
     "head_job_seconds": 9177.0,
+    "head_macos_s": 2678.0,
     "merge_push": {
      "cross legs (check-cross)": 5757.0,
      "just check (gate / release-sweep / release test)": 1061.0,
@@ -2908,6 +2971,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 8264.0,
+    "merge_push_macos_s": 2815.0,
     "pr": 401
    },
    {
@@ -2929,6 +2993,7 @@
      "visual-docs capture": 0
     },
     "head_job_seconds": 10020.0,
+    "head_macos_s": 2860.0,
     "merge_push": {
      "cross legs (check-cross)": 5494.0,
      "just check (gate / release-sweep / release test)": 1569.0,
@@ -2946,6 +3011,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 9043.0,
+    "merge_push_macos_s": 2672.0,
     "pr": 402
    },
    {
@@ -2967,6 +3033,7 @@
      "visual-docs capture": 0
     },
     "head_job_seconds": 9082.0,
+    "head_macos_s": 2582.0,
     "merge_push": {
      "cross legs (check-cross)": 4983.0,
      "just check (gate / release-sweep / release test)": 1493.0,
@@ -2984,6 +3051,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 8852.0,
+    "merge_push_macos_s": 2785.0,
     "pr": 405
    },
    {
@@ -3005,6 +3073,7 @@
      "visual-docs capture": 0
     },
     "head_job_seconds": 9298.0,
+    "head_macos_s": 2636.0,
     "merge_push": {
      "cross legs (check-cross)": 5918.0,
      "just check (gate / release-sweep / release test)": 1719.0,
@@ -3022,6 +3091,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 10447.0,
+    "merge_push_macos_s": 3096.0,
     "pr": 414
    },
    {
@@ -3043,6 +3113,7 @@
      "visual-docs capture": 0
     },
     "head_job_seconds": 10283.0,
+    "head_macos_s": 2773.0,
     "merge_push": {
      "cross legs (check-cross)": 5771.0,
      "just check (gate / release-sweep / release test)": 2061.0,
@@ -3060,6 +3131,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 10628.0,
+    "merge_push_macos_s": 3179.0,
     "pr": 422
    },
    {
@@ -3081,6 +3153,7 @@
      "visual-docs capture": 0
     },
     "head_job_seconds": 9459.0,
+    "head_macos_s": 2592.0,
     "merge_push": {
      "cross legs (check-cross)": 5854.0,
      "just check (gate / release-sweep / release test)": 1448.0,
@@ -3098,6 +3171,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 10413.0,
+    "merge_push_macos_s": 3409.0,
     "pr": 433
    },
    {
@@ -3119,6 +3193,7 @@
      "visual-docs capture": 0
     },
     "head_job_seconds": 9731.0,
+    "head_macos_s": 3033.0,
     "merge_push": {
      "cross legs (check-cross)": 5956.0,
      "just check (gate / release-sweep / release test)": 1880.0,
@@ -3136,6 +3211,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 10771.0,
+    "merge_push_macos_s": 3460.0,
     "pr": 434
    },
    {
@@ -3157,6 +3233,7 @@
      "visual-docs capture": 0
     },
     "head_job_seconds": 10471.0,
+    "head_macos_s": 3559.0,
     "merge_push": {
      "cross legs (check-cross)": 5041.0,
      "just check (gate / release-sweep / release test)": 1656.0,
@@ -3174,6 +3251,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 9205.0,
+    "merge_push_macos_s": 3299.0,
     "pr": 435
    },
    {
@@ -3195,6 +3273,7 @@
      "visual-docs capture": 0
     },
     "head_job_seconds": 11036.0,
+    "head_macos_s": 3114.0,
     "merge_push": {
      "cross legs (check-cross)": 489.0,
      "just check (gate / release-sweep / release test)": 316.0,
@@ -3212,6 +3291,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 2196.0,
+    "merge_push_macos_s": 493.0,
     "pr": 437
    },
    {
@@ -3233,6 +3313,7 @@
      "visual-docs capture": 0
     },
     "head_job_seconds": 10757.0,
+    "head_macos_s": 2511.0,
     "merge_push": {
      "cross legs (check-cross)": 6475.0,
      "just check (gate / release-sweep / release test)": 1777.0,
@@ -3250,6 +3331,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 11130.0,
+    "merge_push_macos_s": 3207.0,
     "pr": 439
    },
    {
@@ -3271,6 +3353,7 @@
      "visual-docs capture": 0
     },
     "head_job_seconds": 10862.0,
+    "head_macos_s": 3091.0,
     "merge_push": {
      "cross legs (check-cross)": 3667.0,
      "just check (gate / release-sweep / release test)": 2146.0,
@@ -3288,6 +3371,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 9115.0,
+    "merge_push_macos_s": 3691.0,
     "pr": 443
    },
    {
@@ -3309,6 +3393,7 @@
      "visual-docs capture": 0
     },
     "head_job_seconds": 10976.0,
+    "head_macos_s": 3495.0,
     "merge_push": {
      "cross legs (check-cross)": 5706.0,
      "just check (gate / release-sweep / release test)": 1654.0,
@@ -3326,6 +3411,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 10629.0,
+    "merge_push_macos_s": 3790.0,
     "pr": 445
    },
    {
@@ -3347,6 +3433,7 @@
      "visual-docs capture": 0
     },
     "head_job_seconds": 9442.0,
+    "head_macos_s": 3078.0,
     "merge_push": {
      "cross legs (check-cross)": 5560.0,
      "just check (gate / release-sweep / release test)": 1580.0,
@@ -3364,6 +3451,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 9838.0,
+    "merge_push_macos_s": 3011.0,
     "pr": 448
    },
    {
@@ -3385,6 +3473,7 @@
      "visual-docs capture": 0
     },
     "head_job_seconds": 10745.0,
+    "head_macos_s": 3341.0,
     "merge_push": {
      "cross legs (check-cross)": 5808.0,
      "just check (gate / release-sweep / release test)": 1726.0,
@@ -3402,6 +3491,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 10388.0,
+    "merge_push_macos_s": 3186.0,
     "pr": 452
    },
    {
@@ -3423,6 +3513,7 @@
      "visual-docs capture": 0
     },
     "head_job_seconds": 10770.0,
+    "head_macos_s": 3261.0,
     "merge_push": {
      "cross legs (check-cross)": 5608.0,
      "just check (gate / release-sweep / release test)": 1713.0,
@@ -3440,6 +3531,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 10340.0,
+    "merge_push_macos_s": 2889.0,
     "pr": 469
    },
    {
@@ -3461,6 +3553,7 @@
      "visual-docs capture": 0
     },
     "head_job_seconds": 10930.0,
+    "head_macos_s": 3252.0,
     "merge_push": {
      "cross legs (check-cross)": 5066.0,
      "just check (gate / release-sweep / release test)": 1732.0,
@@ -3478,6 +3571,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 9521.0,
+    "merge_push_macos_s": 3117.0,
     "pr": 470
    },
    {
@@ -3499,6 +3593,7 @@
      "visual-docs capture": 0
     },
     "head_job_seconds": 11508.0,
+    "head_macos_s": 3479.0,
     "merge_push": {
      "cross legs (check-cross)": 5106.0,
      "just check (gate / release-sweep / release test)": 1591.0,
@@ -3516,6 +3611,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 9426.0,
+    "merge_push_macos_s": 2994.0,
     "pr": 472
    },
    {
@@ -3537,6 +3633,7 @@
      "visual-docs capture": 0
     },
     "head_job_seconds": 9492.0,
+    "head_macos_s": 2743.0,
     "merge_push": {
      "cross legs (check-cross)": 5920.0,
      "just check (gate / release-sweep / release test)": 1763.0,
@@ -3554,6 +3651,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 10439.0,
+    "merge_push_macos_s": 3210.0,
     "pr": 473
    },
    {
@@ -3575,6 +3673,7 @@
      "visual-docs capture": 0
     },
     "head_job_seconds": 11097.0,
+    "head_macos_s": 3335.0,
     "merge_push": {
      "cross legs (check-cross)": 5708.0,
      "just check (gate / release-sweep / release test)": 1532.0,
@@ -3592,6 +3691,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 10114.0,
+    "merge_push_macos_s": 3518.0,
     "pr": 477
    },
    {
@@ -3613,6 +3713,7 @@
      "visual-docs capture": 0
     },
     "head_job_seconds": 11311.0,
+    "head_macos_s": 3453.0,
     "merge_push": {
      "cross legs (check-cross)": 5723.0,
      "just check (gate / release-sweep / release test)": 1912.0,
@@ -3630,6 +3731,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 10398.0,
+    "merge_push_macos_s": 3208.0,
     "pr": 479
    },
    {
@@ -3651,6 +3753,7 @@
      "visual-docs capture": 0
     },
     "head_job_seconds": 11178.0,
+    "head_macos_s": 3216.0,
     "merge_push": {
      "cross legs (check-cross)": 5760.0,
      "just check (gate / release-sweep / release test)": 1729.0,
@@ -3668,6 +3771,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 10351.0,
+    "merge_push_macos_s": 3285.0,
     "pr": 482
    },
    {
@@ -3689,6 +3793,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 11128.0,
+    "head_macos_s": 2929.0,
     "merge_push": {
      "cross legs (check-cross)": 4722.0,
      "just check (gate / release-sweep / release test)": 1941.0,
@@ -3706,6 +3811,7 @@
      "visual-docs capture": 1
     },
     "merge_push_job_seconds": 10508.0,
+    "merge_push_macos_s": 2805.0,
     "pr": 486
    },
    {
@@ -3727,6 +3833,7 @@
      "visual-docs capture": 0
     },
     "head_job_seconds": 11228.0,
+    "head_macos_s": 2994.0,
     "merge_push": {
      "cross legs (check-cross)": 6126.0,
      "just check (gate / release-sweep / release test)": 1682.0,
@@ -3744,6 +3851,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 11108.0,
+    "merge_push_macos_s": 3458.0,
     "pr": 490
    },
    {
@@ -3765,6 +3873,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 10600.0,
+    "head_macos_s": 2733.0,
     "merge_push": {
      "cross legs (check-cross)": 6080.0,
      "just check (gate / release-sweep / release test)": 1467.0,
@@ -3782,6 +3891,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 9464.0,
+    "merge_push_macos_s": 3131.0,
     "pr": 492
    },
    {
@@ -3803,6 +3913,7 @@
      "visual-docs capture": 0
     },
     "head_job_seconds": 10975.0,
+    "head_macos_s": 3347.0,
     "merge_push": {
      "cross legs (check-cross)": 5995.0,
      "just check (gate / release-sweep / release test)": 1696.0,
@@ -3820,6 +3931,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 10701.0,
+    "merge_push_macos_s": 3532.0,
     "pr": 494
    },
    {
@@ -3841,6 +3953,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 12983.0,
+    "head_macos_s": 3479.0,
     "merge_push": {
      "cross legs (check-cross)": 7236.0,
      "just check (gate / release-sweep / release test)": 2110.0,
@@ -3858,6 +3971,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 12054.0,
+    "merge_push_macos_s": 3695.0,
     "pr": 495
    },
    {
@@ -3879,6 +3993,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 13376.0,
+    "head_macos_s": 3744.0,
     "merge_push": {
      "cross legs (check-cross)": 5927.0,
      "just check (gate / release-sweep / release test)": 2293.0,
@@ -3896,6 +4011,7 @@
      "visual-docs capture": 1
     },
     "merge_push_job_seconds": 12597.0,
+    "merge_push_macos_s": 2681.0,
     "pr": 497
    },
    {
@@ -3917,6 +4033,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 12053.0,
+    "head_macos_s": 3254.0,
     "merge_push": {
      "cross legs (check-cross)": 4770.0,
      "just check (gate / release-sweep / release test)": 1845.0,
@@ -3934,6 +4051,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 9348.0,
+    "merge_push_macos_s": 3278.0,
     "pr": 502
    },
    {
@@ -3955,6 +4073,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 11868.0,
+    "head_macos_s": 3047.0,
     "merge_push": {
      "cross legs (check-cross)": 2547.0,
      "just check (gate / release-sweep / release test)": 1292.0,
@@ -3972,6 +4091,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 5715.0,
+    "merge_push_macos_s": 1538.0,
     "pr": 511
    },
    {
@@ -3993,6 +4113,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 12563.0,
+    "head_macos_s": 3376.0,
     "merge_push": {
      "cross legs (check-cross)": 4651.0,
      "just check (gate / release-sweep / release test)": 2276.0,
@@ -4010,6 +4131,7 @@
      "visual-docs capture": 1
     },
     "merge_push_job_seconds": 9699.0,
+    "merge_push_macos_s": 2811.0,
     "pr": 517
    },
    {
@@ -4031,6 +4153,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 12353.0,
+    "head_macos_s": 3393.0,
     "merge_push": {
      "cross legs (check-cross)": 7535.0,
      "just check (gate / release-sweep / release test)": 2299.0,
@@ -4048,6 +4171,7 @@
      "visual-docs capture": 1
     },
     "merge_push_job_seconds": 13457.0,
+    "merge_push_macos_s": 3739.0,
     "pr": 519
    },
    {
@@ -4069,6 +4193,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 12949.0,
+    "head_macos_s": 3641.0,
     "merge_push": {
      "cross legs (check-cross)": 7157.0,
      "just check (gate / release-sweep / release test)": 1114.0,
@@ -4086,6 +4211,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 10214.0,
+    "merge_push_macos_s": 3461.0,
     "pr": 532
    },
    {
@@ -4107,6 +4233,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 12953.0,
+    "head_macos_s": 3315.0,
     "merge_push": {
      "cross legs (check-cross)": 6897.0,
      "just check (gate / release-sweep / release test)": 2069.0,
@@ -4124,6 +4251,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 12192.0,
+    "merge_push_macos_s": 4015.0,
     "pr": 537
    },
    {
@@ -4145,6 +4273,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 13617.0,
+    "head_macos_s": 3545.0,
     "merge_push": {
      "cross legs (check-cross)": 7055.0,
      "just check (gate / release-sweep / release test)": 2197.0,
@@ -4162,6 +4291,7 @@
      "visual-docs capture": 1
     },
     "merge_push_job_seconds": 12859.0,
+    "merge_push_macos_s": 3756.0,
     "pr": 541
    },
    {
@@ -4183,6 +4313,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 11056.0,
+    "head_macos_s": 2482.0,
     "merge_push": {
      "cross legs (check-cross)": 4644.0,
      "just check (gate / release-sweep / release test)": 2520.0,
@@ -4200,6 +4331,7 @@
      "visual-docs capture": 1
     },
     "merge_push_job_seconds": 12336.0,
+    "merge_push_macos_s": 2189.0,
     "pr": 542
    },
    {
@@ -4221,6 +4353,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 14212.0,
+    "head_macos_s": 3898.0,
     "merge_push": {
      "cross legs (check-cross)": 5433.0,
      "just check (gate / release-sweep / release test)": 2642.0,
@@ -4238,6 +4371,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 11594.0,
+    "merge_push_macos_s": 2189.0,
     "pr": 543
    },
    {
@@ -4259,6 +4393,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 12561.0,
+    "head_macos_s": 2979.0,
     "merge_push": {
      "cross legs (check-cross)": 6550.0,
      "just check (gate / release-sweep / release test)": 2608.0,
@@ -4276,6 +4411,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 12776.0,
+    "merge_push_macos_s": 3936.0,
     "pr": 546
    },
    {
@@ -4297,6 +4433,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 14026.0,
+    "head_macos_s": 3246.0,
     "merge_push": {
      "cross legs (check-cross)": 6686.0,
      "just check (gate / release-sweep / release test)": 2235.0,
@@ -4314,6 +4451,7 @@
      "visual-docs capture": 1
     },
     "merge_push_job_seconds": 13548.0,
+    "merge_push_macos_s": 3465.0,
     "pr": 550
    },
    {
@@ -4335,6 +4473,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 14367.0,
+    "head_macos_s": 3388.0,
     "merge_push": {
      "cross legs (check-cross)": 7106.0,
      "just check (gate / release-sweep / release test)": 2161.0,
@@ -4352,6 +4491,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 12971.0,
+    "merge_push_macos_s": 3749.0,
     "pr": 553
    },
    {
@@ -4373,6 +4513,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 14860.0,
+    "head_macos_s": 3862.0,
     "merge_push": {
      "cross legs (check-cross)": 7539.0,
      "just check (gate / release-sweep / release test)": 2257.0,
@@ -4390,6 +4531,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 12612.0,
+    "merge_push_macos_s": 3320.0,
     "pr": 554
    },
    {
@@ -4411,6 +4553,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 14299.0,
+    "head_macos_s": 3634.0,
     "merge_push": {
      "cross legs (check-cross)": 7041.0,
      "just check (gate / release-sweep / release test)": 2317.0,
@@ -4428,6 +4571,7 @@
      "visual-docs capture": 1
     },
     "merge_push_job_seconds": 13396.0,
+    "merge_push_macos_s": 3604.0,
     "pr": 556
    },
    {
@@ -4449,6 +4593,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 13738.0,
+    "head_macos_s": 3573.0,
     "merge_push": {
      "cross legs (check-cross)": 8072.0,
      "just check (gate / release-sweep / release test)": 2522.0,
@@ -4466,6 +4611,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 15061.0,
+    "merge_push_macos_s": 4016.0,
     "pr": 559
    },
    {
@@ -4487,6 +4633,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 14996.0,
+    "head_macos_s": 3834.0,
     "merge_push": {
      "cross legs (check-cross)": 7369.0,
      "just check (gate / release-sweep / release test)": 2306.0,
@@ -4504,6 +4651,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 13566.0,
+    "merge_push_macos_s": 3668.0,
     "pr": 569
    },
    {
@@ -4525,6 +4673,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 15471.0,
+    "head_macos_s": 4209.0,
     "merge_push": {
      "cross legs (check-cross)": 6428.0,
      "just check (gate / release-sweep / release test)": 2449.0,
@@ -4542,6 +4691,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 12441.0,
+    "merge_push_macos_s": 3235.0,
     "pr": 570
    },
    {
@@ -4563,6 +4713,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 14784.0,
+    "head_macos_s": 3459.0,
     "merge_push": {
      "cross legs (check-cross)": 1537.0,
      "just check (gate / release-sweep / release test)": 768.0,
@@ -4580,6 +4731,7 @@
      "visual-docs capture": 1
     },
     "merge_push_job_seconds": 5526.0,
+    "merge_push_macos_s": 1259.0,
     "pr": 573
    },
    {
@@ -4601,6 +4753,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 14949.0,
+    "head_macos_s": 4102.0,
     "merge_push": {
      "cross legs (check-cross)": 7092.0,
      "just check (gate / release-sweep / release test)": 2630.0,
@@ -4618,6 +4771,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 13244.0,
+    "merge_push_macos_s": 3450.0,
     "pr": 574
    },
    {
@@ -4639,6 +4793,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 15491.0,
+    "head_macos_s": 3577.0,
     "merge_push": {
      "cross legs (check-cross)": 7223.0,
      "just check (gate / release-sweep / release test)": 2391.0,
@@ -4656,6 +4811,7 @@
      "visual-docs capture": 1
     },
     "merge_push_job_seconds": 14099.0,
+    "merge_push_macos_s": 3816.0,
     "pr": 575
    },
    {
@@ -4677,6 +4833,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 15276.0,
+    "head_macos_s": 3876.0,
     "merge_push": {
      "cross legs (check-cross)": 5195.0,
      "just check (gate / release-sweep / release test)": 2567.0,
@@ -4694,6 +4851,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 11683.0,
+    "merge_push_macos_s": 1271.0,
     "pr": 580
    },
    {
@@ -4715,6 +4873,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 14844.0,
+    "head_macos_s": 3607.0,
     "merge_push": {
      "cross legs (check-cross)": 6912.0,
      "just check (gate / release-sweep / release test)": 2516.0,
@@ -4732,6 +4891,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 13510.0,
+    "merge_push_macos_s": 3947.0,
     "pr": 591
    },
    {
@@ -4753,6 +4913,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 13140.0,
+    "head_macos_s": 3508.0,
     "merge_push": {
      "cross legs (check-cross)": 6250.0,
      "just check (gate / release-sweep / release test)": 2605.0,
@@ -4770,6 +4931,7 @@
      "visual-docs capture": 1
     },
     "merge_push_job_seconds": 13720.0,
+    "merge_push_macos_s": 4226.0,
     "pr": 592
    },
    {
@@ -4791,6 +4953,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 15748.0,
+    "head_macos_s": 4215.0,
     "merge_push": {
      "cross legs (check-cross)": 7702.0,
      "just check (gate / release-sweep / release test)": 2044.0,
@@ -4808,6 +4971,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 12583.0,
+    "merge_push_macos_s": 3470.0,
     "pr": 595
    },
    {
@@ -4829,6 +4993,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 16039.0,
+    "head_macos_s": 4078.0,
     "merge_push": {
      "cross legs (check-cross)": 7328.0,
      "just check (gate / release-sweep / release test)": 2571.0,
@@ -4846,6 +5011,7 @@
      "visual-docs capture": 1
     },
     "merge_push_job_seconds": 15077.0,
+    "merge_push_macos_s": 3677.0,
     "pr": 598
    },
    {
@@ -4867,6 +5033,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 15944.0,
+    "head_macos_s": 4301.0,
     "merge_push": {
      "cross legs (check-cross)": 5063.0,
      "just check (gate / release-sweep / release test)": 1936.0,
@@ -4884,6 +5051,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 9997.0,
+    "merge_push_macos_s": 3425.0,
     "pr": 599
    },
    {
@@ -4905,6 +5073,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 13990.0,
+    "head_macos_s": 3298.0,
     "merge_push": {
      "cross legs (check-cross)": 7892.0,
      "just check (gate / release-sweep / release test)": 2618.0,
@@ -4922,6 +5091,7 @@
      "visual-docs capture": 1
     },
     "merge_push_job_seconds": 15299.0,
+    "merge_push_macos_s": 4045.0,
     "pr": 600
    },
    {
@@ -4943,6 +5113,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 15062.0,
+    "head_macos_s": 3652.0,
     "merge_push": {
      "cross legs (check-cross)": 6487.0,
      "just check (gate / release-sweep / release test)": 3061.0,
@@ -4960,6 +5131,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 13620.0,
+    "merge_push_macos_s": 4113.0,
     "pr": 604
    },
    {
@@ -4981,6 +5153,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 16220.0,
+    "head_macos_s": 4028.0,
     "merge_push": {
      "cross legs (check-cross)": 8157.0,
      "just check (gate / release-sweep / release test)": 3198.0,
@@ -4998,6 +5171,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 16242.0,
+    "merge_push_macos_s": 4545.0,
     "pr": 605
    },
    {
@@ -5019,6 +5193,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 15621.0,
+    "head_macos_s": 4359.0,
     "merge_push": {
      "cross legs (check-cross)": 5291.0,
      "just check (gate / release-sweep / release test)": 2647.0,
@@ -5036,6 +5211,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 11315.0,
+    "merge_push_macos_s": 3275.0,
     "pr": 608
    },
    {
@@ -5057,6 +5233,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 15778.0,
+    "head_macos_s": 4405.0,
     "merge_push": {
      "cross legs (check-cross)": 7559.0,
      "just check (gate / release-sweep / release test)": 2461.0,
@@ -5074,6 +5251,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 14713.0,
+    "merge_push_macos_s": 4203.0,
     "pr": 611
    },
    {
@@ -5095,6 +5273,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 16156.0,
+    "head_macos_s": 4482.0,
     "merge_push": {
      "cross legs (check-cross)": 8244.0,
      "just check (gate / release-sweep / release test)": 2867.0,
@@ -5112,6 +5291,7 @@
      "visual-docs capture": 1
     },
     "merge_push_job_seconds": 16686.0,
+    "merge_push_macos_s": 4105.0,
     "pr": 612
    },
    {
@@ -5133,6 +5313,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 15582.0,
+    "head_macos_s": 3998.0,
     "merge_push": {
      "cross legs (check-cross)": 2861.0,
      "just check (gate / release-sweep / release test)": 1593.0,
@@ -5150,6 +5331,7 @@
      "visual-docs capture": 1
     },
     "merge_push_job_seconds": 7938.0,
+    "merge_push_macos_s": 1667.0,
     "pr": 613
    },
    {
@@ -5171,6 +5353,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 14857.0,
+    "head_macos_s": 3953.0,
     "merge_push": {
      "cross legs (check-cross)": 0.0,
      "just check (gate / release-sweep / release test)": 0.0,
@@ -5188,6 +5371,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 2539.0,
+    "merge_push_macos_s": 403.0,
     "pr": 614
    },
    {
@@ -5209,6 +5393,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 15732.0,
+    "head_macos_s": 3817.0,
     "merge_push": {
      "cross legs (check-cross)": 8431.0,
      "just check (gate / release-sweep / release test)": 2692.0,
@@ -5226,6 +5411,7 @@
      "visual-docs capture": 1
     },
     "merge_push_job_seconds": 15625.0,
+    "merge_push_macos_s": 4015.0,
     "pr": 634
    },
    {
@@ -5247,6 +5433,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 16785.0,
+    "head_macos_s": 4371.0,
     "merge_push": {
      "cross legs (check-cross)": 8585.0,
      "just check (gate / release-sweep / release test)": 2511.0,
@@ -5264,6 +5451,7 @@
      "visual-docs capture": 1
     },
     "merge_push_job_seconds": 15999.0,
+    "merge_push_macos_s": 4468.0,
     "pr": 651
    },
    {
@@ -5285,6 +5473,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 14712.0,
+    "head_macos_s": 3787.0,
     "merge_push": {
      "cross legs (check-cross)": 4772.0,
      "just check (gate / release-sweep / release test)": 2491.0,
@@ -5302,6 +5491,7 @@
      "visual-docs capture": 1
     },
     "merge_push_job_seconds": 10665.0,
+    "merge_push_macos_s": 2787.0,
     "pr": 653
    },
    {
@@ -5323,6 +5513,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 16614.0,
+    "head_macos_s": 4397.0,
     "merge_push": {
      "cross legs (check-cross)": 7951.0,
      "just check (gate / release-sweep / release test)": 2623.0,
@@ -5340,6 +5531,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 15504.0,
+    "merge_push_macos_s": 4325.0,
     "pr": 667
    },
    {
@@ -5361,6 +5553,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 16234.0,
+    "head_macos_s": 4357.0,
     "merge_push": {
      "cross legs (check-cross)": 1942.0,
      "just check (gate / release-sweep / release test)": 992.0,
@@ -5378,6 +5571,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 6250.0,
+    "merge_push_macos_s": 1940.0,
     "pr": 670
    },
    {
@@ -5399,6 +5593,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 15443.0,
+    "head_macos_s": 4350.0,
     "merge_push": {
      "cross legs (check-cross)": 8159.0,
      "just check (gate / release-sweep / release test)": 2719.0,
@@ -5416,6 +5611,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 14568.0,
+    "merge_push_macos_s": 3872.0,
     "pr": 673
    },
    {
@@ -5437,6 +5633,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 16119.0,
+    "head_macos_s": 4241.0,
     "merge_push": {
      "cross legs (check-cross)": 1460.0,
      "just check (gate / release-sweep / release test)": 767.0,
@@ -5454,6 +5651,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 5198.0,
+    "merge_push_macos_s": 1394.0,
     "pr": 683
    },
    {
@@ -5475,6 +5673,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 16189.0,
+    "head_macos_s": 4394.0,
     "merge_push": {
      "cross legs (check-cross)": 7488.0,
      "just check (gate / release-sweep / release test)": 2739.0,
@@ -5492,6 +5691,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 14045.0,
+    "merge_push_macos_s": 3970.0,
     "pr": 685
    },
    {
@@ -5513,6 +5713,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 16623.0,
+    "head_macos_s": 4450.0,
     "merge_push": {
      "cross legs (check-cross)": 5140.0,
      "just check (gate / release-sweep / release test)": 2722.0,
@@ -5530,6 +5731,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 11785.0,
+    "merge_push_macos_s": 2546.0,
     "pr": 691
    },
    {
@@ -5551,6 +5753,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 16224.0,
+    "head_macos_s": 4352.0,
     "merge_push": {
      "cross legs (check-cross)": 8060.0,
      "just check (gate / release-sweep / release test)": 2708.0,
@@ -5568,6 +5771,7 @@
      "visual-docs capture": 1
     },
     "merge_push_job_seconds": 15836.0,
+    "merge_push_macos_s": 4387.0,
     "pr": 694
    },
    {
@@ -5589,6 +5793,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 15254.0,
+    "head_macos_s": 3817.0,
     "merge_push": {
      "cross legs (check-cross)": 7546.0,
      "just check (gate / release-sweep / release test)": 2302.0,
@@ -5606,6 +5811,7 @@
      "visual-docs capture": 1
     },
     "merge_push_job_seconds": 14694.0,
+    "merge_push_macos_s": 3815.0,
     "pr": 699
    },
    {
@@ -5627,6 +5833,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 14303.0,
+    "head_macos_s": 3393.0,
     "merge_push": {
      "cross legs (check-cross)": 575.0,
      "just check (gate / release-sweep / release test)": 304.0,
@@ -5644,6 +5851,7 @@
      "visual-docs capture": 1
     },
     "merge_push_job_seconds": 2846.0,
+    "merge_push_macos_s": 571.0,
     "pr": 701
    },
    {
@@ -5665,6 +5873,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 15908.0,
+    "head_macos_s": 4055.0,
     "merge_push": {
      "cross legs (check-cross)": 7911.0,
      "just check (gate / release-sweep / release test)": 2819.0,
@@ -5682,6 +5891,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 14905.0,
+    "merge_push_macos_s": 4314.0,
     "pr": 702
    },
    {
@@ -5703,6 +5913,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 15677.0,
+    "head_macos_s": 4432.0,
     "merge_push": {
      "cross legs (check-cross)": 7971.0,
      "just check (gate / release-sweep / release test)": 2689.0,
@@ -5720,6 +5931,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 14728.0,
+    "merge_push_macos_s": 3918.0,
     "pr": 703
    },
    {
@@ -5741,6 +5953,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 15423.0,
+    "head_macos_s": 3661.0,
     "merge_push": {
      "cross legs (check-cross)": 8140.0,
      "just check (gate / release-sweep / release test)": 2726.0,
@@ -5758,6 +5971,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 14738.0,
+    "merge_push_macos_s": 4089.0,
     "pr": 709
    },
    {
@@ -5779,6 +5993,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 15073.0,
+    "head_macos_s": 3732.0,
     "merge_push": {
      "cross legs (check-cross)": 7649.0,
      "just check (gate / release-sweep / release test)": 2489.0,
@@ -5796,6 +6011,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 13756.0,
+    "merge_push_macos_s": 4017.0,
     "pr": 711
    },
    {
@@ -5817,6 +6033,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 15333.0,
+    "head_macos_s": 3998.0,
     "merge_push": {
      "cross legs (check-cross)": 8018.0,
      "just check (gate / release-sweep / release test)": 2750.0,
@@ -5834,6 +6051,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 14703.0,
+    "merge_push_macos_s": 3866.0,
     "pr": 714
    },
    {
@@ -5855,6 +6073,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 13286.0,
+    "head_macos_s": 2359.0,
     "merge_push": {
      "cross legs (check-cross)": 6781.0,
      "just check (gate / release-sweep / release test)": 2269.0,
@@ -5872,6 +6091,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 21364.0,
+    "merge_push_macos_s": 15156.0,
     "pr": 716
    },
    {
@@ -5893,6 +6113,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 15413.0,
+    "head_macos_s": 4452.0,
     "merge_push": {
      "cross legs (check-cross)": 8879.0,
      "just check (gate / release-sweep / release test)": 2808.0,
@@ -5910,6 +6131,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 15413.0,
+    "merge_push_macos_s": 4495.0,
     "pr": 717
    },
    {
@@ -5931,6 +6153,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 15336.0,
+    "head_macos_s": 4259.0,
     "merge_push": {
      "cross legs (check-cross)": 407.0,
      "just check (gate / release-sweep / release test)": 242.0,
@@ -5948,6 +6171,7 @@
      "visual-docs capture": 1
     },
     "merge_push_job_seconds": 2130.0,
+    "merge_push_macos_s": 405.0,
     "pr": 723
    },
    {
@@ -5969,6 +6193,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 16280.0,
+    "head_macos_s": 4392.0,
     "merge_push": {
      "cross legs (check-cross)": 8009.0,
      "just check (gate / release-sweep / release test)": 2791.0,
@@ -5986,6 +6211,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 15279.0,
+    "merge_push_macos_s": 4372.0,
     "pr": 724
    },
    {
@@ -6007,6 +6233,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 16271.0,
+    "head_macos_s": 4565.0,
     "merge_push": {
      "cross legs (check-cross)": 7982.0,
      "just check (gate / release-sweep / release test)": 2693.0,
@@ -6024,6 +6251,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 14890.0,
+    "merge_push_macos_s": 4159.0,
     "pr": 725
    },
    {
@@ -6045,6 +6273,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 14388.0,
+    "head_macos_s": 3370.0,
     "merge_push": {
      "cross legs (check-cross)": 8340.0,
      "just check (gate / release-sweep / release test)": 2791.0,
@@ -6062,6 +6291,7 @@
      "visual-docs capture": 1
     },
     "merge_push_job_seconds": 15976.0,
+    "merge_push_macos_s": 3595.0,
     "pr": 726
    },
    {
@@ -6083,6 +6313,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 15355.0,
+    "head_macos_s": 3937.0,
     "merge_push": {
      "cross legs (check-cross)": 3019.0,
      "just check (gate / release-sweep / release test)": 1513.0,
@@ -6100,6 +6331,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 7492.0,
+    "merge_push_macos_s": 2013.0,
     "pr": 731
    },
    {
@@ -6121,6 +6353,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 16057.0,
+    "head_macos_s": 4239.0,
     "merge_push": {
      "cross legs (check-cross)": 8422.0,
      "just check (gate / release-sweep / release test)": 2711.0,
@@ -6138,6 +6371,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 14493.0,
+    "merge_push_macos_s": 3815.0,
     "pr": 738
    },
    {
@@ -6159,6 +6393,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 15698.0,
+    "head_macos_s": 3812.0,
     "merge_push": {
      "cross legs (check-cross)": 7942.0,
      "just check (gate / release-sweep / release test)": 2649.0,
@@ -6176,6 +6411,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 14229.0,
+    "merge_push_macos_s": 3621.0,
     "pr": 755
    },
    {
@@ -6197,6 +6433,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 15726.0,
+    "head_macos_s": 4185.0,
     "merge_push": {
      "cross legs (check-cross)": 8195.0,
      "just check (gate / release-sweep / release test)": 2800.0,
@@ -6214,6 +6451,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 14994.0,
+    "merge_push_macos_s": 4454.0,
     "pr": 757
    },
    {
@@ -6235,6 +6473,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 17044.0,
+    "head_macos_s": 4774.0,
     "merge_push": {
      "cross legs (check-cross)": 458.0,
      "just check (gate / release-sweep / release test)": 241.0,
@@ -6252,6 +6491,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 2167.0,
+    "merge_push_macos_s": 444.0,
     "pr": 772
    },
    {
@@ -6273,6 +6513,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 17986.0,
+    "head_macos_s": 4432.0,
     "merge_push": {
      "cross legs (check-cross)": 8776.0,
      "just check (gate / release-sweep / release test)": 3115.0,
@@ -6290,6 +6531,7 @@
      "visual-docs capture": 1
     },
     "merge_push_job_seconds": 17073.0,
+    "merge_push_macos_s": 4680.0,
     "pr": 775
    },
    {
@@ -6311,6 +6553,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 16617.0,
+    "head_macos_s": 4490.0,
     "merge_push": {
      "cross legs (check-cross)": 7286.0,
      "just check (gate / release-sweep / release test)": 2975.0,
@@ -6328,6 +6571,7 @@
      "visual-docs capture": 1
     },
     "merge_push_job_seconds": 15199.0,
+    "merge_push_macos_s": 4091.0,
     "pr": 776
    },
    {
@@ -6349,6 +6593,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 17642.0,
+    "head_macos_s": 4399.0,
     "merge_push": {
      "cross legs (check-cross)": 8046.0,
      "just check (gate / release-sweep / release test)": 2250.0,
@@ -6366,6 +6611,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 13185.0,
+    "merge_push_macos_s": 3436.0,
     "pr": 777
    },
    {
@@ -6387,6 +6633,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 16514.0,
+    "head_macos_s": 4860.0,
     "merge_push": {
      "cross legs (check-cross)": 1205.0,
      "just check (gate / release-sweep / release test)": 618.0,
@@ -6404,6 +6651,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 4898.0,
+    "merge_push_macos_s": 1188.0,
     "pr": 778
    },
    {
@@ -6425,6 +6673,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 17702.0,
+    "head_macos_s": 3975.0,
     "merge_push": {
      "cross legs (check-cross)": 8155.0,
      "just check (gate / release-sweep / release test)": 3095.0,
@@ -6442,6 +6691,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 15682.0,
+    "merge_push_macos_s": 4335.0,
     "pr": 781
    },
    {
@@ -6463,6 +6713,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 17255.0,
+    "head_macos_s": 4944.0,
     "merge_push": {
      "cross legs (check-cross)": 9565.0,
      "just check (gate / release-sweep / release test)": 3002.0,
@@ -6480,6 +6731,7 @@
      "visual-docs capture": 1
     },
     "merge_push_job_seconds": 15960.0,
+    "merge_push_macos_s": 4443.0,
     "pr": 783
    },
    {
@@ -6501,6 +6753,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 19092.0,
+    "head_macos_s": 4496.0,
     "merge_push": {
      "cross legs (check-cross)": 9241.0,
      "just check (gate / release-sweep / release test)": 3386.0,
@@ -6518,6 +6771,7 @@
      "visual-docs capture": 1
     },
     "merge_push_job_seconds": 16879.0,
+    "merge_push_macos_s": 4719.0,
     "pr": 793
    },
    {
@@ -6539,6 +6793,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 19103.0,
+    "head_macos_s": 5054.0,
     "merge_push": {
      "cross legs (check-cross)": 9553.0,
      "just check (gate / release-sweep / release test)": 3492.0,
@@ -6556,6 +6811,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 16409.0,
+    "merge_push_macos_s": 4485.0,
     "pr": 806
    },
    {
@@ -6577,6 +6833,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 19386.0,
+    "head_macos_s": 5268.0,
     "merge_push": {
      "cross legs (check-cross)": 9416.0,
      "just check (gate / release-sweep / release test)": 2770.0,
@@ -6594,6 +6851,7 @@
      "visual-docs capture": 1
     },
     "merge_push_job_seconds": 17612.0,
+    "merge_push_macos_s": 4816.0,
     "pr": 810
    },
    {
@@ -6615,6 +6873,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 16772.0,
+    "head_macos_s": 4848.0,
     "merge_push": {
      "cross legs (check-cross)": 9909.0,
      "just check (gate / release-sweep / release test)": 3197.0,
@@ -6632,6 +6891,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 17037.0,
+    "merge_push_macos_s": 5008.0,
     "pr": 813
    },
    {
@@ -6653,6 +6913,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 17939.0,
+    "head_macos_s": 4621.0,
     "merge_push": {
      "cross legs (check-cross)": 8585.0,
      "just check (gate / release-sweep / release test)": 3026.0,
@@ -6670,6 +6931,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 15842.0,
+    "merge_push_macos_s": 4701.0,
     "pr": 819
    },
    {
@@ -6691,6 +6953,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 17174.0,
+    "head_macos_s": 4391.0,
     "merge_push": {
      "cross legs (check-cross)": 8296.0,
      "just check (gate / release-sweep / release test)": 3451.0,
@@ -6708,6 +6971,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 17071.0,
+    "merge_push_macos_s": 3278.0,
     "pr": 827
    },
    {
@@ -6729,6 +6993,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 20029.0,
+    "head_macos_s": 5625.0,
     "merge_push": {
      "cross legs (check-cross)": 10590.0,
      "just check (gate / release-sweep / release test)": 3993.0,
@@ -6746,6 +7011,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 19679.0,
+    "merge_push_macos_s": 6085.0,
     "pr": 828
    },
    {
@@ -6767,6 +7033,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 16022.0,
+    "head_macos_s": 4140.0,
     "merge_push": {
      "cross legs (check-cross)": 7826.0,
      "just check (gate / release-sweep / release test)": 3440.0,
@@ -6784,6 +7051,7 @@
      "visual-docs capture": 1
     },
     "merge_push_job_seconds": 16898.0,
+    "merge_push_macos_s": 4439.0,
     "pr": 833
    },
    {
@@ -6805,6 +7073,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 18355.0,
+    "head_macos_s": 4573.0,
     "merge_push": {
      "cross legs (check-cross)": 6640.0,
      "just check (gate / release-sweep / release test)": 3612.0,
@@ -6822,6 +7091,7 @@
      "visual-docs capture": 1
     },
     "merge_push_job_seconds": 15207.0,
+    "merge_push_macos_s": 3145.0,
     "pr": 840
    },
    {
@@ -6843,6 +7113,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 16573.0,
+    "head_macos_s": 4185.0,
     "merge_push": {
      "cross legs (check-cross)": 9560.0,
      "just check (gate / release-sweep / release test)": 3173.0,
@@ -6860,6 +7131,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 17696.0,
+    "merge_push_macos_s": 4786.0,
     "pr": 848
    },
    {
@@ -6881,6 +7153,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 18238.0,
+    "head_macos_s": 5061.0,
     "merge_push": {
      "cross legs (check-cross)": 8704.0,
      "just check (gate / release-sweep / release test)": 3694.0,
@@ -6898,6 +7171,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 17549.0,
+    "merge_push_macos_s": 4784.0,
     "pr": 849
    },
    {
@@ -6919,6 +7193,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 17833.0,
+    "head_macos_s": 4854.0,
     "merge_push": {
      "cross legs (check-cross)": 9117.0,
      "just check (gate / release-sweep / release test)": 3824.0,
@@ -6936,6 +7211,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 18101.0,
+    "merge_push_macos_s": 5171.0,
     "pr": 852
    },
    {
@@ -6957,6 +7233,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 18300.0,
+    "head_macos_s": 4117.0,
     "merge_push": {
      "cross legs (check-cross)": 10246.0,
      "just check (gate / release-sweep / release test)": 3141.0,
@@ -6974,6 +7251,7 @@
      "visual-docs capture": 1
     },
     "merge_push_job_seconds": 19536.0,
+    "merge_push_macos_s": 5214.0,
     "pr": 853
    },
    {
@@ -6995,6 +7273,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 19067.0,
+    "head_macos_s": 4752.0,
     "merge_push": {
      "cross legs (check-cross)": 11820.0,
      "just check (gate / release-sweep / release test)": 2877.0,
@@ -7012,6 +7291,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 20499.0,
+    "merge_push_macos_s": 6269.0,
     "pr": 861
    },
    {
@@ -7033,6 +7313,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 19716.0,
+    "head_macos_s": 4808.0,
     "merge_push": {
      "cross legs (check-cross)": 10695.0,
      "just check (gate / release-sweep / release test)": 3294.0,
@@ -7050,6 +7331,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 19785.0,
+    "merge_push_macos_s": 6010.0,
     "pr": 862
    },
    {
@@ -7071,6 +7353,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 20698.0,
+    "head_macos_s": 5005.0,
     "merge_push": {
      "cross legs (check-cross)": 7469.0,
      "just check (gate / release-sweep / release test)": 3697.0,
@@ -7088,6 +7371,7 @@
      "visual-docs capture": 1
     },
     "merge_push_job_seconds": 16138.0,
+    "merge_push_macos_s": 2401.0,
     "pr": 865
    },
    {
@@ -7109,6 +7393,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 20019.0,
+    "head_macos_s": 5499.0,
     "merge_push": {
      "cross legs (check-cross)": 8402.0,
      "just check (gate / release-sweep / release test)": 3062.0,
@@ -7126,6 +7411,7 @@
      "visual-docs capture": 1
     },
     "merge_push_job_seconds": 16465.0,
+    "merge_push_macos_s": 5903.0,
     "pr": 866
    },
    {
@@ -7147,6 +7433,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 18319.0,
+    "head_macos_s": 4395.0,
     "merge_push": {
      "cross legs (check-cross)": 10120.0,
      "just check (gate / release-sweep / release test)": 3212.0,
@@ -7164,6 +7451,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 18459.0,
+    "merge_push_macos_s": 5250.0,
     "pr": 868
    },
    {
@@ -7185,6 +7473,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 20355.0,
+    "head_macos_s": 5899.0,
     "merge_push": {
      "cross legs (check-cross)": 11810.0,
      "just check (gate / release-sweep / release test)": 3553.0,
@@ -7202,6 +7491,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 20472.0,
+    "merge_push_macos_s": 5291.0,
     "pr": 875
    },
    {
@@ -7223,6 +7513,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 19433.0,
+    "head_macos_s": 7618.0,
     "merge_push": {
      "cross legs (check-cross)": 11568.0,
      "just check (gate / release-sweep / release test)": 3706.0,
@@ -7240,6 +7531,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 20125.0,
+    "merge_push_macos_s": 5564.0,
     "pr": 878
    },
    {
@@ -7261,6 +7553,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 19470.0,
+    "head_macos_s": 5288.0,
     "merge_push": {
      "cross legs (check-cross)": 9743.0,
      "just check (gate / release-sweep / release test)": 3006.0,
@@ -7278,6 +7571,7 @@
      "visual-docs capture": 1
     },
     "merge_push_job_seconds": 18302.0,
+    "merge_push_macos_s": 5674.0,
     "pr": 884
    },
    {
@@ -7299,6 +7593,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 21359.0,
+    "head_macos_s": 5488.0,
     "merge_push": {
      "cross legs (check-cross)": 8941.0,
      "just check (gate / release-sweep / release test)": 3929.0,
@@ -7316,6 +7611,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 18212.0,
+    "merge_push_macos_s": 5207.0,
     "pr": 886
    },
    {
@@ -7337,6 +7633,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 19865.0,
+    "head_macos_s": 5330.0,
     "merge_push": {
      "cross legs (check-cross)": 12049.0,
      "just check (gate / release-sweep / release test)": 3801.0,
@@ -7354,6 +7651,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 19730.0,
+    "merge_push_macos_s": 5166.0,
     "pr": 887
    },
    {
@@ -7375,6 +7673,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 21930.0,
+    "head_macos_s": 5676.0,
     "merge_push": {
      "cross legs (check-cross)": 5338.0,
      "just check (gate / release-sweep / release test)": 4237.0,
@@ -7392,6 +7691,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 15829.0,
+    "merge_push_macos_s": 4891.0,
     "pr": 891
    },
    {
@@ -7413,6 +7713,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 34132.0,
+    "head_macos_s": 17336.0,
     "merge_push": {
      "cross legs (check-cross)": 17397.0,
      "just check (gate / release-sweep / release test)": 3947.0,
@@ -7430,6 +7731,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 41059.0,
+    "merge_push_macos_s": 25220.0,
     "pr": 892
    },
    {
@@ -7451,6 +7753,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 21452.0,
+    "head_macos_s": 4808.0,
     "merge_push": {
      "cross legs (check-cross)": 8581.0,
      "just check (gate / release-sweep / release test)": 4094.0,
@@ -7468,6 +7771,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 17996.0,
+    "merge_push_macos_s": 6009.0,
     "pr": 909
    },
    {
@@ -7489,6 +7793,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 18750.0,
+    "head_macos_s": 5603.0,
     "merge_push": {
      "cross legs (check-cross)": 12358.0,
      "just check (gate / release-sweep / release test)": 4636.0,
@@ -7506,6 +7811,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 23302.0,
+    "merge_push_macos_s": 5697.0,
     "pr": 914
    },
    {
@@ -7527,6 +7833,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 20401.0,
+    "head_macos_s": 3519.0,
     "merge_push": {
      "cross legs (check-cross)": 8515.0,
      "just check (gate / release-sweep / release test)": 4512.0,
@@ -7544,6 +7851,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 26265.0,
+    "merge_push_macos_s": 8898.0,
     "pr": 916
    },
    {
@@ -7565,6 +7873,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 27842.0,
+    "head_macos_s": 7179.0,
     "merge_push": {
      "cross legs (check-cross)": 0.0,
      "just check (gate / release-sweep / release test)": 0.0,
@@ -7582,6 +7891,7 @@
      "visual-docs capture": 0
     },
     "merge_push_job_seconds": 0,
+    "merge_push_macos_s": 0,
     "pr": 922
    },
    {
@@ -7603,6 +7913,7 @@
      "visual-docs capture": 1
     },
     "head_job_seconds": 23591.0,
+    "head_macos_s": 4737.0,
     "merge_push": {
      "cross legs (check-cross)": 6716.0,
      "just check (gate / release-sweep / release test)": 4426.0,
@@ -7620,6 +7931,7 @@
      "visual-docs capture": 1
     },
     "merge_push_job_seconds": 17964.0,
+    "merge_push_macos_s": 7188.0,
     "pr": 942
    }
   ],
@@ -7642,6 +7954,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 15185.0,
+    "cd_macos_s": 3873.0,
     "merge_to_last_cd_job_s": 3213.0,
     "phases": {
      "ci.yml:push": {
@@ -7704,6 +8017,8 @@
      "visual-docs capture": 0
     },
     "release_pr_job_seconds": 8883.0,
+    "release_pr_macos_s": 2337.0,
+    "release_pr_number": 294,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 2.0,
      "longest_build_s": 541.0,
@@ -7730,6 +8045,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 16574.0,
+    "cd_macos_s": 4864.0,
     "merge_to_last_cd_job_s": 20287.0,
     "phases": {
      "ci.yml:push": {
@@ -7792,6 +8108,8 @@
      "visual-docs capture": 0
     },
     "release_pr_job_seconds": 8171.0,
+    "release_pr_macos_s": 2613.0,
+    "release_pr_number": 308,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 3.0,
      "longest_build_s": 456.0,
@@ -7818,6 +8136,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 17469.0,
+    "cd_macos_s": 4678.0,
     "merge_to_last_cd_job_s": 3713.0,
     "phases": {
      "ci.yml:push": {
@@ -7880,6 +8199,8 @@
      "visual-docs capture": 0
     },
     "release_pr_job_seconds": 10262.0,
+    "release_pr_macos_s": 2426.0,
+    "release_pr_number": 313,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 3.0,
      "longest_build_s": 615.0,
@@ -7906,6 +8227,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 12837.0,
+    "cd_macos_s": 3425.0,
     "merge_to_last_cd_job_s": 4350.0,
     "phases": {
      "ci.yml:push": {
@@ -7968,6 +8290,8 @@
      "visual-docs capture": 0
     },
     "release_pr_job_seconds": 10063.0,
+    "release_pr_macos_s": 3035.0,
+    "release_pr_number": 315,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 2.0,
      "longest_build_s": 526.0,
@@ -7994,6 +8318,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 17436.0,
+    "cd_macos_s": 4882.0,
     "merge_to_last_cd_job_s": 23496.0,
     "phases": {
      "ci.yml:push": {
@@ -8056,6 +8381,8 @@
      "visual-docs capture": 0
     },
     "release_pr_job_seconds": 9820.0,
+    "release_pr_macos_s": 2853.0,
+    "release_pr_number": 324,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 2.0,
      "longest_build_s": 602.0,
@@ -8082,6 +8409,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 16868.0,
+    "cd_macos_s": 4499.0,
     "merge_to_last_cd_job_s": 11249.0,
     "phases": {
      "ci.yml:push": {
@@ -8144,6 +8472,8 @@
      "visual-docs capture": 0
     },
     "release_pr_job_seconds": 10437.0,
+    "release_pr_macos_s": 2529.0,
+    "release_pr_number": 341,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 3.0,
      "longest_build_s": 604.0,
@@ -8170,6 +8500,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 15489.0,
+    "cd_macos_s": 2805.0,
     "merge_to_last_cd_job_s": 4880.0,
     "phases": {
      "ci.yml:push": {
@@ -8232,6 +8563,8 @@
      "visual-docs capture": 0
     },
     "release_pr_job_seconds": 10157.0,
+    "release_pr_macos_s": 2768.0,
+    "release_pr_number": 355,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 3.0,
      "longest_build_s": 600.0,
@@ -8258,6 +8591,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 17631.0,
+    "cd_macos_s": 4812.0,
     "merge_to_last_cd_job_s": 3559.0,
     "phases": {
      "ci.yml:push": {
@@ -8320,6 +8654,8 @@
      "visual-docs capture": 0
     },
     "release_pr_job_seconds": 9349.0,
+    "release_pr_macos_s": 2709.0,
+    "release_pr_number": 363,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 3.0,
      "longest_build_s": 571.0,
@@ -8346,6 +8682,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 17660.0,
+    "cd_macos_s": 4866.0,
     "merge_to_last_cd_job_s": 22070.0,
     "phases": {
      "ci.yml:push": {
@@ -8408,6 +8745,8 @@
      "visual-docs capture": 0
     },
     "release_pr_job_seconds": 9895.0,
+    "release_pr_macos_s": 2886.0,
+    "release_pr_number": 387,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 3.0,
      "longest_build_s": 583.0,
@@ -8434,6 +8773,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 12879.0,
+    "cd_macos_s": 3145.0,
     "merge_to_last_cd_job_s": 3789.0,
     "phases": {
      "ci.yml:push": {
@@ -8496,6 +8836,8 @@
      "visual-docs capture": 0
     },
     "release_pr_job_seconds": 8585.0,
+    "release_pr_macos_s": 2658.0,
+    "release_pr_number": 391,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 2.0,
      "longest_build_s": 641.0,
@@ -8522,6 +8864,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 11036.0,
+    "cd_macos_s": 2854.0,
     "merge_to_last_cd_job_s": 16241.0,
     "phases": {
      "ci.yml:push": {
@@ -8584,6 +8927,8 @@
      "visual-docs capture": 0
     },
     "release_pr_job_seconds": 10777.0,
+    "release_pr_macos_s": 2858.0,
+    "release_pr_number": 393,
     "release_yml_serialization": null,
     "tag": "v0.38.2"
    },
@@ -8605,6 +8950,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 17350.0,
+    "cd_macos_s": 5193.0,
     "merge_to_last_cd_job_s": 25663.0,
     "phases": {
      "ci.yml:push": {
@@ -8667,6 +9013,8 @@
      "visual-docs capture": 0
     },
     "release_pr_job_seconds": 9425.0,
+    "release_pr_macos_s": 2839.0,
+    "release_pr_number": 403,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 2.0,
      "longest_build_s": 608.0,
@@ -8693,6 +9041,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 17540.0,
+    "cd_macos_s": 4821.0,
     "merge_to_last_cd_job_s": 27853.0,
     "phases": {
      "ci.yml:push": {
@@ -8755,6 +9104,8 @@
      "visual-docs capture": 0
     },
     "release_pr_job_seconds": 10258.0,
+    "release_pr_macos_s": 2955.0,
+    "release_pr_number": 404,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 2.0,
      "longest_build_s": 637.0,
@@ -8781,6 +9132,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 18600.0,
+    "cd_macos_s": 4803.0,
     "merge_to_last_cd_job_s": 3957.0,
     "phases": {
      "ci.yml:push": {
@@ -8843,6 +9195,8 @@
      "visual-docs capture": 0
     },
     "release_pr_job_seconds": 10493.0,
+    "release_pr_macos_s": 3162.0,
+    "release_pr_number": 421,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 2.0,
      "longest_build_s": 630.0,
@@ -8869,6 +9223,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 19964.0,
+    "cd_macos_s": 8094.0,
     "merge_to_last_cd_job_s": 7597.0,
     "phases": {
      "ci.yml:push": {
@@ -8931,6 +9286,8 @@
      "visual-docs capture": 0
     },
     "release_pr_job_seconds": 10711.0,
+    "release_pr_macos_s": 3172.0,
+    "release_pr_number": 431,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 2.0,
      "longest_build_s": 577.0,
@@ -8957,6 +9314,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 10133.0,
+    "cd_macos_s": 3871.0,
     "merge_to_last_cd_job_s": 9111.0,
     "phases": {
      "ci.yml:push": {
@@ -9019,6 +9377,8 @@
      "visual-docs capture": 0
     },
     "release_pr_job_seconds": 10705.0,
+    "release_pr_macos_s": 2971.0,
+    "release_pr_number": 440,
     "release_yml_serialization": null,
     "tag": "v0.41.2"
    },
@@ -9040,6 +9400,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 10069.0,
+    "cd_macos_s": 2578.0,
     "merge_to_last_cd_job_s": 3621.0,
     "phases": {
      "ci.yml:push": {
@@ -9102,6 +9463,8 @@
      "visual-docs capture": 0
     },
     "release_pr_job_seconds": 10361.0,
+    "release_pr_macos_s": 3212.0,
+    "release_pr_number": 441,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 2.0,
      "longest_build_s": 672.0,
@@ -9128,6 +9491,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 20248.0,
+    "cd_macos_s": 5888.0,
     "merge_to_last_cd_job_s": 18540.0,
     "phases": {
      "ci.yml:push": {
@@ -9190,6 +9554,8 @@
      "visual-docs capture": 0
     },
     "release_pr_job_seconds": 11870.0,
+    "release_pr_macos_s": 3789.0,
+    "release_pr_number": 442,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 2.0,
      "longest_build_s": 603.0,
@@ -9216,6 +9582,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 13237.0,
+    "cd_macos_s": 3421.0,
     "merge_to_last_cd_job_s": 19194.0,
     "phases": {
      "ci.yml:push": {
@@ -9278,6 +9645,8 @@
      "visual-docs capture": 0
     },
     "release_pr_job_seconds": 11931.0,
+    "release_pr_macos_s": 3213.0,
+    "release_pr_number": 444,
     "release_yml_serialization": null,
     "tag": "v0.43.0"
    },
@@ -9299,6 +9668,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 18285.0,
+    "cd_macos_s": 5350.0,
     "merge_to_last_cd_job_s": 12880.0,
     "phases": {
      "ci.yml:push": {
@@ -9361,6 +9731,8 @@
      "visual-docs capture": 0
     },
     "release_pr_job_seconds": 11267.0,
+    "release_pr_macos_s": 3192.0,
+    "release_pr_number": 449,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 3.0,
      "longest_build_s": 665.0,
@@ -9387,6 +9759,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 11540.0,
+    "cd_macos_s": 3219.0,
     "merge_to_last_cd_job_s": 11828.0,
     "phases": {
      "ci.yml:push": {
@@ -9449,6 +9822,8 @@
      "visual-docs capture": 0
     },
     "release_pr_job_seconds": 10172.0,
+    "release_pr_macos_s": 3135.0,
+    "release_pr_number": 451,
     "release_yml_serialization": null,
     "tag": "v0.44.0"
    },
@@ -9470,6 +9845,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 18883.0,
+    "cd_macos_s": 5600.0,
     "merge_to_last_cd_job_s": 4744.0,
     "phases": {
      "ci.yml:push": {
@@ -9532,6 +9908,8 @@
      "visual-docs capture": 0
     },
     "release_pr_job_seconds": 10449.0,
+    "release_pr_macos_s": 2787.0,
+    "release_pr_number": 453,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 3.0,
      "longest_build_s": 670.0,
@@ -9558,6 +9936,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 19658.0,
+    "cd_macos_s": 5772.0,
     "merge_to_last_cd_job_s": 4287.0,
     "phases": {
      "ci.yml:push": {
@@ -9620,6 +9999,8 @@
      "visual-docs capture": 0
     },
     "release_pr_job_seconds": 10758.0,
+    "release_pr_macos_s": 2906.0,
+    "release_pr_number": 471,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 2.0,
      "longest_build_s": 599.0,
@@ -9646,6 +10027,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 12344.0,
+    "cd_macos_s": 3498.0,
     "merge_to_last_cd_job_s": 8943.0,
     "phases": {
      "ci.yml:push": {
@@ -9708,6 +10090,8 @@
      "visual-docs capture": 0
     },
     "release_pr_job_seconds": 10431.0,
+    "release_pr_macos_s": 2945.0,
+    "release_pr_number": 478,
     "release_yml_serialization": null,
     "tag": "v0.44.3"
    },
@@ -9729,6 +10113,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 19348.0,
+    "cd_macos_s": 5966.0,
     "merge_to_last_cd_job_s": 7318.0,
     "phases": {
      "ci.yml:push": {
@@ -9791,6 +10176,8 @@
      "visual-docs capture": 0
     },
     "release_pr_job_seconds": 10361.0,
+    "release_pr_macos_s": 3228.0,
+    "release_pr_number": 485,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 2.0,
      "longest_build_s": 701.0,
@@ -9817,6 +10204,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 18081.0,
+    "cd_macos_s": 4262.0,
     "merge_to_last_cd_job_s": 8303.0,
     "phases": {
      "ci.yml:push": {
@@ -9879,6 +10267,8 @@
      "visual-docs capture": 0
     },
     "release_pr_job_seconds": 10319.0,
+    "release_pr_macos_s": 3188.0,
+    "release_pr_number": 487,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 2.0,
      "longest_build_s": 692.0,
@@ -9905,6 +10295,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 19090.0,
+    "cd_macos_s": 5924.0,
     "merge_to_last_cd_job_s": 17412.0,
     "phases": {
      "ci.yml:push": {
@@ -9975,6 +10366,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 13218.0,
+    "release_pr_macos_s": 3556.0,
+    "release_pr_number": 523,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 3.0,
      "longest_build_s": 572.0,
@@ -10001,6 +10394,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 21765.0,
+    "cd_macos_s": 5903.0,
     "merge_to_last_cd_job_s": 4351.0,
     "phases": {
      "ci.yml:push": {
@@ -10071,6 +10465,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 13396.0,
+    "release_pr_macos_s": 3839.0,
+    "release_pr_number": 524,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 2.0,
      "longest_build_s": 657.0,
@@ -10097,6 +10493,7 @@
      "visual-docs capture": 1
     },
     "cd_job_seconds": 17278.0,
+    "cd_macos_s": 4607.0,
     "merge_to_last_cd_job_s": 6838.0,
     "phases": {
      "ci.yml:push": {
@@ -10167,6 +10564,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 14159.0,
+    "release_pr_macos_s": 3942.0,
+    "release_pr_number": 534,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 2.0,
      "longest_build_s": 670.0,
@@ -10193,6 +10592,7 @@
      "visual-docs capture": 1
     },
     "cd_job_seconds": 22036.0,
+    "cd_macos_s": 6241.0,
     "merge_to_last_cd_job_s": 24637.0,
     "phases": {
      "ci.yml:push": {
@@ -10263,6 +10663,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 13558.0,
+    "release_pr_macos_s": 3693.0,
+    "release_pr_number": 538,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 2.0,
      "longest_build_s": 654.0,
@@ -10289,6 +10691,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 21122.0,
+    "cd_macos_s": 6061.0,
     "merge_to_last_cd_job_s": 29207.0,
     "phases": {
      "ci.yml:push": {
@@ -10359,6 +10762,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 13337.0,
+    "release_pr_macos_s": 3708.0,
+    "release_pr_number": 544,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 2.0,
      "longest_build_s": 657.0,
@@ -10385,6 +10790,7 @@
      "visual-docs capture": 1
     },
     "cd_job_seconds": 23127.0,
+    "cd_macos_s": 6466.0,
     "merge_to_last_cd_job_s": 17211.0,
     "phases": {
      "ci.yml:push": {
@@ -10455,6 +10861,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 14106.0,
+    "release_pr_macos_s": 3403.0,
+    "release_pr_number": 545,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 2.0,
      "longest_build_s": 752.0,
@@ -10481,6 +10889,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 21941.0,
+    "cd_macos_s": 6500.0,
     "merge_to_last_cd_job_s": 6816.0,
     "phases": {
      "ci.yml:push": {
@@ -10551,6 +10960,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 13276.0,
+    "release_pr_macos_s": 3353.0,
+    "release_pr_number": 547,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 2.0,
      "longest_build_s": 720.0,
@@ -10577,6 +10988,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 21056.0,
+    "cd_macos_s": 6688.0,
     "merge_to_last_cd_job_s": 31495.0,
     "phases": {
      "ci.yml:push": {
@@ -10647,6 +11059,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 14123.0,
+    "release_pr_macos_s": 3463.0,
+    "release_pr_number": 552,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 2.0,
      "longest_build_s": 804.0,
@@ -10673,6 +11087,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 25646.0,
+    "cd_macos_s": 6866.0,
     "merge_to_last_cd_job_s": 36600.0,
     "phases": {
      "ci.yml:push": {
@@ -10743,6 +11158,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 15729.0,
+    "release_pr_macos_s": 4052.0,
+    "release_pr_number": 557,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 2.0,
      "longest_build_s": 782.0,
@@ -10769,6 +11186,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 27340.0,
+    "cd_macos_s": 7497.0,
     "merge_to_last_cd_job_s": 5151.0,
     "phases": {
      "ci.yml:push": {
@@ -10839,6 +11257,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 16284.0,
+    "release_pr_macos_s": 4204.0,
+    "release_pr_number": 560,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 3.0,
      "longest_build_s": 762.0,
@@ -10865,6 +11285,7 @@
      "visual-docs capture": 1
     },
     "cd_job_seconds": 24532.0,
+    "cd_macos_s": 6137.0,
     "merge_to_last_cd_job_s": 6961.0,
     "phases": {
      "ci.yml:push": {
@@ -10935,6 +11356,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 15285.0,
+    "release_pr_macos_s": 3828.0,
+    "release_pr_number": 578,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 3.0,
      "longest_build_s": 823.0,
@@ -10961,6 +11384,7 @@
      "visual-docs capture": 1
     },
     "cd_job_seconds": 25347.0,
+    "cd_macos_s": 5121.0,
     "merge_to_last_cd_job_s": 5332.0,
     "phases": {
      "ci.yml:push": {
@@ -11031,6 +11455,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 15525.0,
+    "release_pr_macos_s": 3909.0,
+    "release_pr_number": 582,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 2.0,
      "longest_build_s": 805.0,
@@ -11057,6 +11483,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 25183.0,
+    "cd_macos_s": 5713.0,
     "merge_to_last_cd_job_s": 20958.0,
     "phases": {
      "ci.yml:push": {
@@ -11127,6 +11554,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 14836.0,
+    "release_pr_macos_s": 3861.0,
+    "release_pr_number": 597,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 2.0,
      "longest_build_s": 766.0,
@@ -11153,6 +11582,7 @@
      "visual-docs capture": 1
     },
     "cd_job_seconds": 21370.0,
+    "cd_macos_s": 5676.0,
     "merge_to_last_cd_job_s": 6115.0,
     "phases": {
      "ci.yml:push": {
@@ -11223,6 +11653,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 13673.0,
+    "release_pr_macos_s": 3250.0,
+    "release_pr_number": 601,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 3.0,
      "longest_build_s": 788.0,
@@ -11249,6 +11681,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 23612.0,
+    "cd_macos_s": 7201.0,
     "merge_to_last_cd_job_s": 5904.0,
     "phases": {
      "ci.yml:push": {
@@ -11319,6 +11752,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 15582.0,
+    "release_pr_macos_s": 4133.0,
+    "release_pr_number": 603,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 3.0,
      "longest_build_s": 763.0,
@@ -11345,6 +11780,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 27352.0,
+    "cd_macos_s": 7700.0,
     "merge_to_last_cd_job_s": 27233.0,
     "phases": {
      "ci.yml:push": {
@@ -11415,6 +11851,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 15820.0,
+    "release_pr_macos_s": 4251.0,
+    "release_pr_number": 606,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 3.0,
      "longest_build_s": 845.0,
@@ -11441,6 +11879,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 24015.0,
+    "cd_macos_s": 4657.0,
     "merge_to_last_cd_job_s": 24765.0,
     "phases": {
      "ci.yml:push": {
@@ -11511,6 +11950,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 14774.0,
+    "release_pr_macos_s": 4178.0,
+    "release_pr_number": 620,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 2.0,
      "longest_build_s": 814.0,
@@ -11537,6 +11978,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 26718.0,
+    "cd_macos_s": 7466.0,
     "merge_to_last_cd_job_s": 27842.0,
     "phases": {
      "ci.yml:push": {
@@ -11607,6 +12049,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 16163.0,
+    "release_pr_macos_s": 3355.0,
+    "release_pr_number": 627,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 2.0,
      "longest_build_s": 803.0,
@@ -11633,6 +12077,7 @@
      "visual-docs capture": 1
     },
     "cd_job_seconds": 29951.0,
+    "cd_macos_s": 7828.0,
     "merge_to_last_cd_job_s": 30761.0,
     "phases": {
      "ci.yml:push": {
@@ -11703,6 +12148,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 16055.0,
+    "release_pr_macos_s": 4056.0,
+    "release_pr_number": 639,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 3.0,
      "longest_build_s": 855.0,
@@ -11729,6 +12176,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 25365.0,
+    "cd_macos_s": 7882.0,
     "merge_to_last_cd_job_s": 33352.0,
     "phases": {
      "ci.yml:push": {
@@ -11799,6 +12247,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 15206.0,
+    "release_pr_macos_s": 3437.0,
+    "release_pr_number": 652,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 3.0,
      "longest_build_s": 868.0,
@@ -11825,6 +12275,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 24105.0,
+    "cd_macos_s": 6652.0,
     "merge_to_last_cd_job_s": 32477.0,
     "phases": {
      "ci.yml:push": {
@@ -11895,6 +12346,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 16084.0,
+    "release_pr_macos_s": 4049.0,
+    "release_pr_number": 669,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 2.0,
      "longest_build_s": 806.0,
@@ -11921,6 +12374,7 @@
      "visual-docs capture": 1
     },
     "cd_job_seconds": 24948.0,
+    "cd_macos_s": 6428.0,
     "merge_to_last_cd_job_s": 14981.0,
     "phases": {
      "ci.yml:push": {
@@ -11991,6 +12445,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 15116.0,
+    "release_pr_macos_s": 4689.0,
+    "release_pr_number": 682,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 4.0,
      "longest_build_s": 819.0,
@@ -12017,6 +12473,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 22077.0,
+    "cd_macos_s": 7119.0,
     "merge_to_last_cd_job_s": 9421.0,
     "phases": {
      "ci.yml:push": {
@@ -12087,6 +12544,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 15603.0,
+    "release_pr_macos_s": 4210.0,
+    "release_pr_number": 688,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 3.0,
      "longest_build_s": 799.0,
@@ -12113,6 +12572,7 @@
      "visual-docs capture": 1
     },
     "cd_job_seconds": 26040.0,
+    "cd_macos_s": 9973.0,
     "merge_to_last_cd_job_s": 25867.0,
     "phases": {
      "ci.yml:push": {
@@ -12183,6 +12643,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 16374.0,
+    "release_pr_macos_s": 4372.0,
+    "release_pr_number": 695,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 3.0,
      "longest_build_s": 835.0,
@@ -12209,6 +12671,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 18038.0,
+    "cd_macos_s": 7540.0,
     "merge_to_last_cd_job_s": 11612.0,
     "phases": {
      "ci.yml:push": {
@@ -12279,6 +12742,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 15320.0,
+    "release_pr_macos_s": 3174.0,
+    "release_pr_number": 710,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 2.0,
      "longest_build_s": 781.0,
@@ -12305,6 +12770,7 @@
      "visual-docs capture": 1
     },
     "cd_job_seconds": 25523.0,
+    "cd_macos_s": 6692.0,
     "merge_to_last_cd_job_s": 14929.0,
     "phases": {
      "ci.yml:push": {
@@ -12375,6 +12841,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 15818.0,
+    "release_pr_macos_s": 4365.0,
+    "release_pr_number": 715,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 2.0,
      "longest_build_s": 776.0,
@@ -12401,6 +12869,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 29161.0,
+    "cd_macos_s": 7099.0,
     "merge_to_last_cd_job_s": 14617.0,
     "phases": {
      "ci.yml:push": {
@@ -12471,6 +12940,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 16117.0,
+    "release_pr_macos_s": 4089.0,
+    "release_pr_number": 721,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 2.0,
      "longest_build_s": 788.0,
@@ -12497,6 +12968,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 26753.0,
+    "cd_macos_s": 7284.0,
     "merge_to_last_cd_job_s": 24091.0,
     "phases": {
      "ci.yml:push": {
@@ -12567,6 +13039,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 16813.0,
+    "release_pr_macos_s": 4330.0,
+    "release_pr_number": 730,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 2.0,
      "longest_build_s": 769.0,
@@ -12593,6 +13067,7 @@
      "visual-docs capture": 1
     },
     "cd_job_seconds": 28534.0,
+    "cd_macos_s": 7518.0,
     "merge_to_last_cd_job_s": 8717.0,
     "phases": {
      "ci.yml:push": {
@@ -12663,6 +13138,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 16113.0,
+    "release_pr_macos_s": 3689.0,
+    "release_pr_number": 736,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 3.0,
      "longest_build_s": 810.0,
@@ -12689,6 +13166,7 @@
      "visual-docs capture": 1
     },
     "cd_job_seconds": 25231.0,
+    "cd_macos_s": 7300.0,
     "merge_to_last_cd_job_s": 4900.0,
     "phases": {
      "ci.yml:push": {
@@ -12759,6 +13237,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 16360.0,
+    "release_pr_macos_s": 4186.0,
+    "release_pr_number": 751,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 2.0,
      "longest_build_s": 805.0,
@@ -12785,6 +13265,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 29484.0,
+    "cd_macos_s": 7815.0,
     "merge_to_last_cd_job_s": 9898.0,
     "phases": {
      "ci.yml:push": {
@@ -12855,6 +13336,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 16651.0,
+    "release_pr_macos_s": 4627.0,
+    "release_pr_number": 756,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 3.0,
      "longest_build_s": 855.0,
@@ -12881,6 +13364,7 @@
      "visual-docs capture": 1
     },
     "cd_job_seconds": 28903.0,
+    "cd_macos_s": 8380.0,
     "merge_to_last_cd_job_s": 14782.0,
     "phases": {
      "ci.yml:push": {
@@ -12951,6 +13435,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 18765.0,
+    "release_pr_macos_s": 4346.0,
+    "release_pr_number": 779,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 3.0,
      "longest_build_s": 872.0,
@@ -12977,6 +13463,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 26482.0,
+    "cd_macos_s": 7662.0,
     "merge_to_last_cd_job_s": 11471.0,
     "phases": {
      "ci.yml:push": {
@@ -13047,6 +13534,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 16794.0,
+    "release_pr_macos_s": 4128.0,
+    "release_pr_number": 780,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 18.0,
      "longest_build_s": 862.0,
@@ -13073,6 +13562,7 @@
      "visual-docs capture": 1
     },
     "cd_job_seconds": 29847.0,
+    "cd_macos_s": 10491.0,
     "merge_to_last_cd_job_s": 21290.0,
     "phases": {
      "ci.yml:push": {
@@ -13143,6 +13633,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 14808.0,
+    "release_pr_macos_s": 4211.0,
+    "release_pr_number": 782,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 3.0,
      "longest_build_s": 812.0,
@@ -13169,6 +13661,7 @@
      "visual-docs capture": 1
     },
     "cd_job_seconds": 29078.0,
+    "cd_macos_s": 7834.0,
     "merge_to_last_cd_job_s": 6393.0,
     "phases": {
      "ci.yml:push": {
@@ -13239,6 +13732,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 22689.0,
+    "release_pr_macos_s": 5208.0,
+    "release_pr_number": 792,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 2.0,
      "longest_build_s": 815.0,
@@ -13265,6 +13760,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 29978.0,
+    "cd_macos_s": 8586.0,
     "merge_to_last_cd_job_s": 32914.0,
     "phases": {
      "ci.yml:push": {
@@ -13335,6 +13831,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 22442.0,
+    "release_pr_macos_s": 5174.0,
+    "release_pr_number": 807,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 2.0,
      "longest_build_s": 883.0,
@@ -13361,6 +13859,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 29600.0,
+    "cd_macos_s": 8061.0,
     "merge_to_last_cd_job_s": 17954.0,
     "phases": {
      "ci.yml:push": {
@@ -13431,6 +13930,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 21205.0,
+    "release_pr_macos_s": 4710.0,
+    "release_pr_number": 812,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 2.0,
      "longest_build_s": 886.0,
@@ -13457,6 +13958,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 28584.0,
+    "cd_macos_s": 7319.0,
     "merge_to_last_cd_job_s": 5809.0,
     "phases": {
      "ci.yml:push": {
@@ -13527,6 +14029,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 21734.0,
+    "release_pr_macos_s": 4626.0,
+    "release_pr_number": 816,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 2.0,
      "longest_build_s": 847.0,
@@ -13553,6 +14057,7 @@
      "visual-docs capture": 1
     },
     "cd_job_seconds": 29198.0,
+    "cd_macos_s": 7829.0,
     "merge_to_last_cd_job_s": 24860.0,
     "phases": {
      "ci.yml:push": {
@@ -13623,6 +14128,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 21407.0,
+    "release_pr_macos_s": 4846.0,
+    "release_pr_number": 824,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 2.0,
      "longest_build_s": 894.0,
@@ -13649,6 +14156,7 @@
      "visual-docs capture": 1
     },
     "cd_job_seconds": 30774.0,
+    "cd_macos_s": 7940.0,
     "merge_to_last_cd_job_s": 5618.0,
     "phases": {
      "ci.yml:push": {
@@ -13719,6 +14227,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 23826.0,
+    "release_pr_macos_s": 4963.0,
+    "release_pr_number": 829,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 3.0,
      "longest_build_s": 926.0,
@@ -13745,6 +14255,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 28889.0,
+    "cd_macos_s": 6029.0,
     "merge_to_last_cd_job_s": 5609.0,
     "phases": {
      "ci.yml:push": {
@@ -13815,6 +14326,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 22347.0,
+    "release_pr_macos_s": 4333.0,
+    "release_pr_number": 835,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 2.0,
      "longest_build_s": 902.0,
@@ -13841,6 +14354,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 32163.0,
+    "cd_macos_s": 8645.0,
     "merge_to_last_cd_job_s": 38478.0,
     "phases": {
      "ci.yml:push": {
@@ -13911,6 +14425,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 21627.0,
+    "release_pr_macos_s": 4845.0,
+    "release_pr_number": 846,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 2.0,
      "longest_build_s": 899.0,
@@ -13937,6 +14453,7 @@
      "visual-docs capture": 1
     },
     "cd_job_seconds": 30715.0,
+    "cd_macos_s": 6616.0,
     "merge_to_last_cd_job_s": 38746.0,
     "phases": {
      "ci.yml:push": {
@@ -14007,6 +14524,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 22930.0,
+    "release_pr_macos_s": 4714.0,
+    "release_pr_number": 850,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 2.0,
      "longest_build_s": 892.0,
@@ -14033,6 +14552,7 @@
      "visual-docs capture": 1
     },
     "cd_job_seconds": 32853.0,
+    "cd_macos_s": 7525.0,
     "merge_to_last_cd_job_s": 6628.0,
     "phases": {
      "ci.yml:push": {
@@ -14103,6 +14623,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 22249.0,
+    "release_pr_macos_s": 4126.0,
+    "release_pr_number": 856,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 2.0,
      "longest_build_s": 927.0,
@@ -14129,6 +14651,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 31764.0,
+    "cd_macos_s": 9081.0,
     "merge_to_last_cd_job_s": 18660.0,
     "phases": {
      "ci.yml:push": {
@@ -14199,6 +14722,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 24336.0,
+    "release_pr_macos_s": 4685.0,
+    "release_pr_number": 860,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 2.0,
      "longest_build_s": 895.0,
@@ -14225,6 +14750,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 35334.0,
+    "cd_macos_s": 8920.0,
     "merge_to_last_cd_job_s": 17007.0,
     "phases": {
      "ci.yml:push": {
@@ -14295,6 +14821,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 23017.0,
+    "release_pr_macos_s": 5093.0,
+    "release_pr_number": 867,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 2.0,
      "longest_build_s": 977.0,
@@ -14321,6 +14849,7 @@
      "visual-docs capture": 1
     },
     "cd_job_seconds": 34734.0,
+    "cd_macos_s": 9463.0,
     "merge_to_last_cd_job_s": 23107.0,
     "phases": {
      "ci.yml:push": {
@@ -14391,6 +14920,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 23087.0,
+    "release_pr_macos_s": 5075.0,
+    "release_pr_number": 869,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 2.0,
      "longest_build_s": 996.0,
@@ -14417,6 +14948,7 @@
      "visual-docs capture": 1
     },
     "cd_job_seconds": 32603.0,
+    "cd_macos_s": 9733.0,
     "merge_to_last_cd_job_s": 38579.0,
     "phases": {
      "ci.yml:push": {
@@ -14487,6 +15019,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 24992.0,
+    "release_pr_macos_s": 4862.0,
+    "release_pr_number": 870,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 2.0,
      "longest_build_s": 950.0,
@@ -14513,6 +15047,7 @@
      "visual-docs capture": 1
     },
     "cd_job_seconds": 52094.0,
+    "cd_macos_s": 24308.0,
     "merge_to_last_cd_job_s": 35877.0,
     "phases": {
      "ci.yml:push": {
@@ -14583,6 +15118,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 25342.0,
+    "release_pr_macos_s": 5051.0,
+    "release_pr_number": 883,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 2.0,
      "longest_build_s": 1038.0,
@@ -14609,6 +15146,7 @@
      "visual-docs capture": 1
     },
     "cd_job_seconds": 52413.0,
+    "cd_macos_s": 24245.0,
     "merge_to_last_cd_job_s": 27621.0,
     "phases": {
      "ci.yml:push": {
@@ -14679,6 +15217,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 27437.0,
+    "release_pr_macos_s": 5640.0,
+    "release_pr_number": 903,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 3.0,
      "longest_build_s": 1004.0,
@@ -14705,6 +15245,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 43589.0,
+    "cd_macos_s": 17179.0,
     "merge_to_last_cd_job_s": 36052.0,
     "phases": {
      "ci.yml:push": {
@@ -14775,6 +15316,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 35911.0,
+    "release_pr_macos_s": 15987.0,
+    "release_pr_number": 907,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 2.0,
      "longest_build_s": 1027.0,
@@ -14801,6 +15344,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 36455.0,
+    "cd_macos_s": 7864.0,
     "merge_to_last_cd_job_s": 18130.0,
     "phases": {
      "ci.yml:push": {
@@ -14871,6 +15415,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 35882.0,
+    "release_pr_macos_s": 14522.0,
+    "release_pr_number": 912,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 2.0,
      "longest_build_s": 1033.0,
@@ -14897,6 +15443,7 @@
      "visual-docs capture": 0
     },
     "cd_job_seconds": 41323.0,
+    "cd_macos_s": 11341.0,
     "merge_to_last_cd_job_s": 31026.0,
     "phases": {
      "ci.yml:push": {
@@ -14967,6 +15514,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 26838.0,
+    "release_pr_macos_s": 4457.0,
+    "release_pr_number": 919,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 3.0,
      "longest_build_s": 1141.0,
@@ -14993,6 +15542,7 @@
      "visual-docs capture": 1
     },
     "cd_job_seconds": 39037.0,
+    "cd_macos_s": 10346.0,
     "merge_to_last_cd_job_s": 7920.0,
     "phases": {
      "ci.yml:push": {
@@ -15063,6 +15613,8 @@
      "visual-docs capture": 1
     },
     "release_pr_job_seconds": 25321.0,
+    "release_pr_macos_s": 6846.0,
+    "release_pr_number": 925,
     "release_yml_serialization": {
      "first_build_started_after_test_end_s": 2.0,
      "longest_build_s": 1077.0,

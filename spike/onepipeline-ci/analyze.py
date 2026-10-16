@@ -88,7 +88,8 @@ def main() -> int:
         fh, ch = family_seconds(head)
         fp, cp = family_seconds(push)
         ci = [s for s in p["head_runs"] if s["workflow"] == "ci.yml"]
-        change.append({"pr": p["number"], "head": fh, "head_count": ch, "merge_push": fp, "merge_push_count": cp,
+        mac = lambda js: sum(j["duration_s"] or 0 for j in js if j["os"] == "macOS")
+        change.append({"pr": p["number"], "head_macos_s": mac(head), "merge_push_macos_s": mac(push), "head": fh, "head_count": ch, "merge_push": fp, "merge_push_count": cp,
                        "head_job_seconds": sum(j["duration_s"] or 0 for j in head),
                        "merge_push_job_seconds": sum(j["duration_s"] or 0 for j in push),
                        "ci_wall_s": max((s["wall_s"] or 0 for s in ci), default=None)})
@@ -119,7 +120,9 @@ def main() -> int:
                           "first_build_started_after_test_end_s": min(secs(test["completed_at"], b["started_at"]) for b in builds),
                           "longest_build_s": max(b["duration_s"] for b in builds),
                           "release_run_wall_s": rel_run["wall_s"]}
-        release.append({"tag": r["tag"], "release_pr": rp["number"] if rp else None,
+        mac = lambda js: sum(j["duration_s"] or 0 for j in js if j["os"] == "macOS")
+        release.append({"tag": r["tag"], "release_pr_macos_s": mac(rp_jobs), "cd_macos_s": mac(cd_jobs),
+                        "release_pr_number": rp["number"] if rp else None,
                         "release_pr_checks_s": rp["checks_phase_s"] if rp else None,
                         "release_pr": fr, "release_pr_count": cr, "cd": fc, "cd_count": cc,
                         "release_pr_job_seconds": sum(j["duration_s"] or 0 for j in rp_jobs),
@@ -208,12 +211,16 @@ def main() -> int:
             "head_job_seconds": stats([c["head_job_seconds"] for c in change]),
             "merge_push_job_seconds": stats([c["merge_push_job_seconds"] for c in change]),
             "ci_head_run_wall_s": stats([c["ci_wall_s"] for c in change]),
+            "head_macos_job_seconds": stats([c["head_macos_s"] for c in change]),
+            "merge_push_macos_job_seconds": stats([c["merge_push_macos_s"] for c in change]),
         },
         "per_release": {
             "release_pr_family_seconds": fam_stats(release, "release_pr"),
             "cd_family_seconds": fam_stats(release, "cd"),
             "release_pr_job_seconds": stats([r["release_pr_job_seconds"] for r in release]),
             "cd_job_seconds": stats([r["cd_job_seconds"] for r in release]),
+            "release_pr_macos_job_seconds": stats([r["release_pr_macos_s"] for r in release]),
+            "cd_macos_job_seconds": stats([r["cd_macos_s"] for r in release]),
             "release_pr_checks_s": stats([r["release_pr_checks_s"] for r in release]),
             "merge_to_last_cd_job_s": stats([r["merge_to_last_cd_job_s"] for r in release]),
             "prs_carried": stats([r["prs_carried"] for r in release]),
