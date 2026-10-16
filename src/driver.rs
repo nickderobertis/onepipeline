@@ -2221,11 +2221,14 @@ impl<'a> ObserverWatch<'a> {
     fn stopped(&mut self, observer: &mut agentgraph::GraphRun) -> Stopped {
         let gate = self.gate();
         let Some(_writing) = gate.open_for_writing() else {
+            // Still said as a stop, because it is one: a run that settles before
+            // its watch next looks — an observer refused at once does — has its
+            // observer stop inside this window, and its reader is owed the stop.
             if !self.said_let_go {
                 self.said_let_go = true;
                 eprintln!(
-                    "onepipeline: the graph watching '{}' stopped as this driver let go of \
-                     the run; its next driver starts its own",
+                    "onepipeline: the observer graph for '{}' has stopped watching as this \
+                     driver let go of the run; its next driver starts its own",
                     self.paths.run
                 );
             }

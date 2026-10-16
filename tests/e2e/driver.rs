@@ -1748,12 +1748,19 @@ fn leaves_the_record_to_the_adoption(
         |_| {
             let said = said();
             said.contains("started another observer graph")
-                || said.contains("stopped as this driver let go")
+                || said.contains("as this driver let go")
         },
     );
     assert!(
-        said().contains("stopped as this driver let go"),
+        said().contains("as this driver let go"),
         "a driver that had let go of the run started another observer:\n{}",
+        said()
+    );
+    // Not restarted, and still reported: an observer that stops as its driver
+    // lets go has stopped watching all the same.
+    assert!(
+        said().contains("has stopped watching"),
+        "the departing driver's observer stopped unreported:\n{}",
         said()
     );
     assert_eq!(
