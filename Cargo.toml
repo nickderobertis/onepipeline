@@ -1004,6 +1004,12 @@ onevcs-testing = "0.19.2"
 # **0.6.0 carries comments across copies and adds per-source caches**. Engine
 # reads remain unpinned, including settlement write-back reads. The plugin API
 # adds public Task and Comment fields and CopyLink, making this a breaking link.
+#
+# **0.7.0 caches project and document reads**, adding version fields to the public
+# Project and Document and `forward_edges` to VersionCoverage: breaking again. Its GitHub
+# token moves from gh2 to gh3, which never orders a gh2 value, so a task version
+# recorded before this release costs one more read and is never served from cache; the
+# engine keeps versions opaque and translates nothing.
 # `justfile`'s `onetaskgraph-version` moves with this release.
 #
 # **No earlier release than 0.7.1**: a plan drafted in a private source reaches the
@@ -1016,10 +1022,12 @@ onetaskgraph-local-md = "=0.7.1"
 # `just engines-current` reads only the engines its script names.
 sha2 = "0.10"
 tokio = "1"
+# Windows only, and for the same reason: each member names the features it calls.
+windows-sys = "0.61"
 
 [package]
 name = "onepipeline"
-version = "0.72.0"
+version = "0.73.1"
 edition = "2021"
 rust-version.workspace = true
 description = "Execute a task DAG over oneagentgraph and onevcs, merging their event streams into one."
@@ -1184,7 +1192,7 @@ async-trait = "0.1"
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = [
+windows-sys = { workspace = true, features = [
   "Win32_Foundation",
   "Win32_Storage_FileSystem",
   "Win32_System_Console",
@@ -1283,6 +1291,11 @@ path = "tests/release_channel/main.rs"
 [[test]]
 name = "stop_verdict"
 path = "tests/stop_verdict/main.rs"
+
+# Large scratch telemetry is a release workload, excluded from per-change tests.
+[[test]]
+name = "scratch_workload"
+path = "tests/scratch_workload/main.rs"
 
 # A CLI binary: optimize for a small, fast-starting artifact.
 [profile.release]

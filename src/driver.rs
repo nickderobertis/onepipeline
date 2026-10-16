@@ -79,6 +79,7 @@ const DRIVER_LOG_LINES: usize = 8;
 /// its own is a launch — `start`, `plan check`, and the two hidden retained
 /// verbs — which is not a post-launch verb.
 pub fn dispatch(cli: Cli) -> Result<i32> {
+    crate::scratch::telemetry_to(std::env::var_os("ONEPIPELINE_SCRATCH_TELEMETRY_DIR"));
     use crate::cli::Command as Verb;
     use crate::verbs;
     // llmlint: ignore-block[no_panics_on_recoverable_errors] how this binary writes a verb's
@@ -93,6 +94,12 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
     // stream are what a closed pipe cuts short.
     match cli.command {
         Verb::Start(args) => start(&args),
+        Verb::Scratch(crate::cli::ScratchCommand::Discard { run }) => {
+            let discarded = verbs::scratch_discard(&ledger::runs_root(), &run)?;
+            print!("{}", verbs::render_scratch_discard(&discarded));
+            eprint!("{}", verbs::render_scratch_discard_errors(&discarded));
+            Ok(discarded.exit_code())
+        }
         Verb::Plan(crate::cli::PlanCommand::Check(args)) => crate::plancheck::check(&args),
         Verb::Boundary(crate::cli::BoundaryCommand::Guidance(args)) => {
             println!("{}", crate::boundary::render_guidance(args.json)?);
@@ -3958,7 +3965,7 @@ pub(crate) fn submit_envelope(
                 // being applied.
                 let mut lock = lock;
                 loop {
-                    match engine::let_go_of(paths, lock) {
+                    match let_go_of_reply(paths, lock) {
                         engine::LettingGo::Released => break,
                         engine::LettingGo::QueueMoved(back) => {
                             lock = back;
@@ -4135,7 +4142,7 @@ fn take_the_run_over_and_answer(
 fn let_go_or_leave_the_claim(paths: &RunPaths, lock: ledger::OwnershipLock) {
     let mut lock = lock;
     loop {
-        match engine::let_go_of(paths, lock) {
+        match let_go_of_reply(paths, lock) {
             engine::LettingGo::Released => return,
             engine::LettingGo::QueueMoved(back) => {
                 lock = back;
@@ -4161,6 +4168,15 @@ fn let_go_or_leave_the_claim(paths: &RunPaths, lock: ledger::OwnershipLock) {
     }
 }
 // llmlint: ignore-end[changed_behavior_has_e2e]
+
+/// The replying writer's final empty check and its scratch account precede
+/// release, so an adopting driver cannot start a dispatch between them.
+fn let_go_of_reply(paths: &RunPaths, lock: ledger::OwnershipLock) -> engine::LettingGo {
+    engine::let_go_of_saying(paths, lock, || {
+        let state = crate::checkpoint::fold_and_checkpoint(paths);
+        crate::scratch::at_writer_ending(paths, &state);
+    })
+}
 
 /// What is holding a run's ownership lock, as far as a waiting `reply` is
 /// concerned.
