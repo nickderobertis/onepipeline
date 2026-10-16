@@ -452,6 +452,8 @@ def main() -> int:
     ap.add_argument("--branch", default="main")
     ap.add_argument("--extra", action="append", default=[], help="also GET this path into --raw (JSON)")
     ap.add_argument("--job-log", type=int, action="append", default=[], help="also GET this job's log into --raw")
+    ap.add_argument("--merge-push-for", default="",
+                    help="workflows whose push run on each feature PR's merge commit is read too (a repeat of its checks)")
     ap.add_argument("--floor", type=int, default=2500)
     ap.add_argument("--cap", type=int, default=3000)
     ap.add_argument("--check-every", type=int, default=10)
@@ -520,6 +522,18 @@ def main() -> int:
         for cd in cd_cache.values():
             for s in cd["runs"]:
                 add_run(s)
+        merge_wfs = [w for w in args.merge_push_for.split(",") if w]
+        for fig in per_pr.values():
+            if fig["release_pr"] or not fig["merge_commit_sha"] or not merge_wfs:
+                continue
+            pushes = [r for wf in merge_wfs for r in runs_by_wf.get(wf, [])
+                      if r.get("event") == "push" and r.get("head_sha") == fig["merge_commit_sha"]
+                      and r.get("status") == "completed"]
+            fig["merge_push_runs"] = []
+            for run in sorted(pushes, key=lambda r: r["created_at"]):
+                summary = run_summary(run, run_jobs(store, run))
+                add_run(summary)
+                fig["merge_push_runs"].append({k: v for k, v in summary.items() if k != "jobs"})
         wanted = [w for w in args.jobs_for.split(",") if w]
         for wf in wanted:
             for run in runs_by_wf.get(wf, []):
