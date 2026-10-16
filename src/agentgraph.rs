@@ -1398,11 +1398,18 @@ impl ProcessGraphRun {
     fn await_logged_line(&mut self) -> Result<()> {
         let deadline = Instant::now() + startup_timeout();
         loop {
+            // llmlint: ignore-block[changed_behavior_has_e2e] the two orders differ only for an
+            // announcement written inside one iteration, between these two statements, which no
+            // driver outside this process can schedule: a graph that announced and exited before
+            // the look reads the same either way. The journey that exposes the race is
+            // `driver::the_shipped_bound_is_eight_restarts_and_an_unreadable_one_falls_back_to_it`,
+            // which counts every observer's run id and failed intermittently with the read first.
             let waited = held(&self.child).try_wait();
             if let Some(announcement) = self.logged_envelope() {
                 self.run_id = announced_run(&announcement);
                 return Ok(());
             }
+            // llmlint: ignore-end[changed_behavior_has_e2e]
             match waited {
                 Err(error) => {
                     return Err(sibling(format!(
