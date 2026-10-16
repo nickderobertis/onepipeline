@@ -360,16 +360,17 @@ pub enum PipelineKind {
     /// Written by `start --take-over` beside its `run-started`, only where the
     /// project's `onepipeline.driver` named a claim; carries that claim whole as
     /// `previous` — its `run`, `host`, `session`, `pid` and `claimed_at`. The run it
-    /// names stops at its own next claim check. Entry 119 of
-    /// `docs/contract-divergences.md` records it.
+    /// names stops at its own next read of the claim. Entries 119 and 127 of
+    /// `docs/contract-divergences.md` record it.
     DriverTakenOver,
     /// A driver found its project claimed by another run, and stopped.
     ///
-    /// Written by the driver that read the claim, once, at the check that found
-    /// it — at launch or adoption, at the start of a pass that would dispatch or
-    /// publish, or on its idle check — carrying the claim it found as `by`. After
-    /// it the driver dispatches and publishes nothing, and ends once its
-    /// dispatches in flight have settled unpublished. Entry 119 records it.
+    /// Written by the driver that read the claim, once, at the read that found
+    /// it — at adoption, or at the read it makes once per claim interval —
+    /// carrying the claim it found as `by`. After it the driver dispatches and
+    /// publishes nothing, and once its dispatches in flight have settled
+    /// unpublished it acknowledges that claim and ends. Entries 119 and 127
+    /// record it.
     DriverSuperseded,
     /// A manager landing registered its ownership and subjects with its flow,
     /// before it drafted, forwarded or touched anything. Kept in the landing's

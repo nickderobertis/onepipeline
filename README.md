@@ -222,6 +222,20 @@ write is reported and retried — unless the store refused it, which is reported
 once and attempted again when the run's graph next changes; it never changes
 execution or an edit ruling.
 
+A run claims its project on the store (`onepipeline.driver`), and a launch finding
+another run's claim is refused unless told `--take-over`. A running driver reads that
+claim once per **claim interval** — `ONEPIPELINE_CLAIM_INTERVAL_SECONDS`, 300 by
+default, which every host driving one project must be given alike — and never more
+often, however busy it is. It starts a dispatch or a publication only on a read younger
+than one interval, and ends any dispatch it still has in progress once its newest read
+is two intervals old. So a takeover waits rather than every driver: `start
+--take-over` writes its claim, and starts nothing until the driver it displaced has
+stopped and acknowledged that on the claim — which that driver does at its next read —
+or, where it never does, until two intervals, the cancel grace
+(`ONEPIPELINE_CANCEL_GRACE_SECONDS`) and ten seconds have passed, by which time it can
+no longer start or continue anything. A run of this host that nothing drives is taken
+over at once.
+
 A task's shape is a template its host owns. A host registers names in
 `<root>/templates.yaml` under `--template-root DIR`; `plan-task` is always
 registered. A name resolves at the first of `--template FILE`, the repository's

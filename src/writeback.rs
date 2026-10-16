@@ -934,6 +934,10 @@ pub struct Writeback {
     /// The claim of the run that took the project over, once one has: from then on this
     /// driver writes nothing more to it, its board being that run's. Set once, never cleared.
     retired: std::sync::OnceLock<crate::payload::DriverClaim>,
+    /// Whether another run has taken the project over and waits on this driver: what it
+    /// projects from then on — what it settled, so that run starts from it — never writes
+    /// the claim, and none of it is a closeout's release.
+    handing_over: std::sync::atomic::AtomicBool,
 }
 
 impl Writeback {
@@ -963,6 +967,7 @@ impl Writeback {
             per_item,
             held: Mutex::new(None),
             retired: std::sync::OnceLock::new(),
+            handing_over: std::sync::atomic::AtomicBool::new(false),
         };
         // The project is retained in each snapshot rather than in the worker so a malformed
         // old launch record disables projection without weakening LaunchRecord's compatibility.
@@ -991,6 +996,7 @@ impl Writeback {
             .lock()
             .ok()
             .and_then(|held| held.clone())
+            .filter(|_| !self.is_handing_over())
             .map_or(DriverWrite::Leave, DriverWrite::Hold);
         if let Some(snapshot) = snapshot_of(paths, launch, state, statuses, Claim::Held, driver) {
             self.queue(snapshot);
@@ -1016,6 +1022,32 @@ impl Writeback {
         }
     }
 
+    /// Another run has taken the project over and starts on what this driver leaves on the
+    /// board: go on projecting what this driver settles, but never its claim — the queued
+    /// projection included — and no closeout's release.
+    pub(crate) fn hand_over(&self) {
+        self.handing_over
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let (lock, _) = &*self.pending;
+        if let Ok(mut pending) = lock.lock() {
+            if let Some(latest) = pending.latest.as_mut() {
+                latest.driver = DriverWrite::Leave;
+            }
+        }
+    }
+
+    fn is_handing_over(&self) -> bool {
+        self.handing_over.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Wait, at most `within`, for every projection this driver handed the worker to land.
+    pub(crate) fn wait_until_landed(&self, within: Duration) {
+        let deadline = Instant::now() + within;
+        while self.still_landing() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     /// Whether a projection this driver handed the worker has yet to land — taken, and still
     /// being attempted, or queued behind one: what a closeout that has spent its window asks.
     pub(crate) fn still_landing(&self) -> bool {
@@ -1037,7 +1069,7 @@ impl Writeback {
         state: &RunState,
         statuses: &BTreeMap<String, NodeStatus>,
     ) {
-        if self.is_retired() {
+        if self.is_retired() || self.is_handing_over() {
             return;
         }
         let driver = DriverWrite::Release {
@@ -1896,6 +1928,16 @@ pub(crate) fn landed_claim(run_dir: &Path) -> Option<Value> {
 /// build cannot read, which may be one — so a read of it would be asked inside the wait.
 pub(crate) fn store_asked_to_wait(run_dir: &Path) -> bool {
     !matches!(AskedWait::kept(run_dir), Kept::Nothing)
+}
+
+/// How long the wait the run's store asked for has left: `None` where it asked for none, and
+/// the recheck of a kept wait this build cannot read where that is what is kept.
+pub(crate) fn store_wait_left(run_dir: &Path) -> Option<Duration> {
+    match AskedWait::kept(run_dir) {
+        Kept::Nothing => None,
+        Kept::Left(left) => Some(left),
+        Kept::Unreadable(_) => Some(UNREADABLE_WAIT_RECHECK),
+    }
 }
 
 /// How often a driver looks again at a kept wait it could not read, while it asks the store
@@ -5809,6 +5851,7 @@ mod tests {
             per_item: DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS,
             held: Mutex::new(None),
             retired: std::sync::OnceLock::new(),
+            handing_over: std::sync::atomic::AtomicBool::new(false),
         };
         writeback.closing_out_until(Instant::now() + super::CLOSEOUT_WAIT, Pending::unlanded);
         assert!(

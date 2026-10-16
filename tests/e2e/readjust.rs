@@ -2051,12 +2051,13 @@ fn an_adoption_readjusts_before_its_first_dispatch() {
     assert_eq!(settled(&world, run, "b")["base"], "main");
 }
 
-/// Nothing polls: a live driver with drafts outstanding and nothing to do, left over
-/// three of its idle intervals — shortened through the test seam entry 119 names —
-/// asks the host nothing at all; and `start` takes no readjustment-interval flag.
+/// Nothing polls: a live driver with drafts outstanding and nothing to do, left over more
+/// than one of its claim intervals — shortened through the setting entry 127 names, so it
+/// reads its claim inside the window — asks the host nothing at all; and `start` takes no
+/// readjustment-interval flag.
 #[test]
 fn an_idle_driver_asks_the_host_nothing() {
-    let world = team_world("readjust-idle").with_env("ONEPIPELINE_IDLE_CLAIM_CHECK_SECONDS", "1");
+    let world = team_world("readjust-idle").with_env("ONEPIPELINE_CLAIM_INTERVAL_SECONDS", "2");
     for node in ["a", "b", "x"] {
         world.script(&format!("{node}.work"), &format!("{node}'s change\n"));
     }

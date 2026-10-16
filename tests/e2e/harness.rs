@@ -3318,6 +3318,52 @@ pub struct Arrival {
 }
 
 impl Rendezvous {
+    /// A rendezvous the binary under test meets itself rather than a double: one of its
+    /// private ordering failpoints, which a journey points at [`Rendezvous::address`]
+    /// through that failpoint's variable.
+    pub fn failpoint() -> Self {
+        Self {
+            listener: std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback listener"),
+        }
+    }
+
+    /// Where the failpoint meets this test.
+    pub fn address(&self) -> String {
+        self.listener
+            .local_addr()
+            .expect("the listener has an address")
+            .to_string()
+    }
+
+    /// The next arrival, if one comes within `patience`.
+    pub fn arrived_within(&self, patience: std::time::Duration) -> Option<Arrival> {
+        self.listener
+            .set_nonblocking(true)
+            .expect("the listener can stop blocking");
+        let deadline = std::time::Instant::now() + patience;
+        let accepted = loop {
+            match self.listener.accept() {
+                Ok((stream, _)) => break Some(stream),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if std::time::Instant::now() >= deadline {
+                        break None;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(error) => panic!("the rendezvous cannot accept: {error}"),
+            }
+        };
+        self.listener
+            .set_nonblocking(false)
+            .expect("the listener can block again");
+        accepted.map(|stream| {
+            stream
+                .set_nonblocking(false)
+                .expect("the connection can block");
+            Arrival::of(stream)
+        })
+    }
+
     /// Block until the next dispatch arrives, and say which one.
     ///
     /// Once this returns, what the caller does next lands on a worker that is
@@ -3326,8 +3372,14 @@ impl Rendezvous {
     /// promise. Called again after a takeover, it answers with the fresh
     /// driver's dispatch, since the stopped one is already held.
     pub fn arrived(&self) -> Arrival {
-        use std::io::BufRead;
         let (stream, _) = self.listener.accept().expect("a dispatch connects");
+        Arrival::of(stream)
+    }
+}
+
+impl Arrival {
+    fn of(stream: std::net::TcpStream) -> Self {
+        use std::io::BufRead;
         let mut announced = String::new();
         std::io::BufReader::new(stream.try_clone().expect("the connection is shared"))
             .read_line(&mut announced)
@@ -6797,6 +6849,8 @@ pub struct Counts {
     /// written, and one resuming from a checkpoint counts what the store has
     /// grown by since.
     pub records_folded: u64,
+    /// Reads of the project's driver claim the driver asked its plan store for.
+    pub claim_reads: u64,
 }
 
 impl Counts {
@@ -6811,6 +6865,7 @@ impl Counts {
             maintenance_sweeps: self.maintenance_sweeps - before.maintenance_sweeps,
             store_bytes: self.store_bytes - before.store_bytes,
             records_folded: self.records_folded - before.records_folded,
+            claim_reads: self.claim_reads - before.claim_reads,
         }
     }
 }
@@ -6842,6 +6897,7 @@ pub fn counts(world: &World, run: &str) -> Counts {
         release_asks: count("release_asks"),
         maintenance_sweeps: count("maintenance_sweeps"),
         store_bytes: count("store_bytes"),
+        claim_reads: count("claim_reads"),
         records_folded: count("records_folded"),
     }
 }
