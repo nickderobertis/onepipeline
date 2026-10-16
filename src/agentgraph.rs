@@ -1389,14 +1389,20 @@ impl ProcessGraphRun {
     /// graph that announced itself and then died started — the launch is what
     /// starts it, and a driver that dies afterwards is what `DRIVER DEAD` and
     /// `adopt` are for.
+    ///
+    /// Whether it has exited is asked *before* the log is read, never after. A
+    /// graph writes its announcement before it exits, so a log read after an
+    /// exit was seen holds every line the graph will ever write; read the other
+    /// way round, a graph that announced itself and exited between the two would
+    /// be taken as started with no run id to address it by.
     fn await_logged_line(&mut self) -> Result<()> {
         let deadline = Instant::now() + startup_timeout();
         loop {
+            let waited = held(&self.child).try_wait();
             if let Some(announcement) = self.logged_envelope() {
                 self.run_id = announced_run(&announcement);
                 return Ok(());
             }
-            let waited = held(&self.child).try_wait();
             match waited {
                 Err(error) => {
                     return Err(sibling(format!(
@@ -1404,19 +1410,8 @@ impl ProcessGraphRun {
                         binary()
                     )))
                 }
-                // Looked for again before the exit is taken as the answer: a graph
-                // that announced itself and exited between the look above and this
-                // one answered first, and its run id is on that line.
-                Ok(Some(status)) => {
-                    if let Some(announcement) = self.logged_envelope() {
-                        self.run_id = announced_run(&announcement);
-                        return Ok(());
-                    }
-                    if status.success() {
-                        return Ok(());
-                    }
-                    return self.refused(status);
-                }
+                Ok(Some(status)) if status.success() => return Ok(()),
+                Ok(Some(status)) => return self.refused(status),
                 Ok(None) => {}
             }
             if Instant::now() >= deadline {
