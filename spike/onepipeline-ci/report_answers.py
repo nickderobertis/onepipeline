@@ -9,6 +9,7 @@ below cites those figures; every projection in it says it is one and names the
 measurements it rests on. JSON is valid YAML, which the template answers file is.
 """
 
+import gzip
 import json
 import subprocess
 import sys
@@ -26,20 +27,37 @@ assert not LOCAL["valid_runs"], "a valid local run exists: rewrite the local-pro
 HITS = json.load(open(out / "nx-input-hits.json"))["summary"]
 
 BRANCH = "nick/ci-time-budgets-wave1/spike-onepipeline-ci"
-INVOCATION = (
-    "python3 -I spike/onepipeline-ci/actions_spike.py --repo nickderobertis/onepipeline --since 2026-09-15 "
-    "--raw <store> --out <figures.json> --log <store>/requests.jsonl --jobs-for \"\" --newest-first "
-    "--shape-since 2026-10-07T10:35:42Z --merge-push-for ci.yml,visual-docs.yml "
-    "--required-checks-out spike/onepipeline-ci/required-status-checks.json "
-    "--extra \"repos/nickderobertis/screencomp/contents/.github/workflows/visual-docs-reusable.yml?ref=v0.4.8\" "
+# The invocation whose output out/figures.json.gz is: run from the worktree root
+# below, with every data path absolute under the parked dispatch's scratch store.
+# The figures document records its own argv as `generated_by`; this must match it.
+WORKDIR = "/home/nick.guest/.onevcs/workspaces/github.com-nickderobertis-onepipeline-5b3104ff76a0/pool/1/worktree"
+STORE = "/home/nick.guest/ai-orchestrator/runs/ci-time-budgets-wave1-brief-spikes/scratch/3446778-0/gh"
+ARGS = (
+    f"--repo nickderobertis/onepipeline --since 2026-09-15 --raw {STORE}/raw --out {STORE}/figures.json "
+    f"--log {STORE}/requests.jsonl --jobs-for  --newest-first --shape-since 2026-10-07T10:35:42Z "
+    f"--merge-push-for ci.yml,visual-docs.yml --required-checks-out {STORE}/required-status-checks.json "
+    "--extra repos/nickderobertis/screencomp/contents/.github/workflows/visual-docs-reusable.yml?ref=v0.4.8 "
     "--job-log 116698687585 --job-log 116660719008 --job-log 116631701735 --job-log 116631701780 --job-log 115817452216"
+)
+FIG = json.load(gzip.open(out / "figures.json.gz"))
+assert FIG["generated_by"] == "actions_spike.py " + ARGS, "out/figures.json.gz was not produced by the invocation this report names"
+assert "--offline" not in FIG["generated_by"] and FIG["requests"]["this_invocation"] == 0
+INVOCATION = (
+    f"cd {WORKDIR}\n"
+    "python3 -I spike/onepipeline-ci/actions_spike.py --repo nickderobertis/onepipeline --since 2026-09-15 "
+    f"--raw {STORE}/raw --out {STORE}/figures.json --log {STORE}/requests.jsonl --jobs-for \"\" --newest-first "
+    "--shape-since 2026-10-07T10:35:42Z --merge-push-for ci.yml,visual-docs.yml "
+    f"--required-checks-out {STORE}/required-status-checks.json "
+    "--extra \"repos/nickderobertis/screencomp/contents/.github/workflows/visual-docs-reusable.yml?ref=v0.4.8\" "
+    "--job-log 116698687585 --job-log 116660719008 --job-log 116631701735 --job-log 116631701780 --job-log 115817452216\n"
+    f"gzip -9 -c {STORE}/figures.json > spike/onepipeline-ci/out/figures.json.gz"
 )
 
 harness = f"""Everything is under `spike/onepipeline-ci/` on `{BRANCH}`. Python 3 standard library and `gh` only; every GitHub read is a `gh api --method GET`.
 
 **The one command** — `actions_spike.py`, given a repository and a start date, reads its Actions run, job and pull-request records read-only, keeps each response body in a raw store keyed by its request path (a path the store holds is never requested again), and writes the per-job, per-run, per-PR (both cycle-time phases) and per-release figures as one JSON document. Before every request it holds the core quota the `rate_limit` endpoint last reported (re-read every 10 requests; that read is itself logged and counted), refuses any request once that figure less the requests since it is not above `--floor 2500`, or once `--cap 3000` requests are logged across every invocation, and logs each request with that quota and the `X-RateLimit-Remaining` GitHub answered. `--offline` makes no request and computes from the store alone. Tag containment and tag commits come from local git and are kept in the store too, so `--offline` needs no checkout.
 
-The report's figures are the output of exactly this invocation, run over the store every earlier invocation filled (it made 0 requests; `out/requests.jsonl` holds all 2,243 that the spike's invocations made):
+The report's figures are the output of exactly this invocation, run from the directory `{WORKDIR}` (the session branch's worktree root, which the relative script path is resolved from) over the raw store `{STORE}/raw` every earlier invocation filled. `--offline` was **not** supplied: the run was online-capable but made 0 requests (its `requests.this_invocation` is 0) because the store already held every path it asked for; `{STORE}/requests.jsonl`, committed byte-identical as `out/requests.jsonl`, holds all 2,243 requests the spike's invocations made. Its output `{STORE}/figures.json` was committed gzip-compressed as `out/figures.json.gz`, whose `generated_by` field records this argv verbatim. A later invocation from the same directory with the same arguments except `--required-checks-out spike/onepipeline-ci/required-status-checks.json` wrote the committed snapshot and an output identical in every field but `generated_by`:
 
 ```
 {INVOCATION}

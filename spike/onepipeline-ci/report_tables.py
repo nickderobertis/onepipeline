@@ -26,9 +26,9 @@ def mp(s):
     return "–" if not s else f"{s['median']:.0f} / {s['p90']:.0f}"
 
 
-print("#### Every CI and CD job and matrix leg (seconds; median / p90 / max over successful runs)\n")
-print("| Workflow :: job (leg) | OS | Window: ok / failed / cancelled | Window duration | Current shape: ok / failed / cancelled | Current-shape duration | Current-shape queue, job created → started | Current-shape wait, run created → started |")
-print("| --- | --- | --- | --- | --- | --- | --- | --- |")
+print("#### Every CI and CD job and matrix leg (seconds; median / p90 / max over successful runs unless a column says otherwise)\n")
+print("| Workflow :: job (leg) | OS | Window: ok / failed / cancelled | Window duration | Current shape: ok / failed / cancelled | Current-shape duration | Current-shape queue, job created → started (median / p90) | Window wait, run created → started | Current-shape wait, run created → started |")
+print("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
 for key, w in fig["per_job"].items():
     s = shp["per_job"].get(key)
     if not w["duration_success_s"] and not (s and s["duration_success_s"]):
@@ -36,7 +36,8 @@ for key, w in fig["per_job"].items():
     sc = f"{s['success']} / {s['failed']} / {s['cancelled']}" if s else "–"
     print(f"| {key.replace('|', '/')} | {', '.join(w['os'])} | {w['conclusions'].get('success', 0)} / {w['failed']} / {w['cancelled']} "
           f"| {mpm(w['duration_success_s'])} | {sc} | {mpm(s['duration_success_s']) if s else '–'} "
-          f"| {mp(s['queue_from_job_created_success_s']) if s else '–'} | {mp(s['queue_from_run_created_success_s']) if s else '–'} |")
+          f"| {mp(s['queue_from_job_created_success_s']) if s else '–'} | {mpm(w['queue_from_run_created_success_s'])} "
+          f"| {mpm(s['queue_from_run_created_success_s']) if s else '–'} |")
 
 print("\n#### Runs per workflow in the window (run-level conclusions, every run listed)\n")
 print("| Workflow | Runs | First run in window | success | failure | cancelled | skipped | other |")
