@@ -3,7 +3,7 @@
 
     nx-run-watch.py <run.json> <snapshot-dir>       # watch until killed
     nx-run-watch.py --summarize <snapshot-dir> <start_ms> <end_ms> <exit> <label> \
-        <load_before> <load_after> <cache> <recipe>
+        <load_before> <load_after> <mode> <recipe> <uptime_before> <uptime_after> <commit>
 """
 
 import datetime as dt
@@ -35,7 +35,7 @@ def ms(value: str) -> float:
     return dt.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp() * 1000
 
 
-def summarize(runs, start, end, status, label, lb, la, cache, recipe) -> None:
+def summarize(runs, start, end, status, label, lb, la, mode, recipe, up_before, up_after, commit) -> None:
     start, end = int(start), int(end)
     invocations, seen = [], set()
     for f in sorted(glob.glob(f"{runs}/*.json")):
@@ -56,8 +56,13 @@ def summarize(runs, start, end, status, label, lb, la, cache, recipe) -> None:
                        "duration_s": (ms(t["endTime"]) - ms(t["startTime"])) / 1000}
                       for t in data["tasks"]],
         })
-    print(json.dumps({"label": label, "recipe": recipe, "nx_cache_directory": cache, "exit": int(status),
-                      "wall_s": (end - start) / 1000, "loadavg_before": lb, "loadavg_after": la,
+    wall = (end - start) / 1000
+    uptime = float(up_after) - float(up_before)
+    print(json.dumps({"label": label, "recipe": recipe, "mode": mode, "commit": commit, "exit": int(status),
+                      "wall_s": wall, "uptime_s": round(uptime, 2),
+                      # A VM pause advances the wall clock and not the uptime clock.
+                      "paused": abs(wall - uptime) > 30,
+                      "loadavg_before": lb, "loadavg_after": la,
                       "nproc": os.cpu_count(), "invocations": invocations}, indent=1))
 
 
