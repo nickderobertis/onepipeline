@@ -158,14 +158,14 @@ class Store:
         self.last_remaining = core["remaining"]
         self.since_check = 0
 
-    def get(self, path: str) -> object:
+    def get(self, path: str, text: bool = False) -> object:
         key = urllib.parse.quote(path, safe="")
-        file = self.raw / f"{key}.json"
+        file = self.raw / f"{key}.{'txt' if text else 'json'}"
         if not file.exists() and self.seed is not None and (self.seed / f"{key}.json").exists():
             file.write_bytes((self.seed / f"{key}.json").read_bytes())
         if file.exists():
             self.reads.append(file.name)
-            return json.loads(file.read_text())
+            return file.read_text() if text else json.loads(file.read_text())
         if self.offline:
             raise Missing(path)
         if self.last_remaining is None or self.since_check >= self.check_every:
@@ -186,9 +186,12 @@ class Store:
         self._log(entry)
         if status != 200:
             raise RuntimeError(f"GET {path} answered {status}: {body[:300]}")
+        self.reads.append(file.name)
+        if text:
+            file.write_text(body)
+            return body
         data = json.loads(body)
         file.write_text(json.dumps(data, sort_keys=True))
-        self.reads.append(file.name)
         return data
 
     def git(self, name: str, argv: list[str]) -> str:
@@ -425,6 +428,11 @@ def main() -> int:
                     help="workflows whose every in-window run has its jobs read for the per-job figures")
     ap.add_argument("--newest-first", action="store_true", help="read PRs and releases newest first")
     ap.add_argument("--shape-since", help="also summarize PRs merged and releases published on or after this instant")
+    ap.add_argument("--required-checks-out", type=Path,
+                    help="also read the default branch's required status checks and write them here, dated")
+    ap.add_argument("--branch", default="main")
+    ap.add_argument("--extra", action="append", default=[], help="also GET this path into --raw (JSON)")
+    ap.add_argument("--job-log", type=int, action="append", default=[], help="also GET this job's log into --raw")
     ap.add_argument("--floor", type=int, default=2500)
     ap.add_argument("--cap", type=int, default=3000)
     ap.add_argument("--check-every", type=int, default=10)
@@ -446,6 +454,18 @@ def main() -> int:
     per_pr: dict[str, dict] = {}
     cd_cache: dict = {}
     try:
+        if args.required_checks_out:
+            checks = store.get(f"repos/{store.repo}/branches/{args.branch}/protection/required_status_checks")
+            snap = {"taken_at": next((json.loads(l)["at"] for l in reversed(store.log_path.read_text().splitlines())
+                                      if "required_status_checks" in l), None),
+                    "repository": store.repo, "branch": args.branch,
+                    "source": f"GET /repos/{store.repo}/branches/{args.branch}/protection/required_status_checks",
+                    "response": checks}
+            args.required_checks_out.write_text(json.dumps(snap, indent=1, sort_keys=True) + "\n")
+        for path in args.extra:
+            store.get(path)
+        for jid in args.job_log:
+            store.get(f"repos/{store.repo}/actions/jobs/{jid}/logs", text=True)
         rels = releases(store)
         in_window_rels = [r for r in rels if (r.get("published_at") or "") >= args.since]
         runs_by_wf: dict[str, list] = {}
