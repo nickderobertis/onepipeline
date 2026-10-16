@@ -1,4 +1,54 @@
 {
+ "cd_job_seconds_by_workflow": {
+  "ci.yml": {
+   "max": 24060.0,
+   "median": 16877.0,
+   "n": 21,
+   "p90": 21061.0
+  },
+  "engine-currency.yml": {
+   "max": 10.0,
+   "median": 8.0,
+   "n": 21,
+   "p90": 9.0
+  },
+  "published-smoke.yml": {
+   "max": 14534.0,
+   "median": 230.0,
+   "n": 21,
+   "p90": 623.0
+  },
+  "release-plz.yml": {
+   "max": 50.0,
+   "median": 42.0,
+   "n": 21,
+   "p90": 44.0
+  },
+  "release.yml": {
+   "max": 22231.0,
+   "median": 14825.0,
+   "n": 21,
+   "p90": 16964.0
+  },
+  "visual-docs.yml": {
+   "max": 1100.0,
+   "median": 384.0,
+   "n": 21,
+   "p90": 937.0
+  }
+ },
+ "ci_head_run_install_overrun_s": {
+  "max": 9844.0,
+  "median": 0.0,
+  "n": 31,
+  "p90": 2935.0
+ },
+ "ci_head_run_last_job": {
+  "cross (macos-latest)": 8,
+  "cross (windows-latest)": 13,
+  "install (macos-latest)": 9,
+  "smoke": 1
+ },
  "ci_install_waits_on_gate": {
   "install (macos-latest)": {
    "started_after_gate_end_s": {
@@ -52,6 +102,20 @@
   "msrv / deny / release-compat / smoke"
  ],
  "feature_changes": 31,
+ "merge_to_release_split_s": {
+  "feature_merge_to_release_pr_merge": {
+   "max": 43432.0,
+   "median": 8464.5,
+   "n": 30,
+   "p90": 32528.0
+  },
+  "release_pr_merge_to_last_cd_job": {
+   "max": 38746.0,
+   "median": 29323.5,
+   "n": 30,
+   "p90": 38579.0
+  }
+ },
  "per_change": {
   "ci_head_run_wall_s": {
    "max": 28625.0,

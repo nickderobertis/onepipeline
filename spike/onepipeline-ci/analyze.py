@@ -145,6 +145,41 @@ def main() -> int:
                                          "waited_from_run_created_s": j["queue_from_run_created_s"],
                                          "gate_s": gate["duration_s"]})
     phase_keys = sorted({k for r in release for k in r["phases"]})
+    # Merge-to-release, split where the release PR merges.
+    rel_pr_by_tag = {}
+    for rp in d["per_pr"].values():
+        if rp["release_pr"] and rp["release"]:
+            rel_pr_by_tag.setdefault(rp["release"], rp)
+    split = []
+    for p in feature:
+        rp = rel_pr_by_tag.get(p["release"])
+        r = d["per_release"].get(p["release"]) if p["release"] else None
+        if rp and r and p["merge_to_release_s"] is not None:
+            split.append({"to_release_pr_merge_s": secs(p["merged_at"], rp["merged_at"]),
+                          "release_pr_merge_to_last_cd_s": secs(rp["merged_at"], r["last_job_completed_at"])})
+    # Job-seconds per release, by workflow.
+    cd_by_wf = {}
+    for r in rels:
+        sums = {}
+        for rid in r["run_ids"]:
+            for j in runs[str(rid)]["jobs"]:
+                sums[j["workflow"]] = sums.get(j["workflow"], 0) + (j["duration_s"] or 0)
+        for wf, v in sums.items():
+            cd_by_wf.setdefault(wf, []).append(v)
+    # Which job of a PR head-commit ci.yml run completed last, and by how much
+    # an install leg (held behind `gate`) outlasted every other job.
+    last_job, install_overrun = {}, []
+    for p in feature:
+        for s in p["head_runs"]:
+            if s["workflow"] != "ci.yml" or not s["jobs"]:
+                continue
+            end = max(s["jobs"], key=lambda j: j["completed_at"] or "")
+            name = end["name"].split(" (")[0] if end["name"].startswith(("install (", "install-documented (")) else end["name"]
+            last_job[end["name"]] = last_job.get(end["name"], 0) + 1
+            inst = [j for j in s["jobs"] if j["name"].startswith("install (")]
+            rest = [j for j in s["jobs"] if not j["name"].startswith("install (")]
+            if inst and rest:
+                install_overrun.append(max(0.0, secs(max(j["completed_at"] for j in rest), max(j["completed_at"] for j in inst))))
     # Per job, over the runs these PRs and releases started: head commits, merge
     # pushes, release-PR head commits and CD runs.
     run_ids = {s["run_id"] for p in prs for s in p["head_runs"]}
@@ -195,6 +230,12 @@ def main() -> int:
                   "waited_from_run_created_s": stats([w["waited_from_run_created_s"] for w in install_wait if w["leg"] == leg])}
             for leg in sorted({w["leg"] for w in install_wait})},
         "per_job": per_job,
+        "merge_to_release_split_s": {
+            "feature_merge_to_release_pr_merge": stats([x["to_release_pr_merge_s"] for x in split]),
+            "release_pr_merge_to_last_cd_job": stats([x["release_pr_merge_to_last_cd_s"] for x in split])},
+        "cd_job_seconds_by_workflow": {wf: stats(v) for wf, v in sorted(cd_by_wf.items())},
+        "ci_head_run_last_job": dict(sorted(last_job.items(), key=lambda kv: -kv[1])),
+        "ci_head_run_install_overrun_s": stats(install_overrun),
         "families": list(FAMILIES),
         "rows": {"changes": change, "releases": release},
     }
