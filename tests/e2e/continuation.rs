@@ -1761,6 +1761,7 @@ fn a_running_driver_reads_its_claim_at_most_once_per_interval() {
         )
     };
     let mut passes = 0;
+    let mut inside = Vec::new();
     for _ in 0..3 {
         let (did, asked) = window(interval - Duration::from_millis(500));
         assert!(
@@ -1772,6 +1773,7 @@ fn a_running_driver_reads_its_claim_at_most_once_per_interval() {
             "the store was asked {asked} times inside one interval"
         );
         passes += did.passes;
+        inside.push((did.claim_reads, asked));
     }
     assert!(
         passes >= 10,
@@ -1790,8 +1792,9 @@ fn a_running_driver_reads_its_claim_at_most_once_per_interval() {
     );
     assert!(did.passes > 2 * did.claim_reads, "{did:?}");
     eprintln!(
-        "claim reads: at most 1 in each of three windows under one interval ({passes} passes), \
-         {} across {several} intervals ({} passes); the store asked {asked} times",
+        "claim reads (driver's count, store's count) in three windows under one interval: \
+         {inside:?} over {passes} passes; across {several} intervals: {} read, the store asked \
+         {asked} times, over {} passes",
         did.claim_reads, did.passes
     );
     world.release("chatty.go");
