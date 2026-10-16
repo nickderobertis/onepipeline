@@ -355,8 +355,12 @@ impl Store {
         Ok(found.item.metadata.into_iter().collect())
     }
 
-    /// Set one key of one project's metadata, within `within`: what a driver releases its
-    /// claim by when the closeout's own projection did not land it in time.
+    /// Set one key of one project's metadata, within `within`: what a driver claims,
+    /// acknowledges, fences and releases by outside its write-back.
+    ///
+    /// A store whose configuration opted into the public boundary has the write checked as
+    /// the write-back's are — by the linked `onevcs`, in process, over `term_scope`, the
+    /// run's own — rather than by the commands that configuration names.
     ///
     /// # Errors
     ///
@@ -367,8 +371,9 @@ impl Store {
         key: &str,
         value: &Value,
         within: std::time::Duration,
+        term_scope: &[String],
     ) -> Result<()> {
-        let built = self
+        let mut built = self
             .engine(&Layer::default())
             .map_err(|error| Error::Sibling {
                 tool: STORE,
@@ -377,6 +382,12 @@ impl Store {
                     self.dir.display()
                 ),
             })?;
+        if built.engine.boundary_active() {
+            built.engine = built
+                .engine
+                .with_write_policy(std::sync::Arc::new(crate::boundary::WritePolicy))
+                .with_term_scope(Some(term_scope.to_vec()));
+        }
         let reader = Reader::over(built)?;
         let named = MetadataKey::new(key.to_owned()).map_err(|why| Error::Sibling {
             tool: STORE,

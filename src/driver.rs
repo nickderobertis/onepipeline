@@ -1500,7 +1500,13 @@ fn start(args: &StartArgs) -> Result<i32> {
             claimed_at: sys::now_rfc3339(),
             lease: Some(crate::continuation::lease_terms()),
         };
-        crate::continuation::hand_over(&store, &project, &mine, claim.as_ref())?;
+        crate::continuation::hand_over(
+            &store,
+            &project,
+            &mine,
+            claim.as_ref(),
+            &crate::boundary::of_run(&plan).scope,
+        )?;
         read = store.read_plan(&project).map_err(Error::from)?;
         graph::validate(&read.plan)?;
         crate::templates::check_plan(&templates, &read, &launch_dir)?;

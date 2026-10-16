@@ -700,6 +700,9 @@ pub(crate) struct ClaimWatch {
     /// A read found another run's claim: the fence this driver clears may since be that
     /// run's, so it reads before it clears.
     superseded: bool,
+    /// The run's term scope, which a public boundary checks this driver's writes over.
+    // llmlint: ignore[invalid_states_unrepresentable] the shape the store takes a scope in, as `writeback::Snapshot::term_scope` says.
+    term_scope: Vec<String>,
 }
 
 impl ClaimWatch {
@@ -711,6 +714,7 @@ impl ClaimWatch {
     pub(crate) fn of_run(
         paths: &crate::ledger::RunPaths,
         launch: &crate::ledger::LaunchRecord,
+        term_scope: Vec<String>,
     ) -> Option<Self> {
         let project = launch.project.parse().ok()?;
         let every = claim_interval();
@@ -736,6 +740,7 @@ impl ClaimWatch {
             fenced: launched.then(std::collections::BTreeSet::new),
             fence_refused: None,
             superseded: false,
+            term_scope,
         })
     }
 
@@ -946,6 +951,7 @@ impl ClaimWatch {
                     PUBLISHING_KEY,
                     &value,
                     CLAIM_READ_DEADLINE,
+                    &self.term_scope,
                 )
                 .map_err(|why| why.to_string())
         });
@@ -993,7 +999,13 @@ impl ClaimWatch {
             // llmlint: ignore-end[changed_behavior_has_e2e]
             Ok(claim) => self
                 .store
-                .set_project_metadata_within(&self.project, DRIVER_KEY, &claim, CLAIM_READ_DEADLINE)
+                .set_project_metadata_within(
+                    &self.project,
+                    DRIVER_KEY,
+                    &claim,
+                    CLAIM_READ_DEADLINE,
+                    &self.term_scope,
+                )
                 .map_err(|why| why.to_string()),
             Err(why) => Err(why.to_string()),
         };
@@ -1227,6 +1239,7 @@ pub(crate) fn hand_over(
     project: &QualifiedId,
     mine: &DriverClaim,
     displaced: Option<&DriverClaim>,
+    term_scope: &[String],
 ) -> Result<HandedOver> {
     store
         .set_project_metadata_within(
@@ -1234,6 +1247,7 @@ pub(crate) fn hand_over(
             DRIVER_KEY,
             &serde_json::to_value(mine).map_err(|why| Error::Invalid(why.to_string()))?,
             CLAIM_READ_DEADLINE,
+            term_scope,
         )
         .map_err(|why| {
             Error::Refused(format!(
@@ -1387,6 +1401,7 @@ pub(crate) fn hand_over(
 pub(crate) fn release_left_standing(
     paths: &crate::ledger::RunPaths,
     launch: &crate::ledger::LaunchRecord,
+    term_scope: &[String],
 ) {
     let Ok(project) = launch.project.parse::<QualifiedId>() else {
         return;
@@ -1417,6 +1432,7 @@ pub(crate) fn release_left_standing(
                 DRIVER_KEY,
                 &Value::Null,
                 CLAIM_READ_DEADLINE,
+                term_scope,
             )
         });
     if let Err(why) = released {

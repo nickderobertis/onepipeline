@@ -1491,7 +1491,11 @@ fn converge(
     // Who the project's store says drives it, read once per claim interval whatever the
     // driver is doing — an adoption's first pass included — and never more often. Each
     // start of a dispatch or a publication asks the lease that read gave, not the store.
-    let mut claims = crate::continuation::ClaimWatch::of_run(paths, launch);
+    let mut claims = crate::continuation::ClaimWatch::of_run(
+        paths,
+        launch,
+        crate::boundary::of_run(&crate::boundary::plan_now(state)).scope,
+    );
     let claimed_at = sys::now_rfc3339();
     // The claim that took the project over from this driver, once one has: from then on it
     // dispatches and publishes nothing more, and ends once what it had in flight settles.
@@ -2632,7 +2636,11 @@ fn close_out_and_drain(
         // refusing the next host's launch over a run that is over. A closeout the store
         // answered — landed, refused or failed — is not asked about again here.
         if !writeback.is_retired() && writeback.still_landing() {
-            crate::continuation::release_left_standing(paths, launch);
+            crate::continuation::release_left_standing(
+                paths,
+                launch,
+                &crate::boundary::of_run(&crate::boundary::plan_now(state)).scope,
+            );
         }
         // The last thing this loop does, and the reason it is here rather than
         // only at the top: a run whose *terminal* projection failed is exactly
