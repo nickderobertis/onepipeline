@@ -371,7 +371,7 @@ pub enum PipelineKind {
     /// it — at adoption, or at the read it makes once per claim interval —
     /// carrying the claim it found as `by`. After it the driver dispatches and
     /// publishes nothing, and once its dispatches in flight have settled
-    /// unpublished it acknowledges that claim and ends. Entries 119 and 127
+    /// unpublished it acknowledges that claim and ends. Entries 119 and 128
     /// record it.
     DriverSuperseded,
     /// A manager landing registered its ownership and subjects with its flow,
