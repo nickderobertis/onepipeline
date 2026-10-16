@@ -122,6 +122,25 @@ class Store:
         return self.prior + self.made
 
     def _gh(self, path: str) -> tuple[int, dict, str]:
+        # A connection that never reached GitHub is retried, twice, after a pause;
+        # each attempt is still logged and counted against the cap by the caller.
+        for attempt in range(3):
+            try:
+                return self._gh_once(path)
+            except ConnectionError as exc:
+                self._log({"request": True, "seq": self._total() + 1, "at": dt.datetime.now(dt.UTC).isoformat(),
+                           "path": path, "status": 0, "error": str(exc)[:200],
+                           "core_remaining_last_reported": self.last_remaining,
+                           "requests_since_report": self.since_check})
+                self.made += 1
+                self.since_check += 1
+                if attempt == 2 or self._total() >= self.cap:
+                    raise
+                import time
+                time.sleep(30)
+        raise AssertionError("unreachable")
+
+    def _gh_once(self, path: str) -> tuple[int, dict, str]:
         proc = subprocess.run(["gh", "api", "--method", "GET", "--include", path],
                               capture_output=True, text=True)
         out = proc.stdout
@@ -141,7 +160,7 @@ class Store:
                 k, v = line.split(":", 1)
                 headers[k.strip().lower()] = v.strip()
         if proc.returncode != 0 and not status:
-            raise RuntimeError(f"gh api {path} failed: {proc.stderr.strip()}")
+            raise ConnectionError(f"gh api {path} failed: {proc.stderr.strip()}")
         return status, headers, body
 
     def _check_quota(self) -> None:
