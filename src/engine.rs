@@ -1011,10 +1011,56 @@ pub fn claim(paths: &RunPaths) -> Result<OwnershipLock> {
 /// graph is terminal or when nothing can move without something arriving over
 /// the channel — a decision point cleared while the loop is still running
 /// resumes the subtree it held, without any external driver action.
-pub fn drive_holding(paths: &RunPaths, lock: OwnershipLock) -> Result<Driven> {
-    exiting_from(paths, lock, |paths, held, answered_from| {
-        driving(paths, held, answered_from, None)
+///
+/// `beside` is what this process writes the run's launch record under from beside
+/// the loop — the observer watch — and the loop closes it before it lets go of
+/// the run, so nothing this driver runs writes that record once another writer can
+/// hold the run.
+pub fn drive_holding(paths: &RunPaths, lock: OwnershipLock, beside: &RecordGate) -> Result<Driven> {
+    exiting_from(paths, lock, beside, |paths, held, answered_from| {
+        driving(paths, held, answered_from, None, beside)
     })
+}
+
+/// Whether what runs beside a driver's loop may still write the run's launch
+/// record.
+///
+/// The record has one writer, the process holding the run, and a driver's
+/// observer watch writes it from another thread — a restart moves the graph run
+/// the record names. A loop that lets go of the run releases the lock while that
+/// thread is still running, so a restart in that window wrote this driver's copy
+/// of the record over whatever the run's next writer had put there: an adopter's
+/// claim, or a record an operator had repaired. Open while the loop holds the run;
+/// the loop closes it before it lets go, and opens it again only when the run is
+/// handed back to it.
+#[derive(Debug)]
+pub struct RecordGate(std::sync::Mutex<bool>);
+
+impl Default for RecordGate {
+    fn default() -> Self {
+        Self(std::sync::Mutex::new(true))
+    }
+}
+
+impl RecordGate {
+    /// Hold the gate open for one write, or `None` once the loop has closed it.
+    ///
+    /// The loop's close waits for a write already holding it, so a write that
+    /// began while the run was held finishes before the run is let go.
+    pub fn open_for_writing(&self) -> Option<std::sync::MutexGuard<'_, bool>> {
+        let open = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (*open).then_some(open)
+    }
+
+    fn set(&self, open: bool) {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = open;
+    }
 }
 
 /// [`drive_holding`], for an explicit trigger that already made its readjustment's read
@@ -1024,8 +1070,10 @@ pub(crate) fn drive_after_readjust(
     lock: OwnershipLock,
     readjuster: crate::readjust::Readjuster,
 ) -> Result<Driven> {
-    exiting_from(paths, lock, |paths, held, answered_from| {
-        driving(paths, held, answered_from, Some(readjuster))
+    // Nothing runs beside this loop, so the gate it closes is its own.
+    let beside = RecordGate::default();
+    exiting_from(paths, lock, &beside, |paths, held, answered_from| {
+        driving(paths, held, answered_from, Some(readjuster), &beside)
     })
 }
 
@@ -1041,6 +1089,7 @@ pub(crate) fn drive_after_readjust(
 fn exiting_from(
     paths: &RunPaths,
     lock: OwnershipLock,
+    beside: &RecordGate,
     body: impl FnOnce(&RunPaths, &mut Option<OwnershipLock>, usize) -> Result<Driven>,
 ) -> Result<Driven> {
     // Taken before anything is applied, so every outcome line after it is this
@@ -1056,6 +1105,8 @@ fn exiting_from(
             answered_from,
         );
     }
+    // Closed before an erring driver's release as before a settled one's.
+    beside.set(false);
     drop(held);
     driven
 }
@@ -1103,6 +1154,7 @@ fn driving(
     held: &mut Option<OwnershipLock>,
     answered_from: usize,
     readjuster: Option<crate::readjust::Readjuster>,
+    beside: &RecordGate,
 ) -> Result<Driven> {
     let launch: LaunchRecord = ledger::read_json(&paths.launch())?;
     // llmlint: ignore-block[boundary_inputs_validated] graph-reference syntax and
@@ -1177,9 +1229,15 @@ fn driving(
             crate::scratch::at_writer_ending(paths, &state);
             record_exit(paths, settlement.into(), None, answered_from);
         };
+        // Closed outside the handover, because the write it waits for may be a
+        // graph launch and nothing under that gate is ever inside a subprocess.
+        beside.set(false);
         match let_go_of_saying(paths, lock, exiting) {
             LettingGo::Released => break (settlement, Departure::Released),
-            LettingGo::QueueMoved(back) => *held = Some(back),
+            LettingGo::QueueMoved(back) => {
+                beside.set(true);
+                *held = Some(back);
+            }
             // Nothing was looked at and nothing released, so this driver does not
             // release the run either: it leaves the claim standing over a process
             // that is ending, which the next writer reclaims, rather than opening
@@ -10393,11 +10451,20 @@ mod tests {
     fn a_reported_error_is_recorded_before_the_release_and_a_panic_records_nothing() {
         let paths = handover_scratch("exit-error");
         let lock = OwnershipLock::acquire(&paths, "drive").expect("the run is driven");
-        let failed = exiting_from(&paths, lock, |paths, held, _| {
+        let beside = RecordGate::default();
+        let failed = exiting_from(&paths, lock, &beside, |paths, held, _| {
             assert!(held.is_some() && paths.lock().is_file());
+            assert!(
+                beside.open_for_writing().is_some(),
+                "a held run's record was shut"
+            );
             Err(Error::Invalid("the queue could not be read".to_string()))
         });
         assert!(failed.is_err());
+        assert!(
+            beside.open_for_writing().is_none(),
+            "the watch may still write the record of a run this driver released"
+        );
         let exits = exits_of(&paths);
         assert_eq!(exits.len(), 1, "{exits:?}");
         assert_eq!(
@@ -10415,7 +10482,9 @@ mod tests {
         let paths = handover_scratch("exit-panic");
         let lock = OwnershipLock::acquire(&paths, "drive").expect("the run is driven");
         let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            exiting_from(&paths, lock, |_, _, _| panic!("a driver bug"))
+            exiting_from(&paths, lock, &RecordGate::default(), |_, _, _| {
+                panic!("a driver bug")
+            })
         }));
         assert!(unwound.is_err(), "the panic did not unwind");
         assert!(

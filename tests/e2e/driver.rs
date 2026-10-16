@@ -1628,6 +1628,107 @@ fn a_launch_records_the_directory_the_process_resolves_not_the_route_to_it() {
     );
 }
 
+/// A driver that has let go of its run writes nothing more to the run's record.
+///
+/// A driver releases the run while the watch that restarts its observer is still
+/// polling beside it, and a restart writes the launch record. So an observer that
+/// stopped in that window had the departing driver's copy of the record written
+/// over whatever the run's next writer had put there: here an operator's repair,
+/// which the adoption then never saw. The gate holds the departing driver in that
+/// window, so the observer stops inside it every time rather than once in a while.
+#[test]
+fn a_driver_that_let_go_of_its_run_writes_its_record_no_more() {
+    use std::io::Write;
+    let world = World::new("driver-let-go-record");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("the let-go peer listens");
+    listener
+        .set_nonblocking(true)
+        .expect("the gate can be checked");
+    // llmlint: ignore-block[tests_mirror_real_usage] an ordering hook holds the real driver in
+    // the window between letting go of the run and stopping its watch, without a sleep. The
+    // run, the observer, the record and the adoption are all the real CLI's own.
+    let world = world.with_env(
+        "ONEPIPELINE_TEST_LET_GO_GATE",
+        &listener.local_addr().expect("the gate address").to_string(),
+    );
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    world.script("observer.wait", "hold");
+    let run = start_detached_observed(&world, "letgo", vec![human("approve", &[])]);
+
+    // llmlint: ignore-block[tests_mirror_real_usage] the peer's half of the ordering hook: the
+    // accepted connection is the real driver, held after its release and before its watch ends.
+    let mut leaving = None;
+    world.until("the driver to let go of the run", |_| {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                leaving = Some(stream);
+                true
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => false,
+            Err(error) => panic!("the let-go peer cannot accept the driver: {error}"),
+        }
+    });
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    world
+        .run(&["status", &run, "--json"])
+        .exited(0)
+        .out_has("\"driven\":false");
+
+    // The run reads as undriven, so its record is an operator's to repair: here
+    // back to one from before `dir`, replayed from wherever the adoption is typed.
+    let mut record = world.run_json(&run, "launch.json");
+    assert!(
+        record
+            .as_object_mut()
+            .expect("the record is an object")
+            .remove("dir")
+            .is_some(),
+        "the record this build wrote carries no `dir` to take away: {record}"
+    );
+    std::fs::write(world.run_file(&run, "launch.json"), record.to_string())
+        .expect("the record is rewritten");
+
+    // And the departing driver's observer stops inside the window. Either answer
+    // is said on its log once it is final — a restart after it has written the
+    // record — so the wait ends on the one that happened.
+    world.release("observer.go.1");
+    let log = || std::fs::read_to_string(world.run_file(&run, "driver.log")).unwrap_or_default();
+    world.until("the driver to answer its stopped observer", |_| {
+        let log = log();
+        log.contains("started another observer graph")
+            || log.contains("stopped as this driver let go")
+    });
+    assert!(
+        log().contains("stopped as this driver let go"),
+        "a driver that had let go of the run started another observer:\n{}",
+        log()
+    );
+    assert!(
+        world.run_json(&run, "launch.json").get("dir").is_none(),
+        "the departing driver wrote its record over the repaired one: {}",
+        world.run_json(&run, "launch.json")
+    );
+    // llmlint: ignore-block[tests_mirror_real_usage] the peer releases the held driver, which
+    // then ends as it would have without the hook.
+    leaving
+        .expect("the driver is held")
+        .write_all(b"go")
+        .expect("the driver is released");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    // What the repair was for: the adoption replays the run from where it is typed.
+    let adopted_from = world.project.clone();
+    let mut adopt = world.cmd(&["adopt", &run]);
+    adopt.current_dir(&adopted_from);
+    world.run_on(adopt, "adopt after the let-go").exited(0);
+    let dirs = dag_launch_dirs(&world);
+    assert_eq!(
+        Path::new(dirs.last().expect("the adoption relaunched the graph")),
+        adopted_from,
+        "the adoption replayed a record the departing driver wrote: {dirs:?}"
+    );
+}
+
 /// A run recorded by a build that had no directory field keeps the reading it
 /// had, and one that records an unusable directory is refused by name.
 ///
@@ -1648,8 +1749,15 @@ fn a_launch_records_the_directory_the_process_resolves_not_the_route_to_it() {
 fn a_launch_record_without_a_directory_is_replayed_from_the_adopting_process() {
     let world = World::new("driver-legacy-dir");
     let run = start_detached_observed(&world, "legacy", vec![human("approve", &[])]);
-    world.until("the driver to exit", |world| {
-        world.run(&["status", &run]).stdout.contains("PAUSED")
+    // Let go of, not merely paused: the run reads `PAUSED` while its driver still
+    // holds it, and that driver's observer watch writes the record on each
+    // restart — `dir` included — so a rewrite made then can be written over. Once
+    // the run is undriven the driver has let go, and writes it no more.
+    world.until("the driver to let go of the run", |world| {
+        world
+            .run(&["status", &run, "--json"])
+            .stdout
+            .contains("\"driven\":false")
     });
 
     let rewrite = |record: &mut serde_json::Value| {
