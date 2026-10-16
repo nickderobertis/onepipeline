@@ -3335,35 +3335,6 @@ impl Rendezvous {
             .to_string()
     }
 
-    /// The next arrival, if one comes within `patience`.
-    pub fn arrived_within(&self, patience: std::time::Duration) -> Option<Arrival> {
-        self.listener
-            .set_nonblocking(true)
-            .expect("the listener can stop blocking");
-        let deadline = std::time::Instant::now() + patience;
-        let accepted = loop {
-            match self.listener.accept() {
-                Ok((stream, _)) => break Some(stream),
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    if std::time::Instant::now() >= deadline {
-                        break None;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                }
-                Err(error) => panic!("the rendezvous cannot accept: {error}"),
-            }
-        };
-        self.listener
-            .set_nonblocking(false)
-            .expect("the listener can block again");
-        accepted.map(|stream| {
-            stream
-                .set_nonblocking(false)
-                .expect("the connection can block");
-            Arrival::of(stream)
-        })
-    }
-
     /// Block until the next dispatch arrives, and say which one.
     ///
     /// Once this returns, what the caller does next lands on a worker that is

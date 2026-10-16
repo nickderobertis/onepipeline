@@ -2231,6 +2231,8 @@ fn a_settlement_dispatch_or_claim_that_is_not_one_refuses_the_launch() {
     unsessioned["session"] = json!("two words");
     let mut unacknowledged = claim.clone();
     unacknowledged["acknowledged"] = json!({"run": "older"});
+    let mut untimely = claim.clone();
+    untimely["acknowledged"] = json!({"run": "older", "host": "builder", "at": "later"});
     let claims = [
         (json!({"run": "elsewhere"}), "missing field"),
         (unnamed, "`host`"),
@@ -2240,6 +2242,7 @@ fn a_settlement_dispatch_or_claim_that_is_not_one_refuses_the_launch() {
         (leased, "`lease`"),
         (untimed, "not an RFC 3339 instant"),
         (unacknowledged, "its `acknowledged`: missing field"),
+        (untimely, "not a run, a host and an instant"),
     ];
     for (bad, says) in claims {
         let key = onetaskgraph_plugin_api::MetadataKey::new("onepipeline.driver".to_owned())

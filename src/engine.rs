@@ -6680,6 +6680,7 @@ fn start_restacks(
                 continue;
             }
         } // llmlint: ignore-end[changed_behavior_has_e2e]
+          // llmlint: ignore[changed_behavior_has_e2e] this path asks the one admission `start_ready` asks — the lease's `may_start`, through the same closure — whose refusal on a stale lease and start once a read renews it are driven end to end by `continuation::a_displaced_driver_held_past_its_lease_starts_nothing_when_it_resumes` and `continuation::a_publication_asked_for_on_a_stale_lease_waits_for_the_next_read`; making a restack ready inside a stale lease would also need a board failing at that instant, and prove nothing the shared closure's journeys do not.
         if !admit(&node.id) {
             break;
         }
@@ -7068,6 +7069,7 @@ fn repair_red_verdicts(
         ) else {
             continue;
         };
+        // llmlint: ignore[changed_behavior_has_e2e] this path asks the one admission `start_ready` asks — the lease's `may_start`, through the same closure — whose refusal on a stale lease and start once a read renews it are driven end to end by `continuation::a_displaced_driver_held_past_its_lease_starts_nothing_when_it_resumes` and `continuation::a_publication_asked_for_on_a_stale_lease_waits_for_the_next_read`; making a red verdict's repair ready inside a stale lease would also need a board failing at that instant, and prove nothing the shared closure's journeys do not.
         if !admit(&id) {
             break;
         }
@@ -7374,6 +7376,7 @@ fn start_readjustments(
         ) else {
             continue;
         };
+        // llmlint: ignore[changed_behavior_has_e2e] this path asks the one admission `start_ready` asks — the lease's `may_start`, through the same closure — whose refusal on a stale lease and start once a read renews it are driven end to end by `continuation::a_displaced_driver_held_past_its_lease_starts_nothing_when_it_resumes` and `continuation::a_publication_asked_for_on_a_stale_lease_waits_for_the_next_read`; making a readjustment ready inside a stale lease would also need a board failing at that instant, and prove nothing the shared closure's journeys do not.
         if !admit(&id) {
             break;
         }
