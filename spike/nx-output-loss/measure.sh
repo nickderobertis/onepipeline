@@ -8,7 +8,7 @@
 #     --terminal tty|notty|ci \
 #     --load on|off \
 #     --mode fail|replay \
-#     --runs N [--scratch DIR] [--record FILE]
+#     [--nx-patch none|close] [--slot K] --runs N [--scratch DIR] [--record FILE]
 #
 # It runs `nx run <project>:<target>` N times, where the target's command is
 # `llmlint --diff --diff-base $LLMLINT_DIFF_BASE_SHA` and `llmlint` is the stand-in
@@ -38,6 +38,14 @@
 #                  from what the invoking command printed. replay: one warm-up run
 #                  stores a ~226KB passing output, then every measured run must be
 #                  a cache hit, and is lost when the replay's last line is missing.
+#   --nx-patch     none: the lockfile's Nx as installed. close: the same Nx in a
+#                  separate copy of the workspace with one line of
+#                  run-commands/running-tasks.js changed, so RunningNodeProcess
+#                  collects the task's output on the child's 'close' (its pipes
+#                  drained) instead of its 'exit' -- the candidate fix.
+#   --slot         which copy of the workspace to run in (default 0), so that
+#                  measurements taken at the same time never share a workspace,
+#                  its Nx state, or the log file its scripts/nx.sh writes.
 #
 # Exits 0 when the measurement was taken (whatever it found), non-zero when it
 # could not be. Kept on a preserved spike branch; not part of any gate.
@@ -46,7 +54,7 @@ set -euo pipefail
 here="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
 repo="$(git -C "$here" rev-parse --show-toplevel)"
 
-arrangement=onepipeline invoke=nx pty=default terminal=notty load=off mode=fail runs=50
+arrangement=onepipeline invoke=nx pty=default terminal=notty load=off mode=fail runs=50 nx_patch=none slot=0
 scratch="${ONEPIPELINE_NODE_SCRATCH_DIR:-${TMPDIR:-/tmp}}/nxloss"
 record=""
 while (($#)); do
@@ -60,6 +68,8 @@ while (($#)); do
   --runs) runs=$2 ;;
   --scratch) scratch=$2 ;;
   --record) record=$2 ;;
+  --nx-patch) nx_patch=$2 ;;
+  --slot) slot=$2 ;;
   -h | --help) sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
   *) echo "measure: unknown argument '$1'; see --help" >&2; exit 64 ;;
   esac
@@ -71,6 +81,8 @@ case "$pty" in default | false | true) ;; *) echo "measure: --pty must be defaul
 case "$terminal" in tty | notty | ci) ;; *) echo "measure: --terminal must be tty, notty or ci" >&2; exit 64 ;; esac
 case "$load" in on | off) ;; *) echo "measure: --load must be on or off" >&2; exit 64 ;; esac
 case "$mode" in fail | replay) ;; *) echo "measure: --mode must be fail or replay" >&2; exit 64 ;; esac
+case "$nx_patch" in none | close) ;; *) echo "measure: --nx-patch must be none or close" >&2; exit 64 ;; esac
+[[ "$slot" =~ ^[0-9]+$ ]] || { echo "measure: --slot must be a non-negative integer" >&2; exit 64; }
 [[ "$runs" =~ ^[1-9][0-9]*$ ]] || { echo "measure: --runs must be a positive integer" >&2; exit 64; }
 mkdir -p "$scratch"
 scratch="$(cd "$scratch" && pwd)"
@@ -117,14 +129,21 @@ prepare() {
   case "$arrangement" in
   onepipeline)
     git -C "$repo" archive HEAD | tar -x -C "$ws"
+    git -C "$repo" rev-parse --short HEAD >"$scratch/.source-rev.$$"
     (cd "$ws" && npm ci --silent --no-audit --no-fund >&2)
     ;;
   ai-orchestrator)
     git clone -q --depth 1 --branch main https://github.com/nickderobertis/ai-orchestrator "$ws"
+    git -C "$ws" rev-parse --short HEAD >"$scratch/.source-rev.$$"
     (cd "$ws" && bun install --frozen-lockfile >/dev/null && uv venv -q .venv)
     ;;
   esac
   add_targets "$ws/project.json"
+  if [ "$nx_patch" = close ]; then
+    local rt="$ws/node_modules/nx/dist/src/executors/run-commands/running-tasks.js"
+    grep -qF "this.childProcess.on('exit', (code, signal) => {" "$rt" || { echo "measure: the line to patch is not in $rt" >&2; exit 1; }
+    sed -i "s/this.childProcess.on('exit', (code, signal) => {/this.childProcess.on('close', (code, signal) => {/" "$rt"
+  fi
   (
     cd "$ws"
     [ -d .git ] || git init -q
@@ -132,10 +151,12 @@ prepare() {
     [ "$arrangement" = onepipeline ] && git add -A .
     git -c user.name=nxloss -c user.email=nxloss@localhost commit -qm "nxloss: plain llmlint targets" --no-verify
   )
-  touch "$ws/.nxloss-ready"
+  mv "$scratch/.source-rev.$$" "$ws/.nxloss-ready"
 }
 
 ws="$scratch/ws-$arrangement"
+[ "$nx_patch" = none ] || ws="$ws-$nx_patch"
+[ "$slot" = 0 ] || ws="$ws-s$slot"
 prepare "$ws"
 project=onepipeline
 [ "$arrangement" = ai-orchestrator ] && project=workspace
@@ -168,9 +189,9 @@ elif [ "$mode" = replay ]; then
   run_env+=("AI_ORCHESTRATOR_NX_SHOW_OUTPUT=1")
 fi
 
-config="arrangement=$arrangement invoke=$invoke pty=$pty terminal=$terminal load=$load mode=$mode nx=$nx_version"
+config="arrangement=$arrangement invoke=$invoke pty=$pty terminal=$terminal load=$load mode=$mode nx=$nx_version nx_patch=$nx_patch source=$(cat "$ws/.nxloss-ready")"
 slug="$(printf '%s' "$config" | tr ' =' '_-')"
-lostdir="$scratch/lost/$slug"
+lostdir="$scratch/lost/$slug-load-$load"
 rm -rf "$lostdir"
 mkdir -p "$lostdir"
 
