@@ -1030,9 +1030,8 @@ pub fn drive_holding(paths: &RunPaths, lock: OwnershipLock, beside: &RecordGate)
 /// the record names. A loop that lets go of the run releases the lock while that
 /// thread is still running, so a restart in that window wrote this driver's copy
 /// of the record over whatever the run's next writer had put there: an adopter's
-/// claim, or a record an operator had repaired. Open while the loop holds the run;
-/// the loop closes it before it lets go, and opens it again only when the run is
-/// handed back to it.
+/// claim, or a record an operator had repaired. Open while the loop drives the
+/// run, and closed by the loop once it begins letting go.
 #[derive(Debug)]
 pub struct RecordGate(std::sync::Mutex<bool>);
 
@@ -1055,11 +1054,11 @@ impl RecordGate {
         (*open).then_some(open)
     }
 
-    fn set(&self, open: bool) {
+    fn close(&self) {
         *self
             .0
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = open;
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = false;
     }
 }
 
@@ -1106,7 +1105,8 @@ fn exiting_from(
         );
     }
     // Closed before an erring driver's release as before a settled one's.
-    beside.set(false);
+    // llmlint: ignore[changed_behavior_has_e2e] the same close the settled release makes, which `driver::a_driver_that_let_go_of_its_run_writes_its_record_no_more` drives end to end; no portable journey makes a held driver's loop return an error, so `a_reported_error_is_recorded_before_the_release_and_a_panic_records_nothing` holds this arm over the real lock.
+    beside.close();
     drop(held);
     driven
 }
@@ -1211,6 +1211,11 @@ fn driving(
             record_result(paths, &state, outcome)?;
         }
         let settlement = crate::driver::settled(&state, paths);
+        // Closed outside the handover, because the write it waits for may be a
+        // graph launch and nothing under that gate is ever inside a subprocess.
+        // And for good: a queue that hands the run back is applied and let go of
+        // again, and nothing in that pass is worth a fresh observer.
+        beside.close();
         // Always here: only a let-go takes the lock out, and one that hands it
         // back puts it back.
         let Some(lock) = held.take() else {
@@ -1229,15 +1234,9 @@ fn driving(
             crate::scratch::at_writer_ending(paths, &state);
             record_exit(paths, settlement.into(), None, answered_from);
         };
-        // Closed outside the handover, because the write it waits for may be a
-        // graph launch and nothing under that gate is ever inside a subprocess.
-        beside.set(false);
         match let_go_of_saying(paths, lock, exiting) {
             LettingGo::Released => break (settlement, Departure::Released),
-            LettingGo::QueueMoved(back) => {
-                beside.set(true);
-                *held = Some(back);
-            }
+            LettingGo::QueueMoved(back) => *held = Some(back),
             // Nothing was looked at and nothing released, so this driver does not
             // release the run either: it leaves the claim standing over a process
             // that is ending, which the next writer reclaims, rather than opening

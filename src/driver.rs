@@ -2182,7 +2182,7 @@ enum Stopped {
     /// Another is watching it now.
     Restarted,
     /// None, because the loop is letting go of the run and the record is no
-    /// longer this driver's to move; one is started if the run is handed back.
+    /// longer this driver's to move.
     LettingGo,
     /// None, and nothing this driver runs will start another.
     Over,
