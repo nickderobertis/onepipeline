@@ -115,6 +115,11 @@ fn filed(world: &World, name: &str, plan: &Value) -> String {
 /// The home's tasks and its members', each by the node id it carries, read with the store's
 /// own members read.
 fn plan_tasks(world: &World, home: &str) -> BTreeMap<String, Value> {
+    read_plan_tasks(world, home).unwrap_or_else(|why| panic!("{why}"))
+}
+
+/// [`plan_tasks`], or why the store could not answer it.
+fn read_plan_tasks(world: &World, home: &str) -> Result<BTreeMap<String, Value>, String> {
     let id = global(home);
     world.store_call(|engine| async move {
         let answer = engine
@@ -133,10 +138,12 @@ fn plan_tasks(world: &World, home: &str) -> BTreeMap<String, Value> {
                 },
             })
             .await
-            .unwrap_or_else(|error| panic!("the store reads the plan {id}: {error}"));
-        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+            .map_err(|error| format!("the store reads the plan {id}: {error}"))?;
+        if !answer.errors.is_empty() {
+            return Err(format!("{:?}", answer.errors));
+        }
         assert!(answer.next.is_none(), "one page holds this plan");
-        answer
+        Ok(answer
             .items
             .iter()
             .map(|task| {
@@ -149,7 +156,7 @@ fn plan_tasks(world: &World, home: &str) -> BTreeMap<String, Value> {
                     task,
                 )
             })
-            .collect()
+            .collect())
     })
 }
 
@@ -191,7 +198,28 @@ fn source_nodes(world: &World, source: &str) -> BTreeMap<String, Value> {
 }
 
 fn words(world: &World, home: &str) -> BTreeMap<String, String> {
-    plan_tasks(world, home)
+    words_of(plan_tasks(world, home))
+}
+
+/// What `local-md` says of a file whose front matter is not whole: an empty file, or one cut
+/// off before its closing `---`.
+const TORN_FILE: &str = "expected YAML front matter delimited by ---";
+
+/// [`words`] as a wait beside a live driver reads them: `None` for a read that met a file
+/// still being written, which is not yet an answer. The driver's routed copy rewrites the
+/// home's project file whole, and `local-md` writes a whole file in place rather than through
+/// a rename, so a read that lands inside that write meets a file with no front matter yet.
+/// Any other failure is the store's answer, and fails the journey.
+fn landed_words(world: &World, home: &str) -> Option<BTreeMap<String, String>> {
+    match read_plan_tasks(world, home) {
+        Ok(tasks) => Some(words_of(tasks)),
+        Err(why) if why.contains(TORN_FILE) => None,
+        Err(why) => panic!("{why}"),
+    }
+}
+
+fn words_of(tasks: BTreeMap<String, Value>) -> BTreeMap<String, String> {
+    tasks
         .into_iter()
         .map(|(node, task)| {
             let word = task["item"]["status"]["name"]
@@ -310,7 +338,7 @@ fn a_plan_spanning_two_sources_runs_as_one_graph_and_settles_each_task_where_it_
     );
 
     world.until_store("every item to read done where it lives", |world| {
-        words(world, &home).values().all(|word| word == "done")
+        landed_words(world, &home).is_some_and(|board| board.values().all(|word| word == "done"))
     });
     let tasks = plan_tasks(&world, &home);
     for (node, task) in &tasks {
@@ -368,7 +396,8 @@ fn a_live_add_routed_to_the_second_source_lands_in_a_member_project_created_for_
         )
         .exited(0);
     world.until_store("the added task to land in the second source", |world| {
-        words(world, &home).get("adopt").map(String::as_str) == Some("queued")
+        landed_words(world, &home)
+            .is_some_and(|board| board.get("adopt").map(String::as_str) == Some("queued"))
     });
     // A stop reads the landed baseline back in a process of its own. The added item is in a
     // source the launch read no task from, so only the home's member list, which now names the
@@ -398,7 +427,10 @@ fn a_live_add_routed_to_the_second_source_lands_in_a_member_project_created_for_
 
     world.until_store(
         "the added task's settlement to land where it lives",
-        |world| words(world, &home).get("adopt").map(String::as_str) == Some("done"),
+        |world| {
+            landed_words(world, &home)
+                .is_some_and(|board| board.get("adopt").map(String::as_str) == Some("done"))
+        },
     );
     let member = read_home(&world)["metadata"]["onetaskgraph.members"].clone();
     let member = member
@@ -427,6 +459,127 @@ fn a_live_add_routed_to_the_second_source_lands_in_a_member_project_created_for_
     );
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey proves
+// the order a stop in `src/driver.rs` and the write-back worker in `src/writeback.rs`
+// take the landing in, so any change under `src/` can move it. `nx.json`'s
+// `noteJourneySource`, the one separately edged Rust test input, itself begins
+// `{workspaceRoot}/src/**/*`, so no narrower edge exists.
+/// A stop made while the routed copy of a live `add` has landed its item and the landed
+/// baseline does not say so yet — the window in which a stop's release, which reads only that
+/// baseline, could not find the item — waits for the attempt to be recorded before it ends the
+/// driver, and releases the item where it lives.
+#[test]
+fn a_stop_while_an_added_item_is_landing_waits_for_it_and_releases_the_item() {
+    use std::io::{BufRead, Write};
+    use std::process::Stdio;
+
+    let world = a_routed_world("multi-source-add-landing");
+    let gate = std::net::TcpListener::bind("127.0.0.1:0").expect("the landing peer listens");
+    gate.set_nonblocking(true).expect("the gate can be checked");
+    // llmlint: ignore-block[tests_mirror_real_usage] the window is the instant between the
+    // store answering the copy and the baseline's save, which no hold of the doubles reaches;
+    // the ordering gate holds the real worker there. The add, the stop and every assertion go
+    // through the compiled binary and the real store.
+    let world = world.with_env(
+        "ONEPIPELINE_TEST_PROJECTION_LANDED_GATE",
+        &gate.local_addr().expect("the gate address").to_string(),
+    );
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let _service = world.repository("local-direct", &[]);
+    let _engine = world.extra_repository("engine");
+    world.script("core.work", "core wrote this\n");
+    world.script("core.wait", "hold");
+    let name = "landing";
+    let home = filed(
+        &world,
+        name,
+        &plan_of(
+            name,
+            vec![on(HOME, "core", &[]), on(HOME, "ship", &["core"])],
+        ),
+    );
+    world.run(&["start", &home, "--detach"]).exited(0);
+    world.until("the held node to be dispatched", |world| {
+        world.events_of(name, "node-dispatched").len() == 1
+    });
+    world
+        .run_with_stdin(
+            &["reply", name],
+            &json!({"version": 2, "commands": [
+                {"op": "add", "node": on(ROUTED, "adopt", &["core"])},
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+    let mut held = None;
+    world.until(
+        "the driver to hold the added item's landed copy",
+        |_| match gate.accept() {
+            Ok((stream, _)) => {
+                held = Some(stream);
+                true
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => false,
+            Err(error) => panic!("the landing peer cannot accept the driver: {error}"),
+        },
+    );
+    assert_eq!(
+        words(&world, &home).get("adopt").map(String::as_str),
+        Some("queued"),
+        "the held copy had not landed the added item"
+    );
+    let baseline = world.run_json(name, "writeback-landed.json");
+    assert!(
+        baseline["items"].get("adopt").is_none(),
+        "the baseline already named the added item, so the window was not held: {baseline}"
+    );
+
+    let mut stopping = world
+        .cmd(&["stop", name])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the stop starts");
+    let (said, heard) = std::sync::mpsc::channel();
+    let stderr = stopping.stderr.take().expect("the stop's stderr");
+    let reader = std::thread::spawn(move || {
+        let mut all = String::new();
+        for line in std::io::BufReader::new(stderr).lines() {
+            let line = line.expect("the stop's stderr reads");
+            let _ = said.send(line.clone());
+            all.push_str(&line);
+            all.push('\n');
+        }
+        all
+    });
+    let mut waiting = false;
+    world.until("the stop to wait for the landing, or to end", |_| {
+        waiting |= heard
+            .try_iter()
+            .any(|line| line.contains("projection in flight to land"));
+        waiting || stopping.try_wait().expect("the stop is there").is_some()
+    });
+    // llmlint: ignore-block[tests_mirror_real_usage] the held worker is let go only once the
+    // real stop has said it is waiting for it, so the stop cannot have ended the driver inside
+    // the window first.
+    if let Some(mut stream) = held {
+        let _ = stream.write_all(b"go");
+    }
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let status = stopping.wait().expect("the stop ends");
+    let stderr = reader.join().expect("the stop's stderr was read");
+    assert!(status.success(), "the stop failed: {status:?}\n{stderr}");
+    assert_eq!(
+        words(&world, &home).get("adopt").map(String::as_str),
+        Some("todo"),
+        "the stop did not release the added item in the member's source: {stderr}"
+    );
+    assert!(
+        waiting,
+        "the stop ended the driver inside the landing: {stderr}"
+    );
+} // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
 /// A stop releases every item of the plan the run never started, in whichever source it lives,
 /// and an adopting driver — a process of its own, reading the run's landed baseline back with
 /// items in both sources — claims them there again.
@@ -451,7 +604,9 @@ fn a_stop_releases_and_an_adoption_reclaims_the_unstarted_items_of_both_sources(
     );
     world.run(&["start", &home, "--detach"]).exited(0);
     world.until_store("the run's claim to reach both sources", |world| {
-        let board = words(world, &home);
+        let Some(board) = landed_words(world, &home) else {
+            return false;
+        };
         board.get("adopt").map(String::as_str) == Some("queued")
             && board.get("ship").map(String::as_str) == Some("queued")
     });
@@ -475,7 +630,9 @@ fn a_stop_releases_and_an_adoption_reclaims_the_unstarted_items_of_both_sources(
     world.until_store(
         "the adopted driver's claim to reach both sources",
         |world| {
-            let board = words(world, &home);
+            let Some(board) = landed_words(world, &home) else {
+                return false;
+            };
             board.get("adopt").map(String::as_str) == Some("queued")
                 && board.get("ship").map(String::as_str) == Some("queued")
         },
@@ -514,7 +671,8 @@ fn a_baseline_item_in_a_routed_source_with_no_member_there_is_refused() {
     );
     world.run(&["start", &home, "--detach"]).exited(0);
     world.until_store("the run's claim to reach the board", |world| {
-        words(world, &home).get("ship").map(String::as_str) == Some("queued")
+        landed_words(world, &home)
+            .is_some_and(|board| board.get("ship").map(String::as_str) == Some("queued"))
     });
     world.run(&["stop", name]).exited(0);
     assert!(
@@ -579,7 +737,9 @@ fn an_adoption_with_no_baseline_reads_a_member_task_by_its_id_in_its_own_source(
     );
     world.run(&["start", &home, "--detach"]).exited(0);
     world.until_store("the run's claim to reach both sources", |world| {
-        let board = words(world, &home);
+        let Some(board) = landed_words(world, &home) else {
+            return false;
+        };
         board.get("adopt").map(String::as_str) == Some("queued")
             && board.get("ship").map(String::as_str) == Some("queued")
     });
@@ -609,7 +769,9 @@ fn an_adoption_with_no_baseline_reads_a_member_task_by_its_id_in_its_own_source(
     world.until_store(
         "the adopted driver's claim to reach both sources, and its record",
         |world| {
-            let board = words(world, &home);
+            let Some(board) = landed_words(world, &home) else {
+                return false;
+            };
             seen = records(world, name);
             board.get("adopt").map(String::as_str) == Some("queued")
                 && board.get("ship").map(String::as_str) == Some("queued")
@@ -678,6 +840,76 @@ fn a_home_whose_member_list_breaks_the_stores_rule_is_not_launched() {
         );
     }
 }
+
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what this journey
+// guards is the text the `local-md` this crate links refuses a torn document with — a
+// `Cargo.lock` move, which only this crate's own project sees — so an edge narrower than this
+// target would drop it out of `nx affected` for exactly the change it exists to catch.
+/// [`TORN_FILE`] is what `local-md` itself says of a home document caught mid-write, read back
+/// through the real store: an empty document and one cut off before its closing `---` are both
+/// refused with it and waited out by [`landed_words`], while a document malformed any other way
+/// is still the store's answer and fails the wait. `local-md` builds the text inside a private
+/// function, so this journey is what holds the copy here to it.
+#[test]
+fn a_home_document_caught_mid_write_is_refused_with_the_text_a_wait_treats_as_torn() {
+    let world = a_routed_world("multi-source-torn-read");
+    let name = "torn";
+    let home = filed(&world, name, &plan_of(name, vec![on(HOME, "core", &[])]));
+    let document = world
+        .store()
+        .join("projects")
+        .join(format!("{}.md", project_id(name)));
+    let authored = std::fs::read_to_string(&document).expect("the home's document");
+    let whole = words(&world, &home);
+    let (front, _) = authored
+        .strip_prefix("---\n")
+        .and_then(|rest| rest.split_once("\n---"))
+        .expect("the home's document opens with front matter");
+    // llmlint: ignore-block[tests_mirror_real_usage] the states are the bytes `local-md`'s own
+    // in-place rewrite of the home passes through, which no hold of the store reaches; the read
+    // and the wait are the real ones.
+    for (torn, state) in [
+        (String::new(), "an empty document"),
+        (
+            format!("---\n{front}\n"),
+            "front matter cut off before its close",
+        ),
+    ] {
+        std::fs::write(&document, &torn).expect("the home's document is torn");
+        let refused =
+            read_plan_tasks(&world, &home).expect_err(&format!("the store read {state} as a plan"));
+        assert!(
+            refused.contains(TORN_FILE),
+            "the store no longer refuses {state} with the text a wait treats as torn: {refused}"
+        );
+        assert_eq!(
+            landed_words(&world, &home),
+            None,
+            "{state} was not waited out"
+        );
+    }
+    std::fs::write(&document, format!("---\n{front}\n  - [unclosed\n---\n"))
+        .expect("the home's document is malformed");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let refused = read_plan_tasks(&world, &home).expect_err("the store read malformed YAML");
+    assert!(
+        !refused.contains(TORN_FILE),
+        "malformed YAML reads as torn, so a wait would never fail on it: {refused}"
+    );
+    let failed =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| landed_words(&world, &home)));
+    assert!(
+        failed.is_err(),
+        "a wait took malformed YAML as not yet settled"
+    );
+
+    std::fs::write(&document, &authored).expect("the home's document is restored");
+    assert_eq!(
+        landed_words(&world, &home),
+        Some(whole),
+        "the whole document did not read back as it did before it was torn"
+    );
+} // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// A plan's design document that links each detail out to the section of the task owning it
 /// — `[budgets](<task's file>#budgets)` — arrives on the board pointing at the board's own copy

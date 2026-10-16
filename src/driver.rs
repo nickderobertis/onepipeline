@@ -2480,7 +2480,13 @@ fn attach(
     if let Some(run) = watched.as_deref_mut() {
         relay_observer(paths, run, tx)?;
     }
-    let mut reported = 0usize;
+    // Every event already printed, by the record it is, and whether the header has been. Not a
+    // count of lines: the merged order interleaves another stream's records by their own
+    // clock, so a record relayed late lands *among* lines already printed, and a count of them
+    // would print the line it displaced a second time and never print the one that arrived.
+    let mut printed: std::collections::HashSet<(String, u64, String, String)> =
+        std::collections::HashSet::new();
+    let mut headed = false;
     // How long the journal was when the run was last read, so it is read again
     // only once it has grown.
     let mut read_at: Option<u64> = None;
@@ -2578,14 +2584,27 @@ fn attach(
         // Unfiltered: an attached launch is streaming its own run's progress to
         // the person who started it, and a profile is what a *reader* of a run
         // chooses. There is nobody else here to have chosen one.
-        let lines: Vec<String> = views::monitor(&view, &EventFilter::default())
-            .lines()
-            .map(str::to_string)
+        let unfiltered = EventFilter::default();
+        let fresh: Vec<_> = view
+            .events
+            .iter()
+            .filter(|event| unfiltered.matches(event))
+            .filter(|event| {
+                printed.insert((
+                    event.stream.clone(),
+                    event.seq,
+                    event.ts.clone(),
+                    event.kind.0.clone(),
+                ))
+            })
             .collect();
-        for line in lines.iter().skip(reported) {
-            eprintln!("{line}");
+        if !fresh.is_empty() || !headed {
+            let rendered = views::monitor_shown(&view, fresh);
+            for line in rendered.lines().skip(usize::from(headed)) {
+                eprintln!("{line}");
+            }
+            headed = true;
         }
-        reported = lines.len();
 
         if concluded {
             // The observer has nothing left to observe — stopped **before** the
@@ -2934,6 +2953,11 @@ pub(crate) fn stop_run(
     // and no stop is recorded on that path: a run whose registry cannot be read
     // is one nobody can say is idle, and writing "stopped" over it would be the
     // same false completion this verb refuses everywhere else.
+    //
+    // The write-back is held still first, and stays held until the release below has read
+    // what landed: a driver ended between an item landing and its baseline saying so leaves
+    // that item claimed with nothing left to release it.
+    let landing = crate::writeback::hold_landing(paths, &record);
     let teardown = terminate(paths, &record).map_err(|why| {
         Error::Refused(format!(
             "run '{}' was not stopped: this build cannot establish what it is running — {why}. \
@@ -2974,6 +2998,7 @@ pub(crate) fn stop_run(
     // signal ended took no closeout of its own. Best effort: it changes neither this
     // verb's answer nor its status.
     crate::writeback::release_stopped(paths, &record);
+    drop(landing);
     // Only a clean teardown reaches here, after `run-stopped` is journaled, so a
     // hook changes neither this verb's answer nor its status.
     crate::hooks::at_stop(paths);
