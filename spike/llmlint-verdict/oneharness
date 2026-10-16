@@ -1,0 +1,44 @@
+#!/usr/bin/env python3
+"""Stand-in for oneharness. Never calls a model. Behaviour chosen by STANDIN_MODE."""
+import json, os, sys
+args = sys.argv[1:]
+if args[:1] == ["--version"]:
+    print("oneharness 0.25.2"); sys.exit(0)
+mode = os.environ.get("STANDIN_MODE", "pass")
+log = os.environ.get("STANDIN_LOG")
+if log:
+    with open(log, "a") as f: f.write(json.dumps(args) + "\n")
+schema = json.load(open(args[args.index("--schema") + 1]))
+rules = list(schema["properties"].keys())
+def report(structured, **extra):
+    r = {"harness": "fake", "status": "ok", "structured": structured}
+    r.update(extra)
+    print(json.dumps({"results": [r]}))
+def verdicts(holds=True):
+    return {n: {"name": n, "rationale": "stand-in", "holds": holds, "violations": []} for n in rules}
+if mode == "pass": report(verdicts(True))
+elif mode == "fail": report(verdicts(False))
+elif mode == "empty_exit0": sys.exit(0)
+elif mode == "empty_exit1": sys.exit(1)
+elif mode == "garbage_exit0": print("I think the code looks fine!"); sys.exit(0)
+elif mode == "json_no_results": print("{}")
+elif mode == "results_empty": print(json.dumps({"results": []}))
+elif mode == "structured_null": report(None, status="error", error="model exploded")
+elif mode == "structured_missing": print(json.dumps({"results": [{"harness": "fake", "status": "ok"}]}))
+elif mode == "structured_empty_obj": report({})
+elif mode == "drop_first_rule": v = verdicts(True); v.pop(rules[0]); report(v)
+elif mode == "wrong_rule_name": report({"some_other_rule": {"holds": True}})
+elif mode == "verdict_no_fields": report({n: {} for n in rules})
+elif mode == "verdict_name_only": report({n: {"name": n} for n in rules})
+elif mode == "relevant_false": report({n: {"name": n, "relevant": False} for n in rules})
+elif mode == "structured_string": report("holds: true")
+elif mode == "structured_list": report([])
+elif mode == "schema_invalid": report(verdicts(True), schema_valid=False, schema_error="bad")
+elif mode == "pass_exit1": report(verdicts(True)); sys.exit(1)
+elif mode == "nonzero_exit": sys.stderr.write("boom\n"); sys.exit(3)
+elif mode == "holds_string": report({n: {"name": n, "holds": "true"} for n in rules})
+elif mode == "only_first_call_answers":
+    c = os.environ["STANDIN_COUNTER"]; n = int(open(c).read()) if os.path.exists(c) else 0
+    open(c, "w").write(str(n + 1))
+    report(verdicts(True) if n == 0 else {})
+else: sys.exit(99)
