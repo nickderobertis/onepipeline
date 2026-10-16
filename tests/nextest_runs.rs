@@ -1397,7 +1397,8 @@ fn the_scripts_refuse_what_they_cannot_run() {
 // proven on GitHub by the demonstration run recorded on this change request.
 #[test]
 fn the_rerun_steps_run_only_after_a_failure_and_are_bounded_by_what_they_run() {
-    // `ci.yml` holds the gate and the cross legs; `release-sweep.yml` the full
+    // `ci.yml` holds gate, Windows cross, PR Mac and manual Mac diagnostics;
+    // `release-sweep.yml` holds the full
     // sweep on the release pull request, which re-runs its failures the same way.
     let workflow = [
         ".github/workflows/ci.yml",
@@ -1429,8 +1430,8 @@ fn the_rerun_steps_run_only_after_a_failure_and_are_bounded_by_what_they_run() {
         })
         .count();
     assert_eq!(
-        archived_runs, 3,
-        "the gate step, the cross step and the release sweep archive their build"
+        archived_runs, 5,
+        "gate, Windows cross, PR Mac, manual Mac and release sweep archive their build"
     );
 
     let steps: Vec<&str> = workflow
@@ -1439,8 +1440,8 @@ fn the_rerun_steps_run_only_after_a_failure_and_are_bounded_by_what_they_run() {
         .collect();
     assert_eq!(
         steps.len(),
-        3,
-        "one rerun step each in gate, cross and the release sweep"
+        5,
+        "one rerun step each in gate, Windows cross, PR Mac, manual Mac and release sweep"
     );
     for step in steps {
         let field = |key: &str| {
