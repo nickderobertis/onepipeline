@@ -121,7 +121,7 @@ pub(crate) const DRIVER_KEY: &str = "onepipeline.driver";
 /// Projection-only **project** metadata naming the publications a driver has under way: its
 /// run and host, the nodes publishing and when it wrote them. Written — and landed — before
 /// any publication starts, and cleared once those publications have settled, so a run
-/// taking the project over can tell whether one may still be under way. Entry 127 of
+/// taking the project over can tell whether one may still be under way. Entry 128 of
 /// `docs/contract-divergences.md` names it; `null` reads as absent, as for the claim.
 pub(crate) const PUBLISHING_KEY: &str = "onepipeline.publishing";
 

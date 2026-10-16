@@ -1,5 +1,5 @@
 {
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "The agent stack's event envelope, filter, artifact reference and labels, and the payload of every onepipeline pipeline kind, as onepipeline declares them.",
   "schemas": [
     {
@@ -4801,6 +4801,144 @@
               "branch"
             ],
             "description": "One branch a landing advances, in the identity it belongs to."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.scratch-removed@2",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "trigger": {
+            "$ref": "#/$defs/ScratchTrigger"
+          },
+          "dirs": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "bytes": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "failed": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/ScratchFailure"
+            }
+          }
+        },
+        "required": [
+          "trigger",
+          "dirs",
+          "bytes",
+          "failed"
+        ],
+        "description": "The scratch removed at one ending or manager request.",
+        "title": "ScratchRemoved",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "ScratchTrigger": {
+            "type": "string",
+            "enum": [
+              "success",
+              "discard"
+            ],
+            "description": "Why scratch is removed."
+          },
+          "ScratchFailure": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "$ref": "#/$defs/AbsolutePath"
+              },
+              "error": {
+                "$ref": "#/$defs/ScratchError"
+              }
+            },
+            "required": [
+              "path",
+              "error"
+            ],
+            "description": "A directory removal that the filesystem refused."
+          },
+          "AbsolutePath": {
+            "type": "string",
+            "pattern": "^(?:/|[A-Za-z]:[\\\\/]|\\\\\\\\[^\\\\]+\\\\[^\\\\]+)"
+          },
+          "ScratchError": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.scratch-retained@2",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "ending": {
+            "$ref": "#/$defs/ScratchEnding"
+          },
+          "dirs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/ScratchDir"
+            }
+          },
+          "total_bytes": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "ending",
+          "dirs",
+          "total_bytes"
+        ],
+        "description": "Scratch kept for inspection or retry.",
+        "title": "ScratchRetained",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "ScratchEnding": {
+            "type": "string",
+            "enum": [
+              "failed",
+              "unfinished",
+              "stopped",
+              "paused"
+            ],
+            "description": "A non-success ending or pause."
+          },
+          "ScratchDir": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "$ref": "#/$defs/AbsolutePath"
+              },
+              "bytes": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "path",
+              "bytes"
+            ],
+            "description": "A directory's allocated disk usage at an ending."
+          },
+          "AbsolutePath": {
+            "type": "string",
+            "pattern": "^(?:/|[A-Za-z]:[\\\\/]|\\\\\\\\[^\\\\]+\\\\[^\\\\]+)"
           }
         }
       }

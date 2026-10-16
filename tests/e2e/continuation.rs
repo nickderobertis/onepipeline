@@ -1138,7 +1138,7 @@ fn a_pass_that_dispatches_three_nodes_reads_the_store_for_none_of_them() {
 }
 
 /// A driver whose dispatch is in flight notices a takeover within one claim interval —
-/// shortened here through the setting entry 127 names — records it, and acknowledges only
+/// shortened here through the setting entry 128 names — records it, and acknowledges only
 /// once that dispatch has settled unpublished; the host that took over, which started
 /// nothing until then, continues the node on its branch, and the shared host is asked for
 /// one change request for it.

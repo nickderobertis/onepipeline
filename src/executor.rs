@@ -582,7 +582,9 @@ fn prepare_dispatch_env(labels: &Labels, session: Option<&str>) -> Result<Vec<(S
 /// calls with identical arguments answer differently, and neither answer existed
 /// before the call.
 ///
-/// Under the run's own directory, so a run's scratch is thrown away with the run.
+/// Under the run's own directory. Scratch survives dispatches, is removed when
+/// every node is done, and is kept at other endings or pauses for inspection
+/// or retry; `onepipeline scratch discard <run-id>` removes an ended run's scratch.
 ///
 /// Uniqueness is the directory's *creation*, not its name: `create_dir` refuses
 /// one that is already there, which a name minted from a pid and a counter would
@@ -1018,6 +1020,7 @@ mod tests {
                 overflow: None,
                 labels: Default::default(),
                 refuse_conflicts: false,
+                caller_merges_base: false,
             }),
             cancel: CancellationToken::new(),
             attempt: NonZeroU32::MIN,
@@ -1142,7 +1145,7 @@ mod tests {
     /// Every dispatch is given a directory of its own, and no two are given one.
     ///
     /// The end-to-end halves are `scratch::a_dispatch_is_given_an_absolute_writable_directory_of_its_own`
-    /// and `scratch::every_dispatch_of_one_node_is_given_its_own_directory_and_none_is_taken_away`,
+    /// and `scratch::every_dispatch_of_one_node_is_given_its_own_directory_kept_until_success`,
     /// which read the value out of a real dispatch's own environment. What is held
     /// here is the promise itself, against the real filesystem: two dispatches of
     /// one node — the pair a retry produces, and the pair that agree on every name

@@ -25,7 +25,7 @@
 //! intervals and a read's deadline old. So the waiting is the adopter's: a `--take-over` writes its claim, and
 //! starts nothing until the driver it displaced has acknowledged it — on the claim — or
 //! until [`takeover_wait`] has passed, by which time the lease of a driver that never
-//! answered has run out. Entry 127 states the contract.
+//! answered has run out. Entry 128 states the contract.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -1883,7 +1883,7 @@ mod tests {
 
     /// Entry 119's block is what this build does: its keys are the ones this build reads and
     /// writes, its dispatch and claim read as the boundary reads them, and its surface is the
-    /// one the engine raises. Its idle interval and seam are entry 127's to replace.
+    /// one the engine raises. Its idle interval and seam are entry 128's to replace.
     #[test]
     fn entry_119s_block_is_this_builds_continuation() {
         let record = include_str!("../docs/contract-divergences.md");
@@ -1928,22 +1928,22 @@ mod tests {
             .is_some());
     }
 
-    /// Entry 127's block is what this build does: its setting, interval, deadline, wait and
+    /// Entry 128's block is what this build does: its setting, interval, deadline, wait and
     /// poll are the constants, its acknowledged claim reads at the boundary, and the README
     /// states the setting and its default.
     #[test]
-    fn entry_127s_block_is_this_builds_claim_lease() {
+    fn entry_128s_block_is_this_builds_claim_lease() {
         let record = include_str!("../docs/contract-divergences.md");
         let entry = record
             .split("\n## ")
-            .find(|entry| entry.starts_with("127."))
-            .expect("the divergence record carries entry 127");
+            .find(|entry| entry.starts_with("128."))
+            .expect("the divergence record carries entry 128");
         let block: Value = serde_json::from_str(
             entry
                 .split("```json")
                 .nth(1)
                 .and_then(|rest| rest.split("```").next())
-                .expect("entry 127 carries a json block"),
+                .expect("entry 128 carries a json block"),
         )
         .expect("the block is JSON");
         assert_eq!(block["setting"], json!(CLAIM_INTERVAL_ENV));
@@ -1992,7 +1992,7 @@ mod tests {
         // What it retires is read nowhere in this build.
         for retired in block["retired"]
             .as_array()
-            .expect("entry 127 names what it retires")
+            .expect("entry 128 names what it retires")
         {
             let retired = retired.as_str().expect("a setting");
             for source in [

@@ -35,7 +35,7 @@ use crate::{authenticated_user, git, git_credentials, run_stamp, scratch_repo};
 /// `repo` the plan's lifecycle nodes name: a cold host has a clone of its own.
 const ALIAS: &str = "continue-smoke";
 
-/// The claim interval every driver here runs under, shortened through entry 127's setting
+/// The claim interval every driver here runs under, shortened through entry 128's setting
 /// so a driver notices a takeover inside the journey.
 const CLAIM_INTERVAL_SECONDS: &str = "10";
 

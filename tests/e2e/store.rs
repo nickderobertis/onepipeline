@@ -2446,9 +2446,13 @@ fn a_projection_that_keeps_failing_is_retried_further_and_further_apart() {
          operator watching the board would notice",
         waited[0]
     );
+    // Strictly longer rather than some multiple: every interval read here also carries one
+    // attempt's own runtime and the poll's lag, which on a loaded Windows runner came to about
+    // half a second and read the quarter-second first step as 703ms against a second of 899ms.
+    // How far the schedule grows is the next assertion's, read where that overhead is small.
     for pair in waited.windows(2) {
         assert!(
-            pair[1] >= pair[0] * 2,
+            pair[1] > pair[0],
             "the destination was asked again after {:?} and then after {:?}, which is not a \
              schedule that grows: {waited:?}",
             pair[0],

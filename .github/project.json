@@ -1,0 +1,53 @@
+{
+  "name": "github-workflows",
+  "$schema": "../node_modules/nx/schemas/project-schema.json",
+  "projectType": "library",
+  "tags": ["scope:tooling", "lang:js"],
+  "targets": {
+    "bootstrap": {
+      "command": "npm ci --prefix .github --ignore-scripts",
+      "cache": false
+    },
+    "test": {
+      "command": "node --test .github/tests/*.test.mjs",
+      "cache": false,
+      "inputs": [
+        "{projectRoot}/**/*",
+        "{workspaceRoot}/screencomp.toml",
+        "{workspaceRoot}/scripts/build-staged-release.py",
+        "{workspaceRoot}/scripts/npm-build.mjs",
+        "{workspaceRoot}/release-targets.toml",
+        "{workspaceRoot}/Cargo.toml",
+        "{workspaceRoot}/npm/onepipeline-cli/package.json",
+        "{workspaceRoot}/tests/ci_workflows.rs",
+        "sharedGlobals"
+      ],
+      "outputs": ["{projectRoot}/.telemetry/macos-policy.json"]
+    },
+    "lint": {
+      "command": "node node_modules/@biomejs/biome/bin/biome lint .github"
+    },
+    "syntax-check": {
+      "command": "bash -c 'for file in .github/*.mjs .github/tests/*.mjs; do node --check \"$file\" || exit; done'"
+    },
+    "budgets": {
+      "command": "bash .github/check-budgets.sh",
+      "dependsOn": ["test"],
+      "cache": false
+    },
+    "check": {
+      "executor": "nx:noop",
+      "dependsOn": ["format-check", "lint", "syntax-check", "budgets"]
+    },
+    "format-check": {
+      "command": "node node_modules/@biomejs/biome/bin/biome format .github"
+    },
+    "format": {
+      "command": "node node_modules/@biomejs/biome/bin/biome format --write .github"
+    },
+    "build": {
+      "executor": "nx:noop",
+      "dependsOn": ["syntax-check"]
+    }
+  }
+}

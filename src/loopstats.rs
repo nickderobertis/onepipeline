@@ -81,7 +81,7 @@ pub(crate) fn maintenance_sweep_started() {
     MAINTENANCE_SWEEPS.fetch_add(1, Ordering::Relaxed);
 }
 
-/// The name the claim reads are reported under, which entry 127 of
+/// The name the claim reads are reported under, which entry 128 of
 /// `docs/contract-divergences.md` names.
 pub(crate) const CLAIM_READS_KEY: &str = "claim_reads";
 

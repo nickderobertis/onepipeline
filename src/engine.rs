@@ -1172,7 +1172,7 @@ fn driving(
     // the run is written. Claimed until the queue is empty, and the result
     // written again whenever a claim moved the graph — this is the run's last
     // word on what became of it. It cannot spin, because the queue's cursor only
-    // advances, and the release itself is [`let_go_of`]'s.
+    // advances, and the release itself is [`let_go_of_saying`]'s.
     let channel = ChannelState::of_run(paths, &launch);
     let (settlement, departure) = loop {
         // Everything the queue is holding, applied and then recorded — the run's
@@ -1205,9 +1205,13 @@ fn driving(
         // And then the run itself, let go of under the handover: the empty check
         // and the release are one section, so an edit accepted after this driver
         // stopped claiming is an edit accepted from a run that is free. Its
-        // `driver-exited` is written inside that section, after the last outcome
-        // line and before the release, so it is this driver's last word.
-        let exiting = || record_exit(paths, settlement.into(), None, answered_from);
+        // scratch record and then its `driver-exited` are written inside that
+        // section, after the last outcome line and before the release, so
+        // `driver-exited` is this driver's last word.
+        let exiting = || {
+            crate::scratch::at_writer_ending(paths, &state);
+            record_exit(paths, settlement.into(), None, answered_from);
+        };
         match let_go_of_saying(paths, lock, exiting) {
             LettingGo::Released => break (settlement, Departure::Released),
             LettingGo::QueueMoved(back) => *held = Some(back),
@@ -1303,14 +1307,13 @@ pub(crate) enum LettingGo {
 /// file read and a file remove, so a holder is never inside a subprocess or a
 /// conversation. A queue that moved sends the caller back to apply it with the
 /// gate already dropped.
-pub(crate) fn let_go_of(paths: &RunPaths, lock: OwnershipLock) -> LettingGo {
-    let_go_of_saying(paths, lock, || {})
-}
-
-/// [`let_go_of`], running `last` inside the section once the queue is found
-/// empty and before the release — the one moment a writer knows it is letting go
-/// and still holds the run.
-fn let_go_of_saying(paths: &RunPaths, lock: OwnershipLock, last: impl FnOnce()) -> LettingGo {
+/// `last` runs inside the section once the queue is found empty and before the
+/// release — the one moment a writer knows it is letting go and still holds the run.
+pub(crate) fn let_go_of_saying(
+    paths: &RunPaths,
+    lock: OwnershipLock,
+    last: impl FnOnce(),
+) -> LettingGo {
     let handover = match ledger::Handover::hold(paths) {
         Ok(handover) => handover,
         Err(why) => return LettingGo::NotHandedOver(lock, why),
@@ -1348,7 +1351,7 @@ pub(crate) enum Accepted {
 /// Take a place behind whatever is driving the run, or take the run.
 ///
 /// **The ask and the submission are one section**, under the same gate
-/// [`let_go_of`] takes, which is what makes the answer still true when the
+/// [`let_go_of_saying`] takes, which is what makes the answer still true when the
 /// commands land: an owner cannot let go of the run between this ask and this
 /// submission, and one that let go before the ask is one this ask does not find.
 ///
@@ -10136,6 +10139,10 @@ fn gating_humans(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn let_go_of(paths: &RunPaths, lock: OwnershipLock) -> LettingGo {
+        let_go_of_saying(paths, lock, || {})
+    }
     use crate::plan::{Plan, PLAN_SCHEMA_VERSION};
     use crate::projection::Recorded;
 

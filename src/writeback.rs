@@ -1470,6 +1470,100 @@ fn launch_wait(per_item: NonZeroU64, pending: &Pending) -> Duration {
     .within()
 }
 
+/// The file in the run's directory a driver's worker holds locked for the whole of each
+/// attempt, from its first store call to its record.
+///
+/// An attempt's writes land in the store before the landed baseline says so, and a stop's
+/// release reads only the baseline: an item the worker created for a live `add` and had not
+/// yet recorded is one no id the run holds can find again. A driver ended inside that window
+/// left the item `queued` on the board, released by nothing. A stop therefore takes this lock
+/// before it signals the driver — see [`hold_landing`] — so the attempt in flight lands whole
+/// first, and the next one cannot start.
+const LANDING_LOCK_FILE: &str = "writeback-landing.lock";
+
+/// How often a stop looks again at a lock an attempt in flight holds.
+const LANDING_POLL: Duration = Duration::from_millis(50);
+
+fn landing_lock(run_dir: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(run_dir.join(LANDING_LOCK_FILE))
+}
+
+/// Hold the run's write-back still for a `stop`: wait for the driver's attempt in flight to
+/// land and be recorded, and keep the next from starting for as long as the answer is held.
+///
+/// Taken before the driver is signalled and held across [`release_stopped`], so the release
+/// reads a baseline naming every item the driver wrote. The wait is bounded by what one
+/// attempt carrying every lineage of the run is allowed, and said on standard error while it
+/// lasts; past it, or where the lock cannot be taken at all, the stop goes on unheld, as a
+/// stop did before the lock existed, and says so. `None` is that: nothing is held.
+pub(crate) fn hold_landing(paths: &RunPaths, launch: &LaunchRecord) -> Option<std::fs::File> {
+    // A launch naming no project has no write-back to wait for.
+    if launch.project.parse::<QualifiedId>().is_err() {
+        return None;
+    }
+    let file = match landing_lock(&paths.dir) {
+        Ok(file) => file,
+        // llmlint: ignore-block[changed_behavior_has_e2e] a run directory the stopping process
+        // cannot open a file in is one whose `run-stopped` it cannot journal either, so the
+        // stop fails a moment later whatever this arm does; no journey arranges it.
+        Err(error) => {
+            eprintln!(
+                "onepipeline: run '{}': the write-back's {LANDING_LOCK_FILE} cannot be opened \
+                 ({error}); the driver is stopped without waiting for a projection it may be \
+                 landing",
+                paths.run
+            );
+            return None;
+        } // llmlint: ignore-end[changed_behavior_has_e2e]
+    };
+    // The bound is sized only once an attempt is found holding the lock. Sizing it folds the
+    // run's journal, and a stop of a run nothing is landing for — every run a teardown of a
+    // host-sized root stops — takes the lock at once and must read nothing more than it did
+    // before the lock existed.
+    let mut waiting: Option<(Duration, Instant)> = None;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Some(file),
+            Err(std::fs::TryLockError::WouldBlock)
+                if waiting.is_none_or(|(_, until)| Instant::now() < until) =>
+            {
+                if waiting.is_none() {
+                    let bound = Deadline::Write {
+                        per_item: per_item_budget(launch),
+                        items: crate::checkpoint::Projected::open(paths).statuses().len(),
+                    }
+                    .within();
+                    eprintln!(
+                        "onepipeline: run '{}': waiting up to {} seconds for the write-back's \
+                         projection in flight to land before its driver is stopped",
+                        paths.run,
+                        bound.as_secs()
+                    );
+                    waiting = Some((bound, Instant::now() + bound));
+                }
+                std::thread::sleep(LANDING_POLL);
+            }
+            // llmlint: ignore-block[changed_behavior_has_e2e] an attempt holds the lock no longer
+            // than its own store deadlines, each of which cancels the call it bounds, so a
+            // journey reaching this arm would have to hold one store call past the sixty-second
+            // floor: the cancellation `writeback_budget` already drives.
+            Err(error) => {
+                eprintln!(
+                    "onepipeline: run '{}': the write-back's projection in flight could not be \
+                     waited out ({error}); its driver is stopped anyway, and an item it was \
+                     creating may be left claimed",
+                    paths.run
+                );
+                return None;
+            } // llmlint: ignore-end[changed_behavior_has_e2e]
+        }
+    }
+}
+
 /// Release what a run a `stop` ended had claimed and never started: one projection, in the
 /// stopping process, carrying exactly the unstarted nodes the landed baseline says are
 /// `queued` and writing each of them `todo`.
@@ -1665,6 +1759,18 @@ fn worker(
                 || member_sources(&store, &snapshot.project),
             )
         });
+        let landing = landing_lock(&run_dir).and_then(|file| file.lock().map(|()| file));
+        // llmlint: ignore-block[changed_behavior_has_e2e] a run directory the driver cannot open a
+        // file in is one it cannot write this attempt's record into either, a line below; the
+        // arm only says so and lands the attempt as one did before the lock existed, and no
+        // journey arranges a run directory its own driver cannot write.
+        if let Err(error) = &landing {
+            eprintln!(
+                "onetaskgraph write-back for '{}' could not hold {LANDING_LOCK_FILE}: {error}; \
+                 a stop made while this attempt lands may not release what it writes",
+                snapshot.project
+            );
+        } // llmlint: ignore-end[changed_behavior_has_e2e]
         let at = crate::sys::now_rfc3339();
         let started = Instant::now();
         let attempted = project(
@@ -1679,6 +1785,7 @@ fn worker(
             &run_dir,
             &ProjectionRecord::of(at, &snapshot.project, started.elapsed(), &attempted),
         );
+        drop(landing);
         let Attempted {
             items,
             result: attempt,
@@ -2801,6 +2908,11 @@ fn create(
         )
         .map_err(|failed| carrying.failed(failed))?
         .map_err(|error| carrying.failed(Failed::engine(PROJECT_COPY, &error)))?;
+    // The items are on the board and the baseline does not say so yet: the window a stop
+    // waits out through [`hold_landing`].
+    if let Err(error) = crate::ordering::meet("ONEPIPELINE_TEST_PROJECTION_LANDED_GATE") {
+        eprintln!("{error}");
+    }
     let counted = actions(&report);
     let into = carrying.actions();
     into.created = into.created.saturating_add(counted.created);
