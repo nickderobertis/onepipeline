@@ -1,0 +1,14 @@
+[
+ {"name": "Attempt 1 — `just check` Nx-cold, in this git worktree with NX_CACHE_DIRECTORY and NX_WORKSPACE_DATA_DIRECTORY overridden",
+  "started": "2026-10-16T00:08:59Z",
+  "why": "Invalid. The VM was paused from about 00:57:47Z to 03:47:29Z: the wall clock advanced about 2 h 50 min that the uptime clock (and the running processes' elapsed time) did not, in the middle of the test phase, so every wall-clock figure spanning it is wrong. Separately, the workspace-data override leaked into the nested Nx runs npm/test/workspace-nx.test.mjs starts and failed 2 of its 242 tests with `Recursive task invocation detected` (a harness defect, fixed by profiling a standalone clone with no Nx override). Stopped by this spike at about 04:24Z."},
+ {"name": "Attempt 2 — `just check` Nx-cold, in a standalone clone under the dispatch's scratch directory",
+  "started": "2026-10-16T04:32:33Z",
+  "why": "Stopped by the spike's disk watchdog at 05:21:54Z with 2,445 MB free on /home (it stops the chain below 2,560 MB). Free space fell from 29 GB to 1.7 GB in about 40 minutes; about 7.5 GB of that was this clone's cargo target, the rest other sessions on the shared host. Load average 35–57 on 14 vCPUs. No summary was written."},
+ {"name": "Attempt 3 — `just gate` Nx-cold with CARGO_INCREMENTAL=0, same clone",
+  "started": "2026-10-16T05:23:39Z",
+  "why": "Invalid as a gate figure: exited 1 after 2,568 s (no pause; uptime clock 2,583 s). The e2e tier refused because onetaskgraph 0.7.0 was missing from the clone's target/tools (this spike had deleted the clone's target/ after attempt 2 to free disk, and bootstrap installs that tool there); the note tier's first 4 journeys failed (nextest then cancelled the rest: `4/30 tests run: 0 passed, 4 failed`) reading /home/nick.guest/ai-orchestrator/onetaskgraph.yaml, a configuration the clone found by walking up from its location under that tree; and test-rest's provisioning journey failed for the same missing tool. Both causes are the spike's setup, not the repository. Its completed cold tasks are kept as partial figures (attempt3-gate-cold.json)."},
+ {"name": "Attempt 4 — `just gate` Nx-cold, clone moved to ~/.cache and re-bootstrapped",
+  "started": "2026-10-16T06:10:17Z",
+  "why": "Stopped by the disk watchdog at 06:28:45Z with 1,119 MB free, about 17 minutes into the test phase (format-check 3.9 s and lint 45.4 s had completed, cargo-warm). Per the manager's ruling c-5f6a4b1f8f21c825d399426a705aa2be, the spike made no further attempt."}
+]
