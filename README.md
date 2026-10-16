@@ -225,16 +225,19 @@ execution or an edit ruling.
 A run claims its project on the store (`onepipeline.driver`), and a launch finding
 another run's claim is refused unless told `--take-over`. A running driver reads that
 claim once per **claim interval** — `ONEPIPELINE_CLAIM_INTERVAL_SECONDS`, 300 by
-default, which every host driving one project must be given alike — and never more
-often, however busy it is. It starts a dispatch or a publication only on a read younger
-than one interval, and ends any dispatch it still has in progress once its newest read
-is two intervals and twenty seconds — the time a read may take — old. So a takeover
-waits rather than every driver: `start --take-over` writes its claim, and starts nothing
-until the driver it displaced has stopped and acknowledged that on the claim — which
-that driver does at its next read — or, where it never does, until two intervals,
-twenty seconds, the cancel grace (`ONEPIPELINE_CANCEL_GRACE_SECONDS`) and ten seconds
-have passed, by which time it can no longer start or continue anything. A run of this
-host that nothing drives is taken over at once.
+default — and never more often, however busy it is. It starts a dispatch or a
+publication only on a read younger than one interval, and ends any dispatch it still has
+in progress once its newest read is two intervals and twenty seconds — the time a read
+may take — old. Before a publication starts, the driver names it on the project
+(`onepipeline.publishing`), and it clears that once the publication has finished. So a
+takeover waits rather than every driver: `start --take-over` writes its claim, and starts
+nothing until the driver it displaced has stopped and acknowledged that on the claim —
+which that driver does at its next read — or, where it never does, until two of *that
+driver's* intervals, twenty seconds, *its* cancel grace (`ONEPIPELINE_CANCEL_GRACE_SECONDS`,
+which its claim states beside its interval) and ten seconds have passed and the project
+names none of its publications under way. A publication held for any length of time holds
+the takeover with it. A claim stating no lease — one an older build wrote — is taken over
+only on an acknowledgement. A run of this host that nothing drives is taken over at once.
 
 A task's shape is a template its host owns. A host registers names in
 `<root>/templates.yaml` under `--template-root DIR`; `plan-task` is always

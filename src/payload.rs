@@ -609,8 +609,23 @@ pub(crate) struct DriverClaim {
     pub(crate) pid: u32,
     /// When the claim was written, RFC 3339.
     pub(crate) claimed_at: String,
+    /// The terms the claiming driver's lease runs on, which a run taking the project over
+    /// waits out; absent from a claim written by a build that kept no lease.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) lease: Option<ClaimLease>,
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
+
+/// The terms a claiming driver's lease runs on: how often it reads its claim, and how long
+/// a dispatch its lease ends has to stop before it is killed.
+// llmlint: ignore[boundary_inputs_validated] the rule stated at this module's head: no payload document denies unknown fields; the store boundary checks these in `continuation::claim_of`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct ClaimLease {
+    /// The driver's claim interval, in whole seconds.
+    pub(crate) interval_seconds: u64,
+    /// The driver's cancel grace, in whole seconds.
+    pub(crate) cancel_grace_seconds: u64,
+}
 
 impl DriverClaim {
     /// Whether this claim names the run `run` driven on `host`: the one test of "names this

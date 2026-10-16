@@ -2402,6 +2402,41 @@ fn carry_the_difference(
             let ours = matches!(&read, Ok(Some(claim)) if claim.names(run, host));
             if !ours {
                 let successor = !matches!(read, Ok(None));
+                // A run letting go has nothing of its own in progress, so it acknowledges the
+                // claim that took the project over where nothing has yet: a takeover waiting on
+                // a driver that never read it starts now, rather than waiting it out — or, over
+                // a claim stating no lease, waiting for good. Written before the baseline moves
+                // past this run's claim, so an attempt the store fails asks again.
+                let stored = match crate::continuation::acknowledgement_over(
+                    snapshot.project.as_str(),
+                    &metadata,
+                    run,
+                    host,
+                ) {
+                    Some(acknowledged) => {
+                        let named = MetadataKey::new(DRIVER_KEY.to_owned()).map_err(|why| {
+                            Failed::from(format!("project key '{DRIVER_KEY}': {why}"))
+                        })?;
+                        attempt
+                            .call(
+                                StoreCall::ProjectMetadataSet,
+                                Deadline::Floor,
+                                attempt.engine.set_project_metadata(
+                                    &snapshot.project.global(),
+                                    &named,
+                                    &acknowledged,
+                                ),
+                            )?
+                            .map_err(|error| Failed::engine(PROJECT_METADATA_SET, &error))?;
+                        eprintln!(
+                            "onepipeline: run '{run}' let go of {} and acknowledged the run that \
+                             took it over",
+                            snapshot.project.as_str()
+                        );
+                        acknowledged
+                    }
+                    None => stored,
+                };
                 baseline
                     .landed
                     .project_metadata

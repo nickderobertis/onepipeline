@@ -118,6 +118,13 @@ pub(crate) const DISPATCH_KEY: &str = "onepipeline.dispatch";
 /// reads `null` exactly as it reads the key absent.
 pub(crate) const DRIVER_KEY: &str = "onepipeline.driver";
 
+/// Projection-only **project** metadata naming the publications a driver has under way: its
+/// run and host, the nodes publishing and when it wrote them. Written — and landed — before
+/// any publication starts, and cleared once those publications have settled, so a run
+/// taking the project over can tell whether one may still be under way. Entry 127 of
+/// `docs/contract-divergences.md` names it; `null` reads as absent, as for the claim.
+pub(crate) const PUBLISHING_KEY: &str = "onepipeline.publishing";
+
 /// The reserved keys the write-back owns and no node field answers to.
 ///
 /// A project a run projected onto — its own, where the plan's store is the destination —
@@ -139,7 +146,7 @@ const PROJECTION_ONLY: &[&str] = &[
 ];
 
 /// The reserved **project** keys the engine owns and no plan setting answers to.
-const PROJECT_PROJECTION_ONLY: &[&str] = &[DRIVER_KEY];
+const PROJECT_PROJECTION_ONLY: &[&str] = &[DRIVER_KEY, PUBLISHING_KEY];
 
 /// A reserved key this mapping fills from the task itself, and where it comes
 /// from — so a project stating it is told which end to edit rather than having

@@ -1498,6 +1498,7 @@ fn start(args: &StartArgs) -> Result<i32> {
             session: crate::vcs::usable(&sys::launching_session()),
             pid: sys::pid(),
             claimed_at: sys::now_rfc3339(),
+            lease: Some(crate::continuation::lease_terms()),
         };
         crate::continuation::hand_over(&store, &project, &mine, claim.as_ref())?;
         read = store.read_plan(&project).map_err(Error::from)?;

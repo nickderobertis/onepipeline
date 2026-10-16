@@ -11028,9 +11028,10 @@ published bundles.
 ## 127. Every running driver read its project's claim at every pass that would dispatch or publish — OPEN
 
 **Proposal, for the planner who owns the contract: one setting,
-`ONEPIPELINE_CLAIM_INTERVAL_SECONDS`, and an `acknowledged` field on entry 119's
-`onepipeline.driver` claim; entry 119's idle check and its seam,
-`ONEPIPELINE_IDLE_CLAIM_CHECK_SECONDS`, are retired.** Entry 119's supersession check had
+`ONEPIPELINE_CLAIM_INTERVAL_SECONDS`; `acknowledged` and `lease` fields on entry 119's
+`onepipeline.driver` claim; and one more project key beside it, `onepipeline.publishing`;
+entry 119's idle check and its seam, `ONEPIPELINE_IDLE_CLAIM_CHECK_SECONDS`, are
+retired.** Entry 119's supersession check had
 every running driver read its project's claim at the start of each pass that would
 dispatch or publish, so that a driver another one had taken over stopped at its next
 pass. On a GitHub Projects board each read is a quota call, and a busy review round made
@@ -11065,6 +11066,13 @@ it. The lease is what every start asks; no start asks the store:
   publication** only while its newest confirming read began less than one interval ago,
   asked at the moment of the start, after anything that could have held it. A publication
   asked for on an older read waits for the next read, which is due by then;
+- a driver **fences its publications**: before any publication starts it writes the
+  project's `onepipeline.publishing` — `{"run", "host", "nodes", "at"}`, the nodes whose
+  publications are under way — and starts it only once that write has landed and the lease
+  still admits it; once a publication has settled it writes the key again without that
+  node, `null` for none. A write the store refuses starts nothing, and is made again five
+  seconds later. A superseded driver reads the key before it clears it, and clears only its
+  own;
 - a driver whose newest confirming read is **two intervals and the 20-second read deadline
   old ends every dispatch it has in progress that is not publishing** — so the read due at
   two intervals is given its whole deadline, and one read the board fails is not alone a
@@ -11097,29 +11105,57 @@ and admits a `--take-over` exactly as one without it; an `acknowledged` that is 
 shape refuses the claim as entry 119's keys do. The next projection of the driver that
 took over writes its claim without it.
 
+### The lease a claim states
+
+Every claim this build writes states the terms its driver's lease runs on —
+`lease: {"interval_seconds", "cancel_grace_seconds"}`, the interval and the cancel grace
+that host was given — because a run taking the project over has to wait out *that*
+driver's lease, not its own: hosts are configured one by one, and an adopter given a
+shorter grace would otherwise stop waiting while the displaced driver's killed dispatch
+still had time to run. A `lease` naming an interval outside 1 to 86 400 seconds, a grace
+of zero, or any other key refuses the claim, as entry 119's keys do. It is optional: a
+claim without one is a claim a build that kept no lease wrote, which the events bundle
+still reads, and it is omitted from no claim this build writes. The `DriverClaim` payload
+gains it, so `schemas/events.json` rises from `1.4.0` to `1.5.0`.
+
 ### The takeover
 
 `start --take-over` over a claim — or over a value that is not one — writes its own claim
 on the project before it continues anything, after every check the launch makes, naming
 the run it is about to mint, this host, the launching session, the launcher's pid and the
 instant. It then **starts nothing** until the claim on the store carries an
-`acknowledged`, or until **the takeover wait** has passed since its write landed: two
-claim intervals and the read deadline, plus the cancel grace, plus ten seconds. Waiting, it reads the claim
-every tenth of an interval, at least one and at most thirty seconds apart, and says on
-standard error what it waits on and how long; a claim naming another run that replaces
+`acknowledged`, or until the displaced driver is **proven to have stopped**: **the
+takeover wait** — two of the intervals its claim's `lease` states and the read deadline,
+plus the cancel grace it states, plus ten seconds — has passed since the adopter's write
+landed, *and* a read after that finds no `onepipeline.publishing` naming the displaced run
+on its host. A fence that still names one holds the takeover for as long as it stands —
+until it is cleared or the displaced driver acknowledges — and is said once, naming the
+nodes and when they were fenced; one the read cannot make out holds it until an
+acknowledgement. A claim stating no `lease` — or a value that is not a claim — names a
+driver no wait outlasts, so its takeover starts **only on an acknowledgement**, which a
+driver of this build writes once it reads the adopter's claim; taken over on the displaced
+run's own host, that host's records prove a run that nothing drives, as before. Waiting,
+it reads the claim every tenth of its own interval, at least one and at most thirty
+seconds apart, and says on standard error what it waits on and how long; a claim naming another run that replaces
 its own while it waits refuses the launch as `ProjectDriven`, exit 2. Once it may start,
 it **reads the project again**, and continues and pins from that read — so what the
 displaced driver settled while it was being taken over is continued rather than
 dispatched again — and its write-back starts from it.
 
-**Why the wait is enough.** Every read the displaced driver began before the adopter's
-claim landed began before the wait did. So no start that read allows comes later than one
-interval into the wait, and no dispatch it keeps outlives two intervals, the read deadline
-and the cancel grace into it: by the wait's end the displaced driver can start nothing — a read it makes
-now finds the adopter's claim — and has nothing in progress. A dead driver is the same
-case with nothing to read. The bound assumes that every host driving one project is given
-the same interval, which the setting's documentation says, and that a publication started
-inside the first interval finishes inside the rest of the wait.
+**Why the wait and the fence are enough.** Every read the displaced driver began before
+the adopter's claim landed began before the wait did. So no start that read allows comes
+later than one of its intervals into the wait, and no dispatch it keeps outlives two of
+them, the read deadline and its own cancel grace into it: by the wait's end the displaced
+driver can start nothing — a read it makes now finds the adopter's claim — and has no
+dispatch in progress. A publication is not bounded by any wait — its push and its change
+request are with the host, and ending the driver does not take back what the host was
+already asked — so it is fenced instead: its fence landed before it started, so before
+one interval into the wait, and stands until it has settled. A read past the wait that
+finds no fence of the displaced driver's therefore finds none of its publications under
+way, and none can start after it. A dead driver is the same case with nothing to read; one
+that died mid-publication leaves its fence standing, and its takeover waits for an
+acknowledgement that does not come — taken over on its own host, that host's records prove
+it gone. The bound assumes only that clocks on the two hosts run at the same rate.
 
 **The same host.** A claim naming a run of this host, under this host's runs root, whose
 ownership lock is free has no driver, which the host's own records prove: `--take-over`
@@ -11131,8 +11167,10 @@ record — works as it did.
 
 Entry 119's limits stand: the claim is not atomic, and two launches reading no claim at
 the same moment both launch, the later claim winning and the other driver stopping at its
-next read — now up to one interval after it. A driver not given the same interval as the
-host taking it over can outlast the wait. The acknowledgement is written over the claim
+next read — now up to one interval after it. The fence is not atomic either: a write of it
+the store refused may still land later, over a newer one, and a superseded driver's read
+and clear are two calls. Each costs a store write before a pass's publications start and
+one once they have settled, which the comparable plan's record counts. The acknowledgement is written over the claim
 without a read beside it: a third launch's claim written in that instant is replaced, and
 that launch is then refused at its next look, which is the safe end of that race.
 
@@ -11143,7 +11181,7 @@ that launch is then refused at its next look, which is the safe end of that race
   "max_claim_interval_seconds": 86400,
   "claim_read_deadline_seconds": 20,
   "lease": {"starts_within_intervals": 1, "dispatches_end_after_intervals": 2, "plus_read_deadline": true},
-  "takeover_wait": {"intervals": 2, "plus_read_deadline": true, "cancel_grace": "ONEPIPELINE_CANCEL_GRACE_SECONDS", "slack_seconds": 10},
+  "takeover_wait": {"intervals": 2, "plus_read_deadline": true, "cancel_grace": "ONEPIPELINE_CANCEL_GRACE_SECONDS", "slack_seconds": 10, "terms": "the displaced claim's lease", "without_terms": "acknowledgement only"},
   "takeover_poll": {"per_interval": 10, "min_seconds": 1, "max_seconds": 30},
   "acknowledged_key": "acknowledged",
   "driver": {
@@ -11152,8 +11190,13 @@ that launch is then refused at its next look, which is the safe end of that race
     "session": "claude-code:3f9a1c2e",
     "pid": 41790,
     "claimed_at": "2026-10-16T09:40:58.551Z",
+    "lease": {"interval_seconds": 300, "cancel_grace_seconds": 300},
     "acknowledged": {"run": "drafts", "host": "builder", "at": "2026-10-16T09:42:01.002Z"}
   },
+  "publishing_key": "onepipeline.publishing",
+  "publishing": {"run": "drafts", "host": "builder", "nodes": ["x"], "at": "2026-10-16T09:40:12.090Z"},
+  "fence_retry_seconds": 5,
+  "bundle_versions": {"events": "1.5.0"},
   "retired": ["ONEPIPELINE_IDLE_CLAIM_CHECK_SECONDS"],
   "loop_stats_count": "claim_reads"
 }
@@ -11172,6 +11215,12 @@ journey sets it:
   driver woken five times a second, its own `claim_reads` (its `ONEPIPELINE_LOOP_STATS`
   report) and the store's own count of project reads, in windows inside one interval and
   across four;
+- the fence: `a_publication_held_past_the_whole_takeover_wait_holds_the_takeover_until_it_has_finished`
+  holds the displaced driver's push at the host for longer than the whole takeover wait —
+  with the displaced driver given a longer interval and cancel grace than the adopter, so
+  the adopter's own terms would have let it start — and asserts that the adopter mints
+  nothing while it is held, says what it waits on, starts once the publication has
+  finished, and that no dispatch or publication of the two overlapped;
 - the four interleavings, each asserting from both drivers' records that every dispatch of
   the displaced driver — and so the publication it made — had settled before the adopter's
   first dispatch, that the displaced driver started none after it read the takeover, that no
@@ -11204,6 +11253,7 @@ journey sets it:
   and `tests/smoke/continuation.rs`'s live journey wait on their takeover in the background.
 
 `src/continuation.rs`'s unit tests hold the interval and the setting's fallback, the
-lease's two bounds and its watchdog, the wait's sum, the acknowledged claim's shape and
-its refusals, and the block above against the constants, the claim boundary and the
+lease's two bounds and its watchdog, the wait's sum over the displaced claim's own terms,
+the acknowledged claim's shape and its refusals, a claim's `lease` and a driver's
+publications and their refusals, and the block above against the constants, the claim boundary and the
 README.

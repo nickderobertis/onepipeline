@@ -1764,17 +1764,32 @@ fn converge(
         // on the lease the newest read gave, and one asked for when that read is an interval
         // old waits for the next — which is due by then.
         let mut waiting = Vec::new();
+        let mut starting = Vec::new();
         for due in publications.drain(..) {
-            let verdict = if superseded_by.is_some() {
-                PublicationVerdict::Withhold
+            if superseded_by.is_some() {
+                let _ = due.answer.send(PublicationVerdict::Withhold);
             } else if claims.as_ref().is_none_or(|watch| watch.may_start(None)) {
-                publishing.insert(due.node.clone());
-                PublicationVerdict::Publish
+                starting.push(due);
             } else {
                 waiting.push(due);
-                continue;
-            };
-            let _ = due.answer.send(verdict);
+            }
+        }
+        // The project names this driver's publications under way before any of them starts,
+        // and stops naming each once it has settled: a run taking the project over that finds
+        // none named knows none is under way. One that cannot be named yet waits, as one on
+        // a stale lease does — and the lease is asked again once the fence has landed.
+        let fenced = claims.as_mut().is_none_or(|watch| {
+            let mut nodes = publishing.clone();
+            nodes.extend(starting.iter().map(|due| due.node.clone()));
+            watch.fence(&nodes) && (starting.is_empty() || watch.may_start(None))
+        });
+        for due in starting {
+            if fenced {
+                publishing.insert(due.node.clone());
+                let _ = due.answer.send(PublicationVerdict::Publish);
+            } else {
+                waiting.push(due);
+            }
         }
         publications = waiting;
         // Every rework republication ready on this pass is answered by one read, which
@@ -2089,6 +2104,10 @@ fn converge(
                 .as_ref()
                 .filter(|_| superseded_by.is_none())
                 .map_or(Duration::MAX, crate::continuation::ClaimWatch::until_read),
+            // And when it next writes the publications under way the store last refused.
+            claims
+                .as_ref()
+                .map_or(Duration::MAX, crate::continuation::ClaimWatch::until_fence_retry),
         ];
         let deadline = if moved {
             Duration::ZERO

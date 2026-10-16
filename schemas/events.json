@@ -1,5 +1,5 @@
 {
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "The agent stack's event envelope, filter, artifact reference and labels, and the payload of every onepipeline pipeline kind, as onepipeline declares them.",
   "schemas": [
     {
@@ -4141,6 +4141,17 @@
               "claimed_at": {
                 "type": "string",
                 "description": "When the claim was written, RFC 3339."
+              },
+              "lease": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ClaimLease"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The terms the claiming driver's lease runs on, which a run taking the project over\nwaits out; absent from a claim written by a build that kept no lease."
               }
             },
             "required": [
@@ -4150,6 +4161,28 @@
               "claimed_at"
             ],
             "description": "A project's `onepipeline.driver` claim: the run driving it, the host and launching\nsession that run is driven from, its driver's pid, and when it claimed.\n\nThe document a journal record carries, and so no stricter than any other payload here;\nthe store's copy is external input, and `continuation::claim_of` refuses one carrying a\nkey this shape does not name before it is read as one."
+          },
+          "ClaimLease": {
+            "type": "object",
+            "properties": {
+              "interval_seconds": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0,
+                "description": "The driver's claim interval, in whole seconds."
+              },
+              "cancel_grace_seconds": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0,
+                "description": "The driver's cancel grace, in whole seconds."
+              }
+            },
+            "required": [
+              "interval_seconds",
+              "cancel_grace_seconds"
+            ],
+            "description": "The terms a claiming driver's lease runs on: how often it reads its claim, and how long\na dispatch its lease ends has to stop before it is killed."
           }
         }
       }
@@ -4198,6 +4231,17 @@
               "claimed_at": {
                 "type": "string",
                 "description": "When the claim was written, RFC 3339."
+              },
+              "lease": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ClaimLease"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The terms the claiming driver's lease runs on, which a run taking the project over\nwaits out; absent from a claim written by a build that kept no lease."
               }
             },
             "required": [
@@ -4207,6 +4251,28 @@
               "claimed_at"
             ],
             "description": "A project's `onepipeline.driver` claim: the run driving it, the host and launching\nsession that run is driven from, its driver's pid, and when it claimed.\n\nThe document a journal record carries, and so no stricter than any other payload here;\nthe store's copy is external input, and `continuation::claim_of` refuses one carrying a\nkey this shape does not name before it is read as one."
+          },
+          "ClaimLease": {
+            "type": "object",
+            "properties": {
+              "interval_seconds": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0,
+                "description": "The driver's claim interval, in whole seconds."
+              },
+              "cancel_grace_seconds": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0,
+                "description": "The driver's cancel grace, in whole seconds."
+              }
+            },
+            "required": [
+              "interval_seconds",
+              "cancel_grace_seconds"
+            ],
+            "description": "The terms a claiming driver's lease runs on: how often it reads its claim, and how long\na dispatch its lease ends has to stop before it is killed."
           }
         }
       }

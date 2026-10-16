@@ -1016,9 +1016,9 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), EVENTS_BUNDLE_VERSION);
     assert_eq!(
-        divergence_block("123.")["bundle_versions"]["events"],
+        divergence_block("127.")["bundle_versions"]["events"],
         EVENTS_BUNDLE_VERSION,
-        "the events bundle version must be the one the landing entry records"
+        "the events bundle version must be the one the claim lease entry records"
     );
     let carried: Vec<String> = bundle
         .schemas()
@@ -10882,9 +10882,10 @@ fn the_readjustment_is_what_the_divergence_record_names() {
         json!({"state": "performed"})
     );
 
+    // The events bundle as this entry left it; entry 127 has raised it since.
     assert_eq!(
         block["bundle_versions"],
-        json!({"events": onepipeline::vocabulary::EVENTS_BUNDLE_VERSION, "planner_channel": DOCUMENT_VERSION})
+        json!({"events": "1.4.0", "planner_channel": DOCUMENT_VERSION})
     );
     assert!(
         onepipeline::channel::layout::bundle_json().contains(&format!("\"{op}\"")),
@@ -10981,8 +10982,6 @@ fn the_manager_landing_contract_is_what_the_divergence_record_names() {
         serde_json::from_value::<onepipeline::vocabulary::Significance>(word.clone())
             .unwrap_or_else(|why| panic!("{kind}'s word {word} is not onevcs's: {why}"));
     }
-    assert_eq!(
-        block["bundle_versions"]["events"],
-        onepipeline::vocabulary::EVENTS_BUNDLE_VERSION
-    );
+    // The version this entry raised the bundle to; entry 127 has raised it since.
+    assert_eq!(block["bundle_versions"]["events"], "1.4.0");
 }
