@@ -1,0 +1,31 @@
+#!/bin/sh
+# Stand-in for the llmlint CLI, placed first on PATH by measure.sh so the paid
+# model is never called. It answers the plain target's command line
+# (`llmlint --diff --diff-base <sha>`) and nothing else.
+#
+# NXLOSS_MODE=fail (default): one distinctive line on stdout, one on stderr,
+#   then exit NXLOSS_EXIT (1 = findings, 2 = refusal) at once.
+# NXLOSS_MODE=pass: a passing run of about 226KB, shaped like ai-orchestrator's
+#   `llmlint --diff -v` (two ~112KB debug lines on stderr, a short report on
+#   stdout), whose last stdout line is the marker a replay must still carry.
+case "${NXLOSS_MODE:-fail}" in
+fail)
+  printf 'NXLOSS-STDOUT %s finding: stand-in diagnostic on stdout\n' "${NXLOSS_NONCE:-none}"
+  printf 'NXLOSS-STDERR %s refusal: stand-in diagnostic on stderr\n' "${NXLOSS_NONCE:-none}" >&2
+  exit "${NXLOSS_EXIT:-1}"
+  ;;
+pass)
+  { printf 'debug: judge call 1 '; head -c 112500 /dev/zero | tr '\0' a; printf '\n'; } >&2
+  i=1
+  while [ "$i" -le 40 ]; do
+    printf 'rule_%02d: pass (stand-in report line)\n' "$i"
+    i=$((i + 1))
+  done
+  { printf 'debug: judge call 2 '; head -c 112500 /dev/zero | tr '\0' b; printf '\n'; } >&2
+  printf '40 rules: 40 passed, 0 failed\n'
+  printf 'See full results with llmlint history NXLOSS-REPLAY-END\n'
+  exit 0
+  ;;
+esac
+echo "stand-in llmlint: unknown NXLOSS_MODE '$NXLOSS_MODE'" >&2
+exit 64
