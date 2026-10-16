@@ -408,9 +408,10 @@ fn status_without_providers_omits_the_report_asks_for_none_and_moves_no_other_li
     for scope in [vec!["status", run.as_str()], vec!["status"]] {
         // Two readings in the view move on their own between invocations: the
         // free space on the host and the age of the unread planner update. So
-        // `--no-providers` is run between two plain `status` runs, and compared
-        // byte for byte only when those two agree above the report — nothing
-        // moved across the bracket, so any difference is the flag's.
+        // `--no-providers` is run between two plain `status` runs, and held
+        // byte for byte to whichever of the two it matches above the report: a
+        // reading that moved once across the bracket leaves it equal to one side,
+        // and a line the flag moved leaves it equal to neither.
         let mut compared = false;
         for _ in 0..BRACKETS {
             let before = world.run(&scope);
@@ -432,21 +433,26 @@ fn status_without_providers_omits_the_report_asks_for_none_and_moves_no_other_li
             after.exited(0);
             omitted.out_lacks("providers:");
             assert_eq!(omitted.stderr, before.stderr, "{}", omitted.args);
-            let cut = above_the_report(&before.stdout);
-            if cut != above_the_report(&after.stdout) {
-                continue;
+            let cuts = [
+                above_the_report(&before.stdout),
+                above_the_report(&after.stdout),
+            ];
+            if cuts.contains(&omitted.stdout) {
+                compared = true;
+                break;
             }
-            assert_eq!(
-                omitted.stdout, cut,
-                "`{}` moved a line besides the provider report",
-                omitted.args
-            );
-            compared = true;
-            break;
+            // Nothing moved across this bracket, so the difference is the flag's.
+            if cuts[0] == cuts[1] {
+                assert_eq!(
+                    omitted.stdout, cuts[0],
+                    "`{}` moved a line besides the provider report",
+                    omitted.args
+                );
+            }
         }
         assert!(
             compared,
-            "`{}` never held still across {BRACKETS} brackets to compare against",
+            "`{}` matched neither neighbouring view across {BRACKETS} brackets",
             scope.join(" ")
         );
     }

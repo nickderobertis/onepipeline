@@ -22,13 +22,41 @@ use std::collections::BTreeMap;
 use serde_json::{json, Value};
 
 use crate::draft_lifecycle::{rules, team_repository, GREEN};
-use crate::harness::{agent, held_publication, lifecycle, plan_of, World};
+use crate::harness::{agent, held_publication, lifecycle, plan_of, process_ended, World};
 
 /// The host's branch prefix every team journey here runs under.
 const PREFIX: &str = "me/";
 
 /// A required check the host reports red.
 const RED: &str = "lint completed failure required";
+
+/// Take this host's runs root away, as a host that never held it would find it.
+///
+/// A run that has settled is waited on until its driver has exited, rather than only until
+/// its result is written: the driver records its exit in the run's journal after
+/// `result.json`, releases the run, and then seals the run's summary beside it, so a removal
+/// racing that closeout finds a file recreated under it. A run still in flight is taken away
+/// as it stands, which is the host a journey means when it leaves a dispatch on the store.
+fn remove_the_runs_root(world: &World) {
+    world.until("every settled run's driver to have exited", |world| {
+        std::fs::read_dir(&world.runs).map_or(true, |runs| {
+            runs.flatten().all(|run| {
+                if !run.path().join("result.json").exists() {
+                    return true;
+                }
+                let exits = world.events_of(&run.file_name().to_string_lossy(), "driver-exited");
+                !exits.is_empty()
+                    && exits.iter().all(|exit| {
+                        exit["payload"]["pid"]
+                            .as_u64()
+                            .and_then(|pid| u32::try_from(pid).ok())
+                            .is_some_and(process_ended)
+                    })
+            })
+        })
+    });
+    std::fs::remove_dir_all(&world.runs).expect("the runs root is removed");
+}
 
 /// A world on a team repository — `change-open`, approvals required — so a published
 /// node settles `change-review-draft` with its change request held as a draft.
@@ -230,7 +258,7 @@ fn a_cold_host_continues_a_drafted_stack_from_the_store_and_dispatches_none_of_i
         .exited(0);
 
     // The host that ran it is gone: its runs root with it, and the cold host has its own.
-    std::fs::remove_dir_all(&world.runs).expect("the runs root is removed");
+    remove_the_runs_root(&world);
     let cold = world.on_host("host-b");
     let launched = launch(&cold, run, &project, &[]);
     launched.exited(0);
@@ -319,7 +347,7 @@ fn a_node_added_on_a_continued_node_is_drafted_on_its_recorded_branch() {
     let created = created_from(&world);
     world.add_task(run, "003-d", &lifecycle("d", &["c"]), &[("c", "002-c")]);
 
-    std::fs::remove_dir_all(&world.runs).expect("the runs root is removed");
+    remove_the_runs_root(&world);
     let cold = world.on_host("host-b");
     launch(&cold, run, &project, &[]).exited(0);
 
@@ -416,7 +444,7 @@ fn the_pinned_node_continues_its_branch_and_its_draft(
     let created = created_from(world);
     // The red checks were the reason it failed; a reviewer's fix has turned them green.
     world.script("gh.checks.2", GREEN);
-    std::fs::remove_dir_all(&world.runs).expect("the runs root is removed");
+    remove_the_runs_root(world);
     let cold = world.on_host("host-b");
     launch(&cold, run, project, &[]).exited(0).err_has(&format!(
         "onepipeline: launch '{run}' continues 1 settled node from the store"
@@ -511,7 +539,7 @@ fn a_cancelled_node_is_continued_pinned_to_its_branch_and_adopts_its_draft() {
         .to_owned();
     let created = created_from(&world);
     world.script("gh.checks.2", GREEN);
-    std::fs::remove_dir_all(&world.runs).expect("the runs root is removed");
+    remove_the_runs_root(&world);
     let cold = world.on_host("host-b");
     let continued = cold.run_from(&cold.project, &["start", &project, "--attach"]);
     assert!(
@@ -643,7 +671,7 @@ fn an_in_flight_dispatch_left_on_the_store_is_continued_by_a_host_that_takes_the
     world.unscript("b.wait");
     world.script("gh.checks.2", GREEN);
     let created = created_from(&world);
-    std::fs::remove_dir_all(&world.runs).expect("the runs root is removed");
+    remove_the_runs_root(&world);
     let cold = world.on_host("host-b");
     let refused = cold.run_from(&cold.project, &["start", &project, "--attach"]);
     refused.exited(2);
@@ -1334,7 +1362,7 @@ fn two_cold_hosts_launching_one_project_at_once_leave_one_driver_and_every_draft
     // A node a planner added that keeps a driver driving, so each has a claim to check.
     world.add_task(run, "003-hold", &agent("hold", &[]), &[]);
     world.script("hold.wait", "hold");
-    std::fs::remove_dir_all(&world.runs).expect("the runs root is removed");
+    remove_the_runs_root(&world);
 
     let hosts: Vec<World> = ["host-b", "host-c"]
         .into_iter()
@@ -1598,7 +1626,7 @@ fn a_dispatchs_branch_wins_over_a_settlements_and_an_authored_branch_over_both()
                "opened_at": "2026-10-11T00:00:00.000Z"}),
     );
     world.script("gh.checks.2", GREEN);
-    std::fs::remove_dir_all(&world.runs).expect("the runs root is removed");
+    remove_the_runs_root(&world);
     let cold = world.on_host("host-b");
     launch(&cold, run, &project, &[])
         .exited(0)
