@@ -48,6 +48,14 @@ onejudge = { workspace = true }
 # the one process boundary a two-party member still has — so the pin is the copy
 # onejudge links; see `[workspace.dependencies]`.
 oneharness-core = { workspace = true }
+# The released `oneharness` CLI, named so the e2e suite can build its binary from
+# this lock (`--package` reaches a normal dependency of a member, not a
+# dev-dependency): a two-party member's onejudge spawns `oneharness run` for each
+# turn, and `tests/e2e/dispatch.rs`'s
+# `a_judged_codex_turn_starts_with_plugins_off_unless_its_config_opts_in` drives
+# that real process — over the one `oneharness-core` above, since 0.25.1 requires
+# `^0.28.1` — with only `codex` doubled. Nothing here calls into it.
+oneharness = "0.25.1"
 # The graph document's own reader, so the observer double runs the judge-side
 # provider the graph *declares* rather than one it remembered: a graph that named
 # a different provider would otherwise still be supervised by this copy.
@@ -69,6 +77,12 @@ tokio = { workspace = true, features = ["rt"] }
 # worker that keeps working through the polite ask to stop. The crate under test
 # names the same dependency for the same platform, and for the same reason —
 # what a process does with a signal is not a `std` question on this MSRV floor.
+# `oneharness` is named for the binary `tests/e2e/harness.rs`'s
+# `oneharness_binary` builds from it, not for any item this crate imports, so no
+# `use` of it exists for cargo-machete to find.
+[package.metadata.cargo-machete]
+ignored = ["oneharness"]
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

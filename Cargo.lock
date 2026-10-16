@@ -1464,9 +1464,9 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "oneagentgraph"
-version = "0.5.7"
+version = "0.5.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "45a0de45655c9a723e080dd358d854683b38de39e8328af874c025e98402608c"
+checksum = "9b563d4aca094275ba44006c0d7b664a8f7ece7e7f2bbc41a61f69241fa4d3d8"
 dependencies = [
  "clap",
  "libc",
@@ -1475,8 +1475,8 @@ dependencies = [
  "onemessagebus",
  "schemars",
  "serde",
+ "serde-saphyr",
  "serde_json",
- "serde_norway",
  "sha2",
  "thiserror 2.0.20",
  "toml_edit",
@@ -1503,10 +1503,23 @@ dependencies = [
 ]
 
 [[package]]
-name = "oneharness-core"
-version = "0.24.2"
+name = "oneharness"
+version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61ccf1b2d49f5b0d4cb7eec8766a16c395e7923444f51426273be9d0ca76a645"
+checksum = "8b9bcf77b188c21df834aba6b0f70fccaace956629f59a4dfa52eecdbe343c03"
+dependencies = [
+ "clap",
+ "oneharness-core",
+ "serde",
+ "serde_json",
+ "toml",
+]
+
+[[package]]
+name = "oneharness-core"
+version = "0.28.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ca843b7528af3669112528459ab4713e87a62544cc3c66b3f1dc348e99857f3c"
 dependencies = [
  "fs2",
  "jsonschema 0.33.0",
@@ -1525,9 +1538,9 @@ dependencies = [
 
 [[package]]
 name = "onejudge"
-version = "0.19.0"
+version = "0.19.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "866c10bcfcf8624e6feacedf352f349fa276b13ed83be0d767306e7ef602ddd0"
+checksum = "14b557991e27288656dbcb174b53d1719df475942baa909b1a4b332b5048fc50"
 dependencies = [
  "clap",
  "oneharness-core",
@@ -1535,8 +1548,8 @@ dependencies = [
  "rustix",
  "schemars",
  "serde",
+ "serde-saphyr",
  "serde_json",
- "serde_yaml_ng",
  "thiserror 2.0.20",
 ]
 
@@ -1597,6 +1610,7 @@ version = "0.0.0"
 dependencies = [
  "libc",
  "oneagentgraph",
+ "oneharness",
  "oneharness-core",
  "onejudge",
  "onemessagebus",
@@ -2395,19 +2409,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "serde_yaml_ng"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b4db627b98b36d4203a7b458cf3573730f2bb591b28871d916dfa9efabfd41f"
-dependencies = [
- "indexmap",
- "itoa",
- "ryu",
- "serde",
- "unsafe-libyaml",
-]
-
-[[package]]
 name = "sha1_smol"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2838,12 +2839,6 @@ name = "unicode-width"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
-
-[[package]]
-name = "unsafe-libyaml"
-version = "0.2.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
 
 [[package]]
 name = "unsafe-libyaml-norway"
