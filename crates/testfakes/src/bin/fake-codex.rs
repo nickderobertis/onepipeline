@@ -31,7 +31,7 @@ fn main() -> ExitCode {
         println!("codex-cli 1.0.0 (fake-codex)");
         return ExitCode::SUCCESS;
     }
-    let dir = fake::script_dir();
+    let dir = script_dir();
     // Recorded first, so an argv this double refuses is still readable by the
     // journey that has to explain why the candidate was stepped past.
     fake::record(&dir, "codex", &args);
@@ -40,6 +40,31 @@ fn main() -> ExitCode {
     }
     println!("{}", fake::CODEX_SERVER_OVERLOADED);
     ExitCode::SUCCESS
+}
+
+/// The file beside this executable that names the script directory, for a
+/// copy oneharness starts with an environment that does not carry
+/// [`fake::SCRIPT_DIR_ENV`].
+///
+/// oneharness from 0.28 starts `codex app-server` as a **shared server**, with
+/// the environment cleared down to its base variables and Codex's own, so the
+/// variable every other double reads is not there. A journey that puts this
+/// binary on `PATH` as `codex` writes the directory here instead.
+const SCRIPT_DIR_BESIDE: &str = "onepipeline-fake-dir";
+
+/// Where this double reads its script from and records into: the variable,
+/// else the file a journey wrote beside this copy, else refused as unset.
+fn script_dir() -> std::path::PathBuf {
+    if std::env::var_os(fake::SCRIPT_DIR_ENV).is_none() {
+        let beside = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|dir| dir.join(SCRIPT_DIR_BESIDE)))
+            .and_then(|file| std::fs::read_to_string(file).ok());
+        if let Some(dir) = beside.filter(|dir| !dir.trim().is_empty()) {
+            return std::path::PathBuf::from(dir.trim());
+        }
+    }
+    fake::script_dir()
 }
 
 /// The sandboxes `codex exec --sandbox` takes, as oneharness maps its modes

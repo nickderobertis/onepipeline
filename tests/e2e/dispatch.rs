@@ -3908,9 +3908,11 @@ fn a_dispatched_codex_turn_starts_with_plugins_off_unless_its_config_opts_in() {
 /// `fake-oneharness` override and its `ONEHARNESS_BIN_CODEX` seam are both
 /// removed, and `codex` is resolved by name off a `PATH` whose first entry holds
 /// `fake-codex` under that name, which records the argv it was started with.
-/// The real CLI starts the agent side as `codex app-server`, a line the double
-/// records and then refuses, which ends the turn: the argv is the whole of the
-/// evidence, so the member's settlement is not read.
+/// The real CLI starts the agent side as one shared `codex app-server` (oneharness
+/// 0.25, core 0.28), under an environment cleared to its base and `CODEX_*`
+/// variables, so the double reads its world from the file written beside it. It
+/// records that line and then refuses it, which ends the turn: the argv is the
+/// whole of the evidence, so the member's settlement is not read.
 #[test]
 fn a_judged_codex_turn_starts_with_plugins_off_unless_its_config_opts_in() {
     let started = |name: &str, config: &str| -> Vec<Vec<String>> {
@@ -3928,6 +3930,13 @@ fn a_judged_codex_turn_starts_with_plugins_off_unless_its_config_opts_in() {
             on_path.join(format!("codex{}", std::env::consts::EXE_SUFFIX)),
         )
         .expect("the codex double is placed under codex's own name");
+        // The shared app-server the real CLI starts runs under an environment
+        // cleared to its base variables, so the double finds its world here.
+        std::fs::write(
+            on_path.join("onepipeline-fake-dir"),
+            world.fakes.to_string_lossy().as_bytes(),
+        )
+        .expect("the codex double is told where its world is");
         let mut launch = world.agentgraph_cmd(&["start", &path, "--attach"]);
         let inherited = launch
             .get_envs()
@@ -3958,14 +3967,14 @@ fn a_judged_codex_turn_starts_with_plugins_off_unless_its_config_opts_in() {
             "a turn reached the oneharness double rather than the real CLI: {invocations:#?}"
         );
         let launches: Vec<Vec<String>> = invocations
-            .into_iter()
+            .iter()
             .filter(|call| call["tool"] == "codex")
             .map(|call| serde_json::from_value(call["args"].clone()).expect("an argv is strings"))
             .filter(|argv: &Vec<String>| argv.as_slice() != ["--version"])
             .collect();
         assert!(
             !launches.is_empty(),
-            "the real oneharness never started codex off the PATH"
+            "the real oneharness never started codex off the PATH: {invocations:#?}"
         );
         launches
     };
