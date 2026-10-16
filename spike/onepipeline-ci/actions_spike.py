@@ -477,11 +477,11 @@ def main() -> int:
     try:
         if args.required_checks_out:
             checks = store.get(f"repos/{store.repo}/branches/{args.branch}/protection/required_status_checks")
-            snap = {"taken_at": next((json.loads(l)["at"] for l in reversed(store.log_path.read_text().splitlines())
-                                      if "required_status_checks" in l), None),
-                    "repository": store.repo, "branch": args.branch,
-                    "source": f"GET /repos/{store.repo}/branches/{args.branch}/protection/required_status_checks",
-                    "response": checks}
+            # GitHub's own response, with the instant it was read and where from beside it.
+            snap = dict(checks)
+            snap["taken_at"] = next((json.loads(l)["at"] for l in reversed(store.log_path.read_text().splitlines())
+                                     if "required_status_checks" in l), None)
+            snap["taken_from"] = f"GET /repos/{store.repo}/branches/{args.branch}/protection/required_status_checks"
             args.required_checks_out.write_text(json.dumps(snap, indent=1, sort_keys=True) + "\n")
         for path in args.extra:
             store.get(path)
@@ -541,6 +541,8 @@ def main() -> int:
                     continue
                 add_run(run_summary(run, run_jobs(store, run)))
         for rid in args.run:
+            if str(rid) in per_run:
+                continue
             run = store.get(f"repos/{store.repo}/actions/runs/{rid}")
             add_run(run_summary(run, run_jobs(store, run)))
     except QuotaStop as exc:

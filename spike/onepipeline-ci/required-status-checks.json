@@ -1,0 +1,81 @@
+{
+ "checks": [
+  {
+   "app_id": 15368,
+   "context": "gate"
+  },
+  {
+   "app_id": 15368,
+   "context": "pr-title"
+  },
+  {
+   "app_id": 15368,
+   "context": "llmlint"
+  },
+  {
+   "app_id": 15368,
+   "context": "msrv"
+  },
+  {
+   "app_id": 15368,
+   "context": "deny"
+  },
+  {
+   "app_id": 15368,
+   "context": "wheel"
+  },
+  {
+   "app_id": 15368,
+   "context": "cross (windows-latest)"
+  },
+  {
+   "app_id": 15368,
+   "context": "install (ubuntu-latest)"
+  },
+  {
+   "app_id": 15368,
+   "context": "install (windows-latest)"
+  },
+  {
+   "app_id": 15368,
+   "context": "install-documented (ubuntu-latest)"
+  },
+  {
+   "app_id": 15368,
+   "context": "install-documented (windows-latest)"
+  },
+  {
+   "app_id": 15368,
+   "context": "smoke"
+  },
+  {
+   "app_id": 15368,
+   "context": "release-compat"
+  },
+  {
+   "app_id": 15368,
+   "context": "visual-docs / report (x86_64, shots/current, shots/verify, Visual docs)"
+  }
+ ],
+ "contexts": [
+  "gate",
+  "pr-title",
+  "llmlint",
+  "msrv",
+  "deny",
+  "wheel",
+  "cross (windows-latest)",
+  "install (ubuntu-latest)",
+  "install (windows-latest)",
+  "install-documented (ubuntu-latest)",
+  "install-documented (windows-latest)",
+  "smoke",
+  "release-compat",
+  "visual-docs / report (x86_64, shots/current, shots/verify, Visual docs)"
+ ],
+ "contexts_url": "https://api.github.com/repos/nickderobertis/onepipeline/branches/main/protection/required_status_checks/contexts",
+ "strict": false,
+ "taken_at": "2026-10-16T00:41:20.520052+00:00",
+ "taken_from": "GET /repos/nickderobertis/onepipeline/branches/main/protection/required_status_checks",
+ "url": "https://api.github.com/repos/nickderobertis/onepipeline/branches/main/protection/required_status_checks"
+}
