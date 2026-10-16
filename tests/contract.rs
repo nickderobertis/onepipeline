@@ -291,6 +291,7 @@ fn the_dispatch_request_carries_every_field_the_contract_declares() {
             overflow: None,
             labels: Default::default(),
             refuse_conflicts: false,
+            caller_merges_base: false,
         }),
         cancel: CancellationToken::new(),
         attempt: NonZeroU32::new(2).expect("two is an attempt"),
@@ -3238,6 +3239,7 @@ fn the_branch_name_template_is_what_the_contract_names() {
         overflow: None,
         labels: Default::default(),
         refuse_conflicts: false,
+        caller_merges_base: false,
     })
     .expect("a request serializes");
     let field = block["session_request_field"]

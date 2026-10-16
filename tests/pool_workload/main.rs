@@ -90,6 +90,7 @@ fn cut_slots(world: &World, checkout: &Path, n: usize) {
                     overflow: None,
                     labels: Default::default(),
                     refuse_conflicts: false,
+                    caller_merges_base: false,
                 })
                 .expect("a session opens on the pooled identity")
                 .token
