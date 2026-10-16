@@ -1315,8 +1315,14 @@ fn a_takeover_of_an_idle_driver_starts_on_its_acknowledgement_within_the_interva
     let base = takeover_world("takeover-idle", interval).through_scripted_source();
     base.script("y.work", "y's change\n");
     let successor = base.on_host("host-b");
+    // llmlint: ignore-block[tests_mirror_real_usage] the acceptance this journey answers to
+    // holds the displaced driver at a chosen point by a test failpoint — the interleaving is the
+    // property, and no user-facing input can place a driver's claim read or dispatch start at a
+    // chosen instant. The failpoint only orders the real binary over the real store, origin and
+    // GitHub double, and every outcome is asserted on the binary's own records.
     let reads = crate::harness::Rendezvous::failpoint();
     let world = base.with_env(READ_GATE, &reads.address());
+    // llmlint: ignore-end[tests_mirror_real_usage]
     let x = world.rendezvous("x");
     let run = "idle";
     let project = author(&world, run, vec![agent("x", &[]), lifecycle("y", &["x"])]);
@@ -1596,10 +1602,16 @@ fn held_at_its_first_dispatch(
     let base = takeover_world(name, interval);
     base.script("x.work", "x's change\n");
     let successor = base.on_host("host-b");
+    // llmlint: ignore-block[tests_mirror_real_usage] the acceptance this journey answers to
+    // holds the displaced driver at a chosen point by a test failpoint — the interleaving is the
+    // property, and no user-facing input can place a driver's claim read or dispatch start at a
+    // chosen instant. The failpoint only orders the real binary over the real store, origin and
+    // GitHub double, and every outcome is asserted on the binary's own records.
     let begins = crate::harness::Rendezvous::failpoint();
     let world = base
         .with_env(BEGIN_GATE, &begins.address())
         .with_env(BEGIN_NODE, "x");
+    // llmlint: ignore-end[tests_mirror_real_usage]
     let run = name.trim_start_matches("takeover-");
     let project = author(&world, run, vec![lifecycle("x", &[])]);
     world
@@ -1645,6 +1657,16 @@ fn a_takeover_whose_displaced_driver_died_proceeds_once_its_lease_has_run_out() 
     let successor = world.on_host("host-b");
     let since = std::time::Instant::now();
     let taking = take_over_in_background(&successor, &project);
+    // A claim somebody clears while it waits is no answer: it goes on waiting.
+    until_claimed_on(&world, &project, "host-b");
+    let key =
+        onetaskgraph_plugin_api::MetadataKey::new("onepipeline.driver".to_owned()).expect("a key");
+    let id: onetaskgraph_core::GlobalId = project.parse().expect("a qualified project");
+    world
+        .store_call(
+            |engine| async move { engine.set_project_metadata(&id, &key, &Value::Null).await },
+        )
+        .unwrap_or_else(|why| panic!("the store refused the write: {why}"));
     let said = launched_over(taking);
     assert!(
         since.elapsed() >= takeover_wait(interval),
@@ -1685,8 +1707,14 @@ fn a_takeover_replaced_while_it_waits_is_refused_and_the_one_that_replaced_it_st
     base.script("x.work", "x's change\n");
     let first = base.on_host("host-b");
     let second = base.on_host("host-c");
+    // llmlint: ignore-block[tests_mirror_real_usage] the acceptance this journey answers to
+    // holds the displaced driver at a chosen point by a test failpoint — the interleaving is the
+    // property, and no user-facing input can place a driver's claim read or dispatch start at a
+    // chosen instant. The failpoint only orders the real binary over the real store, origin and
+    // GitHub double, and every outcome is asserted on the binary's own records.
     let reads = crate::harness::Rendezvous::failpoint();
     let world = base.with_env(READ_GATE, &reads.address());
+    // llmlint: ignore-end[tests_mirror_real_usage]
     let x = world.rendezvous("x");
     let run = "replaced";
     let project = author(&world, run, vec![lifecycle("x", &[])]);
@@ -1797,8 +1825,14 @@ fn a_takeover_waits_out_a_board_that_refuses_a_poll_and_the_acknowledgement() {
     let interval = 5;
     let base = takeover_world("takeover-unanswered", interval).through_scripted_source();
     let successor = base.on_host("host-b");
+    // llmlint: ignore-block[tests_mirror_real_usage] the acceptance this journey answers to
+    // holds the displaced driver at a chosen point by a test failpoint — the interleaving is the
+    // property, and no user-facing input can place a driver's claim read or dispatch start at a
+    // chosen instant. The failpoint only orders the real binary over the real store, origin and
+    // GitHub double, and every outcome is asserted on the binary's own records.
     let reads = crate::harness::Rendezvous::failpoint();
     let world = base.with_env(READ_GATE, &reads.address());
+    // llmlint: ignore-end[tests_mirror_real_usage]
     let x = world.rendezvous("x");
     let run = "unanswered";
     let project = author(&world, run, vec![agent("x", &[])]);
@@ -1842,7 +1876,7 @@ fn a_takeover_waits_out_a_board_that_refuses_a_poll_and_the_acknowledgement() {
 
 /// A driver whose reads of its claim keep failing ends the dispatch it has in progress once
 /// its last confirming read has held it two intervals and a read's deadline, says so, and
-/// starts nothing more until a read confirms it.
+/// starts nothing more until a read confirms it — and starts again once one does.
 #[test]
 fn a_driver_whose_reads_keep_failing_ends_its_dispatch_once_its_lease_lapses() {
     let interval = 5;
@@ -1852,7 +1886,13 @@ fn a_driver_whose_reads_keep_failing_ends_its_dispatch_once_its_lease_lapses() {
         .with_env(crate::harness::CANCEL_GRACE_ENV, "1");
     let x = world.rendezvous("x");
     let run = "lapsed";
-    let project = launch_detached(&world, run, vec![agent("x", &[]), agent("y", &["x"])]);
+    // One dispatch at a time, so `y` waits behind `x` rather than beside it.
+    let mut plan = plan_of(run, vec![agent("x", &[]), agent("y", &[])]);
+    plan["concurrency"] = json!(1);
+    let project = world.plan(run, &plan);
+    world
+        .run_from(&world.project, &["start", &project, "--detach"])
+        .exited(0);
     let held = x.arrived();
     until_claimed_by(&world, &project, run);
     let since = std::time::Instant::now();
@@ -1874,12 +1914,19 @@ fn a_driver_whose_reads_keep_failing_ends_its_dispatch_once_its_lease_lapses() {
     );
     assert_eq!(settled(&world, run, "x")["status"], "cancelled");
     world.until_run_file_holds(run, "driver.log", "ends its dispatches in progress — 'x'");
+    // `y` is free to start and the lease lets it start nothing.
+    std::thread::sleep(std::time::Duration::from_secs(interval));
     assert_eq!(dispatched(&world, run), vec!["x".to_owned()]);
+    // The board answers again: the next read confirms the lease, and `y` starts.
     world.store_stops_refusing("get_project");
     world.until("the driver to end", |world| {
         world.run_file(run, "result.json").is_file()
     });
-    assert_eq!(dispatched(&world, run), vec!["x".to_owned()]);
+    assert_eq!(
+        dispatched(&world, run),
+        vec!["x".to_owned(), "y".to_owned()]
+    );
+    assert_eq!(settled(&world, run, "y")["status"], "done");
     drop(held);
 }
 
@@ -2233,6 +2280,12 @@ fn a_settlement_dispatch_or_claim_that_is_not_one_refuses_the_launch() {
     unacknowledged["acknowledged"] = json!({"run": "older"});
     let mut untimely = claim.clone();
     untimely["acknowledged"] = json!({"run": "older", "host": "builder", "at": "later"});
+    let mut unshaped = claim.clone();
+    unshaped["acknowledged"] = json!("yes");
+    let mut overlong = claim.clone();
+    overlong["acknowledged"] = json!({"run": "older", "host": "builder", "at": at, "pid": 9});
+    let mut nameless = claim.clone();
+    nameless["acknowledged"] = json!({"run": "", "host": "builder", "at": at});
     let claims = [
         (json!({"run": "elsewhere"}), "missing field"),
         (unnamed, "`host`"),
@@ -2243,6 +2296,9 @@ fn a_settlement_dispatch_or_claim_that_is_not_one_refuses_the_launch() {
         (untimed, "not an RFC 3339 instant"),
         (unacknowledged, "its `acknowledged`: missing field"),
         (untimely, "not a run, a host and an instant"),
+        (unshaped, "its `acknowledged`: invalid type"),
+        (overlong, "its `acknowledged`: unknown field"),
+        (nameless, "not a run, a host and an instant"),
     ];
     for (bad, says) in claims {
         let key = onetaskgraph_plugin_api::MetadataKey::new("onepipeline.driver".to_owned())
