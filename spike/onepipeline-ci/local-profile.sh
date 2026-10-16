@@ -7,8 +7,8 @@
 # shares the main clone's cache and task database across every worktree, so
 # nothing there is cold, and overriding NX_WORKSPACE_DATA_DIRECTORY instead
 # leaks into the nested Nx runs `npm/test/workspace-nx.test.mjs` starts and
-# fails them with "Recursive task invocation detected". Nothing about the
-# recipe's environment is changed here.
+# fails them with "Recursive task invocation detected". The recipe runs with
+# no Nx or nextest override; the one variable set is CARGO_INCREMENTAL below.
 #
 # `cold` deletes <checkout>/.nx/cache and <checkout>/.nx/workspace-data first;
 # `warm` keeps what the previous run left. The cargo target directory is the
