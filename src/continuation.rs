@@ -1154,10 +1154,17 @@ fn takeover_poll(interval: Duration) -> Duration {
 /// deadline: by then its lease's watchdog has asked each one to stop, and the cancel grace
 /// later killed it. The slack covers the dispatch thread noticing, and the reaping.
 pub(crate) fn takeover_wait(interval: Duration) -> Duration {
-    LAPSES_AFTER_INTERVALS * interval
-        + CLAIM_READ_DEADLINE
-        + crate::engine::cancel_grace()
-        + LAPSE_SLACK
+    takeover_wait_after(interval, crate::engine::cancel_grace())
+}
+
+/// [`takeover_wait`] for a cancel grace of `grace`, saturating: the grace is an operator's
+/// setting no smaller bound holds, and a wait that could not be represented is one no
+/// takeover outlives anyway.
+fn takeover_wait_after(interval: Duration, grace: Duration) -> Duration {
+    (LAPSES_AFTER_INTERVALS * interval)
+        .saturating_add(CLAIM_READ_DEADLINE)
+        .saturating_add(grace)
+        .saturating_add(LAPSE_SLACK)
 }
 
 #[cfg(test)]
@@ -1273,6 +1280,11 @@ mod tests {
         assert_eq!(
             takeover_wait(interval),
             lease.inner.holds_for + crate::engine::cancel_grace() + LAPSE_SLACK
+        );
+        // A grace no duration can be added to saturates rather than overflowing.
+        assert_eq!(
+            takeover_wait_after(MAX_CLAIM_INTERVAL, Duration::MAX),
+            Duration::MAX
         );
         lease.close();
     }
