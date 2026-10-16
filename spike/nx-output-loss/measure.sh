@@ -8,7 +8,7 @@
 #     --terminal tty|notty|ci \
 #     --load on|off \
 #     --mode fail|replay \
-#     [--nx-patch none|close] [--slot K] --runs N [--scratch DIR] [--record FILE]
+#     [--nx-patch none|close] [--direct true|false] [--slot K] --runs N [--scratch DIR] [--record FILE]
 #
 # It runs `nx run <project>:<target>` N times, where the target's command is
 # `llmlint --diff --diff-base $LLMLINT_DIFF_BASE_SHA` and `llmlint` is the stand-in
@@ -43,6 +43,9 @@
 #                  run-commands/running-tasks.js changed, so RunningNodeProcess
 #                  collects the task's output on the child's 'close' (its pipes
 #                  drained) instead of its 'exit' -- the candidate fix.
+#   --direct       true (default): Nx runs a run-commands task in its own process,
+#                  as it does unless told otherwise. false: NX_RUN_COMMANDS_DIRECTLY=false,
+#                  so Nx runs the run-commands executor in a forked process instead.
 #   --slot         which copy of the workspace to run in (default 0), so that
 #                  measurements taken at the same time never share a workspace,
 #                  its Nx state, or the log file its scripts/nx.sh writes.
@@ -54,7 +57,7 @@ set -euo pipefail
 here="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
 repo="$(git -C "$here" rev-parse --show-toplevel)"
 
-arrangement=onepipeline invoke=nx pty=default terminal=notty load=off mode=fail runs=50 nx_patch=none slot=0
+arrangement=onepipeline invoke=nx pty=default terminal=notty load=off mode=fail runs=50 nx_patch=none slot=0 direct=true
 scratch="${ONEPIPELINE_NODE_SCRATCH_DIR:-${TMPDIR:-/tmp}}/nxloss"
 record=""
 while (($#)); do
@@ -70,6 +73,7 @@ while (($#)); do
   --record) record=$2 ;;
   --nx-patch) nx_patch=$2 ;;
   --slot) slot=$2 ;;
+  --direct) direct=$2 ;;
   -h | --help) sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
   *) echo "measure: unknown argument '$1'; see --help" >&2; exit 64 ;;
   esac
@@ -82,6 +86,7 @@ case "$terminal" in tty | notty | ci) ;; *) echo "measure: --terminal must be tt
 case "$load" in on | off) ;; *) echo "measure: --load must be on or off" >&2; exit 64 ;; esac
 case "$mode" in fail | replay) ;; *) echo "measure: --mode must be fail or replay" >&2; exit 64 ;; esac
 case "$nx_patch" in none | close) ;; *) echo "measure: --nx-patch must be none or close" >&2; exit 64 ;; esac
+case "$direct" in true | false) ;; *) echo "measure: --direct must be true or false" >&2; exit 64 ;; esac
 [[ "$slot" =~ ^[0-9]+$ ]] || { echo "measure: --slot must be a non-negative integer" >&2; exit 64; }
 [[ "$runs" =~ ^[1-9][0-9]*$ ]] || { echo "measure: --runs must be a positive integer" >&2; exit 64; }
 mkdir -p "$scratch"
@@ -178,6 +183,7 @@ run_env=(
   "NX_DAEMON=false"
 )
 unset_env=(-u CI -u GITHUB_ACTIONS -u ONEPIPELINE_NX_SHOW_OUTPUT -u AI_ORCHESTRATOR_NX_SHOW_OUTPUT -u NX_TUI)
+[ "$direct" = true ] || run_env+=("NX_RUN_COMMANDS_DIRECTLY=false")
 case "$terminal" in
 ci) run_env+=("CI=true" "GITHUB_ACTIONS=true") ;;
 tty) unset_env+=(-u CLAUDECODE -u AI_AGENT -u CLAUDE_CODE_ENTRYPOINT) ;;
@@ -189,7 +195,7 @@ elif [ "$mode" = replay ]; then
   run_env+=("AI_ORCHESTRATOR_NX_SHOW_OUTPUT=1")
 fi
 
-config="arrangement=$arrangement invoke=$invoke pty=$pty terminal=$terminal load=$load mode=$mode nx=$nx_version nx_patch=$nx_patch source=$(cat "$ws/.nxloss-ready")"
+config="arrangement=$arrangement invoke=$invoke pty=$pty terminal=$terminal load=$load mode=$mode nx=$nx_version nx_patch=$nx_patch direct=$direct source=$(cat "$ws/.nxloss-ready")"
 slug="$(printf '%s' "$config" | tr ' =' '_-')"
 lostdir="$scratch/lost/$slug-load-$load"
 rm -rf "$lostdir"
