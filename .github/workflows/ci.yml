@@ -194,8 +194,13 @@ jobs:
   # ok` until something still holding its `tee` pipe let go: 8 minutes in run
   # 37862937526, and long enough in 37885197847 that 90 cut a leg whose every test
   # had passed. That pipe is the defect, and this bound only stops it failing a
-  # correct change. The job is left at 130, so a step that took all 120 leaves the
-  # re-run step only what remains of the job.
+  # correct change.
+  #
+  # The step is 180 and the job 220 since the leak was fixed and the tiers
+  # outgrew 120: run 38623010948 (job 116055624649) passed all 1298 e2e tests,
+  # with no leaked process, in 6567s, and 130 cut the job 15s later with the
+  # quick tier still running. 220 is 180 plus the same 15-minute gap and the
+  # re-run step's 25, so a step that took all 180 still leaves that step its own.
   #
   # Splitting the suite across more jobs is the only thing that would make the leg
   # itself shorter, and it is not available: branch protection requires `cross
@@ -214,7 +219,7 @@ jobs:
     # One verdict per leg, each under its own name, for the carrier below.
     outputs:
       windows-latest: ${{ steps.proved.outputs.windows-latest }}
-    timeout-minutes: 130
+    timeout-minutes: 220
     env:
       NEXTEST_PROFILE: ci
     defaults:
@@ -240,7 +245,7 @@ jobs:
       # for that step to re-run without compiling.
       - name: Quality gate (cross-platform legs)
         id: gate
-        timeout-minutes: 120
+        timeout-minutes: 180
         run: ONEPIPELINE_TEST_ARCHIVE="$RUNNER_TEMP/tests.tar.zst" just check-cross 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
       # A leg that stops without a verdict stops holding something — a test
       # process, or a child of one that outlived it — and on Windows there are no
@@ -724,7 +729,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.macos == 'true'
     runs-on: macos-latest
-    timeout-minutes: 180
+    timeout-minutes: 240
     env:
       NEXTEST_PROFILE: ci
     defaults:
@@ -751,7 +756,7 @@ jobs:
       - name: Quality gate (cross-platform legs)
         id: gate
         if: needs.changes.outputs.crate == 'true'
-        timeout-minutes: 120
+        timeout-minutes: 180
         run: ONEPIPELINE_TEST_ARCHIVE="$RUNNER_TEMP/tests.tar.zst" just check-cross 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
       - name: What was still running when it stopped
         if: failure() || cancelled()
@@ -859,7 +864,7 @@ jobs:
     name: Manual Mac diagnostic
     if: github.event_name == 'workflow_dispatch' && inputs.diagnostic
     runs-on: macos-latest
-    timeout-minutes: 180
+    timeout-minutes: 240
     env:
       NEXTEST_PROFILE: ci
     defaults:
@@ -885,7 +890,7 @@ jobs:
       # for that step to re-run without compiling.
       - name: Quality gate (cross-platform legs)
         id: gate
-        timeout-minutes: 120
+        timeout-minutes: 180
         run: ONEPIPELINE_TEST_ARCHIVE="$RUNNER_TEMP/tests.tar.zst" just check-cross 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
       - name: What was still running when it stopped
         if: failure() || cancelled()

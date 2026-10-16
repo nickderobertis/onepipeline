@@ -506,7 +506,8 @@ pub(crate) struct NodeRequeued {
 pub(crate) struct NodeSettled {
     /// The terminal status.
     pub(crate) status: Status,
-    /// The word its settlement was reached under.
+    /// The word its settlement was reached under. A review draft republished
+    /// without a check watch settles change-review-draft-unchecked at its push.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) outcome: Option<String>,
     /// The bounded detail.
@@ -553,6 +554,9 @@ pub(crate) struct NodeSettled {
 /// A settlement a launch continued from its project's store.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct Continued {
+    /// Rework provenance loaded from the store, journal-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) rework: Option<ContinuedRework>,
     /// Where the settlement was read: the project's store.
     pub(crate) source: ContinuedSource,
     // llmlint: ignore-block[invalid_states_unrepresentable] a wire document, as the
@@ -563,6 +567,17 @@ pub(crate) struct Continued {
     pub(crate) run: Option<String>,
     // llmlint: ignore-end[invalid_states_unrepresentable]
 }
+
+// llmlint: ignore-block[invalid_states_unrepresentable] Entry 122 fixes these serialized provenance fields as strings. continuation_of validates the store input before creating this DTO; projection preserves its original metadata rather than executing predecessor text as an instruction.
+/// The rework a continued lineage already carries on its store item.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ContinuedRework {
+    pub(crate) replacement: String,
+    pub(crate) replaces: String,
+    pub(crate) comments: Vec<crate::channel::ReworkComment>,
+}
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// Where a continued settlement was read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -724,6 +739,11 @@ pub(crate) struct EditRejected {
 /// `planner-surface-queued`: a surface sent.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct PlannerSurfaceQueued {
+    // llmlint: ignore-block[invalid_states_unrepresentable] This optional journal DTO preserves entry 122’s wire string. Surface.correlation is the bus’s validated Correlation before record_surface serializes it; no command is executed from this journal text.
+    /// Review revision identity, where the surface names one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) correlation: Option<String>,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
     /// The surface's kind.
     // llmlint: ignore-block[invalid_states_unrepresentable] a queued surface's kind is
     // not `channel::SurfaceKind`'s closed set: the engine queues surfaces of its own —
@@ -1650,6 +1670,9 @@ pub(crate) enum RestackCause {
     Rework,
     /// A stack parent's own restack republished with new commits.
     Restack,
+    /// A node it is connected to landed or was absorbed, so the draft is brought onto
+    /// its placement: its nearest unlanded parents, or the root.
+    Readjust,
 }
 
 /// `node-restack-started`: a draft began being brought onto its stack parents'
@@ -1677,7 +1700,321 @@ pub(crate) struct NodeRestacked {
     /// The publication's outcome word, as the node's settlement carries it.
     pub(crate) outcome: String,
 }
+
+/// How a node's landing was found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum LandingDetection {
+    /// A readjustment's standings read reported its change request merged into its root.
+    Readjust,
+    /// The node it was absorbed into landed, carrying its work.
+    AbsorberLanded,
+}
+
+/// The action a readjustment ran first in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ReadjustTrigger {
+    /// The pass `onepipeline review`.
+    Review,
+    /// The verb `onepipeline readjust`.
+    Readjust,
+    /// Applying a `rework`, or the republication that continues one.
+    Rework,
+    /// A restack, or a placement of a lifecycle node at dispatch.
+    Placement,
+    /// A continuing launch or an adoption, before its first dispatch.
+    Continuation,
+}
+
+/// `node-landed`: a draft's change request was found merged into its root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct NodeLanded {
+    /// The node.
+    pub(crate) node: String,
+    /// Its change request.
+    pub(crate) change_url: String,
+    /// The commit its work reached the root as.
+    pub(crate) commit: String,
+    /// How the landing was found.
+    pub(crate) detected_by: LandingDetection,
+    /// The action whose readjustment found it.
+    pub(crate) trigger: ReadjustTrigger,
+    /// The node whose landing carried it, for an absorbed node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) via: Option<String>,
+}
+
+/// `node-absorbed`: a draft's change request was merged into another node's branch, so
+/// its work reaches the root only with that node's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct NodeAbsorbed {
+    /// The node.
+    pub(crate) node: String,
+    /// The node whose branch it merged into.
+    pub(crate) into: String,
+    /// Its change request.
+    pub(crate) change_url: String,
+    /// The commit the merge made on that branch.
+    pub(crate) commit: String,
+}
+
+/// `change-reopened`: a draft the host closed when its landed parent's branch was
+/// deleted had that branch restored and was reopened.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct ChangeReopened {
+    /// The node.
+    pub(crate) node: String,
+    /// Its change request.
+    pub(crate) change_url: String,
+    /// The branch restored on the origin, which its retarget then deletes again.
+    pub(crate) restored_base: String,
+}
+
+/// Where a draft is placed: its base and the stack parents whose branches it stands on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct Placement {
+    /// The branch its change request is based on.
+    pub(crate) base: String,
+    /// Its stack parents, in declared order; empty on the root.
+    pub(crate) stack_parents: Vec<String>,
+}
+
+/// Whether a readjustment moved a draft's change request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum RetargetWord {
+    /// Its base moved on the host.
+    Retargeted,
+    /// The host already targeted the computed base.
+    Unchanged,
+    /// No retarget was asked: its placement did not move.
+    None,
+}
+
+/// Whether a readjusted draft's branch now carries its new base.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ReadjustContent {
+    /// Its base's head was merged into its branch and pushed.
+    Merged,
+    /// Its change request was moved with no merge: a `retry` merges the base.
+    Pending,
+}
+
+/// `node-readjusted`: a draft was brought onto its placement after a node it is
+/// connected to landed or was absorbed. The node's ordinary `node-settled` follows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct NodeReadjusted {
+    /// The node.
+    pub(crate) node: String,
+    /// Where it was placed before.
+    pub(crate) from: Placement,
+    /// Where it is placed now.
+    pub(crate) to: Placement,
+    /// The nodes whose landing or absorption moved it.
+    pub(crate) cause: Vec<String>,
+    /// The commit its branch stands at afterwards.
+    pub(crate) head: String,
+    /// Whether an agent was dispatched to conclude a conflict.
+    pub(crate) agent_dispatched: bool,
+    /// What became of its change request's base.
+    pub(crate) retarget: RetargetWord,
+    /// Whether its branch carries its new base.
+    pub(crate) content: ReadjustContent,
+}
+
+/// `stack-landed-out-of-order`: a draft merged into the root while unlanded ancestors'
+/// work rode along with it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct StackLandedOutOfOrder {
+    /// The node that landed.
+    pub(crate) node: String,
+    /// Each unlanded ancestor whose work reached the root through it.
+    pub(crate) carried: Vec<String>,
+}
+
+/// `change-closed`: a draft's change request was closed without being merged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct ChangeClosed {
+    /// The node.
+    pub(crate) node: String,
+    /// Its change request.
+    pub(crate) change_url: String,
+}
+
+/// A deferred republication's required-checks verdict, as a later read found it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ChecksVerdictWord {
+    /// Something required has not settled.
+    Pending,
+    /// Every required check passed.
+    Passed,
+    /// Every required check passed or was skipped.
+    PassedWithSkipped,
+    /// A required check failed.
+    Failed,
+    /// The base requires nothing.
+    NoneRequired,
+}
+
+/// `node-checks-read`: a later trigger's read of a draft republished without a check
+/// watch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct NodeChecksRead {
+    /// The node.
+    pub(crate) node: String,
+    /// The head the verdict is about.
+    pub(crate) head: String,
+    /// The verdict.
+    pub(crate) verdict: ChecksVerdictWord,
+}
+
+/// `readjust-read-failed`: one repository's standings read failed, and its drafts were
+/// left as they were.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct ReadjustReadFailed {
+    /// The repository, as its drafts name it.
+    pub(crate) repo: String,
+    /// What the host or the sibling said.
+    pub(crate) detail: String,
+}
 // llmlint: ignore-end[invalid_states_unrepresentable]
+
+/// The scratch removed at one ending or manager request.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ScratchRemoved {
+    pub(crate) trigger: ScratchTrigger,
+    pub(crate) dirs: u64,
+    pub(crate) bytes: u64,
+    pub(crate) failed: Vec<ScratchFailure>,
+}
+
+/// Why scratch is removed.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ScratchTrigger {
+    Success,
+    Discard,
+}
+
+/// A producer-platform absolute path, including Windows paths in a Unix reader.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(transparent)]
+pub(crate) struct AbsolutePath(std::path::PathBuf);
+
+impl AbsolutePath {
+    pub(crate) fn new(path: std::path::PathBuf) -> Result<Self, &'static str> {
+        let text = path.to_str().ok_or("scratch path is not UTF-8")?;
+        let bytes = text.as_bytes();
+        let drive = bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'/' | b'\\');
+        let unc = text.strip_prefix("\\\\").is_some_and(|tail| {
+            let mut parts = tail.split('\\');
+            parts.next().is_some_and(|part| !part.is_empty())
+                && parts.next().is_some_and(|part| !part.is_empty())
+        });
+        if text.starts_with('/') || drive || unc {
+            Ok(Self(path))
+        } else {
+            Err("scratch path must be absolute")
+        }
+    }
+
+    pub(crate) fn display(&self) -> std::path::Display<'_> {
+        self.0.display()
+    }
+}
+
+impl<'de> Deserialize<'de> for AbsolutePath {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::new(std::path::PathBuf::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+impl JsonSchema for AbsolutePath {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "AbsolutePath".into()
+    }
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({"type": "string", "pattern": r"^(?:/|[A-Za-z]:[\\/]|\\\\[^\\]+\\[^\\]+)"})
+    }
+}
+
+/// A failure always states a reason.
+#[derive(Debug, Clone, Serialize)]
+#[serde(transparent)]
+pub(crate) struct ScratchError(String);
+
+impl ScratchError {
+    pub(crate) fn new(error: String) -> Result<Self, &'static str> {
+        if error.is_empty() {
+            Err("scratch failure error must not be empty")
+        } else {
+            Ok(Self(error))
+        }
+    }
+}
+
+impl std::fmt::Display for ScratchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl<'de> Deserialize<'de> for ScratchError {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+impl JsonSchema for ScratchError {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ScratchError".into()
+    }
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({"type": "string", "minLength": 1})
+    }
+}
+
+/// A directory removal that the filesystem refused.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ScratchFailure {
+    pub(crate) path: AbsolutePath,
+    pub(crate) error: ScratchError,
+}
+
+/// A directory's allocated disk usage at an ending.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ScratchDir {
+    pub(crate) path: AbsolutePath,
+    pub(crate) bytes: u64,
+}
+
+/// Scratch kept for inspection or retry.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ScratchRetained {
+    pub(crate) ending: ScratchEnding,
+    pub(crate) dirs: Vec<ScratchDir>,
+    pub(crate) total_bytes: u64,
+}
+
+/// A non-success ending or pause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ScratchEnding {
+    Failed,
+    Unfinished,
+    Stopped,
+    Paused,
+}
 
 /// Declares each payload as the bus [`Message`] its kind carries, the total map
 /// from a kind to that id, and the registry every one of them is registered in.
@@ -1728,7 +2065,93 @@ macro_rules! payload_messages {
     };
 }
 
+// llmlint: ignore-block[invalid_states_unrepresentable] Entry 122 fixes these journal DTOs, including optional flattened location fields alongside the sibling CommentKind. metadata derives all location fields from that same kind; nodes come from the validated graph and host values from onevcs review_comments. These schemas describe recorded output, not a second host parser.
+/// One host read of a draft's review comments; bodies are retained as evidence.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct ReviewCommentsRead {
+    pub(crate) node: String,
+    pub(crate) change_url: String,
+    #[schemars(with = "String")]
+    pub(crate) marker: onevcs::ReadMarker,
+    pub(crate) unchanged: bool,
+    #[schemars(schema_with = "read_cost_schema")]
+    pub(crate) cost: onevcs::ReadCost,
+    pub(crate) comments: Vec<ReviewCommentMetadata>,
+}
+
+/// The metadata of one host comment, without the body retained as an artifact.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct ReviewCommentMetadata {
+    #[schemars(with = "String")]
+    pub(crate) id: onevcs::CommentId,
+    #[schemars(with = "Object")]
+    pub(crate) kind: onevcs::CommentKind,
+    pub(crate) author: String,
+    pub(crate) url: String,
+    pub(crate) updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) line: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) thread: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<String>")]
+    pub(crate) in_reply_to: Option<onevcs::CommentId>,
+}
+// llmlint: ignore-end[invalid_states_unrepresentable]
+
+// onevcs owns the Rust type; its two unsigned metrics are described here because
+// that producer type carries no JsonSchema implementation. Contract tests validate
+// both serialized extrema and rejected out-of-range values through this document.
+// Exhaustive producer destructuring and u32 signatures also hold the complete
+// field set and widths, including future serde-defaulted fields.
+fn read_cost_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "object",
+        "properties": {
+            "graphql_points": {"type": "integer", "minimum": 0, "maximum": u32::MAX},
+            "rest_requests": {"type": "integer", "minimum": 0, "maximum": u32::MAX}
+        },
+        "required": ["graphql_points", "rest_requests"]
+    })
+}
+
+/// `landing-registered`: a manager landing's ownership, recorded before any
+/// side effect.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(transparent)]
+pub(crate) struct LandingRegistered(pub(crate) crate::flow::LandingTransition);
+
+/// `landing-drafting`: a manager landing started drafting its body.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(transparent)]
+pub(crate) struct LandingDrafting(pub(crate) crate::flow::LandingTransition);
+
+/// `landing-started`: a manager landing started its forwarded verb.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(transparent)]
+pub(crate) struct LandingStarted(pub(crate) crate::flow::LandingTransition);
+
+/// `landing-finished`: a manager landing's verb ended `0`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(transparent)]
+pub(crate) struct LandingFinished(pub(crate) crate::flow::LandingTerminal);
+
+/// `landing-refused`: a manager landing's verb ended non-zero, or its progress
+/// could not be relayed.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(transparent)]
+pub(crate) struct LandingRefused(pub(crate) crate::flow::LandingTerminal);
+
+/// `landing-died`: a manager landing's process proved gone with no ending.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(transparent)]
+pub(crate) struct LandingDied(pub(crate) crate::flow::LandingTransition);
+
 payload_messages! {
+    ScratchRemoved => "scratch-removed";
+    ScratchRetained => "scratch-retained";
     RunStarted => "run-started";
     ConcurrentAcknowledged => "concurrent-acknowledged";
     ConcurrentDeferred => "concurrent-deferred";
@@ -1769,11 +2192,26 @@ payload_messages! {
     BranchesSuperseded => "branches-superseded";
     BranchesRetired => "branches-retired";
     ChangeRetitled => "change-retitled";
+    ReviewCommentsRead => "review-comments-read";
     TitleUnverified => "title-unverified";
     NodeRestackStarted => "node-restack-started";
     NodeRestacked => "node-restacked";
+    NodeLanded => "node-landed";
+    NodeAbsorbed => "node-absorbed";
+    ChangeReopened => "change-reopened";
+    NodeReadjusted => "node-readjusted";
+    StackLandedOutOfOrder => "stack-landed-out-of-order";
+    ChangeClosed => "change-closed";
+    NodeChecksRead => "node-checks-read";
+    ReadjustReadFailed => "readjust-read-failed";
     DriverTakenOver => "driver-taken-over";
     DriverSuperseded => "driver-superseded";
+    LandingRegistered => "landing-registered";
+    LandingDrafting => "landing-drafting";
+    LandingStarted => "landing-started";
+    LandingFinished => "landing-finished";
+    LandingRefused => "landing-refused";
+    LandingDied => "landing-died";
 }
 
 #[cfg(test)]
@@ -1824,9 +2262,26 @@ mod tests {
             // Everything a validator reads, which is the document minus its
             // prose: `Phase` is `onevcs`'s type now, so its `description` is
             // written and wrapped there. `tests/registry.rs` is where that
-            // tolerance is pinned to exactly those three pointers.
+            // tolerance is pinned to exactly those three pointers, and to the
+            // one deliberate addition since the capture — the filter's optional
+            // `significance` matcher field, which only admits more.
+            let mut held = held.clone();
+            if text == "agent.event-filter@1" {
+                if let Some(properties) = held
+                    .pointer_mut("/$defs/Matcher/properties")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    properties.remove("significance");
+                }
+                if let Some(definitions) = held
+                    .pointer_mut("/$defs")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    definitions.remove("Significance");
+                }
+            }
             assert_eq!(
-                without_prose(held),
+                without_prose(&held),
                 without_prose(document),
                 "the registry holds {text} under a document that constrains differently from \
                  the one `onemessagebus-agent` 0.8.0 registered it under"
@@ -2413,5 +2868,30 @@ mod tests {
         ] {
             assert_eq!(word(&EvidenceWord::from(evidence)), word(&evidence));
         }
+    }
+}
+
+#[cfg(test)]
+mod scratch_boundaries {
+    use super::{AbsolutePath, ScratchError};
+
+    #[test]
+    fn scratch_paths_and_errors_round_trip_and_reject_invalid_input() {
+        for path in [
+            "/absolute/dispatch",
+            r"C:\scratch\dispatch",
+            r"\\server\share\dispatch",
+        ] {
+            let encoded = serde_json::json!(path);
+            let decoded: AbsolutePath = serde_json::from_value(encoded.clone()).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), encoded);
+        }
+        for path in ["relative/dispatch", "C:relative", ""] {
+            assert!(serde_json::from_value::<AbsolutePath>(serde_json::json!(path)).is_err());
+        }
+        let reason: ScratchError =
+            serde_json::from_value(serde_json::json!("permission denied")).unwrap();
+        assert_eq!(serde_json::to_value(reason).unwrap(), "permission denied");
+        assert!(serde_json::from_value::<ScratchError>(serde_json::json!("")).is_err());
     }
 }

@@ -73,6 +73,49 @@ fn providers() -> Providers<'static> {
     Providers::real()
 }
 
+/// Standings and review feedback from the sibling's single repository read.
+pub(crate) fn review_standings(
+    request: &onevcs::ReviewStandingsRequest,
+) -> Result<onevcs::ReviewStandings> {
+    onevcs::review_standings(&providers(), request).map_err(refusal)
+}
+
+/// Where each named change request of one repository stands, in one batched read.
+pub(crate) fn change_standings(
+    request: &onevcs::ChangeStandingsRequest,
+) -> Result<onevcs::ChangeStandings> {
+    onevcs::change_standings(&providers(), request).map_err(refusal)
+}
+
+/// Move a change request onto `base`, writing its description in the same request.
+pub(crate) fn retarget_change(request: &onevcs::RetargetRequest) -> Result<onevcs::Retargeted> {
+    onevcs::retarget_change(&providers(), request).map_err(refusal)
+}
+
+/// Restore a closed draft's deleted base and reopen it.
+pub(crate) fn reopen_change(request: &onevcs::ReopenRequest) -> Result<onevcs::Reopened> {
+    onevcs::reopen_change(&providers(), request).map_err(refusal)
+}
+
+/// Normalize a repository spelling before collecting a batched host read.
+pub(crate) fn repository_identity(repo: &str) -> Result<String> {
+    providers()
+        .vcs
+        .resolve_identity(repo)
+        .map(|identity| identity.origin)
+        .map_err(refusal)
+}
+
+/// A full host snapshot, by URL, including on a host with no local session.
+pub(crate) fn review_comments(change_url: &str) -> Result<onevcs::ReviewRead> {
+    onevcs::review_comments(
+        &providers(),
+        &onevcs::ChangeRef::Url(change_url.to_owned()),
+        None,
+    )
+    .map_err(refusal)
+}
+
 /// How a refusal this module composed says a session open met a **base
 /// conflict**, written at the **head** of the message.
 ///
@@ -241,14 +284,66 @@ pub fn publish(
             body: body.map(str::to_owned),
             draft: draft.cloned(),
             term_scope: term_scope.clone(),
-            // Every publication here reads its checks: deferring them is for a
-            // caller that reads the verdict later, which nothing in this engine does.
+            // First publications and missing-head-record fallbacks watch their checks.
             defer_checks: false,
             adopt: None,
         },
         &NodeCancellation(cancel),
     )
     .map_err(publication_refusal)
+}
+
+/// Push into a recorded review draft; watch it when this host lacks its branch record.
+pub(crate) fn republish(
+    token: &SessionToken,
+    policy: Option<MergePolicy>,
+    title: Option<&str>,
+    body: Option<&str>,
+    change: &str,
+    cancel: &crate::executor::CancellationToken,
+    term_scope: &onevcs::TermScope,
+) -> std::result::Result<Publication, PublishRefused> {
+    let subject = title
+        .map(|title| title.parse::<Subject>().map_err(sibling))
+        .transpose()
+        .map_err(PublishRefused::Refused)?;
+    let adopt = change
+        .parse::<onevcs::Url>()
+        .map_err(|error| PublishRefused::Refused(sibling(format!("review draft URL: {error}"))))?;
+    let adopted = adopt.clone();
+    let answer = onevcs::publish_with_cancellation(
+        &providers(),
+        token,
+        &PublishRequest {
+            policy,
+            title: subject,
+            body: body.map(str::to_owned),
+            draft: None,
+            term_scope: term_scope.clone(),
+            defer_checks: true,
+            adopt: Some(adopt),
+        },
+        &NodeCancellation(cancel),
+    );
+    match answer {
+        // A record naming another branch is the one refusal that must never fall back:
+        // the change request is not this session's, and the planner decides.
+        Err(onevcs::Error::Invalid { reason })
+            if reason.contains("by this host's newest record of it") =>
+        {
+            Err(PublishRefused::NotThisDraft {
+                change: adopted,
+                reason,
+            })
+        }
+        // This refusal proves that nothing was pushed. A different recorded
+        // branch is a distinct refusal and must remain a planner-visible failure.
+        Err(onevcs::Error::UnrecordedChangeHead { .. }) => {
+            eprintln!("onepipeline: review draft {change} has no local head-branch record; watching its existing draft instead");
+            publish(token, policy, title, body, None, cancel, term_scope)
+        }
+        answer => answer.map_err(publication_refusal),
+    }
 }
 
 /// The node's cancellation, as the publication watch asks it.
@@ -278,6 +373,16 @@ pub(crate) enum PublishRefused {
     /// attempt, handed the conflict again, can answer it. Carries the sibling's
     /// own sentence.
     MergeUnfinished(String),
+    /// A deferred republication refused because this host's newest record says the
+    /// review draft carries another branch than the session's: not this session's
+    /// change request, so nothing is pushed and nothing falls back to publishing it.
+    /// Carries the change request and the sibling's own sentence.
+    NotThisDraft {
+        /// The change request the republication named.
+        change: onevcs::Url,
+        /// What the sibling said.
+        reason: String,
+    },
     /// Any other refusal of the call.
     Refused(Error),
 }
@@ -285,7 +390,9 @@ pub(crate) enum PublishRefused {
 impl std::fmt::Display for PublishRefused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::MergeUnfinished(reason) => f.write_str(reason),
+            Self::MergeUnfinished(reason) | Self::NotThisDraft { reason, .. } => {
+                f.write_str(reason)
+            }
             Self::Refused(error) => error.fmt(f),
         }
     }
@@ -388,6 +495,9 @@ pub const DRAFTED: &str = "change-draft";
 /// `change-open` is already asking the team for review.
 pub const REVIEW_DRAFTED: &str = "change-review-draft";
 
+/// A review draft pushed without a check watch, awaiting the next standings read.
+pub(crate) const REVIEW_DRAFTED_UNCHECKED: &str = "change-review-draft-unchecked";
+
 /// How a publication settles the node that made it.
 ///
 /// This crate's own outcome vocabulary, which a plan's readers and `results`
@@ -403,11 +513,7 @@ pub fn outcome_of(outcome: &PublishOutcome) -> &'static str {
         PublishOutcome::ChangeDraft(_) => DRAFTED,
         // Green and done, but not yet lifted: see [`REVIEW_DRAFTED`].
         PublishOutcome::ChangeReviewDraft(_) => REVIEW_DRAFTED,
-        // A push into a review draft with its checks unread answers only a
-        // `defer_checks` publication, which this engine never makes, so receiving
-        // it is a disagreement with `onevcs` about the request: the residual, and
-        // never a word that reads as finished work.
-        PublishOutcome::ChangeReviewDraftUnchecked(_) => Failure::RESIDUAL,
+        PublishOutcome::ChangeReviewDraftUnchecked(_) => REVIEW_DRAFTED_UNCHECKED,
         PublishOutcome::Queued(_) => "queued",
         PublishOutcome::NothingToPublish => "no-changes",
         PublishOutcome::Failed { kind, .. } => failure_of(*kind).outcome(),
@@ -672,11 +778,10 @@ pub fn landing_of(outcome: &PublishOutcome) -> Option<crate::graph::Landing> {
         PublishOutcome::ChangeOpen(_)
         | PublishOutcome::ChangeDraft(_)
         | PublishOutcome::ChangeReviewDraft(_)
+        | PublishOutcome::ChangeReviewDraftUnchecked(_)
         | PublishOutcome::Queued(_) => Some(Landing::Unlanded),
         // Settled as the residual, as `Failed` is: see [`outcome_of`].
-        PublishOutcome::NothingToPublish
-        | PublishOutcome::ChangeReviewDraftUnchecked(_)
-        | PublishOutcome::Failed { .. } => None,
+        PublishOutcome::NothingToPublish | PublishOutcome::Failed { .. } => None,
     }
 }
 
@@ -2120,6 +2225,97 @@ pub(crate) fn merge_in_progress(session: &Session) -> Option<crate::plan::MergeI
     })
 }
 
+// llmlint: ignore-block[code_lands_in_the_domain_that_owns_it] this merge belongs in
+// `onevcs`, and the pinned 0.49.0 offers no public operation that does it: whether a
+// continued session's open merges its moved base is decided by `onevcs`'s crate-private
+// `base_merge::decide` from the identity's rules file alone, with no per-open override,
+// and its git helpers are private too. The op-readjust amendment requires a restacked
+// draft to carry its new base's head whatever that policy resolves, so this helper stays
+// here, operating only on the session worktree `onevcs` opened; publication still goes
+// through `onevcs`. The missing operation is a per-open base-merge override on
+// `onevcs::SessionRequest` (a `base_merge: Some(BaseMerge::Always)` that the open honours
+// over the rules file); once `onevcs` ships it, a restack's open asks for it and this
+// helper is deleted.
+/// Merge the head of `session`'s base into its branch, in its worktree, where the
+/// branch does not carry it already: `Ok(None)` for a branch that carries it or a merge
+/// that concluded, and `Ok(Some(conflict))` for one git stopped on, left in progress for
+/// a worker to conclude.
+///
+/// What a restack owes whatever the identity's base-merge policy: `onevcs` merges a moved
+/// base at a continued session's open only where it conflicts or the host requires an
+/// up-to-date branch, and a restacked draft has to carry its new base's work either way,
+/// or its diff against that base is not its own. Merge only, never a rebase: the branch
+/// only grows. The base is read off the session clone's `origin/<base>`, which `onevcs`
+/// brings up to the origin at the open, and off the local branch where that is absent.
+pub(crate) fn bring_base_in(
+    session: &Session,
+) -> std::result::Result<Option<onevcs::OpenConflict>, String> {
+    let at = &session.worktree;
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(at)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .map_err(|error| format!("git {args:?}: {error}"))
+    };
+    let resolve = |name: &str| -> Option<String> {
+        git(&[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{name}^{{commit}}"),
+        ])
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    };
+    let base = resolve(&format!("origin/{}", session.base))
+        .or_else(|| resolve(&session.base))
+        .ok_or_else(|| format!("the session's base {} names no commit", session.base))?;
+    let tip = resolve("HEAD").ok_or_else(|| "the session's branch names no commit".to_owned())?;
+    if git(&["merge-base", "--is-ancestor", &base, &tip])?
+        .status
+        .success()
+    {
+        return Ok(None);
+    }
+    let message = format!("Merge {} into {}", session.base, session.branch);
+    let merged = git(&["merge", "--no-ff", "--no-edit", "-m", &message, &base])?;
+    if merged.status.success() {
+        return Ok(None);
+    }
+    // llmlint: ignore-block[changed_behavior_has_e2e] no journey reaches either ending below:
+    // a session the identity's policy opened clean is one whose base `onevcs` found merging
+    // cleanly into this very branch, so a conflict here needs the base to move between the
+    // open and this merge, and a merge git refuses with nothing unmerged needs a damaged
+    // worktree. `bring_base_in_hands_on_a_conflict_and_refuses_a_merge_git_will_not_make`
+    // holds both over real git repositories; the clean merge every journey takes is driven by
+    // `a_readjustment_merges_the_root_in_where_the_policy_merges_only_on_a_conflict`.
+    let unmerged = git(&["diff", "--name-only", "--diff-filter=U"])?;
+    let paths: Vec<String> = String::from_utf8_lossy(&unmerged.stdout)
+        .lines()
+        .map(str::to_owned)
+        .filter(|path| !path.is_empty())
+        .collect();
+    if paths.is_empty() {
+        let _ = git(&["merge", "--abort"]);
+        return Err(format!(
+            "merging {} into {} failed: {}",
+            session.base,
+            session.branch,
+            String::from_utf8_lossy(&merged.stderr).trim()
+        ));
+    }
+    Ok(Some(onevcs::OpenConflict {
+        paths,
+        base_commit: base,
+        branch_tip: tip,
+    }))
+    // llmlint: ignore-end[changed_behavior_has_e2e]
+}
+// llmlint: ignore-end[code_lands_in_the_domain_that_owns_it]
+
 /// One commit's line as a conflicted dispatch is shown it: a subject is the
 /// committer's prose, so it is cut where a line in a task stops being one.
 fn commit_line(line: &str) -> String {
@@ -2543,6 +2739,89 @@ mod tests {
 
     use super::*;
     use crate::plan::Node;
+
+    /// Run git in `at`, as a person setting a repository up, and hand back its stdout.
+    fn git_out(at: &std::path::Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(["-c", "user.name=Test", "-c", "user.email=test@example.com"])
+            .args(args)
+            .current_dir(at)
+            .output()
+            .expect("git runs");
+        assert!(output.status.success(), "git {args:?}: {output:?}");
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    /// A repository with `main` and a branch `draft` off it, each having written
+    /// `shared.md` differently, checked out on `draft`, as a session's worktree.
+    fn diverged(name: &str) -> Session {
+        let at =
+            std::env::temp_dir().join(format!("onepipeline-base-in-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&at);
+        std::fs::create_dir_all(&at).expect("a scratch repository");
+        git_out(&at, &["init", "--quiet", "--initial-branch=main"]);
+        git_out(&at, &["config", "user.name", "Test"]);
+        git_out(&at, &["config", "user.email", "test@example.com"]);
+        std::fs::write(at.join("shared.md"), "first\n").expect("written");
+        git_out(&at, &["add", "shared.md"]);
+        git_out(&at, &["commit", "--quiet", "-m", "first"]);
+        git_out(&at, &["checkout", "--quiet", "-b", "draft"]);
+        std::fs::write(at.join("shared.md"), "the draft's\n").expect("written");
+        git_out(&at, &["commit", "--quiet", "-am", "draft"]);
+        git_out(&at, &["checkout", "--quiet", "main"]);
+        std::fs::write(at.join("shared.md"), "the base's\n").expect("written");
+        git_out(&at, &["commit", "--quiet", "-am", "base"]);
+        git_out(&at, &["checkout", "--quiet", "draft"]);
+        Session {
+            token: SessionToken("s-test".into()),
+            worktree: at,
+            branch: "draft".into(),
+            base: "main".into(),
+            conflict: None,
+        }
+    }
+
+    /// A base whose merge conflicts is left in progress and answered as the conflict an
+    /// open would have reported; a merge git refuses with nothing unmerged — local
+    /// changes it would overwrite — is aborted and refused; and a branch already carrying
+    /// its base is left as it is.
+    #[test]
+    fn bring_base_in_hands_on_a_conflict_and_refuses_a_merge_git_will_not_make() {
+        let session = diverged("conflict");
+        let tip = git_out(&session.worktree, &["rev-parse", "HEAD"]);
+        let base = git_out(&session.worktree, &["rev-parse", "main"]);
+        let conflict = bring_base_in(&session)
+            .expect("the merge was made")
+            .expect("it conflicted");
+        assert_eq!(conflict.paths, ["shared.md"]);
+        assert_eq!(conflict.branch_tip, tip);
+        assert_eq!(conflict.base_commit, base);
+        assert!(session.worktree.join(".git").join("MERGE_HEAD").is_file());
+
+        let session = diverged("refused");
+        std::fs::write(session.worktree.join("shared.md"), "uncommitted\n").expect("written");
+        let refused = bring_base_in(&session).expect_err("git would not merge");
+        assert!(
+            refused.contains("merging main into draft failed"),
+            "{refused}"
+        );
+        assert!(!session.worktree.join(".git").join("MERGE_HEAD").exists());
+
+        let session = diverged("carried");
+        git_out(
+            &session.worktree,
+            &["merge", "--quiet", "-X", "ours", "--no-edit", "main"],
+        );
+        let tip = git_out(&session.worktree, &["rev-parse", "HEAD"]);
+        assert_eq!(bring_base_in(&session), Ok(None));
+        assert_eq!(git_out(&session.worktree, &["rev-parse", "HEAD"]), tip);
+        for name in ["conflict", "refused", "carried"] {
+            let _ = std::fs::remove_dir_all(
+                std::env::temp_dir()
+                    .join(format!("onepipeline-base-in-{name}-{}", std::process::id())),
+            );
+        }
+    }
 
     /// Every `FailureKind` the sibling distinguishes.
     ///
@@ -3192,16 +3471,14 @@ mod tests {
             "change-review-draft"
         );
         assert_eq!(REVIEW_DRAFTED, "change-review-draft");
-        // A push into a review draft with its checks unread answers a request this
-        // engine never makes, so it is the residual and claims no landing: nothing
-        // read its checks, and no word that reads as finished work may say so.
+        // A deferred republication remains an unlanded draft at its push.
         assert_eq!(
             outcome_of(&PublishOutcome::ChangeReviewDraftUnchecked(url.clone())),
-            Failure::RESIDUAL
+            REVIEW_DRAFTED_UNCHECKED
         );
         assert_eq!(
             landing_of(&PublishOutcome::ChangeReviewDraftUnchecked(url.clone())),
-            None
+            Some(crate::graph::Landing::Unlanded)
         );
         assert_eq!(outcome_of(&PublishOutcome::Queued(url)), "queued");
         assert_eq!(outcome_of(&PublishOutcome::NothingToPublish), "no-changes");

@@ -914,8 +914,9 @@ fn the_flag_beats_the_key_a_blank_names_none_and_a_bad_schedule_is_refused_befor
 
 /// What a sweep records when it could not do its work — each one record, each
 /// named by `results`: a maintain command that failed, one that timed out under
-/// the identity's own bound, an identity the sibling could not maintain, and a
-/// host whose identities could not be enumerated at all.
+/// the identity's own bound, an identity the sibling could not maintain, a
+/// repository whose maintenance configuration could not be read, and a host
+/// whose identities could not be enumerated at all.
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] This
 // src/maintenance.rs journey has no narrower Nx edge: noteJourneySource includes src/**/*.
 #[test]
@@ -926,10 +927,15 @@ fn a_failed_or_timed_out_command_an_unmaintainable_identity_and_an_unlistable_ho
     pooled_with_maintenance(&world, None);
     cut_a_slot(&world, &repo.checkout);
     let second = schedule(&world, "second", "1s", "");
+    // The failing run's own `every`, longer than its phase can last. Its driver
+    // sweeps at the fast pace for as long as its node is held, so under `second`
+    // a phase that outlasted one second — two subprocesses on a slow host do —
+    // ran the command again, and its marker was read as the timed-out one's.
+    let hourly = schedule(&world, "hourly", "1h", "");
 
     // A command that failed: recorded as the sibling records it, and — the
     // attempt being what is stamped — not run again inside `every`.
-    held_run(&world, "failing", 2, &["--maintenance-config", &second]).exited(0);
+    held_run(&world, "failing", 2, &["--maintenance-config", &hourly]).exited(0);
     world.until("the record of the failure", |world| {
         !records(world, "failing").is_empty()
     });
@@ -948,7 +954,7 @@ fn a_failed_or_timed_out_command_an_unmaintainable_identity_and_an_unlistable_ho
         .run(&["results", "failing"])
         .exited(0)
         .out_has(&format!(
-            "{SERVICE_IDENTITY} (every 1s): slot 1 ran — failed (exit 3) in"
+            "{SERVICE_IDENTITY} (every 1h): slot 1 ran — failed (exit 3) in"
         ));
     release(&world, "failing");
 
@@ -1008,6 +1014,36 @@ fn a_failed_or_timed_out_command_an_unmaintainable_identity_and_an_unlistable_ho
         .exited(0)
         .out_has(&format!("{SERVICE_IDENTITY} (every 1s): failed — "));
     release(&world, "unmaintainable");
+
+    // A repository whose own `onevcs.toml` the sibling cannot parse: nothing
+    // ran, and no host rule stands in for it, so the identity answers that its
+    // maintenance configuration is unreadable — a refusal the sweep records in
+    // the sibling's own shape rather than drops as the schedule working.
+    pooled_with_maintenance(&world, None);
+    let document = repo.checkout.join("onevcs.toml");
+    std::fs::write(&document, "[pool\n").expect("an unparseable onevcs.toml");
+    held_run(&world, "unreadable", 2, &["--maintenance-config", &second]).exited(0);
+    world.until("the record of the unreadable configuration", |world| {
+        !records(world, "unreadable").is_empty()
+    });
+    let unreadable = &records(&world, "unreadable")[0];
+    let identity = &unreadable["payload"]["identities"][0];
+    assert_eq!(identity["identity"], SERVICE_IDENTITY, "{unreadable}");
+    assert!(
+        identity["outcome"]["maintenance-unreadable"]["reason"]
+            .as_str()
+            .is_some_and(|reason| !reason.is_empty()),
+        "{unreadable}"
+    );
+    assert_eq!(marker_lines(&world), 1, "an unreadable configuration ran");
+    world
+        .run(&["results", "unreadable"])
+        .exited(0)
+        .out_has(&format!(
+            "{SERVICE_IDENTITY} (every 1s): maintenance configuration unreadable — "
+        ));
+    std::fs::remove_file(&document).expect("the document is taken away");
+    release(&world, "unreadable");
 
     // A host whose registered identities could not be enumerated: the registry
     // the sibling keys them by is not a document it can read while the sweep

@@ -119,6 +119,8 @@ use crate::projection::{self, RunState};
 /// approval started clearing its recorded wait: a version-10 fold over a journal
 /// that holds one still carries the wait, and resumed from it would offer the
 /// approval for attestation ahead of the prerequisites it was reparented onto.
+/// Version 12 restores a continued lineage's rework provenance; an older fold
+/// would forget which comments that lineage is already reworking.
 // llmlint: ignore[changed_behavior_has_e2e] a version-1 document is one the build before
 // this one wrote, which no invocation of this build can produce: what a user can reach —
 // a checkpoint at this version being resumed from, and one at a version this build does
@@ -126,7 +128,7 @@ use crate::projection::{self, RunState};
 // refusal of the checked-in version-1 document itself is held by
 // `the_document_the_build_before_this_one_wrote_is_refused_rather_than_read` below, over
 // the real reader and the real file.
-pub(crate) const CHECKPOINT_SCHEMA_VERSION: u32 = 11;
+pub(crate) const CHECKPOINT_SCHEMA_VERSION: u32 = 12;
 
 /// Read the version, refusing a document this build cannot honestly read.
 fn this_version<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<u32, D::Error> {
@@ -455,6 +457,9 @@ pub(crate) struct Projected {
     /// construction. Persisting it beside the seal would be one fact twice, with an
     /// edit to either making the pair disagree.
     digested_bytes: u128,
+    /// What this driver's latest readjustment read, kept for the rest of its trigger.
+    /// In memory only: a fresh driver reads again at its first trigger.
+    pub(crate) readjust: crate::readjust::Readjuster,
 }
 
 impl std::ops::Deref for Projected {
@@ -486,6 +491,7 @@ impl Projected {
                 covered: checkpoint.state,
                 coverage: checkpoint.coverage,
                 took: 0,
+                readjust: crate::readjust::Readjuster::default(),
                 digested_bytes,
             },
             None => Self::empty(),
@@ -500,7 +506,11 @@ impl Projected {
         let journal = paths.journal();
         let mut grown = journal::finished_records_after(&journal, self.coverage.bytes);
         if length_of(&journal) < self.coverage.bytes || !self.coverage.sorts_in_front_of(&grown) {
+            // What this driver read and planned is not folded from the journal, so the
+            // whole-store fold below cannot put it back: it is kept across it.
+            let readjust = std::mem::take(&mut self.readjust);
             *self = Self::empty();
+            self.readjust = readjust;
             grown = journal::finished_records_after(&journal, 0);
         }
         self.took = grown.len() as u64;
@@ -540,6 +550,7 @@ impl Projected {
             covered: empty,
             coverage: Coverage::default(),
             took: 0,
+            readjust: crate::readjust::Readjuster::default(),
             digested_bytes: NOTHING_DIGESTED,
         }
     }
@@ -1635,7 +1646,7 @@ mod tests {
     /// later build of this crate parses, and the only thing that stops a marker
     /// field being renamed, an absence becoming a zero, the digest turning back
     /// into a number, or the version moving without anyone deciding to move it.
-    const GOLDEN: &str = include_str!("../tests/golden/checkpoint-v11.json");
+    const GOLDEN: &str = include_str!("../tests/golden/checkpoint-v12.json");
 
     /// The digest of the journal bytes the golden's marker covers.
     const GOLDEN_BYTES_DIGESTED: u128 = 0x1234_5678_9abc_def0_1234_5678_9abc_def0;
@@ -1724,7 +1735,7 @@ mod tests {
     /// is a real document, byte-for-byte the shape this build writes, and the
     /// reader has to refuse it rather than resume from a fold it would not have
     /// computed.
-    const GOLDEN_EARLIER: [(u32, &str); 10] = [
+    const GOLDEN_EARLIER: [(u32, &str); 11] = [
         (1, include_str!("../tests/golden/checkpoint-v1.json")),
         (2, include_str!("../tests/golden/checkpoint-v2.json")),
         (3, include_str!("../tests/golden/checkpoint-v3.json")),
@@ -1735,6 +1746,7 @@ mod tests {
         (8, include_str!("../tests/golden/checkpoint-v8.json")),
         (9, include_str!("../tests/golden/checkpoint-v9.json")),
         (10, include_str!("../tests/golden/checkpoint-v10.json")),
+        (11, include_str!("../tests/golden/checkpoint-v11.json")),
     ];
 
     #[test]
@@ -1751,13 +1763,13 @@ mod tests {
     }
 
     #[test]
-    fn a_schema_11_document_is_the_shape_the_golden_pins() {
+    fn a_schema_12_document_is_the_shape_the_golden_pins() {
         let rendered = serde_json::to_string_pretty(&a_checkpoint()).expect("it serialises");
         if std::env::var_os("ONEPIPELINE_WRITE_CHECKPOINT_GOLDEN").is_some() {
             std::fs::write(
                 concat!(
                     env!("CARGO_MANIFEST_DIR"),
-                    "/tests/golden/checkpoint-v11.json"
+                    "/tests/golden/checkpoint-v12.json"
                 ),
                 format!("{rendered}\n"),
             )
@@ -1767,12 +1779,12 @@ mod tests {
             rendered.trim(),
             GOLDEN.trim(),
             "the checkpoint document changed shape. If that was deliberate, bump \
-             CHECKPOINT_SCHEMA_VERSION and update tests/golden/checkpoint-v11.json together"
+             CHECKPOINT_SCHEMA_VERSION and update tests/golden/checkpoint-v12.json together"
         );
     }
 
     #[test]
-    fn a_schema_11_document_round_trips_and_a_version_this_build_does_not_read_is_refused() {
+    fn a_schema_12_document_round_trips_and_a_version_this_build_does_not_read_is_refused() {
         let read: Checkpoint =
             serde_json::from_str(GOLDEN).expect("the golden reads back into the types");
         // Compared through the wire rather than through `PartialEq`, which the
@@ -1938,6 +1950,37 @@ mod tests {
             !paths.checkpoint().exists(),
             "a run with no store was given a checkpoint of it"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A re-fold of the whole store, which a record the merge order moves in front of
+    /// what the loop had folded forces, keeps what the driver read and planned: that is
+    /// not folded from the journal, so nothing the re-fold takes in could put it back.
+    #[test]
+    fn a_whole_store_refold_keeps_the_drivers_readjustment() {
+        let root = scratch("refold-keeps-readjust");
+        let paths = a_recorded_run(&root, "r-refold-readjust");
+        settle(&paths, "build", "done");
+        let mut projected = Projected::open(&paths);
+        projected
+            .readjust
+            .bodies
+            .insert("build".into(), "a reviewer's note".into());
+        projected.readjust.tried.insert("ship".into());
+
+        relayed(&paths, "graph-0", 0, "1999-01-01T00:00:00.000Z", "build");
+        projected.refresh(&paths);
+        assert_eq!(
+            folded_as(&projected),
+            without_a_checkpoint(&paths),
+            "the loop's state and a full fold's disagree"
+        );
+        assert_eq!(
+            projected.readjust.bodies.get("build").map(String::as_str),
+            Some("a reviewer's note"),
+            "the re-fold forgot the description the driver read"
+        );
+        assert!(projected.readjust.tried.contains("ship"));
         let _ = std::fs::remove_dir_all(&root);
     }
 

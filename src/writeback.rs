@@ -290,6 +290,10 @@ struct Snapshot {
     /// What each rework's replacement answers, keyed by the replacement: the record
     /// `onepipeline.rework` carries on its item.
     reworks: BTreeMap<String, ReworkProjected>,
+    /// Existing store provenance of continued reworks, preserved until a live rework
+    /// supersedes them. A missing baseline refuses projection rather than erasing it.
+    // llmlint: ignore[invalid_states_unrepresentable] src/AGENTS.md’s interface policy and Snapshot’s adjacent stated_landings/superseded/dispatches suppressions keep graph node keys in the existing String form. These keys are graph-validated ids copied from RunState, and this snapshot joins them to its existing String-keyed graph and lineage maps.
+    continued_metadata: Result<BTreeMap<String, BTreeMap<String, Value>>, String>,
     project_metadata: BTreeMap<String, Value>,
     /// Whether a node the run has not started is written as claimed or released.
     claim: Claim,
@@ -1078,6 +1082,62 @@ impl Writeback {
     }
 }
 
+/// The two existing metadata values a continued rework keeps byte-for-byte.
+/// Read from the launch's seeded baseline, never from a fresh store query.
+fn continued_metadata(
+    paths: &RunPaths,
+    launch: &LaunchRecord,
+    state: &RunState,
+    // llmlint: ignore[invalid_states_unrepresentable] src/AGENTS.md’s interface policy and Snapshot’s neighbouring node-map suppressions retain graph-validated node ids as String keys. This private helper only copies those existing keys from RunState into Snapshot’s matching maps; introducing a distinct node-key type here would disagree with the maps this return joins.
+) -> Result<BTreeMap<String, BTreeMap<String, Value>>, String> {
+    let continued: Vec<_> = state
+        .continued_reworks
+        .iter()
+        .filter(|(node, _)| !state.superseded.contains_key(*node))
+        .collect();
+    if continued.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let baseline: LandedBaseline = crate::ledger::read_json(&paths.dir.join(WRITEBACK_LANDED_FILE))
+        .map_err(|error| format!("cannot preserve continued rework provenance: {error}"))?;
+    if baseline.schema_version != WRITEBACK_LANDED_SCHEMA_VERSION
+        || baseline.project != launch.project
+    {
+        return Err("cannot preserve continued rework provenance: baseline is not this project's current schema".to_owned());
+    }
+    let mut found = BTreeMap::new();
+    for (node, provenance) in continued {
+        let metadata = baseline
+            .items
+            .get(node)
+            .map(|item| &item.metadata)
+            .ok_or_else(|| {
+                format!("continued rework '{node}' is absent from the seeded baseline")
+            })?;
+        let mut kept = BTreeMap::new();
+        for key in [crate::taskgraph::REWORK_KEY, crate::taskgraph::NODE_KEY] {
+            let value = metadata
+                .get(key)
+                .ok_or_else(|| format!("continued rework '{node}' has no {key} in its baseline"))?;
+            kept.insert(key.to_owned(), value.clone());
+        }
+        let stored = crate::continuation::rework_provenance(&kept[crate::taskgraph::REWORK_KEY])
+            .map_err(|error| format!("continued rework '{node}': {error}"))?;
+        if stored.replaces != provenance.replaces || stored.comments != provenance.comments {
+            return Err(format!(
+                "continued rework '{node}' disagrees with its baseline's provenance"
+            ));
+        }
+        if kept[crate::taskgraph::NODE_KEY] != json!(provenance.replacement) {
+            return Err(format!(
+                "continued rework '{node}' disagrees with its baseline's replacement"
+            ));
+        }
+        found.insert(node.clone(), kept);
+    }
+    Ok(found)
+}
+
 /// The snapshot one publish hands the worker, or `None` for a launch naming no project.
 fn snapshot_of(
     paths: &RunPaths,
@@ -1090,12 +1150,28 @@ fn snapshot_of(
     let Ok(project) = launch.project.parse() else {
         return None;
     };
+    // A draft being restacked or readjusted is projected as the settlement it started
+    // from, and a deferred verdict as the review draft it will read as: neither its
+    // merge's head, its session nor its unread verdict is the board's to hold, so a
+    // clean restack, a clean readjustment and a verdict read write no task.
+    let mut statuses = statuses.clone();
+    for node in state.restacking.keys() {
+        statuses.insert(node.clone(), NodeStatus::Done);
+    }
+    let mut outcomes = state.outcomes.clone();
+    for outcome in outcomes.values_mut() {
+        if outcome == crate::vcs::REVIEW_DRAFTED_UNCHECKED {
+            crate::vcs::REVIEW_DRAFTED.clone_into(outcome);
+        }
+    }
+    let mut dispatches = dispatches(paths, state);
+    dispatches.retain(|node, _| !state.restacking.contains_key(node));
     Some(Snapshot {
         project,
         dir: paths.dir.join("writeback"),
         nodes: all_nodes(paths, state),
-        statuses: statuses.clone(),
-        outcomes: state.outcomes.clone(),
+        statuses,
+        outcomes,
         landings: state.landings.clone(),
         landing_commits: state.landing_commits.clone(),
         change_urls: state.change_urls.clone(),
@@ -1103,6 +1179,7 @@ fn snapshot_of(
         settlements: settlements(paths),
         superseded: state.superseded.clone(),
         reworks: reworks_of(state),
+        continued_metadata: continued_metadata(paths, launch, state),
         project_metadata: state
             .plan
             .as_ref()
@@ -1129,7 +1206,7 @@ fn snapshot_of(
             })
             .unwrap_or_default(),
         claim,
-        dispatches: dispatches(paths, state),
+        dispatches,
         driver,
         term_scope: crate::boundary::of_run(&crate::boundary::plan_now(state)).scope,
     })
@@ -1685,6 +1762,11 @@ fn worker(
         let (lock, ready) = &*pending;
         if let Ok(mut state) = lock.lock() {
             state.worker = WorkerState::Idle;
+            // The peer observes the completed record and idle worker together,
+            // before the next snapshot or close-out can take this lock.
+            if let Err(error) = crate::ordering::meet("ONEPIPELINE_TEST_PROJECTION_IDLE_GATE") {
+                eprintln!("{error}");
+            }
             ready.notify_all();
         }
     }
@@ -3735,6 +3817,14 @@ fn task_document(
     for (key, value) in wire {
         metadata.insert(format!("onepipeline.{key}"), value);
     }
+    if let Some(kept) = snapshot
+        .continued_metadata
+        .as_ref()
+        .map_err(Clone::clone)?
+        .get(root)
+    {
+        metadata.extend(kept.iter().map(|(key, value)| (key.clone(), value.clone())));
+    }
     // The settlement, the landing and the change keys are the head's own, absent where the
     // head recorded none: what a superseded attempt closed on is the run journal's to say.
     let id = head.as_str();
@@ -3988,20 +4078,65 @@ fn all_nodes(paths: &RunPaths, state: &RunState) -> BTreeMap<String, Node> {
 }
 
 fn settlements(paths: &RunPaths) -> BTreeMap<String, Value> {
-    let mut found = BTreeMap::new();
+    let mut found: BTreeMap<String, Value> = BTreeMap::new();
+    // The nodes whose next settlement ends a restack or a readjustment no agent turn
+    // was spent on: their content did not change.
+    let mut clean: BTreeSet<String> = BTreeSet::new();
     for event in crate::journal::read(&paths.journal()) {
-        if event.source == Source::Pipeline
-            && event.kind.0 == crate::journal::PipelineKind::NodeSettled.as_str()
-        {
-            if let Some(node) = event.labels.node.as_ref() {
-                // The settlement as the node reached it: which launch read it back from the
-                // store is this run's record, and the board's settlement is what the next
-                // launch continues — the same fields, whoever carried them.
-                let mut settlement = event.payload;
-                settlement.remove("continued");
-                found.insert(node.clone(), Value::Object(settlement));
-            }
+        if event.source != Source::Pipeline {
+            continue;
         }
+        let Some(node) = event.labels.node.as_ref() else {
+            continue;
+        };
+        let kind = event.kind.0.as_str();
+        if kind == crate::journal::PipelineKind::NodeRestacked.as_str()
+            || kind == crate::journal::PipelineKind::NodeReadjusted.as_str()
+        {
+            if event.payload.get("agent_dispatched") == Some(&Value::Bool(false)) {
+                clean.insert(node.clone());
+            }
+            continue;
+        }
+        if kind != crate::journal::PipelineKind::NodeSettled.as_str() {
+            continue;
+        }
+        // The settlement as the node reached it: which launch read it back from the
+        // store is this run's record, and the board's settlement is what the next
+        // launch continues — the same fields, whoever carried them.
+        let mut settlement = event.payload;
+        settlement.remove("continued");
+        // A clean restack or readjustment that left the draft where it was moves only
+        // its head and its unread verdict, and neither is the board's to hold: a cold
+        // host reads the head off the branch on the origin and the verdict off the next
+        // batched read, so the task is not written for it. One that moved the draft's
+        // base or stack is.
+        let placed = |settled: &Map<String, Value>| {
+            settled.get("stack").map(|stack| {
+                let mut stack = stack.clone();
+                if let Some(parents) = stack.get_mut("parents").and_then(Value::as_array_mut) {
+                    for parent in parents {
+                        // Where it stands is its branch: a parent's head moves with every
+                        // push, and its node with every rework of that same branch.
+                        if let Some(parent) = parent.as_object_mut() {
+                            parent.remove("head");
+                            parent.remove("node");
+                        }
+                    }
+                }
+                stack
+            })
+        };
+        let unmoved = |before: &Value| {
+            ["base", "status", "branch", "change_url", "landing"]
+                .iter()
+                .all(|key| before.get(*key) == settlement.get(*key))
+                && before.as_object().map(placed) == Some(placed(&settlement))
+        };
+        if clean.remove(node) && found.get(node).is_some_and(unmoved) {
+            continue;
+        }
+        found.insert(node.clone(), Value::Object(settlement));
     }
     found
 }
@@ -6322,6 +6457,7 @@ mod tests {
                     settlements: BTreeMap::new(),
                     superseded: BTreeMap::new(),
                     reworks: BTreeMap::new(),
+                    continued_metadata: Ok(BTreeMap::new()),
                     project_metadata: BTreeMap::from([(
                         "onepipeline.concurrency".into(),
                         json!(4),

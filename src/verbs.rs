@@ -317,6 +317,34 @@ pub fn render_results(results: &Results) -> String {
     views::results(&results.view)
 }
 
+/// Render node outcomes and current host-derived review state as JSON.
+///
+/// # Errors
+/// A host read or serialization failure.
+pub fn render_results_json(results: &Results) -> Result<String> {
+    let view = &results.view;
+    let comments = crate::review::read(&view.state)?;
+    let statuses = view.state.statuses();
+    to_json(&crate::review::ResultsDocument {
+        schema_version: 1,
+        run: &view.paths.run,
+        nodes: view
+            .state
+            .graph
+            .iter()
+            .map(|node| crate::review::ResultNode {
+                id: &node.id,
+                status: statuses
+                    .get(&node.id)
+                    .copied()
+                    .unwrap_or(crate::graph::NodeStatus::Pending),
+                outcome: view.state.outcomes.get(&node.id).map(String::as_str),
+                comments: comments.get(&node.id).cloned().unwrap_or_default(),
+            })
+            .collect(),
+    })
+}
+
 /// `onepipeline transcript RUN [NODE]`: a dispatched turn's tools and reasoning,
 /// from the evidence it retained.
 #[derive(Debug)]
@@ -1700,4 +1728,220 @@ pub fn render_template_checked(checked: &TemplateChecked) -> String {
 fn to_json<T: serde::Serialize>(value: &T) -> Result<String> {
     serde_json::to_string_pretty(value)
         .map_err(|error| Error::Invalid(format!("the answer does not serialise: {error}")))
+}
+
+/// The removal or conservative refusal of `onepipeline scratch discard RUN`.
+#[derive(Debug)]
+pub struct ScratchDiscard {
+    pub(crate) outcome: crate::scratch::DiscardOutcome,
+}
+
+impl ScratchDiscard {
+    /// Zero for removal (including no scratch), one for partial failure, two for refusal.
+    pub fn exit_code(&self) -> i32 {
+        self.outcome.exit_code()
+    }
+}
+
+/// Remove only the dispatch scratch of an ended, undriven run named under `root`.
+///
+/// Unknown or path-like names, non-ended runs, live drivers and a symlink scratch root
+/// are refused without deletion. Links within scratch are removed without following them.
+///
+/// # Errors
+///
+/// A run's store cannot be read, its handover cannot be held, or its removal cannot be journalled.
+pub fn scratch_discard(root: &Path, run: &str) -> Result<ScratchDiscard> {
+    Ok(ScratchDiscard {
+        outcome: crate::scratch::discard(root, run)?,
+    })
+}
+
+/// The removal report on stdout, empty for a refusal.
+pub fn render_scratch_discard(discarded: &ScratchDiscard) -> String {
+    discarded.outcome.stdout()
+}
+
+/// The refusal or each directory removal failure on stderr, empty for complete removal.
+pub fn render_scratch_discard_errors(discarded: &ScratchDiscard) -> String {
+    discarded.outcome.stderr()
+}
+
+/// Receipt for one explicitly requested review discovery pass.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+pub enum ReviewReceipt {
+    /// The single writer completed discovery.
+    Performed {
+        /// A host read failed after successful reads were journalled.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+        /// The drafts whose check verdict is still owed by a later trigger's read.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        outstanding: Vec<String>,
+    },
+    /// The request is durable and the driver has not yet answered.
+    Requested {
+        /// Its durable command queue id.
+        request: u64,
+    },
+}
+
+impl From<crate::trigger::Answered> for ReviewReceipt {
+    fn from(answered: crate::trigger::Answered) -> Self {
+        match answered {
+            crate::trigger::Answered::Performed { error, outstanding } => {
+                Self::Performed { error, outstanding }
+            }
+            crate::trigger::Answered::Requested(request) => Self::Requested { request },
+        }
+    }
+}
+
+/// Readjust a run's drafts, then discover their feedback, starting no work from it.
+///
+/// Readjusts first: the run's drafts are read where they stand on the host, in one
+/// batched read per repository and root, and what that read found is recorded before
+/// discovery reads each draft's feedback out of the same read. Bringing the drafts a
+/// landing moved onto their placement follows: a run something drives does it in its
+/// loop, and on a run nothing drives this call drives the run until those settle.
+///
+/// # Errors
+/// An unknown run, another session's undriven run, or a ledger/channel refusal.
+/// A host read failure is carried by the performed receipt.
+pub fn review(
+    paths: &RunPaths,
+    session: &str,
+    timeout: std::time::Duration,
+) -> Result<ReviewReceipt> {
+    crate::trigger::requested(paths, session, timeout, crate::trigger::Asked::Review)
+        .map(ReviewReceipt::from)
+}
+
+/// The drafts a receipt says still owe their verdict, as a clause of its line.
+fn outstanding_clause(outstanding: &[String]) -> String {
+    if outstanding.is_empty() {
+        String::new()
+    } else {
+        format!("; check verdict outstanding: {}", outstanding.join(", "))
+    }
+}
+
+/// Render the review receipt as one document or one terminal line.
+///
+/// # Errors
+/// A receipt that could not be serialized.
+pub fn render_review(receipt: &ReviewReceipt, json: bool) -> Result<String> {
+    if json {
+        to_json(receipt)
+    } else {
+        Ok(match receipt {
+            ReviewReceipt::Performed {
+                error: None,
+                outstanding,
+            } => format!("review performed{}", outstanding_clause(outstanding)),
+            ReviewReceipt::Performed {
+                error: Some(error),
+                outstanding,
+            } => format!("review failed: {error}{}", outstanding_clause(outstanding)),
+            ReviewReceipt::Requested { request } => format!("review requested ({request})"),
+        })
+    }
+}
+
+impl ReviewReceipt {
+    /// Success or a durable request exits 0; a performed pass with a host failure exits 1.
+    pub const fn exit_code(&self) -> i32 {
+        match self {
+            Self::Performed { error: Some(_), .. } => 1,
+            _ => 0,
+        }
+    }
+}
+
+/// Receipt for one explicitly requested readjustment.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+pub enum ReadjustReceipt {
+    /// The single writer read the drafts and readjusted them.
+    Performed {
+        /// A repository's standings read failed; its drafts were left as they were.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+        /// The drafts whose check verdict is still owed by a later trigger's read.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        outstanding: Vec<String>,
+    },
+    /// The request is durable and the driver has not yet answered.
+    Requested {
+        /// Its durable command queue id.
+        request: u64,
+    },
+}
+
+impl From<crate::trigger::Answered> for ReadjustReceipt {
+    fn from(answered: crate::trigger::Answered) -> Self {
+        match answered {
+            crate::trigger::Answered::Performed { error, outstanding } => {
+                Self::Performed { error, outstanding }
+            }
+            crate::trigger::Answered::Requested(request) => Self::Requested { request },
+        }
+    }
+}
+
+/// Readjust a run's drafts onto what has landed on the host, surfacing no comment.
+///
+/// Every draft is read in one batched standings read per repository and root; each
+/// landing, absorption and close is recorded, every draft a landing moved is brought
+/// onto its placement and its change request moved after its push, and each deferred
+/// verdict is read. A run something drives is asked through its driver; one nothing
+/// drives is readjusted under its lock.
+///
+/// # Errors
+/// An unknown run, another session's undriven run, or a ledger/channel refusal.
+/// A host read failure is carried by the performed receipt.
+pub fn readjust(
+    paths: &RunPaths,
+    session: &str,
+    timeout: std::time::Duration,
+) -> Result<ReadjustReceipt> {
+    crate::trigger::requested(paths, session, timeout, crate::trigger::Asked::Readjust)
+        .map(ReadjustReceipt::from)
+}
+
+/// Render the readjust receipt as one document or one terminal line.
+///
+/// # Errors
+/// A receipt that could not be serialized.
+pub fn render_readjust(receipt: &ReadjustReceipt, json: bool) -> Result<String> {
+    if json {
+        to_json(receipt)
+    } else {
+        Ok(match receipt {
+            ReadjustReceipt::Performed {
+                error: None,
+                outstanding,
+            } => format!("readjust performed{}", outstanding_clause(outstanding)),
+            ReadjustReceipt::Performed {
+                error: Some(error),
+                outstanding,
+            } => format!(
+                "readjust failed: {error}{}",
+                outstanding_clause(outstanding)
+            ),
+            ReadjustReceipt::Requested { request } => format!("readjust requested ({request})"),
+        })
+    }
+}
+
+impl ReadjustReceipt {
+    /// Success or a durable request exits 0; a performed readjustment with a failed
+    /// host read exits 1.
+    pub const fn exit_code(&self) -> i32 {
+        match self {
+            Self::Performed { error: Some(_), .. } => 1,
+            _ => 0,
+        }
+    }
 }

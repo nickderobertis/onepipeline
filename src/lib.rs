@@ -98,12 +98,15 @@ mod land;
 mod ledger;
 mod lifecycle;
 mod loopstats;
+mod ordering;
 mod plancheck;
 mod pool;
 mod projection;
+mod readjust;
 mod refusal;
 mod release;
 mod rendercost;
+mod review;
 mod shutdown;
 mod stack;
 mod stopguard;
@@ -111,6 +114,7 @@ mod summary;
 mod supersession;
 mod sys;
 mod taskgraph;
+mod trigger;
 mod unpublished;
 mod unwatched;
 mod vcs;
@@ -157,3 +161,5 @@ pub fn run(cli: cli::Cli) -> Result<i32> {
     flow::take_inherited();
     driver::dispatch(cli)
 }
+
+mod scratch;

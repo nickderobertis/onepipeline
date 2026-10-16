@@ -167,6 +167,9 @@ pub struct Cli {
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 #[command(rename_all = "kebab-case")]
 pub enum Command {
+    /// Manage dispatch scratch of ended runs.
+    #[command(subcommand)]
+    Scratch(ScratchCommand),
     /// Execute a plan: drive its DAG continuously to settlement.
     Start(StartArgs),
     /// Read a plan without launching it.
@@ -194,6 +197,10 @@ pub enum Command {
     Channel(ChannelCommand),
     /// Read the next planner surface.
     Next(TargetArgs),
+    /// Discover review comments on the run’s unlanded drafts.
+    Review(ReviewArgs),
+    /// Readjust the run’s drafts onto what has landed on the host.
+    Readjust(ReadjustArgs),
     /// Reply to a surface, with a verdict, graph edits, or both.
     Reply(ReplyArgs),
     /// Raise a surface to the planner.
@@ -242,9 +249,13 @@ pub enum Command {
     /// change request's body first.
     #[command(override_usage = LAND_USAGE_REPO_RECOVER)]
     RepoRecover(LandArgs),
+    /// Merge finished branches onto the base, in order, through the linked
+    /// onevcs `integrate`, supervised in the launching session's flow.
+    #[command(override_usage = LAND_USAGE_INTEGRATE)]
+    Integrate(IntegrateArgs),
     // llmlint: ignore-end[new_command_or_client_gets_its_own_project]
     /// Per-node outcomes, with each node's own evidence.
-    Results(RunArgs),
+    Results(ResultsArgs),
     // llmlint: ignore[new_command_or_client_gets_its_own_project] a verb of this one binary
     // rather than a new command or client: it reads the run store the engine owns and records
     // through the `onevcs` library it already links, as the verbs in the block above do.
@@ -786,18 +797,20 @@ pub struct ReadArgs {
     pub all: bool,
 }
 
-/// What `next` and `watch` read: one run, shaped through a profile as
-/// [`ReadArgs`] takes it, or one flow with `--flow` in its place.
+/// What `next`, `monitor` and `watch` read: one run, shaped through a profile
+/// as [`ReadArgs`] takes it, or one flow with `--flow` in its place.
 ///
-/// The two are mutually exclusive, and a flow has no event view to shape, so
-/// `--filter` and `--all` are a run's alone.
+/// The two are mutually exclusive. A flow's event view is its landings'
+/// journals, shaped through the shipped profiles — `planner` unless `--filter`
+/// names `detailed` or a spec — so `--all` is a run's alone.
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 #[command(group = clap::ArgGroup::new("target").required(true).args(["run", "flow"]))]
 pub struct TargetArgs {
     /// The run id.
     pub run: Option<String>,
-    /// The flow to read instead of a run, by the id `flow run` printed.
-    #[arg(long, value_name = "ID", conflicts_with_all = ["filter", "all"])]
+    /// The flow to read instead of a run, by the id `flow run` or a landing
+    /// verb printed.
+    #[arg(long, value_name = "ID", conflicts_with = "all")]
     pub flow: Option<String>,
     /// The profile to read through: a name this run has, or a filter spec as a
     /// file path or inline JSON.
@@ -815,9 +828,10 @@ pub struct TargetArgs {
 /// those too and a cursor is not something `next` can resume from.
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 pub struct MonitorArgs {
-    /// The run, and the profile its event view is shaped through.
+    /// The run, and the profile its event view is shaped through — or, with
+    /// `--flow`, one flow's landings.
     #[command(flatten)]
-    pub read: ReadArgs,
+    pub read: TargetArgs,
     /// Render only what was recorded after this cursor — one an earlier
     /// `monitor` or `watch` printed.
     #[arg(long, value_name = "CURSOR")]
@@ -982,12 +996,13 @@ impl std::str::FromStr for WatchTimeout {
 /// a match. The README and the divergence record are reconciled against the
 /// spellings here too, so what a supervisor is told to type is what the parser
 /// reads.
-const CONDITIONS: [(&str, WatchUntil); 6] = [
+const CONDITIONS: [(&str, WatchUntil); 7] = [
     ("settled", WatchUntil::Settled),
     ("surface", WatchUntil::Surface),
     ("nothing-driving", WatchUntil::NothingDriving),
     ("node-settled", WatchUntil::NodeSettled),
     ("run-joined", WatchUntil::RunJoined),
+    ("landing-progress", WatchUntil::LandingProgress),
     // The one entry that is a **shape** rather than a word: what follows the
     // prefix is a node id the caller supplies, so the parser reads this row by
     // its prefix and builds the condition from the text after it. The value
@@ -1005,7 +1020,7 @@ const NODE_ID_PLACEHOLDER: &str = "<ID>";
 ///
 /// Derived from the one table above rather than restated, so a spelling this
 /// build reads is a spelling it names.
-pub fn watch_conditions() -> [&'static str; 6] {
+pub fn watch_conditions() -> [&'static str; 7] {
     CONDITIONS.map(|(spelling, _)| spelling)
 }
 
@@ -1062,6 +1077,11 @@ pub enum WatchUntil {
     /// armed, or past its cursor. A flow watch's alone — `watch --flow` — and
     /// refused on a run's.
     RunJoined,
+    /// Return when one of the watched flow's manager landings records a
+    /// transition, or relays an `onevcs` operation event, that the watch's
+    /// profile admits — under the shipped `planner` profile a milestone or a
+    /// blocker, never progress. A flow watch's alone, and refused on a run's.
+    LandingProgress,
 }
 
 impl std::fmt::Display for WatchUntil {
@@ -1072,6 +1092,7 @@ impl std::fmt::Display for WatchUntil {
             Self::NothingDriving => out.write_str("nothing-driving"),
             Self::NodeSettled => out.write_str("node-settled"),
             Self::RunJoined => out.write_str("run-joined"),
+            Self::LandingProgress => out.write_str("landing-progress"),
             Self::Node(node) => write!(
                 out,
                 "{}{node}",
@@ -1385,6 +1406,29 @@ const LAND_USAGE_PUBLISH_BRANCH: &str = "onepipeline publish-branch <BRANCH> --r
 /// How `onepipeline repo-recover` is spelled.
 const LAND_USAGE_REPO_RECOVER: &str = "onepipeline repo-recover <BRANCH> --repo \
      <CHECKOUT|ALIAS> [--pr-author-graph <PATH>] [--no-draft] [ONEVCS-ARGS]...";
+
+/// How `onepipeline integrate` is spelled.
+const LAND_USAGE_INTEGRATE: &str = "onepipeline integrate <BRANCHES>... [--push] [ONEVCS-ARGS]...";
+
+/// `onepipeline integrate`.
+///
+/// Every argument is the linked `onevcs integrate`'s, forwarded unchanged in
+/// order and judged by its own parser — the ordered branches, `--push`, and the
+/// term-scope flags — and the identity is the registered repository the current
+/// directory is in, exactly as that verb answers.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct IntegrateArgs {
+    /// The branches in the order they should land, `--push`, and every other
+    /// argument `onevcs integrate` takes.
+    #[arg(
+        value_name = "ARGS",
+        trailing_var_arg = true,
+        allow_hyphen_values = true,
+        num_args = 0..,
+        value_parser = clap::value_parser!(std::ffi::OsString)
+    )]
+    pub args: Vec<std::ffi::OsString>,
+}
 
 /// `onepipeline publish-branch` and `onepipeline repo-recover`.
 ///
@@ -1713,5 +1757,45 @@ pub struct TelemetryArgs {
     pub changes: bool,
     /// Print `--changes` as its JSON document.
     #[arg(long, requires = "changes")]
+    pub json: bool,
+}
+
+/// Manager actions on dispatch scratch.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum ScratchCommand {
+    /// Remove the scratch of one ended, undriven run.
+    Discard {
+        /// The run id under the runs root.
+        run: String,
+    },
+}
+
+/// Arguments for an explicit, non-interactive review discovery pass.
+#[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
+pub struct ReviewArgs {
+    /// The recorded run.
+    pub run: String,
+    /// Print the receipt as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Arguments for an explicit, non-interactive readjustment of a run's drafts.
+#[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
+pub struct ReadjustArgs {
+    /// The recorded run.
+    pub run: String,
+    /// Print the receipt as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Arguments for a run's node outcomes and current review state.
+#[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
+pub struct ResultsArgs {
+    /// The recorded run.
+    pub run: String,
+    /// Print node outcomes and review state as JSON.
+    #[arg(long)]
     pub json: bool,
 }

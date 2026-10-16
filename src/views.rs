@@ -476,6 +476,11 @@ struct HostShutdown {
     branches: Option<BTreeMap<(String, String), crate::payload::PreservedWord>>,
 }
 
+/// Whether this run is still awaiting adoption after a host shutdown.
+pub(crate) fn host_shutdown(view: &RunView) -> bool {
+    HostShutdown::of(view).is_some()
+}
+
 impl HostShutdown {
     /// The shutdown this run is under, or `None` for a run that is not.
     ///
@@ -2616,6 +2621,14 @@ pub(crate) fn status_reporting(view: &RunView, providers: Providers) -> String {
                 out.push_str(&format!("  {}: {reworked}\n", one_line(node)));
             }
         }
+        // What people merging drafts on the host did to the stack, and what the run
+        // did about it: how each landing was found, what was absorbed into another
+        // draft, where each draft was readjusted onto, and whose verdict is owed.
+        for id in statuses.keys() {
+            for said in readjust_phrases(&view.state, id) {
+                out.push_str(&format!("  {id}: {said}\n"));
+            }
+        }
         for (id, node_status) in &statuses {
             if *node_status != NodeStatus::Done {
                 continue;
@@ -2744,12 +2757,14 @@ pub(crate) fn status_reporting(view: &RunView, providers: Providers) -> String {
                 .parent()
                 .unwrap_or_else(|| Path::new(ledger::DEFAULT_RUNS_DIR)),
         ));
+        out.push_str(&crate::scratch::lines(view, Some(5)));
         if providers == Providers::Reported {
             if let Some(health) = crate::agentgraph::health() {
                 out.push_str(&format!("  providers: {health}\n"));
             }
         }
     }
+    out.push_str(&review_lines(view));
     out
 }
 
@@ -4274,6 +4289,7 @@ pub fn results(view: &RunView) -> String {
         view.paths.run,
         graph::state_of(&view.state.statuses()).as_str()
     );
+    out.push_str(&review_lines(view));
     let shut_down = HostShutdown::of(view);
     let from_the_store = FromTheStore::of(view);
     if let Some(from) = &from_the_store {
@@ -4387,6 +4403,9 @@ pub fn results(view: &RunView) -> String {
         if let Some(restacked) = restack_phrase(&view.state, &node.id) {
             out.push_str(&format!(" — {restacked}"));
         }
+        for said in readjust_phrases(&view.state, &node.id) {
+            out.push_str(&format!(" — {said}"));
+        }
         out.push('\n');
         if let Some(title) = unverified_title_phrase(&view.state, &node.id) {
             out.push_str(&format!("      {title}\n"));
@@ -4467,6 +4486,7 @@ pub fn results(view: &RunView) -> String {
     out.push_str(&crate::hooks::results_lines(view));
     // And the last maintenance sweep that did something, for the same reason.
     out.push_str(&crate::maintenance::results_lines(view));
+    out.push_str(&crate::scratch::lines(view, None));
     out.push_str(&journal_loss_line(view));
     out
 }
@@ -4520,6 +4540,76 @@ fn rework_phrase(state: &RunState, id: &str) -> Option<String> {
         one_line(&rework.replacement),
         one_line(&rework.reason)
     ))
+}
+
+/// What readjustment found and did about a node, each a phrase both views print:
+/// how its landing was found, the draft it was absorbed into, where its last
+/// readjustment moved it and why, and a check verdict still owed.
+fn readjust_phrases(state: &RunState, id: &str) -> Vec<String> {
+    let mut said = Vec::new();
+    if let Some(landed) = state.landed_how.get(id) {
+        said.push(match (&landed.detected_by, &landed.via) {
+            (crate::payload::LandingDetection::AbsorberLanded, Some(via)) => format!(
+                "landed with {} at {}, which it was merged into",
+                one_line(via),
+                one_line(&landed.commit)
+            ),
+            _ => format!(
+                "landed at {}, found merged on the host by a readjustment",
+                one_line(&landed.commit)
+            ),
+        });
+    }
+    if let Some(into) = state.absorbed.get(id) {
+        if !state.landed_how.contains_key(id) {
+            said.push(format!(
+                "merged into {}'s branch, and lands only with it",
+                one_line(into)
+            ));
+        }
+    }
+    if let Some(readjusted) = state.readjusted.get(id) {
+        let onto = if readjusted.to.stack_parents.is_empty() {
+            format!("the root {}", one_line(&readjusted.to.base))
+        } else {
+            format!(
+                "{} ({})",
+                one_line(&readjusted.to.base),
+                readjusted
+                    .to
+                    .stack_parents
+                    .iter()
+                    .map(|parent| one_line(parent))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        let content = match readjusted.content {
+            crate::payload::ReadjustContent::Merged => "",
+            crate::payload::ReadjustContent::Pending => ", nothing merged yet: `retry` merges it",
+        };
+        said.push(format!(
+            "readjusted onto {onto} from {} after {} landed or merged, change request {}{content}",
+            one_line(&readjusted.from.base),
+            readjusted
+                .cause
+                .iter()
+                .map(|cause| one_line(cause))
+                .collect::<Vec<_>>()
+                .join(", "),
+            match readjusted.retarget {
+                crate::payload::RetargetWord::Retargeted => "retargeted",
+                crate::payload::RetargetWord::Unchanged => "already on it",
+                crate::payload::RetargetWord::None => "not moved",
+            }
+        ));
+    }
+    if state.outcomes.get(id).map(String::as_str) == Some(crate::vcs::REVIEW_DRAFTED_UNCHECKED)
+        && !state.superseded.contains_key(id)
+    {
+        said.push("check verdict outstanding until the next trigger reads it".to_owned());
+    }
+    said
 }
 
 /// What the last restack a node published did — the parent it was brought onto,
@@ -4909,6 +4999,15 @@ fn goals_of(view: &RunView) -> String {
     }
     out
 }
+
+// llmlint: ignore-block[cli_output_contract] The approved status/results SDK renderers return String and existing terminal diagnostics are part of that view. The planner ruled to retain those signatures and show host-read failures in the view; review and results --json carry failures through their separate exit/error paths. The refusal journey drives all three paths.
+fn review_lines(view: &RunView) -> String {
+    match crate::review::read(&view.state) {
+        Ok(comments) => crate::review::lines(&comments),
+        Err(error) => format!("  review state could not be read: {error}\n"),
+    }
+}
+// llmlint: ignore-end[cli_output_contract]
 
 #[cfg(test)]
 mod tests {

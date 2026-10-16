@@ -91,8 +91,13 @@ enum Change {
     /// is one. `pr ready` is the only thing that moves it, to
     /// [`Open`](Change::Open).
     Draft,
-    /// The host landed it, at [`MERGE_SHA`].
+    /// The host landed it, at [`MERGE_SHA`] — or, merged by a person, at the commit
+    /// its merge record names.
     Merged,
+    /// A person or the host closed it without merging, ready for review when it closed.
+    Closed,
+    /// Closed without merging while it was a draft, which a reopen restores.
+    ClosedDraft,
 }
 
 impl Change {
@@ -102,6 +107,8 @@ impl Change {
             Change::Open => "open",
             Change::Draft => "draft",
             Change::Merged => "merged",
+            Change::Closed => "closed",
+            Change::ClosedDraft => "closed-draft",
         }
     }
 
@@ -110,6 +117,8 @@ impl Change {
             "open" => Some(Change::Open),
             "draft" => Some(Change::Draft),
             "merged" => Some(Change::Merged),
+            "closed" => Some(Change::Closed),
+            "closed-draft" => Some(Change::ClosedDraft),
             _ => None,
         }
     }
@@ -118,6 +127,11 @@ impl Change {
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let dir = fake::script_dir();
+    // A person's move on the host, which a journey makes and no `gh` invocation is: it
+    // is never recorded on the ledger of what the host was asked.
+    if args.first().map(String::as_str) == Some(PERSON) {
+        return holding_the_records(&dir, || person(&args[1..], &dir));
+    }
     fake::record(&dir, "gh", &args);
 
     // Recorded first, so a journey scripting the outage can still assert this
@@ -133,6 +147,13 @@ fn main() -> ExitCode {
         args.get(1).map(String::as_str),
     ) {
         (Some("api"), Some("user")) => user(&args),
+        (Some("api"), Some(path))
+            if path.starts_with("repos/")
+                && path.contains("/pulls/")
+                && path.split('/').count() == 5 =>
+        {
+            holding_the_records(&dir, || patch_pull(&args, &dir, path))
+        }
         (Some("api"), Some("graphql")) => review_read(&args, &dir),
         (Some("api"), Some(path)) if path.starts_with("repos/") && path.split('/').count() == 3 => {
             repository(&args, &dir, path)
@@ -328,7 +349,7 @@ fn protection(args: &[String], dir: &Path, path: &str) -> ExitCode {
             let mut required: Vec<String> = declared_required(dir);
             required.sort();
             required.dedup();
-            let rules = if required.is_empty() {
+            let mut rules = if required.is_empty() {
                 serde_json::json!([])
             } else {
                 serde_json::json!([{
@@ -341,6 +362,14 @@ fn protection(args: &[String], dir: &Path, path: &str) -> ExitCode {
                     },
                 }])
             };
+            // `gh.up-to-date-not-required` is a host whose rules say outright that a
+            // branch need not be up to date with its base before it merges.
+            if dir.join("gh.up-to-date-not-required").exists() {
+                if let Some(rule) = rules.get_mut(0) {
+                    rule["parameters"]["strict_required_status_checks_policy"] =
+                        serde_json::json!(false);
+                }
+            }
             println!("{rules}");
             ExitCode::SUCCESS
         }
@@ -553,9 +582,7 @@ fn record(dir: &Path, id: &str, state: Change) {
             fake::fail(&format!("cannot create {}: {error}", parent.display()));
         }
     }
-    if let Err(error) = std::fs::write(&path, state.as_str()) {
-        fake::fail(&format!("cannot write {}: {error}", path.display()));
-    }
+    write_file(&path, state.as_str());
 }
 
 /// Run one write of `opened.jsonl` while no other process of this host is writing
@@ -582,7 +609,13 @@ fn holding_the_records(dir: &Path, write: impl FnOnce() -> ExitCode) -> ExitCode
             .open(&lock)
         {
             Ok(_) => break,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            // Windows answers a create of a file another process is still deleting
+            // with `PermissionDenied`, not `AlreadyExists`: the lock is being let go,
+            // so it is waited for like one still held.
+            Err(error)
+                if error.kind() == std::io::ErrorKind::AlreadyExists
+                    || (cfg!(windows) && error.kind() == std::io::ErrorKind::PermissionDenied) =>
+            {
                 if std::time::Instant::now() >= deadline {
                     fake::fail(&format!(
                         "{} was held for a minute by a writer that never let it go",
@@ -692,9 +725,15 @@ fn origin_of(dir: &Path, repo: &str) -> Option<PathBuf> {
 /// than trusted for where it came from — `onevcs` decides which checks are about
 /// which commit by comparing it. Read off a journey's script through the same
 /// check, so a seeded thread naming anything else is refused as it is read.
-#[derive(Debug, serde::Deserialize)]
-#[serde(try_from = "String")]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(try_from = "String", into = "String")]
 struct Sha(String);
+
+impl From<Sha> for String {
+    fn from(sha: Sha) -> Self {
+        sha.0
+    }
+}
 
 impl TryFrom<String> for Sha {
     type Error = String;
@@ -1088,7 +1127,11 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
             // record rather than from anything this invocation was given.
             "title": opened.title,
             "body": opened.body,
-            "state": if merged { "MERGED" } else { "OPEN" },
+            "state": match state {
+                Change::Merged => "MERGED",
+                Change::Closed | Change::ClosedDraft => "CLOSED",
+                Change::Open | Change::Draft => "OPEN",
+            },
             "mergeable": "MERGEABLE",
             "mergeStateStatus": "CLEAN",
             "headRefOid": head.as_str(),
@@ -1524,6 +1567,8 @@ impl Activity {
     }
 }
 
+type ActivityShape = fn(&[&str], &str) -> Option<(String, String)>;
+
 /// The change request whose head an activity read asks about, and the commit, or
 /// the refusal that the path is not one GitHub answers.
 ///
@@ -1534,7 +1579,7 @@ impl Activity {
 fn activity_of(
     dir: &Path,
     path: &str,
-    shape: fn(&[&str], &str) -> Option<(String, String)>,
+    shape: ActivityShape,
 ) -> Result<(Sha, Option<Opened>), ExitCode> {
     let (base, query) = path.split_once('?').unwrap_or((path, ""));
     let segments: Vec<&str> = base.split('/').collect();
@@ -1836,9 +1881,7 @@ fn edit(args: &[String], dir: &Path) -> ExitCode {
             })
         })
         .collect();
-    if let Err(error) = std::fs::write(&path, format!("{}\n", rewritten.join("\n"))) {
-        fake::fail(&format!("cannot write {}: {error}", path.display()));
-    }
+    write_file(&path, &format!("{}\n", rewritten.join("\n")));
     println!("{}", url_of(&edited));
     ExitCode::SUCCESS
 }
@@ -1949,6 +1992,18 @@ fn review_read(args: &[String], dir: &Path) -> ExitCode {
         }
     }
     let field = |key: &str| fields.get(key).map(String::as_str);
+    if fields.len() == 3
+        && field("owner").is_some()
+        && field("name").is_some()
+        && field("query").is_some_and(|query| query.contains("c0: pullRequest(number:"))
+    {
+        return standings_read(
+            field("query").unwrap(),
+            field("owner").unwrap(),
+            field("name").unwrap(),
+            dir,
+        );
+    }
     let required = [
         "query",
         "owner",
@@ -2036,6 +2091,19 @@ fn review_read(args: &[String], dir: &Path) -> ExitCode {
             "gh api graphql was given number={given:?}, not a pull request's number"
         ));
     };
+    let review_host = dir.join("review-host.json");
+    if review_host.is_file() {
+        use onevcs::RemoteHost;
+        let read = onevcs_testing::FileHost::create(&review_host)
+            .and_then(|host| host.review_comments(&onevcs::ChangeId(number.to_string()), None));
+        match read {
+            Ok(read) => {
+                println!("{}", review_wire(&read));
+                return ExitCode::SUCCESS;
+            }
+            Err(error) => return fake::refuse(&error.to_string()),
+        }
+    }
     let Some(opened) = opened_changes(dir)
         .into_iter()
         .find(|opened| opened.number == number && opened.repo == repo)
@@ -2183,4 +2251,776 @@ fn hunk_at(origin: &Path, base: &str, head: &str, path: &str, line: NonZeroU32) 
         };
         matches!((start, span), (Some(start), Some(span)) if start <= line && line < start + span)
     })
+}
+
+// llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] spike-review-loop’s recorded real GitHub payloads are this adapter’s source. This dispatch is explicitly remote-double-only; node op-review owns the real GitHub/board onepipeline-smoke journey that reconciles the composed review wire. The adapter retains sibling-owned state and costs and the linked real onevcs reader parses it.
+/// GraphQL adapter over the sibling's remote double. Payload fields follow the
+/// spike-review-loop measurement; state and charges remain the double's own.
+fn review_wire(read: &onevcs::ReviewRead) -> serde_json::Value {
+    use onevcs::CommentKind;
+    use serde_json::{json, Value};
+    use std::collections::BTreeMap;
+    let page = |nodes: Vec<Value>| json!({"pageInfo": {"hasNextPage": false, "endCursor": null}, "nodes": nodes});
+    let mut threads: BTreeMap<String, Value> = BTreeMap::new();
+    let mut conversation = Vec::new();
+    let mut reviews = Vec::new();
+    for comment in &read.comments {
+        let mut raw = json!({"id": comment.id, "author": {"login": comment.author}, "body": comment.body, "url": comment.url, "createdAt": comment.created_at, "updatedAt": comment.updated_at, "lastEditedAt": null, "replyTo": comment.in_reply_to.as_ref().map(|parent| json!({"id": parent}))});
+        match &comment.kind {
+            CommentKind::ReviewThread {
+                thread,
+                path,
+                line,
+                outdated,
+                resolved,
+            } => {
+                let held = threads.entry(thread.clone()).or_insert_with(|| json!({"id": thread, "path": path, "line": line, "isOutdated": outdated, "isResolved": resolved, "comments": page(Vec::new())}));
+                held["comments"]["nodes"]
+                    .as_array_mut()
+                    .expect("adapter builds an array")
+                    .push(raw);
+            }
+            CommentKind::Review { state } => {
+                raw["state"] = json!(state.to_uppercase());
+                reviews.push(raw);
+            }
+            CommentKind::Conversation => conversation.push(raw),
+            _ => panic!("the linked double emitted an unknown comment kind"),
+        }
+    }
+    json!({"data": {"rateLimit": {"cost": read.cost.graphql_points}, "repository": {"pullRequest": {"url": read.change_url, "reviewThreads": page(threads.into_values().collect()), "comments": page(conversation), "reviews": page(reviews)}}}})
+}
+// llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
+
+/// Serve aliased standings through the sibling's remote double, retaining its ledger.
+fn standings_read(query: &str, owner: &str, name: &str, dir: &Path) -> ExitCode {
+    use onevcs::{ChangeId, RemoteHost};
+    let mut delimiters = Vec::new();
+    for character in query.chars() {
+        match character {
+            '{' | '(' => delimiters.push(character),
+            '}' | ')' => {
+                let expected = if character == '}' { '{' } else { '(' };
+                if delimiters.pop() != Some(expected) {
+                    return fake::refuse("standings query has unbalanced delimiters");
+                }
+            }
+            _ => {}
+        }
+    }
+    if !delimiters.is_empty() {
+        return fake::refuse("standings query has unbalanced delimiters");
+    }
+    if !query.starts_with("query($owner: String!, $name: String!)")
+        || !query.contains("rateLimit { cost } repository(owner: $owner, name: $name) {")
+        || !query.contains("url number state isDraft body baseRefName headRefName headRefOid")
+        || !query.contains("statusCheckRollup")
+    {
+        return fake::refuse("standings query is not the repository standings operation");
+    }
+    let mut changes = Vec::new();
+    for (at, fragment) in query.split("pullRequest(number: ").skip(1).enumerate() {
+        let Some(number) = fragment
+            .split(')')
+            .next()
+            .and_then(|number| number.parse::<NonZeroU64>().ok())
+        else {
+            return fake::refuse("standings query names an invalid change request");
+        };
+        if !query.contains(&format!(" c{at}: pullRequest(number: {number})")) {
+            return fake::refuse("standings query has an unknown alias");
+        }
+        changes.push(ChangeId(number.to_string()));
+    }
+    if changes.is_empty() {
+        return fake::refuse("standings query names no complete change requests");
+    }
+    let repository_host = dir.join(format!(
+        "review-host.{}.{}.json",
+        fake::segment(owner),
+        fake::segment(name)
+    ));
+    let path = if repository_host.is_file() {
+        repository_host
+    } else if dir.join("review-host.json").is_file() {
+        dir.join("review-host.json")
+    } else {
+        return own_standings(query, owner, name, &changes, dir);
+    };
+    let host = match onevcs_testing::FileHost::create(path) {
+        Ok(host) => host,
+        Err(error) => return fake::refuse(&error.to_string()),
+    };
+    // The root is used only to classify landings in the double. GitHub's wire
+    // carries the merged base and the real reader classifies against its request.
+    let answer = if query.contains("reviewThreads(") {
+        host.review_standings(
+            "main",
+            &changes
+                .iter()
+                .cloned()
+                .map(|change| (change, None))
+                .collect::<Vec<_>>(),
+        )
+        .map(|answer| (answer.standings, answer.reads, answer.cost))
+    } else {
+        host.change_standings("main", &changes)
+            .map(|answer| (answer.standings, Vec::new(), answer.cost))
+    };
+    match answer {
+        Ok((standings, reads, cost)) => {
+            println!("{}", standings_wire(&standings, &reads, cost));
+            ExitCode::SUCCESS
+        }
+        Err(error) => fake::refuse(&error.to_string()),
+    }
+}
+
+/// Translate sibling-owned standings and verdicts into GitHub's response fields.
+fn standings_wire(
+    standings: &[onevcs::ChangeStanding],
+    reads: &[onevcs::ReviewRead],
+    cost: onevcs::ReadCost,
+) -> serde_json::Value {
+    use onevcs::{ChangeState, ChecksVerdict};
+    use serde_json::{json, Value};
+    let page = |nodes: Vec<Value>| json!({"pageInfo": {"hasNextPage": false}, "nodes": nodes});
+    let mut repository =
+        json!({"defaultBranchRef": {"name": "main"}, "rulesets": page(Vec::new())});
+    let mut protections = Vec::new();
+    let mut required =
+        std::collections::BTreeMap::<String, std::collections::BTreeSet<String>>::new();
+    for standing in standings {
+        let names = match &standing.checks {
+            ChecksVerdict::Pending { waiting } => waiting.clone(),
+            ChecksVerdict::Failed { failed } => failed.clone(),
+            ChecksVerdict::PassedWithSkipped { skipped } => skipped.clone(),
+            ChecksVerdict::Passed => vec!["verified".to_owned()],
+            ChecksVerdict::NoneRequired => Vec::new(),
+            _ => panic!("the linked double emitted an unknown check verdict"),
+        };
+        required
+            .entry(standing.base.clone())
+            .or_default()
+            .extend(names);
+    }
+    for (at, standing) in standings.iter().enumerate() {
+        let (state, commit, merged_at, deleted) = match &standing.state {
+            ChangeState::Open => ("OPEN", None, None, false),
+            ChangeState::Closed { base_deleted } => ("CLOSED", None, None, *base_deleted),
+            ChangeState::Merged {
+                commit, merged_at, ..
+            } => ("MERGED", Some(commit), merged_at.as_ref(), false),
+            _ => panic!("the linked double emitted an unknown change state"),
+        };
+        let (names, conclusion, status) = match &standing.checks {
+            ChecksVerdict::Pending { waiting } => (waiting.clone(), Value::Null, "IN_PROGRESS"),
+            ChecksVerdict::Failed { failed } => (failed.clone(), json!("FAILURE"), "COMPLETED"),
+            ChecksVerdict::PassedWithSkipped { skipped } => {
+                (skipped.clone(), json!("SKIPPED"), "COMPLETED")
+            }
+            ChecksVerdict::Passed => (vec!["verified".to_owned()], json!("SUCCESS"), "COMPLETED"),
+            ChecksVerdict::NoneRequired => (Vec::new(), Value::Null, "COMPLETED"),
+            _ => panic!("the linked double emitted an unknown check verdict"),
+        };
+        let declared = &required[&standing.base];
+        protections.push(json!({"databaseId": at + 1, "pattern": standing.base, "requiredStatusCheckContexts": declared}));
+        let contexts = declared.iter().map(|name| {
+            let (status, conclusion) = if names.contains(name) {
+                (status, conclusion.clone())
+            } else {
+                ("COMPLETED", json!("SUCCESS"))
+            };
+            json!({"__typename": "CheckRun", "name": name, "status": status, "conclusion": conclusion, "isRequired": true})
+        }).collect::<Vec<_>>();
+        let mut pull = json!({
+            "url": standing.url, "state": state, "isDraft": standing.draft,
+            "body": standing.body, "baseRefName": standing.base,
+            "headRefName": standing.head_branch, "headRefOid": standing.head,
+            "mergedAt": merged_at, "mergeCommit": commit.map(|commit| json!({"oid": commit})),
+            "baseRef": if deleted { Value::Null } else { json!({"name": standing.base}) },
+            "headRef": {"target": {"statusCheckRollup": {"contexts": {"nodes": contexts}}}},
+        });
+        if let Some(read) = reads.get(at) {
+            let wire = review_wire(read);
+            for field in ["reviewThreads", "comments", "reviews"] {
+                pull[field] = wire["data"]["repository"]["pullRequest"][field].clone();
+            }
+        }
+        repository[format!("c{at}")] = pull;
+    }
+    repository["branchProtectionRules"] = page(protections);
+    json!({"data": {"rateLimit": {"cost": cost.graphql_points}, "repository": repository}})
+}
+
+/// The hidden first argument that makes an invocation a person's move on the host.
+const PERSON: &str = "__person";
+
+/// What a person's merge left: the branch it merged into, the commit that reached it,
+/// when, and the head it merged — which outlives a deleted head branch.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MergedRecord {
+    // llmlint: ignore-block[invalid_states_unrepresentable] the branch and the moment are the
+    // host's own words as the standings wire carries them back — `baseRefName` and an RFC 3339
+    // `mergedAt` — written only by `person_merge` from a branch `pr create` recorded and this
+    // program's own clock; the two commits are `Sha`s, held to an object id both ways.
+    into: String,
+    commit: Sha,
+    merged_at: String,
+    head: Sha,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
+}
+
+fn merged_record_path(dir: &Path, id: &str) -> PathBuf {
+    dir.join("gh-merged")
+        .join(format!("{}.json", fake::segment(id)))
+}
+
+fn merged_record(dir: &Path, id: &str) -> Option<MergedRecord> {
+    let text = read_if_present(&merged_record_path(dir, id))?;
+    Some(serde_json::from_str(&text).unwrap_or_else(|error| {
+        fake::fail(&format!(
+            "the merge record of {id} is not one this host wrote: {error}"
+        ))
+    }))
+}
+
+/// Replace `path` with `text` whole: written beside it and renamed over it.
+///
+/// The readers of these files take no lock, and a write in place truncates before
+/// it writes, so a read between the two sees an empty or half-written record — a
+/// change request reported missing, which under load is a retarget refused for a
+/// change request this host opened. A rename is seen whole or not at all.
+fn write_file(path: &Path, text: &str) {
+    if let Some(parent) = path.parent() {
+        if let Err(error) = std::fs::create_dir_all(parent) {
+            fake::fail(&format!("cannot create {}: {error}", parent.display()));
+        }
+    }
+    let mut beside = path.as_os_str().to_owned();
+    beside.push(format!(".{}.tmp", std::process::id()));
+    let beside = PathBuf::from(beside);
+    if let Err(error) = std::fs::write(&beside, text) {
+        fake::fail(&format!("cannot write {}: {error}", beside.display()));
+    }
+    // Windows refuses the rename while a reader holds the target open without
+    // sharing its deletion, which a reader lets go of within moments.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match std::fs::rename(&beside, path) {
+            Ok(()) => return,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::PermissionDenied
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(error) => fake::fail(&format!("cannot write {}: {error}", path.display())),
+        }
+    }
+}
+
+/// Rewrite every record `pr create` wrote, with `change` applied to the one numbered
+/// `number` of `repo`.
+fn rewrite_opened(dir: &Path, repo: &str, number: NonZeroU64, change: impl Fn(&mut Opened)) {
+    let mut found = false;
+    let lines: Vec<String> = opened_changes(dir)
+        .into_iter()
+        .map(|mut opened| {
+            if opened.repo == repo && opened.number == number {
+                change(&mut opened);
+                found = true;
+            }
+            serde_json::to_string(&opened).unwrap_or_else(|error| {
+                fake::fail(&format!("a record does not serialise: {error}"))
+            })
+        })
+        .collect();
+    if !found {
+        fake::fail(&format!("no change request {number} of {repo} was opened"));
+    }
+    let mut text = lines.join("\n");
+    text.push('\n');
+    write_file(&dir.join("gh").join("opened.jsonl"), &text);
+}
+
+/// Whether the origin behind `repo` holds `branch`.
+fn origin_holds(dir: &Path, repo: &str, branch: &str) -> bool {
+    let (Some(origin), Some(branch)) = (origin_of(dir, repo), Branch::parse(branch)) else {
+        return false;
+    };
+    std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(&origin)
+        .args(["rev-parse", "--verify", "--quiet"])
+        .arg(branch.as_ref_name())
+        .output()
+        .is_ok_and(|answer| answer.status.success())
+}
+
+/// The verdict a journey scripted for the required checks on `head`, as
+/// `gh-head-verdict/<head>` holds it — `passed`, `none`, `pending:<names>`,
+/// `failed:<names>` or `skipped:<names>` — and every required check passed otherwise.
+fn head_verdict(dir: &Path, head: &str) -> onevcs::ChecksVerdict {
+    let Some(scripted) = read_if_present(&dir.join("gh-head-verdict").join(fake::segment(head)))
+    else {
+        return onevcs::ChecksVerdict::Passed;
+    };
+    verdict_of(&scripted).unwrap_or_else(|why| fake::fail(&why))
+}
+
+/// A scripted verdict: `passed`, `none`, `pending:<names>`, `failed:<names>` or
+/// `skipped:<names>`, and nothing else.
+fn verdict_of(scripted: &str) -> Result<onevcs::ChecksVerdict, String> {
+    let scripted = scripted.trim();
+    let named = |names: &str| -> Result<Vec<String>, String> {
+        let names: Vec<String> = names.split(',').map(str::to_owned).collect();
+        if names
+            .iter()
+            .any(|name| name.trim().is_empty() || name.trim() != name)
+        {
+            return Err(format!(
+                "{scripted:?} names an empty or padded check: list one name or more, \
+                 comma-separated"
+            ));
+        }
+        Ok(names)
+    };
+    match scripted.split_once(':') {
+        None if scripted == "passed" => Ok(onevcs::ChecksVerdict::Passed),
+        None if scripted == "none" => Ok(onevcs::ChecksVerdict::NoneRequired),
+        Some(("pending", names)) => Ok(onevcs::ChecksVerdict::Pending {
+            waiting: named(names)?,
+        }),
+        Some(("failed", names)) => Ok(onevcs::ChecksVerdict::Failed {
+            failed: named(names)?,
+        }),
+        Some(("skipped", names)) => Ok(onevcs::ChecksVerdict::PassedWithSkipped {
+            skipped: named(names)?,
+        }),
+        _ => Err(format!(
+            "{scripted:?} is no verdict a head can be scripted with: `passed`, `none`, or \
+             `pending:`, `failed:` or `skipped:` with the checks named"
+        )),
+    }
+}
+
+/// Answer an aliased standings read out of this host's own records: every change
+/// request `pr create` opened, as `pr ready`, a person's merge, close or retarget, and
+/// a retarget or reopen through the API left it.
+fn own_standings(
+    query: &str,
+    owner: &str,
+    name: &str,
+    changes: &[onevcs::ChangeId],
+    dir: &Path,
+) -> ExitCode {
+    // `gh.standings-outage.<owner>.<name>` is this one repository's read refused, as a
+    // host answering an error for it would, while every other repository's is answered.
+    if dir
+        .join(format!(
+            "gh.standings-outage.{}.{}",
+            fake::segment(owner),
+            fake::segment(name)
+        ))
+        .exists()
+    {
+        return fake::refuse(&format!(
+            "the standings of {owner}/{name} could not be read"
+        ));
+    }
+    let repo = format!("{owner}/{name}");
+    let opened = opened_changes(dir);
+    let mut standings = Vec::new();
+    for change in changes {
+        let Some(held) = opened
+            .iter()
+            .find(|held| held.repo == repo && held.number.to_string() == change.0)
+        else {
+            return fake::refuse(&format!("no pull request {} in {repo}", change.0));
+        };
+        let id = change_key(dir, held);
+        let state = state_of_opened(dir, held);
+        let merged = merged_record(dir, &id);
+        let head = merged
+            .as_ref()
+            .map_or_else(|| head_of(dir, held), |merged| Sha(merged.head.0.clone()))
+            .as_str()
+            .to_owned();
+        let url = url_of(held)
+            .parse::<onevcs::Url>()
+            .unwrap_or_else(|error| fake::fail(&format!("this host's own URL: {error}")));
+        standings.push(onevcs::ChangeStanding {
+            url,
+            body: held.body.clone(),
+            base: held.base.clone(),
+            head_branch: held.head.clone(),
+            head: onevcs::Sha(head.clone()),
+            draft: matches!(state, Change::Draft | Change::ClosedDraft),
+            state: match state {
+                Change::Open | Change::Draft => onevcs::ChangeState::Open,
+                Change::Closed | Change::ClosedDraft => onevcs::ChangeState::Closed {
+                    base_deleted: !origin_holds(dir, &repo, &held.base),
+                },
+                Change::Merged => onevcs::ChangeState::Merged {
+                    into: merged
+                        .as_ref()
+                        .map_or_else(|| held.base.clone(), |merged| merged.into.clone()),
+                    commit: onevcs::Sha(
+                        merged
+                            .as_ref()
+                            .map_or_else(|| MERGE_SHA.to_owned(), |merged| merged.commit.0.clone()),
+                    ),
+                    landing: false,
+                    merged_at: merged
+                        .as_ref()
+                        .map(|merged| merged.merged_at.clone())
+                        .or_else(|| read_if_present(&merged_at(dir, &id))),
+                },
+            },
+            checks: head_verdict(dir, &head),
+        });
+    }
+    let reads: Vec<onevcs::ReviewRead> = if query.contains("reviewThreads(") {
+        standings
+            .iter()
+            .map(|standing| onevcs::ReviewRead {
+                change_url: standing.url.to_string(),
+                comments: Vec::new(),
+                marker: onevcs::ReadMarker(WRITTEN_AT.to_owned()),
+                unchanged: false,
+                cost: onevcs::ReadCost::default(),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let cost = onevcs::ReadCost {
+        graphql_points: 1,
+        rest_requests: 0,
+    };
+    println!("{}", standings_wire(&standings, &reads, cost));
+    ExitCode::SUCCESS
+}
+
+/// `gh api repos/O/N/pulls/<n> --method PATCH -f base=B [-f body=…]` and
+/// `… --method PATCH -f state=open`: a retarget writing the description with it, and a
+/// reopen — each answered with the pull request as this host now holds it.
+fn patch_pull(args: &[String], dir: &Path, path: &str) -> ExitCode {
+    let segments: Vec<&str> = path.split('/').collect();
+    let repo = format!("{}/{}", segments[1], segments[2]);
+    let Ok(number) = segments[4].parse::<NonZeroU64>() else {
+        return fake::refuse(&format!("{path} names no pull request number"));
+    };
+    if args.get(2).map(String::as_str) != Some("--method")
+        || args.get(3).map(String::as_str) != Some("PATCH")
+    {
+        return fake::refuse("a pull request is written with --method PATCH and nothing else");
+    }
+    let mut fields = std::collections::BTreeMap::new();
+    for pair in args[4..].chunks(2) {
+        let [flag, value] = pair else {
+            return fake::refuse("a PATCH field has no value");
+        };
+        if flag != "-f" {
+            return fake::refuse(&format!("a PATCH takes -f fields, not {flag}"));
+        }
+        let Some((key, value)) = value.split_once('=') else {
+            return fake::refuse(&format!("{value:?} is no key=value field"));
+        };
+        if !["base", "body", "state"].contains(&key) || fields.insert(key, value).is_some() {
+            return fake::refuse(&format!("a PATCH of {key:?} is not one this host takes"));
+        }
+    }
+    let Some(held) = opened_changes(dir)
+        .into_iter()
+        .find(|held| held.repo == repo && held.number == number)
+    else {
+        return fake::refuse(&format!("no pull request {number} in {repo}"));
+    };
+    let id = change_key(dir, &held);
+    let state = state_of_opened(dir, &held);
+    if let Some(open) = fields.get("state") {
+        if *open != "open" || fields.len() != 1 {
+            return fake::refuse("a reopen writes state=open alone");
+        }
+        let reopened = match state {
+            Change::Closed => Change::Open,
+            Change::ClosedDraft => Change::Draft,
+            _ => return fake::refuse(&format!("pull request {number} is not closed")),
+        };
+        record(dir, &id, reopened);
+    } else {
+        if state == Change::Merged || matches!(state, Change::Closed | Change::ClosedDraft) {
+            return fake::refuse(&format!("pull request {number} is not open"));
+        }
+        let base = fields.get("base").map(|base| (*base).to_owned());
+        let body = fields.get("body").map(|body| (*body).to_owned());
+        if base.is_some() && dir.join("gh.retarget-refused").exists() {
+            return fake::refuse(&format!("pull request {number} could not be retargeted"));
+        }
+        if let Some(base) = &base {
+            if !origin_holds(dir, &repo, base) {
+                return fake::refuse(&format!("{repo} has no branch {base}"));
+            }
+        }
+        rewrite_opened(dir, &repo, number, |opened| {
+            if let Some(base) = &base {
+                opened.base.clone_from(base);
+            }
+            if let Some(body) = &body {
+                opened.body.clone_from(body);
+            }
+        });
+    }
+    let now = opened_changes(dir)
+        .into_iter()
+        .find(|held| held.repo == repo && held.number == number)
+        .unwrap_or_else(|| fake::fail("the record just written is gone"));
+    let state = state_of_opened(dir, &now);
+    println!(
+        "{}",
+        serde_json::json!({
+            "number": now.number,
+            "state": if matches!(state, Change::Closed | Change::ClosedDraft) { "closed" } else { "open" },
+            "draft": matches!(state, Change::Draft | Change::ClosedDraft),
+            "base": {"ref": now.base},
+            "body": now.body,
+        })
+    );
+    ExitCode::SUCCESS
+}
+
+/// A person's move: `merge <repo> <number> squash|merge-commit kept|deleted-retarget|deleted-close`,
+/// `close <repo> <number>`, `retarget <repo> <number> <base>`, and
+/// `verdict <head> <verdict>`.
+///
+/// A merge is made on the origin itself — a squash commit or a merge commit of the
+/// head onto the base the change request targets now — and recorded as merged at that
+/// commit; a deleted head is deleted from the origin, and every open change request
+/// based on it is retargeted onto the merged one's base or closed, as `how` says.
+fn person(args: &[String], dir: &Path) -> ExitCode {
+    let arg = |at: usize| args.get(at).map(String::as_str).unwrap_or_default();
+    let takes = match arg(0) {
+        "merge" => 5,
+        "retarget" => 4,
+        "close" | "verdict" => 3,
+        other => return fake::refuse(&format!("{other:?} is no person's move")),
+    };
+    if args.len() != takes {
+        return fake::refuse(&format!(
+            "a person's `{}` takes {} arguments after it and was given {}: {args:?}",
+            arg(0),
+            takes - 1,
+            args.len().saturating_sub(1)
+        ));
+    }
+    let addressed = || -> Result<Opened, String> {
+        let repo = arg(1);
+        let number = arg(2)
+            .parse::<NonZeroU64>()
+            .map_err(|_| format!("{:?} is no pull request number", arg(2)))?;
+        opened_changes(dir)
+            .into_iter()
+            .find(|held| held.repo == repo && held.number == number)
+            .ok_or_else(|| format!("no pull request {number} in {repo}"))
+    };
+    let moved = match arg(0) {
+        "merge" => addressed().and_then(|held| {
+            let how = Merging::of(arg(3))?;
+            let after = HeadAfter::of(arg(4))?;
+            person_merge(dir, &held, how, after)
+        }),
+        "close" => addressed().and_then(|held| {
+            let closed = match state_of_opened(dir, &held) {
+                Change::Open => Change::Closed,
+                Change::Draft => Change::ClosedDraft,
+                _ => return Err(format!("pull request {} is not open", held.number)),
+            };
+            record(dir, &change_key(dir, &held), closed);
+            Ok(())
+        }),
+        "retarget" => addressed().and_then(|held| {
+            let base = Branch::parse(arg(3))
+                .filter(|base| origin_holds(dir, &held.repo, &base.0))
+                .ok_or_else(|| format!("{:?} is no branch the origin holds", arg(3)))?;
+            rewrite_opened(dir, &held.repo, held.number, |opened| {
+                opened.base.clone_from(&base.0);
+            });
+            Ok(())
+        }),
+        "verdict" => Sha::parse(arg(1))
+            .ok_or_else(|| format!("{:?} is not a commit", arg(1)))
+            .and_then(|head| {
+                verdict_of(arg(2))?;
+                write_file(
+                    &dir.join("gh-head-verdict")
+                        .join(fake::segment(head.as_str())),
+                    arg(2),
+                );
+                Ok(())
+            }),
+        other => Err(format!("{other:?} is no person's move")),
+    };
+    match moved {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(why) => fake::refuse(&why),
+    }
+}
+
+/// How a person merges: one squash commit, or a merge commit of the head.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Merging {
+    Squash,
+    MergeCommit,
+}
+
+impl Merging {
+    fn of(word: &str) -> Result<Self, String> {
+        match word {
+            "squash" => Ok(Self::Squash),
+            "merge-commit" => Ok(Self::MergeCommit),
+            other => Err(format!("{other:?} is no way to merge")),
+        }
+    }
+}
+
+/// What becomes of a merged head, and of what was based on it once it is deleted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeadAfter {
+    Kept,
+    Deleted,
+    DeletedRetargeting,
+    DeletedClosing,
+}
+
+impl HeadAfter {
+    fn of(word: &str) -> Result<Self, String> {
+        match word {
+            "kept" => Ok(Self::Kept),
+            "deleted" => Ok(Self::Deleted),
+            "deleted-retarget" => Ok(Self::DeletedRetargeting),
+            "deleted-close" => Ok(Self::DeletedClosing),
+            other => Err(format!("{other:?} is not what becomes of a head")),
+        }
+    }
+}
+
+fn git_in(at: &Path, args: &[&str]) -> Result<String, String> {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(at)
+        .env("GIT_AUTHOR_NAME", "A Person")
+        .env("GIT_AUTHOR_EMAIL", "person@example.com")
+        .env("GIT_COMMITTER_NAME", "A Person")
+        .env("GIT_COMMITTER_EMAIL", "person@example.com")
+        .output()
+        .map_err(|error| format!("git {args:?}: {error}"))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    } else {
+        Err(format!(
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
+}
+
+fn person_merge(dir: &Path, held: &Opened, how: Merging, after: HeadAfter) -> Result<(), String> {
+    let number = held.number;
+    let origin = origin_of(dir, &held.repo)
+        .ok_or_else(|| format!("no origin is written down for {}", held.repo))?;
+    let id = change_key(dir, held);
+    if !matches!(state_of_opened(dir, held), Change::Open | Change::Draft) {
+        return Err(format!("pull request {number} is not open"));
+    }
+    let work = dir
+        .join("gh-person")
+        .join(format!("{}-{number}", fake::segment(&held.repo)));
+    let _ = std::fs::remove_dir_all(&work);
+    let merged = (|| -> Result<(String, String), String> {
+        std::fs::create_dir_all(&work).map_err(|error| error.to_string())?;
+        let origin = origin.to_string_lossy().into_owned();
+        git_in(&work, &["clone", "--quiet", &origin, "."])?;
+        let head = git_in(&work, &["rev-parse", &format!("origin/{}", held.head)])?;
+        git_in(
+            &work,
+            &[
+                "checkout",
+                "--quiet",
+                "-B",
+                &held.base,
+                &format!("origin/{}", held.base),
+            ],
+        )?;
+        let message = format!("{} (#{number})", held.title);
+        let theirs = format!("origin/{}", held.head);
+        match how {
+            Merging::Squash => {
+                git_in(&work, &["merge", "--squash", "--quiet", &theirs])?;
+                git_in(&work, &["commit", "--quiet", "-m", &message])?;
+            }
+            Merging::MergeCommit => {
+                git_in(
+                    &work,
+                    &["merge", "--no-ff", "--quiet", "-m", &message, &theirs],
+                )?;
+            }
+        }
+        let commit = git_in(&work, &["rev-parse", "HEAD"])?;
+        git_in(
+            &work,
+            &[
+                "push",
+                "--quiet",
+                "origin",
+                &format!("HEAD:refs/heads/{}", held.base),
+            ],
+        )?;
+        if after != HeadAfter::Kept {
+            git_in(
+                &work,
+                &["push", "--quiet", "origin", "--delete", &held.head],
+            )?;
+        }
+        Ok((commit, head))
+    })();
+    let _ = std::fs::remove_dir_all(&work);
+    let (commit, head) = merged?;
+    let commit = Sha::parse(&commit).ok_or_else(|| format!("git answered {commit:?}"))?;
+    let head = Sha::parse(&head).ok_or_else(|| format!("git answered {head:?}"))?;
+    record(dir, &id, Change::Merged);
+    let record_text = serde_json::to_string(&MergedRecord {
+        into: held.base.clone(),
+        commit,
+        merged_at: fake::now(),
+        head,
+    })
+    .map_err(|error| format!("a merge record does not serialise: {error}"))?;
+    write_file(&merged_record_path(dir, &id), &record_text);
+    if matches!(
+        after,
+        HeadAfter::DeletedRetargeting | HeadAfter::DeletedClosing
+    ) {
+        for dependant in opened_changes(dir)
+            .into_iter()
+            .filter(|other| other.repo == held.repo && other.base == held.head)
+        {
+            let key = change_key(dir, &dependant);
+            match (after, state_of_opened(dir, &dependant)) {
+                (HeadAfter::DeletedClosing, Change::Open) => record(dir, &key, Change::Closed),
+                (HeadAfter::DeletedClosing, Change::Draft) => {
+                    record(dir, &key, Change::ClosedDraft);
+                }
+                (HeadAfter::DeletedRetargeting, Change::Open | Change::Draft) => {
+                    rewrite_opened(dir, &held.repo, dependant.number, |opened| {
+                        opened.base.clone_from(&held.base);
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
 }

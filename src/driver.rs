@@ -79,6 +79,7 @@ const DRIVER_LOG_LINES: usize = 8;
 /// its own is a launch — `start`, `plan check`, and the two hidden retained
 /// verbs — which is not a post-launch verb.
 pub fn dispatch(cli: Cli) -> Result<i32> {
+    crate::scratch::telemetry_to(std::env::var_os("ONEPIPELINE_SCRATCH_TELEMETRY_DIR"));
     use crate::cli::Command as Verb;
     use crate::verbs;
     // llmlint: ignore-block[no_panics_on_recoverable_errors] how this binary writes a verb's
@@ -93,6 +94,12 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
     // stream are what a closed pipe cuts short.
     match cli.command {
         Verb::Start(args) => start(&args),
+        Verb::Scratch(crate::cli::ScratchCommand::Discard { run }) => {
+            let discarded = verbs::scratch_discard(&ledger::runs_root(), &run)?;
+            print!("{}", verbs::render_scratch_discard(&discarded));
+            eprint!("{}", verbs::render_scratch_discard_errors(&discarded));
+            Ok(discarded.exit_code())
+        }
         Verb::Plan(crate::cli::PlanCommand::Check(args)) => crate::plancheck::check(&args),
         Verb::Boundary(crate::cli::BoundaryCommand::Guidance(args)) => {
             println!("{}", crate::boundary::render_guidance(args.json)?);
@@ -170,7 +177,9 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
         Verb::Next(args) => {
             let next = match (&args.run, &args.flow) {
                 (_, Some(flow)) => {
-                    crate::flow::next(&crate::flow::Flow::open(&ledger::runs_root(), flow)?)?
+                    let root = ledger::runs_root();
+                    let flow = crate::flow::Flow::open(&root, flow)?;
+                    crate::flow::next(&root, &flow, &flow_filter(args.filter.as_deref())?)?
                 }
                 (Some(run), None) => {
                     let paths = resolve(run)?;
@@ -181,6 +190,36 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             };
             println!("{}", verbs::render_next(&next));
             Ok(EXIT_SUCCESS)
+        }
+        Verb::Review(args) => {
+            let timeout = reply_timeout_seconds();
+            let receipt = verbs::review(
+                &resolve(&args.run)?,
+                &sys::launching_session(),
+                Duration::from_secs(timeout),
+            )?;
+            let rendered = verbs::render_review(&receipt, args.json)?;
+            if !args.json && receipt.exit_code() != EXIT_SUCCESS {
+                eprintln!("{rendered}");
+            } else {
+                println!("{rendered}");
+            }
+            Ok(receipt.exit_code())
+        }
+        Verb::Readjust(args) => {
+            let timeout = reply_timeout_seconds();
+            let receipt = verbs::readjust(
+                &resolve(&args.run)?,
+                &sys::launching_session(),
+                Duration::from_secs(timeout),
+            )?;
+            let rendered = verbs::render_readjust(&receipt, args.json)?;
+            if !args.json && receipt.exit_code() != EXIT_SUCCESS {
+                eprintln!("{rendered}");
+            } else {
+                println!("{rendered}");
+            }
+            Ok(receipt.exit_code())
         }
         Verb::Reply(args) => {
             let (target, file) =
@@ -295,7 +334,31 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             Ok(EXIT_SUCCESS)
         }
         Verb::Monitor(args) => {
-            let paths = resolve(&args.read.run)?;
+            let run = match (&args.read.run, &args.read.flow) {
+                (_, Some(flow)) => {
+                    let root = ledger::runs_root();
+                    let flow = crate::flow::Flow::open(&root, flow)?;
+                    let rendered = crate::flowwatch::monitor(
+                        &root,
+                        &flow,
+                        &flow_filter(args.read.filter.as_deref())?,
+                        args.cursor.as_deref(),
+                    )?;
+                    let mut out = std::io::stdout();
+                    // llmlint: ignore[cli_output_contract] `monitor --flow` has no machine form, as `monitor`'s own arm below says: one line-oriented document whose last line is the resume cursor.
+                    writeln!(out, "{rendered}")
+                        .and_then(|()| out.flush())
+                        .map_err(|e| {
+                            Error::Invalid(format!(
+                                "`monitor` could not write to standard output: {e}"
+                            ))
+                        })?;
+                    return Ok(EXIT_SUCCESS);
+                }
+                (Some(run), None) => run,
+                (None, None) => return Err(named_neither()),
+            };
+            let paths = resolve(run)?;
             let filter = read_filter(&paths, args.read.filter.as_deref(), args.read.all)?;
             let monitored = verbs::monitor(&paths, &filter, args.cursor.as_deref())?;
             // One write of the whole document, and a failed one refused rather than
@@ -570,11 +633,14 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
         }
         Verb::PublishBranch(args) => crate::land::land(crate::land::Verb::PublishBranch, args.args),
         Verb::RepoRecover(args) => crate::land::land(crate::land::Verb::Recover, args.args),
+        Verb::Integrate(args) => crate::land::land(crate::land::Verb::Integrate, args.args),
         Verb::Results(args) => {
-            print!(
-                "{}",
-                verbs::render_results(&verbs::results(&resolve(&args.run)?)?)
-            );
+            let results = verbs::results(&resolve(&args.run)?)?;
+            if args.json {
+                println!("{}", verbs::render_results_json(&results)?);
+            } else {
+                print!("{}", verbs::render_results(&results));
+            }
             Ok(EXIT_SUCCESS)
         }
         Verb::Supersessions(args) => {
@@ -730,6 +796,7 @@ fn watch_flow(flow: &str, args: &crate::cli::WatchArgs) -> Result<i32> {
         tick: Duration::from_secs(args.tick_interval),
         cursor: args.cursor.clone(),
         until: args.until.clone(),
+        filter: flow_filter(args.read.filter.as_deref())?,
     };
     let mut log = match &args.log {
         Some(path) => Some((crate::watch::open_log(path)?, path.display().to_string())),
@@ -976,6 +1043,23 @@ fn read_filter(paths: &RunPaths, named: Option<&str>, all: bool) -> Result<Event
         // failed, and this is the second reading rather than a fallback that
         // hides it — a name that is neither a profile nor a readable file is
         // answered with the profile refusal, which names the ones this run has.
+        Err(unknown) => match Path::new(named).is_file() {
+            true => Ok(EventFilter::read(named)?),
+            false => Err(unknown),
+        },
+    }
+}
+
+/// The profile a flow's landing events are read through: a flow is launched
+/// with no launch configuration, so a name is one of the shipped profiles —
+/// `planner` where none is named — and anything else a spec, inline or a file.
+fn flow_filter(named: Option<&str>) -> Result<EventFilter> {
+    let named = named.unwrap_or(filter::DEFAULT_PROFILE);
+    if named.trim_start().starts_with('{') {
+        return Ok(EventFilter::read(named)?);
+    }
+    match filter::Filters::default().profile(named) {
+        Ok(filter) => Ok(filter),
         Err(unknown) => match Path::new(named).is_file() {
             true => Ok(EventFilter::read(named)?),
             false => Err(unknown),
@@ -3734,11 +3818,43 @@ pub(crate) fn submit_envelope(
             }
             engine::Accepted::NothingIsDriving(lock) => {
                 let mut journal = Journal::open(paths);
+                // Applying a `rework` readjusts first, as the loop does: a node its read
+                // finds landed is refused for it, and the replacement is placed on what
+                // has landed. Judged then against the record that read left.
+                let readjusted;
+                let (view, frontier) = if envelope
+                    .commands
+                    .iter()
+                    .any(|command| matches!(command, crate::channel::Command::Rework { .. }))
+                {
+                    let mut projected = crate::checkpoint::Projected::open(paths);
+                    crate::readjust::run(
+                        paths,
+                        &mut journal,
+                        &mut projected,
+                        crate::payload::ReadjustTrigger::Rework,
+                    )?;
+                    readjusted = RunView::open(paths)?;
+                    let frontier = Frontier {
+                        node_validator: readjusted.launch.node_validator().map(str::to_owned),
+                        graph_validation: Some(edits::GraphValidation {
+                            default_graph: oneagentgraph::config::ConfigRef(
+                                readjusted.launch.node_graph.clone(),
+                            ),
+                            launch_node_sets: readjusted.launch.node_sets.clone(),
+                            launch_dir: readjusted.launch.dir.clone(),
+                        }),
+                        ..readjusted.state.frontier()
+                    };
+                    (&readjusted, frontier)
+                } else {
+                    (&view, frontier.clone())
+                };
                 let mut graph = view.state.graph.clone();
                 let mut compiled: Vec<edits::Operation> = Vec::new();
                 // This pass's own copy, walked forward as each command commits, for
                 // the reason the checking pass above holds one.
-                let mut frontier = frontier.clone();
+                let mut frontier = frontier;
                 // The same three phases the reconcile loop runs, and for the same
                 // reason: which writer judged an envelope is an accident of whether
                 // anything was driving the run, so an envelope is all of its commands
@@ -3849,7 +3965,7 @@ pub(crate) fn submit_envelope(
                 // being applied.
                 let mut lock = lock;
                 loop {
-                    match engine::let_go_of(paths, lock) {
+                    match let_go_of_reply(paths, lock) {
                         engine::LettingGo::Released => break,
                         engine::LettingGo::QueueMoved(back) => {
                             lock = back;
@@ -4026,7 +4142,7 @@ fn take_the_run_over_and_answer(
 fn let_go_or_leave_the_claim(paths: &RunPaths, lock: ledger::OwnershipLock) {
     let mut lock = lock;
     loop {
-        match engine::let_go_of(paths, lock) {
+        match let_go_of_reply(paths, lock) {
             engine::LettingGo::Released => return,
             engine::LettingGo::QueueMoved(back) => {
                 lock = back;
@@ -4052,6 +4168,15 @@ fn let_go_or_leave_the_claim(paths: &RunPaths, lock: ledger::OwnershipLock) {
     }
 }
 // llmlint: ignore-end[changed_behavior_has_e2e]
+
+/// The replying writer's final empty check and its scratch account precede
+/// release, so an adopting driver cannot start a dispatch between them.
+fn let_go_of_reply(paths: &RunPaths, lock: ledger::OwnershipLock) -> engine::LettingGo {
+    engine::let_go_of_saying(paths, lock, || {
+        let state = crate::checkpoint::fold_and_checkpoint(paths);
+        crate::scratch::at_writer_ending(paths, &state);
+    })
+}
 
 /// What is holding a run's ownership lock, as far as a waiting `reply` is
 /// concerned.

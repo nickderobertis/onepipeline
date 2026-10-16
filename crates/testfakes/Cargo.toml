@@ -35,6 +35,8 @@ onemessagebus = { workspace = true }
 # the shape `onevcs` declares — a restatement here would keep parsing after that
 # library changed it, and the journey would pass having proved the fixture.
 onevcs = { workspace = true }
+# Review journeys use the sibling’s own remote double behind the gh wire adapter.
+onevcs-testing = { workspace = true }
 # The verdict a two-party member settles on, so this double writes it in the
 # shape **onejudge** declares rather than one hand-rolled here — the same reason
 # the two pins above are taken rather than restated.
@@ -69,6 +71,16 @@ tokio = { workspace = true, features = ["rt"] }
 # what a process does with a signal is not a `std` question on this MSRV floor.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# What `containment` ends a test's processes through on that platform: a job
+# object the test process joins, which every process it starts joins after it.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
+] }
 
 [[bin]]
 name = "fake-oneagentgraph"

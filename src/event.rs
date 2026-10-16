@@ -313,6 +313,8 @@ pub enum PipelineKind {
     /// rework, `retitle` for the op of that name. The node's title in the graph
     /// moves with it.
     ChangeRetitled,
+    /// An explicit discovery read and its host-reported cost.
+    ReviewCommentsRead,
     /// A rework's publication could not verify that its change request's title
     /// still says what the change does, and left it unchanged: `node`, the
     /// `title` it kept, and the `reason` — the drafting dispatch failed, no body
@@ -327,6 +329,32 @@ pub enum PipelineKind {
     /// an agent was dispatched to conclude a conflict, and the publication's
     /// `outcome`. The node's ordinary `node-settled` follows.
     NodeRestacked,
+    /// A draft's change request was found merged into its root: `node`, `change_url`,
+    /// the `commit` it reached the root as, `detected_by` — `readjust`, or
+    /// `absorber-landed` with the absorbing node as `via` — and the `trigger` whose
+    /// readjustment found it. The node's landing is `landed` from it on.
+    NodeLanded,
+    /// A draft's change request was merged into another node's branch: `node`, the node
+    /// it merged `into`, `change_url` and `commit`. It lands only with that node.
+    NodeAbsorbed,
+    /// A draft the host closed under its landed parent's deleted branch was reopened on
+    /// that branch, restored: `node`, `change_url`, `restored_base`.
+    ChangeReopened,
+    /// A draft was brought onto its placement after a node it is connected to landed or
+    /// was absorbed: `node`, its placement `from` and `to`, the `cause`, its `head`,
+    /// whether an agent was dispatched, the `retarget` and its `content`. The node's
+    /// ordinary `node-settled` follows.
+    NodeReadjusted,
+    /// A draft merged into the root carrying unlanded ancestors' work: `node`, `carried`.
+    StackLandedOutOfOrder,
+    /// A draft's change request was closed without merging: `node`, `change_url`.
+    ChangeClosed,
+    /// A later read of a draft republished without a check watch: `node`, `head`,
+    /// `verdict`.
+    NodeChecksRead,
+    /// One repository's standings read failed: `repo`, `detail`. Its drafts stay as
+    /// they were.
+    ReadjustReadFailed,
     /// A launch passed another driver's claim on its project with `--take-over`.
     ///
     /// Written by `start --take-over` beside its `run-started`, only where the
@@ -343,6 +371,26 @@ pub enum PipelineKind {
     /// it the driver dispatches and publishes nothing, and ends once its
     /// dispatches in flight have settled unpublished. Entry 119 records it.
     DriverSuperseded,
+    /// A manager landing registered its ownership and subjects with its flow,
+    /// before it drafted, forwarded or touched anything. Kept in the landing's
+    /// own journal, and mirrored into every run it was associated with.
+    LandingRegistered,
+    /// A manager landing started drafting its change request's body.
+    LandingDrafting,
+    /// A manager landing started the linked `onevcs` verb it forwards.
+    LandingStarted,
+    /// A manager landing's forwarded verb ended with status `0`.
+    LandingFinished,
+    /// A manager landing's forwarded verb ended non-zero, or its progress could
+    /// not be relayed.
+    LandingRefused,
+    /// A manager landing's process was proved gone with no ending recorded,
+    /// written by the reader that proved it.
+    LandingDied,
+    /// Dispatch scratch was removed at success or on request.
+    ScratchRemoved,
+    /// Dispatch scratch was measured and kept at a non-success ending or pause.
+    ScratchRetained,
 }
 
 impl PipelineKind {
@@ -389,11 +437,28 @@ impl PipelineKind {
             Self::BranchesSuperseded => "branches-superseded",
             Self::BranchesRetired => "branches-retired",
             Self::ChangeRetitled => "change-retitled",
+            Self::ReviewCommentsRead => "review-comments-read",
             Self::TitleUnverified => "title-unverified",
             Self::NodeRestackStarted => "node-restack-started",
             Self::NodeRestacked => "node-restacked",
+            Self::NodeLanded => "node-landed",
+            Self::NodeAbsorbed => "node-absorbed",
+            Self::ChangeReopened => "change-reopened",
+            Self::NodeReadjusted => "node-readjusted",
+            Self::StackLandedOutOfOrder => "stack-landed-out-of-order",
+            Self::ChangeClosed => "change-closed",
+            Self::NodeChecksRead => "node-checks-read",
+            Self::ReadjustReadFailed => "readjust-read-failed",
             Self::DriverTakenOver => "driver-taken-over",
             Self::DriverSuperseded => "driver-superseded",
+            Self::LandingRegistered => "landing-registered",
+            Self::LandingDrafting => "landing-drafting",
+            Self::LandingStarted => "landing-started",
+            Self::LandingFinished => "landing-finished",
+            Self::LandingRefused => "landing-refused",
+            Self::LandingDied => "landing-died",
+            Self::ScratchRemoved => "scratch-removed",
+            Self::ScratchRetained => "scratch-retained",
         }
     }
 
@@ -463,11 +528,28 @@ pub const PIPELINE_KINDS: &[PipelineKind] = &[
     PipelineKind::BranchesSuperseded,
     PipelineKind::BranchesRetired,
     PipelineKind::ChangeRetitled,
+    PipelineKind::ReviewCommentsRead,
     PipelineKind::TitleUnverified,
     PipelineKind::NodeRestackStarted,
     PipelineKind::NodeRestacked,
+    PipelineKind::NodeLanded,
+    PipelineKind::NodeAbsorbed,
+    PipelineKind::ChangeReopened,
+    PipelineKind::NodeReadjusted,
+    PipelineKind::StackLandedOutOfOrder,
+    PipelineKind::ChangeClosed,
+    PipelineKind::NodeChecksRead,
+    PipelineKind::ReadjustReadFailed,
     PipelineKind::DriverTakenOver,
     PipelineKind::DriverSuperseded,
+    PipelineKind::LandingRegistered,
+    PipelineKind::LandingDrafting,
+    PipelineKind::LandingStarted,
+    PipelineKind::LandingFinished,
+    PipelineKind::LandingRefused,
+    PipelineKind::LandingDied,
+    PipelineKind::ScratchRemoved,
+    PipelineKind::ScratchRetained,
 ];
 
 /// The id of a stored artifact.

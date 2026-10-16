@@ -334,13 +334,29 @@ esac
         let _scratch = Scratch(root.clone());
         let clone = root.join("clone");
         let remote = root.join("remote.git");
-        let initialized = Command::new("git")
+        // Git's automatic GC otherwise detaches: waiting for `git push` alone
+        // does not join the writer that can race Scratch's recursive removal.
+        // The receiving repository is configured below because the transport
+        // can clear command-scoped configuration before starting receive-pack.
+        let git_command = || {
+            let mut command = Command::new("git");
+            command.args(["-c", "gc.autoDetach=false"]);
+            command
+        };
+        let initialized = git_command()
             .args(["init", "--quiet", "--bare"])
             .arg(&remote)
             .output()
             .unwrap();
         assert!(initialized.status.success());
-        let cloned = Command::new("git")
+        let configured = git_command()
+            .arg("--git-dir")
+            .arg(&remote)
+            .args(["config", "gc.autoDetach", "false"])
+            .output()
+            .unwrap();
+        assert!(configured.status.success());
+        let cloned = git_command()
             .arg("clone")
             .arg(&remote)
             .arg(&clone)
@@ -349,7 +365,7 @@ esac
         assert!(cloned.status.success());
         // Copy the finished working tree, including hook files if restored, rather
         // than HEAD: this test must also prove an uncommitted hook deletion.
-        let exported = Command::new("git")
+        let exported = git_command()
             .args(["ls-files", "-z"])
             .current_dir(env!("CARGO_MANIFEST_DIR"))
             .output()
@@ -369,7 +385,7 @@ esac
             }
         }
         let git = |args: &[&str]| {
-            let out = Command::new("git")
+            let out = git_command()
                 .args(args)
                 .current_dir(&clone)
                 .output()
@@ -386,10 +402,11 @@ esac
         git(&["config", "core.hooksPath", ".githooks"]);
         git(&["add", "."]);
         git(&["commit", "--quiet", "-m", "test: first authored commit"]);
+        git(&["repack"]);
         git(&["remote", "rename", "origin", "local"]);
         let artifacts = git(&["ls-files", "-s", "shots", "screenshots/images"]).stdout;
         let push = || {
-            let out = Command::new("git")
+            let out = git_command()
                 .args(["push", "local", "HEAD:refs/heads/journey"])
                 .env("GIT_TRACE", "1")
                 .current_dir(&clone)
@@ -406,7 +423,7 @@ esac
             ] {
                 assert!(!trace.contains(command), "push executed {command}: {trace}");
             }
-            let received = Command::new("git")
+            let received = git_command()
                 .arg("--git-dir")
                 .arg(&remote)
                 .args(["rev-parse", "refs/heads/journey"])
@@ -439,7 +456,33 @@ esac
         git(&["add", "screenshots/push-journey.txt"]);
         git(&["commit", "--quiet", "-m", "test: change a guarded path"]);
         push();
-        push(); // Up-to-date pushes still resolve the configured hooks directory.
+        // Up-to-date pushes still resolve the configured hooks directory.
+        push();
+        // Keep both packs, then cross the real automatic-GC pack threshold.
+        // This proves the command joins maintenance, rather than relying on a
+        // small fixture never reaching the condition that caused the race.
+        git(&["repack"]);
+        let collected = git_command()
+            .args([
+                "-c",
+                "gc.auto=1",
+                "-c",
+                "gc.autoPackLimit=1",
+                "gc",
+                "--auto",
+            ])
+            .env("GIT_TRACE", "1")
+            .current_dir(&clone)
+            .output()
+            .unwrap();
+        let trace = String::from_utf8_lossy(&collected.stderr);
+        assert!(collected.status.success(), "automatic GC failed: {trace}");
+        assert!(trace.contains("pack-objects"), "GC did no work: {trace}");
+        assert!(
+            !trace.contains("--detach"),
+            "GC left a writer behind: {trace}"
+        );
+        assert!(!clone.join(".git/gc.pid").exists(), "GC has not finished");
         let planned = Command::new("just")
             .args(["--dry-run", "bootstrap"])
             .current_dir(&clone)

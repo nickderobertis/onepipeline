@@ -5690,6 +5690,15 @@ fn a_driver_that_owns_a_run_and_claims_nothing(world: &World, name: &str) -> (St
 /// with the shadow source declared over that root — fails on and retries: the failing
 /// projection that holds a close-out open.
 pub(crate) fn unwritable_shadow_store(world: &World, run: &str) {
+    unwritable_shadow_store_with(world, run, |path| std::fs::remove_dir_all(path));
+}
+
+/// The removal boundary can impose Windows sharing-mode refusals on Linux.
+pub(crate) fn unwritable_shadow_store_with(
+    world: &World,
+    run: &str,
+    mut remove: impl FnMut(&std::path::Path) -> std::io::Result<()>,
+) {
     let shadow = world.run_file(run, "writeback");
     world.until("the first projection to open its shadow store", |_| {
         shadow.is_dir()
@@ -5698,8 +5707,33 @@ pub(crate) fn unwritable_shadow_store(world: &World, run: &str) {
     // a state a host produces on its own — a full disk, a permission change — and not one any
     // verb of this CLI can be asked to make; `store.rs`'s
     // `an_unwritable_shadow_store_is_reported_retried_and_recovered` states it the same way.
-    std::fs::remove_dir_all(&shadow).expect("the shadow store is taken away");
-    std::fs::write(&shadow, "not a folder").expect("a file makes the shadow store unwritable");
+    world.until("the shadow store's open handles to release it", |_| {
+        match remove(&shadow) {
+            Ok(()) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::DirectoryNotEmpty
+                ) =>
+            {
+                return false
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("the shadow store cannot be taken away: {error}"),
+        }
+        match std::fs::write(&shadow, "not a folder") {
+            Ok(()) => true,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::IsADirectory
+                ) =>
+            {
+                false
+            }
+            Err(error) => panic!("the shadow store cannot be made unwritable: {error}"),
+        }
+    });
     // llmlint: ignore-end[tests_mirror_real_usage]
 }
 
