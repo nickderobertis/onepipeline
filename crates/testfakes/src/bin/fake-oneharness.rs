@@ -46,6 +46,19 @@ pub const WORK_FILE: &str = "work.md";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // Not oneharness's surface: the fixture `harness::a_worlds_teardown_*`
+    // drives, so a journey can hold this double to what its teardown promises
+    // about a process it started. Answered before anything is required of the
+    // environment, because the descendant is started with none of it.
+    match args.first().map(String::as_str) {
+        Some("leave-a-descendant") => return leave_a_descendant(&args[1..]),
+        Some("leave-descendants") => return leave_descendants(&args[1..]),
+        Some("linger") => linger(),
+        Some("linger-held-at-exit") => return linger_held_at_exit(&args[1..]),
+        Some("orphan") => return orphan(&args[1..]),
+        Some("hold-at-exit") => return hold_at_exit(&args[1..]),
+        _ => {}
+    }
     let dir = fake::script_dir();
     fake::record(&dir, "oneharness", &args);
 
@@ -53,6 +66,352 @@ fn main() -> ExitCode {
         Some("run") => run(&args, &dir),
         Some(other) => fake::refuse(&format!("unknown oneharness command '{other}'")),
         None => fake::refuse("oneharness takes a command"),
+    }
+}
+
+/// Start a long-lived descendant of this double, record both pids, and then
+/// either keep running (`hold`) or end at once and orphan it (`exit`).
+///
+/// `hold-at-exit` keeps running too, but its descendant is one that outlasts
+/// its own kill: see [`linger_held_at_exit`]. The record is written once that
+/// is arranged, and by the process arranging it rather than by this one.
+///
+/// What the run that left the Windows leg hanging had in it: a `fake-oneharness`
+/// a test had started, or something under it, still running and holding the
+/// standard handles it inherited after the test that started it had returned.
+/// The descendant inherits this double's standard streams, as one started by
+/// default does, and on Unix takes a process group of its own, as the engine
+/// gives its drivers, so a teardown that only ended this double's group would
+/// leave it.
+///
+/// The record is `<double pid> <descendant pid>`, written whole under a
+/// temporary name and renamed into place, so a reader polling for it never
+/// reads half of one.
+fn leave_a_descendant(args: &[String]) -> ExitCode {
+    let [record, then] = args else {
+        return fake::refuse(
+            "leave-a-descendant takes a record path and `hold`, `exit` or `hold-at-exit`",
+        );
+    };
+    let then = match then.as_str() {
+        "hold" => Then::Hold,
+        "exit" => Then::Exit,
+        "hold-at-exit" => Then::HoldAtExit,
+        other => {
+            return fake::refuse(&format!(
+                "leave-a-descendant then {other:?}: `hold`, `exit` or `hold-at-exit`"
+            ))
+        }
+    };
+    let me = std::env::current_exe()
+        .unwrap_or_else(|error| fake::fail(&format!("this double cannot name itself: {error}")));
+    let mut descendant = std::process::Command::new(me);
+    if then == Then::HoldAtExit {
+        let double = std::process::id().to_string();
+        descendant.args(["linger-held-at-exit", record, &double]);
+    } else {
+        descendant.arg("linger");
+    }
+    descendant.stdin(std::process::Stdio::null());
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut descendant, 0);
+    // Never waited for on the `exit` path, which is the point: this double ends
+    // and leaves the descendant running, and `init` is what collects it then.
+    #[expect(
+        clippy::zombie_processes,
+        reason = "the descendant is left running on purpose; see this function's doc"
+    )]
+    let mut descendant = descendant
+        .spawn()
+        .unwrap_or_else(|error| fake::fail(&format!("cannot start the descendant: {error}")));
+    if then != Then::HoldAtExit {
+        write_record(
+            record,
+            &format!("{} {}", std::process::id(), descendant.id()),
+        );
+    }
+    if then == Then::Exit {
+        return ExitCode::SUCCESS;
+    }
+    // Held for as long as the descendant runs, which is until something ends
+    // one of them from outside.
+    let _ = descendant.wait();
+    linger()
+}
+
+/// Start `<count>` long-lived descendants of this double, record
+/// `<double pid> <descendant pid>...`, and keep running beside them.
+///
+/// Each is started as [`leave_a_descendant`] starts its one. Many, so that a
+/// teardown has more to end than its first look makes room for.
+fn leave_descendants(args: &[String]) -> ExitCode {
+    let usage = "leave-descendants takes a record path and a count";
+    let [record, count] = args else {
+        return fake::refuse(usage);
+    };
+    let Some(count) = count.parse::<usize>().ok().filter(|count| *count > 0) else {
+        return fake::refuse(usage);
+    };
+    let me = std::env::current_exe()
+        .unwrap_or_else(|error| fake::fail(&format!("this double cannot name itself: {error}")));
+    let mut pids = vec![std::process::id()];
+    for _ in 0..count {
+        let mut descendant = std::process::Command::new(&me);
+        descendant.arg("linger").stdin(std::process::Stdio::null());
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut descendant, 0);
+        // Never waited for: they run until the teardown under test ends them.
+        #[expect(
+            clippy::zombie_processes,
+            reason = "the descendants are left running on purpose; see this function's doc"
+        )]
+        let started = descendant
+            .spawn()
+            .unwrap_or_else(|error| fake::fail(&format!("cannot start a descendant: {error}")));
+        pids.push(started.id());
+    }
+    let line: Vec<String> = pids.iter().map(u32::to_string).collect();
+    write_record(record, &line.join(" "));
+    linger()
+}
+
+/// What `leave-a-descendant` does once its descendant is running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Then {
+    /// Keep running beside it.
+    Hold,
+    /// End at once, leaving it an orphan.
+    Exit,
+    /// Keep running beside a descendant that outlasts its own kill.
+    HoldAtExit,
+}
+
+/// Write `line` to `record` whole, under a temporary name renamed into place,
+/// so a reader polling for it never reads half of one.
+fn write_record(record: &str, line: &str) {
+    let staged = format!("{record}.partial");
+    std::fs::write(&staged, format!("{line}\n"))
+        .and_then(|()| std::fs::rename(&staged, record))
+        .unwrap_or_else(|error| fake::fail(&format!("cannot record the pids: {error}")));
+}
+
+/// How long [`hold_at_exit`] keeps a killed process from finishing its exit.
+///
+/// Long beside the moment a teardown's kill lands and its next look at the
+/// process table, so that a teardown which stops looking once the walk from
+/// the test finds nothing returns well inside it.
+#[cfg(target_os = "linux")]
+const HELD_AT_EXIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// The descendant `leave-a-descendant <record> hold-at-exit` starts: one that,
+/// once killed, is still on its way out after the double above it has gone.
+///
+/// It starts its tracer, [`hold_at_exit`], through [`orphan`] — so that tracer
+/// is no descendant of the test by the time it is in place — and lets that one
+/// process trace it and no other. A kill then stops this process at its exit, still holding
+/// what it inherited, and the double above it, killed beside it, hands it to
+/// `init` while it waits there: out of reach of any walk from the test, but a
+/// process the test started and its teardown found.
+///
+/// Linux only: the exit stop is `ptrace`'s `PTRACE_O_TRACEEXIT`.
+#[cfg(target_os = "linux")]
+fn linger_held_at_exit(args: &[String]) -> ExitCode {
+    let usage = "linger-held-at-exit takes a record path and the double's pid";
+    let [record, double] = args else {
+        return fake::refuse(usage);
+    };
+    if ProcessId::parse(double).is_none() {
+        return fake::refuse(usage);
+    }
+    let me = std::env::current_exe()
+        .unwrap_or_else(|error| fake::fail(&format!("this double cannot name itself: {error}")));
+    let pid = std::process::id().to_string();
+    let started = std::process::Command::new(me)
+        .args(["orphan", "hold-at-exit", &pid, double, record])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output();
+    let tracer = started
+        .ok()
+        .filter(|started| started.status.success())
+        .and_then(|started| String::from_utf8(started.stdout).ok())
+        .and_then(|pid| ProcessId::parse(pid.trim()));
+    let Some(tracer) = tracer else {
+        write_record(record, "refused: the tracer did not start");
+        return ExitCode::FAILURE;
+    };
+    // SAFETY: `prctl` reads its integer arguments and touches no memory.
+    let allowed = unsafe {
+        libc::prctl(
+            libc::PR_SET_PTRACER,
+            libc::c_ulong::from(tracer.0.unsigned_abs()),
+            0_u64,
+            0_u64,
+            0_u64,
+        )
+    };
+    if allowed != 0 {
+        write_record(
+            record,
+            &format!(
+                "refused: the tracer at pid {} may not be let in: {}",
+                tracer.0,
+                std::io::Error::last_os_error()
+            ),
+        );
+        return ExitCode::FAILURE;
+    }
+    linger()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn linger_held_at_exit(_: &[String]) -> ExitCode {
+    fake::refuse("linger-held-at-exit traces through ptrace, which only Linux has")
+}
+
+/// The pid of the [`orphan`] that started this process, which is its parent
+/// until that has exited and no longer once it has.
+const ORPHANED_BY: &str = "FAKE_ONEHARNESS_ORPHANED_BY";
+
+/// Start this double again with `args`, its standard streams on nothing, write
+/// its pid, and exit without waiting for it, so that what it started belongs
+/// to `init`.
+fn orphan(args: &[String]) -> ExitCode {
+    let me = std::env::current_exe()
+        .unwrap_or_else(|error| fake::fail(&format!("this double cannot name itself: {error}")));
+    let started = std::process::Command::new(me)
+        .args(args)
+        .env(ORPHANED_BY, std::process::id().to_string())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    match started {
+        Ok(started) => {
+            println!("{}", started.id());
+            ExitCode::SUCCESS
+        }
+        Err(error) => fake::fail(&format!("cannot start {args:?}: {error}")),
+    }
+}
+
+/// Trace `<pid>`, record `<double pid> <pid>` once that holds and this process
+/// is an orphan, and keep `<pid>` at its exit for [`HELD_AT_EXIT`] once it is
+/// killed. Ends when `<pid>` does.
+///
+/// The trace is asked for until `<pid>` has let this process in, which it does
+/// only once [`orphan`] has said which process this is.
+///
+/// Every other stop is let go at once, without the signal that caused it: a
+/// teardown's `SIGSTOP` would otherwise leave `<pid>` stopped rather than
+/// exiting, which is a different process from the one this stands for.
+#[cfg(target_os = "linux")]
+fn hold_at_exit(args: &[String]) -> ExitCode {
+    let usage = "hold-at-exit takes a pid, the double's pid and a record path";
+    let [pid, double, record] = args else {
+        return fake::refuse(usage);
+    };
+    let (Some(traced), Some(double)) = (ProcessId::parse(pid), ProcessId::parse(double)) else {
+        return fake::refuse(usage);
+    };
+    // Named rather than read off this process's parent, which by the time it
+    // is read may already be whatever `init` the starter's exit handed it to.
+    let Some(starter) = std::env::var(ORPHANED_BY)
+        .ok()
+        .and_then(|starter| ProcessId::parse(&starter))
+        .map(|starter| starter.0.unsigned_abs())
+    else {
+        return fake::refuse(&format!(
+            "hold-at-exit is started through `orphan`, which sets {ORPHANED_BY}"
+        ));
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        // SAFETY: `ptrace` reads its integer arguments; `addr` is unused by
+        // SEIZE.
+        let seized = unsafe {
+            libc::ptrace(
+                libc::PTRACE_SEIZE,
+                traced.0,
+                std::ptr::null_mut::<libc::c_void>(),
+                libc::PTRACE_O_TRACEEXIT as usize as *mut libc::c_void,
+            )
+        };
+        if seized == 0 {
+            break;
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::EPERM) || std::time::Instant::now() >= deadline {
+            write_record(record, &format!("refused: cannot trace {pid}: {error}"));
+            return ExitCode::FAILURE;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    // Recorded only once nothing that started this is still running, so that a
+    // reader of the record is reading about a tracer outside the test's tree.
+    while std::os::unix::process::parent_id() == starter {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    write_record(record, &format!("{} {}", double.0, traced.0));
+    let at_exit = libc::SIGTRAP | (libc::PTRACE_EVENT_EXIT << 8);
+    loop {
+        let mut status = 0;
+        // SAFETY: `status` outlives the call.
+        if unsafe { libc::waitpid(traced.0, &raw mut status, libc::__WALL) } != traced.0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            fake::fail(&format!("hold-at-exit lost {pid}: {error}"));
+        }
+        // Exited or killed: what this was holding has gone.
+        if !libc::WIFSTOPPED(status) {
+            return ExitCode::SUCCESS;
+        }
+        if status >> 8 == at_exit {
+            std::thread::sleep(HELD_AT_EXIT);
+        }
+        // SAFETY: as above; a zero `data` delivers no signal.
+        unsafe {
+            libc::ptrace(
+                libc::PTRACE_CONT,
+                traced.0,
+                std::ptr::null_mut::<libc::c_void>(),
+                std::ptr::null_mut::<libc::c_void>(),
+            )
+        };
+    }
+}
+
+/// The id of exactly one process: positive, because `ptrace`, `waitpid` and
+/// `prctl` read zero and below as something other than a single process — and
+/// `PR_SET_PTRACER` reads zero as lifting the restriction altogether.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProcessId(libc::pid_t);
+
+#[cfg(target_os = "linux")]
+impl ProcessId {
+    fn parse(text: &str) -> Option<Self> {
+        text.parse::<libc::pid_t>()
+            .ok()
+            .filter(|pid| *pid > 0)
+            .map(Self)
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn hold_at_exit(_: &[String]) -> ExitCode {
+    fake::refuse("hold-at-exit traces through ptrace, which only Linux has")
+}
+
+/// Run until something ends this process from outside.
+///
+/// In a loop because `park` may return without being unparked, and nothing here
+/// unparks it.
+fn linger() -> ! {
+    loop {
+        std::thread::park();
     }
 }
 

@@ -20,6 +20,7 @@
 
 use std::path::{Path, PathBuf};
 
+pub mod containment;
 pub mod hosted;
 pub mod yaml;
 

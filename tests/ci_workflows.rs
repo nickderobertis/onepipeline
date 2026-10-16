@@ -552,6 +552,28 @@ fn the_release_pull_request_runs_the_full_sweep_and_every_other_pull_request_the
         runs(gate, "just check-affected 2>&1"),
         "the gate runs `just check-affected`"
     );
+    // The workload journeys no `check` reaches run here, after the quality gate.
+    let position = |job: &Value, step_run: &str| {
+        job["steps"]
+            .as_array()
+            .expect("the job has steps")
+            .iter()
+            .position(|step| step.get("run").and_then(Value::as_str) == Some(step_run))
+    };
+    let checked = sweep["steps"]
+        .as_array()
+        .expect("the job has steps")
+        .iter()
+        .position(|step| step["id"].as_str() == Some("every"))
+        .expect("the release sweep names its quality gate `every`");
+    assert!(
+        position(sweep, "just workload").is_some_and(|workload| workload > checked),
+        "the release sweep does not run `just workload` after its quality gate"
+    );
+    assert!(
+        position(gate, "just workload").is_none(),
+        "the gate runs the workload journeys"
+    );
     assert!(
         !runs(gate, "just check 2>&1"),
         "the gate also runs the full sweep"
@@ -590,6 +612,50 @@ fn the_release_pull_request_runs_the_full_sweep_and_every_other_pull_request_the
             "the affected-tier gate does not run on a {what}"
         );
     }
+}
+
+/// The release sweep re-takes the release workloads and their budgets: after its
+/// quality gate, unconditionally, through the `workload` recipe. No pull
+/// request's affected-tier gate runs them, so the per-change bar never pays for
+/// the 840,000-entry scratch journey.
+#[test]
+fn the_release_sweep_runs_the_workloads_after_its_quality_gate_and_the_gate_never_does() {
+    let steps = |file: &str, job: &str| -> Vec<Value> {
+        workflow(file)["jobs"][job]["steps"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{file}'s {job} job has steps"))
+            .clone()
+    };
+    let position = |steps: &[Value], run: &str| {
+        steps.iter().position(|step| {
+            step.get("run")
+                .and_then(Value::as_str)
+                .is_some_and(|text| text.contains(run))
+        })
+    };
+    let sweep = steps("release-sweep.yml", "release-sweep");
+    let gate = position(&sweep, "just check 2>&1").expect("the sweep runs `just check`");
+    let workload = position(&sweep, "just workload").expect("the sweep runs `just workload`");
+    assert!(workload > gate, "the workloads run before the quality gate");
+    assert!(
+        sweep[workload].get("if").is_none() && sweep[workload].get("continue-on-error").is_none(),
+        "the workload step is conditional or cannot fail the sweep: {:?}",
+        sweep[workload]
+    );
+    assert!(
+        position(&steps("ci.yml", "gate"), "just workload").is_none(),
+        "the per-change gate runs the release workloads"
+    );
+    let justfile = fs::read_to_string(repo_root().join("justfile")).expect("the justfile");
+    let recipe: Vec<&str> = justfile
+        .split("\n\n")
+        .find(|block| block.lines().any(|line| line == "workload:"))
+        .expect("a `workload` recipe")
+        .lines()
+        .skip_while(|line| *line != "workload:")
+        .skip(1)
+        .collect();
+    assert_eq!(recipe, ["    @bash scripts/nx.sh run-many -t workload"]);
 }
 
 /// The `just check` the sweep runs reaches every gate-eligible project: each

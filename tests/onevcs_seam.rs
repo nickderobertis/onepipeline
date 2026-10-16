@@ -88,6 +88,7 @@ fn every_operation_this_crate_performs_is_served_by_the_provider_seam() {
             overflow: None,
             labels: Default::default(),
             refuse_conflicts: false,
+            caller_merges_base: false,
         })
         .expect("the seam opens a session");
     assert_eq!(session.branch, "feature");
@@ -217,6 +218,7 @@ fn every_operation_this_crate_performs_is_served_by_the_provider_seam() {
             overflow: None,
             labels: Default::default(),
             refuse_conflicts: false,
+            caller_merges_base: false,
         })
         .expect("the seam opens a second session");
     let reason = onevcs::DraftReason::AwaitingRelease {
@@ -308,6 +310,7 @@ fn every_operation_this_crate_performs_is_served_by_the_provider_seam() {
             overflow: None,
             labels: Default::default(),
             refuse_conflicts: false,
+            caller_merges_base: false,
         })
         .expect("the seam cuts a session at a proposed name");
     assert_eq!(cut.branch, "ENG-123/build");
@@ -323,6 +326,7 @@ fn every_operation_this_crate_performs_is_served_by_the_provider_seam() {
             overflow: None,
             labels: Default::default(),
             refuse_conflicts: false,
+            caller_merges_base: false,
         })
         .expect_err("a request naming a branch to continue and a name to cut is refused");
     assert!(
@@ -363,6 +367,7 @@ fn published_through_the_lifecycle(
             overflow: None,
             labels: Default::default(),
             refuse_conflicts: false,
+            caller_merges_base: false,
         })
         .expect("the seam opens a session");
     let published = onevcs::publish(
@@ -538,7 +543,7 @@ fn the_draft_lifecycle_answers_what_a_node_settles_on(root: &std::path::Path) {
     // has run: the one with no run yet is pending, not passed, so the watch does
     // not settle — the publication ends `checks-unsettled`, naming the check
     // nothing has vouched for, and no `checks-settled` is recorded. Before the
-    // linked `onevcs` 0.43.1 the reported check alone read as the whole set.
+    // `onevcs` 0.43.1 the reported check alone read as the whole set.
     let host = MemoryHost::seeded(HostState {
         checks: [(first.clone(), vec![check("lint", "success", "ready")])].into(),
         required_checks: Some(onevcs::RequiredChecks {

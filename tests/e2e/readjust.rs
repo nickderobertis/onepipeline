@@ -1989,8 +1989,87 @@ fn a_placement_at_dispatch_readjusts_before_it_dispatches() {
     found_first(&world, run, "a", "placement", ("node-dispatched", "e"));
     std::fs::write(world.fakes.join("x.go"), "").expect("the hold is released");
     let ended = driver.wait_with_output().expect("the driver ends");
-    assert!(ended.status.success(), "{ended:?}");
+    ended_complete(&world, run, &ended);
 }
+
+/// Every node of `run` whose last settlement in its journal is `failed`, each with that
+/// settlement's outcome and detail: what the attached driver's stream cannot be relied on to
+/// show, because it is progress for a person and not the record.
+fn failed_settlements(world: &World, run: &str) -> String {
+    let mut last: std::collections::BTreeMap<String, Value> = std::collections::BTreeMap::new();
+    for settled in world.events_of(run, "node-settled") {
+        if let Some(node) = settled["labels"]["node"].as_str() {
+            last.insert(node.to_owned(), settled["payload"].clone());
+        }
+    }
+    last.iter()
+        .filter(|(_, payload)| payload["status"] == "failed")
+        .map(|(node, payload)| {
+            format!(
+                "node '{node}' failed ({}): {}",
+                payload["outcome"].as_str().unwrap_or("no outcome"),
+                payload["detail"].as_str().unwrap_or("no detail")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// An adopting driver ended with its run complete, or the failure says which nodes failed
+/// and why, as the run's journal records it, beside what the driver itself answered.
+fn ended_complete(world: &World, run: &str, ended: &std::process::Output) {
+    assert!(
+        ended.status.success(),
+        "the driver did not end the run complete; its journal records these failed nodes:\n{}\n\
+         the driver answered: {ended:?}",
+        failed_settlements(world, run)
+    );
+}
+
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey proves
+// what a failed run's journal records for the node that failed, which any change under
+// `src/` can move. `nx.json`'s `noteJourneySource`, the one separately edged Rust test
+// input, itself begins `{workspaceRoot}/src/**/*`, so no narrower edge exists.
+/// When a journey's adopting driver ends with a node failed, what the journey says names that
+/// node and the detail its settlement carries in the run's journal, which the driver's own
+/// stream does not print.
+#[test]
+fn a_driver_ending_with_a_failed_node_is_reported_with_that_nodes_settlement() {
+    let world = team_world("readjust-failed-report");
+    world.script("a.work", "a's change\n");
+    world.script("b.fail", "1");
+    let run = "reported";
+    launched_at(
+        &world,
+        run,
+        vec![lifecycle("a", &[]), lifecycle("b", &[])],
+        2,
+    );
+    let ended = world
+        .cmd(&["adopt", run])
+        .output()
+        .expect("the adopting driver runs");
+    let detail = world
+        .events_of(run, "node-settled")
+        .into_iter()
+        .rev()
+        .find(|settled| settled["labels"]["node"] == "b")
+        .and_then(|settled| settled["payload"]["detail"].as_str().map(str::to_owned))
+        .expect("b's settlement carries a detail");
+    let said = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ended_complete(&world, run, &ended);
+    }))
+    .expect_err("a run with a failed node did not end complete");
+    let said = said
+        .downcast_ref::<String>()
+        .cloned()
+        .expect("the failure says something");
+    assert!(
+        said.contains("node 'b' failed") && said.contains(&detail),
+        "the failure does not name b with its settlement's detail {detail:?}: {said}"
+    );
+    assert!(!said.contains("node 'a'"), "a settled done: {said}");
+} // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// A continuing launch on a cold host, from the local Markdown store, readjusts before
 /// its first dispatch: `a`'s landing, made before it, is found by its own read and `b`

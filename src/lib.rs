@@ -162,3 +162,5 @@ pub fn run(cli: cli::Cli) -> Result<i32> {
     flow::take_inherited();
     driver::dispatch(cli)
 }
+
+mod scratch;

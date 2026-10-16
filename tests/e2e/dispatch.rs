@@ -898,16 +898,12 @@ fn a_dispatchs_scratch_directory_reaches_the_turn_the_library_backend_runs() {
         world.dump()
     );
     assert!(
-        at.is_dir(),
-        "the turn was handed {}, which is not a directory that exists\n{}",
-        at.display(),
-        world.dump()
+        !at.exists(),
+        "settled scratch still exists: {}",
+        at.display()
     );
-    std::fs::write(
-        at.join("written"),
-        "by a journey standing where the turn stood",
-    )
-    .unwrap_or_else(|error| panic!("{} is not writable: {error}", at.display()));
+    assert!(!world.run_file("scratch", "scratch").exists());
+    assert_eq!(world.events_of("scratch", "scratch-removed").len(), 1);
 }
 
 /// Every reading a turn took of the scratch directory it was given, as
@@ -1024,13 +1020,10 @@ fn concurrent_dispatches_each_hold_their_own_scratch_directory_throughout() {
             "{job} was given {at:?}, which is not absolute"
         );
         assert!(
-            at.is_dir(),
-            "{job}'s scratch directory {} is gone\n{}",
-            at.display(),
-            world.dump()
+            !at.exists(),
+            "settled scratch still exists: {}",
+            at.display()
         );
-        std::fs::write(at.join("read-back"), job)
-            .unwrap_or_else(|error| panic!("{} is not writable: {error}", at.display()));
         each.push(at);
     }
     assert_ne!(
@@ -3932,6 +3925,19 @@ fn the_codex_double_answers_each_exec_line_oneharness_builds_and_refuses_each_it
             "Do build.",
         ][..],
         &["exec", "-c", "features.plugins=true", "--json", "Do build."][..],
+        &[
+            "exec",
+            "-c",
+            "features.plugins=false",
+            "-c",
+            "features.apps=false",
+            "-c",
+            "analytics.enabled=false",
+            "-c",
+            "model_catalog_json=\"/catalog.json\"",
+            "--json",
+            "Do build.",
+        ][..],
     ] {
         let answered = sent(argv);
         let said = String::from_utf8_lossy(&answered.stdout).to_string();

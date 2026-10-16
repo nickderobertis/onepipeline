@@ -645,7 +645,7 @@ fn repository_dir(repo: &Path) -> PathBuf {
 /// `path` without the extended-length prefix Windows adds to a canonical path (`\\?\C:\…`,
 /// `\\?\UNC\server\…`), which is how `onevcs` can answer a checkout while the caller
 /// registered it plainly; any other path, and every path elsewhere, is returned as it is.
-fn plain(path: PathBuf) -> PathBuf {
+pub(crate) fn plain(path: PathBuf) -> PathBuf {
     if cfg!(windows) {
         if let Some(stripped) = path.to_str().and_then(without_verbatim_prefix) {
             return PathBuf::from(stripped);

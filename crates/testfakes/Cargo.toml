@@ -72,6 +72,16 @@ tokio = { workspace = true, features = ["rt"] }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# What `containment` ends a test's processes through on that platform: a job
+# object the test process joins, which every process it starts joins after it.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
+] }
+
 [[bin]]
 name = "fake-oneagentgraph"
 path = "src/bin/fake-oneagentgraph.rs"
