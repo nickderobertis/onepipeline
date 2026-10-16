@@ -931,13 +931,23 @@ pub struct Writeback {
     per_item: NonZeroU64,
     /// The claim this driver writes on the project, once it has made one.
     held: Mutex<Option<crate::payload::DriverClaim>>,
-    /// The claim of the run that took the project over, once one has: from then on this
-    /// driver writes nothing more to it, its board being that run's. Set once, never cleared.
-    retired: std::sync::OnceLock<crate::payload::DriverClaim>,
-    /// Whether another run has taken the project over and waits on this driver: what it
-    /// projects from then on — what it settled, so that run starts from it — never writes
-    /// the claim, and none of it is a closeout's release.
-    handing_over: std::sync::atomic::AtomicBool,
+    /// Whose board the project is: this driver's, or — once another run has taken it over —
+    /// that run's, while this one hands it over and then for good.
+    board: Mutex<Board>,
+}
+
+/// Whose board a driver's projections write to.
+#[derive(Debug, Clone, PartialEq)]
+enum Board {
+    /// This driver's: it writes its claim and, at closeout, its release.
+    Driving,
+    /// Another run has taken the project over and waits on this driver: what it projects
+    /// now — what it settled, so that run starts from it — never writes the claim, and none
+    /// of it is a closeout's release.
+    HandingOver,
+    /// The run that took the project over, by its claim: this driver writes nothing more to
+    /// it. Never left.
+    Retired(crate::payload::DriverClaim),
 }
 
 impl Writeback {
@@ -966,8 +976,7 @@ impl Writeback {
             pending,
             per_item,
             held: Mutex::new(None),
-            retired: std::sync::OnceLock::new(),
-            handing_over: std::sync::atomic::AtomicBool::new(false),
+            board: Mutex::new(Board::Driving),
         };
         // The project is retained in each snapshot rather than in the worker so a malformed
         // old launch record disables projection without weakening LaunchRecord's compatibility.
@@ -1014,7 +1023,11 @@ impl Writeback {
     /// Write nothing more to the project: another run has taken it over, and what this
     /// driver projected after that would be written over that run's own.
     pub(crate) fn retire(&self, by: &crate::payload::DriverClaim) {
-        let _ = self.retired.set(by.clone());
+        if let Ok(mut board) = self.board.lock() {
+            if !matches!(*board, Board::Retired(_)) {
+                *board = Board::Retired(by.clone());
+            }
+        }
         let (lock, ready) = &*self.pending;
         if let Ok(mut pending) = lock.lock() {
             pending.latest = None;
@@ -1026,8 +1039,11 @@ impl Writeback {
     /// board: go on projecting what this driver settles, but never its claim — the queued
     /// projection included — and no closeout's release.
     pub(crate) fn hand_over(&self) {
-        self.handing_over
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Ok(mut board) = self.board.lock() {
+            if *board == Board::Driving {
+                *board = Board::HandingOver;
+            }
+        }
         let (lock, _) = &*self.pending;
         if let Ok(mut pending) = lock.lock() {
             if let Some(latest) = pending.latest.as_mut() {
@@ -1037,7 +1053,9 @@ impl Writeback {
     }
 
     fn is_handing_over(&self) -> bool {
-        self.handing_over.load(std::sync::atomic::Ordering::SeqCst)
+        self.board
+            .lock()
+            .is_ok_and(|board| *board == Board::HandingOver)
     }
 
     /// Wait, at most `within`, for every projection this driver handed the worker to land.
@@ -1057,7 +1075,9 @@ impl Writeback {
 
     /// Whether another run took the project over, so this driver writes nothing more to it.
     pub(crate) fn is_retired(&self) -> bool {
-        self.retired.get().is_some()
+        self.board
+            .lock()
+            .is_ok_and(|board| matches!(*board, Board::Retired(_)))
     }
 
     /// The same, for the snapshot a closeout projects: a node that never started is written
@@ -5850,8 +5870,7 @@ mod tests {
             pending: Arc::new((Mutex::new(Pending::default()), Condvar::new())),
             per_item: DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS,
             held: Mutex::new(None),
-            retired: std::sync::OnceLock::new(),
-            handing_over: std::sync::atomic::AtomicBool::new(false),
+            board: Mutex::new(super::Board::Driving),
         };
         writeback.closing_out_until(Instant::now() + super::CLOSEOUT_WAIT, Pending::unlanded);
         assert!(

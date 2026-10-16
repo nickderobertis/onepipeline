@@ -81,6 +81,10 @@ pub(crate) fn maintenance_sweep_started() {
     MAINTENANCE_SWEEPS.fetch_add(1, Ordering::Relaxed);
 }
 
+/// The name the claim reads are reported under, which entry 127 of
+/// `docs/contract-divergences.md` names.
+pub(crate) const CLAIM_READS_KEY: &str = "claim_reads";
+
 pub(crate) fn claim_read() {
     CLAIM_READS.fetch_add(1, Ordering::Relaxed);
 }
@@ -148,7 +152,7 @@ pub(crate) fn flush(paths: &crate::ledger::RunPaths) -> crate::error::Result<()>
         "upstream_reads": UPSTREAM_READS.load(Ordering::Relaxed),
         "release_asks": RELEASE_ASKS.load(Ordering::Relaxed),
         "maintenance_sweeps": MAINTENANCE_SWEEPS.load(Ordering::Relaxed),
-        "claim_reads": CLAIM_READS.load(Ordering::Relaxed),
+        (CLAIM_READS_KEY): CLAIM_READS.load(Ordering::Relaxed),
         "store_bytes": STORE_BYTES.load(Ordering::Relaxed),
         "records_folded": RECORDS_FOLDED.load(Ordering::Relaxed),
     });

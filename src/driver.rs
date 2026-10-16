@@ -932,11 +932,6 @@ pub(crate) fn resolve_node_graphs(node: &mut Node, base: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Mint a run id from the plan's name or the project's, made unique.
-///
-/// The plan's own name first, which a project states as `onepipeline.name` or
-/// leaves to its own title; the native half of the qualified id otherwise, which
-/// is what a person launching it typed.
 /// Whether the driver `claim` names provably can no longer act, by this host's own records:
 /// a run of this host, under this runs root, that nothing drives — its ownership lock taken
 /// and let go again here. Anything else is a driver only its acknowledgement, or its lease
@@ -960,6 +955,11 @@ fn gone_from_this_host(root: &Path, claim: Option<&crate::payload::DriverClaim>)
     })
 }
 
+/// Mint a run id from the plan's name or the project's, made unique.
+///
+/// The plan's own name first, which a project states as `onepipeline.name` or
+/// leaves to its own title; the native half of the qualified id otherwise, which
+/// is what a person launching it typed.
 fn mint_run_id(plan: &Plan, native: &str, root: &Path) -> String {
     let base = plan
         .name

@@ -740,8 +740,8 @@ pub(crate) fn publication_cleared(tx: &Sender<Message>, node: &str) -> bool {
 /// this driver settles is on it.
 ///
 /// Nothing more is started. A dispatch in progress settles unpublished — or is ended by the
-/// lease's watchdog, two intervals after the last read that found the project this
-/// driver's — and a publication already under way finishes.
+/// lease's watchdog, once the last read that found the project this driver's has held it as
+/// long as a read may — and a publication already under way finishes.
 ///
 /// Answers whether this driver owes the run that took over an acknowledgement: it does
 /// where it ever held a lease, so that run may be waiting on it — an adoption whose first
@@ -793,6 +793,13 @@ fn supersede(
         },
     )?;
     Ok(owed)
+}
+
+/// The claim that took a project over from this driver, and whether this driver still owes
+/// it the acknowledgement it gives once nothing of its own is in progress.
+struct Superseded {
+    by: crate::payload::DriverClaim,
+    owed: bool,
 }
 
 /// The kind of the non-blocking surface a superseded driver raises.
@@ -1488,14 +1495,11 @@ fn converge(
     let claimed_at = sys::now_rfc3339();
     // The claim that took the project over from this driver, once one has: from then on it
     // dispatches and publishes nothing more, and ends once what it had in flight settles.
-    let mut superseded_by: Option<crate::payload::DriverClaim> = None;
+    let mut superseded_by: Option<Superseded> = None;
     let mut publications: Vec<PublicationDue> = Vec::new();
     // The nodes whose publication this driver cleared and which have not settled: a
     // publication under way is finished, so neither a takeover nor a lapsed lease ends it.
     let mut publishing: BTreeSet<String> = BTreeSet::new();
-    // Whether a superseded driver still owes the claim that superseded it an
-    // acknowledgement, which it gives once nothing of its own is in progress.
-    let mut owed = false;
     // Rework republications waiting on the standings read that continues their trigger.
     let mut reworks_due: Vec<ReworkDue> = Vec::new();
     let channel = ChannelState::of_run(paths, launch);
@@ -1752,8 +1756,8 @@ fn converge(
                 .filter(|watch| watch.read_due())
                 .and_then(crate::continuation::ClaimWatch::check)
             {
-                owed = supersede(paths, journal, writeback.as_ref(), claims.as_ref(), &by)?;
-                superseded_by = Some(by);
+                let owed = supersede(paths, journal, writeback.as_ref(), claims.as_ref(), &by)?;
+                superseded_by = Some(Superseded { by, owed });
             }
         }
         // A publication waits on the pass rather than reading the claim itself: it starts
@@ -1977,8 +1981,11 @@ fn converge(
         // the project is the run that took it over's to drive. Before it goes it says so on
         // that run's claim, once what it settled is on the board, which is what that run
         // starts on.
-        if let (Some(by), true, true) = (&superseded_by, in_flight.is_empty(), owed) {
-            owed = false;
+        if let Some(Superseded { by, owed }) = superseded_by
+            .as_mut()
+            .filter(|superseded| superseded.owed && in_flight.is_empty())
+        {
+            *owed = false;
             if let Some(writeback) = writeback
                 .as_ref()
                 .filter(|writeback| !writeback.is_retired())
@@ -1987,6 +1994,7 @@ fn converge(
                 // Bounded by one interval: the adopter's own wait is longer than that by more
                 // than an interval, so a board that is slow to take this is not one that
                 // could still be taking it once the adopter writes its own.
+                // llmlint: ignore[changed_behavior_has_e2e] the bound is reached only by a store that holds this one projection for a whole claim interval and then answers, which needs the sibling suspended mid-command — host-level process control no CLI journey exposes; what follows it, the acknowledgement, is driven by every takeover journey in `tests/e2e/continuation.rs`, and an acknowledgement that cannot be written by `a_takeover_waits_out_a_board_that_refuses_a_poll_and_the_acknowledgement`.
                 writeback.wait_until_landed(crate::continuation::claim_interval());
                 writeback.retire(by);
             }

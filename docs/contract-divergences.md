@@ -11043,7 +11043,8 @@ carries the cost. The rules below are this build's; the contract's wording, and 
 ### The interval, and the lease a read gives
 
 A running driver reads the claim **once per claim interval** — 300 seconds unless
-`ONEPIPELINE_CLAIM_INTERVAL_SECONDS` names a positive whole number of seconds — whatever
+`ONEPIPELINE_CLAIM_INTERVAL_SECONDS` names a positive whole number of seconds, a day at
+most — whatever
 it is doing, busy or idle: a read is due once the previous one *began* an interval ago,
 and never sooner. A launch's driver starts on the read that let it launch, and an
 adoption's first pass reads before it claims anything, as before. A read the store has
@@ -11064,8 +11065,10 @@ it. The lease is what every start asks; no start asks the store:
   publication** only while its newest confirming read began less than one interval ago,
   asked at the moment of the start, after anything that could have held it. A publication
   asked for on an older read waits for the next read, which is due by then;
-- a driver whose newest confirming read is **two intervals old ends every dispatch it
-  has in progress that is not publishing** — cooperatively, killed after the cancel grace
+- a driver whose newest confirming read is **two intervals and the 20-second read deadline
+  old ends every dispatch it has in progress that is not publishing** — so the read due at
+  two intervals is given its whole deadline, and one read the board fails is not alone a
+  lapse — cooperatively, killed after the cancel grace
   (`ONEPIPELINE_CANCEL_GRACE_SECONDS`) — through a watchdog thread of the lease's own, so
   neither a slow call nor a held step of the reconcile loop delays it. It goes on reading
   once per interval, and starts again on a read that confirms it.
@@ -11101,7 +11104,7 @@ on the project before it continues anything, after every check the launch makes,
 the run it is about to mint, this host, the launching session, the launcher's pid and the
 instant. It then **starts nothing** until the claim on the store carries an
 `acknowledged`, or until **the takeover wait** has passed since its write landed: two
-claim intervals, plus the cancel grace, plus ten seconds. Waiting, it reads the claim
+claim intervals and the read deadline, plus the cancel grace, plus ten seconds. Waiting, it reads the claim
 every tenth of an interval, at least one and at most thirty seconds apart, and says on
 standard error what it waits on and how long; a claim naming another run that replaces
 its own while it waits refuses the launch as `ProjectDriven`, exit 2. Once it may start,
@@ -11111,12 +11114,12 @@ dispatched again — and its write-back starts from it.
 
 **Why the wait is enough.** Every read the displaced driver began before the adopter's
 claim landed began before the wait did. So no start that read allows comes later than one
-interval into the wait, and no dispatch it keeps outlives two intervals and the cancel
-grace into it: by the wait's end the displaced driver can start nothing — a read it makes
+interval into the wait, and no dispatch it keeps outlives two intervals, the read deadline
+and the cancel grace into it: by the wait's end the displaced driver can start nothing — a read it makes
 now finds the adopter's claim — and has nothing in progress. A dead driver is the same
 case with nothing to read. The bound assumes that every host driving one project is given
 the same interval, which the setting's documentation says, and that a publication started
-inside the first interval finishes inside the second.
+inside the first interval finishes inside the rest of the wait.
 
 **The same host.** A claim naming a run of this host, under this host's runs root, whose
 ownership lock is free has no driver, which the host's own records prove: `--take-over`
@@ -11137,10 +11140,11 @@ that launch is then refused at its next look, which is the safe end of that race
 {
   "setting": "ONEPIPELINE_CLAIM_INTERVAL_SECONDS",
   "claim_interval_seconds": 300,
+  "max_claim_interval_seconds": 86400,
   "claim_read_deadline_seconds": 20,
-  "lease": {"starts_within_intervals": 1, "dispatches_end_after_intervals": 2},
-  "takeover_wait": {"intervals": 2, "cancel_grace": "ONEPIPELINE_CANCEL_GRACE_SECONDS", "slack_seconds": 10},
-  "takeover_poll_seconds": {"fraction_of_interval": 0.1, "min": 1, "max": 30},
+  "lease": {"starts_within_intervals": 1, "dispatches_end_after_intervals": 2, "plus_read_deadline": true},
+  "takeover_wait": {"intervals": 2, "plus_read_deadline": true, "cancel_grace": "ONEPIPELINE_CANCEL_GRACE_SECONDS", "slack_seconds": 10},
+  "takeover_poll": {"per_interval": 10, "min_seconds": 1, "max_seconds": 30},
   "acknowledged_key": "acknowledged",
   "driver": {
     "run": "drafts-2",
@@ -11180,6 +11184,12 @@ journey sets it:
 - `a_takeover_whose_displaced_driver_died_proceeds_once_its_lease_has_run_out`,
   `a_displaced_driver_resuming_after_its_adopter_finished_starts_nothing`, and
   `a_takeover_replaced_while_it_waits_is_refused_and_the_one_that_replaced_it_starts`;
+- the board failing: `a_takeover_whose_claim_the_board_refuses_is_refused_before_anything_is_minted`,
+  `a_takeover_waits_out_a_board_that_refuses_a_poll_and_the_acknowledgement`,
+  `a_driver_whose_reads_keep_failing_ends_its_dispatch_once_its_lease_lapses` and
+  `a_publication_asked_for_on_a_stale_lease_waits_for_the_next_read`; and
+  `a_settlement_dispatch_or_claim_that_is_not_one_refuses_the_launch` refuses an
+  `acknowledged` that is not one;
 - entry 119's journeys that asserted a claim read at each pass that would dispatch or
   publish now assert the lease: `a_superseded_driver_starts_nothing_once_it_has_read_the_takeover`,
   `a_pass_that_dispatches_three_nodes_reads_the_store_for_none_of_them`,
