@@ -841,6 +841,10 @@ fn a_home_whose_member_list_breaks_the_stores_rule_is_not_launched() {
     }
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what this journey
+// guards is the text the `local-md` this crate links refuses a torn document with — a
+// `Cargo.lock` move, which only this crate's own project sees — so an edge narrower than this
+// target would drop it out of `nx affected` for exactly the change it exists to catch.
 /// [`TORN_FILE`] is what `local-md` itself says of a home document caught mid-write, read back
 /// through the real store: an empty document and one cut off before its closing `---` are both
 /// refused with it and waited out by [`landed_words`], while a document malformed any other way
@@ -905,7 +909,7 @@ fn a_home_document_caught_mid_write_is_refused_with_the_text_a_wait_treats_as_to
         Some(whole),
         "the whole document did not read back as it did before it was torn"
     );
-}
+} // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// A plan's design document that links each detail out to the section of the task owning it
 /// — `[budgets](<task's file>#budgets)` — arrives on the board pointing at the board's own copy

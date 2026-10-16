@@ -6032,6 +6032,46 @@ fn an_attached_launch_streams_every_record_of_its_run_once() {
     let lines = reader.join().expect("the launch's stderr was read");
     assert!(status.success(), "{status:?}\n{}", lines.join("\n"));
 
+    // The header once, as the stream's first line, and the run's trailer after the read that
+    // printed it and after each read that printed a record since — never after a read that
+    // printed nothing, so never twice in a row, and the last one the run as it ended.
+    let header = "Concise graph events; ask the producing library for full detail by stream id.";
+    assert_eq!(
+        lines.iter().filter(|line| line.as_str() == header).count(),
+        1,
+        "the header was not printed exactly once:\n{}",
+        lines.join("\n")
+    );
+    assert_eq!(
+        lines.first().map(String::as_str),
+        Some(header),
+        "the stream did not open with its header:\n{}",
+        lines.join("\n")
+    );
+    let trailer = format!("-- {run}  ");
+    let trailers: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.starts_with(&trailer))
+        .map(|(at, _)| at)
+        .collect();
+    assert!(
+        trailers.len() >= 2,
+        "the run's trailer was not printed after the reads either side of the held dispatch:\n{}",
+        lines.join("\n")
+    );
+    assert!(
+        trailers.windows(2).all(|pair| pair[1] > pair[0] + 1),
+        "a trailer was printed after a read that printed no record:\n{}",
+        lines.join("\n")
+    );
+    let last = &lines[*trailers.last().expect("counted above")];
+    assert!(
+        last.contains("2/2 done"),
+        "the last trailer is not the run as it ended: {last}\n{}",
+        lines.join("\n")
+    );
+
     // Each record as the stream begins its line: its time, then who said it.
     let begins = |event: &Value| -> String {
         let ts = event["ts"].as_str().expect("a record's time");
