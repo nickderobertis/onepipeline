@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# THROWAWAY stand-in for llmlint: prints hard-coded reports, never calls a model.
+# SPIKE_LLMLINT_MODE = pass | fail | oversize-before | oversize-after
+mode=${SPIKE_LLMLINT_MODE:-pass}
+case "${1:-}" in
+  --version) echo "llmlint 0.4.10"; exit 0 ;;
+  config) echo "rules: 22 (stand-in config)"; exit 0 ;;
+  fingerprint) echo "sha256:5f0c1a9e7b2d4c6e8a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f"; exit 0 ;;
+esac
+sleep 1
+case "$mode" in
+pass)
+  echo
+  echo "22 rules: 17 passed, 0 failed, 0 skipped, 5 not relevant"
+  echo 'See full results with `llmlint history 20261016T210412Z-4c1e2`'
+  exit 0 ;;
+fail)
+  echo
+  echo "  FAIL comments_earn_their_place"
+  echo "       src/views.rs:212: The comment restates the match arm beneath it — that a paused run prints PAUSED — and"
+  echo "       adds no reason a reader could not get from the code; delete it or say why the arm is ordered first."
+  echo
+  echo "22 rules: 16 passed, 1 failed, 0 skipped, 5 not relevant"
+  echo 'See full results with `llmlint history 20261016T210533Z-9b7d0`'
+  exit 1 ;;
+oversize-before)
+  echo "ERROR agent default judge 1 [contracts_have_one_source_or_a_drift_gate, comments_earn_their_place, changed_behavior_has_e2e, tests_assert_real_behavior, names_match_behavior, suppressions_justified, boundary_inputs_validated, no_hardcoded_secrets, least_privilege_grants, new_code_lands_in_a_project, cli_output_contract]: oneharness run failed: harness oneharness default produced output that failed schema validation: no JSON value could be extracted from the response"
+  echo
+  echo "11 rules: 0 passed, 0 failed, 11 skipped, 1 errored"
+  echo 'See full results with `llmlint history 20261016T210648Z-2e5f1`'
+  exit 2 ;;
+oversize-after)
+  echo "ERROR agent default judge 1: prompt too large for one judge turn: tests/golden/views/results.txt alone makes a"
+  echo "      1,412,906-character prompt, over the 1,048,576-character limit of harness 'oneharness default'"
+  echo "      (llmlint already batches the other 37 changed files into turns under that bound; a single file cannot be split)"
+  echo "  remedy: add tests/golden/views/results.txt to files.exclude in llmlint.yml if it is generated, or split the"
+  echo "      change so no one file's prompt exceeds 1,048,576 characters"
+  echo
+  echo "22 rules: 0 passed, 0 failed, 22 skipped, 1 errored"
+  echo 'See full results with `llmlint history 20261016T210702Z-6a3c8`'
+  exit 2 ;;
+esac

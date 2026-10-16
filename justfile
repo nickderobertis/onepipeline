@@ -747,5 +747,5 @@ lint-llm-validate *args:
 # The blocking `llmlint` PR check; `just gate` runs it before you push.
 # llmlint scoped to the files this branch changed since it forked from main.
 lint-llm-diff base="origin/main" *options:
-    @bash scripts/llmlint-diff.sh "$@"
+    @LLMLINT_DIFF_BASE_SHA="$(git rev-parse --verify '{{base}}^{commit}')" ONEPIPELINE_NX_SHOW_OUTPUT=1 bash scripts/nx.sh run onepipeline:lint-llm-diff {{options}}
 
