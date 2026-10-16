@@ -1455,7 +1455,7 @@ pub(crate) fn hold_landing(paths: &RunPaths, launch: &LaunchRecord) -> Option<st
     }
     let file = match landing_lock(&paths.dir) {
         Ok(file) => file,
-        // llmlint: ignore[changed_behavior_has_e2e] a run directory the stopping process
+        // llmlint: ignore-block[changed_behavior_has_e2e] a run directory the stopping process
         // cannot open a file in is one whose `run-stopped` it cannot journal either, so the
         // stop fails a moment later whatever this arm does; no journey arranges it.
         Err(error) => {
@@ -1466,7 +1466,7 @@ pub(crate) fn hold_landing(paths: &RunPaths, launch: &LaunchRecord) -> Option<st
                 paths.run
             );
             return None;
-        }
+        } // llmlint: ignore-end[changed_behavior_has_e2e]
     };
     let bound = Deadline::Write {
         per_item: per_item_budget(launch),
@@ -1490,7 +1490,7 @@ pub(crate) fn hold_landing(paths: &RunPaths, launch: &LaunchRecord) -> Option<st
                 }
                 std::thread::sleep(LANDING_POLL);
             }
-            // llmlint: ignore[changed_behavior_has_e2e] an attempt holds the lock no longer
+            // llmlint: ignore-block[changed_behavior_has_e2e] an attempt holds the lock no longer
             // than its own store deadlines, each of which cancels the call it bounds, so a
             // journey reaching this arm would have to hold one store call past the sixty-second
             // floor: the cancellation `writeback_budget` already drives.
@@ -1503,7 +1503,7 @@ pub(crate) fn hold_landing(paths: &RunPaths, launch: &LaunchRecord) -> Option<st
                     bound.as_secs()
                 );
                 return None;
-            }
+            } // llmlint: ignore-end[changed_behavior_has_e2e]
         }
     }
 }
@@ -1704,7 +1704,7 @@ fn worker(
             )
         });
         let landing = landing_lock(&run_dir).and_then(|file| file.lock().map(|()| file));
-        // llmlint: ignore[changed_behavior_has_e2e] a run directory the driver cannot open a
+        // llmlint: ignore-block[changed_behavior_has_e2e] a run directory the driver cannot open a
         // file in is one it cannot write this attempt's record into either, a line below; the
         // arm only says so and lands the attempt as one did before the lock existed, and no
         // journey arranges a run directory its own driver cannot write.
@@ -1714,7 +1714,7 @@ fn worker(
                  a stop made while this attempt lands may not release what it writes",
                 snapshot.project
             );
-        }
+        } // llmlint: ignore-end[changed_behavior_has_e2e]
         let at = crate::sys::now_rfc3339();
         let started = Instant::now();
         let attempted = project(
