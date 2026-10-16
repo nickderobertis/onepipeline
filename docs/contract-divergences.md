@@ -11228,6 +11228,10 @@ journey sets it:
   `a_takeover_over_a_claim_stating_no_lease_starts_only_on_an_acknowledgement` holds a
   takeover over a claim stating no lease past the wait its own terms would give, and starts
   it on the displaced driver's acknowledgement;
+  `a_publication_whose_fence_the_board_refuses_starts_once_a_later_write_lands`,
+  `a_takeover_finding_a_fence_it_cannot_read_waits_until_it_is_cleared` and
+  `a_superseded_driver_whose_read_before_clearing_its_fence_fails_still_hands_over` drive
+  the fence's failures;
 - the four interleavings, each asserting from both drivers' records that every dispatch of
   the displaced driver — and so the publication it made — had settled before the adopter's
   first dispatch, that the displaced driver started none after it read the takeover, that no

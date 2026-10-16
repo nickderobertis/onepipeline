@@ -622,9 +622,10 @@ pub(crate) struct DriverClaim {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct ClaimLease {
     /// The driver's claim interval, in whole seconds.
-    pub(crate) interval_seconds: u64,
+    // llmlint: ignore[invalid_states_unrepresentable] zero is unrepresentable; the day's upper bound is the setting's (`continuation::MAX_CLAIM_INTERVAL`), checked where a claim is read at the store boundary, and a newtype for it would publish a schema of its own in `schemas/events.json` for a bound no reader of a journal record needs.
+    pub(crate) interval_seconds: std::num::NonZeroU64,
     /// The driver's cancel grace, in whole seconds.
-    pub(crate) cancel_grace_seconds: u64,
+    pub(crate) cancel_grace_seconds: std::num::NonZeroU64,
 }
 
 impl DriverClaim {

@@ -382,6 +382,7 @@ impl Store {
                     self.dir.display()
                 ),
             })?;
+        // llmlint: ignore[changed_behavior_has_e2e] driven end to end by every `tests/e2e/publication_boundary.rs` journey that publishes — a store whose configuration opts into the boundary, where a driver's fence must land before its publication starts; without this policy each of them waited on a fence the store refused, which is how the gap was found.
         if built.engine.boundary_active() {
             built.engine = built
                 .engine

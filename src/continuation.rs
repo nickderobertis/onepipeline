@@ -84,9 +84,8 @@ pub(crate) const MAX_CLAIM_INTERVAL: Duration = Duration::from_secs(86_400);
 
 /// The setting naming the claim interval, in whole seconds.
 ///
-/// Every host driving one project reads it the same way, and has to be given the same
-/// value: an adopter waits out its own interval for a driver that does not answer, so a
-/// driver given a longer one could outlast the wait.
+/// Each host is given its own; its claim states it, and a run taking the project over waits
+/// out the interval that claim states rather than its own.
 pub(crate) const CLAIM_INTERVAL_ENV: &str = "ONEPIPELINE_CLAIM_INTERVAL_SECONDS";
 
 /// The longest one read of the claim may take before the driver goes on without its answer
@@ -138,9 +137,17 @@ const LEASE_KEYS: [&str; 2] = ["interval_seconds", "cancel_grace_seconds"];
 /// The terms this driver's lease runs on, as its claim states them: the claim interval and
 /// the cancel grace it was given, which a run taking the project over waits out.
 pub(crate) fn lease_terms() -> ClaimLease {
+    terms_of(claim_interval())
+}
+
+/// The terms a lease on `interval` runs on, with this host's cancel grace: both are at
+/// least a second, as [`claim_interval`] and the grace's own setting read them.
+fn terms_of(interval: Duration) -> ClaimLease {
+    let positive =
+        |seconds: u64| std::num::NonZeroU64::new(seconds).unwrap_or(std::num::NonZeroU64::MIN);
     ClaimLease {
-        interval_seconds: claim_interval().as_secs(),
-        cancel_grace_seconds: crate::engine::cancel_grace().as_secs(),
+        interval_seconds: positive(interval.as_secs()),
+        cancel_grace_seconds: positive(crate::engine::cancel_grace().as_secs()),
     }
 }
 
@@ -315,16 +322,13 @@ fn stored_claim_of(
                 )));
             }
             // A lease no driver of this build runs on would size a takeover's wait wrong.
-            if let Some(lease) = claim.lease.filter(|lease| {
-                lease.interval_seconds == 0
-                    || lease.interval_seconds > MAX_CLAIM_INTERVAL.as_secs()
-                    || lease.cancel_grace_seconds == 0
-            }) {
+            if let Some(lease) = claim
+                .lease
+                .filter(|lease| lease.interval_seconds.get() > MAX_CLAIM_INTERVAL.as_secs())
+            {
                 return Err(refused(format!(
-                    "its `lease` names a {}s interval and a {}s cancel grace, not an interval \
-                     of 1 to {} seconds and a positive grace",
+                    "its `lease` names a {}s interval, not one of 1 to {} seconds",
                     lease.interval_seconds,
-                    lease.cancel_grace_seconds,
                     MAX_CLAIM_INTERVAL.as_secs()
                 )));
             }
@@ -754,10 +758,7 @@ impl ClaimWatch {
             session: crate::vcs::usable(session),
             pid: crate::sys::pid(),
             claimed_at: claimed_at.to_owned(),
-            lease: Some(ClaimLease {
-                interval_seconds: self.every.as_secs(),
-                cancel_grace_seconds: crate::engine::cancel_grace().as_secs(),
-            }),
+            lease: Some(terms_of(self.every)),
         };
         self.mine = Some(mine.clone());
         mine
@@ -1497,16 +1498,24 @@ fn takeover_poll(interval: Duration) -> Duration {
 /// Saturating: the grace is an operator's setting no smaller bound holds, and a wait that
 /// could not be represented is one no takeover outlives anyway.
 pub(crate) fn takeover_wait(terms: ClaimLease) -> Duration {
-    Duration::from_secs(terms.interval_seconds)
+    Duration::from_secs(terms.interval_seconds.get())
         .saturating_mul(LAPSES_AFTER_INTERVALS)
         .saturating_add(CLAIM_READ_DEADLINE)
-        .saturating_add(Duration::from_secs(terms.cancel_grace_seconds))
+        .saturating_add(Duration::from_secs(terms.cancel_grace_seconds.get()))
         .saturating_add(LAPSE_SLACK)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Lease terms of `interval` and `grace` seconds, each positive.
+    fn terms(interval: u64, grace: u64) -> ClaimLease {
+        ClaimLease {
+            interval_seconds: std::num::NonZeroU64::new(interval).expect("a positive interval"),
+            cancel_grace_seconds: std::num::NonZeroU64::new(grace).expect("a positive grace"),
+        }
+    }
 
     fn claim(run: &str, host: &str) -> Value {
         json!({"run": run, "host": host, "session": null, "pid": 7,
@@ -1521,10 +1530,7 @@ mod tests {
         assert_eq!(claim_interval_of(Some("86400")), MAX_CLAIM_INTERVAL);
         // The longest interval's whole wait is still an instant away from now.
         assert!(Instant::now()
-            .checked_add(takeover_wait(ClaimLease {
-                interval_seconds: MAX_CLAIM_INTERVAL.as_secs(),
-                cancel_grace_seconds: 30,
-            }))
+            .checked_add(takeover_wait(terms(MAX_CLAIM_INTERVAL.as_secs(), 30)))
             .is_some());
         for unusable in [
             None,
@@ -1611,13 +1617,7 @@ mod tests {
         )
         .expect("a lease reads")
         .expect("held");
-        assert_eq!(
-            read.lease,
-            Some(ClaimLease {
-                interval_seconds: 5,
-                cancel_grace_seconds: 40
-            })
-        );
+        assert_eq!(read.lease, Some(terms(5, 40)));
         for (lease, says) in [
             (json!(5), "its `lease` is 5, not a mapping"),
             (
@@ -1626,15 +1626,15 @@ mod tests {
             ),
             (
                 json!({"interval_seconds": 0, "cancel_grace_seconds": 1}),
-                "a 0s interval and a 1s cancel grace",
+                "expected a nonzero",
             ),
             (
                 json!({"interval_seconds": 86_401, "cancel_grace_seconds": 1}),
-                "a 86401s interval",
+                "a 86401s interval, not one of 1 to 86400 seconds",
             ),
             (
                 json!({"interval_seconds": 5, "cancel_grace_seconds": 0}),
-                "a 0s cancel grace",
+                "expected a nonzero",
             ),
             (json!({"interval_seconds": 5}), "missing field"),
         ] {
@@ -1738,19 +1738,13 @@ mod tests {
         let lease = Lease::new(interval, CLAIM_READ_DEADLINE);
         assert_eq!(lease.inner.holds_for, 2 * interval + CLAIM_READ_DEADLINE);
         // Sized by the displaced driver's own terms, whatever this host was given.
-        let theirs = ClaimLease {
-            interval_seconds: interval.as_secs(),
-            cancel_grace_seconds: 45,
-        };
+        let theirs = terms(interval.as_secs(), 45);
         assert_eq!(
             takeover_wait(theirs),
             lease.inner.holds_for + Duration::from_secs(45) + LAPSE_SLACK
         );
         // Terms no duration can be added to saturate rather than overflowing.
-        let unbounded = ClaimLease {
-            interval_seconds: u64::MAX,
-            cancel_grace_seconds: u64::MAX,
-        };
+        let unbounded = terms(u64::MAX, u64::MAX);
         assert_eq!(takeover_wait(unbounded), Duration::MAX);
         lease.close();
     }
@@ -1863,6 +1857,9 @@ mod tests {
         let claim: std::collections::BTreeSet<String> =
             CLAIM_KEYS.iter().map(|key| (*key).to_owned()).collect();
         assert_eq!(claim, properties::<DriverClaim>());
+        let lease: std::collections::BTreeSet<String> =
+            LEASE_KEYS.iter().map(|key| (*key).to_owned()).collect();
+        assert_eq!(lease, properties::<ClaimLease>());
         let mut settled = properties::<crate::payload::NodeSettled>();
         settled.remove("continued");
         settled.insert("remote".to_owned());
@@ -2015,10 +2012,10 @@ mod tests {
         assert!(held.names("drafts-2", "host-b"));
         assert_eq!(
             held.lease,
-            Some(ClaimLease {
-                interval_seconds: CLAIM_INTERVAL.as_secs(),
-                cancel_grace_seconds: crate::engine::DEFAULT_CANCEL_GRACE_SECONDS
-            })
+            Some(terms(
+                CLAIM_INTERVAL.as_secs(),
+                crate::engine::DEFAULT_CANCEL_GRACE_SECONDS
+            ))
         );
         assert!(acknowledged.is_some_and(|ack| ack.run == "drafts" && ack.host == "builder"));
         let readme = include_str!("../README.md")

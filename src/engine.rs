@@ -1782,6 +1782,7 @@ fn converge(
         // and stops naming each once it has settled: a run taking the project over that finds
         // none named knows none is under way. One that cannot be named yet waits, as one on
         // a stale lease does — and the lease is asked again once the fence has landed.
+        // llmlint: ignore[changed_behavior_has_e2e] the lease asked again after the fence lands is the one admission every start asks, whose refusal on a stale lease is driven by `continuation::a_publication_asked_for_on_a_stale_lease_waits_for_the_next_read`; reaching it *between* the fence's write and that question needs a store that holds one write for a whole claim interval and then answers, which is the sibling suspended mid-command — host-level process control no CLI journey exposes.
         let fenced = claims.as_mut().is_none_or(|watch| {
             let mut nodes = publishing.clone();
             nodes.extend(starting.iter().map(|due| due.node.clone()));

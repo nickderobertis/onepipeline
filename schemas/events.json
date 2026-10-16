@@ -4168,13 +4168,13 @@
               "interval_seconds": {
                 "type": "integer",
                 "format": "uint64",
-                "minimum": 0,
+                "minimum": 1,
                 "description": "The driver's claim interval, in whole seconds."
               },
               "cancel_grace_seconds": {
                 "type": "integer",
                 "format": "uint64",
-                "minimum": 0,
+                "minimum": 1,
                 "description": "The driver's cancel grace, in whole seconds."
               }
             },
@@ -4258,13 +4258,13 @@
               "interval_seconds": {
                 "type": "integer",
                 "format": "uint64",
-                "minimum": 0,
+                "minimum": 1,
                 "description": "The driver's claim interval, in whole seconds."
               },
               "cancel_grace_seconds": {
                 "type": "integer",
                 "format": "uint64",
-                "minimum": 0,
+                "minimum": 1,
                 "description": "The driver's cancel grace, in whole seconds."
               }
             },
