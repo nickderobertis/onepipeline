@@ -487,6 +487,15 @@ fn a_cancelled_node_is_continued_pinned_to_its_branch_and_adopts_its_draft() {
         world.run_file(run, "result.json").is_file()
     });
     drop(retry);
+    // The detached driver still has its closeout to write after its result, into the runs
+    // root this journey removes below: that host is gone only once its driver is.
+    let driver = world.run_json(run, "launch.json")["pid"]
+        .as_u64()
+        .and_then(|pid| u32::try_from(pid).ok())
+        .expect("the launch record names the driver");
+    world.until("the detached driver to hand back", |_| {
+        crate::harness::process_ended(driver)
+    });
     let stored = stored_settlements(&world, &project);
     assert_eq!(stored["b"]["status"], "cancelled", "{stored:#?}");
     for field in ["branch", "change_url"] {
