@@ -932,6 +932,32 @@ pub(crate) fn resolve_node_graphs(node: &mut Node, base: &Path) -> Result<()> {
     Ok(())
 }
 
+/// What a launch found where a project's claim goes.
+enum Found {
+    /// No claim: nobody drives the project.
+    Nothing,
+    /// A claim, naming the run that drives it.
+    Claim(crate::payload::DriverClaim),
+    /// Something that is not a claim, which only a takeover passes.
+    NotAClaim,
+}
+
+impl Found {
+    /// The claim found, where one was.
+    fn claim(&self) -> Option<crate::payload::DriverClaim> {
+        match self {
+            Self::Claim(claim) => Some(claim.clone()),
+            Self::Nothing | Self::NotAClaim => None,
+        }
+    }
+
+    /// Whether a driver may still stand behind what was found: a claim that is not one may
+    /// be standing over a driver too, and a takeover waits on it as on any other.
+    fn may_stand_over_a_driver(&self) -> bool {
+        !matches!(self, Self::Nothing)
+    }
+}
+
 /// Whether the driver `claim` names provably can no longer act, by this host's own records:
 /// a run of this host, under this runs root, that nothing drives — its ownership lock taken
 /// and let go again here. Anything else is a driver only its acknowledgement, or its lease
@@ -1183,18 +1209,16 @@ fn start(args: &StartArgs) -> Result<i32> {
     // the launch above, so a claim is never defaulted to none.
     // A claim that is not one refuses the launch, unless the launch takes the project over:
     // otherwise a project whose claim a stranger mangled could never be launched again.
-    // Whether the project held anything at all where a claim goes: a claim that is not one
-    // may still be standing over a driver, and a takeover waits on it as on any other.
-    let mut mangled = false;
-    let claim = match crate::continuation::claim_of(project.as_str(), &read.project_metadata) {
-        Ok(claim) => claim,
+    let found = match crate::continuation::claim_of(project.as_str(), &read.project_metadata) {
+        Ok(Some(claim)) => Found::Claim(claim),
+        Ok(None) => Found::Nothing,
         Err(refused) if args.take_over => {
             eprintln!("onepipeline: --take-over passes a claim that is not one: {refused}");
-            mangled = true;
-            None
+            Found::NotAClaim
         }
         Err(refused) => return Err(refused),
     };
+    let claim = found.claim();
     // What the project's last driver left on it, which a launch continues rather than runs
     // again — unless it is told `--fresh`.
     let mut continuation = if args.fresh {
@@ -1465,7 +1489,7 @@ fn start(args: &StartArgs) -> Result<i32> {
     // acknowledged it or can no longer act. A driver of this host whose run nothing drives
     // has let go already, which this host's own records prove.
     if args.take_over
-        && (claim.is_some() || mangled)
+        && found.may_stand_over_a_driver()
         && !gone_from_this_host(&root, claim.as_ref())?
     {
         let mine = crate::payload::DriverClaim {
