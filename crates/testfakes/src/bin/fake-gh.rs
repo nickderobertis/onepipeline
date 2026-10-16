@@ -861,7 +861,12 @@ fn list(args: &[String], dir: &Path) -> ExitCode {
             ("--head", Shape::Named),
             ("--base", Shape::Named),
             ("--state", Shape::Exact("open")),
-            ("--json", Shape::Exact("number,url,state,headRefOid")),
+            // `onevcs` 0.52.0 reads the draft state and the description in the
+            // same listing, rather than viewing each change request again.
+            (
+                "--json",
+                Shape::Exact("number,url,state,headRefOid,isDraft,title,body"),
+            ),
         ],
         &[],
     ) {
@@ -888,11 +893,15 @@ fn list(args: &[String], dir: &Path) -> ExitCode {
         })
         .map(|change| {
             let head = head_of(dir, &change);
+            let draft = recorded(dir, &change_key(dir, &change)) == Some(Change::Draft);
             serde_json::json!({
                 "number": change.number,
                 "url": url_of(&change),
                 "state": "OPEN",
                 "headRefOid": head.as_str(),
+                "isDraft": draft,
+                "title": change.title,
+                "body": change.body,
             })
         })
         .collect();
@@ -1067,7 +1076,8 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
         // `change show` and after every `change describe`: what a drafter is
         // shown of the worker's own description, and what a journey reads back
         // to hold the description the closeout wrote to the one the host has.
-        Some("title,body") => "title,body",
+        // `onevcs` 0.52.0 reads the draft state in that same view.
+        Some("title,body,isDraft") => "title,body,isDraft",
         // Whether the change can merge into its base. `onevcs` 0.38.0 reads it
         // while it watches a merge it armed, so a conflict the host confirms
         // ends the watch as `sync-conflict` rather than waiting out its bound.
