@@ -902,9 +902,8 @@ onemessagebus = "0.9.1"
 # same pre-1.0 reason as every raise above: `^0.17` admits no 0.19.x.
 # `oneagentgraph` 0.5.6 requires it.
 #
-# 0.19.2 is that release moved onto `serde-saphyr`, so no libyaml translation
-# reaches this build through it. `oneagentgraph` 0.5.10 requires it. 0.19.5 is the
-# release onejudge's own YAML move published, beside `oneagentgraph` 0.5.13.
+# **0.19.5 reads and writes YAML through `serde-saphyr`**, so no libyaml
+# translation reaches this build through it; `oneagentgraph` 0.5.13 requires it.
 onejudge = "0.19.5"
 # **Test-support only**, and named for one reason: `crates/testfakes`'s
 # `oneharness` double writes the report onejudge reads back, and that report is
@@ -992,12 +991,11 @@ onejudge = "0.19.5"
 # (oneharness #1403), which the run views draw a turn's activity through. Inside
 # `^0.24.0`, so `oneagentgraph` and `onejudge` resolve this one copy with it.
 #
-# **0.26.0** is the core `oneagentgraph` 0.5.10 and `onejudge` 0.19.2 each
-# require, so the three move together; `^0.24.1` admits no 0.26.x pre-1.0.
-#
-# **0.28.1** is the core `oneagentgraph` 0.5.13 and `onejudge` 0.19.5 each
-# require, so the three move together again.
-oneharness-core = "0.28.1"
+# **0.28.x** is the core `oneagentgraph` 0.5.13 and `onejudge` 0.19.5 each
+# require, so the three move together; no earlier caret admits a 0.28.x pre-1.0.
+# It starts Codex with apps and analytics off, which `crates/testfakes`'s
+# `fake-codex` speaks.
+oneharness-core = "0.28.2"
 # The sibling's own test-support crate, from the **same** revision as the library
 # it implements — here by resolving both from the registry at the releases cut
 # from one commit, each release of this crate requiring the exact `onevcs` it was
