@@ -459,6 +459,11 @@ fn a_live_add_routed_to_the_second_source_lands_in_a_member_project_created_for_
     );
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey proves
+// the order a stop in `src/driver.rs` and the write-back worker in `src/writeback.rs`
+// take the landing in, so any change under `src/` can move it. `nx.json`'s
+// `noteJourneySource`, the one separately edged Rust test input, itself begins
+// `{workspaceRoot}/src/**/*`, so no narrower edge exists.
 /// A stop made while the routed copy of a live `add` has landed its item and the landed
 /// baseline does not say so yet — the window in which a stop's release, which reads only that
 /// baseline, could not find the item — waits for the attempt to be recorded before it ends the
@@ -573,7 +578,7 @@ fn a_stop_while_an_added_item_is_landing_waits_for_it_and_releases_the_item() {
         waiting,
         "the stop ended the driver inside the landing: {stderr}"
     );
-}
+} // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// A stop releases every item of the plan the run never started, in whichever source it lives,
 /// and an adopting driver — a process of its own, reading the run's landed baseline back with
@@ -834,6 +839,72 @@ fn a_home_whose_member_list_breaks_the_stores_rule_is_not_launched() {
             "a run was minted over the member list {members}"
         );
     }
+}
+
+/// [`TORN_FILE`] is what `local-md` itself says of a home document caught mid-write, read back
+/// through the real store: an empty document and one cut off before its closing `---` are both
+/// refused with it and waited out by [`landed_words`], while a document malformed any other way
+/// is still the store's answer and fails the wait. `local-md` builds the text inside a private
+/// function, so this journey is what holds the copy here to it.
+#[test]
+fn a_home_document_caught_mid_write_is_refused_with_the_text_a_wait_treats_as_torn() {
+    let world = a_routed_world("multi-source-torn-read");
+    let name = "torn";
+    let home = filed(&world, name, &plan_of(name, vec![on(HOME, "core", &[])]));
+    let document = world
+        .store()
+        .join("projects")
+        .join(format!("{}.md", project_id(name)));
+    let authored = std::fs::read_to_string(&document).expect("the home's document");
+    let whole = words(&world, &home);
+    let (front, _) = authored
+        .strip_prefix("---\n")
+        .and_then(|rest| rest.split_once("\n---"))
+        .expect("the home's document opens with front matter");
+    // llmlint: ignore-block[tests_mirror_real_usage] the states are the bytes `local-md`'s own
+    // in-place rewrite of the home passes through, which no hold of the store reaches; the read
+    // and the wait are the real ones.
+    for (torn, state) in [
+        (String::new(), "an empty document"),
+        (
+            format!("---\n{front}\n"),
+            "front matter cut off before its close",
+        ),
+    ] {
+        std::fs::write(&document, &torn).expect("the home's document is torn");
+        let refused =
+            read_plan_tasks(&world, &home).expect_err(&format!("the store read {state} as a plan"));
+        assert!(
+            refused.contains(TORN_FILE),
+            "the store no longer refuses {state} with the text a wait treats as torn: {refused}"
+        );
+        assert_eq!(
+            landed_words(&world, &home),
+            None,
+            "{state} was not waited out"
+        );
+    }
+    std::fs::write(&document, format!("---\n{front}\n  - [unclosed\n---\n"))
+        .expect("the home's document is malformed");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let refused = read_plan_tasks(&world, &home).expect_err("the store read malformed YAML");
+    assert!(
+        !refused.contains(TORN_FILE),
+        "malformed YAML reads as torn, so a wait would never fail on it: {refused}"
+    );
+    let failed =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| landed_words(&world, &home)));
+    assert!(
+        failed.is_err(),
+        "a wait took malformed YAML as not yet settled"
+    );
+
+    std::fs::write(&document, &authored).expect("the home's document is restored");
+    assert_eq!(
+        landed_words(&world, &home),
+        Some(whole),
+        "the whole document did not read back as it did before it was torn"
+    );
 }
 
 /// A plan's design document that links each detail out to the section of the task owning it

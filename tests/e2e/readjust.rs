@@ -2026,6 +2026,10 @@ fn ended_complete(world: &World, run: &str, ended: &std::process::Output) {
     );
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey proves
+// what a failed run's journal records for the node that failed, which any change under
+// `src/` can move. `nx.json`'s `noteJourneySource`, the one separately edged Rust test
+// input, itself begins `{workspaceRoot}/src/**/*`, so no narrower edge exists.
 /// When a journey's adopting driver ends with a node failed, what the journey says names that
 /// node and the detail its settlement carries in the run's journal, which the driver's own
 /// stream does not print.
@@ -2065,7 +2069,7 @@ fn a_driver_ending_with_a_failed_node_is_reported_with_that_nodes_settlement() {
         "the failure does not name b with its settlement's detail {detail:?}: {said}"
     );
     assert!(!said.contains("node 'a'"), "a settled done: {said}");
-}
+} // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// A continuing launch on a cold host, from the local Markdown store, readjusts before
 /// its first dispatch: `a`'s landing, made before it, is found by its own read and `b`

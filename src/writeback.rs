@@ -1704,6 +1704,10 @@ fn worker(
             )
         });
         let landing = landing_lock(&run_dir).and_then(|file| file.lock().map(|()| file));
+        // llmlint: ignore[changed_behavior_has_e2e] a run directory the driver cannot open a
+        // file in is one it cannot write this attempt's record into either, a line below; the
+        // arm only says so and lands the attempt as one did before the lock existed, and no
+        // journey arranges a run directory its own driver cannot write.
         if let Err(error) = &landing {
             eprintln!(
                 "onetaskgraph write-back for '{}' could not hold {LANDING_LOCK_FILE}: {error}; \

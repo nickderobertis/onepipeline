@@ -2592,8 +2592,6 @@ fn attach(
             })
             .collect();
         if !fresh.is_empty() || !headed {
-            // The header once, then each record the first time it is read, and the run's
-            // trailer after every read that printed one.
             let rendered = views::monitor_shown(&view, fresh);
             for line in rendered.lines().skip(usize::from(headed)) {
                 eprintln!("{line}");
