@@ -21,7 +21,8 @@ pair() {
   echo "$name-warm exit $?" >>"$work/chain.status"
   du -sh "$clone/.nx/cache" >>"$work/out/$name.disk"
 }
-pair check check
-pair check-affected check-affected
+# `gate` runs `check` as its dependency recipe, so each gate run's log also
+# times a `check` of the same Nx state, up to its `check: ok` line.
 pair gate gate
+pair check-affected check-affected
 echo 0 >"$work/chain.exit"

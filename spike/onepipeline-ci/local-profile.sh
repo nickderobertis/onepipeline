@@ -12,9 +12,11 @@
 #
 # `cold` deletes <checkout>/.nx/cache and <checkout>/.nx/workspace-data first;
 # `warm` keeps what the previous run left. The cargo target directory is the
-# checkout's own and is left as it stands.
+# checkout's own and is left as it stands. CARGO_INCREMENTAL=0 is set, as
+# Swatinem/rust-cache sets it in every CI job that builds here.
 #
-# Writes <out-dir>/<label>.log (the recipe's output; Nx keeps each task's own
+# Writes <out-dir>/<label>.log (the recipe's output, each line prefixed with
+# its arrival time on the wall clock and on the uptime clock; Nx keeps each task's own
 # output under .nx/cache/terminalOutputs, copied to <label>.terminal/ after the
 # run) and <label>.json: wall clock, the host's uptime clock over the same
 # interval (a VM pause shows as wall clock the uptime clock did not see, and is
@@ -39,8 +41,8 @@ watcher=$!
 load_before=$(cut -d' ' -f1-3 /proc/loadavg)
 up_before=$(cut -d' ' -f1 /proc/uptime)
 start_ms=$(date +%s%3N)
-just "$@" >"$out/$label.log" 2>&1
-status=$?
+CARGO_INCREMENTAL=0 just "$@" 2>&1 | python3 -I "$here/ts-lines.py" >"$out/$label.log"
+status=${PIPESTATUS[0]}
 end_ms=$(date +%s%3N)
 up_after=$(cut -d' ' -f1 /proc/uptime)
 load_after=$(cut -d' ' -f1-3 /proc/loadavg)
