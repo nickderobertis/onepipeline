@@ -32,13 +32,18 @@ set positional-arguments := true
 # release into this clone's own build directory, never onto `PATH`, and
 # `tests/linked_engines.rs` fails if this line ever names a release other than the one
 # the lock links.
-onetaskgraph-version := "0.7.0"
+onetaskgraph-version := "0.7.1"
 onetaskgraph-root := justfile_directory() / "target" / "tools" / ("onetaskgraph-" + onetaskgraph-version)
 
 # The budget checker `budgets.yaml` is measured with (`just budgets`), installed at this
 # release into this clone's own build directory, never onto `PATH`, as `onetaskgraph` is above.
 onebudgetspec-version := "0.1.1"
 onebudgetspec-root := justfile_directory() / "target" / "tools" / ("onebudgetspec-" + onebudgetspec-version)
+
+# The pruner `just pool-maintenance` runs, installed onto `PATH` by `bootstrap` (the
+# `pool-maintenance` project's) at this release and no other: onevcs runs that recipe in
+# an idle warm-pool slot (`onevcs.toml`), outside any build directory of this clone.
+prune-superseded-version := "0.1.1"
 
 # The renderer the visual-docs capture draws each scene with (`just screenshots`).
 # NOT part of `check`, `gate` or `bootstrap`: screenshots are informational, and
@@ -135,6 +140,13 @@ _ensure-onebudgetspec:
       || cargo install onebudgetspec --locked --quiet --version {{onebudgetspec-version}} --root "{{onebudgetspec-root}}" \
       || { echo "onebudgetspec {{onebudgetspec-version}} could not be installed into {{onebudgetspec-root}}; 'just budgets' refuses without it" >&2; exit 1; }
 # llmlint: ignore-end[changed_behavior_has_e2e]
+
+# The released `cargo-prune-superseded` `just pool-maintenance` runs, skipped when that
+# release is already the one on `PATH`. Network, so only `bootstrap` installs it.
+_ensure-prune-superseded:
+    @[ "$(cargo-prune-superseded --version 2>/dev/null)" = "cargo-prune-superseded {{prune-superseded-version}}" ] \
+      || cargo install --locked cargo-prune-superseded --version {{prune-superseded-version}} --quiet \
+      || { echo "cargo-prune-superseded {{prune-superseded-version}} could not be installed; 'just pool-maintenance' refuses without it" >&2; exit 1; }
 
 # These are test runners, not rules: their version cannot change the gate's
 # verdict, so both here and CI take the latest rather than keeping two pins that
@@ -577,6 +589,28 @@ host-view-budget binary built_by="":
     @just _ensure-node-modules
     @ONEPIPELINE_HOST_VIEW_BUILT_BY="$2" node scripts/host-view-measure.mjs "$1"
     @node_modules/.bin/onebudgetspec check budgets.yaml --id host-view-time
+
+# What onevcs runs in each idle warm-pool slot of this repository (`onevcs.toml`). `target`
+# is every directory this clone's cargo builds write to: `.cargo/config.toml` sets it, and
+# the pruner finds the nested ones (`target/llvm-cov-target`, `target/wheel-*`) inside it.
+# Each unit's newest build, and every build modified within the window, is kept.
+# Remove this clone's superseded cargo builds older than 2 days.
+pool-maintenance:
+    @command -v cargo-prune-superseded >/dev/null 2>&1 \
+      || { echo "cargo-prune-superseded is not on PATH: run 'just bootstrap' (or 'just _ensure-prune-superseded'), then re-run" >&2; exit 1; }
+    @cargo-prune-superseded --keep-within 2d target
+
+# Outside `check` and `gate`: the one host budget, `pool-maintenance/budgets.yaml`'s, builds
+# this clone twice to stage what it times. `release-sweep.yml` runs it after its gate.
+# Measure every project's host-labelled budgets against their thresholds.
+budgets-host:
+    @bash scripts/nx.sh run-many -t budgets-host
+
+# The `pool-maintenance` project's `budgets-host` target.
+_pool-maintenance-budgets:
+    @[ -x "{{onebudgetspec-root}}/bin/onebudgetspec" ] || [ -x "{{onebudgetspec-root}}/bin/onebudgetspec.exe" ] \
+      || { echo "onebudgetspec {{onebudgetspec-version}} is not installed: run 'just bootstrap' (or 'just _ensure-onebudgetspec'), then re-run" >&2; exit 1; }
+    @"{{onebudgetspec-root}}/bin/onebudgetspec" check pool-maintenance/budgets.yaml --label host
 
 # Both are outside `check` for the reason `deps-check` is: they read the
 # crates.io index, and the deterministic gate stays offline. The split half of

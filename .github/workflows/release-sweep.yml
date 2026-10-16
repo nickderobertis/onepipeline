@@ -70,3 +70,23 @@ jobs:
       - name: Committed generated files are up to date
         run: git diff --exit-code -- Cargo.lock package-lock.json
   # llmlint: ignore-end[no_second_broader_sweep_over_an_already_gated_commit]
+
+  # The host budgets, after the gate passes: the pool-maintenance pass's measurement builds
+  # the workspace twice, so no per-change path reaches it, and this is the only job that
+  # runs it (`just budgets-host`).
+  host-budgets:
+    needs: release-sweep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,nextest,cargo-llvm-cov
+      - name: Bootstrap
+        run: just bootstrap
+      - name: Host budgets
+        run: just budgets-host

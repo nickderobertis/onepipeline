@@ -1011,9 +1011,13 @@ onevcs-testing = "0.19.2"
 # recorded before this release costs one more read and is never served from cache; the
 # engine keeps versions opaque and translates nothing.
 # `justfile`'s `onetaskgraph-version` moves with this release.
-onetaskgraph-core = "=0.7.0"
-onetaskgraph-plugin-api = "=0.7.0"
-onetaskgraph-local-md = "=0.7.0"
+#
+# **No earlier release than 0.7.1**: a plan drafted in a private source reaches the
+# board with no origin recorded, and only 0.7.1's document copy still files its
+# documents under the board's plan. `tests/e2e/multi_source.rs` fails on 0.7.0.
+onetaskgraph-core = "=0.7.1"
+onetaskgraph-plugin-api = "=0.7.1"
+onetaskgraph-local-md = "=0.7.1"
 # Not engines: two crates both members use, pinned once so they build against one version.
 # `just engines-current` reads only the engines its script names.
 sha2 = "0.10"
@@ -1023,7 +1027,7 @@ windows-sys = "0.61"
 
 [package]
 name = "onepipeline"
-version = "0.73.1"
+version = "0.74.0"
 edition = "2021"
 rust-version.workspace = true
 description = "Execute a task DAG over oneagentgraph and onevcs, merging their event streams into one."
