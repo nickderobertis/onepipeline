@@ -2690,6 +2690,9 @@ pub fn request_for(node: &crate::plan::Node) -> Option<SessionRequest> {
         // merge in progress, and the worker it is dispatched to concludes it:
         // see `lifecycle::merge_resolution`.
         refuse_conflicts: false,
+        // onevcs's session-open rules probe still runs, as it did before the
+        // field existed: this crate does not merge a session's base itself.
+        caller_merges_base: false,
     })
 }
 

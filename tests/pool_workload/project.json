@@ -1,0 +1,54 @@
+{
+  "name": "onepipeline-pool-workload",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "library",
+  "sourceRoot": "tests/pool_workload",
+  "tags": [
+    "scope:tests",
+    "lang:rust",
+    "tier:workload"
+  ],
+  "targets": {
+    "bootstrap": {
+      "executor": "nx:noop"
+    },
+    "build": {
+      "command": "just _tier-build pool_workload",
+      "inputs": [
+        "poolWorkloadSource"
+      ]
+    },
+    "format": {
+      "command": "just _tier-format tests/pool_workload/main.rs"
+    },
+    "format-check": {
+      "command": "just _tier-fmt-check tests/pool_workload/main.rs",
+      "inputs": [
+        "poolWorkloadSource"
+      ]
+    },
+    "lint": {
+      "command": "just _tier-lint pool_workload",
+      "inputs": [
+        "poolWorkloadSource"
+      ]
+    },
+    "workload": {
+      "//": "llmlint: ignore-block[new_projects_keep_the_graph_uniform] this project declares no `test` on purpose, as the live tiers do: its journey measures a whole host-shaped sweep, so it runs only through this uncached target, which no `check`, `test`, coverage or `budgets` target reaches; a `test` that ran it would put it in every per-change selection, and one that ran nothing would look covered while proving nothing. npm/test/workspace-nx.test.mjs holds the exemption to the `tier:workload` tag.",
+      "command": "just _pool-workload-run",
+      "inputs": [
+        "poolWorkloadSource"
+      ],
+      "cache": false,
+      "parallelism": false,
+      "//end": "llmlint: ignore-end[new_projects_keep_the_graph_uniform]"
+    },
+    "check": {
+      "executor": "nx:noop",
+      "dependsOn": [
+        "format-check",
+        "lint"
+      ]
+    }
+  }
+}

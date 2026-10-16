@@ -1020,6 +1020,7 @@ mod tests {
                 overflow: None,
                 labels: Default::default(),
                 refuse_conflicts: false,
+                caller_merges_base: false,
             }),
             cancel: CancellationToken::new(),
             attempt: NonZeroU32::MIN,

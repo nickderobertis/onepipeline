@@ -144,6 +144,7 @@ pub(crate) fn cut_a_slot(world: &World, checkout: &Path) {
                 overflow: None,
                 labels: Default::default(),
                 refuse_conflicts: false,
+                caller_merges_base: false,
             })
             .expect("a session opens on the pooled identity");
         vcs.close_session(&session.token)
@@ -957,6 +958,10 @@ fn a_failed_or_timed_out_command_an_unmaintainable_identity_and_an_unlistable_ho
             "{SERVICE_IDENTITY} (every 1h): slot 1 ran — failed (exit 3) in"
         ));
     release(&world, "failing");
+    // That run's driver tried the slot again each time `every` came round until
+    // it was let go, so how many markers it left is the host's pace, not this
+    // journey's: what the later sections hold is that none of them adds one.
+    let attempted = marker_lines(&world);
 
     // A command that timed out under the identity's own bound: a hold nothing
     // releases, bounded at a second.
@@ -975,7 +980,7 @@ fn a_failed_or_timed_out_command_an_unmaintainable_identity_and_an_unlistable_ho
     );
     assert_eq!(
         marker_lines(&world),
-        1,
+        attempted,
         "a timed-out command wrote its marker"
     );
     world
@@ -1035,13 +1040,15 @@ fn a_failed_or_timed_out_command_an_unmaintainable_identity_and_an_unlistable_ho
             .is_some_and(|reason| !reason.is_empty()),
         "{unreadable}"
     );
-    assert_eq!(marker_lines(&world), 1, "an unreadable configuration ran");
+    assert_eq!(
+        marker_lines(&world),
+        attempted,
+        "an unreadable configuration ran"
+    );
     world
         .run(&["results", "unreadable"])
         .exited(0)
-        .out_has(&format!(
-            "{SERVICE_IDENTITY} (every 1s): maintenance configuration unreadable — "
-        ));
+        .out_has(&format!("{SERVICE_IDENTITY} — maintenance unreadable: "));
     std::fs::remove_file(&document).expect("the document is taken away");
     release(&world, "unreadable");
 
@@ -1504,6 +1511,7 @@ fn a_sweep_answered_in_use_no_slots_and_no_command_journals_nothing() {
                 overflow: None,
                 labels: Default::default(),
                 refuse_conflicts: false,
+                caller_merges_base: false,
             })
             .expect("a session opens into the slot")
             .token
@@ -1734,6 +1742,575 @@ fn a_pass_with_no_sweep_due_reads_no_registry_sessions_or_workspaces_document() 
     release(&world, "listless");
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
+/// Size each named identity's pool, naming a host `maintain` only where one is
+/// given: `(name, slots, host command as argv JSON)`.
+fn sized_pools(world: &World, pools: &[(&str, u64, Option<&str>)]) {
+    let mut document = "version: 1\nrules:\n".to_owned();
+    for (name, slots, command) in pools {
+        document.push_str(&format!(
+            "  - match: {{host: github.com, owner: owner, name: {name}}}\n    pool: {slots}\n    \
+             overflow: 0\n"
+        ));
+        if let Some(command) = command {
+            document.push_str(&format!(
+                "    maintain:\n      command: {command}\n      timeout: 120s\n"
+            ));
+        }
+    }
+    std::fs::write(world.onevcs_home().join("workspaces.yml"), document)
+        .expect("the workspaces file is written");
+}
+
+/// Commit the repository's own maintenance into its base: `tools/maintain.sh`,
+/// the `declared_maintain.sh` fixture, and `onevcs.toml` as given, pushed so every
+/// slot cut afterwards carries the script.
+#[cfg(unix)]
+fn declare(world: &World, checkout: &Path, declaration: &str) {
+    let tools = checkout.join("tools");
+    std::fs::create_dir_all(&tools).expect("a tools directory");
+    onepipeline_testfakes::executable(
+        &tools.join("maintain.sh"),
+        std::fs::read(repo_file("tests/e2e/declared_maintain.sh")).expect("the fixture ships"),
+    );
+    std::fs::write(checkout.join("onevcs.toml"), declaration).expect("the declaration is written");
+    crate::harness::git(world, checkout, &["add", "-A"]);
+    crate::harness::git(
+        world,
+        checkout,
+        &["commit", "-m", "chore: declare the pool maintenance"],
+    );
+    crate::harness::git(world, checkout, &["push", "origin", "main"]);
+}
+
+#[cfg(unix)]
+fn declaring(args: &[&str]) -> String {
+    let mut argv = vec!["tools/maintain.sh"];
+    argv.extend_from_slice(args);
+    format!(
+        "schema_version = 1\n\n[pool.maintain]\ncommand = {}\ntimeout = \"2m\"\n",
+        serde_json::to_string(&argv).expect("an argv serializes")
+    )
+}
+
+/// Cut `n` slots for the identity: `n` real sessions open at once, then closed,
+/// each handing its slot back to the pool.
+#[cfg(unix)]
+fn cut_slots(world: &World, checkout: &Path, n: usize) {
+    world.on_onevcs(|| {
+        let vcs = onevcs::Providers::real().vcs;
+        let tokens: Vec<_> = (0..n)
+            .map(|_| {
+                vcs.open_session(onevcs::SessionRequest {
+                    repo: checkout.to_string_lossy().into_owned(),
+                    branch: None,
+                    branch_name: None,
+                    branch_prefix: None,
+                    base: None,
+                    execution_checkout: None,
+                    pool: None,
+                    overflow: None,
+                    labels: Default::default(),
+                    refuse_conflicts: false,
+                    caller_merges_base: false,
+                })
+                .expect("a session opens on the pooled identity")
+                .token
+            })
+            .collect();
+        for token in &tokens {
+            vcs.close_session(token)
+                .expect("the session closes and hands the slot back");
+        }
+    });
+}
+
+/// Every slot's worktree of the identity, by slot number.
+#[cfg(unix)]
+fn worktrees(world: &World, repo: &str) -> Vec<PathBuf> {
+    let status = pool_status_of(world, repo);
+    let mut slots: Vec<(u64, PathBuf)> = status["slots"]
+        .as_array()
+        .expect("slots")
+        .iter()
+        .map(|slot| {
+            (
+                slot["number"].as_u64().expect("a slot number"),
+                Path::new(slot["path"].as_str().expect("a slot path")).join("worktree"),
+            )
+        })
+        .collect();
+    slots.sort();
+    slots.into_iter().map(|(_, worktree)| worktree).collect()
+}
+
+/// Write `mebibytes` of ordinary, non-sparse files under the worktree's `scratch/`.
+#[cfg(unix)]
+fn scratch(worktree: &Path, mebibytes: usize) {
+    let dir = worktree.join("scratch");
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let chunk: Vec<u8> = (0..1024 * 1024).map(|at| (at % 251) as u8 + 1).collect();
+    for at in 0..mebibytes {
+        std::fs::write(dir.join(format!("output-{at}.bin")), &chunk).expect("a scratch file");
+    }
+}
+
+/// The allocated bytes under `root`, measured the way the sibling's `disk` is: every
+/// entry without following links, each inode's blocks once.
+#[cfg(unix)]
+fn allocated(root: &Path) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    let mut seen = std::collections::HashSet::new();
+    let mut pending = vec![root.to_path_buf()];
+    let mut bytes = 0;
+    while let Some(path) = pending.pop() {
+        let metadata = std::fs::symlink_metadata(&path).expect("an entry reads");
+        if !seen.insert((metadata.dev(), metadata.ino())) {
+            continue;
+        }
+        bytes += metadata.blocks() * 512;
+        if metadata.is_dir() {
+            for entry in std::fs::read_dir(&path).expect("a directory lists") {
+                pending.push(entry.expect("an entry").path());
+            }
+        }
+    }
+    bytes
+}
+
+/// `0.3 GiB`, as `results` spells a byte count.
+#[cfg(unix)]
+fn gib(bytes: u64) -> String {
+    format!("{:.1} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+}
+
+#[cfg(unix)]
+fn disk_of(record: &Value, identity: &str, number: u64) -> Value {
+    let entry = record["payload"]["identities"]
+        .as_array()
+        .expect("identities")
+        .iter()
+        .find(|entry| entry["identity"] == identity)
+        .unwrap_or_else(|| panic!("{identity} is not in the record: {record}"));
+    entry["outcome"]["slots"]
+        .as_array()
+        .expect("slots")
+        .iter()
+        .find(|slot| slot["number"] == number)
+        .unwrap_or_else(|| panic!("slot {number} of {identity} is not in the record: {record}"))
+        ["outcome"]["ran"]["disk"]
+        .clone()
+}
+
+/// What a `disk` freed: `before_bytes - after_bytes`, signed.
+#[cfg(unix)]
+fn dropped(disk: &Value) -> i128 {
+    i128::from(disk["before_bytes"].as_u64().expect("before_bytes"))
+        - i128::from(disk["after_bytes"].as_u64().expect("after_bytes"))
+}
+
+#[cfg(unix)]
+fn line_under_header(results: &str) -> Option<&str> {
+    let mut lines = results.lines();
+    lines.find(|line| line.starts_with("  pool maintenance: last sweep that did something"))?;
+    lines.next()
+}
+
+/// A sweep runs each repository's own declared maintenance, and `results` says
+/// how much it freed.
+///
+/// Three pooled slots across two identities that declare, in a real `onevcs.toml`,
+/// a script they track which removes the ordinary files the journey wrote into each
+/// worktree — sized so `other` frees more than `service` across its two slots — and
+/// a third identity that declares nothing under a host naming no `maintain`, with the
+/// same files in its slot. One sweep removes the declared identities' files and
+/// journals one record whose every slot carries the sibling's `disk`, its drop equal
+/// to the one this journey measures itself; the third's files stay and it is in
+/// neither the record nor the summary. `results` prints the summary directly under
+/// the sweep's header — the total, the slots that freed, and each identity by its
+/// last path segment, largest first — and the per-identity slot lines as before.
+///
+/// Unix: the sibling measures allocated blocks only there, and answers `null`
+/// elsewhere, so there is no freed figure for a Windows leg to read.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] This
+// src/maintenance.rs journey has no narrower Nx edge: noteJourneySource includes src/**/*.
+#[cfg(unix)]
+#[test]
+fn a_sweep_runs_each_repositorys_declared_maintenance_and_results_says_what_it_freed() {
+    let world = pooled_world("maintenance-declared", Some(FAST_PACE));
+    let service = world.repository("local-direct", &[]);
+    let other = world.extra_repository("other");
+    let third = world.extra_repository("third");
+    sized_pools(
+        &world,
+        &[("service", 2, None), ("other", 1, None), ("third", 1, None)],
+    );
+    declare(&world, &service.checkout, &declaring(&[]));
+    declare(&world, &other.checkout, &declaring(&[]));
+    cut_slots(&world, &service.checkout, 2);
+    cut_slots(&world, &other.checkout, 1);
+    cut_slots(&world, &third.checkout, 1);
+
+    let service_slots = worktrees(&world, "service");
+    assert_eq!(service_slots.len(), 2);
+    scratch(&service_slots[0], 64);
+    scratch(&service_slots[1], 48);
+    let other_slot = &worktrees(&world, "other")[0];
+    scratch(other_slot, 220);
+    let third_slot = &worktrees(&world, "third")[0];
+    scratch(third_slot, 8);
+    let maintained = [
+        (SERVICE_IDENTITY, 1, &service_slots[0]),
+        (SERVICE_IDENTITY, 2, &service_slots[1]),
+        ("github.com/owner/other", 1, other_slot),
+    ];
+    let before: Vec<u64> = maintained
+        .iter()
+        .map(|(_, _, worktree)| allocated(worktree))
+        .collect();
+
+    let hour = schedule(&world, "declared", "1h", "");
+    held_run(&world, "declared", 2, &["--maintenance-config", &hour]).exited(0);
+    world.until("the record of the sweep", |world| {
+        !records(world, "declared").is_empty()
+    });
+    release(&world, "declared");
+    let all = records(&world, "declared");
+    assert_eq!(all.len(), 1, "{}", world.dump());
+    let record = &all[0];
+
+    for (_, _, worktree) in &maintained {
+        assert!(!worktree.join("scratch").exists(), "{}", worktree.display());
+    }
+    assert!(
+        third_slot.join("scratch/output-0.bin").is_file(),
+        "an identity declaring nothing was maintained"
+    );
+    let identities: Vec<&str> = record["payload"]["identities"]
+        .as_array()
+        .expect("identities")
+        .iter()
+        .map(|entry| entry["identity"].as_str().expect("a key"))
+        .collect();
+    assert_eq!(
+        identities,
+        ["github.com/owner/other", SERVICE_IDENTITY],
+        "{record}"
+    );
+    let mut freed: Vec<(&str, u64)> = Vec::new();
+    for ((identity, number, worktree), before) in maintained.iter().zip(&before) {
+        let measured = i128::from(*before) - i128::from(allocated(worktree));
+        let disk = disk_of(record, identity, *number);
+        assert_eq!(
+            dropped(&disk),
+            measured,
+            "slot {number} of {identity}: {record}"
+        );
+        assert!(measured > 0, "slot {number} of {identity} freed nothing");
+        let name = identity.rsplit('/').next().expect("a segment");
+        match freed.iter_mut().find(|(seen, _)| *seen == name) {
+            Some((_, sum)) => *sum += measured as u64,
+            None => freed.push((name, measured as u64)),
+        }
+    }
+    freed.sort_by_key(|(_, bytes)| std::cmp::Reverse(*bytes));
+    assert_eq!(freed[0].0, "other", "the journey's sizes put other first");
+    let total: u64 = freed.iter().map(|(_, bytes)| bytes).sum();
+    let summary = format!(
+        "  pool maintenance: freed {} across 3 slot(s) ({})",
+        gib(total),
+        freed
+            .iter()
+            .map(|(name, bytes)| format!("{name} {}", gib(*bytes)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let results = world.run(&["results", "declared"]);
+    results
+        .exited(0)
+        .out_has(&format!(
+            "{SERVICE_IDENTITY} (every 1h): slot 1 ran — succeeded in"
+        ))
+        .out_has("; slot 2 ran — succeeded in")
+        .out_has("github.com/owner/other (every 1h): slot 1 ran — succeeded in");
+    assert_eq!(
+        line_under_header(&results.stdout),
+        Some(summary.as_str()),
+        "{}",
+        results.stdout
+    );
+    assert!(!results.stdout.contains("third"), "{}", results.stdout);
+}
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
+/// Puts a directory's permissions back however the journey ends, so the world's
+/// scratch can be removed.
+#[cfg(unix)]
+struct Unlocked(PathBuf);
+
+#[cfg(unix)]
+impl Drop for Unlocked {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+    }
+}
+
+/// A slot that grew, and one the sibling could not measure, free nothing; the
+/// other slots' reductions still sum, count and order as before.
+///
+/// Two identities, two slots each. In `service` one slot's files are removed and
+/// the other's maintenance writes more than it holds; in `other` one slot's files
+/// are removed and the other carries a directory nobody may read, so the
+/// sibling's measure of that worktree fails and its `disk` is `null`. The record
+/// carries both as they happened, and `results`' summary counts exactly the two
+/// slots that shrank, with their sum and in their order.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] This
+// src/maintenance.rs journey has no narrower Nx edge: noteJourneySource includes src/**/*.
+#[cfg(unix)]
+#[test]
+fn a_slot_that_grew_or_could_not_be_measured_frees_nothing_in_the_summary() {
+    use std::os::unix::fs::PermissionsExt;
+    let world = pooled_world("maintenance-unfreed", Some(FAST_PACE));
+    let service = world.repository("local-direct", &[]);
+    let other = world.extra_repository("other");
+    sized_pools(&world, &[("service", 2, None), ("other", 2, None)]);
+    declare(&world, &service.checkout, &declaring(&[]));
+    declare(&world, &other.checkout, &declaring(&[]));
+    cut_slots(&world, &service.checkout, 2);
+    cut_slots(&world, &other.checkout, 2);
+
+    let service_slots = worktrees(&world, "service");
+    let other_slots = worktrees(&world, "other");
+    scratch(&service_slots[0], 80);
+    std::fs::write(
+        service_slots[1].join("grow.bytes"),
+        (40 * 1024 * 1024).to_string(),
+    )
+    .expect("the growth is asked for");
+    scratch(&other_slots[0], 150);
+    scratch(&other_slots[1], 30);
+    let locked = other_slots[1].join("locked");
+    std::fs::create_dir_all(&locked).expect("a directory to lock");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
+        .expect("the directory is locked");
+    let unlocked = Unlocked(locked);
+    let shrinking_before = [allocated(&service_slots[0]), allocated(&other_slots[0])];
+
+    let hour = schedule(&world, "unfreed", "1h", "");
+    held_run(&world, "unfreed", 2, &["--maintenance-config", &hour]).exited(0);
+    world.until("the record of the sweep", |world| {
+        !records(world, "unfreed").is_empty()
+    });
+    release(&world, "unfreed");
+    drop(unlocked);
+    let all = records(&world, "unfreed");
+    assert_eq!(all.len(), 1, "{}", world.dump());
+    let record = &all[0];
+
+    let grew = disk_of(record, SERVICE_IDENTITY, 2);
+    assert!(dropped(&grew) < 0, "the slot did not grow: {record}");
+    assert_eq!(
+        disk_of(record, "github.com/owner/other", 2),
+        Value::Null,
+        "{record}"
+    );
+    assert!(
+        !other_slots[1].join("scratch").exists(),
+        "the command did not run"
+    );
+    let service_freed = disk_of(record, SERVICE_IDENTITY, 1);
+    let other_freed = disk_of(record, "github.com/owner/other", 1);
+    assert_eq!(
+        dropped(&service_freed),
+        i128::from(shrinking_before[0]) - i128::from(allocated(&service_slots[0])),
+        "{record}"
+    );
+    assert_eq!(
+        dropped(&other_freed),
+        i128::from(shrinking_before[1]) - i128::from(allocated(&other_slots[0])),
+        "{record}"
+    );
+    let (service_freed, other_freed) =
+        (dropped(&service_freed) as u64, dropped(&other_freed) as u64);
+    assert!(
+        other_freed > service_freed,
+        "the journey's sizes put other first"
+    );
+    let summary = format!(
+        "  pool maintenance: freed {} across 2 slot(s) (other {}, service {})",
+        gib(service_freed + other_freed),
+        gib(other_freed),
+        gib(service_freed)
+    );
+    let results = world.run(&["results", "unfreed"]);
+    results.exited(0);
+    assert_eq!(
+        line_under_header(&results.stdout),
+        Some(summary.as_str()),
+        "{}",
+        results.stdout
+    );
+}
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
+/// A sweep over idle slots whose identities declare nothing, under a host naming
+/// no `maintain`, journals nothing: nothing ran and nothing went wrong.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] This
+// src/maintenance.rs journey has no narrower Nx edge: noteJourneySource includes src/**/*.
+#[test]
+fn a_sweep_over_identities_that_declare_nothing_journals_nothing() {
+    let world = pooled_world("maintenance-undeclared", Some(FAST_PACE));
+    let service = world.repository("local-direct", &[]);
+    let other = world.extra_repository("other");
+    sized_pools(&world, &[("service", 1, None), ("other", 1, None)]);
+    cut_a_slot(&world, &service.checkout);
+    cut_a_slot(&world, &other.checkout);
+
+    let every = schedule(&world, "undeclared", "1s", "");
+    held_run(&world, "undeclared", 2, &["--maintenance-config", &every]).exited(0);
+    until_sweeps(&world, "undeclared", 2);
+    world.until("the second sweep to end", |world| {
+        !sweeping(world, "undeclared")
+    });
+    release(&world, "undeclared");
+    assert!(records(&world, "undeclared").is_empty(), "{}", world.dump());
+    for repo in ["service", "other"] {
+        assert_eq!(the_slot_of(&world, repo)["last_maintained"], Value::Null);
+    }
+    let results = world.run(&["results", "undeclared"]);
+    assert!(
+        !results.exited(0).stdout.contains("pool maintenance"),
+        "{}",
+        results.stdout
+    );
+}
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
+/// A sweep whose only activity is a declared command that succeeds and frees
+/// nothing journals one record carrying that `succeeded`, and `results` prints no
+/// summary line for it.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] This
+// src/maintenance.rs journey has no narrower Nx edge: noteJourneySource includes src/**/*.
+#[cfg(unix)]
+#[test]
+fn a_declared_command_that_frees_nothing_is_recorded_with_no_summary() {
+    let world = pooled_world("maintenance-nothing-freed", Some(FAST_PACE));
+    let service = world.repository("local-direct", &[]);
+    sized_pools(&world, &[("service", 1, None)]);
+    declare(&world, &service.checkout, &declaring(&[]));
+    cut_a_slot(&world, &service.checkout);
+
+    let hour = schedule(&world, "nothing", "1h", "");
+    held_run(&world, "nothing", 2, &["--maintenance-config", &hour]).exited(0);
+    world.until("the record of the sweep", |world| {
+        !records(world, "nothing").is_empty()
+    });
+    release(&world, "nothing");
+    let all = records(&world, "nothing");
+    assert_eq!(all.len(), 1, "{}", world.dump());
+    let ran = &all[0]["payload"]["identities"][0]["outcome"]["slots"][0]["outcome"]["ran"];
+    assert_eq!(ran["outcome"], "succeeded", "{}", all[0]);
+    assert!(dropped(&ran["disk"]) <= 0, "{}", all[0]);
+    let results = world.run(&["results", "nothing"]);
+    results.exited(0).out_has(&format!(
+        "{SERVICE_IDENTITY} (every 1h): slot 1 ran — succeeded in"
+    ));
+    assert!(
+        !results.stdout.contains("pool maintenance: freed"),
+        "{}",
+        results.stdout
+    );
+}
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
+/// A sweep whose declared command fails journals one record carrying the
+/// failure, as the sibling reports it.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] This
+// src/maintenance.rs journey has no narrower Nx edge: noteJourneySource includes src/**/*.
+#[cfg(unix)]
+#[test]
+fn a_declared_command_that_fails_is_recorded_as_failed() {
+    let world = pooled_world("maintenance-declared-fails", Some(FAST_PACE));
+    let service = world.repository("local-direct", &[]);
+    sized_pools(&world, &[("service", 1, None)]);
+    declare(&world, &service.checkout, &declaring(&["3"]));
+    cut_a_slot(&world, &service.checkout);
+
+    let hour = schedule(&world, "fails", "1h", "");
+    held_run(&world, "fails", 2, &["--maintenance-config", &hour]).exited(0);
+    world.until("the record of the sweep", |world| {
+        !records(world, "fails").is_empty()
+    });
+    release(&world, "fails");
+    let all = records(&world, "fails");
+    assert_eq!(all.len(), 1, "{}", world.dump());
+    assert_eq!(
+        all[0]["payload"]["identities"][0]["outcome"]["slots"][0]["outcome"]["ran"]["outcome"],
+        json!({"failed": {"exit": 3}}),
+        "{}",
+        all[0]
+    );
+    world.run(&["results", "fails"]).exited(0).out_has(&format!(
+        "{SERVICE_IDENTITY} (every 1h): slot 1 ran — failed (exit 3) in"
+    ));
+}
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
+/// A repository whose `onevcs.toml` does not parse has nothing run for it — not
+/// even the command its host names — and the sweep journals one record carrying
+/// `maintenance-unreadable` with the sibling's reason, which `results` prints on
+/// that identity's line.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] This
+// src/maintenance.rs journey has no narrower Nx edge: noteJourneySource includes src/**/*.
+#[test]
+fn a_malformed_declaration_is_recorded_unreadable_and_the_host_command_does_not_run() {
+    let world = pooled_world("maintenance-unreadable", Some(FAST_PACE));
+    let service = world.repository("local-direct", &[]);
+    let maintain = interpreted_script(&world, "maintain");
+    let host = serde_json::to_string(&[maintain.as_str()]).expect("an argv serializes");
+    sized_pools(&world, &[("service", 1, Some(host.as_str()))]);
+    std::fs::write(
+        service.checkout.join("onevcs.toml"),
+        "schema_version = 1\n\n[pool.maintain]\ncommand = 5\n",
+    )
+    .expect("the declaration is written");
+    crate::harness::git(&world, &service.checkout, &["add", "-A"]);
+    crate::harness::git(
+        &world,
+        &service.checkout,
+        &["commit", "-m", "chore: declare a malformed maintenance"],
+    );
+    cut_a_slot(&world, &service.checkout);
+
+    let hour = schedule(&world, "unreadable", "1h", "");
+    held_run(&world, "unreadable", 2, &["--maintenance-config", &hour]).exited(0);
+    world.until("the record of the sweep", |world| {
+        !records(world, "unreadable").is_empty()
+    });
+    let record = records(&world, "unreadable")[0].clone();
+    let entry = &record["payload"]["identities"][0];
+    assert_eq!(entry["identity"], SERVICE_IDENTITY, "{record}");
+    let reason = entry["outcome"]["maintenance-unreadable"]["reason"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no unreadable outcome: {record}"))
+        .to_owned();
+    assert!(reason.contains("onevcs.toml"), "{reason}");
+    assert_eq!(marker_lines(&world), 0, "the host's command ran");
+    assert_eq!(the_slot(&world)["last_maintained"], Value::Null);
+    release(&world, "unreadable");
+    world
+        .run(&["results", "unreadable"])
+        .exited(0)
+        .out_has(&format!(
+            "      {SERVICE_IDENTITY} — maintenance unreadable: {}\n",
+            reason
+                .chars()
+                .map(|c| if c.is_control() { ' ' } else { c })
+                .collect::<String>()
+        ));
+}
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// Both halves of the maintain fixture answer the same way: what one platform's

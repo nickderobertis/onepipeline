@@ -65,6 +65,9 @@ jobs:
         continue-on-error: true
         timeout-minutes: 25
         run: just rerun-failed-coverage "$RUNNER_TEMP/quality-gate.log" "$RUNNER_TEMP/tests.tar.zst"
+      # The workload journeys and the budgets they record, which no `check`
+      # reaches: each measures a whole host-shaped workload, so the release PR is
+      # where they run.
       - name: Release workloads
         run: just workload
       - name: Committed generated files are up to date

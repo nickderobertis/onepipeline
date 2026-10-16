@@ -618,6 +618,7 @@ mod tests {
             overflow: None,
             labels: Default::default(),
             refuse_conflicts: false,
+            caller_merges_base: false,
         };
         // Held on the refusal's reading, with no read made: the request names
         // an identity no registry holds, which a read would have refused.

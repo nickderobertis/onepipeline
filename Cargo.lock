@@ -1725,9 +1725,9 @@ dependencies = [
 
 [[package]]
 name = "onevcs"
-version = "0.51.2"
+version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "387644e1461ededf8dedbeb6e185f73eda529cf55dc5426b45120bdd349ae58f"
+checksum = "acc52bfc543261305ff17acedc3f867f51a8fe2d19c52634833de74ac97657a3"
 dependencies = [
  "aho-corasick",
  "clap",
@@ -1757,9 +1757,9 @@ dependencies = [
 
 [[package]]
 name = "onevcs-testing"
-version = "0.19.2"
+version = "0.19.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c48527309446f5a4377ee075a295851e8162aecab51fde76c9a1a00d84ad064"
+checksum = "4ffee6c609929f05d4c61f04a476cc0fb2866aa8bda203679f7de4323ac76fb0"
 dependencies = [
  "onevcs",
  "serde",
@@ -2556,7 +2556,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

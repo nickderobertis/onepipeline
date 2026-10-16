@@ -129,8 +129,16 @@ const LIVE_TARGETS = {
   "onepipeline-release-compat": "release-compat",
 };
 const declaresUniform = (declared, target) =>
-  (target !== "test" || !declared.tags?.includes("tier:live")) &&
-  (!declared.tags?.includes("tier:workload") || !["test"].includes(target));
+  target !== "test" ||
+  (!declared.tags?.includes("tier:live") && !declared.tags?.includes("tier:workload"));
+
+// The workload tiers (`tier:workload`: `onepipeline-pool-workload`,
+// `onepipeline-scratch-workload`) measure a whole host-shaped workload against
+// their own budgets file. Like the live tiers they declare no `test`: their journey
+// and its budget check are one uncached `workload` target, fanned out by `just
+// workload` and reached by no `check`, `test`, coverage or `budgets` target, so no
+// per-change selection pays for one.
+const WORKLOAD = projects.filter((declared) => declared.tags?.includes("tier:workload"));
 
 // The budget tiers (`tier:budget`: `onepipeline-stop-verdict`) produce the telemetry
 // `onepipeline:budgets` reads. They time an uninstrumented release binary over full
@@ -242,6 +250,42 @@ describe("the live and network tiers", () => {
   }
 });
 
+describe("the workload tiers", () => {
+  it("are the projects whose journey only `just workload` runs", () => {
+    assert.deepEqual(WORKLOAD.map((declared) => declared.name).sort(), [
+      "onepipeline-pool-workload",
+      "onepipeline-scratch-workload",
+    ]);
+    const body = justfile.split("\nworkload:\n")[1]?.split("\n\n")[0] ?? "";
+    assert.match(body, /scripts\/nx\.sh run-many -t workload(\s|$)/, body);
+    assert.equal(nxJson.targetDefaults.workload?.cache, false, "nx.json caches `workload`");
+  });
+
+  for (const declared of WORKLOAD) {
+    it(`keeps \`${declared.name}\`'s journey out of every per-change target`, () => {
+      const workload = declared.targets.workload;
+      assert.ok(workload, `${declared.name} declares no \`workload\` target`);
+      assert.equal(workload.cache, false, `${declared.name}:workload could replay a measure`);
+      assert.equal(workload.parallelism, false, `${declared.name}:workload runs beside others`);
+      assert.equal(declared.targets.test, undefined, `${declared.name} declares a \`test\``);
+      assert.deepEqual(declared.targets.check.dependsOn, ["format-check", "lint"]);
+      for (const owner of projects) {
+        for (const target of ["check", "test", "test-rest", "test-quick", "budgets"]) {
+          assert.doesNotMatch(
+            JSON.stringify(owner.targets?.[target]?.dependsOn ?? []),
+            /workload/,
+            `${owner.name}:${target} reaches a workload`,
+          );
+        }
+        assert.ok(
+          !(owner.implicitDependencies ?? []).includes(declared.name),
+          `${owner.name} depends on ${declared.name}, so a change to it selects them`,
+        );
+      }
+    });
+  }
+});
+
 describe("the offline tier split", () => {
   // The target set `onepipeline-note-journeys` declares is the shape every
   // offline test tier copies, so a tier that grew or lost one is caught here.
@@ -323,6 +367,7 @@ describe("the offline tier split", () => {
       "smoke",
       "release_channel",
       "stop_verdict",
+      "pool_workload",
       "scratch_workload",
     ]) {
       assert.ok(
@@ -964,7 +1009,7 @@ describe("the locked install", () => {
   });
 });
 
-describe("release-only scratch workload selection", () => {
+describe("release-only workload selection", () => {
   it("keeps the large journey out of check graphs for all projects and each relevant edit", (t) => {
     const repo = scratchRepository(t);
     const graphPath = join(repo.path, "task-graph.json");
@@ -988,7 +1033,13 @@ describe("release-only scratch workload selection", () => {
         tasks.join("\n"),
       );
     noWorkload(graph(["run-many", "-t", "check"]));
-    for (const file of ["src/plan.rs", "src/executor.rs", "tests/scratch_workload/main.rs"]) {
+    for (const file of [
+      "src/plan.rs",
+      "src/executor.rs",
+      "src/maintenance.rs",
+      "tests/scratch_workload/main.rs",
+      "tests/pool_workload/main.rs",
+    ]) {
       const base = repo.head();
       repo.change(file);
       noWorkload(graph(["affected", "-t", "check", `--base=${base}`]));
@@ -996,6 +1047,7 @@ describe("release-only scratch workload selection", () => {
     const tasks = graph(["run-many", "-t", "workload"]);
     assert.ok(tasks.includes("onepipeline-scratch-workload:workload"), tasks.join("\n"));
     assert.ok(tasks.includes("onepipeline-scratch-workload:build"), tasks.join("\n"));
+    assert.ok(tasks.includes("onepipeline-pool-workload:workload"), tasks.join("\n"));
     const declared = project("onepipeline-scratch-workload");
     assert.equal(declared.targets.workload.parallelism, false);
     assert.deepEqual(declared.targets.check.dependsOn, ["format-check", "lint"]);
