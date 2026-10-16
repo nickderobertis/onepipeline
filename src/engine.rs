@@ -1215,6 +1215,7 @@ fn driving(
         // graph launch and nothing under that gate is ever inside a subprocess.
         // And for good: a queue that hands the run back is applied and let go of
         // again, and nothing in that pass is worth a fresh observer.
+        // llmlint: ignore[changed_behavior_has_e2e] that the close waits out a restart already writing is the gate's own mutual exclusion, held by `closing_the_record_gate_waits_for_a_write_already_under_way`; holding a real graph launch mid-start would need the sibling suspended, while the restart asked for after the close is driven end to end by both `driver::*_let_go_of_its_run_writes_its_record_no_more` journeys.
         beside.close();
         // Always here: only a let-go takes the lock out, and one that hands it
         // back puts it back.
@@ -10436,6 +10437,35 @@ mod tests {
             .filter_map(|line| serde_json::from_str::<Value>(line).ok())
             .filter(|event| event["kind"] == "driver-exited")
             .collect()
+    }
+
+    /// **The loop's close waits out a write already holding the record gate.**
+    ///
+    /// A restart that began while the run was held finishes writing the record
+    /// before the loop goes on to let go of the run, and one asked for after the
+    /// close is refused.
+    #[test]
+    fn closing_the_record_gate_waits_for_a_write_already_under_way() {
+        let gate = RecordGate::default();
+        let writing = gate
+            .open_for_writing()
+            .expect("a driven run's record gate is open");
+        std::thread::scope(|scope| {
+            let closing = scope.spawn(|| gate.close());
+            std::thread::sleep(Duration::from_millis(200));
+            assert!(
+                !closing.is_finished(),
+                "the gate closed under a write still in progress"
+            );
+            drop(writing);
+            closing
+                .join()
+                .expect("the gate closes once the write is done");
+        });
+        assert!(
+            gate.open_for_writing().is_none(),
+            "a write was let through a closed gate"
+        );
     }
 
     /// **A driver-side error is recorded while the run is still held, and a
