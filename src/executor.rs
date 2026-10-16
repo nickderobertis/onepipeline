@@ -622,8 +622,14 @@ fn make_node_scratch_dir(labels: &Labels) -> Result<PathBuf> {
             // Absolute, because the value is read by a program whose working
             // directory is its own business: a relative runs root — the default
             // is one — would name a different place from the workspace a
-            // dispatch runs in.
-            Ok(()) => return std::fs::canonicalize(&at).map_err(ledger(&at)),
+            // dispatch runs in. Plain, never Windows' verbatim `\\?\` spelling:
+            // the run's `scratch-retained` record spells each directory plainly,
+            // and that record has to name the directory this dispatch was given.
+            Ok(()) => {
+                return std::fs::canonicalize(&at)
+                    .map(crate::templates::plain)
+                    .map_err(ledger(&at))
+            }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(ledger(&at)(error)),
         }
@@ -1206,6 +1212,53 @@ mod tests {
 
         std::env::remove_var(crate::ledger::RUNS_DIR_ENV);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The directory a dispatch's environment names, read back the way the run's
+    /// `scratch-retained` record will spell it.
+    fn handed_and_recorded(what: &str) -> (PathBuf, Vec<PathBuf>) {
+        let root = scratch_root(what);
+        std::env::set_var(crate::ledger::RUNS_DIR_ENV, &root);
+        let labels = Labels {
+            run_id: Some("demo".into()),
+            node: Some("build".into()),
+            ..Labels::default()
+        };
+        let env =
+            prepare_dispatch_env(&labels, None).expect("the dispatch's environment is composed");
+        let (_, handed) = env
+            .into_iter()
+            .find(|(key, _)| key == NODE_SCRATCH_DIR_ENV)
+            .expect("every dispatch carries a scratch directory");
+        let recorded =
+            crate::scratch::recorded_dirs(&crate::ledger::RunPaths::under(&root, "demo"))
+                .expect("the run's scratch is listed");
+        std::env::remove_var(crate::ledger::RUNS_DIR_ENV);
+        let _ = std::fs::remove_dir_all(&root);
+        (PathBuf::from(handed), recorded)
+    }
+
+    /// The run's `scratch-retained` record names the directory a dispatch was
+    /// handed in the very spelling it was handed in, so a reader of the record
+    /// can find the dispatch's directory by comparing the two.
+    #[test]
+    fn a_retained_record_spells_a_dispatchs_scratch_as_the_dispatch_was_given_it() {
+        let _runs_dir = runs_dir_lock();
+        let (handed, recorded) = handed_and_recorded("scratch-spelling");
+        assert_eq!(recorded, vec![handed]);
+    }
+
+    /// `std::fs::canonicalize` answers Windows' verbatim `\\?\C:\…` spelling,
+    /// which the record never uses, so a dispatch handed it was named by no
+    /// record entry.
+    #[test]
+    #[cfg(windows)]
+    fn a_dispatch_on_windows_is_handed_its_scratch_without_the_verbatim_prefix() {
+        let _runs_dir = runs_dir_lock();
+        let (handed, recorded) = handed_and_recorded("scratch-plain");
+        let spelled = handed.to_str().expect("the scratch path is UTF-8");
+        assert!(!spelled.starts_with(r"\\?\"), "{spelled}");
+        assert_eq!(recorded, vec![handed]);
     }
 
     /// A runs root that cannot be made absolute refuses the dispatch.
