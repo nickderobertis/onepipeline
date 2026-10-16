@@ -1404,8 +1404,19 @@ impl ProcessGraphRun {
                         binary()
                     )))
                 }
-                Ok(Some(status)) if status.success() => return Ok(()),
-                Ok(Some(status)) => return self.refused(status),
+                // Looked for again before the exit is taken as the answer: a graph
+                // that announced itself and exited between the look above and this
+                // one answered first, and its run id is on that line.
+                Ok(Some(status)) => {
+                    if let Some(announcement) = self.logged_envelope() {
+                        self.run_id = announced_run(&announcement);
+                        return Ok(());
+                    }
+                    if status.success() {
+                        return Ok(());
+                    }
+                    return self.refused(status);
+                }
                 Ok(None) => {}
             }
             if Instant::now() >= deadline {
