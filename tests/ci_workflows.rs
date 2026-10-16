@@ -223,7 +223,7 @@ fn needs(job: &Value) -> Vec<String> {
 /// The result command a carrier job runs, if this job is one: a Linux job that
 /// reports a required name for a proof that may legitimately not run.
 fn carrier_run(job: &Value) -> Option<&str> {
-    job["steps"].as_sequence()?.iter().find_map(|step| {
+    job["steps"].as_array()?.iter().find_map(|step| {
         step["run"].as_str().filter(|run| {
             [
                 "node .github/macos-policy.mjs carrier",
@@ -869,7 +869,7 @@ fn the_pr_and_opted_in_diagnostic_lanes_preserve_the_three_former_mac_proofs() {
         let lane = &ci["jobs"][key];
         assert_eq!(lane["runs-on"].as_str(), Some("macos-latest"));
         let commands = lane["steps"]
-            .as_sequence()
+            .as_array()
             .unwrap()
             .iter()
             .filter_map(|step| step["run"].as_str())
@@ -887,7 +887,7 @@ fn the_pr_and_opted_in_diagnostic_lanes_preserve_the_three_former_mac_proofs() {
         }
     }
     for key in ["cross", "install", "install-documented"] {
-        assert!(!serde_norway::to_string(&ci["jobs"][key])
+        assert!(!onepipeline_testfakes::yaml::to_string(&ci["jobs"][key])
             .unwrap()
             .contains("macos-latest"));
     }
