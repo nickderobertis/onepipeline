@@ -779,3 +779,119 @@ fn a_design_documents_fragment_link_to_a_filed_task_lands_on_that_tasks_copy() {
         "the link did not land on the board's copy of the task with its fragment kept"
     );
 }
+
+/// A plan drafted in a source declared private is copied onto the board, which is not: the copy
+/// records no origin there, so the board names nothing private. Its design document, copied after
+/// it with the store's document copy, still finds the board's copy of the plan — through the
+/// private draft's own copy link — and is filed under it, recording no origin either.
+#[test]
+fn a_private_drafts_document_is_filed_under_the_boards_copy_of_its_plan() {
+    let world = a_routed_world("multi-source-private-draft")
+        .with_env("ONETASKGRAPH_SOURCES__DRAFT__VISIBILITY", "private")
+        .with_env("ONETASKGRAPH_SOURCES__PLANS__VISIBILITY", "public")
+        .with_env("ONETASKGRAPH_SOURCES__MEMBERS__VISIBILITY", "public");
+    // Declaring a visibility opts the store into the public boundary, whose writes are checked
+    // by the `onevcs` an operator's store names, run under this world's state root.
+    let onevcs = crate::harness::onevcs_binary()
+        .to_string_lossy()
+        .into_owned();
+    let world = world
+        .with_env(
+            "ONETASKGRAPH_WRITE_POLICY__CHECK_COMMAND",
+            &format!("{onevcs},boundary,check,--destination,public,--input,-"),
+        )
+        .with_env(
+            "ONETASKGRAPH_WRITE_POLICY__VISIBILITY_COMMAND",
+            &format!("{onevcs},boundary,inspect,--input,-,--json"),
+        );
+    let name = "drafted";
+    let project = project_id(name);
+    // The board already holds another plan under the draft's own id, so the copy files this one
+    // under an id of its own, and only a lookup that finds the board's copy finds it.
+    world.write_item(
+        &world.store().join("projects").join(format!("{project}.md")),
+        &[("title", json!("Another plan"))],
+        "",
+    );
+    // A node naming no repository: nothing but the private draft could make it private, so
+    // the store's boundary needs no repository policy to classify it.
+    let home = world.on_onevcs(|| {
+        filed(
+            &world,
+            name,
+            &plan_of(name, vec![crate::harness::agent("core", &[])]),
+        )
+    });
+    assert_ne!(
+        home,
+        format!("{STORE_SOURCE}:{project}"),
+        "the copy landed on the board's other plan"
+    );
+    world.write_item(
+        &root_of(&world, DRAFT).join("documents").join("design.md"),
+        &[("title", json!("Design")), ("project", json!(project))],
+        "## Design\nHow core ships.\n",
+    );
+
+    let design = global(&format!("{DRAFT}:design"));
+    let board = global(&home);
+    let (filed_under, landed) = world.on_onevcs(|| {
+        world.store_call(|engine| async move {
+            let report = engine
+                .copy(&onetaskgraph_core::CopyRequest {
+                    items: onetaskgraph_core::CopyItems::new(vec![design]).expect("one item"),
+                    scope: onetaskgraph_core::CopyScope::Documents,
+                    destination: onetaskgraph_plugin_api::SourceName::new(STORE_SOURCE)
+                        .expect("a source name"),
+                    match_by: None,
+                    recreate: false,
+                    create: false,
+                    dry_run: false,
+                    comments: false,
+                    no_link: false,
+                    expect: None,
+                })
+                .await
+                .unwrap_or_else(|error| panic!("the document copy runs: {error}"));
+            let id = report
+                .items
+                .first()
+                .and_then(|item| item.action.destination())
+                .unwrap_or_else(|| panic!("the copy reports where the document landed: {report:?}"))
+                .clone();
+            let landed = engine.document(&id).await.unwrap_or_else(|error| {
+                panic!("the store reads the copied document {id}: {error}")
+            });
+            let plan = engine.project(&board).await.unwrap_or_else(|error| {
+                panic!("the store reads the board's plan {board}: {error}")
+            });
+            (
+                serde_json::to_value(&plan).expect("a project renders"),
+                serde_json::to_value(&landed).expect("a document renders"),
+            )
+        })
+    });
+
+    let document = &landed["items"][0]["item"];
+    assert_eq!(
+        document["project"],
+        json!(global(&home).native.as_str()),
+        "the document is not filed under the board's copy of the plan: {landed}"
+    );
+    assert!(
+        document["metadata"]
+            .get(onetaskgraph_core::GlobalId::ORIGIN_KEY)
+            .is_none(),
+        "the board's document names its private origin: {landed}"
+    );
+    assert!(
+        filed_under["items"][0]["item"]["metadata"]
+            .get(onetaskgraph_core::GlobalId::ORIGIN_KEY)
+            .is_none(),
+        "the board's plan names its private origin: {filed_under}"
+    );
+    assert!(
+        !landed.to_string().contains(&format!("{DRAFT}:")),
+        "the board's document names the private draft: {landed}"
+    );
+}
