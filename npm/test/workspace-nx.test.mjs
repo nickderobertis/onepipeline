@@ -129,7 +129,8 @@ const LIVE_TARGETS = {
   "onepipeline-release-compat": "release-compat",
 };
 const declaresUniform = (declared, target) =>
-  target !== "test" || !declared.tags?.includes("tier:live");
+  (target !== "test" || !declared.tags?.includes("tier:live")) &&
+  (!declared.tags?.includes("tier:workload") || !["test"].includes(target));
 
 // The budget tiers (`tier:budget`: `onepipeline-stop-verdict`) produce the telemetry
 // `onepipeline:budgets` reads. They time an uninstrumented release binary over full
@@ -145,7 +146,8 @@ const OFFLINE_RUST = projects.filter(
   (declared) =>
     declared.tags?.includes("lang:rust") &&
     !declared.tags?.includes("tier:live") &&
-    !declared.tags?.includes("tier:budget"),
+    !declared.tags?.includes("tier:budget") &&
+    !declared.tags?.includes("tier:workload"),
 );
 
 describe("the uniform target set", () => {
@@ -314,7 +316,15 @@ describe("the offline tier split", () => {
       execFileSync("just", ["--evaluate", name], { cwd: root, encoding: "utf8" });
     assert.match(project("onepipeline").targets["test-rest"].command, /just _crate-test-rest/);
     const rest = evaluate("rest-tier");
-    for (const binary of ["e2e", "contract", "note", "smoke", "release_channel", "stop_verdict"]) {
+    for (const binary of [
+      "e2e",
+      "contract",
+      "note",
+      "smoke",
+      "release_channel",
+      "stop_verdict",
+      "scratch_workload",
+    ]) {
       assert.ok(
         rest.includes(`not binary(${binary})`),
         `rest-tier runs the ${binary} binary: ${rest}`,
@@ -951,5 +961,46 @@ describe("the locked install", () => {
       result.stderr,
       /npm not found;.*the pinned onebudgetspec SDK the stage budget reports through/,
     );
+  });
+});
+
+describe("release-only scratch workload selection", () => {
+  it("keeps the large journey out of check graphs for all projects and each relevant edit", (t) => {
+    const repo = scratchRepository(t);
+    const graphPath = join(repo.path, "task-graph.json");
+    const graph = (args) => {
+      const run = spawnSync(
+        join(repo.path, "node_modules", ".bin", "nx"),
+        [...args, `--graph=${graphPath}`],
+        {
+          cwd: repo.path,
+          env: { ...process.env, NX_DAEMON: "false", NX_CACHE_PROJECT_GRAPH: "false" },
+          encoding: "utf8",
+        },
+      );
+      assert.equal(run.status, 0, `${run.stdout}\n${run.stderr}`);
+      const tasks = JSON.parse(readFileSync(graphPath, "utf8")).tasks.tasks;
+      return Object.keys(tasks);
+    };
+    const noWorkload = (tasks) =>
+      assert.ok(
+        tasks.every((task) => !task.endsWith(":workload")),
+        tasks.join("\n"),
+      );
+    noWorkload(graph(["run-many", "-t", "check"]));
+    for (const file of ["src/plan.rs", "src/executor.rs", "tests/scratch_workload/main.rs"]) {
+      const base = repo.head();
+      repo.change(file);
+      noWorkload(graph(["affected", "-t", "check", `--base=${base}`]));
+    }
+    const tasks = graph(["run-many", "-t", "workload"]);
+    assert.ok(tasks.includes("onepipeline-scratch-workload:workload"), tasks.join("\n"));
+    assert.ok(tasks.includes("onepipeline-scratch-workload:build"), tasks.join("\n"));
+    const declared = project("onepipeline-scratch-workload");
+    assert.equal(declared.targets.workload.parallelism, false);
+    assert.deepEqual(declared.targets.check.dependsOn, ["format-check", "lint"]);
+    assert.equal(declared.targets.test, undefined);
+    assert.equal(declared.targets.budgets, undefined);
+    assert.ok(!project("onepipeline").implicitDependencies.includes(declared.name));
   });
 });

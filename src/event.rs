@@ -387,6 +387,10 @@ pub enum PipelineKind {
     /// A manager landing's process was proved gone with no ending recorded,
     /// written by the reader that proved it.
     LandingDied,
+    /// Dispatch scratch was removed at success or on request.
+    ScratchRemoved,
+    /// Dispatch scratch was measured and kept at a non-success ending or pause.
+    ScratchRetained,
 }
 
 impl PipelineKind {
@@ -453,6 +457,8 @@ impl PipelineKind {
             Self::LandingFinished => "landing-finished",
             Self::LandingRefused => "landing-refused",
             Self::LandingDied => "landing-died",
+            Self::ScratchRemoved => "scratch-removed",
+            Self::ScratchRetained => "scratch-retained",
         }
     }
 
@@ -542,6 +548,8 @@ pub const PIPELINE_KINDS: &[PipelineKind] = &[
     PipelineKind::LandingFinished,
     PipelineKind::LandingRefused,
     PipelineKind::LandingDied,
+    PipelineKind::ScratchRemoved,
+    PipelineKind::ScratchRetained,
 ];
 
 /// The id of a stored artifact.

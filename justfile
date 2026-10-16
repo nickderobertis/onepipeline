@@ -260,7 +260,7 @@ _crate-lint:
 # so no change could ever select one without the other, and running the two as
 # separate nextest processes would put eight process trees on the machine where
 # `.config/nextest.toml`'s one group allows four.
-rest-tier := "not binary(smoke) and not binary(release_channel) and not binary(note) and not binary(e2e) and not binary(contract) and not binary(stop_verdict)"
+rest-tier := "not binary(smoke) and not binary(release_channel) and not binary(note) and not binary(e2e) and not binary(contract) and not binary(stop_verdict) and not binary(scratch_workload)"
 e2e-tier := "binary(e2e)"
 contract-tier := "binary(contract)"
 note-tier := "binary(note) and not test(/^harness::/)"
@@ -690,3 +690,11 @@ lint-llm-validate *args:
 # llmlint scoped to the files this branch changed since it forked from main.
 lint-llm-diff base="origin/main" *options:
     @bash scripts/llmlint-diff.sh "$@"
+
+# Release workloads deliberately sit outside check, test, coverage and root budgets.
+workload:
+    @bash scripts/nx.sh run-many -t workload
+
+_scratch-workload-run:
+    @RUSTFLAGS="-D warnings" cargo nextest run --locked --test scratch_workload --test-threads 1 -E 'not test(/^harness::/)' --no-tests=fail
+    @cd tests/scratch_workload && ../../node_modules/.bin/onebudgetspec check budgets.yaml
