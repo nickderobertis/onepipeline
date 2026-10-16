@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.74.0](https://github.com/nickderobertis/onepipeline/compare/v0.73.1...v0.74.0) - 2026-10-16
+
+### Added
+
+- *(scratch)* [**breaking**] remove a successful run's dispatch scratch and report what other endings keep ([#910](https://github.com/nickderobertis/onepipeline/pull/910))
+
 ## [0.73.1](https://github.com/nickderobertis/onepipeline/compare/v0.73.0...v0.73.1) - 2026-10-15
 
 ### Fixed
