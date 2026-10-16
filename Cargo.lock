@@ -460,7 +460,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1562,7 +1562,7 @@ dependencies = [
 
 [[package]]
 name = "onepipeline"
-version = "0.72.0"
+version = "0.73.1"
 dependencies = [
  "async-trait",
  "clap",
@@ -1610,13 +1610,14 @@ dependencies = [
  "serde_norway",
  "sha2",
  "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "onetaskgraph-core"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8e591073da836bc7923f3596ca222449b0eb3e4e5318f100d32ff465aa23026"
+checksum = "7b876477a477d4bb932792b77b736ca3993b161eea1d6dea1d1344a8b0c53bc4"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1630,8 +1631,8 @@ dependencies = [
  "schemars",
  "secrecy",
  "serde",
+ "serde-saphyr",
  "serde_json",
- "serde_norway",
  "serde_path_to_error",
  "sha2",
  "thiserror 2.0.20",
@@ -1640,9 +1641,9 @@ dependencies = [
 
 [[package]]
 name = "onetaskgraph-github-projects"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb61420d24736cae48d2730616dfe36dc54f35594f4049ff327ec500177a8608"
+checksum = "e6aa69897868dcca01d8e6ff5e4b2599da099154c91b5732009f78957ca9679a"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1658,9 +1659,9 @@ dependencies = [
 
 [[package]]
 name = "onetaskgraph-in-memory"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c9a932266f98275293793d3f16faeb756e72379f1bb4666bc0aa7626870d5643"
+checksum = "8a1eba5026cfe6bb61fa99a9c940c286231216aa024a0cd4b5b6437a66fe2f03"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1672,9 +1673,9 @@ dependencies = [
 
 [[package]]
 name = "onetaskgraph-linear"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c47c81105de231d6bd99e978692100c4ed59b904a4408371a1da0aefbb93503"
+checksum = "6f96de8a4f41612a5faedb245dd23fd7d4145ad1582a9c72501f2d696b92d835"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1688,25 +1689,26 @@ dependencies = [
 
 [[package]]
 name = "onetaskgraph-local-md"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed1f6ce4ab482cbd6c5e877e9666e879d4821e3dab5d8aa889cde3fa0a4f7fe4"
+checksum = "c8c7c1591d252c614397814bd9d36b71cf31983cbc6ccec0444dcc4a958d02fb"
 dependencies = [
  "async-trait",
  "chrono",
  "onetaskgraph-plugin-api",
  "schemars",
  "serde",
+ "serde-saphyr",
  "serde_json",
- "serde_norway",
+ "serde_path_to_error",
  "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "onetaskgraph-plugin-api"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c7c22e8c199b941eae89f5223fe99dd4207faa6c6659a55891495baa6213dc6"
+checksum = "a5e1f854c710048fc41889ab66e7841e304d7d0b9fe1dfbdf2587660be2cd36e"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2098,7 +2100,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2155,7 +2157,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2554,10 +2556,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3123,7 +3125,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

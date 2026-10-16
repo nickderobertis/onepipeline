@@ -32,7 +32,7 @@ set positional-arguments := true
 # release into this clone's own build directory, never onto `PATH`, and
 # `tests/linked_engines.rs` fails if this line ever names a release other than the one
 # the lock links.
-onetaskgraph-version := "0.6.0"
+onetaskgraph-version := "0.7.0"
 onetaskgraph-root := justfile_directory() / "target" / "tools" / ("onetaskgraph-" + onetaskgraph-version)
 
 # The budget checker `budgets.yaml` is measured with (`just budgets`), installed at this
@@ -245,8 +245,9 @@ _crate-lint:
 # `stop_verdict` is offline but in none of the four either: it times the release
 # binary rather than the instrumented one, so its project
 # (`onepipeline-stop-verdict`) runs it through `just stop-verdict-journeys`. Nor
-# is `pool_workload`: it measures a whole host-shaped maintenance sweep, so its
-# project (`onepipeline-pool-workload`) runs it only through `just workload`.
+# are `pool_workload` and `scratch_workload`: each measures a whole host-shaped
+# workload, so its project (`onepipeline-pool-workload`,
+# `onepipeline-scratch-workload`) runs it only through `just workload`.
 #
 # `rest-tier` is spelled as the complement of every other binary, so a test
 # binary added later lands in the crate's tier rather than in none.
@@ -262,7 +263,7 @@ _crate-lint:
 # so no change could ever select one without the other, and running the two as
 # separate nextest processes would put eight process trees on the machine where
 # `.config/nextest.toml`'s one group allows four.
-rest-tier := "not binary(smoke) and not binary(release_channel) and not binary(note) and not binary(e2e) and not binary(contract) and not binary(stop_verdict) and not binary(pool_workload)"
+rest-tier := "not binary(smoke) and not binary(release_channel) and not binary(note) and not binary(e2e) and not binary(contract) and not binary(stop_verdict) and not binary(pool_workload) and not binary(scratch_workload)"
 e2e-tier := "binary(e2e)"
 contract-tier := "binary(contract)"
 note-tier := "binary(note) and not test(/^harness::/)"
@@ -518,6 +519,10 @@ _pool-workload-run:
     @RUSTFLAGS="-D warnings" cargo nextest run --locked -E 'binary(pool_workload) and not test(/^harness::/)' --no-tests=fail
     @node_modules/.bin/onebudgetspec check tests/pool_workload/budgets.yaml
 
+_scratch-workload-run:
+    @RUSTFLAGS="-D warnings" cargo nextest run --locked --test scratch_workload --test-threads 1 -E 'not test(/^harness::/)' --no-tests=fail
+    @cd tests/scratch_workload && ../../node_modules/.bin/onebudgetspec check budgets.yaml
+
 # Drives the compiled binary — never an in-process `main()`.
 # The end-to-end binary journeys in isolation (also run by `test`/`check`),
 # narrowed to the journeys a nextest filter names when one is given.
@@ -709,3 +714,4 @@ lint-llm-validate *args:
 # llmlint scoped to the files this branch changed since it forked from main.
 lint-llm-diff base="origin/main" *options:
     @bash scripts/llmlint-diff.sh "$@"
+

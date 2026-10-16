@@ -132,11 +132,12 @@ const declaresUniform = (declared, target) =>
   target !== "test" ||
   (!declared.tags?.includes("tier:live") && !declared.tags?.includes("tier:workload"));
 
-// The workload tiers (`tier:workload`: `onepipeline-pool-workload`) measure a whole
-// host-shaped workload against their own budgets file. Like the live tiers they
-// declare no `test`: their journey and its budget check are one uncached `workload`
-// target, fanned out by `just workload` and reached by no `check`, `test`,
-// coverage or `budgets` target, so no per-change selection pays for one.
+// The workload tiers (`tier:workload`: `onepipeline-pool-workload`,
+// `onepipeline-scratch-workload`) measure a whole host-shaped workload against
+// their own budgets file. Like the live tiers they declare no `test`: their journey
+// and its budget check are one uncached `workload` target, fanned out by `just
+// workload` and reached by no `check`, `test`, coverage or `budgets` target, so no
+// per-change selection pays for one.
 const WORKLOAD = projects.filter((declared) => declared.tags?.includes("tier:workload"));
 
 // The budget tiers (`tier:budget`: `onepipeline-stop-verdict`) produce the telemetry
@@ -251,10 +252,10 @@ describe("the live and network tiers", () => {
 
 describe("the workload tiers", () => {
   it("are the projects whose journey only `just workload` runs", () => {
-    assert.deepEqual(
-      WORKLOAD.map((declared) => declared.name),
-      ["onepipeline-pool-workload"],
-    );
+    assert.deepEqual(WORKLOAD.map((declared) => declared.name).sort(), [
+      "onepipeline-pool-workload",
+      "onepipeline-scratch-workload",
+    ]);
     const body = justfile.split("\nworkload:\n")[1]?.split("\n\n")[0] ?? "";
     assert.match(body, /scripts\/nx\.sh run-many -t workload(\s|$)/, body);
     assert.equal(nxJson.targetDefaults.workload?.cache, false, "nx.json caches `workload`");
@@ -367,6 +368,7 @@ describe("the offline tier split", () => {
       "release_channel",
       "stop_verdict",
       "pool_workload",
+      "scratch_workload",
     ]) {
       assert.ok(
         rest.includes(`not binary(${binary})`),
@@ -1004,5 +1006,53 @@ describe("the locked install", () => {
       result.stderr,
       /npm not found;.*the pinned onebudgetspec SDK the stage budget reports through/,
     );
+  });
+});
+
+describe("release-only workload selection", () => {
+  it("keeps the large journey out of check graphs for all projects and each relevant edit", (t) => {
+    const repo = scratchRepository(t);
+    const graphPath = join(repo.path, "task-graph.json");
+    const graph = (args) => {
+      const run = spawnSync(
+        join(repo.path, "node_modules", ".bin", "nx"),
+        [...args, `--graph=${graphPath}`],
+        {
+          cwd: repo.path,
+          env: { ...process.env, NX_DAEMON: "false", NX_CACHE_PROJECT_GRAPH: "false" },
+          encoding: "utf8",
+        },
+      );
+      assert.equal(run.status, 0, `${run.stdout}\n${run.stderr}`);
+      const tasks = JSON.parse(readFileSync(graphPath, "utf8")).tasks.tasks;
+      return Object.keys(tasks);
+    };
+    const noWorkload = (tasks) =>
+      assert.ok(
+        tasks.every((task) => !task.endsWith(":workload")),
+        tasks.join("\n"),
+      );
+    noWorkload(graph(["run-many", "-t", "check"]));
+    for (const file of [
+      "src/plan.rs",
+      "src/executor.rs",
+      "src/maintenance.rs",
+      "tests/scratch_workload/main.rs",
+      "tests/pool_workload/main.rs",
+    ]) {
+      const base = repo.head();
+      repo.change(file);
+      noWorkload(graph(["affected", "-t", "check", `--base=${base}`]));
+    }
+    const tasks = graph(["run-many", "-t", "workload"]);
+    assert.ok(tasks.includes("onepipeline-scratch-workload:workload"), tasks.join("\n"));
+    assert.ok(tasks.includes("onepipeline-scratch-workload:build"), tasks.join("\n"));
+    assert.ok(tasks.includes("onepipeline-pool-workload:workload"), tasks.join("\n"));
+    const declared = project("onepipeline-scratch-workload");
+    assert.equal(declared.targets.workload.parallelism, false);
+    assert.deepEqual(declared.targets.check.dependsOn, ["format-check", "lint"]);
+    assert.equal(declared.targets.test, undefined);
+    assert.equal(declared.targets.budgets, undefined);
+    assert.ok(!project("onepipeline").implicitDependencies.includes(declared.name));
   });
 });

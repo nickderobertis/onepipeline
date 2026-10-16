@@ -68,7 +68,7 @@ jobs:
       # The workload journeys and the budgets they record, which no `check`
       # reaches: each measures a whole host-shaped workload, so the release PR is
       # where they run.
-      - name: Workload budgets (every workload project)
+      - name: Release workloads
         run: just workload
       - name: Committed generated files are up to date
         run: git diff --exit-code -- Cargo.lock package-lock.json

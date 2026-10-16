@@ -927,10 +927,15 @@ fn a_failed_or_timed_out_command_an_unmaintainable_identity_and_an_unlistable_ho
     pooled_with_maintenance(&world, None);
     cut_a_slot(&world, &repo.checkout);
     let second = schedule(&world, "second", "1s", "");
+    // The failing run's own `every`, longer than its phase can last. Its driver
+    // sweeps at the fast pace for as long as its node is held, so under `second`
+    // a phase that outlasted one second — two subprocesses on a slow host do —
+    // ran the command again, and its marker was read as the timed-out one's.
+    let hourly = schedule(&world, "hourly", "1h", "");
 
     // A command that failed: recorded as the sibling records it, and — the
     // attempt being what is stamped — not run again inside `every`.
-    held_run(&world, "failing", 2, &["--maintenance-config", &second]).exited(0);
+    held_run(&world, "failing", 2, &["--maintenance-config", &hourly]).exited(0);
     world.until("the record of the failure", |world| {
         !records(world, "failing").is_empty()
     });
@@ -949,7 +954,7 @@ fn a_failed_or_timed_out_command_an_unmaintainable_identity_and_an_unlistable_ho
         .run(&["results", "failing"])
         .exited(0)
         .out_has(&format!(
-            "{SERVICE_IDENTITY} (every 1s): slot 1 ran — failed (exit 3) in"
+            "{SERVICE_IDENTITY} (every 1h): slot 1 ran — failed (exit 3) in"
         ));
     release(&world, "failing");
     // That run's driver tried the slot again each time `every` came round until

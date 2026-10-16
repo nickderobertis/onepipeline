@@ -291,6 +291,11 @@ impl Filesystem {
     }
 }
 
+/// Allocated byte counts use the same one-decimal GiB form in scratch and free-space notices.
+pub(crate) fn gib(bytes: u64) -> String {
+    format!("{:.1} GiB", bytes as f64 / GIB)
+}
+
 /// `41.2 GiB of 196.9 GiB (21% free)`.
 fn share(free: u64, total: u64) -> String {
     // Integer arithmetic for the share, so a host at 197G/197G reads `0%`
@@ -301,14 +306,6 @@ fn share(free: u64, total: u64) -> String {
         u128::from(free) * 100 / u128::from(total)
     };
     format!("{} of {} ({share}% free)", gib(free), gib(total))
-}
-
-/// `41.2 GiB`: a byte count as the free-space lines spell it.
-///
-/// Precision is a rendering: the lines are read by a person and a byte count
-/// carries nothing a tenth of a gibibyte does not.
-pub(crate) fn gib(bytes: u64) -> String {
-    format!("{:.1} GiB", bytes as f64 / GIB)
 }
 
 /// What tells one filesystem from another on this host.

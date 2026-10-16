@@ -743,6 +743,9 @@ impl World {
     /// names itself; its scratch directory does not have to.
     pub fn new(name: &str) -> Self {
         static NTH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        // Before anything is started, so that everything this test starts is
+        // something its teardown can reach. See [`Drop for World`](World).
+        onepipeline_testfakes::containment::enrol();
         LIVE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let root = std::env::temp_dir().join(format!(
             "op-{}-{}",
@@ -3841,6 +3844,17 @@ impl World {
 impl Drop for World {
     fn drop(&mut self) {
         self.stop_the_runs_it_can();
+        let last = LIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) == 1;
+        // Then whatever that left — what `stop` had no run to reach it through, or
+        // no longer found under the run's driver — once no world is left that
+        // could still want it. `containment` says why and what each platform
+        // reaches. Before the directories go, because Windows will not remove a
+        // directory a running process is in.
+        let left = if last {
+            onepipeline_testfakes::containment::end_descendants().err()
+        } else {
+            None
+        };
         // A host [`on_host`](World::on_host) made removes only what is its own: the world it
         // was made from still has runs to stop and a root to remove.
         let removed = match &self.home {
@@ -3853,8 +3867,17 @@ impl Drop for World {
         // target directory. Best-effort: Windows refuses to unlink a running
         // image, and a directory left behind there costs a directory entry
         // rather than a binary, because these are links and not copies.
-        if LIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+        if last {
             let _ = std::fs::remove_dir_all(held_dir());
+        }
+        // Said last, so a teardown that fails still removes what it made; and not
+        // while the test is already failing: a second panic during the first
+        // aborts, and loses the message that says why.
+        if let Some(left) = left {
+            assert!(
+                std::thread::panicking(),
+                "this test's teardown left processes running: {left}"
+            );
         }
     }
 }
@@ -3995,6 +4018,542 @@ fn still_running(pid: u64) -> bool {
         .expect("this host answers about a process it owns")
         .success()
 } // llmlint: ignore-end[tests_mirror_real_usage]
+
+/// A double this test started through a world's own spawning path, and the
+/// long-lived process that double started in turn, are both gone once the world
+/// is.
+///
+/// No run is involved, so the binary's own `stop` has nothing to walk: what ends
+/// them is the teardown every world runs last. The descendant takes a process
+/// group of its own on Unix, and both inherit this test's standard streams,
+/// which is how a process left running makes nextest report a test `LEAK` and
+/// keeps a CI step that tees the run waiting after its last test.
+///
+/// The double is still running at teardown here, which is the case every
+/// platform reaches; the journey below is the one where it is not.
+// llmlint: ignore-block[tests_mirror_real_usage] as above: a journey cannot assert what
+// is true after itself, and being dropped is the only way this property is ever reached.
+#[test]
+fn a_worlds_teardown_ends_a_double_it_started_and_the_descendant_that_double_started() {
+    let (pids, mut double) = {
+        let world = World::new("teardown-descendant");
+        let record = world.root.join("descendant.pids");
+        let double = world
+            .cmd_on(
+                &self::double("fake-oneharness"),
+                &["leave-a-descendant", &record.to_string_lossy(), "hold"],
+            )
+            .spawn()
+            .expect("the double starts");
+        let pids = left_descendant(&record);
+        for pid in [pids.0, pids.1] {
+            assert!(
+                !process_ended(pid),
+                "pid {pid} had ended before the teardown, so this proves nothing about it"
+            );
+        }
+        (pids, double)
+    };
+
+    let (double_pid, descendant) = pids;
+    assert!(
+        process_ended(double_pid),
+        "the double at pid {double_pid} outlived the world whose spawning path started it"
+    );
+    assert!(
+        process_ended(descendant),
+        "pid {descendant}, which the double at pid {double_pid} started, outlived the world \
+         that started the double"
+    );
+    // Collected, so the ended double leaves no entry behind in this process.
+    double.wait().expect("the ended double is collected");
+}
+
+/// The same, where what the double started is still on its way out when the
+/// double is gone: killed beside the double, it is held at its exit by a tracer
+/// outside the test's tree, so the double's death hands it to `init` before it
+/// has finished. No walk from the test reaches it then, and it was a descendant
+/// when the teardown found it; the teardown is not over until it has gone.
+///
+/// Linux only, because the exit stop is `ptrace`'s.
+#[cfg(target_os = "linux")]
+#[test]
+// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] the three-second hold is the
+// property under test — a killed descendant still exiting after the walk has stopped finding
+// it — and what it proves is `World`'s own teardown, which every e2e and note journey runs, so
+// this edge is the harness's; one bounded hold does not warrant a project of its own.
+fn a_worlds_teardown_waits_for_a_descendant_still_exiting_after_its_double_is_gone() {
+    let (double_pid, descendant) = {
+        let world = World::new("teardown-exiting");
+        let record = world.root.join("descendant.pids");
+        // Collected by nothing here: the teardown kills it, and its zombie is
+        // this process's until it ends, which the assertions below allow for.
+        #[expect(
+            clippy::zombie_processes,
+            reason = "the teardown under test is what ends it; see the comment above"
+        )]
+        let _double = world
+            .cmd_on(
+                &double("fake-oneharness"),
+                &[
+                    "leave-a-descendant",
+                    &record.to_string_lossy(),
+                    "hold-at-exit",
+                ],
+            )
+            .spawn()
+            .expect("the double starts");
+        let pids = left_descendant(&record);
+        for pid in [pids.0, pids.1] {
+            assert!(
+                !process_ended(pid),
+                "pid {pid} had ended before the teardown, so this proves nothing about it"
+            );
+        }
+        pids
+    };
+
+    assert!(
+        process_ended(double_pid),
+        "the double at pid {double_pid} outlived the world whose spawning path started it"
+    );
+    assert!(
+        process_ended(descendant),
+        "pid {descendant}, which the double at pid {double_pid} started and the teardown \
+         killed, was still exiting when the world was gone"
+    );
+}
+
+use onepipeline_testfakes::containment::PATIENCE_VARIABLE;
+
+/// A teardown that has killed a descendant and still finds it running when its
+/// patience runs out fails its test and names it, rather than waiting on it
+/// for good or letting the test pass while it holds the test's output.
+///
+/// Held at its exit for longer than the teardown is let wait, so the teardown
+/// has already signalled what it names. Linux only, because the exit stop is
+/// `ptrace`'s.
+#[cfg(target_os = "linux")]
+#[test]
+// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] as for the journey above: the
+// hold is the property under test, and what it proves is `World`'s own teardown.
+fn a_worlds_teardown_names_a_killed_descendant_it_could_not_wait_out() {
+    let world = World::new("teardown-outwaited");
+    let record = world.root.join("descendant.pids");
+    #[expect(
+        clippy::zombie_processes,
+        reason = "the teardown under test is what ends it"
+    )]
+    let _double = world
+        .cmd_on(
+            &double("fake-oneharness"),
+            &[
+                "leave-a-descendant",
+                &record.to_string_lossy(),
+                "hold-at-exit",
+            ],
+        )
+        .spawn()
+        .expect("the double starts");
+    let (_, descendant) = left_descendant(&record);
+
+    let refused = with_variable(PATIENCE_VARIABLE, "1000", move || drop(world))
+        .expect_err("a teardown that could not wait out what it killed let its test pass");
+    let said = panic_text(refused.as_ref());
+    assert!(
+        said.contains("this test's teardown left processes running")
+            && said.contains(&descendant.to_string()),
+        "the teardown's failure does not name pid {descendant}, which it killed and could not \
+         wait out: {said}"
+    );
+    // Its exit finishes once the hold does; waited for here so this test does
+    // not return while it still holds the test's output.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !process_ended(descendant) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "pid {descendant} never finished its exit"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// A teardown that runs out of patience fails its test and names what it left
+/// running, rather than letting the test pass with them still there — and
+/// what it left, it ends once it is given the time.
+///
+/// Out of patience at once, through the variable that says how long it waits,
+/// so it gives up at its first look and before it has ended anything.
+#[test]
+fn a_worlds_teardown_that_runs_out_of_patience_names_what_it_left_running() {
+    let world = World::new("teardown-impatient");
+    let (double_pid, descendant) = holding_a_descendant(&world);
+
+    let refused = with_variable(PATIENCE_VARIABLE, "0", move || drop(world))
+        .expect_err("a teardown that left processes running let its test pass");
+    let said = panic_text(refused.as_ref());
+    assert!(
+        said.contains("this test's teardown left processes running"),
+        "the teardown's failure does not say what it is: {said}"
+    );
+    for pid in [double_pid, descendant] {
+        assert!(
+            said.contains(&pid.to_string()),
+            "the teardown's failure does not name pid {pid}, which it left running: {said}"
+        );
+    }
+    ends_what_it_left(&[double_pid, descendant]);
+}
+
+/// When the test is already failing, a teardown that also fails leaves the
+/// test's own failure as the reason, rather than aborting the process over a
+/// second panic and losing it.
+#[test]
+fn a_failing_tests_own_failure_survives_a_teardown_that_also_fails() {
+    let world = World::new("teardown-impatient-failing");
+    let (double_pid, descendant) = holding_a_descendant(&world);
+
+    let failed = with_variable(PATIENCE_VARIABLE, "0", move || {
+        let _world = world;
+        panic!("the test's own failure");
+    })
+    .expect_err("the test's own failure was swallowed");
+    assert_eq!(
+        panic_text(failed.as_ref()),
+        "the test's own failure",
+        "the test's own failure is not what it failed with"
+    );
+    ends_what_it_left(&[double_pid, descendant]);
+}
+
+/// A teardown told to wait for something that is no length of time, or for
+/// longer than it may, says so rather than guessing one — and with its own
+/// patience back, ends what it found.
+#[test]
+fn a_worlds_teardown_given_a_patience_it_cannot_keep_fails_saying_so() {
+    let world = World::new("teardown-unkeepable-patience");
+    let (double_pid, descendant) = holding_a_descendant(&world);
+
+    for (patience, refusal) in [
+        ("soon", "is not a number of milliseconds"),
+        ("600001", "is longer than the 600s a teardown may wait"),
+    ] {
+        let answered = with_variable(
+            PATIENCE_VARIABLE,
+            patience,
+            onepipeline_testfakes::containment::end_descendants,
+        )
+        .expect("the teardown answers rather than panicking");
+        let said = answered.expect_err("a patience the teardown cannot keep was kept");
+        assert!(
+            said.contains(PATIENCE_VARIABLE) && said.contains(refusal),
+            "a patience of {patience:?} is not refused as one: {said}"
+        );
+    }
+    drop(world);
+    for pid in [double_pid, descendant] {
+        assert!(
+            process_ended(pid),
+            "pid {pid} outlived the world once its patience was its own"
+        );
+    }
+}
+
+/// A teardown that cannot list this host's processes says so by name, rather
+/// than passing with nothing ended.
+#[cfg(unix)]
+#[test]
+fn a_worlds_teardown_that_cannot_list_processes_fails_saying_why() {
+    let world = World::new("teardown-unlisted");
+    let (double_pid, descendant) = holding_a_descendant(&world);
+    let empty = world.root.join("no-programs");
+    std::fs::create_dir_all(&empty).expect("an empty directory to search");
+
+    let refused = with_variable("PATH", &empty, move || drop(world))
+        .expect_err("a teardown that could not look let its test pass");
+    let said = panic_text(refused.as_ref());
+    assert!(
+        said.contains("this test's teardown left processes running")
+            && said.contains("ps did not run"),
+        "the teardown's failure does not say it could not list processes: {said}"
+    );
+    ends_what_it_left(&[double_pid, descendant]);
+}
+
+/// A teardown handed a process list it cannot read refuses it by name, rather
+/// than reading it as a host with nothing left to end: a `ps` that fails, one
+/// that writes something other than text, and one that writes a row that is no
+/// process are each its own refusal — and with the host's own `ps` back, the
+/// teardown ends what it found.
+#[cfg(unix)]
+#[test]
+fn a_worlds_teardown_refuses_a_process_list_it_cannot_read() {
+    let world = World::new("teardown-unreadable-list");
+    let (double_pid, descendant) = holding_a_descendant(&world);
+    for (case, script, refusal) in [
+        ("fails", "exit 3", "ps exited"),
+        (
+            "not-text",
+            "printf '\\377\\n'",
+            "ps wrote something other than text",
+        ),
+        (
+            "not-a-row",
+            "printf 'not a process\\n'",
+            "ps wrote a row that is not a process",
+        ),
+    ] {
+        let bin = world.root.join(format!("ps-that-{case}"));
+        std::fs::create_dir_all(&bin).expect("a directory for the stand-in ps");
+        let ps = bin.join("ps");
+        std::fs::write(&ps, format!("#!/bin/sh\n{script}\n")).expect("the stand-in ps");
+        std::fs::set_permissions(&ps, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .expect("the stand-in ps is runnable");
+
+        let answered = with_variable("PATH", &bin, || {
+            onepipeline_testfakes::containment::end_descendants()
+        })
+        .expect("the teardown answers rather than panicking");
+        let said = answered.expect_err("a process list nobody could read was read as empty");
+        assert!(
+            said.contains(refusal),
+            "a ps that {case} is not refused as one: {said}"
+        );
+    }
+    drop(world);
+    for pid in [double_pid, descendant] {
+        assert!(
+            process_ended(pid),
+            "pid {pid} outlived the world once its process list could be read"
+        );
+    }
+}
+
+/// A row whose state `ps` could not classify — the `?` macOS writes for a
+/// process mid-exit, as `?<` — is a process the teardown ends, rather than a
+/// row it refuses: the host's own `ps`, with the double's and its
+/// descendant's states rewritten that way until each has ended, leaves the
+/// teardown answering and neither still running.
+#[cfg(unix)]
+#[test]
+fn a_worlds_teardown_ends_a_process_ps_lists_in_a_state_it_could_not_classify() {
+    let world = World::new("teardown-unclassified-state");
+    let (double_pid, descendant) = holding_a_descendant(&world);
+    let host_path = std::env::var_os("PATH").expect("the host has a PATH");
+    let bin = world.root.join("ps-unclassified");
+    std::fs::create_dir_all(&bin).expect("a directory for the stand-in ps");
+    let ps = bin.join("ps");
+    // The host's own `ps`, found on the host's own PATH. Only a row not yet a
+    // zombie is rewritten: a zombie written `?` would be a process that never
+    // ends, which is not what macOS reports.
+    std::fs::write(
+        &ps,
+        format!(
+            "#!/bin/sh\nPATH='{}'\nexport PATH\n\
+             ps \"$@\" | awk -v pids=' {double_pid} {descendant} ' \
+             '{{ if (index(pids, \" \" $1 \" \") && $3 !~ /^Z/) $3 = \"?\" substr($3, 2); print }}'\n",
+            host_path.to_string_lossy().replace('\'', "'\\''")
+        ),
+    )
+    .expect("the stand-in ps");
+    std::fs::set_permissions(&ps, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+        .expect("the stand-in ps is runnable");
+
+    let answered = with_variable("PATH", &bin, || {
+        onepipeline_testfakes::containment::end_descendants()
+    })
+    .expect("the teardown answers rather than panicking");
+    answered.expect("a row in a state ps could not classify was refused as no process");
+    for pid in [double_pid, descendant] {
+        assert!(
+            process_ended(pid),
+            "pid {pid}, listed in a state ps could not classify, outlived the teardown"
+        );
+    }
+    drop(world);
+}
+
+/// More descendants than the teardown's first look has room for are all gone
+/// once the world is: on Windows the job is asked again, with room for all of
+/// them, rather than ended as far as the first answer went.
+#[test]
+fn a_worlds_teardown_ends_more_descendants_than_its_first_look_has_room_for() {
+    let pids = {
+        let world = World::new("teardown-many");
+        let record = world.root.join("descendants.pids");
+        #[expect(
+            clippy::zombie_processes,
+            reason = "the teardown under test is what ends it"
+        )]
+        let _double = world
+            .cmd_on(
+                &double("fake-oneharness"),
+                &["leave-descendants", &record.to_string_lossy(), "80"],
+            )
+            .spawn()
+            .expect("the double starts");
+        let pids = recorded_pids(&record);
+        assert_eq!(pids.len(), 81, "the record is not the double and 80 others");
+        for pid in &pids {
+            assert!(
+                !process_ended(*pid),
+                "pid {pid} had ended before the teardown, so this proves nothing about it"
+            );
+        }
+        pids
+    };
+
+    let left: Vec<u32> = pids
+        .into_iter()
+        .filter(|pid| !process_ended(*pid))
+        .collect();
+    assert!(
+        left.is_empty(),
+        "pids {left:?} outlived the world whose spawning path started them"
+    );
+}
+
+/// The same, where the double has already exited by the teardown and what it
+/// started is an orphan: the process the Windows leg was left holding.
+///
+/// Windows only, because only there does the teardown reach it. A Unix process
+/// whose parent has exited belongs to `init`, and nothing descends from this
+/// test to it any more — `containment` says why that is not closed there.
+#[cfg(windows)]
+#[test]
+fn a_worlds_teardown_ends_a_descendant_whose_double_has_already_exited() {
+    let descendant = {
+        let world = World::new("teardown-orphan");
+        let record = world.root.join("descendant.pids");
+        let exited = world
+            .cmd_on(
+                &double("fake-oneharness"),
+                &["leave-a-descendant", &record.to_string_lossy(), "exit"],
+            )
+            .status()
+            .expect("the double runs");
+        assert!(exited.success(), "the double refused: {exited}");
+        let (double_pid, descendant) = left_descendant(&record);
+        assert!(
+            process_ended(double_pid),
+            "the double at pid {double_pid} is still running, so its descendant is no orphan"
+        );
+        assert!(
+            !process_ended(descendant),
+            "pid {descendant} had ended before the teardown, so this proves nothing about it"
+        );
+        descendant
+    };
+
+    assert!(
+        process_ended(descendant),
+        "pid {descendant}, orphaned by a double this test started, outlived the world that \
+         started it"
+    );
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// The pids `fake-oneharness leave-a-descendant` records, once it has: the
+/// double's own, then its descendant's.
+fn left_descendant(record: &Path) -> (u32, u32) {
+    let pids = recorded_pids(record);
+    let [double, descendant] = pids[..] else {
+        panic!("the record is not two pids: {pids:?}")
+    };
+    (double, descendant)
+}
+
+/// The pids a double records at `record`, once it has: its own first.
+fn recorded_pids(record: &Path) -> Vec<u32> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let text = loop {
+        if let Ok(text) = std::fs::read_to_string(record) {
+            break text;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the double never recorded what it started at {}",
+            record.display()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    text.split_whitespace()
+        .map(|pid| {
+            pid.parse()
+                .ok()
+                .filter(|pid| *pid != 0)
+                .unwrap_or_else(|| panic!("the record is not pids: {text:?}"))
+        })
+        .collect()
+}
+
+/// Start a double from `world` that keeps running beside a descendant of its
+/// own, and return both pids once both are.
+fn holding_a_descendant(world: &World) -> (u32, u32) {
+    let record = world.root.join("descendant.pids");
+    #[expect(
+        clippy::zombie_processes,
+        reason = "the teardown under test is what ends it"
+    )]
+    let _double = world
+        .cmd_on(
+            &double("fake-oneharness"),
+            &["leave-a-descendant", &record.to_string_lossy(), "hold"],
+        )
+        .spawn()
+        .expect("the double starts");
+    left_descendant(&record)
+}
+
+/// Run `run` with the environment variable `name` set to `value`, and put it
+/// back as it was however `run` ends.
+///
+/// This process's own environment, which no other test shares: nextest runs
+/// each in a process of its own.
+fn with_variable<T>(
+    name: &str,
+    value: impl AsRef<std::ffi::OsStr>,
+    run: impl FnOnce() -> T,
+) -> std::thread::Result<T> {
+    let was = std::env::var_os(name);
+    std::env::set_var(name, value);
+    // Unwind-safe in fact: nothing `run` could leave half-changed is read after
+    // a panic except the variable, which is put back below either way, and the
+    // panic itself, which is handed to the caller rather than resumed past.
+    let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run));
+    match was {
+        Some(was) => std::env::set_var(name, was),
+        None => std::env::remove_var(name),
+    }
+    ran
+}
+
+/// End what a failed teardown left, as a teardown with its patience back does,
+/// and hold it to having ended every one of `pids`.
+fn ends_what_it_left(pids: &[u32]) {
+    onepipeline_testfakes::containment::end_descendants()
+        .expect("the teardown ends what it left once it is let");
+    for pid in pids {
+        assert!(
+            process_ended(*pid),
+            "pid {pid} is still running after the teardown that was let finish"
+        );
+    }
+}
+
+/// What a caught panic said: a `String` when `panic!` formatted its message, a
+/// `&str` when it was a literal.
+fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| {
+            payload
+                .downcast_ref::<&str>()
+                .map(|said| (*said).to_owned())
+        })
+        .unwrap_or_else(|| "a panic that said nothing".to_owned())
+}
 
 /// A repository `onevcs` knows about, and what its base branch carries.
 pub struct Repository {
@@ -4646,47 +5205,10 @@ pub fn reaped_pid() -> u32 {
 /// and then still has its closeout to write, so the last file it touches is not a
 /// signal that it has finished touching them.
 ///
-/// A process that has ended but not yet been reaped counts as ended, because the
-/// question is whether it can still write, and a zombie cannot. Every other answer
-/// this host cannot give reads as still running, so a wait on this outlives the
-/// process rather than stopping short of it.
-#[cfg(unix)]
+/// [`onepipeline_testfakes::containment::process_ended`] says what counts as
+/// ended, and why it asks `ps` rather than `/proc`.
 pub fn process_ended(pid: u32) -> bool {
-    let Ok(raw) = i32::try_from(pid) else {
-        return false;
-    };
-    // SAFETY: signal 0 delivers nothing and touches no memory this call owns.
-    if unsafe { libc::kill(raw, 0) } != 0 {
-        return std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
-    }
-    // The state field follows the command name's closing parenthesis.
-    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
-        stat.rsplit_once(')')
-            .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z'))
-    })
-}
-
-/// The same question on Windows, where a process handle is signalled once — and
-/// only once — the process has terminated.
-#[cfg(windows)]
-pub fn process_ended(pid: u32) -> bool {
-    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, WAIT_OBJECT_0};
-    use windows_sys::Win32::System::Threading::{
-        OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
-    };
-    // SAFETY: `OpenProcess` returns null on failure and otherwise a handle closed
-    // below; no borrowed memory crosses the boundary.
-    let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
-    if handle.is_null() {
-        // No such process any more: its pid names nothing this host can open.
-        return std::io::Error::last_os_error().raw_os_error()
-            == Some(ERROR_INVALID_PARAMETER as i32);
-    }
-    // SAFETY: `handle` is live, and a zero timeout returns at once.
-    let waited = unsafe { WaitForSingleObject(handle, 0) };
-    // SAFETY: the handle came from `OpenProcess` above and is closed once.
-    unsafe { CloseHandle(handle) };
-    waited == WAIT_OBJECT_0
+    onepipeline_testfakes::containment::process_ended(pid)
 }
 
 /// End one process this suite is entitled to end, and wait until it is gone.
