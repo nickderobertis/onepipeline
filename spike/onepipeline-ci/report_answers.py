@@ -74,6 +74,108 @@ method = f"""**Real systems.** GitHub's REST API for `nickderobertis/onepipeline
 {local}"""
 
 
+# The user's target CI/CD shape (ci-time-budgets-wave1 rulings): every job this
+# repository runs today folded into lint + test-<os> per PR and release-plz +
+# build-<os> + publish per release. Each target job is projected from the
+# current-shape durations of the jobs it absorbs: its floor is the longest of them
+# (all absorbed work overlapping on one runner), its ceiling their serial sum
+# (no setup shared). Neither is measured; both are PROJECTIONS.
+SHAPE = json.load(open(out / "derived-shape.json"))["per_job"]
+
+
+def _stat(job, key):
+    return SHAPE[job]["duration_success_s"][key]
+
+
+def fold(jobs, key="median"):
+    vals = [_stat(j, key) for j in jobs]
+    return round(max(vals)), round(sum(vals))
+
+
+def n(x):
+    return f"{round(x):,}"
+
+
+TARGET_CI = {
+    "lint": ["ci.yml :: llmlint", "ci.yml :: pr-title", "ci.yml :: msrv", "ci.yml :: deny", "ci.yml :: release-compat",
+             "engine-currency.yml :: engines-current", "notignored.yml :: suppressions",
+             "visual-docs.yml :: visual-docs / arches", "visual-docs.yml :: visual-docs / pages-preflight",
+             "visual-docs.yml :: visual-docs / capture (x86_64, shots/current, shots/verify, Visual docs)",
+             "visual-docs.yml :: visual-docs / report (x86_64, shots/current, shots/verify, Visual docs)",
+             "visual-docs.yml :: visual-docs / deploy-pages"],
+    "test-linux": ["ci.yml :: gate", "ci.yml :: smoke", "ci.yml :: install (ubuntu-latest)",
+                   "ci.yml :: install-documented (ubuntu-latest)", "ci.yml :: wheel",
+                   "ci.yml :: wheel (aarch64-unknown-linux-gnu)"],
+    "test-windows": ["ci.yml :: cross (windows-latest)", "ci.yml :: install (windows-latest)",
+                     "ci.yml :: install-documented (windows-latest)"],
+    "test-macos": ["ci.yml :: cross (macos-latest)", "ci.yml :: install (macos-latest)",
+                   "ci.yml :: install-documented (macos-latest)"],
+}
+TARGETS = {"linux": ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"],
+           "macos": ["aarch64-apple-darwin", "x86_64-apple-darwin"],
+           "windows": ["x86_64-pc-windows-msvc"]}
+VERIFY = {"linux": ["release.yml :: verify-crate", "release.yml :: verify-pypi (ubuntu-latest)",
+                    "release.yml :: verify-npm (ubuntu-latest)", "release.yml :: verify-npm (ubuntu-24.04-arm)"],
+          "macos": ["release.yml :: verify-pypi (macos-latest)", "release.yml :: verify-pypi (macos-15-intel)",
+                    "release.yml :: verify-npm (macos-latest)", "release.yml :: verify-npm (macos-15-intel)"],
+          "windows": ["release.yml :: verify-pypi (windows-latest)", "release.yml :: verify-npm (windows-latest)"]}
+PUBLISH = ["release.yml :: guard", "release.yml :: linked-engines", "release.yml :: publish-crate",
+           "release.yml :: publish-pypi", "release.yml :: publish-npm", "release.yml :: record the release outcome"]
+RELEASE_PLZ = ["release-plz.yml :: guard", "release-plz.yml :: release-plz"]
+
+
+def build(os_, key="median"):
+    # One build per target packaging all three artifacts: floor = that target's
+    # longest of today's three builds; ceiling = all three, as today, in series.
+    lo = hi = 0
+    for t in TARGETS[os_]:
+        three = [_stat(f"release.yml :: {k} ({t})", key) for k in ("upload", "build-npm", "build-wheels")]
+        lo += max(three)
+        hi += sum(three)
+    verify = sum(_stat(j, key) for j in VERIFY[os_])
+    return round(lo + verify), round(hi + verify)
+
+
+T_CI = {k: (fold(v), fold(v, "p90")) for k, v in TARGET_CI.items()}
+T_BUILD = {o: (build(o), build(o, "p90")) for o in TARGETS}
+T_PUBLISH = round(sum(_stat(j, "median") for j in PUBLISH))
+T_PLZ = round(sum(_stat(j, "median") for j in RELEASE_PLZ))
+CI_LO = max(v[0][0] for k, v in T_CI.items() if k != "lint")
+CI_HI = max(v[0][1] for v in T_CI.values())
+CI_HI90 = max(v[1][1] for v in T_CI.values())
+B_LO = max(v[0][0] for v in T_BUILD.values())
+B_HI = max(v[0][1] for v in T_BUILD.values())
+CD_PATH_LO = T_PLZ + B_LO + T_PUBLISH
+CD_PATH_HI = T_PLZ + B_HI + T_PUBLISH
+CYCLE_LO = 2 * CI_LO + CD_PATH_LO
+CYCLE_HI = 2 * CI_HI + CD_PATH_HI
+
+
+def ci_line(k):
+    (lo, hi), (lo90, hi90) = T_CI[k]
+    return f"`{k}` {n(lo)}–{n(hi)} median ({n(lo90)}–{n(hi90)} p90)"
+
+
+def b_line(o):
+    (lo, hi), (lo90, hi90) = T_BUILD[o]
+    return f"`build-{o}` {n(lo)}–{n(hi)} median ({n(lo90)}–{n(hi90)} p90)"
+
+
+TARGET_SHAPE = (
+    "**The user's target CI/CD shape, projected from this repository's measurements (PROJECTIONS: each target job's range runs from the longest current-shape median of the jobs it absorbs, all of their work overlapping on one runner, to their serial sum, no setup shared; p90 likewise from p90s; `report_answers.py` computes them from `out/derived-shape.json`).** "
+    f"Per PR, 4 jobs (screencomp.toml's arches are `[x86_64]` only, so no second visual-docs job): {ci_line('lint')} (llmlint, pr-title, msrv, deny, release-compat, engines-current, notignored, and visual-docs' arches, pages-preflight, capture, report and preview deploy); "
+    f"{ci_line('test-linux')} (`gate`, `smoke`, install and install-documented on ubuntu, both `wheel` legs); "
+    f"{ci_line('test-windows')} (`cross`, install, install-documented); {ci_line('test-macos')} (the same on macOS). "
+    f"Nx-affected selection does not lower the test jobs: 31 of 31 current-shape feature PRs changed a `rustBuild` input every Rust tier hashes. "
+    f"**Consequence for the `timeout-minutes: 30` rule: `lint` fits (ceiling {n(T_CI['lint'][0][1])} s), but `test-linux`, `test-windows` and `test-macos` each exceed 1,800 s at their floor, so under that rule all three would be cancelled on every PR that touches Rust until the Windows, macOS and Linux test tiers are cut (the expensive-strategy finding's options); that is a decision for the user, not a threshold to set.** "
+    f"Per release, 5 jobs: `release-plz` {n(T_PLZ)} (guard + release-plz); {b_line('linux')}, {b_line('macos')}, {b_line('windows')} — each building its targets once (floor: the longest of today's three release builds per target; ceiling: all three, as today) plus today's post-publish verify legs for that OS (pre-publish test-installs of the exact files are not measured separately and are taken as no longer than those verify legs); `publish` {n(T_PUBLISH)} (guard, linked-engines, publish-crate, publish-pypi, publish-npm, record outcome; the budget-reader tail is not measured). "
+    f"If each build job waits for `publish` before its post-publish verification, add ≈{n(T_PUBLISH)} s to every build job, making the longest CD job {n(B_LO + T_PUBLISH)}–{n(B_HI + T_PUBLISH)} s; otherwise it is {n(B_LO)}–{n(B_HI)} s. "
+    f"Removed against today: the release test re-run (3,738 s median off the CD critical path), the 15-job ci.yml push re-run on the release merge, the 9 published-smoke jobs, and release.yml's 32 jobs folded into 4: 5 jobs per release against today's 66 median. "
+    f"Release cycle with zero queue and the release PR merged the moment its checks pass: 2 × the PR checks phase ({n(CI_LO)}–{n(CI_HI)}) + release-plz + longest build + publish ({n(CD_PATH_LO)}–{n(CD_PATH_HI)}) = {n(CYCLE_LO)}–{n(CYCLE_HI)} s, against today's current-shape median release cycle of 38,235 s; the macOS queue (cross macOS job created → started 1,172 s median, 12,419 p90; macOS release builds 1,761–3,847 s median) and the wait for someone to merge the release PR come on top and are not projected. "
+    "Removing the push re-run is conditional on requiring branches to be up to date: the snapshot reads `strict: false` today, and 12 of the 31 current-shape feature merges (52 of 144 in the window; `out/merge-tree-equality.json`) landed a tree their PR head was not tested on, so under `strict: true` each such PR would first be updated and its whole checks phase re-run — at the projected test-windows duration per update."
+)
+
+
 def cand(budget, measure, workload, achievable, limits, consumed):
     return {"budget": budget, "measure": measure, "workload": workload, "achievable": achievable,
             "limits": limits, "consumed": consumed}
@@ -119,6 +221,18 @@ candidates = [
          "Four local attempts, about 3.3 h of host time (attempt 1 about 1 h 29 min of uptime before it was stopped, attempt 2 50 min, attempt 3 43 min, attempt 4 18 min) and two clone bootstraps (493 s and 145 s); no GitHub request"),
 ]
 
+# What each GitHub candidate becomes in the user's target shape (TARGET_SHAPE finding).
+TARGET_ACH = {
+    "onepipeline-ci-check-time": f"In the user's target shape (lint + test-linux/windows/macos; design finding *target CI/CD shape*): PROJECTION {n(CI_LO)}–{n(CI_HI)} s median ({n(CI_HI90)} p90 ceiling), the longest being `test-windows`, which absorbs cross, install and install-documented on Windows — consolidation lengthens the longest job, and `timeout-minutes: 30` would cancel every test job today.",
+    "onepipeline-cd-job-time": f"In the user's target shape: PROJECTION {n(B_LO)}–{n(B_HI)} s for the longest per-platform build job, or {n(B_LO + T_PUBLISH)}–{n(B_HI + T_PUBLISH)} s if each build job waits for `publish` ({n(T_PUBLISH)} s) before its post-publish verification.",
+    "onepipeline-release-cycle-time": f"In the user's target shape: PROJECTION {n(CYCLE_LO)}–{n(CYCLE_HI)} s with zero queue and the release PR merged as soon as its checks pass (2 × PR checks + release-plz + longest build + publish), before macOS queueing and the release-PR merge wait.",
+    "onepipeline-ci-job-count": "In the user's target shape: 4 (lint, test-linux, test-windows, test-macos; no second visual-docs platform, since screencomp.toml's arches are `[x86_64]`) — the ruling's threshold, met by construction.",
+    "onepipeline-cd-job-count": "In the user's target shape: 5 (release-plz, build-linux, build-macos, build-windows, publish) — the ruling's threshold, met by construction.",
+}
+for c in candidates:
+    if c["budget"] in TARGET_ACH:
+        c["achievable"] += " " + TARGET_ACH[c["budget"]]
+
 findings = [
     # repeats
     "**Checks that run more than once per change, measured (current shape, median job-seconds per change; full families in `out/derived-shape.json`).** "
@@ -139,6 +253,7 @@ findings = [
     "ci.yml PR head — changes 13/17; gate 3,440/4,237 (P4's saving is not projected: the only local measure is attempt 3's partial cold `onepipeline-stop-verdict:test`, 1,388 s on this host including its build of every test binary, and CI exposes no split); cross (windows-latest) 5,873/7,281; cross (macos-latest) 3,941/4,731; install macOS 564/753, ubuntu 387/591, windows 646/998, now starting at run start instead of 3,527 s in (P3); install-documented macOS 609/817, ubuntu 483/581, windows 861/1,059; wheel 529/602; wheel aarch64 458/513; msrv 79/246; deny 36/39; release-compat 152/345; smoke 398/464; pr-title 4/5; llmlint 205/320; visual-docs capture 856/1,081, report 13/18, arches 7/8, pages-preflight 3/4, deploy-pages 31/70; engines-current 8/9; notignored 10/12; release-sweep 3,954/4,912. "
     "ci.yml / visual-docs.yml push on a merge — removed where the tree was tested (61% of current feature merges, 90% of release merges), otherwise as on the PR head. "
     "release.yml — guard 3/4, linked-engines 9/11, test 3,738/4,663, upload 417–895, build-npm 426–890, build-wheels 457–838 (each now starting at run start, P2), publish-crate 218/232, verify-crate 482/569, publish-pypi 33/42, publish-npm 818/1,250, verify-pypi 11–27, verify-npm 8–25, record the release outcome 9/14; release-plz guard 3/4, release-plz 39/41; published-smoke legs 8–26. The CD critical path: PROJECTION −3,738 s (median) from P2 alone; the Release run's wall clock (11,282 s median) is otherwise macOS queueing.",
+    TARGET_SHAPE,
     # cannot reach 1800
     "**Checks that cannot reach 1,800 s without sharding** (current-shape median / p90 / max, s): "
     "**`cross (windows-latest)`** 5,873 / 7,281 / 9,155 (required). The latest green leg spent 8,598 s in the gate step: e2e 7,958 s wall for 1,348 tests (28,682 test-s, 134 slow), note 127 s, contract 1 s, rest 177 s, bootstrap 435 s. At the e2e group's 4 threads on 4 vCPUs the e2e floor is 7,170 s. "
@@ -162,7 +277,7 @@ findings = [
     "(R4) Do not re-run cross, gate and the install legs on the release PR (its tree is `main` plus release-plz's version bump): saves 23,017 job-s and the release-PR checks phase (8,302 s median, 23,839 p90) falls to its packaging legs and `release-sweep` (3,954 s, not required, so it would gate nothing unless required); losing a cross-platform test of the bumped version string. "
     "(R5) The 90-minute cycle: with every job held to 1,800 s and zero queueing, the serial path — head checks 1,800, release-plz 40, release-PR checks 1,800, Release test 1,800, longest build 926, publish-npm 818, verify-npm 36, outcome 9, published-smoke 72 — is ≈7,300 s, so 5,400 s needs at least one of R1, R3 or R4 (each removes 72–1,800 s of that path) on top of every job reaching 1,800 s; today's measured path is 38,235 s median.",
     # verdict
-    "**Required-check plan.** `required-status-checks.json` (taken 2026-10-16T00:41:20Z, GET /repos/nickderobertis/onepipeline/branches/main/protection/required_status_checks; `strict: false`) lists 14 contexts; the `ci.yml` job behind each, which a `verdict` job must `needs:`: `gate` → `gate` (ci.yml 63); `pr-title` → `pr-title` (535); `llmlint` → `llmlint` (549); `msrv` → `msrv` (250); `deny` → `deny` (378); `wheel` → `wheel`, its x86_64 leg, named by `name: ${{ matrix.check }}` (501–510); `cross (windows-latest)` → `cross` (187, matrix 193); `install (ubuntu-latest)` and `install (windows-latest)` → `install` (399, matrix 405); `install-documented (ubuntu-latest)` and `install-documented (windows-latest)` → `install-documented` (454, matrix 458); `smoke` → `smoke` (288); `release-compat` → `release-compat` (356); `visual-docs / report (x86_64, shots/current, shots/verify, Visual docs)` → a new `visual-docs` job in ci.yml (today visual-docs.yml 30). So `verdict: needs: [gate, pr-title, llmlint, msrv, deny, wheel, cross, install, install-documented, smoke, release-compat, visual-docs]`, `if: always()`, failing on any `failure` or `cancelled` and passing `skipped` (smoke, pr-title and llmlint skip on push; the crate jobs skip when `changes` says the crate is unaffected). Two consequences for the human step: a matrix job's `needs` result covers every leg, so `verdict` would also hold `cross (macos-latest)`, `install (macos-latest)`, `install-documented (macos-latest)` and `wheel (aarch64-unknown-linux-gnu)`, which are not required today — a tightening; and AGENTS.md says visual-docs is *not* required and ci.yml (183–185) says `cross (macos-latest)` is, both contradicted by the snapshot (follow-up drafted).",
+    "**Required-check plan.** `required-status-checks.json` (taken 2026-10-16T00:41:20Z, GET /repos/nickderobertis/onepipeline/branches/main/protection/required_status_checks; `strict: false`) lists 14 contexts; the `ci.yml` job behind each, which a `verdict` job must `needs:`: `gate` → `gate` (ci.yml 63); `pr-title` → `pr-title` (535); `llmlint` → `llmlint` (549); `msrv` → `msrv` (250); `deny` → `deny` (378); `wheel` → `wheel`, its x86_64 leg, named by `name: ${{ matrix.check }}` (501–510); `cross (windows-latest)` → `cross` (187, matrix 193); `install (ubuntu-latest)` and `install (windows-latest)` → `install` (399, matrix 405); `install-documented (ubuntu-latest)` and `install-documented (windows-latest)` → `install-documented` (454, matrix 458); `smoke` → `smoke` (288); `release-compat` → `release-compat` (356); `visual-docs / report (x86_64, shots/current, shots/verify, Visual docs)` → a new `visual-docs` job in ci.yml (today visual-docs.yml 30). So `verdict: needs: [gate, pr-title, llmlint, msrv, deny, wheel, cross, install, install-documented, smoke, release-compat, visual-docs]`, `if: always()`, failing on any `failure` or `cancelled` and passing `skipped` (smoke, pr-title and llmlint skip on push; the crate jobs skip when `changes` says the crate is unaffected). Two consequences for the human step: a matrix job's `needs` result covers every leg, so `verdict` would also hold `cross (macos-latest)`, `install (macos-latest)`, `install-documented (macos-latest)` and `wheel (aarch64-unknown-linux-gnu)`, which are not required today — a tightening; and AGENTS.md says visual-docs is *not* required and ci.yml (183–185) says `cross (macos-latest)` is, both contradicted by the snapshot (follow-up drafted). The user's later ruling (ci-time-budgets-wave1 rulings, *No verdict job*) supersedes this verdict plan: the required set becomes exactly `lint`, `test-linux`, `test-windows` and `test-macos`, so each of the 14 contexts above maps to the target job that absorbs it — `pr-title`, `llmlint`, `msrv`, `deny`, `release-compat` and the visual-docs context → `lint`; `gate`, `smoke`, `wheel`, `install (ubuntu-latest)` and `install-documented (ubuntu-latest)` → `test-linux`; `cross (windows-latest)`, `install (windows-latest)` and `install-documented (windows-latest)` → `test-windows`; and `test-macos` newly requires the macOS legs no context requires today. Under that ruling the visual-docs context name below matters only to the switch-over, since the new required contexts are the four job names.",
     "**Visual-docs context.** A `visual-docs` job in ci.yml calling `nickderobertis/screencomp/.github/workflows/visual-docs-reusable.yml@v0.4.8` with the same `with:` block and no `name:` reproduces `visual-docs / report (x86_64, shots/current, shots/verify, Visual docs)` byte for byte. Evidence: the prefix is the caller's job id — visual-docs.yml line 30 `visual-docs:` with no `name:` — and every job record read under it is named `visual-docs / <called job>`; the called job is `report` (reusable line 387); its parenthesised suffix is the matrix the `arches` job builds (reusable lines 305–316: `arch`, `project`, `current`, `verify`, `manifest`, `gallery_title`), rendered with the empty `project` and `manifest` omitted; and `Visual docs` is the `gallery-title` input's default (reusable lines 111–114), not the calling workflow's `name: Visual docs` (visual-docs.yml line 7) — so renaming the workflow to `CI` does not change it. It stays exact only while ci.yml's job id is `visual-docs` with no `name:`, `gallery-title` is unset, `screencomp.toml`'s arches stay `[x86_64]`, and the pin's reusable workflow keeps those lines. GitHub's documentation pages read (*Reuse workflows*, *Workflow syntax*) state no naming rule for called jobs, so this rests on the workflow lines and the job records, not on a documented guarantee. The caller job must grant `contents: write` and `pull-requests: write` (visual-docs.yml 38–40), because ci.yml's workflow-level `permissions: contents: read` (9–10) would otherwise cap the called jobs (reusable deploy-pages comment: a called job's permissions must be a subset of the caller's). "
     "Triggers once the PR run moves: visual-docs.yml must keep `pull_request: types: [closed]` — `cleanup-preview` runs only on `closed` (reusable line 523) — and its monthly `schedule` — `prune-history` runs only on `schedule` (reusable line 548); its `push: branches: [main]` keeps deploying the canonical gallery (or moves to ci.yml's push with `if:` guards). Its `pull_request` types must drop `opened, synchronize, reopened`, or both workflows would report the same context on every PR; a `closed` run's `report` is skipped (capture's `if` excludes `closed`, reusable line 324), so it posts no conflicting result. The two files then carry the same `with:` block, which can drift.",
     "**Token permissions for the CD-tail reader.** The reads are `GET /repos/{o}/{r}/actions/runs`, `.../actions/workflows/{id}/runs`, `.../actions/runs/{id}/jobs`, `.../actions/jobs/{id}/logs` (GitHub, *Permissions required for GitHub Apps*, section \"Repository permissions for \\\"Actions\\\"\", read), `.../pulls` and `.../pulls/{n}` (section \"Repository permissions for \\\"Pull requests\\\"\", read; `pulls/{n}` also under \"Contents\"), and `.../releases` (section \"Repository permissions for \\\"Contents\\\"\", read). "
