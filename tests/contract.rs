@@ -6673,7 +6673,8 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // The kinds the contract does not list are exactly the ones the divergence
     // record proposes, and no others: a kind neither document names fails here.
     let proposed: BTreeSet<String> = [
-        "40.", "47.", "55.", "65.", "70.", "92.", "119.", "121.", "122.", "123.", "126.", "127.", "129.",
+        "40.", "47.", "55.", "65.", "70.", "92.", "119.", "121.", "122.", "123.", "126.", "127.",
+        "129.",
     ]
     .into_iter()
     .flat_map(|entry| {
