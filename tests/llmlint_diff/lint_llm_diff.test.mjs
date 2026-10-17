@@ -322,7 +322,15 @@ describe("just lint-llm-diff", () => {
     const ws = new Workspace(t);
     const run = ws.lint("no-such-base");
     assert.notEqual(run.status, 0, run.output);
-    assert.match(run.stderr, /'no-such-base' does not resolve to a commit/, run.output);
+    // The recipe's whole say is one refusal line naming the base; `just` adds
+    // its own failure line after it, which is not the recipe's.
+    const said = run.output.split("\n").filter((line) => line.startsWith("lint-llm-diff:"));
+    assert.deepEqual(
+      said,
+      ["lint-llm-diff: 'no-such-base' does not resolve to a commit"],
+      run.output,
+    );
+    assert.equal(run.stdout, "", run.output);
     assert.equal(ws.judgeCalls(), 0, run.output);
   });
 });

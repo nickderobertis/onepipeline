@@ -756,7 +756,7 @@ lint-llm-diff base="origin/main" *nx_args:
     base="$1"
     shift
     sha="$(git rev-parse --verify --quiet "${base}^{commit}")" || {
-      echo "lint-llm-diff: '$base' does not resolve to a commit; fetch it or pass an existing base" >&2
+      echo "lint-llm-diff: '$base' does not resolve to a commit" >&2
       exit 2
     }
     echo "lint-llm-diff: judging the diff against $base ($sha)"
