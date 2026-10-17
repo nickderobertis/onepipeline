@@ -287,7 +287,7 @@ describe("the dropped targets", () => {
   });
 });
 
-// llmlint: ignore-block[plan_criteria_require_realistic_tests] The macOS and Windows build recipes need native macOS and Windows toolchains this Linux host cannot run, so inside the dispatch their proof is the recipes' plan mode checked against the last release's published artifacts; the Linux recipe is driven for real end to end, and the hosted build jobs build and run the foreign artifacts on every release.
+// Why plan mode is the proof for macOS and Windows: the macOS and Windows build recipes need native macOS and Windows toolchains this Linux host cannot run, so inside the dispatch their proof is the recipes' plan mode checked against the last release's published artifacts; the Linux recipe is driven for real end to end, and the hosted build jobs build and run the foreign artifacts on every release.
 describe("each platform's plan", () => {
   const published = JSON.parse(read(".github/fixtures/release-v0.74.1-published.json"));
   const as = (name) => name.replaceAll(published.version, VERSION);
@@ -361,4 +361,3 @@ describe("each platform's plan", () => {
     }
   });
 });
-// llmlint: ignore-end[plan_criteria_require_realistic_tests]
