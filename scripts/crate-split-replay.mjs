@@ -97,11 +97,14 @@ export function compileMapping(mapping) {
   onlyKeys(mapping, ["shared", "crates", "sources", "fallback", "suites"], "the mapping");
   strings(mapping, "shared", "the mapping", false);
   strings(mapping, "sources", "the mapping", false);
-  if (
-    mapping.crates !== undefined &&
-    (typeof mapping.crates !== "object" || Array.isArray(mapping.crates))
-  ) {
-    throw new Refusal("crates is not an object", MAPPING_HELP);
+  for (const container of ["crates", "suites"]) {
+    const value = mapping[container];
+    if (
+      value !== undefined &&
+      (value === null || typeof value !== "object" || Array.isArray(value))
+    ) {
+      throw new Refusal(`${container} is not an object of named entries`, MAPPING_HELP);
+    }
   }
   const crates = mapping.crates ?? {};
   if (Object.keys(crates).length === 0)
@@ -111,11 +114,11 @@ export function compileMapping(mapping) {
     strings(crate, "paths", `crates.${name}`, true);
     strings(crate, "deps", `crates.${name}`, false);
     for (const dep of crate.deps ?? []) {
-      if (!(dep in crates))
+      if (!Object.hasOwn(crates, dep))
         throw new Refusal(`crate ${name} depends on unknown crate ${dep}`, MAPPING_HELP);
     }
   }
-  if (mapping.fallback !== undefined && !(mapping.fallback in crates)) {
+  if (mapping.fallback !== undefined && !Object.hasOwn(crates, mapping.fallback)) {
     throw new Refusal(`fallback ${mapping.fallback} is not a crate`, MAPPING_HELP);
   }
   const declared = mapping.suites ?? {};
@@ -137,7 +140,7 @@ export function compileMapping(mapping) {
   for (const [name, suite] of Object.entries(mapping.suites ?? {})) {
     const reach = new Set();
     for (const crate of suite.crates ?? []) {
-      if (!(crate in crates)) {
+      if (!Object.hasOwn(crates, crate)) {
         throw new Refusal(`suite ${name} exercises unknown crate ${crate}`, MAPPING_HELP);
       }
       for (const reached of closure(crate)) reach.add(reached);
@@ -324,19 +327,44 @@ function render(result) {
 
 /** Today's shape, read from `nx.json` and `tests/e2e/main.rs` in `repo`. */
 export function todaysMapping(repo) {
-  const named = JSON.parse(readFileSync(join(repo, "nx.json"), "utf8")).namedInputs;
-  const expand = (name) =>
-    named[name].flatMap((input) =>
-      typeof input !== "string"
-        ? []
-        : input in named
-          ? expand(input)
-          : [input.replace("{workspaceRoot}/", "")],
+  const refuse = (why) =>
+    new Refusal(
+      `nx.json cannot give today's shape: ${why}`,
+      "run --today from this repository's root, or replay a --mapping",
     );
+  let named;
+  try {
+    named = JSON.parse(readFileSync(join(repo, "nx.json"), "utf8")).namedInputs;
+  } catch (error) {
+    throw refuse(error.message);
+  }
+  if (named === null || typeof named !== "object") throw refuse("it has no namedInputs");
+  const expand = (name, seen = []) => {
+    if (seen.includes(name)) throw refuse(`${[...seen, name].join(" -> ")} is a cycle`);
+    const inputs = named[name];
+    if (!Object.hasOwn(named, name) || !Array.isArray(inputs)) {
+      throw refuse(`${name} is not a list of inputs`);
+    }
+    // An object input (`dependentTasksOutputFiles` and the like) names no source file.
+    return inputs
+      .filter((input) => typeof input === "string")
+      .flatMap((input) =>
+        Object.hasOwn(named, input)
+          ? expand(input, [...seen, name])
+          : [input.replace("{workspaceRoot}/", "")],
+      );
+  };
   const build = expand("rustBuild");
   const sources = build.filter((glob) => /^(src|crates|schemas)\//.test(glob));
+  if (sources.length === 0)
+    throw refuse("rustBuild names no source under src/, crates/ or schemas/");
   const e2e = expand("e2eSource").filter((glob) => !build.includes(glob));
-  const main = readFileSync(join(repo, "tests", "e2e", "main.rs"), "utf8");
+  let main;
+  try {
+    main = readFileSync(join(repo, "tests", "e2e", "main.rs"), "utf8");
+  } catch (error) {
+    throw refuse(`tests/e2e/main.rs cannot be read: ${error.message}`);
+  }
   const modules = [...main.matchAll(/^mod (\w+);/gm)]
     .map((m) => m[1])
     .filter((m) => m !== "harness");
@@ -347,6 +375,18 @@ export function todaysMapping(repo) {
     crates: { onepipeline: { paths: sources, deps: [] } },
     suites: { e2e: { paths: e2e, crates: ["onepipeline"], modules: [...modules, "harness"] } },
   };
+}
+
+/** Write `text` to `out`, refusing with what to fix when it cannot be. */
+function writeOut(out, text) {
+  try {
+    writeFileSync(out, text);
+  } catch (error) {
+    throw new Refusal(
+      `--out ${out} cannot be written: ${error.message}`,
+      "point --out at a file in a directory that exists and that you can write to",
+    );
+  }
 }
 
 const USAGE =
@@ -440,7 +480,7 @@ function main(argv) {
     ? moduleSeconds(selectRun(loadRecords(options.records), options.run).records)
     : null;
   const result = replay(mapping, changes, seconds);
-  writeFileSync(options.out, json ? `${JSON.stringify(result, null, 2)}\n` : `${render(result)}\n`);
+  writeOut(options.out, json ? `${JSON.stringify(result, null, 2)}\n` : `${render(result)}\n`);
   const { summary } = result;
   const pct = (x) => (x === null || x === undefined ? "-" : `${(100 * x).toFixed(1)}%`);
   console.log(

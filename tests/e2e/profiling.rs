@@ -460,3 +460,28 @@ fn a_journey_run_again_replaces_its_record() {
         "the second run's record replaced the first's: {first:#} {second:#}"
     );
 }
+
+/// A test name that is not a test's path — one that could reach outside the
+/// record directory — writes nothing anywhere, and says so.
+#[test]
+fn a_test_name_that_is_not_a_tests_path_writes_no_record() {
+    let world = World::new("profile-escaping");
+    let records = world.root.join("profiles");
+    let ran = Command::new(std::env::current_exe().expect("this suite's own binary"))
+        .args(["--exact", IDLE, "--nocapture"])
+        .env(profile::DIR_ENV, &records)
+        .env("NEXTEST_TEST_NAME", "../../escaped")
+        .output()
+        .expect("the suite runs");
+    passed(IDLE, &ran);
+    let said = String::from_utf8_lossy(&ran.stderr);
+    assert!(
+        said.contains(r#"no test profile is written for "../../escaped""#),
+        "{said}"
+    );
+    assert!(!records.exists(), "a record directory was made");
+    assert!(
+        !world.root.join("escaped.json").exists(),
+        "a record escaped its directory"
+    );
+}

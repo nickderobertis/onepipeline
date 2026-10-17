@@ -404,3 +404,108 @@ test("globs cross directories only at a double star", () => {
   assert.ok(!globToRegExp("src/*.rs").test("src/channel/layout.rs"));
   assert.ok(globToRegExp("src/*.rs").test("src/plan.rs"));
 });
+
+test("--run weighs the suites by the run it names, and refuses one the records do not hold", () => {
+  const records = join(scratch, "two-runs");
+  mkdirSync(join(records, "e2e"), { recursive: true });
+  for (const [run, wall] of [
+    ["first", 10],
+    ["second", 40],
+  ]) {
+    writeFileSync(
+      join(records, "e2e", `${run}.one.json`),
+      JSON.stringify({
+        ...golden,
+        test: "one::first",
+        run_id: run,
+        wall_s: wall,
+        unattributed_s: wall,
+        categories,
+      }),
+    );
+  }
+  const weighed = (run) =>
+    replayed(`run-${run}`, mapping(false), ["--records", records, "--run", run]).suites.one
+      .testSeconds;
+  assert.equal(weighed("first"), 10);
+  assert.equal(weighed("second"), 40);
+  refused(
+    [
+      "--mapping",
+      mappingFile("run-none", mapping(false)),
+      ...window(),
+      "--out",
+      join(scratch, "x"),
+      "--records",
+      records,
+      "--run",
+      "third",
+    ],
+    /no record belongs to run third/,
+  );
+});
+
+test("a mapping's containers and names are its own, not an array's or an object's inherited ones", () => {
+  const broken = (change) => {
+    const proposal = mapping(false);
+    change(proposal);
+    return [
+      "--mapping",
+      mappingFile("inherited", proposal),
+      "--out",
+      join(scratch, "x"),
+      "--repo",
+      repo,
+    ];
+  };
+  refused(
+    broken((p) => {
+      p.suites = Object.values(p.suites);
+    }),
+    /suites is not an object of named entries/,
+  );
+  refused(
+    broken((p) => {
+      p.crates.beta.deps = ["toString"];
+    }),
+    /crate beta depends on unknown crate toString/,
+  );
+  refused(
+    broken((p) => {
+      p.fallback = "constructor";
+    }),
+    /fallback constructor is not a crate/,
+  );
+});
+
+test("--today refuses an nx.json whose inputs cannot be expanded", () => {
+  const dir = join(scratch, "cyclic");
+  mkdirSync(join(dir, "tests", "e2e"), { recursive: true });
+  writeFileSync(join(dir, "tests", "e2e", "main.rs"), "mod one;\n");
+  const today = (namedInputs) => {
+    writeFileSync(join(dir, "nx.json"), JSON.stringify({ namedInputs }));
+    return ["--today", "--repo", dir, "--out", join(scratch, "x")];
+  };
+  refused(
+    today({ rustBuild: ["a"], a: ["rustBuild"], e2eSource: [] }),
+    /rustBuild -> a -> rustBuild is a cycle/,
+  );
+  refused(today({ rustBuild: "src/**" }), /rustBuild is not a list of inputs/);
+  refused(
+    today({ rustBuild: ["{workspaceRoot}/Cargo.lock"], e2eSource: [] }),
+    /rustBuild names no source/,
+  );
+});
+
+test("a result that cannot be written says where it was going and what to fix", () => {
+  refused(
+    [
+      "--mapping",
+      mappingFile("unwritable", mapping(false)),
+      ...window(),
+      "--out",
+      join(scratch, "no-such-dir", "r.md"),
+    ],
+    /--out .*no-such-dir.*r\.md cannot be written/,
+  );
+});

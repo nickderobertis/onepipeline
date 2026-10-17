@@ -371,10 +371,17 @@ export function parseArgs(argv) {
 function main(argv) {
   const { options, platforms } = parseArgs(argv);
   const report = buildReport(platforms, options);
-  writeFileSync(
-    options.out,
-    options.json ? `${JSON.stringify(report, null, 2)}\n` : `${render(report)}\n`,
-  );
+  try {
+    writeFileSync(
+      options.out,
+      options.json ? `${JSON.stringify(report, null, 2)}\n` : `${render(report)}\n`,
+    );
+  } catch (error) {
+    throw new Refusal(
+      `--out ${options.out} cannot be written: ${error.message}`,
+      "point --out at a file in a directory that exists and that you can write to",
+    );
+  }
   const tests = report.platforms.map((p) => `${p.label} ${p.breakdown.total.tests}`).join(", ");
   console.log(`test-profile-report: wrote ${options.out} (tests read: ${tests})`);
 }

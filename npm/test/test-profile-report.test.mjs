@@ -257,3 +257,22 @@ test("an invocation that does not say what to read or where to write is refused 
     /next: name a directory of records/,
   );
 });
+
+test("a record file that is not JSON is refused by its path", () => {
+  const dir = join(scratch, "torn");
+  write(dir, [record("a::one", { wall: 1 })]);
+  writeFileSync(join(dir, "e2e", "torn.json"), '{"schema": 1, "test"');
+  refused(
+    ["--out", join(scratch, "x"), `torn=${dir}`],
+    /torn\.json is not JSON/,
+    /next: remove .*torn\.json, or rerun the test that wrote it/,
+  );
+});
+
+test("a report that cannot be written says where it was going and what to fix", () => {
+  refused(
+    ["--out", join(scratch, "no-such-dir", "report.md"), `linux=${join(scratch, "linux")}`],
+    /--out .*no-such-dir.*report\.md cannot be written/,
+    /next: point --out at a file in a directory that exists/,
+  );
+});
