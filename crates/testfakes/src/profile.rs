@@ -196,28 +196,15 @@ fn test_name() -> Option<String> {
     if let Some(name) = std::env::var_os("NEXTEST_TEST_NAME") {
         return name.into_string().ok();
     }
-    // A test binary run by hand: one name, matched exactly. The flags that take a
-    // value are libtest's own, and their values are not names.
-    const VALUED: [&str; 6] = [
-        "--test-threads",
-        "--skip",
-        "--logfile",
-        "--format",
-        "--color",
-        "-Z",
-    ];
-    let mut exact = false;
-    let mut names = Vec::new();
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        if VALUED.contains(&arg.as_str()) {
-            args.next();
-        } else if arg == "--exact" {
-            exact = true;
-        } else if !arg.starts_with('-') {
-            names.push(arg);
-        }
-    }
+    // A test binary run by hand: `--exact` and one name. Every argument that is not
+    // a flag counts as a name, so one given a flag's value (`--test-threads 1`)
+    // reads as two and writes nothing, rather than this keeping a copy of which of
+    // libtest's flags take one.
+    let exact = std::env::args().any(|arg| arg == "--exact");
+    let names: Vec<String> = std::env::args()
+        .skip(1)
+        .filter(|arg| !arg.starts_with('-'))
+        .collect();
     match (exact, names.as_slice()) {
         (true, [name]) => Some(name.clone()),
         _ => None,

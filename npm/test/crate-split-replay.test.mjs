@@ -476,6 +476,12 @@ test("a mapping's containers and names are its own, not an array's or an object'
     }),
     /fallback constructor is not a crate/,
   );
+  refused(
+    broken((p) => {
+      p.fallback = ["alpha"];
+    }),
+    /fallback alpha is not a crate/,
+  );
 });
 
 test("--today refuses an nx.json whose inputs cannot be expanded", () => {

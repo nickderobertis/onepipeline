@@ -15,7 +15,8 @@
 // test retried within that run is read at its last attempt.
 //
 // The report (Markdown, or JSON with --json) is written to --out; what is printed is
-// one line saying where it went.
+// one line saying where it went. It exits 0 once the report is written, and 1 with
+// the reason and a `next:` line on stderr when anything is refused or fails.
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";

@@ -210,6 +210,10 @@ mod out_of_band;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod plan;
 mod plan_check;
+// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] what these journeys prove is
+// the record every test in this binary writes — the harness's constructor and teardown and
+// `onepipeline_testfakes::profile` behind them — so they run this binary's own tests in
+// child processes, and no project but this one compiles what they test. About ten seconds.
 mod profiling;
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the reason is at the
 // head of `tests/e2e/publish_preserve.rs` and is not restated here; this declaration is

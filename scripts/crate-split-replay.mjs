@@ -37,7 +37,8 @@
 // many e2e test-seconds the window's pull requests would have skipped.
 //
 // The result (Markdown, or JSON with --json) is written to --out; what is printed is
-// one line with the headline figures.
+// one line with the headline figures. It exits 0 once the result is written, and 1
+// with the reason and a `next:` line on stderr when anything is refused or fails.
 import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -130,7 +131,10 @@ export function compileMapping(mapping) {
         throw new Refusal(`crate ${name} depends on unknown crate ${dep}`, MAPPING_HELP);
     }
   }
-  if (mapping.fallback !== undefined && !Object.hasOwn(crates, mapping.fallback)) {
+  if (
+    mapping.fallback !== undefined &&
+    (typeof mapping.fallback !== "string" || !Object.hasOwn(crates, mapping.fallback))
+  ) {
     throw new Refusal(`fallback ${mapping.fallback} is not a crate`, MAPPING_HELP);
   }
   const declared = mapping.suites ?? {};

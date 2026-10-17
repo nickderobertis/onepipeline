@@ -125,13 +125,21 @@ fn a_profiled_journey_that_does_nothing() {
     assert!(recorded.programs.is_empty(), "{recorded:?}");
 }
 
-/// The test [`FAILING`] names: it fails after building a world, which is the
-/// verdict `should_panic` turns into a pass so this suite can run it.
+/// Set in the one child process that runs [`FAILING`] so it fails for real.
+const FAIL_FOR_REAL: &str = "ONEPIPELINE_PROFILE_FIXTURE_FAILS";
+
+/// The test [`FAILING`] names: it builds a world and then fails, which
+/// `should_panic` makes a pass so this suite can run it — unless
+/// [`FAIL_FOR_REAL`] is set, when it returns instead, and libtest fails it for
+/// not panicking.
 #[test]
 #[should_panic(expected = "the profiled journey fails")]
 fn a_profiled_journey_that_fails() {
     let _world = World::new("profile-failing");
-    panic!("the profiled journey fails");
+    assert!(
+        std::env::var_os(FAIL_FOR_REAL).is_some(),
+        "the profiled journey fails"
+    );
 }
 
 /// Run this suite's own binary the way nextest runs one test — alone, in a
@@ -395,16 +403,34 @@ fn a_process_waited_on_is_counted_once_and_held_for_the_wait() {
     );
 }
 
-/// A failing test's record is written when its thread ends, like any other.
+/// A test that fails leaves its record like any other: one whose panic is its
+/// pass, and one the test binary itself reports failed.
 #[test]
 fn a_failing_journey_leaves_its_record_too() {
     let world = World::new("profile-failing-record");
-    let records = world.root.join("profiles");
-    passed(FAILING, &run_alone(&["--exact", FAILING], &records));
-    let failing = read_record(&records.join("e2e").join(file_of(FAILING)));
-    assert_eq!(failing["test"], FAILING, "{failing:#}");
-    assert_eq!(failing["ended"], "test-thread", "{failing:#}");
-    assert_eq!(failing["categories"]["fixture"]["count"], 1, "{failing:#}");
+    for fails in [false, true] {
+        let records = world.root.join(format!("profiles-{fails}"));
+        let mut child = Command::new(std::env::current_exe().expect("this suite's own binary"));
+        child
+            .args(["--exact", FAILING, "--nocapture"])
+            .env(profile::DIR_ENV, &records)
+            .env_remove("NEXTEST_TEST_NAME");
+        if fails {
+            child.env(FAIL_FOR_REAL, "1");
+        }
+        let ran = child.output().expect("the suite runs");
+        assert_eq!(
+            ran.status.success(),
+            !fails,
+            "{}{}",
+            String::from_utf8_lossy(&ran.stdout),
+            String::from_utf8_lossy(&ran.stderr)
+        );
+        let failing = read_record(&records.join("e2e").join(file_of(FAILING)));
+        assert_eq!(failing["test"], FAILING, "{failing:#}");
+        assert_eq!(failing["ended"], "test-thread", "{failing:#}");
+        assert_eq!(failing["categories"]["fixture"]["count"], 1, "{failing:#}");
+    }
 }
 
 /// A process running several tests writes nothing: no one test owns its totals.
