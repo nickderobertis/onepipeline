@@ -937,11 +937,18 @@ fn the_windows_leg_is_split_into_shards_that_each_report_and_pass_only_together(
         .iter()
         .find(|step| step["id"] == "gate")
         .expect("`cross` has its quality gate");
+    // The first shard runs `check-cross` whole and every other its `test-quick`
+    // alone, so the format and lint checks run once and every shard tests its share.
+    assert_eq!(
+        gate["env"]["GATE"].as_str(),
+        Some("${{ matrix.shard == 1 && 'check-cross' || 'test-quick' }}"),
+        "the shards do not split `check-cross` between them: {gate}"
+    );
     assert!(
         gate["run"]
             .as_str()
-            .is_some_and(|run| run.contains("just check-cross")),
-        "every shard runs the whole of `check-cross`, partitioned: {gate}"
+            .is_some_and(|run| run.contains("just \"$GATE\"")),
+        "the quality gate does not run the recipe its shard is given: {gate}"
     );
     let proved = steps
         .iter()

@@ -1423,10 +1423,13 @@ fn the_rerun_steps_run_only_after_a_failure_and_are_bounded_by_what_they_run() {
     let archive = "\"$RUNNER_TEMP/tests.tar.zst\"";
     let archived_runs = workflow
         .lines()
+        // The Windows shards name their recipe in `GATE`: `check-cross` for the
+        // first, `test-quick` for the rest.
         .filter(|line| {
-            line.trim().starts_with(&format!(
-                "run: ONEPIPELINE_TEST_ARCHIVE={archive} just check"
-            ))
+            ["just check", "just \"$GATE\""].iter().any(|recipe| {
+                line.trim()
+                    .starts_with(&format!("run: ONEPIPELINE_TEST_ARCHIVE={archive} {recipe}"))
+            })
         })
         .count();
     assert_eq!(
@@ -2225,4 +2228,83 @@ fn a_shards_cached_pass_never_stands_in_for_another_shards_run() {
              shard's pass replays for another: {inputs:?}"
         );
     }
+}
+
+/// The log grammar the inventory is read with is nextest's, so it is held against
+/// nextest's own: the partition fixture run under this repository's `ci` profile —
+/// the one the Windows leg reports with — in colour, written into a leg's log once
+/// per tier under the Nx line that starts it and with the timestamp GitHub puts
+/// before every line, has to come back as every test it ran.
+#[test]
+fn the_windows_inventory_reads_what_nextest_itself_reports() {
+    // The binaries the profile's own filters name, as the scheduling fixture has.
+    let fixture = Fixture::new(
+        "inventory-real-nextest",
+        SCHEDULING_MANIFEST,
+        &[
+            (
+                "src/lib.rs",
+                "#[cfg(test)]\nmod tests {\n    #[test]\n    fn unit() {}\n}\n",
+            ),
+            (".config/nextest.toml", &repository_config()),
+            (
+                "tests/e2e.rs",
+                "#[test]\nfn one() {}\n#[test]\nfn two() {}\n",
+            ),
+            ("tests/note.rs", "#[test]\nfn one() {}\n"),
+            ("tests/release_channel.rs", "#[test]\nfn one() {}\n"),
+            ("tests/oneagentgraph_liveness.rs", "#[test]\nfn one() {}\n"),
+        ],
+    );
+    let nextest = |args: &[&str]| {
+        fixture
+            .command(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+            .arg("nextest")
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .expect("nextest runs in the fixture")
+    };
+    let ran = nextest(&["run", "--profile", "ci", "--color", "always"]);
+    let reported = format!("{}{}", stdout(&ran), stderr(&ran));
+    assert!(
+        ran.status.success(),
+        "the fixture's run passed:\n{reported}"
+    );
+    let listed = nextest(&["list", "--message-format", "oneline"]);
+    assert!(listed.status.success(), "{}", stderr(&listed));
+    let tests: Vec<String> = stdout(&listed)
+        .lines()
+        .filter_map(|line| line.split_once(' '))
+        .map(|(binary, test)| format!("{binary}\t{test}"))
+        .collect();
+    assert_eq!(tests.len(), 6, "{}", stdout(&listed));
+
+    let mut log = String::new();
+    for (_, project, _) in INVENTORY_PROJECTS {
+        log.push_str(&format!(
+            "2026-10-17T07:22:20.0Z > nx run {project}:test-quick\n"
+        ));
+        for line in reported.lines() {
+            log.push_str(&format!("2026-10-17T07:22:20.1Z {line}\n"));
+        }
+    }
+    let (code, written, said) = windows_inventory(
+        "inventory-real-nextest-log",
+        &INVENTORY_PROJECTS,
+        INVENTORY_JUSTFILE,
+        &log,
+        None,
+    );
+    assert_eq!(code, Some(0), "{said}\n{log}");
+    let mut expected: Vec<String> = ["rest-tier", "e2e-tier", "contract-tier", "note-tier"]
+        .iter()
+        .flat_map(|tier| tests.iter().map(move |test| format!("{tier}\t{test}")))
+        .collect();
+    expected.sort();
+    let inventoried: Vec<&str> = written
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .collect();
+    assert_eq!(inventoried, expected, "{said}");
 }

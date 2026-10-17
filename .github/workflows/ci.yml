@@ -256,10 +256,14 @@ jobs:
       # Teed for the re-run step below; `shell: bash` above is pipefail, so the
       # tee cannot turn a failed leg green. The archive is the test build, kept
       # for that step to re-run without compiling.
+      # The first shard runs `check-cross` whole and the others its `test-quick`
+      # alone: the format and lint checks read the one commit every shard builds.
       - name: Quality gate (cross-platform legs)
         id: gate
         timeout-minutes: 180
-        run: ONEPIPELINE_TEST_ARCHIVE="$RUNNER_TEMP/tests.tar.zst" just check-cross 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
+        env:
+          GATE: ${{ matrix.shard == 1 && 'check-cross' || 'test-quick' }}
+        run: ONEPIPELINE_TEST_ARCHIVE="$RUNNER_TEMP/tests.tar.zst" just "$GATE" 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
       # A leg that stops without a verdict stops holding something — a test
       # process, or a child of one that outlived it — and on Windows there are no
       # process groups to make that visible afterwards, so it is read here while
