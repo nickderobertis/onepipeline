@@ -725,3 +725,11 @@ test("a crate graph Cargo could not build, or a module weighed twice, is refused
     /module one is named twice, in one and two/,
   );
 });
+
+test("--exclude leaves out the changes whose subjects it matches", () => {
+  const result = replayed("exclude", mapping(false), ["--exclude", "^(chore: release|feat)"]);
+  assert.deepEqual(
+    result.perChange.map((change) => change.subject),
+    ["test: suite one", "fix: the lock", "docs: the readme"],
+  );
+});

@@ -348,3 +348,26 @@ test("each field a record must carry is checked, and the record that lacks it re
   writeFileSync(join(array, "a.json"), "[]");
   refused(["--out", join(scratch, "x"), `field=${array}`], /it is schema undefined/, /next:/);
 });
+
+test("--top-tests and --top-modules keep only that many, costliest first", () => {
+  const out = JSON.parse(
+    report(
+      "--json",
+      "--top-tests",
+      "1",
+      "--top-modules",
+      "1",
+      `windows=${join(scratch, "windows")}`,
+    ),
+  );
+  const [windows] = out.platforms;
+  assert.deepEqual(
+    windows.breakdown.tests.map((t) => t.name),
+    ["e2e::readjust::slow"],
+  );
+  assert.deepEqual(
+    windows.breakdown.modules.map((m) => m.name),
+    ["e2e::readjust"],
+  );
+  assert.equal(windows.breakdown.allModules.length, 3);
+});
