@@ -213,8 +213,9 @@ jobs:
   # 224-minute step and a 238-minute job. Each half needs 117 and 130: inside 180
   # and 220 by over half again. The shards are nextest's `count:K/2` of every
   # tier, so between them they run each test once; `just cross-shards` proves that
-  # of this host's listing. No leg name is required — `cross (windows-latest)` is
-  # the carrier below, which needs both shards' verdicts.
+  # of this host's listing and of the 2651 tests base's leg ran
+  # (`.github/windows-test-inventory.tsv`). No leg name is required —
+  # `cross (windows-latest)` is the carrier below, which needs both shards' verdicts.
   # llmlint: ignore-end[comments_earn_their_place]
   cross:
     name: cross proof (${{ matrix.os }}, shard ${{ matrix.shard }}/2)
