@@ -815,17 +815,33 @@ fn transcript(paths: &RunPaths, rework: &str) -> Option<std::path::PathBuf> {
         .find(|path| path.is_file())
 }
 
-/// A `decline`, judged against the run's record and not yet posted: the one
-/// operation it compiled to, and what posting its replies needs.
+/// A `decline`, judged against the run's record and not yet posted: the node, the
+/// comments and the reason its one `decline-applied` names, and what posting its
+/// replies needs.
 pub(crate) struct ValidatedDecline {
-    pub(crate) compiled: [crate::edits::Operation; 1],
+    comments: Vec<crate::channel::ReworkComment>,
     paths: RunPaths,
-    // llmlint: ignore-block[invalid_states_unrepresentable] the launch record's resolved graph reference, the run's own change request URL and the lineage root `review::root` walked to.
+    // llmlint: ignore-block[invalid_states_unrepresentable] the plan node id the engine's edit validator resolved, the op's reason held non-blank by `staged_decline`, the launch record's resolved graph reference, the run's own change request URL and the lineage root `review::root` walked to.
+    node: String,
+    reason: String,
     graph: Option<String>,
     change_url: String,
     root: String,
     // llmlint: ignore-end[invalid_states_unrepresentable]
     term_scope: onevcs::TermScope,
+}
+
+impl ValidatedDecline {
+    /// The `decline-applied` the commands after this one are validated against: its
+    /// replies are not posted yet, so it names none.
+    pub(crate) fn staged(&self) -> crate::edits::Operation {
+        crate::edits::Operation::DeclineApplied {
+            node: self.node.clone(),
+            comments: self.comments.clone(),
+            reason: self.reason.clone(),
+            replies: Vec::new(),
+        }
+    }
 }
 
 /// Every comment id a read this run journalled found on a node of `node`'s lineage.
@@ -867,25 +883,23 @@ pub(crate) fn staged_decline(
     graph: Option<&str>,
     compiled: Vec<crate::edits::Operation>,
 ) -> Result<crate::engine::Staged> {
-    let one = match <[crate::edits::Operation; 1]>::try_from(compiled) {
-        Ok(one @ [crate::edits::Operation::DeclineApplied { .. }]) => one,
+    let (node, comments, reason) = match <[crate::edits::Operation; 1]>::try_from(compiled) {
+        Ok(
+            [crate::edits::Operation::DeclineApplied {
+                node,
+                comments,
+                reason,
+                ..
+            }],
+        ) => (node, comments, reason),
         // llmlint: ignore[changed_behavior_has_e2e] `compile_decline` returns exactly one `decline-applied` or refuses, so no command reaches this arm; it is the type's.
         Ok(other) => return Ok(crate::engine::Staged::Compiled(other.into())),
         Err(other) => return Ok(crate::engine::Staged::Compiled(other)),
     };
-    let [crate::edits::Operation::DeclineApplied {
-        node,
-        comments,
-        reason,
-        ..
-    }] = &one
-    else {
-        return Ok(crate::engine::Staged::Compiled(one.into()));
-    };
     if reason.trim().is_empty() {
         return Err(crate::channel::Refusal::BlankReason { node: node.clone() }.into());
     }
-    let read = read_for(paths, state, node);
+    let read = read_for(paths, state, &node);
     if let Some(unread) = comments.iter().find(|comment| !read.contains(&comment.id)) {
         return Err(crate::channel::Refusal::CommentNotRead {
             node: node.clone(),
@@ -893,14 +907,16 @@ pub(crate) fn staged_decline(
         }
         .into());
     }
-    let change_url = state.known_change_url(node).ok_or_else(|| {
+    let change_url = state.known_change_url(&node).ok_or_else(|| {
         Error::Refused(format!(
             "decline: node '{node}' has no change request on the run's record"
         ))
     })?;
     Ok(crate::engine::Staged::Decline(Box::new(ValidatedDecline {
-        root: crate::review::root(state, node).to_owned(),
-        compiled: one,
+        root: crate::review::root(state, &node).to_owned(),
+        node,
+        comments,
+        reason,
         paths: paths.clone(),
         graph: graph.map(str::to_owned),
         change_url,
@@ -920,15 +936,12 @@ pub(crate) fn staged_decline(
 /// drafter is configured, the read, the drafting or a post failed — any reply posted
 /// before the failure staying on the host.
 pub(crate) fn decline(validated: &ValidatedDecline) -> Result<Vec<crate::edits::Operation>> {
-    let [crate::edits::Operation::DeclineApplied {
+    let ValidatedDecline {
         node,
         comments,
         reason,
         ..
-    }] = &validated.compiled
-    else {
-        return Ok(validated.compiled.to_vec());
-    };
+    } = validated;
     let not_posted = |detail: String| -> Error {
         crate::channel::Refusal::DeclineNotPosted {
             node: node.clone(),

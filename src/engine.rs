@@ -4745,12 +4745,12 @@ impl Staged {
     /// whose disposition validation *did* settle is a [`Compiled`](Self::Compiled)
     /// like any other, and stages the record it commits — which is what a carried
     /// note owes the node's next dispatch.
-    pub(crate) fn staged(&self) -> &[edits::Operation] {
+    pub(crate) fn staged(&self) -> std::borrow::Cow<'_, [edits::Operation]> {
         match self {
-            Self::Compiled(operations) => operations,
-            Self::Note(_) => &[],
-            Self::Retitle(retitle) => &retitle.compiled,
-            Self::Decline(decline) => &decline.compiled,
+            Self::Compiled(operations) => operations.into(),
+            Self::Note(_) => (&[] as &[edits::Operation]).into(),
+            Self::Retitle(retitle) => retitle.compiled.as_slice().into(),
+            Self::Decline(decline) => vec![decline.staged()].into(),
         }
     }
 }
@@ -4843,7 +4843,7 @@ fn validate_envelope(
         if let Ok(step) = &ruling {
             crate::projection::fold_operations(
                 &mut staged_state,
-                step.staged(),
+                &step.staged(),
                 Some(sys::now_millis()),
             );
         }

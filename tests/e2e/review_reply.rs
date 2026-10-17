@@ -1767,6 +1767,58 @@ fn a_drafter_answer_its_schema_refuses_is_never_read_and_the_one_after_it_is() {
     assert_eq!(drafter_tasks(&world).len(), 3);
 }
 
+/// Under an operator's drafter whose schema accepts any object, the engine still holds the
+/// result to the replies shape itself: a reply carrying a field it does not name, or a
+/// disposition that is neither of the two, is refused `decline-not-posted` with nothing
+/// posted, and the drafting after it posts.
+#[test]
+fn a_drafter_answer_a_permissive_schema_lets_through_is_refused_by_the_engine_itself() {
+    let world = team_world("reply-permissive-schema");
+    let run = "permissive";
+    let (_, host) = launched_with_replies(&world, run);
+    std::fs::write(
+        world.graphs().join("review-reply.schema.json"),
+        r#"{"type":"object"}"#,
+    )
+    .expect("the operator's permissive schema is written");
+    let left = conversation(1116, 1);
+    add(&host, 1, left.clone());
+    review(&world, run);
+    for (answer, says) in [
+        (
+            json!({"replies": [{"comment": left.id.0, "disposition": "declined",
+                "body": "Left as it is.", "mood": "tired"}]}),
+            "not the replies shape",
+        ),
+        (
+            json!({"replies": [{"comment": left.id.0, "disposition": "maybe",
+                "body": "Left as it is."}]}),
+            "maybe",
+        ),
+    ] {
+        world.script("review-reply.result", &answer.to_string());
+        let refusal = rejected(
+            &world,
+            run,
+            &decline(&world, run, "a", &[&left], "out of scope"),
+        );
+        assert_eq!(refusal["kind"], "decline-not-posted", "{refusal}");
+        assert!(
+            refusal["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains(says)),
+            "{refusal}"
+        );
+        assert!(posts(&world).is_empty());
+    }
+    world.unscript("review-reply.result");
+    let output = decline(&world, run, "a", &[&left], "out of scope");
+    assert_eq!(output.code, 0, "{}\n{}", output.stdout, output.stderr);
+    assert!(the_reply_to(&host, 1, &left)
+        .body
+        .contains("label=declined"));
+}
+
 /// A rework's reply the host refuses is left owed: the pass fails naming it, the reply
 /// the host took before it stays and is never posted again, and the next pass drafts and
 /// posts only the one refused.
@@ -1818,6 +1870,14 @@ fn a_rework_s_reply_the_host_refuses_is_posted_by_the_next_pass_and_the_one_it_t
 /// Drop `onepipeline.rework`'s `replaces_head` from every document of `world`'s store
 /// carrying it — the record as a build before the key wrote it.
 fn as_an_older_build_wrote_it(world: &World) {
+    rewrite_rework_record(world, |record| {
+        assert!(record.remove("replaces_head").is_some());
+    });
+}
+
+/// Rewrite the one stored rework record carrying `replaces_head` with `edit`, as
+/// something other than this build writing the store would leave it.
+fn rewrite_rework_record(world: &World, edit: impl Fn(&mut serde_json::Map<String, Value>)) {
     let mut pending = vec![world.store()];
     let mut rewritten = 0;
     while let Some(dir) = pending.pop() {
@@ -1835,10 +1895,11 @@ fn as_an_older_build_wrote_it(world: &World) {
             let (front, body) = rest.split_once("\n---\n").expect("front matter ends");
             let mut front: Value =
                 onepipeline_testfakes::yaml::from_str(front).expect("front matter parses");
-            let record = front["metadata"]["onepipeline.rework"]
-                .as_object_mut()
-                .expect("a rework record");
-            assert!(record.remove("replaces_head").is_some());
+            edit(
+                front["metadata"]["onepipeline.rework"]
+                    .as_object_mut()
+                    .expect("a rework record"),
+            );
             let front =
                 onepipeline_testfakes::yaml::to_string(&front).expect("front matter renders");
             std::fs::write(&path, format!("---\n{front}---\n{body}"))
@@ -1894,6 +1955,73 @@ fn a_stored_rework_record_naming_no_superseded_head_drafts_from_the_replacement_
     assert!(the_reply_to(&host, 1, &left)
         .body
         .contains(&format!("/commit/{head}")));
+}
+
+/// A cold host continuing from a stored rework record whose superseded head is no full
+/// commit id refuses the launch naming the node and why, drafting and posting nothing,
+/// and continues once the record names the head again.
+#[test]
+fn a_stored_rework_record_naming_a_malformed_superseded_head_refuses_the_continuing_launch() {
+    let world = team_world("reply-malformed-head");
+    let run = "malformed";
+    let project = launched_with(&world, run, &[]);
+    let host = host(&world, run, &["a", "b"]);
+    let left = conversation(1136, 1);
+    add(&host, 1, left.clone());
+    review(&world, run);
+    rework(&world, run, &[&left]);
+    world.until_store("the rework's record to reach the store", |world| {
+        world
+            .store_tasks(&project)
+            .iter()
+            .any(|task| task["item"]["metadata"]["onepipeline.rework"]["replaces_head"].is_string())
+    });
+    let held = world
+        .store_tasks(&project)
+        .iter()
+        .find_map(|task| {
+            task["item"]["metadata"]["onepipeline.rework"]["replaces_head"]
+                .as_str()
+                .map(str::to_owned)
+        })
+        .expect("the stored head");
+    rewrite_rework_record(&world, |record| {
+        record.insert("replaces_head".to_owned(), json!("not-a-commit"));
+    });
+
+    let cold = world.on_host("cold-malformed");
+    std::fs::remove_dir_all(&world.runs).unwrap();
+    std::fs::remove_dir_all(world.onevcs_home()).unwrap();
+    let graph = world.review_reply_graph();
+    let start = [
+        "start",
+        &project,
+        "--attach",
+        "--review-reply-graph",
+        &graph,
+    ];
+    let refused = cold.run_from(&cold.project, &start);
+    assert_ne!(refused.code, 0, "{}\n{}", refused.stdout, refused.stderr);
+    assert!(
+        refused.stderr.contains("node 'a'")
+            && refused
+                .stderr
+                .contains("names a superseded head that is no full commit id"),
+        "{}",
+        refused.stderr
+    );
+    assert!(drafter_tasks(&cold).is_empty());
+    assert!(posts(&cold).is_empty());
+
+    rewrite_rework_record(&world, |record| {
+        record.insert("replaces_head".to_owned(), json!(held));
+    });
+    let continued = cold.run_from(&cold.project, &start);
+    assert_eq!(
+        continued.code, 0,
+        "{}\n{}",
+        continued.stdout, continued.stderr
+    );
 }
 
 /// A decline whose own read of the change request fails is refused

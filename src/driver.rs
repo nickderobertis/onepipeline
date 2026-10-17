@@ -4015,7 +4015,7 @@ pub(crate) fn submit_envelope(
                             return Err(error);
                         }
                     };
-                    edits::advance(&mut frontier, step.staged());
+                    edits::advance(&mut frontier, &step.staged());
                     staged.push(step);
                 }
                 // Then deliver, which is the first thing here that reaches outside
