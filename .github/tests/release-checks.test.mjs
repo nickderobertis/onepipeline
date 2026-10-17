@@ -67,8 +67,13 @@ function said(result) {
 }
 
 /// The environment a release job hands its recipe, every registry switched on.
+/// Registries a describe block stands up for every run in it, so nothing here
+/// asks the public ones.
+let ambient = {};
+
 function releaseEnv(github, out, overrides = {}) {
   return {
+    ...ambient,
     ...github.env(),
     RELEASE_TAG: TAG,
     PYPI_PUBLISH: "true",
@@ -315,6 +320,70 @@ describe("a release phase refuses what it cannot trust", () => {
 });
 
 describe("verification refuses a downloaded archive that is not the documents and the executable", () => {
+  /// A Windows zip archive and its checksum on a fresh Release, built from
+  /// `members` ([name, "file" | "symlink" | "directory"]), then verified.
+  async function verifyWindowsZip(members) {
+    const github = await new GitHubDouble().start();
+    const release = github.addRelease(TAG);
+    const content = Buffer.from(
+      execFileSync("python3", ["-c", ZIP, JSON.stringify(members)], { encoding: "latin1" }),
+      "latin1",
+    );
+    const file = `onepipeline-v${VERSION}-x86_64-pc-windows-msvc.zip`;
+    release.assets.push({ id: github.nextId++, name: file, content });
+    release.assets.push({
+      id: github.nextId++,
+      name: `onepipeline-v${VERSION}-x86_64-pc-windows-msvc.sha256`,
+      content: Buffer.from(`${createHash("sha256").update(content).digest("hex")}  ${file}\n`),
+    });
+    const out = scratch("release-verify-zip");
+    try {
+      return await run("just", ["release-windows", "verify"], {
+        env: releaseEnv(github, out, { PYPI_PUBLISH: "false", NPM_PUBLISH: "false" }),
+      });
+    } finally {
+      await github.stop();
+      rmSync(out, { recursive: true, force: true });
+    }
+  }
+  const ZIP = `
+import io, json, sys, zipfile
+buffer = io.BytesIO()
+with zipfile.ZipFile(buffer, 'w') as bundle:
+    for name, kind in json.loads(sys.argv[1]):
+        info = zipfile.ZipInfo(name + ('/' if kind == 'directory' else ''))
+        info.external_attr = {'file': 0o100644, 'symlink': 0o120777, 'directory': 0o040755}[kind] << 16
+        bundle.writestr(info, '' if kind == 'directory' else ('README.md' if kind == 'symlink' else name))
+sys.stdout.buffer.write(buffer.getvalue())
+`;
+  const documents = [
+    ["README.md", "file"],
+    ["LICENSE", "file"],
+    ["CHANGELOG.md", "file"],
+  ];
+
+  it("extracts a Windows zip that is the documents and onepipeline.exe, then smokes what it unpacked", async () => {
+    const result = await verifyWindowsZip([...documents, ["onepipeline.exe", "file"]]);
+    // A Windows executable cannot run here, so the smoke refuses to stand in
+    // another onepipeline for it: reaching that refusal is the proof the
+    // archive was accepted and unpacked.
+    assert.equal(result.code, 1, said(result));
+    assert.doesNotMatch(result.stderr, /each a regular file|put no onepipeline executable/);
+    assert.match(result.stderr, /PATH resolves onepipeline to .*, not the one Release archive \S+\.zip installed in/);
+  });
+
+  for (const [name, members] of [
+    ["omits onepipeline.exe", documents],
+    ["links onepipeline.exe to another file", [...documents, ["onepipeline.exe", "symlink"]]],
+    ["carries onepipeline.exe as a directory", [...documents, ["onepipeline.exe", "directory"]]],
+  ]) {
+    it(`refuses a Windows zip that ${name}`, async () => {
+      const result = await verifyWindowsZip(members);
+      assert.equal(result.code, 1, said(result));
+      assert.match(result.stderr, /\.zip is not \[.*\], each a regular file/, said(result));
+    });
+  }
+
   /// A tar.gz and its checksum on the Release, built from `members` ([name, tar flag]).
   function archive(members) {
     const dir = scratch("archive");
@@ -529,14 +598,56 @@ describe("a lock that links an engine twice", () => {
 describe("the release outcome record", () => {
   let github;
   let out;
+  let crates;
+  let npm;
+  let home;
   before(async () => {
     github = await new GitHubDouble().start();
     github.addRelease(TAG);
     out = scratch("release-outcome");
+    crates = await new CratesDouble().start();
+    npm = new Registry();
+    await npm.start();
+    home = scratch("npm-home");
+    ambient = { ...npm.npmEnv(home), ONEPIPELINE_CRATE_REGISTRY: `${crates.url}/index/` };
   });
   after(async () => {
-    await github.stop();
+    ambient = {};
+    await Promise.all([github.stop(), crates.stop(), npm.stop()]);
     rmSync(out, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it("on a fresh runner with no results, records what the registries already serve as shipped", async () => {
+    rmSync(join(out, "common", "publish-results.json"), { force: true });
+    crates.crates.set("onepipeline", [
+      {
+        line: {
+          name: "onepipeline",
+          vers: VERSION,
+          deps: [],
+          cksum: "0".repeat(64),
+          features: {},
+          yanked: false,
+        },
+        content: Buffer.from("crate"),
+      },
+    ]);
+    try {
+      const jobs = {};
+      for (const key of ["LINUX", "MACOS", "WINDOWS"]) jobs[`${key}_RESULT`] = "success";
+      const result = await run("just", ["release-outcome"], {
+        env: releaseEnv(github, out, { ...jobs, NPM_PUBLISH: "false" }),
+      });
+      assert.equal(result.code, 0, said(result));
+      assert.deepEqual(states(recorded())["crate:onepipeline"], [
+        "shipped-unverified",
+        "success",
+        "skipped",
+      ]);
+    } finally {
+      crates.crates.clear();
+    }
   });
 
   function recorded() {

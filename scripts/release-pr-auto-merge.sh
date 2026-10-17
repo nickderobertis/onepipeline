@@ -49,7 +49,8 @@ status="$(request "$api/repos/$GITHUB_REPOSITORY/pulls?state=open&per_page=100")
 # Every pull request is checked for the fields read here, so a malformed answer
 # is refused rather than mistaken for "no release PR".
 jq -ce --arg repo "$GITHUB_REPOSITORY" '
-  if type == "array" and all(.[]; (.number | type) == "number" and (.node_id | type) == "string"
+  if type == "array" and all(.[]; (.number | type) == "number" and .number > 0 and .number == (.number | floor)
+                              and (.node_id | type) == "string"
                               and .node_id != ""
                               and (.head.ref | type) == "string"
                               and ((.head.repo | type) == "null" or (.head.repo.full_name | type) == "string"))
@@ -80,7 +81,10 @@ status="$(request -X POST -H "Content-Type: application/json" --data-binary "@$w
 if [ "$status" != 200 ] || ! jq -e --argjson number "$number" '(.errors | length // 0) == 0
       and .data.enablePullRequestAutoMerge.pullRequest.number == $number
       and .data.enablePullRequestAutoMerge.pullRequest.autoMergeRequest.mergeMethod == "SQUASH"' "$work/body" >/dev/null 2>&1; then
-  fail "GitHub refused auto-merge on release PR #$number (HTTP $status): $(jq -r '[.errors[]?.message] | join("; ")' "$work/body" 2>/dev/null || head -c 300 "$work/body")" \
+  said="$(jq -r '([.errors[]?.message] | join("; ")) as $errors
+                 | if $errors != "" then $errors else (.message // empty) end' "$work/body" 2>/dev/null || true)"
+  [ -n "$said" ] || said="$(head -c 300 "$work/body")"
+  fail "GitHub refused auto-merge on release PR #$number (HTTP $status): $said" \
     "allow auto-merge in the repository settings and check RELEASE_PLZ_TOKEN can write pull requests, then re-run the job"
 fi
 echo "Auto-merge requested on release PR #$number: it squash-merges once its required checks pass."

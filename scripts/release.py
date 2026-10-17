@@ -361,7 +361,7 @@ def built(platform, out, tag, version):
     except (OSError, ValueError) as error:
         raise Refused(f'no build in {out}: {error}', 'run the build phase first, into the same --out') from error
     expect(isinstance(manifest, dict) and set(manifest) == {'schema_version', 'platform', 'tag', 'version', 'artifacts'}
-           and manifest['schema_version'] == 1, f'{out}/build.json is not a build this script wrote',
+           and type(manifest['schema_version']) is int and manifest['schema_version'] == 1, f'{out}/build.json is not a build this script wrote',
            'rebuild into an empty directory')
     expect(manifest['platform'] == platform and manifest['tag'] == tag and manifest['version'] == version,
            f"the build in {out} is {manifest['platform']} {manifest['tag']}, not {platform} {tag}",
@@ -401,8 +401,13 @@ def json_of(body, what, check):
     return value
 
 
+def is_id(value):
+    """A GitHub object id: a positive integer, and JSON's `true` is not one."""
+    return type(value) is int and value > 0
+
+
 def is_asset(value):
-    return (isinstance(value, dict) and isinstance(value.get('id'), int) and isinstance(value.get('name'), str)
+    return (isinstance(value, dict) and is_id(value.get('id')) and isinstance(value.get('name'), str)
             and isinstance(value.get('browser_download_url'), str))
 
 
@@ -418,7 +423,7 @@ class Release:
         expect(status == 200, f'GitHub answered {status} for the Release tagged {tag}',
                'create the Release first: release-plz does, or cut it by hand from the tag')
         self.data = json_of(body, f'the Release tagged {tag}', lambda v: isinstance(v, dict)
-                            and isinstance(v.get('id'), int) and isinstance(v.get('upload_url'), str)
+                            and is_id(v.get('id')) and isinstance(v.get('upload_url'), str)
                             and v.get('tag_name') == tag and (v.get('body') is None or isinstance(v['body'], str)))
 
     def call(self, method, path, body=None, headers=None):
@@ -565,6 +570,12 @@ def smoke(directory, version, label):
     expect(any((Path(directory) / name).is_file() for name in ['onepipeline', 'onepipeline.exe', 'onepipeline.cmd']),
            f'{label} put no onepipeline executable in {directory}', 'republish a package that carries the binary')
     env = dict(os.environ, PATH=f'{directory}{os.pathsep}{os.environ["PATH"]}')
+    resolved = shutil.which('onepipeline', path=env['PATH'])
+    # Compared without following links: npm's own bin entry is a link into the package.
+    where = lambda path: os.path.normcase(os.path.abspath(path))
+    expect(resolved and where(os.path.dirname(resolved)) == where(directory),
+           f"PATH resolves onepipeline to {resolved}, not the one {label} installed in {directory}",
+           'run this where the installed executable can run: its own platform')
     run('bash', str(SCRIPTS / 'smoke-published.sh'), '--expect-version', version, '--label', label, env=env,
         capture=True)
 
@@ -784,6 +795,13 @@ def outcome(args):
     out = out_dir(argparse.Namespace(out=args.out, platform='common'))
     out.mkdir(parents=True, exist_ok=True)
     results = publish_results(out)
+    # A re-run on a fresh runner has no results file, so what a registry already
+    # serves is the floor: shipped, by an earlier run, and not verified by this one.
+    if not results_path(out).exists():
+        if crate_serves(version):
+            results['crate']['published'] = 'success'
+        if switch('NPM_PUBLISH') and npm_serves(NPM_LAUNCHER, version):
+            results['npm-launcher']['published'] = 'success'
     for platform in PLATFORMS:
         for phase in ['RESULT', 'PUBLISHED', 'VERIFIED']:
             value = os.environ.get(f'{platform.upper()}_{phase}', '')
