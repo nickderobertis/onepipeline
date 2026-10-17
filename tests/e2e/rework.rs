@@ -782,9 +782,23 @@ fn a_rework_conflicting_with_the_draft_above_is_concluded_by_that_draft_s_worker
 /// nothing orders those two. So the order held here is the restack's start against
 /// the verdict, which only the trigger this journey runs once the checks have
 /// passed can read.
+///
+/// And `status` is read while the restack is still running because its push is
+/// held: unchecked, the restack settles at that push too, a moment after it
+/// starts, which no poll of `status` is guaranteed to land inside. The rework's
+/// push and the restack's go through one hook, so the hook is switched to the
+/// restack's hold while the rework's push is the one it is holding.
 #[test]
 fn a_restack_starts_before_its_reworked_parent_s_checks_have_settled() {
-    let world = team_world("rework-early").with_env("ONEVCS_CHECKS_TIMEOUT_SECONDS", "120");
+    let world = World::new("rework-early")
+        .with_env("ONEVCS_BRANCH_PREFIX", crate::stacked_drafts::PREFIX)
+        .with_env("ONEVCS_CHECKS_TIMEOUT_SECONDS", "120");
+    let rework_push = crate::harness::held_publication(&world, &world.fakes.join("rework.go"));
+    // The first settlement's pushes go straight through.
+    rework_push.release();
+    world.repository("change-open", &rework_push.argv());
+    crate::draft_lifecycle::rules(&world, "change-open", "required", None);
+    world.script("gh.checks", crate::draft_lifecycle::GREEN);
     world.script("a.work", "a's change\n");
     world.script("b.work", "b's change\n");
     world.script("a-rework-1.work", "a's change, as the review asked\n");
@@ -815,6 +829,7 @@ fn a_restack_starts_before_its_reworked_parent_s_checks_have_settled() {
         );
     }
 
+    rework_push.rearm();
     reply(
         &world,
         run,
@@ -826,6 +841,10 @@ fn a_restack_starts_before_its_reworked_parent_s_checks_have_settled() {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     let driver = driving.spawn().expect("the adopting driver starts");
+    world.until("the rework's push to be held", |_| rework_push.holding());
+    let restack_push = crate::harness::held_publication(&world, &world.fakes.join("restack.go"));
+    crate::harness::hold_later_pushes_at(&world, &restack_push);
+    rework_push.release();
     world.until("b's restack to start", |world| {
         !world.events_of(run, "node-restack-started").is_empty()
     });
@@ -854,7 +873,8 @@ fn a_restack_starts_before_its_reworked_parent_s_checks_have_settled() {
         .iter()
         .any(|event| event["labels"]["node"] == "a-rework-1"));
     // `status` reads the draft as restacking onto the rework's pushed head while
-    // its own publication waits on its checks.
+    // its own publication is still under way.
+    world.until("b's restack to reach its push", |_| restack_push.holding());
     let a_pushed = world
         .events_of(run, "node-restack-started")
         .first()
@@ -866,6 +886,7 @@ fn a_restack_starts_before_its_reworked_parent_s_checks_have_settled() {
             text(&a_pushed, "the head")
         ))
     });
+    restack_push.release();
     for number in [&a_number, &b_number] {
         world.script(
             &format!("gh.checks.{number}"),
