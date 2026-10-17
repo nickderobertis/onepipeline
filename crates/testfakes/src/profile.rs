@@ -183,7 +183,7 @@ extern "C" {
 }
 
 extern "C" fn at_exit() {
-    write("process-exit");
+    write(Ended::ProcessExit);
 }
 
 /// Everything recorded so far: for a test asserting what its own work recorded.
@@ -196,8 +196,32 @@ fn test_name() -> Option<String> {
     if let Some(name) = std::env::var_os("NEXTEST_TEST_NAME") {
         return name.into_string().ok();
     }
-    let mut args = std::env::args().skip_while(|arg| arg != "--exact").skip(1);
-    args.find(|arg| !arg.starts_with('-'))
+    // A test binary run by hand: one name, matched exactly. The flags that take a
+    // value are libtest's own, and their values are not names.
+    const VALUED: [&str; 6] = [
+        "--test-threads",
+        "--skip",
+        "--logfile",
+        "--format",
+        "--color",
+        "-Z",
+    ];
+    let mut exact = false;
+    let mut names = Vec::new();
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if VALUED.contains(&arg.as_str()) {
+            args.next();
+        } else if arg == "--exact" {
+            exact = true;
+        } else if !arg.starts_with('-') {
+            names.push(arg);
+        }
+    }
+    match (exact, names.as_slice()) {
+        (true, [name]) => Some(name.clone()),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -213,7 +237,7 @@ struct TestThreadEnds;
 
 impl Drop for TestThreadEnds {
     fn drop(&mut self) {
-        write("test-thread");
+        write(Ended::TestThread);
     }
 }
 
@@ -263,8 +287,8 @@ struct Frame {
 
 /// A recorded stretch of the calling thread, closed when it is dropped.
 ///
-/// Held for the extent of the work it measures; frames close in the order they
-/// opened, so one is never moved off the stack it opened on.
+/// Held for the extent of the work it measures; frames close in the reverse of
+/// the order they opened, so one is never moved off the stack it opened on.
 #[must_use = "a span measures until it is dropped"]
 pub struct Span {
     _not_send: std::marker::PhantomData<*const ()>,
@@ -307,9 +331,6 @@ impl Drop for Span {
         with_recorder(|recorder| {
             let snapshot = &mut recorder.snapshot;
             let tally = &mut snapshot.tallies[frame.category.index()];
-            // A span counts once however deep it nests in its own kind: a
-            // fixture built out of other fixtures is one fixture. Every process,
-            // sleep and file operation is a leaf, so each one counts.
             let counted = match frame.counts {
                 Counts::Leaf => true,
                 Counts::Span => frame.outermost,
@@ -367,9 +388,44 @@ pub fn polled<T>(work: impl FnOnce() -> T) -> T {
     work()
 }
 
+/// What wrote a record: the end of the test's own thread, or — for a test that
+/// never reached anything recorded on it — the process's exit.
+#[derive(Clone, Copy)]
+enum Ended {
+    TestThread,
+    ProcessExit,
+}
+
+impl Ended {
+    fn name(self) -> &'static str {
+        match self {
+            Self::TestThread => "test-thread",
+            Self::ProcessExit => "process-exit",
+        }
+    }
+}
+
+/// The file name a test's record is written under, or `None` for a name that
+/// could reach outside the record directory. A test's path in its binary is
+/// identifiers joined by `::`, so anything else is not one.
+fn record_file(name: &str) -> Option<String> {
+    let identifiers = name.split("::");
+    let valid = identifiers.clone().all(|identifier| {
+        !identifier.is_empty()
+            && identifier
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    });
+    valid.then(|| format!("{}.json", identifiers.collect::<Vec<_>>().join(".")))
+}
+
 /// Write this process's record, once.
-fn write(ended: &str) {
+fn write(ended: Ended) {
     let Some(name) = test_name() else {
+        return;
+    };
+    let Some(file_name) = record_file(&name) else {
+        eprintln!("no test profile is written for {name:?}: it is not a test's path");
         return;
     };
     let Some((binary, dir, record)) = with_recorder(|recorder| {
@@ -385,12 +441,18 @@ fn write(ended: &str) {
     let dir = std::env::var_os(DIR_ENV)
         .map_or(dir, PathBuf::from)
         .join(binary);
-    let file = dir.join(format!("{}.json", name.replace("::", ".")));
+    let file = dir.join(file_name);
     // Through a name of this process's own and a rename, so a reader never
     // sees half a record; and never a panic, because this runs after the test
     // has given its verdict, and a record is evidence about the run rather than
     // part of it.
-    let staged = dir.join(format!(".{}.{}", std::process::id(), file_name(&file)));
+    let staged = dir.join(format!(
+        ".{}.{}",
+        std::process::id(),
+        file.file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    ));
     let written = std::fs::create_dir_all(&dir)
         .and_then(|()| std::fs::write(&staged, format!("{record:#}\n")))
         .and_then(|()| std::fs::rename(&staged, &file));
@@ -402,13 +464,7 @@ fn write(ended: &str) {
     }
 }
 
-fn file_name(path: &std::path::Path) -> String {
-    path.file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default()
-}
-
-fn record(recorder: &Recorder, binary: &str, name: &str, ended: &str) -> serde_json::Value {
+fn record(recorder: &Recorder, binary: &str, name: &str, ended: Ended) -> serde_json::Value {
     let wall = recorder.started.elapsed();
     let snapshot = &recorder.snapshot;
     let mut categories = serde_json::Map::new();
@@ -452,7 +508,7 @@ fn record(recorder: &Recorder, binary: &str, name: &str, ended: &str) -> serde_j
             .duration_since(SystemTime::UNIX_EPOCH)
             .map_or(0.0, |since| since.as_secs_f64()),
         "wall_s": wall.as_secs_f64(),
-        "ended": ended,
+        "ended": ended.name(),
         "categories": categories,
         "unattributed_s": wall.saturating_sub(attributed).as_secs_f64(),
         "programs": programs,

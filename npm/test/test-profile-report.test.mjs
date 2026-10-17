@@ -46,9 +46,8 @@ function write(dir, records) {
   records.forEach((r, i) => {
     writeFileSync(join(dir, "e2e", `${i}.${r.test.replace("::", ".")}.json`), JSON.stringify(r));
   });
-  // Neither of these is a record, and both are skipped.
+  // A record its writer is still staging, which the reader passes over.
   writeFileSync(join(dir, "e2e", ".staged.json"), "{");
-  writeFileSync(join(dir, "e2e", "other.json"), JSON.stringify({ schema: 99, test: "x" }));
 }
 
 before(() => {
@@ -74,12 +73,28 @@ before(() => {
 
 after(() => rmSync(scratch, { recursive: true, force: true }));
 
-function report(...args) {
-  const ran = spawnSync(process.execPath, [script, ...args], { encoding: "utf8" });
-  assert.equal(ran.status, 0, ran.stderr);
-  return ran.stdout;
+function run(...args) {
+  return spawnSync(process.execPath, [script, ...args], { encoding: "utf8" });
 }
 
+let outputs = 0;
+
+/** The report the command writes to its --out file; what it prints is one line. */
+function report(...args) {
+  const out = join(scratch, `report-${outputs++}`);
+  const ran = run("--out", out, ...args);
+  assert.equal(ran.status, 0, ran.stderr);
+  assert.equal(ran.stdout.trim().split("\n").length, 1, ran.stdout);
+  assert.match(ran.stdout, new RegExp(`wrote ${out}`));
+  return readFileSync(out, "utf8");
+}
+
+function refused(args, message, next) {
+  const ran = run(...args);
+  assert.equal(ran.status, 1, ran.stdout);
+  assert.match(ran.stderr, message);
+  assert.match(ran.stderr, next);
+}
 test("the reader reads the record the harness writes, field for field", () => {
   assert.equal(SCHEMA, golden.schema);
   assert.deepEqual(CATEGORIES, Object.keys(golden.categories));
@@ -158,12 +173,87 @@ test("a missing baseline is named rather than compared against", () => {
   assert.match(markdown, /No records for linux, so no platform is compared with it\./);
 });
 
-test("a run nothing recorded is refused by name", () => {
-  const ran = spawnSync(
-    process.execPath,
-    [script, "--run", "linux=never", `linux=${join(scratch, "linux")}`],
-    { encoding: "utf8" },
+test("a run named by --run is read, and one nothing recorded is refused naming the runs there are", () => {
+  const out = JSON.parse(
+    report("--json", "--run", "linux=before", `linux=${join(scratch, "linux")}`),
   );
-  assert.equal(ran.status, 1);
-  assert.match(ran.stderr, /no record belongs to run never/);
+  assert.equal(out.platforms[0].run, "before");
+  assert.equal(out.platforms[0].breakdown.total.tests, 1);
+  refused(
+    ["--out", join(scratch, "x"), "--run", "linux=never", `linux=${join(scratch, "linux")}`],
+    /no record belongs to run never/,
+    /next: name one of the runs these records hold: .*now/,
+  );
+});
+
+test("of two runs with as many records, the newer is read", () => {
+  const dir = join(scratch, "tie");
+  write(dir, [
+    record("a::one", { run: "older", startedAt: 1, wall: 1 }),
+    record("a::one", { run: "newer", startedAt: 2, wall: 2 }),
+  ]);
+  const out = JSON.parse(report("--json", `tie=${dir}`));
+  assert.equal(out.platforms[0].run, "newer");
+});
+
+test("a directory with no records reports none rather than inventing a run", () => {
+  const dir = join(scratch, "empty");
+  mkdirSync(dir);
+  const out = JSON.parse(report("--json", `empty=${dir}`));
+  assert.equal(out.platforms[0].run, null);
+  assert.equal(out.platforms[0].breakdown.total.tests, 0);
+  assert.match(report(`empty=${dir}`), /No records\./);
+});
+
+test("a file that is not a record of this schema is refused by its path", () => {
+  const dir = join(scratch, "other");
+  write(dir, [record("a::one", { wall: 1 })]);
+  writeFileSync(join(dir, "e2e", "newer.json"), JSON.stringify({ ...golden, schema: 2 }));
+  refused(
+    ["--out", join(scratch, "x"), `other=${dir}`],
+    /newer\.json is not a test-profile record: it is schema 2, and this reads 1/,
+    /next: remove .*newer\.json, or rerun the test that wrote it/,
+  );
+  const broken = join(scratch, "broken");
+  write(broken, [{ ...golden, wall_s: -1 }]);
+  refused(
+    ["--out", join(scratch, "x"), `broken=${broken}`],
+    /wall_s is not a nonnegative number/,
+    /next:/,
+  );
+});
+
+test("an invocation that does not say what to read or where to write is refused with one to copy", () => {
+  const linux = `linux=${join(scratch, "linux")}`;
+  const usage = /next: .*node scripts\/test-profile-report\.mjs --out report\.md/;
+  refused([linux], /--out names no file for the report/, usage);
+  refused(["--out", join(scratch, "x")], /no LABEL=DIR of records was named/, usage);
+  refused(
+    ["--out", join(scratch, "x"), "--top-tests", "-3", linux],
+    /--top-tests -3 is not a whole number/,
+    /next:/,
+  );
+  refused(
+    ["--out", join(scratch, "x"), "--top-tests", "1.5", linux],
+    /is not a whole number/,
+    /next:/,
+  );
+  refused(["--out", join(scratch, "x"), linux, linux], /linux names two directories/, /next:/);
+  refused(["--out", join(scratch, "x"), "--run", "linux", linux], /is not a LABEL=RUN_ID/, /next:/);
+  refused(
+    ["--out", join(scratch, "x"), "--run", "mac=r", linux],
+    /--run names mac, which no LABEL=DIR does/,
+    /next:/,
+  );
+  refused(["--out", join(scratch, "x"), "=dir"], /is not a LABEL=DIR/, /next:/);
+  refused(
+    ["--out", join(scratch, "x"), join(scratch, "x"), linux],
+    /is not an option or a LABEL=DIR/,
+    usage,
+  );
+  refused(
+    ["--out", join(scratch, "x"), `gone=${join(scratch, "no-such")}`],
+    /cannot be read/,
+    /next: name a directory of records/,
+  );
 });

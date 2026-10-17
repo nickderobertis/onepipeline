@@ -3,37 +3,96 @@
 // into a per-test and per-module breakdown, and each platform's cost per category
 // against a baseline platform's.
 //
-//   node scripts/test-profile-report.mjs [--top-tests N] [--top-modules N] [--baseline LABEL]
-//        [--run LABEL=RUN_ID] [--json] LABEL=DIR [LABEL=DIR ...]
+//   node scripts/test-profile-report.mjs --out FILE [--json] [--top-tests N]
+//        [--top-modules N] [--baseline LABEL] [--run LABEL=RUN_ID] LABEL=DIR [LABEL=DIR ...]
 //
 // Each LABEL=DIR is one platform's records: a directory searched recursively for the
 // records `onepipeline_testfakes::profile` writes, such as a CI leg's downloaded
 // artifact. A directory can hold several runs' records — a test that was not run again
 // keeps its old one, and a CI leg runs a tier and then a few of its tests again — so
 // only one run per platform is read: the one `--run` names, or else the run with the
-// most records, the newest of those on a tie. The rest are reported as set aside. A test retried within that run is read at its last attempt.
-import { readdirSync, readFileSync } from "node:fs";
+// most records, the newest of those on a tie. The rest are reported as set aside. A
+// test retried within that run is read at its last attempt.
+//
+// The report (Markdown, or JSON with --json) is written to --out; what is printed is
+// one line saying where it went.
+import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 export const SCHEMA = 1;
 export const CATEGORIES = ["spawn", "git", "build", "fixture", "wait", "fs"];
 
-/** Every record under `dir`, however deep; files that are not records are skipped. */
+/** A failure the command explains, with what to do about it. */
+export class Refusal extends Error {
+  constructor(message, next) {
+    super(message);
+    this.next = next;
+  }
+}
+
+const isSeconds = (value) => Number.isFinite(value) && value >= 0;
+const isCount = (value) => Number.isSafeInteger(value) && value >= 0;
+
+/** Why `record` is not a record this reader can fold, or `undefined` when it is one. */
+export function recordProblem(record) {
+  if (record === null || typeof record !== "object") return "it is not an object";
+  if (record.schema !== SCHEMA) return `it is schema ${record.schema}, and this reads ${SCHEMA}`;
+  for (const field of ["binary", "test"]) {
+    if (typeof record[field] !== "string" || record[field] === "") return `${field} is not a name`;
+  }
+  for (const field of ["wall_s", "unattributed_s", "started_at"]) {
+    if (!isSeconds(record[field])) return `${field} is not a nonnegative number`;
+  }
+  if (record.run_id !== null && typeof record.run_id !== "string") return "run_id is not a string";
+  if (record.attempt !== null && !isCount(record.attempt)) return "attempt is not a count";
+  for (const category of CATEGORIES) {
+    const tally = record.categories?.[category];
+    if (!isCount(tally?.count)) return `categories.${category}.count is not a count`;
+    if (!isSeconds(tally?.s)) return `categories.${category}.s is not a nonnegative number`;
+  }
+  if (!isCount(record.categories.wait.polls)) return "categories.wait.polls is not a count";
+  return undefined;
+}
+
+/**
+ * Every record under `dir`, however deep. A file a writer is still staging (a name
+ * starting with `.`) is passed over; any other `.json` that is not a record is refused
+ * by name, because a record read wrong is a report that is wrong.
+ */
 export function loadRecords(dir) {
   const records = [];
   const walk = (at) => {
-    for (const entry of readdirSync(at, { withFileTypes: true })) {
+    let entries;
+    try {
+      entries = readdirSync(at, { withFileTypes: true });
+    } catch (error) {
+      throw new Refusal(
+        `${at} cannot be read: ${error.message}`,
+        "name a directory of records: target/test-profile/e2e after an e2e run, or a CI leg's unpacked test-profile-* artifact",
+      );
+    }
+    for (const entry of entries) {
       const path = join(at, entry.name);
       if (entry.isDirectory()) walk(path);
       else if (entry.isFile() && entry.name.endsWith(".json") && !entry.name.startsWith(".")) {
         let record;
         try {
           record = JSON.parse(readFileSync(path, "utf8"));
-        } catch {
-          continue;
+        } catch (error) {
+          throw new Refusal(
+            `${path} is not JSON: ${error.message}`,
+            `remove ${path}, or rerun the test that wrote it`,
+          );
         }
-        if (record?.schema === SCHEMA && typeof record.test === "string") records.push(record);
+        const problem = recordProblem(record);
+        if (problem) {
+          throw new Refusal(
+            `${path} is not a test-profile record: ${problem}`,
+            `remove ${path}, or rerun the test that wrote it`,
+          );
+        }
+        records.push(record);
       }
     }
   };
@@ -58,13 +117,18 @@ export function selectRun(records, runId) {
   let chosen;
   if (runId !== undefined) {
     chosen = runs.get(runId);
-    if (!chosen) throw new Error(`no record belongs to run ${runId}`);
+    if (!chosen) {
+      throw new Refusal(
+        `no record belongs to run ${runId}`,
+        `name one of the runs these records hold: ${[...runs.keys()].join(", ") || "(none)"}`,
+      );
+    }
   } else {
     chosen = [...runs.values()].sort(
       (a, b) => b.records.length - a.records.length || b.latest - a.latest,
     )[0];
   }
-  if (!chosen) return { run: undefined, records: [], setAside: 0 };
+  if (!chosen) return { run: null, records: [], setAside: 0 };
   const last = new Map();
   for (const record of chosen.records) {
     const key = `${record.binary}\u0000${record.test}`;
@@ -170,6 +234,10 @@ export function render(report) {
   for (const platform of report.platforms) {
     const { label, run, setAside, breakdown: b } = platform;
     lines.push(`## ${label}`, "");
+    if (run === null) {
+      lines.push("No records.", "");
+      continue;
+    }
     lines.push(
       `Run \`${run}\`: ${b.total.tests} tests, ${b.total.wall.toFixed(1)} test-s` +
         (setAside ? ` (${setAside} records of other runs set aside)` : "") +
@@ -239,32 +307,76 @@ export function buildReport(platforms, { baseline, runs = {}, topTests, topModul
   return report;
 }
 
-function main(argv) {
+const USAGE =
+  "node scripts/test-profile-report.mjs --out report.md linux=target/test-profile/e2e [windows=DIR ...]";
+const LABEL = /^[A-Za-z0-9._-]+$/;
+
+/** `LABEL=VALUE`, both halves present and the label a plain name. */
+function pair(arg, what) {
+  const at = arg.indexOf("=");
+  const label = arg.slice(0, at);
+  const value = arg.slice(at + 1);
+  if (at <= 0 || value === "" || !LABEL.test(label)) {
+    throw new Refusal(`${arg} is not ${what}`, `write it as LABEL=VALUE, e.g. ${USAGE}`);
+  }
+  return [label, value];
+}
+
+function count(arg, value) {
+  const n = Number(value);
+  if (!/^[0-9]+$/.test(value) || !Number.isSafeInteger(n)) {
+    throw new Refusal(`${arg} ${value} is not a whole number`, `give ${arg} a count such as 30`);
+  }
+  return n;
+}
+
+export function parseArgs(argv) {
   const options = { baseline: "linux", runs: {}, topTests: 30, topModules: 10, json: false };
   const platforms = [];
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     const value = () => {
-      if (i + 1 >= argv.length) throw new Error(`${arg} needs a value`);
+      if (i + 1 >= argv.length) throw new Refusal(`${arg} needs a value`, USAGE);
       return argv[++i];
     };
     if (arg === "--json") options.json = true;
+    else if (arg === "--out") options.out = value();
     else if (arg === "--baseline") options.baseline = value();
-    else if (arg === "--top-tests") options.topTests = Number(value());
-    else if (arg === "--top-modules") options.topModules = Number(value());
+    else if (arg === "--top-tests") options.topTests = count(arg, value());
+    else if (arg === "--top-modules") options.topModules = count(arg, value());
     else if (arg === "--run") {
-      const [label, id] = value().split("=");
+      const [label, id] = pair(value(), "a LABEL=RUN_ID");
       options.runs[label] = id;
-    } else if (arg.includes("=")) {
-      const at = arg.indexOf("=");
-      platforms.push({ label: arg.slice(0, at), dir: arg.slice(at + 1) });
-    } else throw new Error(`not an option or a LABEL=DIR: ${arg}`);
+    } else if (!arg.startsWith("-") && arg.includes("=")) {
+      const [label, dir] = pair(arg, "a LABEL=DIR");
+      if (platforms.some((platform) => platform.label === label)) {
+        throw new Refusal(`${label} names two directories`, "give each platform one LABEL=DIR");
+      }
+      platforms.push({ label, dir });
+    } else throw new Refusal(`${arg} is not an option or a LABEL=DIR`, USAGE);
   }
-  if (platforms.length === 0) throw new Error("name at least one LABEL=DIR of records");
+  if (platforms.length === 0) throw new Refusal("no LABEL=DIR of records was named", USAGE);
+  if (!options.out) throw new Refusal("--out names no file for the report", USAGE);
+  for (const label of Object.keys(options.runs)) {
+    if (!platforms.some((platform) => platform.label === label)) {
+      throw new Refusal(
+        `--run names ${label}, which no LABEL=DIR does`,
+        "give --run a label the command also reads",
+      );
+    }
+  }
+  return { options, platforms };
+}
+
+function main(argv) {
+  const { options, platforms } = parseArgs(argv);
   const report = buildReport(platforms, options);
-  process.stdout.write(
+  writeFileSync(
+    options.out,
     options.json ? `${JSON.stringify(report, null, 2)}\n` : `${render(report)}\n`,
   );
+  const tests = report.platforms.map((p) => `${p.label} ${p.breakdown.total.tests}`).join(", ");
+  console.log(`test-profile-report: wrote ${options.out} (tests read: ${tests})`);
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
@@ -272,6 +384,7 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
     main(process.argv.slice(2));
   } catch (error) {
     console.error(`test-profile-report: ${error.message}`);
+    console.error(`next: ${error instanceof Refusal ? error.next : USAGE}`);
     process.exitCode = 1;
   }
 }

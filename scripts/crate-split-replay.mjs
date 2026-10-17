@@ -2,8 +2,13 @@
 // Replay merged pull requests against a proposed crate split, and say which test
 // suites Nx-affected selection would have run for each one.
 //
-//   node scripts/crate-split-replay.mjs --mapping FILE [--repo DIR] [--ref REF]
-//        [--since DATE] [--until DATE] [--exclude REGEX] [--records DIR] [--run RUN_ID] [--json]
+//   node scripts/crate-split-replay.mjs (--mapping FILE | --today) --out FILE [--repo DIR]
+//        [--ref REF] [--since DATE] [--until DATE] [--exclude REGEX] [--records DIR]
+//        [--run RUN_ID] [--json]
+//
+// --today replays today's shape instead of a proposal: one crate and the whole e2e
+// binary as one suite, read from the repository's own `nx.json` (`rustBuild` and
+// `e2eSource`) and `tests/e2e/main.rs`, so it cannot drift from what Nx does now.
 //
 // Each first-parent commit on REF (default `origin/main`) committed in [since, until)
 // is one squash-merged pull request, except those whose subject matches --exclude
@@ -30,10 +35,14 @@
 // With --records (a directory of `target/test-profile` records), each suite is weighed
 // by the test-seconds its `modules` spent in that run, so the report also says how
 // many e2e test-seconds the window's pull requests would have skipped.
+//
+// The result (Markdown, or JSON with --json) is written to --out; what is printed is
+// one line with the headline figures.
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { loadRecords, moduleOf, selectRun } from "./test-profile-report.mjs";
+import { loadRecords, moduleOf, Refusal, selectRun } from "./test-profile-report.mjs";
 
 /** A glob over repository-relative paths: `**` crosses directories, `*` and `?` do not. */
 export function globToRegExp(glob) {
@@ -58,16 +67,65 @@ function matcher(globs = []) {
   return (file) => compiled.some((pattern) => pattern.test(file));
 }
 
+const isStrings = (value) =>
+  Array.isArray(value) && value.every((item) => typeof item === "string" && item !== "");
+
+/** Refuse a mapping key that is not one of `known`; `//` is a comment. */
+function onlyKeys(object, known, where) {
+  if (object === null || typeof object !== "object" || Array.isArray(object)) {
+    throw new Refusal(`${where} is not an object`, MAPPING_HELP);
+  }
+  for (const key of Object.keys(object)) {
+    if (key !== "//" && !known.includes(key)) {
+      throw new Refusal(`${where} has a key this replay does not read: ${key}`, MAPPING_HELP);
+    }
+  }
+}
+
+function strings(object, key, where, required) {
+  if (object[key] === undefined && !required) return;
+  if (!isStrings(object[key])) {
+    throw new Refusal(`${where}.${key} is not a list of nonempty strings`, MAPPING_HELP);
+  }
+}
+
+const MAPPING_HELP =
+  "write the mapping in the shape the head of scripts/crate-split-replay.mjs gives; scripts/crate-split/proposed.json is one";
+
 /** Check a mapping's shape and compile it. */
 export function compileMapping(mapping) {
+  onlyKeys(mapping, ["shared", "crates", "sources", "fallback", "suites"], "the mapping");
+  strings(mapping, "shared", "the mapping", false);
+  strings(mapping, "sources", "the mapping", false);
+  if (
+    mapping.crates !== undefined &&
+    (typeof mapping.crates !== "object" || Array.isArray(mapping.crates))
+  ) {
+    throw new Refusal("crates is not an object", MAPPING_HELP);
+  }
   const crates = mapping.crates ?? {};
+  if (Object.keys(crates).length === 0)
+    throw new Refusal("the mapping names no crate", MAPPING_HELP);
   for (const [name, crate] of Object.entries(crates)) {
+    onlyKeys(crate, ["paths", "deps"], `crates.${name}`);
+    strings(crate, "paths", `crates.${name}`, true);
+    strings(crate, "deps", `crates.${name}`, false);
     for (const dep of crate.deps ?? []) {
-      if (!(dep in crates)) throw new Error(`crate ${name} depends on unknown crate ${dep}`);
+      if (!(dep in crates))
+        throw new Refusal(`crate ${name} depends on unknown crate ${dep}`, MAPPING_HELP);
     }
   }
   if (mapping.fallback !== undefined && !(mapping.fallback in crates)) {
-    throw new Error(`fallback ${mapping.fallback} is not a crate`);
+    throw new Refusal(`fallback ${mapping.fallback} is not a crate`, MAPPING_HELP);
+  }
+  const declared = mapping.suites ?? {};
+  if (Object.keys(declared).length === 0)
+    throw new Refusal("the mapping names no suite", MAPPING_HELP);
+  for (const [name, suite] of Object.entries(declared)) {
+    onlyKeys(suite, ["paths", "crates", "modules"], `suites.${name}`);
+    strings(suite, "paths", `suites.${name}`, true);
+    strings(suite, "crates", `suites.${name}`, true);
+    strings(suite, "modules", `suites.${name}`, false);
   }
   const closure = (name, seen = new Set()) => {
     if (seen.has(name)) return seen;
@@ -79,7 +137,9 @@ export function compileMapping(mapping) {
   for (const [name, suite] of Object.entries(mapping.suites ?? {})) {
     const reach = new Set();
     for (const crate of suite.crates ?? []) {
-      if (!(crate in crates)) throw new Error(`suite ${name} exercises unknown crate ${crate}`);
+      if (!(crate in crates)) {
+        throw new Refusal(`suite ${name} exercises unknown crate ${crate}`, MAPPING_HELP);
+      }
       for (const reached of closure(crate)) reach.add(reached);
     }
     suites[name] = { own: matcher(suite.paths), crates: reach, modules: suite.modules ?? [] };
@@ -144,6 +204,7 @@ export function mergedChanges(repo, { ref, since, until, exclude }) {
     `--since=${since}`,
     `--until=${until}`,
     "--format=%H%x09%cI%x09%s",
+    "--end-of-options",
     ref,
   ]);
   const skip = new RegExp(exclude);
@@ -261,6 +322,36 @@ function render(result) {
   return lines.join("\n");
 }
 
+/** Today's shape, read from `nx.json` and `tests/e2e/main.rs` in `repo`. */
+export function todaysMapping(repo) {
+  const named = JSON.parse(readFileSync(join(repo, "nx.json"), "utf8")).namedInputs;
+  const expand = (name) =>
+    named[name].flatMap((input) =>
+      typeof input !== "string"
+        ? []
+        : input in named
+          ? expand(input)
+          : [input.replace("{workspaceRoot}/", "")],
+    );
+  const build = expand("rustBuild");
+  const sources = build.filter((glob) => /^(src|crates|schemas)\//.test(glob));
+  const e2e = expand("e2eSource").filter((glob) => !build.includes(glob));
+  const main = readFileSync(join(repo, "tests", "e2e", "main.rs"), "utf8");
+  const modules = [...main.matchAll(/^mod (\w+);/gm)]
+    .map((m) => m[1])
+    .filter((m) => m !== "harness");
+  return {
+    shared: build.filter((glob) => !sources.includes(glob)),
+    sources,
+    fallback: "onepipeline",
+    crates: { onepipeline: { paths: sources, deps: [] } },
+    suites: { e2e: { paths: e2e, crates: ["onepipeline"], modules: [...modules, "harness"] } },
+  };
+}
+
+const USAGE =
+  "node scripts/crate-split-replay.mjs --mapping scripts/crate-split/proposed.json --out replay.md";
+
 function main(argv) {
   const options = {
     repo: ".",
@@ -270,16 +361,19 @@ function main(argv) {
     exclude: "^chore: release",
   };
   let json = false;
+  let today = false;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     const value = () => {
-      if (i + 1 >= argv.length) throw new Error(`${arg} needs a value`);
+      if (i + 1 >= argv.length) throw new Refusal(`${arg} needs a value`, USAGE);
       return argv[++i];
     };
     if (arg === "--json") json = true;
+    else if (arg === "--today") today = true;
     else if (
       [
         "--mapping",
+        "--out",
         "--repo",
         "--ref",
         "--since",
@@ -290,19 +384,70 @@ function main(argv) {
       ].includes(arg)
     ) {
       options[arg.slice(2)] = value();
-    } else throw new Error(`not an option: ${arg}`);
+    } else throw new Refusal(`${arg} is not an option`, USAGE);
   }
-  if (!options.mapping) throw new Error("--mapping names the proposed split");
-  const mapping = JSON.parse(readFileSync(options.mapping, "utf8"));
+  if (!options.out) throw new Refusal("--out names no file for the result", USAGE);
+  if (today === (options.mapping !== undefined)) {
+    throw new Refusal("name the split to replay: --mapping FILE, or --today, and not both", USAGE);
+  }
+  const since = Date.parse(options.since);
+  const until = Date.parse(options.until);
+  if (Number.isNaN(since) || Number.isNaN(until) || since >= until) {
+    throw new Refusal(
+      `--since ${options.since} and --until ${options.until} are not a window`,
+      "give two ISO dates, the first earlier, e.g. --since 2026-09-15T00:00:00Z --until 2026-10-16T00:00:00Z",
+    );
+  }
+  if (options.ref.startsWith("-") || options.ref === "") {
+    throw new Refusal(
+      `--ref ${options.ref} is not a revision`,
+      "name a branch or commit, e.g. --ref origin/main",
+    );
+  }
+  try {
+    new RegExp(options.exclude);
+  } catch (error) {
+    throw new Refusal(
+      `--exclude is not a pattern: ${error.message}`,
+      "give --exclude a regular expression such as '^chore: release'",
+    );
+  }
+  let mapping;
+  if (today) mapping = todaysMapping(options.repo);
+  else {
+    try {
+      mapping = JSON.parse(readFileSync(options.mapping, "utf8"));
+    } catch (error) {
+      throw new Refusal(
+        `${options.mapping} cannot be read as JSON: ${error.message}`,
+        MAPPING_HELP,
+      );
+    }
+  }
   // Refused before any history is read: a proposal that does not hold together is
   // the mistake to report, whatever the repository says.
   compileMapping(mapping);
-  const changes = mergedChanges(options.repo, options);
+  let changes;
+  try {
+    changes = mergedChanges(options.repo, options);
+  } catch (error) {
+    throw new Refusal(
+      `the history of ${options.ref} in ${options.repo} cannot be read: ${error.message.split("\n")[0]}`,
+      "run from a clone that has the ref, e.g. after git fetch origin",
+    );
+  }
   const seconds = options.records
     ? moduleSeconds(selectRun(loadRecords(options.records), options.run).records)
     : null;
   const result = replay(mapping, changes, seconds);
-  process.stdout.write(json ? `${JSON.stringify(result, null, 2)}\n` : `${render(result)}\n`);
+  writeFileSync(options.out, json ? `${JSON.stringify(result, null, 2)}\n` : `${render(result)}\n`);
+  const { summary } = result;
+  const pct = (x) => (x === null || x === undefined ? "-" : `${(100 * x).toFixed(1)}%`);
+  console.log(
+    `crate-split-replay: wrote ${options.out}: ${summary.changes} changes, ${summary.suites} suites, ` +
+      `${pct(summary.skippedSuiteFraction)} of suite runs skipped` +
+      (seconds ? `, ${pct(summary.testSecondsSkippedFraction)} of test-seconds` : ""),
+  );
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
@@ -310,6 +455,7 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
     main(process.argv.slice(2));
   } catch (error) {
     console.error(`crate-split-replay: ${error.message}`);
+    console.error(`next: ${error instanceof Refusal ? error.next : USAGE}`);
     process.exitCode = 1;
   }
 }

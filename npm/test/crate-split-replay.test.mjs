@@ -3,14 +3,23 @@
 // crate depends on the other.
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { globToRegExp } from "../../scripts/crate-split-replay.mjs";
+import { compileMapping, globToRegExp } from "../../scripts/crate-split-replay.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+const golden = JSON.parse(
+  readFileSync(join(root, "tests", "golden", "test-profile-record-v1.json"), "utf8"),
+);
+const categories = Object.fromEntries(
+  Object.entries(golden.categories).map(([name, tally]) => [
+    name,
+    Object.fromEntries(Object.keys(tally).map((key) => [key, 0])),
+  ]),
+);
 const script = join(root, "scripts", "crate-split-replay.mjs");
 
 let scratch;
@@ -55,6 +64,15 @@ before(() => {
     "crates/beta/src/lib.rs": "seed\n",
     "tests/one.rs": "seed\n",
     "tests/two.rs": "seed\n",
+    // Today's shape, for --today: one crate, every test in one suite.
+    "nx.json": JSON.stringify({
+      namedInputs: {
+        sharedGlobals: ["{workspaceRoot}/nx.json"],
+        rustBuild: ["{workspaceRoot}/crates/**/*", "{workspaceRoot}/Cargo.lock", "sharedGlobals"],
+        e2eSource: ["rustBuild", "{workspaceRoot}/tests/**/*"],
+      },
+    }),
+    "tests/e2e/main.rs": "mod harness;\nmod one;\nmod two;\n",
   });
   commit("feat: alpha", "2026-09-16T00:00:00Z", { "crates/alpha/src/lib.rs": "a\n" });
   commit("feat: beta", "2026-09-17T00:00:00Z", { "crates/beta/src/lib.rs": "b\n" });
@@ -74,15 +92,78 @@ before(() => {
     ["one::first", 10],
     ["one::second", 5],
     ["two::only", 20],
+    // A module no suite of either mapping names.
+    ["three::stray", 1],
   ]) {
     writeFileSync(
       join(records, `${test.replace("::", ".")}.json`),
-      JSON.stringify({ schema: 1, binary: "e2e", test, run_id: "r", started_at: 1, wall_s: wall }),
+      // The golden record's shape, which is what the harness writes, at this
+      // test's name and wall clock with nothing attributed.
+      JSON.stringify({
+        ...golden,
+        test,
+        run_id: "r",
+        wall_s: wall,
+        unattributed_s: wall,
+        categories,
+      }),
     );
   }
 });
 
 after(() => rmSync(scratch, { recursive: true, force: true }));
+
+// The proposed split, held to the e2e binary it proposes to divide: every module
+// `tests/e2e/main.rs` declares is in exactly one suite (or is a support file one
+// suite lists), and every repository file a module's tests read by a literal path
+// is an input of that module's suite. A module added, renamed or given a new
+// runtime file without the proposal following fails here.
+test("the proposed split names every e2e module once and every file its tests read", () => {
+  const proposal = JSON.parse(
+    readFileSync(join(root, "scripts", "crate-split", "proposed.json"), "utf8"),
+  );
+  const compiled = compileMapping(proposal);
+  const main = readFileSync(join(root, "tests", "e2e", "main.rs"), "utf8");
+  const declared = [...main.matchAll(/^mod (\w+);/gm)].map((m) => m[1]);
+  const owner = new Map();
+  for (const [name, suite] of Object.entries(proposal.suites)) {
+    for (const module of suite.modules) {
+      assert.ok(!owner.has(module), `${module} is in ${owner.get(module)} and ${name}`);
+      owner.set(module, name);
+    }
+  }
+  for (const module of declared) {
+    const file = `tests/e2e/${module}.rs`;
+    const source = readFileSync(join(root, file), "utf8");
+    // A module with tests of its own is one a suite runs; one without is support a
+    // suite compiles, so a suite listing its file is enough.
+    if (/#\[test\]/.test(source))
+      assert.ok(owner.has(module), `${module} is in no suite's modules`);
+    const suite =
+      owner.get(module) ??
+      Object.keys(proposal.suites).find((name) => compiled.suites[name].own(file));
+    assert.ok(suite, `${module} is in no suite of the proposal`);
+    assert.ok(compiled.suites[suite].own(file), `${suite} does not list ${file}`);
+    const reads = [
+      ...[...source.matchAll(/repo_file\(\s*"([^"]+)"/g)].map((m) => m[1]),
+      ...[...source.matchAll(/CARGO_MANIFEST_DIR"\)\)\s*\.join\("([^"]+)"/g)].map((m) => m[1]),
+      ...[...source.matchAll(/include_str!\("([^"]+)"/g)].map((m) =>
+        join("tests/e2e", m[1]).replaceAll("\\", "/"),
+      ),
+    ]
+      // What a test writes rather than reads.
+      .filter((path) => path !== "." && path !== "target" && !path.startsWith("target/"));
+    for (const path of reads) {
+      const read = path.replace(/\/$/, "");
+      const covered =
+        compiled.shared(read) ||
+        compiled.suites[suite].own(read) ||
+        compiled.suites[suite].own(`${read}/x`) ||
+        Object.values(compiled.crates).some((claims) => claims(read));
+      assert.ok(covered, `${module} reads ${read}, which is no input of ${suite}`);
+    }
+  }
+});
 
 function mapping(betaDependsOnAlpha) {
   return {
@@ -100,31 +181,49 @@ function mapping(betaDependsOnAlpha) {
   };
 }
 
-function replayed(name, proposal) {
+function run(args) {
+  return spawnSync(process.execPath, [script, ...args], { encoding: "utf8" });
+}
+
+const WINDOW = [
+  "--repo",
+  "",
+  "--ref",
+  "main",
+  "--since",
+  "2026-09-15T00:00:00Z",
+  "--until",
+  "2026-10-16T00:00:00Z",
+];
+const window = () => WINDOW.map((arg) => (arg === "" ? repo : arg));
+
+let outputs = 0;
+
+/** What the command wrote to --out; what it printed is one line. */
+function written(args, { json = true } = {}) {
+  const out = join(scratch, `out-${outputs++}`);
+  const ran = run([...args, "--out", out, ...(json ? ["--json"] : [])]);
+  assert.equal(ran.status, 0, ran.stderr);
+  assert.equal(ran.stdout.trim().split("\n").length, 1, ran.stdout);
+  const text = readFileSync(out, "utf8");
+  return json ? JSON.parse(text) : text;
+}
+
+function mappingFile(name, proposal) {
   const file = join(scratch, `${name}.json`);
   writeFileSync(file, JSON.stringify(proposal));
-  const ran = spawnSync(
-    process.execPath,
-    [
-      script,
-      "--mapping",
-      file,
-      "--repo",
-      repo,
-      "--ref",
-      "main",
-      "--since",
-      "2026-09-15T00:00:00Z",
-      "--until",
-      "2026-10-16T00:00:00Z",
-      "--records",
-      join(scratch, "records"),
-      "--json",
-    ],
-    { encoding: "utf8" },
-  );
-  assert.equal(ran.status, 0, ran.stderr);
-  return JSON.parse(ran.stdout);
+  return file;
+}
+
+function replayed(name, proposal, extra = ["--records", join(scratch, "records")]) {
+  return written(["--mapping", mappingFile(name, proposal), ...window(), ...extra]);
+}
+
+function refused(args, message) {
+  const ran = run(args);
+  assert.equal(ran.status, 1, ran.stdout);
+  assert.match(ran.stderr, message);
+  assert.match(ran.stderr, /\nnext: /);
 }
 
 const affectedBySubject = (result) =>
@@ -163,16 +262,139 @@ test("a dependency carries a change to the crates that depend on it", () => {
   assert.equal(result.summary.testSecondsSkipped, 2 * 15 + 2 * 20);
 });
 
-test("a mapping that names a crate it does not declare is refused", () => {
+test("a dependency of a dependency carries a change too", () => {
   const proposal = mapping(false);
-  proposal.suites.two.crates = ["delta"];
-  const file = join(scratch, "broken.json");
-  writeFileSync(file, JSON.stringify(proposal));
-  const ran = spawnSync(process.execPath, [script, "--mapping", file, "--repo", repo], {
-    encoding: "utf8",
+  proposal.crates.gamma = { paths: ["crates/gamma/**"], deps: [] };
+  proposal.crates.alpha.deps = ["gamma"];
+  proposal.crates.beta.deps = ["alpha"];
+  proposal.fallback = "beta";
+  const result = replayed("chain", proposal);
+  assert.deepEqual(affectedBySubject(result)["feat: a crate the mapping forgot"], ["one", "two"]);
+  assert.deepEqual(result.summary.unclaimedFiles, []);
+});
+
+test("without records the suites are counted and not weighed", () => {
+  const result = replayed("unweighed", mapping(false), []);
+  assert.equal(result.suites.one.testSeconds, null);
+  assert.equal(result.summary.testSecondsPerRun, undefined);
+  assert.equal(result.summary.skippedSuiteRuns, 6);
+});
+
+test("a test module no suite names is reported, not silently weighed as nothing", () => {
+  assert.deepEqual(replayed("stray", mapping(false)).summary.modulesInNoSuite, ["three"]);
+});
+
+test("a window holding no merged change replays nothing", () => {
+  const file = mappingFile("empty-window", mapping(false));
+  const result = written([
+    "--mapping",
+    file,
+    "--repo",
+    repo,
+    "--ref",
+    "main",
+    "--since",
+    "2026-11-01T00:00:00Z",
+    "--until",
+    "2026-12-01T00:00:00Z",
+  ]);
+  assert.equal(result.summary.changes, 0);
+  assert.equal(result.summary.skippedSuiteFraction, null);
+});
+
+test("the Markdown result tables each suite", () => {
+  const file = mappingFile("markdown", mapping(false));
+  const text = written(["--mapping", file, ...window(), "--records", join(scratch, "records")], {
+    json: false,
   });
-  assert.equal(ran.status, 1);
-  assert.match(ran.stderr, /suite two exercises unknown crate delta/);
+  assert.match(text, /^6 merged changes, 2 suites: 6 of 12 suite runs skipped \(50\.0%\)\./);
+  assert.match(
+    text,
+    /Test-seconds: 35\.0 per full run; 110\.0 skipped over the window \(52\.4%\)\./,
+  );
+  assert.match(text, /\| one \| 4 \| 33\.3% \| 15\.0 \|/);
+  assert.match(text, /Source files no crate claims: crates\/gamma\/src\/lib\.rs\./);
+});
+
+test("--today reads today's shape from the repository's own nx.json and e2e binary", () => {
+  const result = written(["--today", ...window()]);
+  assert.deepEqual(Object.keys(result.suites), ["e2e"]);
+  // Every change in the window but the readme touches the crate, the lock or the tests.
+  assert.equal(result.suites.e2e.affected, 5);
+  assert.equal(result.suites.e2e.unaffected, 1);
+});
+
+test("a mapping that does not hold together is refused before any history is read", () => {
+  const broken = (change) => {
+    const proposal = mapping(false);
+    change(proposal);
+    return [
+      "--mapping",
+      mappingFile("broken", proposal),
+      "--out",
+      join(scratch, "x"),
+      "--repo",
+      join(scratch, "nowhere"),
+    ];
+  };
+  refused(
+    broken((p) => {
+      p.suites.two.crates = ["delta"];
+    }),
+    /suite two exercises unknown crate delta/,
+  );
+  refused(
+    broken((p) => {
+      p.crates.beta.deps = ["delta"];
+    }),
+    /crate beta depends on unknown crate delta/,
+  );
+  refused(
+    broken((p) => {
+      p.suitez = p.suites;
+    }),
+    /the mapping has a key this replay does not read: suitez/,
+  );
+  refused(
+    broken((p) => {
+      p.suites.one.path = p.suites.one.paths;
+    }),
+    /suites\.one has a key this replay does not read: path/,
+  );
+  refused(
+    broken((p) => {
+      p.crates.alpha.paths = "crates/alpha/**";
+    }),
+    /crates\.alpha\.paths is not a list of nonempty strings/,
+  );
+  refused(
+    broken((p) => {
+      p.fallback = "delta";
+    }),
+    /fallback delta is not a crate/,
+  );
+  refused(
+    broken((p) => {
+      p.suites = {};
+    }),
+    /the mapping names no suite/,
+  );
+});
+
+test("an invocation with no window, revision or output it can use is refused before git runs", () => {
+  const file = mappingFile("ok", mapping(false));
+  const base = ["--mapping", file, "--repo", repo, "--out", join(scratch, "x")];
+  refused(["--mapping", file], /--out names no file for the result/);
+  refused(["--out", join(scratch, "x")], /name the split to replay/);
+  refused([...base, "--today"], /name the split to replay/);
+  refused([...base, "--since", "yesterday"], /are not a window/);
+  refused(
+    [...base, "--since", "2026-10-16T00:00:00Z", "--until", "2026-09-15T00:00:00Z"],
+    /are not a window/,
+  );
+  refused([...base, "--ref", "--output=/tmp/owned"], /is not a revision/);
+  refused([...base, "--exclude", "("], /--exclude is not a pattern/);
+  refused([...base, "--ref", "no-such-branch"], /the history of no-such-branch .* cannot be read/);
 });
 
 test("globs cross directories only at a double star", () => {
