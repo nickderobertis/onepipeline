@@ -999,8 +999,10 @@ fn journal_mtime_ms(paths: &RunPaths) -> u64 {
 /// driver the CLI launched — writes that run's summary again for every record it
 /// appends. Every read has to answer either the state before that write or the
 /// state after it: never a partial document, never a parse failure, never an
-/// error. What makes that true is the write being a rename over the target
-/// rather than a write through it, and this is what holds it true.
+/// error. What this holds is that listing-level answer, not how the document is
+/// stored: a write through the target rather than a rename over it would tear the
+/// document, but the reader folds the journal for one it cannot parse, so a torn
+/// write is caught here only where a reader would trust what it tore.
 ///
 /// **The overlap is held, not hoped for.** Every node's dispatch waits on the
 /// reader, which lets them go one at a time and only once it has read
