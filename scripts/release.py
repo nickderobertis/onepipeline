@@ -675,6 +675,9 @@ def publish_common(args):
     def record(target=None, phase=None, result=None):
         if target:
             results[target][phase] = result
+            if phase == 'published' and result != 'success':
+                # What an earlier run verified is not what this run is publishing.
+                results[target]['verified'] = 'skipped'
         results_path(out).write_text(json.dumps(results, indent=2) + '\n')
 
     tag, version, channels = guard('publish-common', dry_run=args.dry_run)

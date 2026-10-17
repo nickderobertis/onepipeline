@@ -940,6 +940,41 @@ describe("publish: the crate, and a registry that loses an artifact", () => {
     }
   });
 
+  it("a re-run whose crate upload fails drops the earlier verification rather than reporting it", async () => {
+    const { s, env, results } = await assetsOnly();
+    try {
+      mkdirSync(join(env.ONEPIPELINE_RELEASE_OUT, "common"), { recursive: true });
+      writeFileSync(
+        join(env.ONEPIPELINE_RELEASE_OUT, "common", "publish-results.json"),
+        JSON.stringify({
+          crate: { published: "success", verified: "success" },
+          "npm-launcher": { published: "skipped", verified: "skipped" },
+        }),
+      );
+      s.crates.refuseNext("PUT", /^\/api\/v1\/crates\/new$/, 403, "this token may not publish");
+      const refused = await run("just", ["release-publish", "publish"], { cwd: checkout, env });
+      assert.equal(refused.code, 1, said(refused));
+      assert.deepEqual(results().crate, { published: "failure", verified: "skipped" });
+      const jobs = {};
+      for (const key of ["LINUX", "MACOS", "WINDOWS"]) jobs[`${key}_RESULT`] = "success";
+      const recorded = await run("just", ["release-outcome"], { env: { ...env, ...jobs } });
+      assert.equal(recorded.code, 0, said(recorded));
+      const record = JSON.parse(
+        s.github
+          .release(TAG)
+          .assets.find((a) => a.name === "release-outcome.json")
+          .content.toString(),
+      );
+      const crate = record.targets.find((t) => t.id === "crate:onepipeline");
+      assert.deepEqual(
+        [crate.outcome, crate.published, crate.verified],
+        ["shipped-unverified", "failure", "skipped"],
+      );
+    } finally {
+      await s.stop();
+    }
+  });
+
   it("a crate the registry serves but cannot be installed is shipped and not verified", async () => {
     const { s, env, results } = await assetsOnly();
     try {

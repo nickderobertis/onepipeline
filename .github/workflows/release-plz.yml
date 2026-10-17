@@ -123,6 +123,7 @@ jobs:
 
       # Belt to the baseline fix: never open/merge a release PR on a push that is
       # itself a merged release commit.
+      # llmlint: ignore[changed_behavior_has_e2e] `release-pr` pushes a branch and opens a PR on the real forge, and the release-plz journey (tests/release_journeys/release-plz.journey.mjs) must write no remote, so it runs this step's own command line with `release-pr` mapped to release-plz's local `update`, which prepares the same bump and changelog; the auto-merge step after it is driven against the local forge.
       - name: Open or update the release PR
         if: "${{ steps.guard.outputs.enabled == 'true' && !startsWith(github.event.head_commit.message, 'chore: release') }}"
         env:

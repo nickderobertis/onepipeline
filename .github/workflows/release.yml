@@ -183,8 +183,7 @@ jobs:
         run: just release-windows verify
 
   # Runs when a build job failed too, so the outcome is recorded either way; its
-  # publish step runs only when every build job succeeded. Its last step is the
-  # outcome record; the release's budget tail is appended after it.
+  # publish step runs only when every build job succeeded.
   publish:
     needs: [build-linux, build-macos, build-windows]
     if: ${{ !cancelled() }}
