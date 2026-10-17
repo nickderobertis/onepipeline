@@ -37,6 +37,8 @@
         "{workspaceRoot}/scripts/release-outcome.mjs",
         "{workspaceRoot}/scripts/nx.sh",
         "{workspaceRoot}/scripts/stacked-spikes-budget.mjs",
+        "{workspaceRoot}/scripts/test-profile-report.mjs",
+        "{workspaceRoot}/scripts/crate-split-replay.mjs",
         "{workspaceRoot}/budgets.yaml",
         "{workspaceRoot}/package-lock.json",
         "{workspaceRoot}/scripts/nx-affected.sh",
