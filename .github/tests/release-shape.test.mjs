@@ -1,15 +1,5 @@
 // The release's shape, read out of the workflow files, the recipes' plan mode
-// and release-targets.toml together:
-//
-//   * release.yml is exactly build-linux, build-macos, build-windows and
-//     publish, each on the runner its name says with a 30-minute timeout;
-//     release-plz.yml is one job; nothing follows the Release on workflow_run;
-//   * every artifact the release produces is uploaded by exactly one step of
-//     exactly one job, and every declared target and covered package by the
-//     jobs its `published_by` names;
-//   * each build job test-installs before it publishes and verifies after;
-//   * nothing builds, publishes or verifies arm64 Linux or Intel macOS;
-//   * each platform's plan is what v0.74.1 published for its targets.
+// and release-targets.toml together.
 //
 // What a step uploads is what its recipe's `plan` says it does: release/release.py
 // refuses to build a file the plan does not name, and publishes only what it
