@@ -46,10 +46,15 @@ status="$(request "$api/repos/$GITHUB_REPOSITORY/pulls?state=open&per_page=100")
 [ "$status" = 200 ] || fail "GitHub answered $status listing open pull requests: $(head -c 300 "$work/body")" \
   "check that RELEASE_PLZ_TOKEN can read pull requests, then re-run"
 
-jq -c --arg repo "$GITHUB_REPOSITORY" \
-  '[.[] | select((.head.ref | startswith("release-plz-")) and .head.repo.full_name == $repo)
-        | {number, node_id, ref: .head.ref}]' "$work/body" >"$work/release-prs" \
-  || fail "GitHub's pull request list is not the JSON array it documents" "re-run the job"
+# Every pull request is checked for the fields read here, so a malformed answer
+# is refused rather than mistaken for "no release PR".
+jq -ce --arg repo "$GITHUB_REPOSITORY" '
+  if type == "array" and all(.[]; (.number | type) == "number" and (.node_id | type) == "string"
+                              and (.head.ref | type) == "string")
+  then [.[] | select((.head.ref | startswith("release-plz-")) and .head.repo.full_name? == $repo)
+              | select(.node_id != "") | {number, node_id}]
+  else error("not a pull request list") end' "$work/body" >"$work/release-prs" 2>/dev/null \
+  || fail "GitHub's pull request list is not the JSON array of pull requests it documents" "re-run the job once GitHub answers normally"
 count="$(jq length "$work/release-prs")"
 case "$count" in
   0)

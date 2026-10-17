@@ -193,7 +193,20 @@ describe("a lock that links an engine twice", () => {
     assert.equal(github.release(TAG).assets.length, 0);
   });
 
-  it("is not refused when the lock links each engine once", async () => {
+  it("is not refused when the lock links each engine once, and `publish`'s dry run then writes nothing", async () => {
+    const before = github.requests.length;
+    const dry = await run("just", ["release-publish", "dry-run"], {
+      env: releaseEnv(github, scratch("release-dry"), {
+        CARGO_REGISTRY_TOKEN: "crates-not-a-real-token",
+      }),
+    });
+    assert.equal(dry.code, 0, said(dry));
+    for (const file of [`onepipeline-${VERSION}.crate`, `onepipeline-cli-${VERSION}.tgz`]) {
+      assert.ok(dry.stdout.includes(`would publish ${file}`), said(dry));
+    }
+    assert.match(dry.stdout, /dry run: published nothing platform-independent/);
+    assert.deepEqual(github.requests.slice(before), [], "a dry run does not even read the Release");
+
     const result = await run("bash", ["scripts/linked-engines.sh", "--format", "split"]);
     assert.equal(result.code, 0, said(result));
     assert.match(result.stdout, /linked engines resolve once each/);
@@ -314,6 +327,101 @@ describe("the release outcome record", () => {
     ]);
   });
 
+  function allJobs(published, verified) {
+    const jobs = {};
+    for (const key of ["LINUX", "MACOS", "WINDOWS"]) {
+      Object.assign(jobs, {
+        [`${key}_RESULT`]: "success",
+        [`${key}_PUBLISHED`]: published[key] ?? "success",
+        [`${key}_VERIFIED`]: verified[key] ?? "success",
+      });
+    }
+    return jobs;
+  }
+
+  function launcherResults(published, verified) {
+    mkdirSync(join(out, "common"), { recursive: true });
+    writeFileSync(
+      join(out, "common", "publish-results.json"),
+      JSON.stringify({
+        crate: { published: "success", verified: "success" },
+        "npm-launcher": { published, verified },
+      }),
+    );
+  }
+
+  it("records a build job whose publish step failed as shipped but not verified", async () => {
+    launcherResults("success", "success");
+    const result = await run("just", ["release-outcome"], {
+      env: releaseEnv(github, out, { ...allJobs({ WINDOWS: "failure" }, { WINDOWS: "skipped" }) }),
+    });
+    assert.equal(result.code, 0, said(result));
+    assert.deepEqual(states(recorded())["pypi:onepipeline-cli"], [
+      "shipped-unverified",
+      "success",
+      "failure",
+    ]);
+  });
+
+  it("records a release everything of which published but one verification failed", async () => {
+    launcherResults("success", "failure");
+    const result = await run("just", ["release-outcome"], {
+      env: releaseEnv(github, out, allJobs({}, { MACOS: "failure" })),
+    });
+    assert.equal(result.code, 0, said(result));
+    const record = recorded();
+    assert.equal(record.outcome, "shipped-unverified");
+    assert.deepEqual(states(record)["pypi:onepipeline-cli"], [
+      "shipped-unverified",
+      "success",
+      "failure",
+    ]);
+    assert.deepEqual(states(record)["npm:onepipeline-cli"], [
+      "shipped-unverified",
+      "success",
+      "failure",
+    ]);
+    assert.deepEqual(states(record)["crate:onepipeline"], [
+      "shipped-verified",
+      "success",
+      "success",
+    ]);
+  });
+
+  it("records a registry switched off as skipped", async () => {
+    launcherResults("skipped", "skipped");
+    const result = await run("just", ["release-outcome"], {
+      env: releaseEnv(github, out, { ...allJobs({}, {}), PYPI_PUBLISH: "false", NPM_PUBLISH: "" }),
+    });
+    assert.equal(result.code, 0, said(result));
+    const record = recorded();
+    assert.deepEqual(states(record)["pypi:onepipeline-cli"], [
+      "nothing-shipped",
+      "skipped",
+      "skipped",
+    ]);
+    assert.deepEqual(states(record)["npm:onepipeline-cli"], [
+      "nothing-shipped",
+      "skipped",
+      "skipped",
+    ]);
+  });
+
+  it("refuses a publish-results file it cannot read rather than reading it as nothing published", async () => {
+    mkdirSync(join(out, "common"), { recursive: true });
+    for (const content of ["{not json", JSON.stringify({ crate: { published: "yes" } })]) {
+      writeFileSync(join(out, "common", "publish-results.json"), content);
+      const before = github.writes().length;
+      const result = await run("just", ["release-outcome"], {
+        env: releaseEnv(github, out, allJobs({}, {})),
+      });
+      assert.equal(result.code, 1, said(result));
+      assert.match(result.stderr, /publish-results\.json is not (JSON|the shape)/, said(result));
+      assert.equal(github.writes().length, before, "no record replaced the last one");
+    }
+    rmSync(join(out, "common", "publish-results.json"));
+  });
+
   it("refuses a job result GitHub does not report rather than guessing", async () => {
     const result = await run("just", ["release-outcome"], {
       env: releaseEnv(github, out, { LINUX_RESULT: "succeeded" }),
@@ -388,6 +496,51 @@ describe("release-plz.yml's auto-merge step", () => {
       assert.equal(result.code, 1, said(result));
       assert.match(result.stderr, /GitHub answered 403 listing open pull requests/);
       assert.equal(github.graphql.length, 0);
+    } finally {
+      await github.stop();
+    }
+  });
+
+  it("fails visibly when GitHub does not answer at all", async () => {
+    const github = await new GitHubDouble().start();
+    const env = github.env();
+    await github.stop();
+    const result = await run("bash", ["-eo", "pipefail", "-c", step.run], { env });
+    assert.equal(result.code, 1, said(result));
+    assert.match(result.stderr, /GitHub did not answer at http:\/\/127\.0\.0\.1/);
+  });
+
+  it("fails visibly on a pull request list that is not one", async () => {
+    const github = await new GitHubDouble().start();
+    try {
+      for (const body of [
+        '{"message":"an object"}',
+        "not json",
+        '[{"number":"12","node_id":7,"head":{"ref":"release-plz-a"}}]',
+      ]) {
+        github.pullsBody = body;
+        const result = await runStep(github);
+        assert.equal(result.code, 1, `${body}: ${said(result)}`);
+        assert.match(result.stderr, /not the JSON array of pull requests it documents/);
+      }
+      assert.equal(github.graphql.length, 0, "nothing was asked to merge");
+    } finally {
+      await github.stop();
+    }
+  });
+
+  it("fails visibly when the merge request is refused or answered with nonsense", async () => {
+    const github = await new GitHubDouble().start();
+    try {
+      github.addPull(12, "release-plz-a");
+      github.refuseNext("POST", /^\/graphql$/, 502, "Bad Gateway");
+      let result = await runStep(github);
+      assert.equal(result.code, 1, said(result));
+      assert.match(result.stderr, /GitHub refused auto-merge on release PR #12 \(HTTP 502\)/);
+      github.graphqlBody = '{"data":{"enablePullRequestAutoMerge":null}}';
+      result = await runStep(github);
+      assert.equal(result.code, 1, said(result));
+      assert.match(result.stderr, /GitHub refused auto-merge on release PR #12 \(HTTP 200\)/);
     } finally {
       await github.stop();
     }

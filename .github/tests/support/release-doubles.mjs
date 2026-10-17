@@ -57,6 +57,7 @@ class Double {
         const body = Buffer.concat(chunks);
         this.requests.push({ method: req.method, path: url.pathname, query: url.search });
         const answer = (status, payload, type) => {
+          if (res.headersSent) return;
           const data = Buffer.isBuffer(payload)
             ? payload
             : Buffer.from(typeof payload === "string" ? payload : JSON.stringify(payload));
@@ -68,6 +69,7 @@ class Double {
           });
           res.end(req.method === "HEAD" ? undefined : data);
         };
+        if (held > BODY_LIMIT) return answer(413, { message: `body exceeds ${BODY_LIMIT} bytes` });
         const refusal = this.refusals.findIndex(
           (r) => r.method === req.method && r.pattern.test(url.pathname),
         );
@@ -110,6 +112,9 @@ export class GitHubDouble extends Double {
     this.nextId = 1;
     /// What the next auto-merge request is answered with: null accepts it.
     this.autoMergeRefusal = null;
+    /// Raw bodies to answer the pull request list and GraphQL with instead.
+    this.pullsBody = null;
+    this.graphqlBody = null;
   }
 
   env() {
@@ -168,6 +173,7 @@ export class GitHubDouble extends Double {
     if (req.method === "POST" && path === "/graphql") {
       const request = JSON.parse(body.toString("utf8"));
       this.graphql.push(request);
+      if (this.graphqlBody !== null) return answer(200, this.graphqlBody, "application/json");
       if (this.autoMergeRefusal) {
         return answer(200, { data: null, errors: [{ message: this.autoMergeRefusal }] });
       }
@@ -185,6 +191,7 @@ export class GitHubDouble extends Double {
       });
     }
     if (req.method === "GET" && path === `${repo}/pulls`) {
+      if (this.pullsBody !== null) return answer(200, this.pullsBody, "application/json");
       return answer(200, this.pulls);
     }
     if (req.method === "GET" && new RegExp(`^${repo}/commits/[0-9a-f]+/pulls$`).test(path)) {
@@ -209,7 +216,9 @@ export class GitHubDouble extends Double {
     if (req.method === "PATCH" && found) {
       const release = this.releases.find((r) => r.id === Number(found[1]));
       if (!release) return answer(404, { message: "Not Found" });
-      release.body = JSON.parse(body.toString("utf8")).body;
+      const patch = JSON.parse(body.toString("utf8"));
+      if (typeof patch?.body !== "string") return answer(422, { message: "body must be a string" });
+      release.body = patch.body;
       return answer(200, this.#view(release));
     }
     if (req.method === "POST" && path.startsWith(uploads)) {
@@ -348,10 +357,24 @@ export class CratesDouble extends Double {
       return answer(200, { dl: `${this.url}/api/v1/crates`, api: this.url });
     }
     if (req.method === "PUT" && url.pathname === "/api/v1/crates/new") {
+      // Cargo's framing: a little-endian u32 length and the metadata JSON, then
+      // a u32 length and the .crate, and nothing after.
+      const malformed = (why) => answer(400, { errors: [{ detail: `malformed publish body: ${why}` }] });
+      if (body.length < 4) return malformed("no metadata length");
       const length = body.readUInt32LE(0);
-      const meta = JSON.parse(body.subarray(4, 4 + length).toString("utf8"));
+      if (body.length < 8 + length) return malformed("truncated metadata");
       const crateLength = body.readUInt32LE(4 + length);
-      const content = body.subarray(8 + length, 8 + length + crateLength);
+      if (body.length !== 8 + length + crateLength) return malformed("the crate length is not the body's");
+      let meta;
+      try {
+        meta = JSON.parse(body.subarray(4, 4 + length).toString("utf8"));
+      } catch {
+        return malformed("metadata is not JSON");
+      }
+      if (typeof meta?.name !== "string" || typeof meta.vers !== "string" || !Array.isArray(meta.deps)) {
+        return malformed("metadata lacks name, vers or deps");
+      }
+      const content = body.subarray(8 + length);
       const versions = this.crates.get(meta.name) ?? [];
       if (versions.some((v) => v.line.vers === meta.vers)) {
         return answer(200, { errors: [{ detail: `crate version \`${meta.vers}\` is already uploaded` }] });

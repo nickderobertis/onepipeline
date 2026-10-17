@@ -25,7 +25,7 @@ name: Release-plz
 # from; `--registry-manifest-path` points it at a checkout of the last release
 # tag as the baseline, restoring conventional-commit versioning from git history.
 #
-# `.github/tests/release-plz-job.test.mjs` runs these steps, in this order and
+# `.github/tests/release-plz.journey.mjs` runs these steps, in this order and
 # under these conditions, over a scratch repository.
 
 on:

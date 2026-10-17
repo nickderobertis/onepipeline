@@ -648,6 +648,11 @@ engines-current:
 linked-engines:
     @bash scripts/linked-engines.sh --format notes
 
+# Offline, so release.yml's `publish` job can refuse a release on it before uploading anything.
+# Fail when Cargo.lock resolves a sibling engine at more than one version.
+engines-split:
+    @bash scripts/linked-engines.sh --format split
+
 # Outside `check` and `gate` because it pulls the manylinux image and a toolchain
 # over the network and needs Docker. release.yml's `build-linux` job (through
 # `release-linux`) and ci.yml's `wheel` job both build with this script, so there

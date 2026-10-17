@@ -118,7 +118,7 @@ jobs:
           tool: just
       - name: Install the packager and the Rust target
         run: |
-          uv tool install maturin==1.14.1
+          just nx run onepipeline-npm:bootstrap
           uv tool dir --bin >> "$GITHUB_PATH"
           rustup target add aarch64-apple-darwin
       - name: Build, package and test-install the macOS artifacts
@@ -163,7 +163,7 @@ jobs:
           tool: just
       - name: Install the packager and the Rust target
         run: |
-          uv tool install maturin==1.14.1
+          just nx run onepipeline-npm:bootstrap
           uv tool dir --bin >> "$GITHUB_PATH"
           rustup target add x86_64-pc-windows-msvc
       - name: Build, package and test-install the Windows artifacts

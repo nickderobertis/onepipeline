@@ -247,28 +247,29 @@ fn release_linux_legs() -> Vec<(String, String)> {
     legs
 }
 
+/// The maturin every release build uses: npm/project.json's `bootstrap`, which
+/// release.yml's macOS and Windows jobs run, and which the manylinux build pins too.
 fn release_maturin_version() -> String {
     let text = fs::read_to_string(repo_root().join(".github/workflows/release.yml"))
         .expect("release.yml is readable");
-    let pins: Vec<&str> = text
-        .lines()
-        .filter_map(|line| line.trim().strip_prefix("uv tool install maturin=="))
-        .collect();
-    assert!(!pins.is_empty(), "release.yml pins a maturin version");
+    for job in ["build-macos", "build-windows"] {
+        assert!(
+            job_block("release.yml", job).contains("just nx run onepipeline-npm:bootstrap"),
+            "release.yml's {job} installs maturin through the npm project's bootstrap"
+        );
+    }
     assert!(
-        pins.iter().all(|pin| *pin == pins[0]),
-        "release.yml pins one maturin version, found {pins:?}"
+        !text.contains("maturin=="),
+        "release.yml pins no maturin of its own"
     );
     let npm: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(repo_root().join("npm/project.json")).unwrap())
             .unwrap();
     let bootstrap = npm["targets"]["bootstrap"]["command"].as_str().unwrap();
-    assert_eq!(
-        bootstrap,
-        format!("uv tool install maturin=={}", pins[0]),
-        "the staged packager and release wheel packager must use the same version"
-    );
-    pins[0].to_string()
+    bootstrap
+        .strip_prefix("uv tool install maturin==")
+        .expect("the npm project's bootstrap installs one pinned maturin")
+        .to_string()
 }
 
 #[test]
@@ -449,7 +450,7 @@ fn the_pull_request_check_builds_the_release_linux_legs_through_the_recipe() {
     );
     let driver = fs::read_to_string(repo_root().join("scripts/release.py")).unwrap();
     assert!(
-        driver.contains("'build-linux-wheel.sh'"),
+        driver.contains("'just', 'wheel-linux'"),
         "the release's Linux recipe builds its wheel with the script `just wheel-linux` runs"
     );
 }

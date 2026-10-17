@@ -237,9 +237,12 @@ describe("the Linux recipe, publishing in its dry-run mode", () => {
       linux.artifacts.map((a) => a.target),
       [TARGET, TARGET, TARGET, TARGET],
     );
-    assert.equal(
-      (built.stdout.match(/^release: building \S+ once$/gm) ?? []).length,
-      1,
+    assert.match(
+      built.stdout,
+      new RegExp(
+        `^release: built ${TARGET} once, packaged its wheel, archive and npm package from that binary, and test-installed all three`,
+        "m",
+      ),
       "one build per Linux target",
     );
     const p = payloads(linux);
@@ -304,16 +307,19 @@ describe("the Linux recipe, publishing in its dry-run mode", () => {
   });
 
   it("test-installs those files and runs what each installed", () => {
-    assert.match(
-      built.stdout,
-      new RegExp(
-        `installed wheel, npm and archive for ${TARGET} ${VERSION.replaceAll(".", "\\.")}`,
-      ),
-    );
-    for (const installed of ["python", "npm", "archive"]) {
-      assert.ok(
-        existsSync(join(OUT, "linux", "install", TARGET, installed)),
-        `the ${installed} install exists`,
+    assert.match(built.stdout, /and test-installed all three/);
+    // What each install put in place, run again here: the build ran its smoke
+    // over these, and they are the installs of the very files it publishes.
+    const installed = join(OUT, "linux", "install", TARGET);
+    for (const binary of [
+      join(installed, "python", "bin", "onepipeline"),
+      join(installed, "npm", "node_modules", "onepipeline-cli-linux-x64", "bin", "onepipeline"),
+      join(installed, "archive", "onepipeline"),
+    ]) {
+      assert.equal(
+        execFileSync(binary, ["--version"], { encoding: "utf8" }).trim(),
+        `onepipeline ${VERSION}`,
+        binary,
       );
     }
     for (const artifact of linux.artifacts) {
@@ -484,6 +490,19 @@ describe("registry verification refuses what a user could not run", () => {
     }
   });
 
+  it("fails when the Release's archive does not match its checksum", async () => {
+    const s = await serving();
+    try {
+      const archive = s.github.release(TAG).assets.find((a) => a.name.endsWith(".tar.gz"));
+      archive.content = Buffer.concat([archive.content, Buffer.from("tampered")]);
+      const result = await verify(s);
+      assert.equal(result.code, 1, said(result));
+      assert.match(result.stderr, /on the Release does not match its onepipeline-v\S+\.sha256/);
+    } finally {
+      await s.stop();
+    }
+  });
+
   it("fails when a registry serves no package for this platform", async () => {
     const s = await serving({ wheel: false });
     try {
@@ -495,6 +514,124 @@ describe("registry verification refuses what a user could not run", () => {
       const result = await verify(s);
       assert.equal(result.code, 1, said(result));
       assert.match(result.stderr, /PyPI onepipeline-cli .* for x86_64-unknown-linux-gnu/);
+    } finally {
+      await s.stop();
+    }
+  });
+});
+
+describe("publication refuses a build that is not the plan, untouched", () => {
+  /// A copy of the build, changed by `tamper`, published against fresh doubles.
+  async function publishTampered(tamper) {
+    const s = await services();
+    const out = join(ROOT, "target", "release-journeys", `tampered-${process.pid}`);
+    rmSync(out, { recursive: true, force: true });
+    try {
+      mkdirSync(out, { recursive: true });
+      execFileSync("cp", ["-a", join(OUT, "linux"), join(out, "linux")]);
+      const manifest = join(out, "linux", "build.json");
+      const build = JSON.parse(
+        readFileSync(manifest, "utf8").replaceAll(join(OUT, "linux"), join(out, "linux")),
+      );
+      tamper(build, join(out, "linux"));
+      writeFileSync(manifest, JSON.stringify(build));
+      const result = await run("just", ["release-linux", "publish"], {
+        env: { ...s.env, ONEPIPELINE_RELEASE_OUT: out },
+      });
+      assert.deepEqual(writesOf(s), {}, "nothing was published");
+      return result;
+    } finally {
+      await s.stop();
+      rmSync(out, { recursive: true, force: true });
+    }
+  }
+  const of = (build, kind) => build.artifacts.find((a) => a.kind === kind);
+
+  it("refuses a build of another version", async () => {
+    const result = await publishTampered((build) => {
+      build.version = "0.0.1";
+      build.tag = "v0.0.1";
+    });
+    assert.equal(result.code, 1, said(result));
+    assert.match(result.stderr, /is linux v0\.0\.1, not linux v/);
+  });
+
+  it("refuses a file the test-install never ran", async () => {
+    const result = await publishTampered((build) => {
+      writeFileSync(of(build, "archive").path, "a different archive");
+    });
+    assert.equal(result.code, 1, said(result));
+    assert.match(result.stderr, /changed after it was built and test-installed/);
+  });
+
+  it("refuses a file the plan does not name", async () => {
+    const result = await publishTampered((build) => {
+      of(build, "wheel").file = `onepipeline_cli-${VERSION}-py3-none-manylinux_2_39_x86_64.whl`;
+    });
+    assert.equal(result.code, 1, said(result));
+    assert.match(result.stderr, /are not the plan's/);
+  });
+
+  it("refuses a Linux binary above the planned glibc floor", async () => {
+    const result = await publishTampered((build, dir) => {
+      // This host's own `true` links the host's glibc, far above 2.17.
+      const wheel = of(build, "wheel");
+      const into = mkdtempSync(join(SCRATCH, "wheel-"));
+      execFileSync("python3", ["-m", "zipfile", "-e", wheel.path, into]);
+      execFileSync("cp", [
+        "/usr/bin/true",
+        join(into, `onepipeline_cli-${VERSION}.data`, "scripts", "onepipeline"),
+      ]);
+      const rebuilt = join(dir, "rebuilt.whl");
+      execFileSync("python3", [
+        "-c",
+        "import shutil,sys; shutil.make_archive(sys.argv[1], 'zip', sys.argv[2])",
+        rebuilt,
+        into,
+      ]);
+      execFileSync("mv", [`${rebuilt}.zip`, wheel.path]);
+      wheel.sha256 = sha(readFileSync(wheel.path));
+      rmSync(into, { recursive: true, force: true });
+    });
+    assert.equal(result.code, 1, said(result));
+    assert.match(result.stderr, /requires GLIBC_2\.\d+, above the planned floor 2\.17/);
+  });
+});
+
+describe("a registry switched off", () => {
+  it("is neither published to nor verified, and the Release assets still are", async () => {
+    const s = await services();
+    try {
+      const env = {
+        ...s.env,
+        ONEPIPELINE_RELEASE_OUT: OUT,
+        PYPI_PUBLISH: "false",
+        NPM_PUBLISH: "",
+      };
+      const published = await run("just", ["release-linux", "publish"], { env });
+      assert.equal(published.code, 0, said(published));
+      assert.match(published.stdout, /skipped PyPI \(PYPI_PUBLISH off\), npm \(NPM_PUBLISH off\)/);
+      assert.deepEqual(Object.keys(writesOf(s)).sort(), [
+        `onepipeline-v${VERSION}-${TARGET}.sha256`,
+        `onepipeline-v${VERSION}-${TARGET}.tar.gz`,
+      ]);
+      assert.equal(s.pypi.files.size, 0);
+      assert.equal(s.npm.packages.size, 0);
+      const verified = await run("just", ["release-linux", "verify"], { env });
+      assert.equal(verified.code, 0, said(verified));
+      assert.match(
+        verified.stdout + verified.stderr,
+        /Release archive .*surface smoke test passed/,
+      );
+      assert.doesNotMatch(
+        verified.stdout + verified.stderr,
+        /PyPI onepipeline-cli|npm onepipeline-cli-linux-x64/,
+      );
+      const typo = await run("just", ["release-linux", "publish"], {
+        env: { ...env, NPM_PUBLISH: "yes" },
+      });
+      assert.equal(typo.code, 1, said(typo));
+      assert.match(typo.stderr, /NPM_PUBLISH is 'yes', which neither turns publishing on nor off/);
     } finally {
       await s.stop();
     }

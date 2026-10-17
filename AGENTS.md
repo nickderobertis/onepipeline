@@ -153,22 +153,15 @@ nothing — fires `release.yml`: five CD jobs in all. **Nothing else writes a
 version:** maturin reads it from `Cargo.toml` via `dynamic = ["version"]` and
 `scripts/npm-build.mjs` stamps it from the same place.
 
-**`release.yml` is one build job per platform, then `publish`.** `build-linux`
-(`x86_64-unknown-linux-gnu`), `build-macos` (`aarch64-apple-darwin`) and
-`build-windows` (`x86_64-pc-windows-msvc`) each run their platform's recipe —
-`just release-<platform> build`, `publish`, `verify` — which builds each target
-once, packages the archive, wheel and npm platform package from that one binary
-(Linux inside the manylinux2014 image, so all three carry its glibc 2.17 floor),
-test-installs those files, publishes them, and installs them back from the
-registries on that OS. `publish` needs all three: it refuses a lock that links an
-engine twice, records the linked engines in the notes, confirms every registry
-serves every platform, publishes the crate and the npm launcher, installs both,
-and records `release-outcome.json`. `just release-<platform> plan` lists what a
-job publishes without building it. Intel macOS and arm64 Linux are not built.
-**A failed build job leaves the platforms that built published and the
-platform-independent artifacts unpublished** until the failed job is re-run and
-then `publish`; every upload skips what its registry already serves, so a re-run
-publishes only what is missing.
+**`release.yml` is one build job per platform, then `publish`, and each job's
+work is its platform's recipe** (`just release-<platform>`, whose `plan` lists
+what it publishes). A target is built once and every artifact for it is packaged
+from that one binary; nothing is published before that exact file installed and
+ran, and nothing is reported published until it installs back from its registry.
+The platform-independent artifacts wait for every platform. **A failed build job
+leaves the platforms that built published and the platform-independent artifacts
+unpublished** until the failed job and then `publish` are re-run; every upload
+skips what its registry already serves.
 
 **Where each tier runs follows from that release model.** Releases are batched:
 every merge since the last tag rides one release-plz release PR, so the commit

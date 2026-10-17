@@ -16,12 +16,12 @@ Usage:
   release.py outcome [--out DIR]
 
 `plan` lists, without building, every file, package, wheel tag and target a
-platform's build produces or `publish` uploads; `build` refuses an artifact that
-differs from it, so the plan is what a release publishes.
+platform's build produces or `publish` uploads; `build` and `publish` both refuse
+an artifact that differs from it, so the plan is what a release publishes.
 
 The release reaches this as environment, which the workflow sets:
   RELEASE_TAG             the Release's tag (default: v<Cargo.toml version>, dry runs only)
-  PYPI_PUBLISH, NPM_PUBLISH   'true' turns that registry on; PYPI_TOKEN, NODE_AUTH_TOKEN
+  PYPI_PUBLISH, NPM_PUBLISH   'true' turns that registry on, '' or 'false' off; PYPI_TOKEN, NODE_AUTH_TOKEN
   CARGO_REGISTRY_TOKEN    set: publish the crate; unset: skip it, as always
   GITHUB_TOKEN, GITHUB_REPOSITORY, GITHUB_API_URL   the Release's assets and notes
   ONEPIPELINE_PYPI_UPLOAD_URL, ONEPIPELINE_PYPI_INDEX_URL, ONEPIPELINE_PYPI_JSON_URL,
@@ -29,12 +29,16 @@ The release reaches this as environment, which the workflow sets:
   ONEPIPELINE_RELEASE_VERIFY_BUDGET   seconds an install may wait for a registry (default 600)
   ONEPIPELINE_RELEASE_OUT where each platform's files go (default target/release-artifacts)
 
-Exit 0: the phase completed. Exit 1: the release was refused or a step failed,
-named on stderr with what to do next. Exit 2: the command line was refused.
+Quiet on success: one summary line per phase (a dry run lists what it would
+publish, which is its product). Exit 0: the phase completed. Exit 1: the release
+was refused or a step failed, named on stderr with what to do next. Exit 2: the
+command line was refused.
 """
 import argparse
+import contextlib
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import re
@@ -82,6 +86,7 @@ OUTCOME_FILE = 'release-outcome.json'
 OUTCOME_TARGETS = [f'crate:{CRATE}', f'pypi:{PYPI_NAME}', f'npm:{NPM_LAUNCHER}']
 # The line `linked-engines.sh --format notes` opens its section with.
 LINKED_ENGINES_MARKER = '<!-- linked-engines -->'
+RESULTS = ['success', 'failure', 'cancelled', 'skipped']
 
 
 class Refused(Exception):
@@ -96,25 +101,28 @@ def say(message):
     print(f'release: {message}', flush=True)
 
 
-def run(*args, env=None, cwd=None, quiet=False):
+def expect(condition, message, action):
+    if not condition:
+        raise Refused(message, action)
+
+
+def run(*args, env=None, cwd=None, capture=False):
     """Run one command; a failure carries its output into the refusal.
 
     The program is resolved on PATH first, because Windows runs `npm` and `uv`
-    only by their full `.cmd`/`.exe` path.
+    only by their full `.cmd`/`.exe` path. `capture` returns stdout and leaves
+    stderr on the terminal.
     """
     args = (shutil.which(str(args[0]), path=(env or os.environ).get('PATH')) or args[0], *args[1:])
     result = subprocess.run(args, cwd=cwd or ROOT, env=env, text=True,
-                            stdout=subprocess.PIPE if quiet else None,
-                            stderr=subprocess.STDOUT if quiet else None)
+                            stdout=subprocess.PIPE if capture else None)
     if result.returncode != 0:
-        if quiet and result.stdout:
+        if capture and result.stdout:
             sys.stderr.write(result.stdout)
         raise Refused(f"'{' '.join(str(a) for a in args)}' exited {result.returncode}",
                       'fix what the output above names, then re-run this phase')
     return result.stdout or ''
 
-
-# --- what a release is -------------------------------------------------------
 
 def cargo_version():
     try:
@@ -127,59 +135,60 @@ def cargo_version():
 def release_tag(dry_run):
     tag = os.environ.get('RELEASE_TAG', '')
     if not tag:
-        if not dry_run:
-            raise Refused('RELEASE_TAG is not set, so nothing says which Release this is',
-                          "set RELEASE_TAG to the Release's tag, as release.yml does, or pass --dry-run")
+        expect(dry_run, 'RELEASE_TAG is not set, so nothing says which Release this is',
+               "set RELEASE_TAG to the Release's tag, as release.yml does, or pass --dry-run")
         return f'v{cargo_version()}'
     return tag
 
 
 def tag_version(tag):
     """The version a release tag names, or a refusal: `v` and a SemVer, nothing else."""
-    if not re.fullmatch('v' + staged.SEMVER_PATTERN, tag):
-        raise Refused(f"release tag '{tag}' is not a vX.Y.Z version tag",
-                      'cut the Release from a v<version> tag; release-plz names them so')
+    expect(re.fullmatch('v' + staged.SEMVER_PATTERN, tag), f"release tag '{tag}' is not a vX.Y.Z version tag",
+           'cut the Release from a v<version> tag; release-plz names them so')
     return tag[1:]
+
+
+def switch(name):
+    """A repository variable that turns a registry on: 'true', or '' / 'false' for off."""
+    value = os.environ.get(name, '')
+    expect(value in ('', 'true', 'false'), f"{name} is '{value}', which neither turns publishing on nor off",
+           f"set {name} to 'true' or 'false', or unset it")
+    return value == 'true'
+
+
+def require_github():
+    for name in ['GITHUB_TOKEN', 'GITHUB_REPOSITORY']:
+        expect(os.environ.get(name), f'{name} is not set, so the Release cannot be read or written',
+               f'set {name}, as every Actions job has it')
 
 
 def guard(phase, dry_run=False):
     """Whether this release may publish at all, and through which registries.
 
-    The checks the release used to spread over a `guard` job and a tag check in
-    every verify job: a tag that is not `v<semver>`, or names another version
-    than Cargo.toml, is refused before any build or upload; so is a registry
-    switched on with no credential to publish with. A missing crates.io token
-    turns the crate off rather than refusing, as it always has.
+    A tag that is not `v<semver>`, or names another version than Cargo.toml, is
+    refused before any build or upload; so is a registry switched on with no
+    credential to publish with. A missing crates.io token turns the crate off.
     """
     tag = release_tag(dry_run)
     tag_version(tag)
     version = cargo_version()
-    if tag != f'v{version}':
-        raise Refused(f"release tag '{tag}' does not name Cargo.toml's version {version}",
-                      'cut the Release from the commit whose Cargo.toml carries that version')
-    channels = {
-        'assets': True,
-        'pypi': os.environ.get('PYPI_PUBLISH') == 'true',
-        'npm': os.environ.get('NPM_PUBLISH') == 'true',
-        'crate': bool(os.environ.get('CARGO_REGISTRY_TOKEN')),
-    }
-    if channels['pypi'] and not os.environ.get('PYPI_TOKEN'):
-        raise Refused('PYPI_PUBLISH is on but PYPI_TOKEN is empty',
-                      'add the PYPI_TOKEN secret (see gh-secrets.json) or unset PYPI_PUBLISH')
-    if channels['npm'] and not os.environ.get('NODE_AUTH_TOKEN'):
-        raise Refused('NPM_PUBLISH is on but NODE_AUTH_TOKEN is empty',
-                      'add the NPM_TOKEN secret (see gh-secrets.json) or unset NPM_PUBLISH')
+    expect(tag == f'v{version}', f"release tag '{tag}' does not name Cargo.toml's version {version}",
+           'cut the Release from the commit whose Cargo.toml carries that version')
+    channels = {'assets': True, 'pypi': switch('PYPI_PUBLISH'), 'npm': switch('NPM_PUBLISH'),
+                'crate': bool(os.environ.get('CARGO_REGISTRY_TOKEN'))}
+    expect(not channels['pypi'] or os.environ.get('PYPI_TOKEN'), 'PYPI_PUBLISH is on but PYPI_TOKEN is empty',
+           'add the PYPI_TOKEN secret (see gh-secrets.json) or unset PYPI_PUBLISH')
+    expect(not channels['npm'] or os.environ.get('NODE_AUTH_TOKEN'), 'NPM_PUBLISH is on but NODE_AUTH_TOKEN is empty',
+           'add the NPM_TOKEN secret (see gh-secrets.json) or unset NPM_PUBLISH')
     if phase != 'build' and not dry_run:
-        for name in ['GITHUB_TOKEN', 'GITHUB_REPOSITORY']:
-            if not os.environ.get(name):
-                raise Refused(f'{name} is not set, so the Release cannot be read or written',
-                              f'set {name}, as every Actions job has it')
-    if not channels['crate'] and phase == 'publish-common':
-        say('CARGO_REGISTRY_TOKEN not set; skipping crates.io publish.')
-    for name in ['pypi', 'npm']:
-        if not channels[name] and phase != 'build':
-            say(f'{name.upper()}_PUBLISH is not on; skipping {name}.')
+        require_github()
     return tag, version, channels
+
+
+def skipped(channels, names):
+    off = [{'pypi': 'PyPI (PYPI_PUBLISH off)', 'npm': 'npm (NPM_PUBLISH off)',
+            'crate': 'crates.io (CARGO_REGISTRY_TOKEN not set)'}[name] for name in names if not channels[name]]
+    return f"; skipped {', '.join(off)}" if off else ''
 
 
 def wheel_name(version, target):
@@ -194,9 +203,8 @@ def npm_package(target):
 def check_targets():
     declared = set(staged.supported_targets())
     built = {target for targets in PLATFORMS.values() for target in targets}
-    if declared != built:
-        raise Refused(f'scripts/npm-build.mjs declares {sorted(declared)} but the build jobs build {sorted(built)}',
-                      "keep npm-build.mjs's TARGETS and PLATFORMS in scripts/release.py the same set")
+    expect(declared == built, f'scripts/npm-build.mjs declares {sorted(declared)} but the build jobs build {sorted(built)}',
+           "keep npm-build.mjs's TARGETS and PLATFORMS in scripts/release.py the same set")
 
 
 def plan(platform, version):
@@ -214,8 +222,7 @@ def plan(platform, version):
     for target in PLATFORMS[platform]:
         floor = GLIBC_FLOOR.get(target)
         extra = {'glibc_floor': '.'.join(map(str, floor))} if floor else {}
-        archive = staged.archive_name(version, target)
-        artifacts.append({'kind': 'archive', 'target': target, 'file': archive,
+        artifacts.append({'kind': 'archive', 'target': target, 'file': staged.archive_name(version, target),
                           'package': None, 'destination': 'github-release', **extra})
         artifacts.append({'kind': 'checksum', 'target': target, 'file': f'onepipeline-v{version}-{target}.sha256',
                           'package': None, 'destination': 'github-release'})
@@ -229,8 +236,6 @@ def plan(platform, version):
     return {'platform': platform, 'version': version, 'targets': PLATFORMS[platform], 'artifacts': artifacts}
 
 
-# --- build -------------------------------------------------------------------
-
 def out_dir(args):
     base = Path(os.environ.get('ONEPIPELINE_RELEASE_OUT') or ROOT / 'target' / 'release-artifacts')
     return (args.out or base / args.platform).resolve()
@@ -240,9 +245,8 @@ def fresh(out):
     """An output directory this script owns, emptied: a marker says it is ours."""
     marker = out / '.release-artifacts'
     if out.exists() and any(out.iterdir()):
-        if not marker.exists():
-            raise Refused(f'{out} is not empty and is not a directory this script made',
-                          'pass --out an empty directory, or remove that one')
+        expect(marker.exists(), f'{out} is not empty and is not a directory this script made',
+               'pass --out an empty directory, or remove that one')
         shutil.rmtree(out)
     out.mkdir(parents=True, exist_ok=True)
     marker.write_text('scripts/release.py output\n')
@@ -250,37 +254,38 @@ def fresh(out):
 
 def glibc_needed(binary):
     """The highest GLIBC_ symbol version a Linux binary requires."""
-    if not shutil.which('objdump'):
-        raise Refused('objdump not found, so the glibc floor cannot be read',
-                      'install binutils, then re-run')
+    expect(shutil.which('objdump'), 'objdump not found, so the glibc floor cannot be read',
+           'install binutils, then re-run')
     symbols = subprocess.run(['objdump', '-T', str(binary)], text=True, capture_output=True, check=True).stdout
     versions = {tuple(int(part) for part in found) for found in re.findall(r'GLIBC_(\d+)\.(\d+)', symbols)}
     return max(versions) if versions else (0, 0)
 
 
-def conform(record, version):
-    """Hold one target's built files to its plan, so the plan is what ships."""
-    target = record['target']
-    wanted = {artifact['kind']: artifact for artifact in plan_for_target(target, version)}
-    for kind, path in [('wheel', record['wheel']), ('archive', record['archive']), ('npm', record['npm'])]:
-        if Path(path).name != wanted[kind]['file']:
-            raise Refused(f'{target} built {Path(path).name}, but the plan names {wanted[kind]["file"]}',
-                          'make the build produce the planned name, or change the plan and its test deliberately')
-    if target in GLIBC_FLOOR:
-        with zipfile.ZipFile(record['wheel']) as wheel:
-            member = next(name for name in wheel.namelist() if name.endswith('.data/scripts/onepipeline'))
-            with tempfile.TemporaryDirectory() as scratch:
-                binary = Path(scratch) / 'onepipeline'
-                binary.write_bytes(wheel.read(member))
-                needed = glibc_needed(binary)
-        if needed > GLIBC_FLOOR[target]:
-            raise Refused(f'{target} requires GLIBC_{needed[0]}.{needed[1]}, above the planned floor '
-                          f'{wanted["wheel"]["glibc_floor"]}', 'build it inside the manylinux2014 image, as scripts/build-linux-wheel.sh does')
+def conform(platform, version, artifacts):
+    """Hold a build's files to its platform's plan, so the plan is what ships.
 
-
-def plan_for_target(target, version):
-    platform = next(name for name, targets in PLATFORMS.items() if target in targets)
-    return [artifact for artifact in plan(platform, version)['artifacts'] if artifact['target'] == target]
+    Every planned file, and nothing else, with the plan's name, kind and
+    destination; and a Linux binary within the planned glibc floor.
+    """
+    planned = plan(platform, version)['artifacts']
+    fields = ['kind', 'target', 'file', 'package', 'destination']
+    expect(isinstance(artifacts, list) and all(isinstance(a, dict) for a in artifacts),
+           'the build lists no artifacts', 'rebuild into an empty directory')
+    expect([[a.get(f) for f in fields] for a in artifacts] == [[a[f] for f in fields] for a in planned],
+           f"the build's files {[a.get('file') for a in artifacts]} are not the plan's {[a['file'] for a in planned]}",
+           'make the build produce the planned files, or change the plan and its test deliberately')
+    for artifact in artifacts:
+        floor = GLIBC_FLOOR.get(artifact['target'])
+        if artifact['kind'] != 'wheel' or not floor:
+            continue
+        with zipfile.ZipFile(artifact['path']) as wheel, tempfile.TemporaryDirectory() as scratch:
+            members = [name for name in wheel.namelist() if name.endswith('.data/scripts/onepipeline')]
+            expect(len(members) == 1, f"{artifact['file']} carries no onepipeline executable", 'rebuild the wheel')
+            binary = Path(scratch) / 'onepipeline'
+            binary.write_bytes(wheel.read(members[0]))
+            needed = glibc_needed(binary)
+        expect(needed <= floor, f"{artifact['file']} requires GLIBC_{needed[0]}.{needed[1]}, above the planned floor "
+               f"{artifact['glibc_floor']}", 'build it inside the manylinux2014 image, as `just wheel-linux` does')
 
 
 def compile_wheel(platform, target, out):
@@ -292,9 +297,10 @@ def compile_wheel(platform, target, out):
         except ValueError as error:
             raise Refused(f'{out} is outside the checkout, which the manylinux container cannot see',
                           'pass --out a directory inside the repository') from error
-        run('bash', str(SCRIPTS / 'build-linux-wheel.sh'), '--target', target, '--out', str(relative))
-        wheel, = wheels.glob('*.whl')
-        return wheel
+        run('just', 'wheel-linux', target, str(relative))
+        found = list(wheels.glob('*.whl'))
+        expect(len(found) == 1, f'the {target} build left {len(found)} wheels', 'rebuild into an empty directory')
+        return found[0]
     os.environ['RUSTFLAGS'] = '-D warnings'
     return staged.compile_wheel(target, out, 'release')
 
@@ -303,54 +309,60 @@ def build(args):
     tag, version, _ = guard('build', dry_run=args.dry_run)
     out = out_dir(args)
     fresh(out)
-    built = []
+    records = []
     for target in PLATFORMS[args.platform]:
-        say(f'building {target} once')
         wheel = compile_wheel(args.platform, target, out)
         try:
-            record = staged.package(target, wheel, out, version)
+            records.append(staged.package(target, wheel, out, version))
         except (ValueError, OSError, subprocess.SubprocessError) as error:
             raise Refused(f'{target} could not be packaged: {error}',
                           'fix what the packaging reports, then re-run the build') from error
-        conform(record, version)
-        say(f'test-installing the {target} wheel, npm package and archive')
+    files = []
+    for record in records:
+        paths = {'archive': Path(record['archive']), 'wheel': Path(record['wheel']), 'npm': Path(record['npm']),
+                 'checksum': Path(record['archive']).with_name(f"onepipeline-v{version}-{record['target']}.sha256")}
+        for artifact in [a for a in plan(args.platform, version)['artifacts'] if a['target'] == record['target']]:
+            path = paths[artifact['kind']]
+            files.append({**artifact, 'file': path.name, 'path': str(path),
+                          'sha256': hashlib.sha256(path.read_bytes()).hexdigest()})
+    conform(args.platform, version, files)
+    for record in records:
         try:
-            staged.install(record, out, sys.executable, shutil.which('node') or 'node')
+            # The installer's own progress is not this phase's output.
+            with contextlib.redirect_stdout(io.StringIO()):
+                staged.install(record, out, sys.executable, shutil.which('node') or 'node')
         except subprocess.CalledProcessError as error:
             for output in [error.stdout, error.stderr]:
                 if output:
                     sys.stderr.write(output)
-            raise Refused(f'the {target} test-install failed, so nothing is published',
+            raise Refused(f"the {record['target']} test-install failed, so nothing is published",
                           'fix what the install above reports; the release publishes only files that installed') from error
-        built.append(record)
-    files = []
-    for record in built:
-        for artifact in plan_for_target(record['target'], version):
-            path = {'archive': Path(record['archive']),
-                    'checksum': Path(record['archive']).with_name(artifact['file']),
-                    'wheel': Path(record['wheel']), 'npm': Path(record['npm'])}[artifact['kind']]
-            files.append({**artifact, 'path': str(path), 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()})
     manifest = {'schema_version': 1, 'platform': args.platform, 'tag': tag, 'version': version, 'artifacts': files}
     (out / 'build.json').write_text(json.dumps(manifest, indent=2) + '\n')
-    say(f'built, packaged and test-installed {len(built)} target(s) into {out}')
+    say(f"built {', '.join(PLATFORMS[args.platform])} once, packaged its wheel, archive and npm package "
+        f'from that binary, and test-installed all three, into {out}')
 
 
-def built(out, version):
+def built(platform, out, tag, version):
+    """The build this phase publishes, refused unless it is the plan, untouched."""
     try:
         manifest = json.loads((out / 'build.json').read_text())
     except (OSError, ValueError) as error:
         raise Refused(f'no build in {out}: {error}', 'run the build phase first, into the same --out') from error
-    if not isinstance(manifest, dict) or manifest.get('version') != version:
-        raise Refused(f'the build in {out} is not of version {version}', 'rebuild for this release')
+    expect(isinstance(manifest, dict) and set(manifest) == {'schema_version', 'platform', 'tag', 'version', 'artifacts'}
+           and manifest['schema_version'] == 1, f'{out}/build.json is not a build this script wrote',
+           'rebuild into an empty directory')
+    expect(manifest['platform'] == platform and manifest['tag'] == tag and manifest['version'] == version,
+           f"the build in {out} is {manifest['platform']} {manifest['tag']}, not {platform} {tag}",
+           'rebuild for this platform and release')
+    conform(platform, version, manifest['artifacts'])
     for artifact in manifest['artifacts']:
-        path = Path(artifact['path'])
-        if hashlib.sha256(path.read_bytes()).hexdigest() != artifact['sha256']:
-            raise Refused(f'{path} changed after it was built and test-installed',
-                          'rebuild; only the files the test-install ran may be published')
+        path = Path(artifact.get('path', ''))
+        expect(path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() == artifact.get('sha256'),
+               f'{path} changed after it was built and test-installed',
+               'rebuild; only the files the test-install ran may be published')
     return manifest
 
-
-# --- the registries ----------------------------------------------------------
 
 def http(method, url, body=None, headers=None, token=None):
     request = urllib.request.Request(url, data=body, method=method, headers=dict(headers or {}))
@@ -363,23 +375,38 @@ def http(method, url, body=None, headers=None, token=None):
     except urllib.error.HTTPError as error:
         return error.code, error.read()
     except (urllib.error.URLError, OSError) as error:
-        raise Refused(f'{method} {url} did not answer: {error}',
-                      're-run once the service answers') from error
+        raise Refused(f'{method} {url} did not answer: {error}', 're-run once the service answers') from error
+
+
+def json_of(body, what, check):
+    """A service's JSON answer, refused unless `check` says it has the shape used."""
+    try:
+        value = json.loads(body)
+    except ValueError as error:
+        raise Refused(f'{what} is not JSON', 're-run once the service answers normally') from error
+    expect(check(value), f'{what} is not the shape the service documents', 're-run once the service answers normally')
+    return value
+
+
+def is_asset(value):
+    return (isinstance(value, dict) and isinstance(value.get('id'), int) and isinstance(value.get('name'), str)
+            and isinstance(value.get('browser_download_url'), str))
 
 
 class Release:
     """The GitHub Release this run publishes into."""
 
     def __init__(self, tag):
+        require_github()
         self.api = os.environ.get('GITHUB_API_URL', 'https://api.github.com').rstrip('/')
         self.repo = os.environ['GITHUB_REPOSITORY']
         self.token = os.environ['GITHUB_TOKEN']
-        self.tag = tag
         status, body = self.call('GET', f'/repos/{self.repo}/releases/tags/{urllib.parse.quote(tag)}')
-        if status != 200:
-            raise Refused(f'GitHub answered {status} for the Release tagged {tag}',
-                          'create the Release first: release-plz does, or cut it by hand from the tag')
-        self.data = json.loads(body)
+        expect(status == 200, f'GitHub answered {status} for the Release tagged {tag}',
+               'create the Release first: release-plz does, or cut it by hand from the tag')
+        self.data = json_of(body, f'the Release tagged {tag}', lambda v: isinstance(v, dict)
+                            and isinstance(v.get('id'), int) and isinstance(v.get('upload_url'), str)
+                            and v.get('tag_name') == tag and isinstance(v.get('body') or '', str))
 
     def call(self, method, path, body=None, headers=None):
         url = path if path.startswith('http') else self.api + path
@@ -387,33 +414,29 @@ class Release:
 
     def assets(self):
         status, body = self.call('GET', f"/repos/{self.repo}/releases/{self.data['id']}/assets?per_page=100")
-        if status != 200:
-            raise Refused(f'GitHub answered {status} listing the Release assets', 're-run once GitHub answers')
-        return {asset['name']: asset for asset in json.loads(body)}
+        expect(status == 200, f'GitHub answered {status} listing the Release assets', 're-run once GitHub answers')
+        listed = json_of(body, 'the Release assets', lambda v: isinstance(v, list) and all(map(is_asset, v)))
+        return {asset['name']: asset for asset in listed}
 
     def upload(self, path, replace=False):
+        """Upload one asset; one already there is kept, unless `replace`. True when it uploaded."""
         existing = self.assets().get(path.name)
         if existing and not replace:
-            say(f'{path.name} is already on the Release; not uploading it again')
             return False
         if existing:
             status, _ = self.call('DELETE', f"/repos/{self.repo}/releases/assets/{existing['id']}")
-            if status not in (204, 404):
-                raise Refused(f'GitHub answered {status} replacing {path.name}', 're-run once GitHub answers')
+            expect(status in (204, 404), f'GitHub answered {status} replacing {path.name}', 're-run once GitHub answers')
         target = re.sub(r'\{.*\}$', '', self.data['upload_url']) + '?name=' + urllib.parse.quote(path.name)
         status, body = self.call('POST', target, path.read_bytes(), {'Content-Type': 'application/octet-stream'})
-        if status != 201:
-            raise Refused(f'GitHub answered {status} uploading {path.name}: {body[:200]!r}',
-                          're-run the job; a re-run uploads only what is missing')
-        say(f'uploaded {path.name} to the Release')
+        expect(status == 201, f'GitHub answered {status} uploading {path.name}: {body[:200]!r}',
+               're-run the job; a re-run uploads only what is missing')
         return True
 
     def download(self, asset):
         # The public download URL, without the token: GitHub redirects it to
         # storage that refuses a request carrying a second credential.
         status, body = http('GET', asset['browser_download_url'])
-        if status != 200:
-            raise Refused(f"GitHub answered {status} for {asset['name']}", 're-run once GitHub answers')
+        expect(status == 200, f"GitHub answered {status} for {asset['name']}", 're-run once GitHub answers')
         return body
 
     def notes(self, section):
@@ -424,8 +447,7 @@ class Release:
         status, _ = self.call('PATCH', f"/repos/{self.repo}/releases/{self.data['id']}",
                               json.dumps({'body': kept.rstrip('\n') + '\n\n' + section}).encode(),
                               {'Content-Type': 'application/json'})
-        if status != 200:
-            raise Refused(f'GitHub answered {status} recording the linked engines', 're-run once GitHub answers')
+        expect(status == 200, f'GitHub answered {status} recording the linked engines', 're-run once GitHub answers')
 
 
 def pypi_urls():
@@ -439,13 +461,15 @@ def pypi_files(version):
     status, body = http('GET', f'{pypi_urls()[2]}/{PYPI_NAME}/{version}/json')
     if status == 404:
         return set()
-    if status != 200:
-        raise Refused(f'PyPI answered {status} for {PYPI_NAME} {version}', 're-run once PyPI answers')
-    return {entry['filename'] for entry in json.loads(body).get('urls', [])}
+    expect(status == 200, f'PyPI answered {status} for {PYPI_NAME} {version}', 're-run once PyPI answers')
+    release = json_of(body, f'PyPI\'s {PYPI_NAME} {version}', lambda v: isinstance(v, dict)
+                      and isinstance(v.get('urls'), list)
+                      and all(isinstance(u, dict) and isinstance(u.get('filename'), str) for u in v['urls']))
+    return {entry['filename'] for entry in release['urls']}
 
 
 def npm_serves(package, version):
-    view = subprocess.run(['npm', 'view', f'{package}@{version}', 'version', '--prefer-online'],
+    view = subprocess.run([shutil.which('npm') or 'npm', 'view', f'{package}@{version}', 'version', '--prefer-online'],
                           text=True, capture_output=True)
     if view.returncode == 0:
         return view.stdout.strip() == version
@@ -474,44 +498,45 @@ def crate_serves(version):
     status, body = http('GET', f'{index}/{index_path(CRATE)}')
     if status == 404:
         return False
-    if status != 200:
-        raise Refused(f'the crates.io index answered {status} for {CRATE}', 're-run once it answers')
-    return any(json.loads(line).get('vers') == version for line in body.decode().splitlines() if line.strip())
+    expect(status == 200, f'the crates.io index answered {status} for {CRATE}', 're-run once it answers')
+    versions = []
+    for line in body.decode('utf-8', 'replace').splitlines():
+        if line.strip():
+            entry = json_of(line, f'the index entry for {CRATE}', lambda v: isinstance(v, dict) and isinstance(v.get('vers'), str))
+            versions.append(entry['vers'])
+    return version in versions
 
 
 def crate_args():
     return ['--index', f'sparse+{crate_registry()}'] if crate_registry() else []
 
 
-# --- publish -----------------------------------------------------------------
-
 def publish(args):
     tag, version, channels = guard('publish', dry_run=args.dry_run)
-    out = out_dir(args)
-    manifest = built(out, version)
-    uploads = [artifact for artifact in manifest['artifacts']
-               if artifact['destination'] == 'github-release' or channels.get(artifact['destination'])]
+    manifest = built(args.platform, out_dir(args), tag, version)
+    uploads = [artifact for artifact in manifest['artifacts'] if channels[{'github-release': 'assets'}.get(
+        artifact['destination'], artifact['destination'])]]
     if args.dry_run:
         for artifact in uploads:
             say(f"would publish {artifact['file']} to {artifact['destination']}")
-        say(f'dry run: published nothing for {args.platform}')
+        say(f"dry run: published nothing for {args.platform}{skipped(channels, ['pypi', 'npm'])}")
         return
     release = Release(tag)
-    for artifact in uploads:
-        if artifact['destination'] == 'github-release':
-            release.upload(Path(artifact['path']))
+    uploaded = [Path(a['path']).name for a in uploads
+                if a['destination'] == 'github-release' and release.upload(Path(a['path']))]
     wheels = [Path(a['path']) for a in uploads if a['destination'] == 'pypi']
     if wheels:
         upload, index, _ = pypi_urls()
         env = dict(os.environ, UV_PUBLISH_TOKEN=os.environ['PYPI_TOKEN'])
         # `--check-url` asks the index first, so a re-run uploads only the wheels
         # it does not already serve.
-        run('uv', 'publish', '--trusted-publishing', 'never', '--publish-url', upload,
+        run('uv', 'publish', '--quiet', '--trusted-publishing', 'never', '--publish-url', upload,
             '--check-url', index, *[str(wheel) for wheel in wheels], env=env)
     for artifact in uploads:
         if artifact['destination'] == 'npm':
             run('bash', str(SCRIPTS / 'publish-npm.sh'), artifact['path'])
-    say(f'published {len(uploads)} {args.platform} artifact(s) for {version}')
+    say(f"published {args.platform}'s {len(uploads)} artifact(s) for {version} "
+        f"({len(uploaded)} Release asset(s) uploaded, the rest already there){skipped(channels, ['pypi', 'npm'])}")
 
 
 def smoke(directory, version, label):
@@ -525,6 +550,16 @@ def retry_install(label, action, *command):
         '--action', action, '--', *command)
 
 
+def unpack(archive, into):
+    into.mkdir(parents=True)
+    if archive.name.endswith('.zip'):
+        with zipfile.ZipFile(archive) as bundle:
+            bundle.extractall(into)
+    else:
+        with tarfile.open(archive) as bundle:
+            bundle.extractall(into, filter='data')
+
+
 def verify(args):
     """Install what this platform published, from the registries, and run it."""
     tag, version, channels = guard('verify')
@@ -536,23 +571,14 @@ def verify(args):
             archive = staged.archive_name(version, target)
             checksum = f'onepipeline-v{version}-{target}.sha256'
             for name in [archive, checksum]:
-                if name not in assets:
-                    raise Refused(f'the Release serves no {name}', 're-run the build job that publishes it')
+                expect(name in assets, f'the Release serves no {name}', 're-run the build job that publishes it')
             payload = release.download(assets[archive])
-            recorded = release.download(assets[checksum]).decode().split()
-            if not recorded or recorded[0] != hashlib.sha256(payload).hexdigest():
-                raise Refused(f'{archive} on the Release does not match its {checksum}',
-                              'delete both assets and re-run the build job')
-            unpacked = scratch / 'archive' / target
-            unpacked.mkdir(parents=True)
+            recorded = release.download(assets[checksum]).decode('utf-8', 'replace').split()
+            expect(recorded and recorded[0] == hashlib.sha256(payload).hexdigest(),
+                   f'{archive} on the Release does not match its {checksum}', 'delete both assets and re-run the build job')
             (scratch / archive).write_bytes(payload)
-            if archive.endswith('.zip'):
-                with zipfile.ZipFile(scratch / archive) as bundle:
-                    bundle.extractall(unpacked)
-            else:
-                with tarfile.open(scratch / archive) as bundle:
-                    bundle.extractall(unpacked, filter='data')
-            smoke(unpacked, version, f'Release archive {archive}')
+            unpack(scratch / archive, scratch / 'archive' / target)
+            smoke(scratch / 'archive' / target, version, f'Release archive {archive}')
             if channels['pypi']:
                 venv = scratch / 'pypi' / target
                 run(sys.executable, '-m', 'venv', str(venv))
@@ -571,16 +597,13 @@ def verify(args):
                               'npm', 'install', '--prefix', str(prefix), '--prefer-online', '--no-audit',
                               '--no-fund', f'{name}@{version}')
                 smoke(prefix / 'node_modules' / name / 'bin', version, f'npm {name} {version}')
-    say(f'every {args.platform} artifact of {version} installs from its registry and runs')
+    say(f"every {args.platform} artifact of {version} installs from its registry and runs{skipped(channels, ['pypi', 'npm'])}")
 
-
-# --- publish: the platform-independent artifacts -----------------------------
 
 def availability(version, channels, common=False):
     """What is missing from any registry for any platform, as one list."""
     missing = []
-    release = Release(f'v{version}')
-    assets = release.assets()
+    assets = Release(f'v{version}').assets()
     pypi = pypi_files(version) if channels['pypi'] else set()
     for platform in PLATFORMS:
         for artifact in plan(platform, version)['artifacts']:
@@ -604,6 +627,11 @@ def results_path(out):
 
 
 def publish_common(args):
+    """The platform-independent artifacts, once every platform is out.
+
+    Writes the crate's and the launcher's publish and verify results as it goes,
+    for `outcome` to read whatever happens next.
+    """
     args.platform = 'common'
     out = out_dir(args)
     out.mkdir(parents=True, exist_ok=True)
@@ -611,78 +639,62 @@ def publish_common(args):
                'npm-launcher': {'published': 'skipped', 'verified': 'skipped'}}
     results_path(out).unlink(missing_ok=True)
 
-    def record():
+    def record(target=None, phase=None, result=None):
+        if target:
+            results[target][phase] = result
         results_path(out).write_text(json.dumps(results, indent=2) + '\n')
 
     tag, version, channels = guard('publish-common', dry_run=args.dry_run)
     # A lock that links an engine twice is a build whose behaviour depends on
     # which copy each crate reaches; it is refused before anything is written.
-    run('bash', str(SCRIPTS / 'linked-engines.sh'), '--format', 'split')
+    run('just', 'engines-split', capture=True)
     if args.dry_run:
         for artifact in plan('common', version)['artifacts']:
-            if artifact['kind'] == 'crate' and not channels['crate']:
-                continue
-            if artifact['kind'] == 'npm' and not channels['npm']:
-                continue
-            say(f"would publish {artifact['file']} to {artifact['destination']}")
-        say('dry run: published nothing platform-independent')
+            if channels.get({'crates.io': 'crate', 'github-release': 'assets'}.get(artifact['destination'],
+                                                                                      artifact['destination'])):
+                say(f"would publish {artifact['file']} to {artifact['destination']}")
+        say(f"dry run: published nothing platform-independent{skipped(channels, ['crate', 'npm'])}")
         return
     record()
     missing = availability(version, channels)
-    if missing:
-        raise Refused('not every platform is published, so nothing platform-independent is: missing '
-                      + '; '.join(missing), 're-run the build job that publishes what is missing, then this one')
-    notes = run('bash', str(SCRIPTS / 'linked-engines.sh'), '--format', 'notes', quiet=True)
-    Release(tag).notes(notes)
+    expect(not missing, 'not every platform is published, so nothing platform-independent is: missing '
+           + '; '.join(missing), 're-run the build job that publishes what is missing, then this one')
+    Release(tag).notes(run('just', 'linked-engines', capture=True))
     if channels['crate']:
-        results['crate']['published'] = 'failure'
-        record()
-        if crate_serves(version):
-            say(f'{CRATE} {version} is already on crates.io; nothing to publish.')
-        else:
-            env = dict(os.environ, RUSTFLAGS='-D warnings')
+        record('crate', 'published', 'failure')
+        if not crate_serves(version):
             # crates.io takes the token from CARGO_REGISTRY_TOKEN; a registry
             # named by its index is handed it explicitly.
             token = ['--token', os.environ['CARGO_REGISTRY_TOKEN']] if crate_registry() else []
-            run('cargo', 'publish', '--locked', *crate_args(), *token, env=env)
-        results['crate']['published'] = 'success'
+            run('cargo', 'publish', '--locked', '--quiet', *crate_args(), *token,
+                env=dict(os.environ, RUSTFLAGS='-D warnings'))
+        record('crate', 'published', 'success')
     if channels['npm']:
-        results['npm-launcher']['published'] = 'failure'
-        record()
-        launcher = run('node', str(SCRIPTS / 'npm-build.mjs'), 'launcher', '--out', str(out / 'npm'), quiet=True).strip()
+        record('npm-launcher', 'published', 'failure')
+        launcher = run('node', str(SCRIPTS / 'npm-build.mjs'), 'launcher', '--out', str(out / 'npm'), capture=True).strip()
         run('bash', str(SCRIPTS / 'publish-npm.sh'), launcher)
-        results['npm-launcher']['published'] = 'success'
-    record()
+        record('npm-launcher', 'published', 'success')
     with tempfile.TemporaryDirectory() as scratch:
         scratch = Path(scratch)
         if channels['crate']:
-            results['crate']['verified'] = 'failure'
-            record()
+            record('crate', 'verified', 'failure')
             retry_install(f'crates.io {CRATE} {version}', f'check {CRATE} {version} on crates.io',
-                          'cargo', 'install', CRATE, '--version', version, '--locked', '--force',
+                          'cargo', 'install', CRATE, '--version', version, '--locked', '--force', '--quiet',
                           '--root', str(scratch / 'cargo'), *crate_args())
             smoke(scratch / 'cargo' / 'bin', version, f'crates.io {CRATE} {version}')
-            results['crate']['verified'] = 'success'
+            record('crate', 'verified', 'success')
         if channels['npm']:
-            results['npm-launcher']['verified'] = 'failure'
-            record()
+            record('npm-launcher', 'verified', 'failure')
             prefix = scratch / 'npm'
             retry_install(f'npm {NPM_LAUNCHER} {version}', f'check {NPM_LAUNCHER}@{version} on the npm registry',
                           'npm', 'install', '--global', '--prefix', str(prefix), '--prefer-online', '--no-audit',
                           '--no-fund', f'{NPM_LAUNCHER}@{version}')
             smoke(prefix / ('' if os.name == 'nt' else 'bin'), version, f'npm {NPM_LAUNCHER} {version}')
-            results['npm-launcher']['verified'] = 'success'
-    record()
+            record('npm-launcher', 'verified', 'success')
     missing = availability(version, channels, common=True)
-    if missing:
-        raise Refused('a registry does not serve every artifact of this release: missing ' + '; '.join(missing),
-                      're-run the job that publishes what is missing')
-    say(f'every registry serves {version} for every platform')
-
-
-# --- the outcome -------------------------------------------------------------
-
-RESULTS = ['success', 'failure', 'cancelled', 'skipped']
+    expect(not missing, 'a registry does not serve every artifact of this release: missing ' + '; '.join(missing),
+           're-run the job that publishes what is missing')
+    say(f"every registry serves {version} for every platform{skipped(channels, ['crate', 'pypi', 'npm'])}")
 
 
 def registry_outcome(published, verified):
@@ -693,15 +705,28 @@ def registry_outcome(published, verified):
     worst publication, and no verification of what was never shipped.
     """
     for result in [*published, *verified]:
-        if result not in RESULTS:
-            raise Refused(f"'{result}' is not a job or step result GitHub reports",
-                          'pass success, failure, cancelled or skipped')
-    worst = lambda results: next((r for r in ['failure', 'cancelled', 'skipped'] if r in results), 'success')
+        expect(result in RESULTS, f"'{result}' is not a job or step result GitHub reports",
+               'pass success, failure, cancelled or skipped')
+
+    def worst(results):
+        return next((r for r in ['failure', 'cancelled', 'skipped'] if r in results), 'success')
+
     if all(result == 'success' for result in published):
         return 'success', worst(verified)
     if 'success' in published:
         return 'success', 'failure'
     return worst(published), 'skipped'
+
+
+def publish_results(out):
+    """What `publish`'s publish step recorded; skipped throughout when it never ran."""
+    path = results_path(out)
+    if not path.exists():
+        return {'crate': {'published': 'skipped', 'verified': 'skipped'},
+                'npm-launcher': {'published': 'skipped', 'verified': 'skipped'}}
+    return json_of(path.read_text(), str(path), lambda v: isinstance(v, dict) and set(v) == {'crate', 'npm-launcher'}
+                   and all(isinstance(r, dict) and set(r) == {'published', 'verified'}
+                           and all(x in RESULTS for x in r.values()) for r in v.values()))
 
 
 def outcome(args):
@@ -713,30 +738,25 @@ def outcome(args):
     """
     tag = release_tag(dry_run=False)
     version = tag_version(tag)
-    for name in ['GITHUB_TOKEN', 'GITHUB_REPOSITORY']:
-        if not os.environ.get(name):
-            raise Refused(f'{name} is not set, so the outcome cannot be attached to the Release',
-                          f'set {name}, as every Actions job has it')
+    require_github()
     out = out_dir(argparse.Namespace(out=args.out, platform='common'))
     out.mkdir(parents=True, exist_ok=True)
-    try:
-        results = json.loads(results_path(out).read_text())
-    except (OSError, ValueError):
-        results = {'crate': {'published': 'skipped', 'verified': 'skipped'},
-                   'npm-launcher': {'published': 'skipped', 'verified': 'skipped'}}
+    results = publish_results(out)
     builds = []
     for platform in PLATFORMS:
         key = platform.upper()
         job = os.environ.get(f'{key}_RESULT') or 'skipped'
         builds.append({phase: os.environ.get(f'{key}_{phase.upper()}') or job for phase in ['published', 'verified']})
     crate, pypi, npm = OUTCOME_TARGETS
-    targets = {crate: (results['crate']['published'], results['crate']['verified'])}
-    targets[pypi] = (registry_outcome([b['published'] for b in builds], [b['verified'] for b in builds])
-                                    if os.environ.get('PYPI_PUBLISH') == 'true' else ('skipped', 'skipped'))
     launcher = results['npm-launcher']
-    targets[npm] = (registry_outcome([b['published'] for b in builds] + [launcher['published']],
-                                                       [b['verified'] for b in builds] + [launcher['verified']])
-                                      if os.environ.get('NPM_PUBLISH') == 'true' else ('skipped', 'skipped'))
+    targets = {
+        crate: (results['crate']['published'], results['crate']['verified']),
+        pypi: (registry_outcome([b['published'] for b in builds], [b['verified'] for b in builds])
+               if switch('PYPI_PUBLISH') else ('skipped', 'skipped')),
+        npm: (registry_outcome([b['published'] for b in builds] + [launcher['published']],
+                               [b['verified'] for b in builds] + [launcher['verified']])
+              if switch('NPM_PUBLISH') else ('skipped', 'skipped')),
+    }
     document = out / OUTCOME_FILE
     run_url = (f"{os.environ.get('GITHUB_SERVER_URL', 'https://github.com')}/{os.environ['GITHUB_REPOSITORY']}"
                f"/actions/runs/{os.environ.get('GITHUB_RUN_ID', '0')}")
@@ -794,6 +814,10 @@ def main():
     except Refused as refusal:
         print(f'release: {refusal}', file=sys.stderr)
         print(f'ACTION: {refusal.action}', file=sys.stderr)
+        raise SystemExit(1)
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError, zipfile.BadZipFile, tarfile.TarError) as error:
+        print(f'release: {args.command} stopped: {type(error).__name__}: {error}', file=sys.stderr)
+        print('ACTION: fix the file, tool or environment that error names, then re-run this phase', file=sys.stderr)
         raise SystemExit(1)
 
 
