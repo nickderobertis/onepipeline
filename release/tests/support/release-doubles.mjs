@@ -119,6 +119,9 @@ export class GitHubDouble extends Double {
     this.assetsBody = null;
     /// Called with the Release before each asset listing is answered.
     this.onAssetsListed = null;
+    /// Origins to name in upload and download URLs instead of this server's.
+    this.uploadOrigin = null;
+    this.downloadOrigin = null;
   }
 
   env() {
@@ -155,7 +158,10 @@ export class GitHubDouble extends Double {
       id: release.id,
       tag_name: release.tag_name,
       body: release.body,
-      upload_url: `${this.url}/uploads/repos/${this.repository}/releases/${release.id}/assets{?name,label}`,
+      upload_url:
+        this.uploadOrigin === null
+          ? `${this.url}/uploads/repos/${this.repository}/releases/${release.id}/assets{?name,label}`
+          : `${this.uploadOrigin}/repos/${this.repository}/releases/${release.id}/assets{?name,label}`,
       assets: release.assets.map((a) => this.#asset(a)),
     };
   }
@@ -166,7 +172,7 @@ export class GitHubDouble extends Double {
       name: asset.name,
       size: asset.content.length,
       url: `${this.url}/repos/${this.repository}/releases/assets/${asset.id}`,
-      browser_download_url: `${this.url}/download/${asset.id}/${asset.name}`,
+      browser_download_url: `${this.downloadOrigin ?? this.url}/download/${asset.id}/${asset.name}`,
     };
   }
 

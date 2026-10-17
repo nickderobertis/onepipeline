@@ -318,6 +318,45 @@ describe("a release phase refuses what it cannot trust", () => {
   });
 });
 
+describe("a Release that names another host", () => {
+  it("is refused before the token or a download goes there", async () => {
+    const github = await new GitHubDouble().start();
+    const release = github.addRelease(TAG);
+    const out = scratch("release-hosts");
+    try {
+      github.uploadOrigin = "https://uploads.example.com";
+      let result = await run("just", ["release-outcome"], {
+        env: releaseEnv(github, out, { LINUX_RESULT: "success" }),
+      });
+      assert.equal(result.code, 1, said(result));
+      assert.match(
+        result.stderr,
+        /the Release's upload URL https:\/\/uploads\.example\.com\S* is not GitHub's/,
+      );
+      assert.deepEqual(github.writes(), [], "nothing was sent to the other host's URL");
+      github.uploadOrigin = null;
+      github.downloadOrigin = "http://192.0.2.1";
+      for (const name of [
+        `onepipeline-v${VERSION}-x86_64-unknown-linux-gnu.tar.gz`,
+        `onepipeline-v${VERSION}-x86_64-unknown-linux-gnu.sha256`,
+      ]) {
+        release.assets.push({ id: github.nextId++, name, content: Buffer.from(name) });
+      }
+      result = await run("just", ["release-linux", "verify"], {
+        env: releaseEnv(github, out, { PYPI_PUBLISH: "false", NPM_PUBLISH: "false" }),
+      });
+      assert.equal(result.code, 1, said(result));
+      assert.match(
+        result.stderr,
+        /is not an HTTPS URL|download URL http:\/\/192\.0\.2\.1\S* is not GitHub's/,
+      );
+    } finally {
+      await github.stop();
+      rmSync(out, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("verification refuses a downloaded archive that is not the documents and the executable", () => {
   /// A Windows zip archive and its checksum on a fresh Release, built from
   /// `members` ([name, "file" | "symlink" | "directory"]), then verified.

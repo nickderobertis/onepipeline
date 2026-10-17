@@ -401,6 +401,15 @@ def json_of(body, what, check):
     return value
 
 
+def origin(url):
+    """A URL's scheme and host, refused unless HTTPS, or HTTP to this machine."""
+    parsed = urllib.parse.urlsplit(url)
+    local = parsed.hostname in ('127.0.0.1', 'localhost', '::1')
+    expect(parsed.scheme == 'https' or (parsed.scheme == 'http' and local),
+           f'{url} is not an HTTPS URL', 're-run once GitHub answers normally')
+    return parsed.scheme, parsed.netloc
+
+
 def is_id(value):
     """A GitHub object id: a positive integer, and JSON's `true` is not one."""
     return type(value) is int and value > 0
@@ -425,6 +434,12 @@ class Release:
         self.data = json_of(body, f'the Release tagged {tag}', lambda v: isinstance(v, dict)
                             and is_id(v.get('id')) and isinstance(v.get('upload_url'), str)
                             and v.get('tag_name') == tag and (v.get('body') is None or isinstance(v['body'], str)))
+        # The token goes where the upload URL says, so it must be GitHub's: the
+        # API's own origin, or its uploads host.
+        api = origin(self.api)
+        uploads = {api, (api[0], api[1].replace('api.', 'uploads.', 1))}
+        expect(origin(self.data['upload_url']) in uploads, f"the Release's upload URL {self.data['upload_url']} is not GitHub's",
+               're-run once GitHub answers normally')
 
     def call(self, method, path, body=None, headers=None):
         url = path if path.startswith('http') else self.api + path
@@ -452,7 +467,12 @@ class Release:
 
     def download(self, asset):
         # The public download URL, without the token: GitHub redirects it to
-        # storage that refuses a request carrying a second credential.
+        # storage that refuses a request carrying a second credential. It is
+        # fetched only from the server or the API GitHub named.
+        server = os.environ.get('GITHUB_SERVER_URL', 'https://github.com')
+        expect(origin(asset['browser_download_url']) in {origin(server), origin(self.api)},
+               f"{asset['name']}'s download URL {asset['browser_download_url']} is not GitHub's",
+               're-run once GitHub answers normally')
         status, body = http('GET', asset['browser_download_url'])
         expect(status == 200, f"GitHub answered {status} for {asset['name']}", 're-run once GitHub answers')
         return body
