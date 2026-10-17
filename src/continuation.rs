@@ -929,6 +929,11 @@ impl ClaimWatch {
         if crate::writeback::store_asked_to_wait(&self.run_dir) {
             return false;
         }
+        // A write the store refused is made again when its retry is due, and not on whatever
+        // pass something else woke first.
+        if self.fence_refused.is_some() && !self.until_fence_retry().is_zero() {
+            return false;
+        }
         if nodes.is_empty() && self.superseded {
             match self
                 .store
