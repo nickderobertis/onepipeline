@@ -3072,6 +3072,11 @@ fn difference(
     }
     // The edges as a set: a plan edit that reorders a node's `deps` leaves the board's
     // blocking edges exactly as they stand, so it writes none.
+    // llmlint: ignore[changed_behavior_has_e2e] driven end to end: each rework in
+    // `review_round::the_busy_review_round_ends_answered_and_true_and_records_what_it_spent`
+    // reorders the two-parent draft's `deps` (its reworked parent's replacement moves to the
+    // end) with the same parents, and that journey fails naming the write the store answered
+    // as unchanged when this compares the edges in order.
     let set = |edges: &[String]| edges.iter().cloned().collect::<BTreeSet<String>>();
     let edges_moved = match held.edges {
         Edges::Landed => set(&was.depends_on) != set(&is.depends_on),
