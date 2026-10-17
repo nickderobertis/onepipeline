@@ -2746,19 +2746,19 @@ fn a_restart_the_observers_graph_refuses_is_reported_and_not_asked_again() {
     // Both held, so the observer is watching and the node is genuinely in flight
     // before the graph becomes unrunnable: what is under test is a *restart*
     // being refused, not a launch being refused.
+    //
+    // The node is held at a rendezvous rather than seen in the invocation log,
+    // because the double records an invocation before it reads its refusal
+    // script: a dispatch merely *invoked* can still take the refusal scripted
+    // below for its own, fail all its attempts, and settle the run before the
+    // observer is ever restarted. Arrived, it is past that read.
     world.script("observer.wait", "hold");
-    world.script("build.wait", "hold");
+    let build = world.rendezvous("build");
     let run = start_detached_observed(&world, "refused-restart", vec![agent("build", &[])]);
-    world.until(
-        "the observer to be watching and the node to be in flight",
-        |world| {
-            !world.observer_saw().is_empty()
-                && world.was_invoked(
-                    "oneagentgraph",
-                    &["run", "--label", "onepipeline.node=build"],
-                )
-        },
-    );
+    let held = build.arrived();
+    world.until("the observer to be watching", |world| {
+        !world.observer_saw().is_empty()
+    });
 
     // From here the graph will not start at all — a config that no longer
     // resolves, a directory that has gone — and then the observer goes.
@@ -2795,8 +2795,24 @@ fn a_restart_the_observers_graph_refuses_is_reported_and_not_asked_again() {
         "a run whose observer would not start again reads as watched: {}",
         rendered.stdout
     );
+    // The refusal was the observer's alone: the node went on in the one dispatch
+    // it started with, rather than spending its attempts on the same answer.
+    assert_eq!(
+        world.events_of(&run, "node-dispatched").len(),
+        1,
+        "the node's own dispatch took the observer's refusal\n{}",
+        world.dump()
+    );
+    assert!(
+        world.events_of(&run, "node-settled").is_empty(),
+        "the node settled while its dispatch was held\n{}",
+        world.dump()
+    );
 
-    world.release("build.go");
+    held.release();
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
 }
 
 /// The shipped bound, unset and unreadable, is eight restarts.
