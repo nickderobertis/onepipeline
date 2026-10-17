@@ -228,10 +228,10 @@ fn release_linux_legs() -> Vec<(String, String)> {
         .expect("build-linux names its runner")
         .to_string();
     let plan = Command::new("python3")
-        .args(["scripts/release.py", "plan", "linux"])
+        .args(["release/release.py", "plan", "linux"])
         .current_dir(repo_root())
         .output()
-        .expect("python3 runs scripts/release.py");
+        .expect("python3 runs release/release.py");
     assert!(plan.status.success(), "the Linux plan is readable");
     let plan: serde_json::Value = serde_json::from_slice(&plan.stdout).unwrap();
     let legs: Vec<(String, String)> = plan["targets"]
@@ -448,7 +448,7 @@ fn the_pull_request_check_builds_the_release_linux_legs_through_the_recipe() {
         release.contains("run: just release-linux build"),
         "release.yml's Linux job builds through its recipe"
     );
-    let driver = fs::read_to_string(repo_root().join("scripts/release.py")).unwrap();
+    let driver = fs::read_to_string(repo_root().join("release/release.py")).unwrap();
     assert!(
         driver.contains("'just', 'wheel-linux'"),
         "the release's Linux recipe builds its wheel with the script `just wheel-linux` runs"

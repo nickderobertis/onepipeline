@@ -5,7 +5,6 @@
     "includes": [
       "*.mjs",
       "tests/*.mjs",
-      "tests/support/*.mjs",
       "package.json",
       "project.json"
     ]

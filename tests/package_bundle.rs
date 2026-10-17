@@ -74,10 +74,10 @@ fn release_packaging_retains_every_target_and_installs_apple_silicon_before_publ
     let jobs = &release["jobs"];
     let plan = |platform: &str| -> Vec<String> {
         let out = std::process::Command::new("python3")
-            .args(["scripts/release.py", "plan", platform])
+            .args(["release/release.py", "plan", platform])
             .current_dir(&root)
             .output()
-            .expect("python3 runs scripts/release.py");
+            .expect("python3 runs release/release.py");
         assert!(
             out.status.success(),
             "plan {platform} failed:\n{}",
@@ -107,7 +107,7 @@ fn release_packaging_retains_every_target_and_installs_apple_silicon_before_publ
             .filter_map(|s| s["run"].as_str())
             .collect();
         // The build phase test-installs every artifact before the publish phase
-        // can run: scripts/release.py's `build` refuses to finish otherwise.
+        // can run: release/release.py's `build` refuses to finish otherwise.
         let at = |phase: &str| {
             runs.iter()
                 .position(|run| *run == format!("just release-{platform} {phase}"))
@@ -128,8 +128,8 @@ fn release_packaging_retains_every_target_and_installs_apple_silicon_before_publ
             &std::fs::read_to_string(root.join("scripts/build-staged-release.py")).unwrap(),
         ),
         (
-            "scripts/release.py",
-            &std::fs::read_to_string(root.join("scripts/release.py")).unwrap(),
+            "release/release.py",
+            &std::fs::read_to_string(root.join("release/release.py")).unwrap(),
         ),
     ] {
         for word in [

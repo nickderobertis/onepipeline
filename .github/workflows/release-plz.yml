@@ -138,4 +138,4 @@ jobs:
         if: "${{ steps.guard.outputs.enabled == 'true' && !startsWith(github.event.head_commit.message, 'chore: release') }}"
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
-        run: bash scripts/release-pr-auto-merge.sh
+        run: bash release/release-pr-auto-merge.sh

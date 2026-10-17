@@ -20,7 +20,7 @@
 // The version is sourced from Cargo.toml (release-plz stays the single version
 // driver, exactly like the wheels' `dynamic = ["version"]`); pass --version to
 // override. Nothing here publishes — it only assembles package directories under
-// --out; scripts/release.py packs and publishes them.
+// --out; release/release.py packs and publishes them.
 //
 // Usage:
 //   node scripts/npm-build.mjs platform --target <triple> --binary <path> \
@@ -45,7 +45,7 @@ import { fileURLToPath } from "node:url";
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 // Rust target triple -> npm platform package facts. Keys must match PLATFORMS in
-// scripts/release.py, which the release.yml build jobs build; the (platform, arch) pair must match
+// release/release.py, which the release.yml build jobs build; the (platform, arch) pair must match
 // the PACKAGES map in npm/onepipeline-cli/bin/onepipeline.js and the
 // optionalDependencies in npm/onepipeline-cli/package.json.
 const TARGETS = {

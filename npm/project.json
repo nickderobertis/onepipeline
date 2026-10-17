@@ -60,7 +60,7 @@
         "{workspaceRoot}/pyproject.toml",
         "sharedGlobals",
         "{workspaceRoot}/scripts/build-staged-release.py",
-        "{workspaceRoot}/scripts/release.py"
+        "{workspaceRoot}/release/release.py"
       ]
     },
     "check": {

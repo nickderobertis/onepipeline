@@ -57,7 +57,7 @@ const PLATFORMS = ["linux", "macos", "windows"];
 /// One build job's plan: every file, package and target it builds and publishes.
 function plan(platform) {
   return JSON.parse(
-    execFileSync("python3", ["scripts/release.py", "plan", platform], {
+    execFileSync("python3", ["release/release.py", "plan", platform], {
       cwd: REPO_ROOT,
       encoding: "utf8",
     }),

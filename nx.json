@@ -57,6 +57,7 @@
       "{workspaceRoot}/graphs/**/*",
       "{workspaceRoot}/personas/**/*",
       "{workspaceRoot}/scripts/**/*",
+      "{workspaceRoot}/release/**/*",
       "{workspaceRoot}/screenshots/**/*",
       "{workspaceRoot}/.github/**/*",
       "{workspaceRoot}/AGENTS.md",

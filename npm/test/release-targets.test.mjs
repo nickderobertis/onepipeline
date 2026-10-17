@@ -207,7 +207,7 @@ function builtTargets() {
   return ["linux", "macos", "windows"].flatMap(
     (platform) =>
       JSON.parse(
-        execFileSync("python3", ["scripts/release.py", "plan", platform], {
+        execFileSync("python3", ["release/release.py", "plan", platform], {
           cwd: REPO_ROOT,
           encoding: "utf8",
         }),
@@ -217,7 +217,7 @@ function builtTargets() {
 
 /**
  * How each registry is *reached* by the release — release.yml and the
- * scripts/release.py its recipes run — and what to look for to know that it
+ * release/release.py its recipes run — and what to look for to know that it
  * still is.
  *
  * A publish step is what makes a name a name this repository publishes: with the
@@ -234,7 +234,7 @@ const PUBLISH_STEPS = {
 function releaseConfiguration() {
   const cargo = read("Cargo.toml");
   return {
-    workflow: read(".github", "workflows", "release.yml") + read("scripts", "release.py"),
+    workflow: read(".github", "workflows", "release.yml") + read("release", "release.py"),
     built: builtTargets(),
     cargo,
     members: Object.fromEntries(

@@ -5,7 +5,7 @@
 // registry. npm's is `npm/test/registry-support.mjs`.
 //
 // They are the *environment* the release journeys run in, not the layer under
-// test: the journeys drive the real scripts/release.py, `uv`, `pip`, `npm` and
+// test: the journeys drive the real release/release.py, `uv`, `pip`, `npm` and
 // `cargo` against them, because the public services may not be written to by a
 // test and cannot be told to fail on cue. Each records every request, so a
 // journey can say what was — and what was not — written.

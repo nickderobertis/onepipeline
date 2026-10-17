@@ -24,14 +24,14 @@ probe = "scripts/release-probe.sh"
 id = "crate:onepipeline"
 name = "crate"
 what = "The onepipeline library and the `onepipeline` binary, as a Rust dependent takes them with `cargo add onepipeline`."
-published_by = ".github/workflows/release.yml — the `publish` job's `just release-publish publish` step (scripts/release.py's `cargo publish`), under Cargo.toml's [package] name."
+published_by = ".github/workflows/release.yml — the `publish` job's `just release-publish publish` step (release/release.py's `cargo publish`), under Cargo.toml's [package] name."
 manifest = "Cargo.toml"
 
 [[target]]
 id = "pypi:onepipeline-cli"
 name = "pypi"
 what = "The standalone `onepipeline` binary as maturin `bin`-bindings wheels, installed with `pip install onepipeline-cli`."
-published_by = ".github/workflows/release.yml — each platform's wheel by its own build job, `build-linux`, `build-macos` and `build-windows`, through its `just release-<platform> publish` step (scripts/release.py's `uv publish`), from pyproject.toml's [project] name."
+published_by = ".github/workflows/release.yml — each platform's wheel by its own build job, `build-linux`, `build-macos` and `build-windows`, through its `just release-<platform> publish` step (release/release.py's `uv publish`), from pyproject.toml's [project] name."
 manifest = "pyproject.toml"
 
 # The three per-platform packages `scripts/npm-build.mjs` builds are `covers`

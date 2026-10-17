@@ -2,7 +2,7 @@
 // packages, test-installs, publishes and verifies against local registries, and
 // `just release-publish` checks every platform is out and publishes the rest.
 //
-// Nothing in the release is doubled. The recipes run the real scripts/release.py,
+// Nothing in the release is doubled. The recipes run the real release/release.py,
 // which runs the real manylinux build (Docker), `uv`, `pip`, `npm` and `cargo`;
 // the registries and GitHub they talk to are local servers
 // (`support/release-doubles.mjs`, `npm/test/registry-support.mjs`) that the
@@ -34,7 +34,7 @@ import {
   CratesDouble,
   GitHubDouble,
   PyPIDouble,
-} from "../../.github/tests/support/release-doubles.mjs";
+} from "../../release/tests/support/release-doubles.mjs";
 import { Registry } from "../../npm/test/registry-support.mjs";
 
 const ROOT = process.cwd();

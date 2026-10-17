@@ -3,7 +3,7 @@
 # image the release publishes it from.
 #
 # This is the one definition of a Linux wheel build: release.yml's `build-linux`
-# job runs it through scripts/release.py, and ci.yml's `wheel` job through `just
+# job runs it through release/release.py, and ci.yml's `wheel` job through `just
 # wheel-linux`, so a pull request builds under the image, prerequisites and
 # maturin invocation a release does. The release packages its Linux archive and
 # npm package from the binary inside this wheel, so all three share its glibc
@@ -53,7 +53,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-# The Linux targets scripts/release.py's `linux` platform builds;
+# The Linux targets release/release.py's `linux` platform builds;
 # tests/linux_wheel.rs fails when the two sets differ. arm64 Linux is not
 # released. Each carries the SHA-256 static.rust-lang.org publishes for
 # rustup-init $rustup_version on that architecture, so the installer the

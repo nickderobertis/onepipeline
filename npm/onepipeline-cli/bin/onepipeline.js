@@ -18,7 +18,7 @@ const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 
 // process.platform-process.arch -> the platform package that carries the binary.
-// The keys mirror the targets scripts/release.py builds, the TARGETS table in
+// The keys mirror the targets release/release.py builds, the TARGETS table in
 // scripts/npm-build.mjs, and the optionalDependencies in package.json; keep the
 // four in lockstep.
 const PACKAGES = {

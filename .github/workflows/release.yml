@@ -13,7 +13,7 @@ name: Release
 # files, publishes them (the Release assets, PyPI, npm), and then installs what
 # the registries serve on its own OS and runs it. Every step is a phase of its
 # platform's recipe — `just release-<platform> build|publish|verify` — so a
-# release and a developer run the same scripts/release.py, and `just
+# release and a developer run the same release/release.py, and `just
 # release-<platform> plan` lists everything a job publishes without building it.
 #
 # `publish` needs all three. It refuses a lock that links an engine twice,

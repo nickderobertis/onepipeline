@@ -11,7 +11,7 @@
 //   * nothing builds, publishes or verifies arm64 Linux or Intel macOS;
 //   * each platform's plan is what v0.74.1 published for its targets.
 //
-// What a step uploads is what its recipe's `plan` says it does: scripts/release.py
+// What a step uploads is what its recipe's `plan` says it does: release/release.py
 // refuses to build a file the plan does not name, and publishes only what it
 // built, so the plan is the upload list rather than a description of one.
 

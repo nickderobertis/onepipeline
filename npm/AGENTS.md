@@ -10,7 +10,7 @@ Five places name that platform matrix and must move together:
 1. `bin/onepipeline.js`'s `PACKAGES` map,
 2. `package.json`'s `optionalDependencies`,
 3. `scripts/npm-build.mjs`'s `TARGETS` table,
-4. `PLATFORMS` in `scripts/release.py`, the targets `.github/workflows/release.yml`'s
+4. `PLATFORMS` in `release/release.py`, the targets `.github/workflows/release.yml`'s
    build jobs build (`just release-<platform> plan` lists them), and
 5. those jobs' `verify` steps, which install each platform package from the
    registry and start it.
@@ -40,7 +40,7 @@ deliverable; CI's `wheel` job proves it end to end.
 
 Nothing in this directory is published from a developer's machine:
 `.github/workflows/release.yml`'s jobs assemble, pack, and publish it through
-`scripts/release.py`, and `scripts/publish-npm.sh` makes that publish idempotent.
+`release/release.py`, and `scripts/publish-npm.sh` makes that publish idempotent.
 
 **Never treat an `npm publish` exit code as evidence that the version
 resolves.** Ask the registry.

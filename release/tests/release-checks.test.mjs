@@ -29,8 +29,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parse } from "yaml";
-import { evaluate } from "../workflow-graph.mjs";
+import { evaluate, workflows } from "../../.github/workflow-graph.mjs";
 import { CratesDouble, GitHubDouble, PyPIDouble } from "./support/release-doubles.mjs";
 import { Registry } from "../../npm/test/registry-support.mjs";
 
@@ -87,7 +86,7 @@ function releaseEnv(github, out, overrides = {}) {
 }
 
 describe("an ineligible release", () => {
-  const workflow = parse(readFileSync(join(ROOT, ".github/workflows/release.yml"), "utf8"));
+  const workflow = workflows(ROOT)["release.yml"];
   /// Every step of release.yml that runs a release recipe: [job, step].
   const steps = Object.entries(workflow.jobs).flatMap(([job, spec]) =>
     spec.steps.filter((step) => /^just release-/.test(step.run ?? "")).map((step) => [job, step]),
@@ -530,6 +529,7 @@ describe("a lock that links an engine twice", () => {
     copy = scratch("release-split");
     for (const path of [
       "scripts",
+      "release",
       "Cargo.toml",
       "justfile",
       "README.md",
@@ -650,6 +650,8 @@ describe("the release outcome record", () => {
       "success",
       "skipped",
     ]);
+    // Unserved again, so the cases after this one see a registry without it.
+    npm.packages.delete("onepipeline-cli");
   });
 
   it("on a fresh runner with no results, records what the registries already serve as shipped", async () => {
@@ -956,7 +958,7 @@ describe("the release outcome record", () => {
 });
 
 describe("release-plz.yml's auto-merge step", () => {
-  const workflow = parse(readFileSync(join(ROOT, ".github/workflows/release-plz.yml"), "utf8"));
+  const workflow = workflows(ROOT)["release-plz.yml"];
   const step = workflow.jobs["release-plz"].steps.find((s) =>
     /^Merge the release PR automatically/.test(s.name ?? ""),
   );

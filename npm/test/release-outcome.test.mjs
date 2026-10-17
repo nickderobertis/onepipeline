@@ -419,7 +419,7 @@ describe("the release outcome record", () => {
   });
 
   it("accepts every tag the release will hand it", async () => {
-    // scripts/release.py checks the tag, strips its `v`, and passes the rest
+    // release/release.py checks the tag, strips its `v`, and passes the rest
     // here, so two independently written grammars decide one thing. They need
     // not be identical — this one may be the looser — but a tag the release lets
     // through and this refuses would fail the outcome step on a release that had
@@ -428,7 +428,7 @@ describe("the release outcome record", () => {
       attempt("python3", [
         "-c",
         "import importlib.util,sys\n" +
-          "spec=importlib.util.spec_from_file_location('release','scripts/release.py')\n" +
+          "spec=importlib.util.spec_from_file_location('release','release/release.py')\n" +
           "release=importlib.util.module_from_spec(spec); spec.loader.exec_module(release)\n" +
           "try: release.tag_version(sys.argv[1])\nexcept release.Refused: sys.exit(1)",
         tag,
@@ -457,7 +457,7 @@ describe("the release outcome record", () => {
       assert.equal(
         composed.code,
         0,
-        `scripts/release.py accepts the tag ${tag} and this refuses the version in it: ${composed.stderr}`,
+        `release/release.py accepts the tag ${tag} and this refuses the version in it: ${composed.stderr}`,
       );
     }
   });
@@ -476,7 +476,7 @@ describe("the release outcome record", () => {
         [
           "-c",
           "import importlib.util,json\n" +
-            "spec=importlib.util.spec_from_file_location('release','scripts/release.py')\n" +
+            "spec=importlib.util.spec_from_file_location('release','release/release.py')\n" +
             "release=importlib.util.module_from_spec(spec); spec.loader.exec_module(release)\n" +
             "print(json.dumps(release.OUTCOME_TARGETS))",
         ],

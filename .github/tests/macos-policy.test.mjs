@@ -957,7 +957,7 @@ test("actual producer commands govern credential guards and architecture overrid
     crate: "false",
   });
   // The crate's credential is read by the publish recipe rather than a job
-  // guard (release-checks.test.mjs drives it), so the graph is the same either way.
+  // guard (release/tests/release-checks.test.mjs drives it), so the graph is the same either way.
   for (const cratePublish of ["false", "true"])
     assert.deepEqual(
       runGraph(release, { ...s, cratePublish })

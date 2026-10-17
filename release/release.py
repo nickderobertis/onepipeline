@@ -54,7 +54,8 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path.cwd()
-SCRIPTS = Path(__file__).resolve().parent
+# The repository scripts each phase composes.
+SCRIPTS = Path(__file__).resolve().parent.parent / 'scripts'
 
 _spec = importlib.util.spec_from_file_location('staged', SCRIPTS / 'build-staged-release.py')
 staged = importlib.util.module_from_spec(_spec)
@@ -206,7 +207,7 @@ def check_targets():
     declared = set(staged.supported_targets())
     built = {target for targets in PLATFORMS.values() for target in targets}
     expect(declared == built, f'scripts/npm-build.mjs declares {sorted(declared)} but the build jobs build {sorted(built)}',
-           "keep npm-build.mjs's TARGETS and PLATFORMS in scripts/release.py the same set")
+           "keep npm-build.mjs's TARGETS and PLATFORMS in release/release.py the same set")
 
 
 def plan(platform, version):
@@ -251,7 +252,7 @@ def fresh(out):
                'pass --out an empty directory, or remove that one')
         shutil.rmtree(out)
     out.mkdir(parents=True, exist_ok=True)
-    marker.write_text('scripts/release.py output\n')
+    marker.write_text('release/release.py output\n')
 
 
 def glibc_needed(binary):

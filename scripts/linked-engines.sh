@@ -790,7 +790,7 @@ for name in "${SIBLINGS[@]}"; do
 done
 
 # llmlint: ignore-block[tool_output_is_signal] the document below *is* this mode's
-# product — `--format notes` asks for it, scripts/release.py captures the stdout whole and
+# product — `--format notes` asks for it, release/release.py captures the stdout whole and
 # appends it to a Release body, and there is no shorter form of "which version of each
 # engine did this release link". The check mode, which is the one a gate reads, keeps
 # to a line.

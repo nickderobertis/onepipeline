@@ -711,7 +711,7 @@ _release platform phase:
 # Windows runners carry `python`, not `python3`.
 _release-python *args:
     @case "$(uname -s)" in MINGW* | MSYS* | CYGWIN*) py=python ;; *) py=python3 ;; esac; \
-      "$py" scripts/release.py "$@"
+      "$py" release/release.py "$@"
 
 # Reads the floor from Cargo.toml's `rust-version`; that toolchain must be
 # installed (`rustup toolchain install <version>`). Warnings are errors here too.

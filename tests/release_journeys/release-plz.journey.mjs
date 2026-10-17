@@ -22,7 +22,7 @@ import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { evaluate, workflows } from "../../.github/workflow-graph.mjs";
-import { GitHubDouble } from "../../.github/tests/support/release-doubles.mjs";
+import { GitHubDouble } from "../../release/tests/support/release-doubles.mjs";
 
 const ROOT = process.cwd();
 const workflow = workflows(ROOT)["release-plz.yml"];
@@ -57,10 +57,10 @@ function bash(script, { cwd, env }) {
 function scratchRepository(base) {
   const repo = join(base, "repo");
   mkdirSync(join(repo, "src"), { recursive: true });
-  mkdirSync(join(repo, "scripts"));
+  mkdirSync(join(repo, "release"));
   cpSync(
-    join(ROOT, "scripts", "release-pr-auto-merge.sh"),
-    join(repo, "scripts", "release-pr-auto-merge.sh"),
+    join(ROOT, "release", "release-pr-auto-merge.sh"),
+    join(repo, "release", "release-pr-auto-merge.sh"),
   );
   writeFileSync(
     join(repo, "Cargo.toml"),

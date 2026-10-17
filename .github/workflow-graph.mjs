@@ -42,7 +42,7 @@ export function digest(root = process.cwd()) {
     "Cargo.toml",
     "release-targets.toml",
     "scripts/build-staged-release.py",
-    "scripts/release.py",
+    "release/release.py",
     "scripts/npm-build.mjs",
     "npm/onepipeline-cli/package.json",
   ]) {
@@ -97,7 +97,7 @@ function releaseTargets(root, platform) {
     planCache.set(
       key,
       JSON.parse(
-        execFileSync("python3", ["scripts/release.py", "plan", platform], {
+        execFileSync("python3", ["release/release.py", "plan", platform], {
           cwd: root,
           encoding: "utf8",
         }),
