@@ -40,7 +40,7 @@
         "{workspaceRoot}/scripts/test-profile-report.mjs",
         "{workspaceRoot}/scripts/crate-split-replay.mjs",
         "{workspaceRoot}/scripts/crate-split/**/*",
-        "{workspaceRoot}/tests/golden/test-profile-record-v1.json",
+        "{workspaceRoot}/tests/golden/test-profile-record-v2.json",
         "{workspaceRoot}/tests/e2e/*.rs",
         "{workspaceRoot}/budgets.yaml",
         "{workspaceRoot}/package-lock.json",

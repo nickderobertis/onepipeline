@@ -21,7 +21,9 @@ import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-export const SCHEMA = 1;
+export const SCHEMA = 2;
+/** How a record was written; `unfinished` is a test the runner ended before it did. */
+export const ENDINGS = ["test-thread", "process-exit", "unfinished"];
 export const CATEGORIES = ["spawn", "git", "build", "fixture", "wait", "fs"];
 
 /** A failure the command explains, with what to do about it. */
@@ -48,6 +50,7 @@ export function recordProblem(record) {
     if (!isSeconds(record[field])) return `${field} is not a nonnegative number`;
   }
   if (record.run_id !== null && typeof record.run_id !== "string") return "run_id is not a string";
+  if (!ENDINGS.includes(record.ended)) return `ended is not one of ${ENDINGS.join(", ")}`;
   if (record.attempt !== null && !isCount(record.attempt)) return "attempt is not a count";
   for (const category of CATEGORIES) {
     const tally = record.categories?.[category];
@@ -171,7 +174,14 @@ function counts(record, category) {
 
 /** The totals of a set of records: wall, each category, and what none of them holds. */
 export function totals(records) {
-  const total = { tests: records.length, wall: 0, unattributed: 0, categories: {}, counts: {} };
+  const total = {
+    tests: records.length,
+    unfinished: records.filter((record) => record.ended === "unfinished").length,
+    wall: 0,
+    unattributed: 0,
+    categories: {},
+    counts: {},
+  };
   for (const category of CATEGORIES) {
     total.categories[category] = 0;
     total.counts[category] = 0;
@@ -254,6 +264,9 @@ export function render(report) {
     lines.push(
       `Run \`${run}\`: ${b.total.tests} tests, ${b.total.wall.toFixed(1)} test-s` +
         (setAside ? ` (${setAside} records of other runs set aside)` : "") +
+        (b.total.unfinished
+          ? `, ${b.total.unfinished} of them unfinished (ended by the runner; their figures are their last heartbeat's)`
+          : "") +
         `. Counts: ${CATEGORIES.map((c) => `${c} ${b.total.counts[c]}`).join(", ")}, polls ${b.total.counts.polls}.`,
       "",
     );

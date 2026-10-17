@@ -26,7 +26,7 @@ const FAILING: &str = "profiling::a_profiled_journey_that_fails";
 /// The record's shape, which `scripts/test-profile-report.mjs` reads: a record
 /// written here is held to it, and that script's tests are held to it too, so a
 /// field renamed on one side fails on that side.
-const GOLDEN: &str = "tests/golden/test-profile-record-v1.json";
+const GOLDEN: &str = "tests/golden/test-profile-record-v2.json";
 
 /// What a record says, without the values: each object's keys and each leaf's
 /// JSON type, with `programs` — one entry per program a test happened to run —
@@ -662,4 +662,60 @@ fn a_record_names_the_run_and_attempt_it_belongs_to() {
             "{record:#}"
         );
     }
+}
+
+/// Set in the one child process that runs [`HANGING`] so it hangs.
+const HANG_FOR_REAL: &str = "ONEPIPELINE_PROFILE_FIXTURE_HANGS";
+
+/// A test that builds a world and then, in the child that sets
+/// [`HANG_FOR_REAL`], never returns — as a test nextest ends at its
+/// `terminate-after` does not.
+const HANGING: &str = "profiling::a_profiled_journey_that_hangs_until_it_is_ended";
+
+/// The test [`HANGING`] names. Run by the suite itself it builds its world and
+/// returns.
+#[test]
+fn a_profiled_journey_that_hangs_until_it_is_ended() {
+    let world = World::new("profile-hanging");
+    if std::env::var_os(HANG_FOR_REAL).is_some() {
+        world.until_within(std::time::Duration::from_secs(3600), "nothing", |_| false);
+    }
+}
+
+/// A test ended by the runner before it finishes leaves a record all the same:
+/// the heartbeat's, marked `unfinished`, holding what it had spent.
+#[test]
+fn a_journey_ended_before_it_finishes_leaves_an_unfinished_record() {
+    let world = World::new("profile-ended");
+    let records = world.root.join("profiles");
+    let path = records.join("e2e").join(file_of(HANGING));
+    let mut hanging = Command::new(std::env::current_exe().expect("this suite's own binary"))
+        .args(["--exact", HANGING, "--nocapture"])
+        .env(profile::DIR_ENV, &records)
+        .env(HANG_FOR_REAL, "1")
+        .env_remove("NEXTEST_TEST_NAME")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("the hanging journey starts");
+    // A heartbeat taken once the journey is polling: its world built, its wait
+    // under way.
+    world.until_within(
+        profile::HEARTBEAT * 6,
+        "a heartbeat from inside the hanging journey's wait",
+        |_| {
+            profile::fs::read_to_string(&path)
+                .ok()
+                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                .is_some_and(|record| record["categories"]["wait"]["s"].as_f64() > Some(0.0))
+        },
+    );
+    hanging.kill().expect("the hanging journey is ended");
+    assert!(!hanging.wait().expect("it is reaped").success());
+
+    let record = read_record(&path);
+    assert_eq!(record["test"], HANGING, "{record:#}");
+    assert_eq!(record["ended"], "unfinished", "{record:#}");
+    assert_eq!(record["categories"]["fixture"]["count"], 1, "{record:#}");
+    assert!(record["wall_s"].as_f64() > Some(0.0), "{record:#}");
 }

@@ -12,7 +12,7 @@ import { compileMapping, globToRegExp } from "../../scripts/crate-split-replay.m
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const golden = JSON.parse(
-  readFileSync(join(root, "tests", "golden", "test-profile-record-v1.json"), "utf8"),
+  readFileSync(join(root, "tests", "golden", "test-profile-record-v2.json"), "utf8"),
 );
 const categories = Object.fromEntries(
   Object.entries(golden.categories).map(([name, tally]) => [

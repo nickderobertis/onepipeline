@@ -14,7 +14,7 @@ const script = join(root, "scripts", "test-profile-report.mjs");
 // The record a real test wrote, at the shape `tests/e2e/profiling.rs` holds every
 // record the harness writes to: the one source both sides of the format answer to.
 const golden = JSON.parse(
-  readFileSync(join(root, "tests", "golden", "test-profile-record-v1.json"), "utf8"),
+  readFileSync(join(root, "tests", "golden", "test-profile-record-v2.json"), "utf8"),
 );
 
 let scratch;
@@ -29,12 +29,13 @@ function record(test, { run = "now", attempt = 1, startedAt = 100, wall, spent =
   }
   categories.wait.polls = 0;
   return {
-    schema: 1,
+    schema: SCHEMA,
     binary: "e2e",
     test,
     run_id: run,
     attempt,
     started_at: startedAt,
+    ended: "test-thread",
     wall_s: wall,
     categories,
     unattributed_s: wall - attributed,
@@ -208,10 +209,10 @@ test("a directory with no records reports none rather than inventing a run", () 
 test("a file that is not a record of this schema is refused by its path", () => {
   const dir = join(scratch, "other");
   write(dir, [record("a::one", { wall: 1 })]);
-  writeFileSync(join(dir, "e2e", "newer.json"), JSON.stringify({ ...golden, schema: 2 }));
+  writeFileSync(join(dir, "e2e", "newer.json"), JSON.stringify({ ...golden, schema: SCHEMA + 1 }));
   refused(
     ["--out", join(scratch, "x"), `other=${dir}`],
-    /newer\.json is not a test-profile record: it is schema 2, and this reads 1/,
+    /newer\.json is not a test-profile record: it is schema 3, and this reads 2/,
     /next: remove .*newer\.json, or rerun the test that wrote it/,
   );
   const broken = join(scratch, "broken");
@@ -334,6 +335,7 @@ test("each field a record must carry is checked, and the record that lacks it re
       /categories\.wait\.polls is not a count/,
     ],
     [{ categories: undefined }, /categories\.spawn\.count is not a count/],
+    [{ ended: "crashed" }, /ended is not one of test-thread, process-exit, unfinished/],
     [{ wall_s: 0.5 }, /its categories hold .* of a 0\.5s test/],
     [{ unattributed_s: 0.5 }, /unattributed_s 0\.5 is not what its categories leave of wall_s/],
   ];
@@ -370,4 +372,16 @@ test("--top-tests and --top-modules keep only that many, costliest first", () =>
     ["e2e::readjust"],
   );
   assert.equal(windows.breakdown.allModules.length, 3);
+});
+
+test("a test the runner ended is read from its last heartbeat and counted as unfinished", () => {
+  const dir = join(scratch, "unfinished");
+  write(dir, [
+    { ...record("a::killed", { wall: 360 }), ended: "unfinished" },
+    record("a::done", { wall: 1 }),
+  ]);
+  const [read] = JSON.parse(report("--json", `unfinished=${dir}`)).platforms;
+  assert.equal(read.breakdown.total.tests, 2);
+  assert.equal(read.breakdown.total.unfinished, 1);
+  assert.match(report(`unfinished=${dir}`), /2 tests, 361\.0 test-s, 1 of them unfinished/);
 });

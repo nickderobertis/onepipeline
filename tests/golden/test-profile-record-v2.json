@@ -1,5 +1,5 @@
 {
-  "schema": 1,
+  "schema": 2,
   "binary": "e2e",
   "test": "profiling::a_profiled_journey_builds_a_fixture_and_a_binary_then_polls_and_writes",
   "run_id": "00000000-0000-0000-0000-000000000000",

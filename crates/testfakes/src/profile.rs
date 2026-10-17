@@ -49,7 +49,7 @@ use std::time::{Duration, Instant, SystemTime};
 pub const DIR_ENV: &str = "ONEPIPELINE_TEST_PROFILE_DIR";
 
 /// The version of the record's shape, written into every record as `schema`.
-pub const SCHEMA: u32 = 1;
+pub const SCHEMA: u32 = 2;
 
 /// What a moment of a test's wall clock was spent on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -176,7 +176,24 @@ pub fn start(binary: &'static str, dir: PathBuf) {
     // SAFETY: `at_exit` is an `extern "C"` function that takes nothing, which is
     // the whole of what the C runtime asks of a handler it calls at exit.
     unsafe { atexit(at_exit) };
+    // A test the runner ends — nextest's `terminate-after`, a cancelled leg — runs
+    // neither the end of its thread nor the C runtime's exit. So until the final
+    // record is written, a provisional one marked `unfinished` is kept current,
+    // and the test leaves what it had spent when it was ended.
+    let _ = std::thread::Builder::new()
+        .name("test-profile-heartbeat".to_owned())
+        .spawn(|| loop {
+            write(Ended::Unfinished);
+            std::thread::sleep(HEARTBEAT);
+        });
 }
+
+/// How often the provisional record of a test still running is rewritten.
+///
+/// A heartbeat sees what has closed: time inside a frame still open when the
+/// test was ended — the process it was waiting on when nextest ended it — is in
+/// the record's wall clock and its `unattributed_s`, not in a category.
+pub const HEARTBEAT: Duration = Duration::from_secs(5);
 
 extern "C" {
     fn atexit(handler: extern "C" fn()) -> std::ffi::c_int;
@@ -369,12 +386,15 @@ pub fn polled<T>(work: impl FnOnce() -> T) -> T {
     work()
 }
 
-/// What wrote a record: the end of the test's own thread, or — for a test that
-/// never reached anything recorded on it — the process's exit.
+/// What wrote a record: the end of the test's own thread; the process's exit,
+/// for a test that never reached anything recorded on it; or the heartbeat, for
+/// a test still running — which is what a test the runner ended leaves behind.
 #[derive(Clone, Copy)]
 enum Ended {
     TestThread,
     ProcessExit,
+    /// Provisional: the test was still running when this was written.
+    Unfinished,
 }
 
 impl Ended {
@@ -382,6 +402,7 @@ impl Ended {
         match self {
             Self::TestThread => "test-thread",
             Self::ProcessExit => "process-exit",
+            Self::Unfinished => "unfinished",
         }
     }
 }
@@ -409,40 +430,43 @@ fn write(ended: Ended) {
         eprintln!("no test profile is written for {name:?}: it is not a test's path");
         return;
     };
-    let Some((binary, dir, record)) = with_recorder(|recorder| {
-        let (binary, dir) = recorder.binary.clone()?;
+    // The file is written under the recorder's lock, so a provisional record
+    // can never land after the final one it would replace.
+    with_recorder(|recorder| {
+        let Some((binary, dir)) = recorder.binary.clone() else {
+            return;
+        };
         if recorder.written {
-            return None;
+            return;
         }
-        recorder.written = true;
-        Some((binary, dir, record(recorder, binary, &name, ended)))
-    }) else {
-        return;
-    };
-    let dir = std::env::var_os(DIR_ENV)
-        .map_or(dir, PathBuf::from)
-        .join(binary);
-    let file = dir.join(file_name);
-    // Through a name of this process's own and a rename, so a reader never
-    // sees half a record; and never a panic, because this runs after the test
-    // has given its verdict, and a record is evidence about the run rather than
-    // part of it.
-    let staged = dir.join(format!(
-        ".{}.{}",
-        std::process::id(),
-        file.file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default()
-    ));
-    let written = std::fs::create_dir_all(&dir)
-        .and_then(|()| std::fs::write(&staged, format!("{record:#}\n")))
-        .and_then(|()| std::fs::rename(&staged, &file));
-    if let Err(error) = written {
-        eprintln!(
-            "the test profile for {name} was not written to {}: {error}",
-            file.display()
-        );
-    }
+        if !matches!(ended, Ended::Unfinished) {
+            recorder.written = true;
+        }
+        let record = record(recorder, binary, &name, ended);
+        let dir = std::env::var_os(DIR_ENV)
+            .map_or(dir, PathBuf::from)
+            .join(binary);
+        let file = dir.join(file_name);
+        // Through a name of this process's own and a rename, so a reader never
+        // sees half a record; and never a panic, because a record is evidence
+        // about the run rather than part of it.
+        let staged = dir.join(format!(
+            ".{}.{}",
+            std::process::id(),
+            file.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        ));
+        let written = std::fs::create_dir_all(&dir)
+            .and_then(|()| std::fs::write(&staged, format!("{record:#}\n")))
+            .and_then(|()| std::fs::rename(&staged, &file));
+        if let Err(error) = written {
+            eprintln!(
+                "the test profile for {name} was not written to {}: {error}",
+                file.display()
+            );
+        }
+    });
 }
 
 fn record(recorder: &Recorder, binary: &str, name: &str, ended: Ended) -> serde_json::Value {
