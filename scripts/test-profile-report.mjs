@@ -276,9 +276,9 @@ export function render(report) {
 }
 
 /** Read every platform's records and build the report. */
-export function buildReport(platforms, { baseline, runs = {}, topTests, topModules }) {
+export function buildReport(platforms, { baseline, runs = new Map(), topTests, topModules }) {
   const read = platforms.map(({ label, dir }) => {
-    const { run, records, setAside } = selectRun(loadRecords(dir), runs[label]);
+    const { run, records, setAside } = selectRun(loadRecords(dir), runs.get(label));
     return {
       label,
       run,
@@ -331,7 +331,13 @@ function count(arg, value) {
 }
 
 export function parseArgs(argv) {
-  const options = { baseline: "linux", runs: {}, topTests: 30, topModules: 10, json: false };
+  const options = {
+    baseline: "linux",
+    runs: new Map(),
+    topTests: 30,
+    topModules: 10,
+    json: false,
+  };
   const platforms = [];
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -346,7 +352,7 @@ export function parseArgs(argv) {
     else if (arg === "--top-modules") options.topModules = count(arg, value());
     else if (arg === "--run") {
       const [label, id] = pair(value(), "a LABEL=RUN_ID");
-      options.runs[label] = id;
+      options.runs.set(label, id);
     } else if (!arg.startsWith("-") && arg.includes("=")) {
       const [label, dir] = pair(arg, "a LABEL=DIR");
       if (platforms.some((platform) => platform.label === label)) {
@@ -357,7 +363,7 @@ export function parseArgs(argv) {
   }
   if (platforms.length === 0) throw new Refusal("no LABEL=DIR of records was named", USAGE);
   if (!options.out) throw new Refusal("--out names no file for the report", USAGE);
-  for (const label of Object.keys(options.runs)) {
+  for (const label of options.runs.keys()) {
     if (!platforms.some((platform) => platform.label === label)) {
       throw new Refusal(
         `--run names ${label}, which no LABEL=DIR does`,

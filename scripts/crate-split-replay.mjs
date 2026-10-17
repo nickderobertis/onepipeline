@@ -92,6 +92,17 @@ function strings(object, key, where, required) {
 const MAPPING_HELP =
   "write the mapping in the shape the head of scripts/crate-split-replay.mjs gives; scripts/crate-split/proposed.json is one";
 
+/**
+ * Refuse a crate or suite name that is not a plain one: a name an object already has
+ * (`constructor`, `__proto__`) would read or replace what it inherits, rather than
+ * name an entry.
+ */
+function named(name, what) {
+  if (!/^[A-Za-z0-9._-]+$/.test(name) || name in Object.prototype) {
+    throw new Refusal(`${JSON.stringify(name)} is not a ${what} name`, MAPPING_HELP);
+  }
+}
+
 /** Check a mapping's shape and compile it. */
 export function compileMapping(mapping) {
   onlyKeys(mapping, ["shared", "crates", "sources", "fallback", "suites"], "the mapping");
@@ -110,6 +121,7 @@ export function compileMapping(mapping) {
   if (Object.keys(crates).length === 0)
     throw new Refusal("the mapping names no crate", MAPPING_HELP);
   for (const [name, crate] of Object.entries(crates)) {
+    named(name, "crate");
     onlyKeys(crate, ["paths", "deps"], `crates.${name}`);
     strings(crate, "paths", `crates.${name}`, true);
     strings(crate, "deps", `crates.${name}`, false);
@@ -125,6 +137,7 @@ export function compileMapping(mapping) {
   if (Object.keys(declared).length === 0)
     throw new Refusal("the mapping names no suite", MAPPING_HELP);
   for (const [name, suite] of Object.entries(declared)) {
+    named(name, "suite");
     onlyKeys(suite, ["paths", "crates", "modules"], `suites.${name}`);
     strings(suite, "paths", `suites.${name}`, true);
     strings(suite, "crates", `suites.${name}`, true);
@@ -228,9 +241,11 @@ export function mergedChanges(repo, { ref, since, until, exclude }) {
 }
 
 /** Test-seconds per test module in one run's records. */
-export function moduleSeconds(records) {
+export function moduleSeconds(records, binary = "e2e") {
   const out = {};
-  for (const record of records) {
+  // A suite here is a set of e2e modules, so another binary's module of the same
+  // name is not one of them.
+  for (const record of records.filter((held) => held.binary === binary)) {
     const name = moduleOf(record.test);
     out[name] = (out[name] ?? 0) + (record.wall_s ?? 0);
   }

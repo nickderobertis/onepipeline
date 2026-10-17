@@ -485,3 +485,41 @@ fn a_test_name_that_is_not_a_tests_path_writes_no_record() {
         "a record escaped its directory"
     );
 }
+
+/// A fixture built on a thread the test started is counted as it would be on the
+/// test thread, and its time is the fixture's once: what nested inside it is not
+/// added to the background time again.
+#[test]
+fn nested_work_on_a_thread_the_test_started_is_counted_once() {
+    let world = World::new("profile-background-nested");
+    world.run(&["--version"]).exited(0);
+    let before = profile::snapshot();
+    std::thread::scope(|scope| {
+        scope.spawn(|| world.repository("local-direct", &[]));
+    });
+    let after = profile::snapshot();
+    let delta = |category: Category| {
+        let (a, b) = (after.of(category), before.of(category));
+        (
+            a.background_count - b.background_count,
+            a.background - b.background,
+        )
+    };
+    let (fixtures, fixture_time) = delta(Category::Fixture);
+    assert_eq!(fixtures, 1, "{after:?}");
+    assert!(fixture_time > std::time::Duration::ZERO, "{after:?}");
+    let (gits, git_time) = delta(Category::Git);
+    assert_eq!(
+        gits, 7,
+        "the same git operations as on the test thread: {after:?}"
+    );
+    assert_eq!(
+        git_time,
+        std::time::Duration::ZERO,
+        "git inside the fixture is in the fixture's time already: {after:?}"
+    );
+    assert_eq!(
+        after.of(Category::Fixture).count,
+        before.of(Category::Fixture).count
+    );
+}

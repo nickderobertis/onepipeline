@@ -509,3 +509,56 @@ test("a result that cannot be written says where it was going and what to fix", 
     /--out .*no-such-dir.*r\.md cannot be written/,
   );
 });
+
+test("only the e2e binary's records weigh an e2e suite", () => {
+  const records = join(scratch, "two-binaries");
+  mkdirSync(join(records, "e2e"), { recursive: true });
+  mkdirSync(join(records, "note"), { recursive: true });
+  const write = (binary, wall) =>
+    writeFileSync(
+      join(records, binary, "one.first.json"),
+      JSON.stringify({
+        ...golden,
+        binary,
+        test: "one::first",
+        run_id: "r",
+        wall_s: wall,
+        unattributed_s: wall,
+        categories,
+      }),
+    );
+  write("e2e", 10);
+  write("note", 1000);
+  const result = replayed("two-binaries", mapping(false), ["--records", records]);
+  assert.equal(result.suites.one.testSeconds, 10);
+});
+
+test("a crate or suite named like an object's own property is refused", () => {
+  for (const [change, message] of [
+    [
+      (p) => {
+        p.suites.one2 = p.suites.one;
+      },
+      /"__proto__" is not a suite name/,
+    ],
+    [
+      (p) => {
+        p.crates.constructor = { paths: ["x/**"] };
+      },
+      /"constructor" is not a crate name/,
+    ],
+    [
+      (p) => {
+        p.suites["one two"] = p.suites.one;
+      },
+      /"one two" is not a suite name/,
+    ],
+  ]) {
+    const proposal = JSON.parse(JSON.stringify(mapping(false)));
+    change(proposal);
+    // Through JSON text, as a mapping file arrives: `__proto__` is then an own key.
+    const file = join(scratch, "reserved.json");
+    writeFileSync(file, JSON.stringify(proposal).replace('"one2":', '"__proto__":'));
+    refused(["--mapping", file, "--out", join(scratch, "x"), "--repo", repo], message);
+  }
+});

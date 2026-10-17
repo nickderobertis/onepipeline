@@ -276,3 +276,39 @@ test("a report that cannot be written says where it was going and what to fix", 
     /next: point --out at a file in a directory that exists/,
   );
 });
+
+test("records a test binary run by hand wrote, with no run id, are read as one run", () => {
+  const dir = join(scratch, "by-hand");
+  write(dir, [
+    { ...record("a::one", { wall: 1 }), run_id: null, attempt: null },
+    { ...record("a::two", { wall: 2 }), run_id: null, attempt: null },
+    record("a::one", { run: "nextest", wall: 9 }),
+  ]);
+  const [read] = JSON.parse(report("--json", `by-hand=${dir}`)).platforms;
+  assert.equal(read.run, "(no run id)");
+  assert.equal(read.breakdown.total.tests, 2);
+  assert.equal(read.setAside, 1);
+});
+
+test("a label an object already has is a label like any other", () => {
+  const linux = join(scratch, "linux");
+  const out = JSON.parse(
+    report(
+      "--json",
+      "--baseline",
+      "__proto__",
+      "--run",
+      "__proto__=now",
+      `__proto__=${linux}`,
+      `constructor=${linux}`,
+    ),
+  );
+  assert.deepEqual(
+    out.platforms.map((p) => [p.label, p.run]),
+    [
+      ["__proto__", "now"],
+      ["constructor", "now"],
+    ],
+  );
+  assert.equal(out.ratios[0].label, "constructor");
+});
