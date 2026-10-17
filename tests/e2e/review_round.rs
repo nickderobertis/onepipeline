@@ -548,7 +548,7 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
     }
     // One command asks the host a repository's visibility once, however many envelopes,
     // edits and store writes its boundary judges: the decline's one ask is the engine's, and
-    // the other is `onevcs`'s own guard on the reply it posts.
+    // `onevcs`'s own guard on the reply it posts reads the answer that ask recorded.
     let decline = &record["phases"][1];
     assert_eq!(decline["phase"], "decline");
     let probes = decline["gh"]
@@ -558,7 +558,7 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
         .filter(|call| call["endpoint"] == "REST repository")
         .count();
     assert_eq!(
-        probes, 2,
+        probes, 1,
         "the decline asked the repository's visibility {probes} times"
     );
     let replies: usize = record["phases"]
