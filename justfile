@@ -700,7 +700,7 @@ release-outcome:
 # naming what is missing, rather than skipping.
 # The release journeys: the Linux recipe and publish against local registries, and release-plz.yml's job over a scratch repository.
 release-journeys:
-    @ONEPIPELINE_NX_SHOW_OUTPUT=1 bash scripts/nx.sh run github-workflows:release-journeys --outputStyle=stream-without-prefixes
+    @ONEPIPELINE_NX_SHOW_OUTPUT=1 bash scripts/nx.sh run onepipeline-release-journeys:release-journeys --outputStyle=stream-without-prefixes
 
 _release platform phase:
     @case "$2" in \

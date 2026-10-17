@@ -21,12 +21,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parse } from "yaml";
-import { evaluate } from "../workflow-graph.mjs";
-import { GitHubDouble } from "./support/release-doubles.mjs";
+import { evaluate, workflows } from "../../.github/workflow-graph.mjs";
+import { GitHubDouble } from "../../.github/tests/support/release-doubles.mjs";
 
 const ROOT = process.cwd();
-const workflow = parse(readFileSync(join(ROOT, ".github/workflows/release-plz.yml"), "utf8"));
+const workflow = workflows(ROOT)["release-plz.yml"];
 const job = workflow.jobs["release-plz"];
 const real = spawnSync("bash", ["-c", "command -v release-plz"], {
   encoding: "utf8",

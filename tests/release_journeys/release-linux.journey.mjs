@@ -12,7 +12,8 @@
 //
 // Outside the deterministic gate: the build needs Docker, the manylinux image
 // and a Rust toolchain from the network, and minutes of release compile. Run it
-// with `just release-journeys`.
+// with `just release-journeys`; this project is a network tier, so no `check`
+// reaches it.
 
 import { spawn, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -29,7 +30,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { CratesDouble, GitHubDouble, PyPIDouble } from "./support/release-doubles.mjs";
+import {
+  CratesDouble,
+  GitHubDouble,
+  PyPIDouble,
+} from "../../.github/tests/support/release-doubles.mjs";
 import { Registry } from "../../npm/test/registry-support.mjs";
 
 const ROOT = process.cwd();

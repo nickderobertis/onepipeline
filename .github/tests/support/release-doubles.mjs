@@ -32,9 +32,10 @@ class Double {
     return `http://127.0.0.1:${this.port}`;
   }
 
-  /// Answer the next request matching `method` and `pattern` with `status`.
-  refuseNext(method, pattern, status, message = "refused by the test") {
-    this.refusals.push({ method, pattern, status, message });
+  /// Answer the next request matching `method` and `pattern` with `status`:
+  /// `{ message }` as JSON, or `message` itself as the body when `raw`.
+  refuseNext(method, pattern, status, message = "refused by the test", raw = false) {
+    this.refusals.push({ method, pattern, status, message, raw });
   }
 
   /// Every request that could have written something.
@@ -61,8 +62,7 @@ class Double {
             : Buffer.from(typeof payload === "string" ? payload : JSON.stringify(payload));
           res.writeHead(status, {
             "content-type":
-              type ??
-              (Buffer.isBuffer(payload) ? "application/octet-stream" : "application/json"),
+              type ?? (Buffer.isBuffer(payload) ? "application/octet-stream" : "application/json"),
             "content-length": data.length,
           });
           res.end(req.method === "HEAD" ? undefined : data);
@@ -73,7 +73,9 @@ class Double {
         );
         if (refusal !== -1) {
           const [r] = this.refusals.splice(refusal, 1);
-          return answer(r.status, { message: r.message });
+          return r.raw
+            ? answer(r.status, r.message, "text/plain")
+            : answer(r.status, { message: r.message });
         }
         Promise.resolve()
           .then(() => this.handle(req, url, body, answer))
@@ -317,11 +319,7 @@ export class PyPIDouble extends Double {
             `<a href="${this.url}/files/${name}#sha256=${sha256(content)}">${name}</a>`,
         )
         .join("\n");
-      return answer(
-        200,
-        `<!DOCTYPE html><html><body>\n${links}\n</body></html>\n`,
-        "text/html",
-      );
+      return answer(200, `<!DOCTYPE html><html><body>\n${links}\n</body></html>\n`, "text/html");
     }
     let found = url.pathname.match(/^\/files\/(.+)$/);
     if (req.method === "GET" && found) {
@@ -335,7 +333,11 @@ export class PyPIDouble extends Double {
         .map(([filename]) => ({ filename, url: `${this.url}/files/${filename}` }));
       return urls.length ? answer(200, { urls }) : answer(404, { message: "Not Found" });
     }
-    return answer(404, `the PyPI double does not serve ${req.method} ${url.pathname}`, "text/plain");
+    return answer(
+      404,
+      `the PyPI double does not serve ${req.method} ${url.pathname}`,
+      "text/plain",
+    );
   }
 }
 
@@ -368,25 +370,33 @@ export class CratesDouble extends Double {
     if (req.method === "PUT" && url.pathname === "/api/v1/crates/new") {
       // Cargo's framing: a little-endian u32 length and the metadata JSON, then
       // a u32 length and the .crate, and nothing after.
-      const malformed = (why) => answer(400, { errors: [{ detail: `malformed publish body: ${why}` }] });
+      const malformed = (why) =>
+        answer(400, { errors: [{ detail: `malformed publish body: ${why}` }] });
       if (body.length < 4) return malformed("no metadata length");
       const length = body.readUInt32LE(0);
       if (body.length < 8 + length) return malformed("truncated metadata");
       const crateLength = body.readUInt32LE(4 + length);
-      if (body.length !== 8 + length + crateLength) return malformed("the crate length is not the body's");
+      if (body.length !== 8 + length + crateLength)
+        return malformed("the crate length is not the body's");
       let meta;
       try {
         meta = JSON.parse(body.subarray(4, 4 + length).toString("utf8"));
       } catch {
         return malformed("metadata is not JSON");
       }
-      if (typeof meta?.name !== "string" || typeof meta.vers !== "string" || !Array.isArray(meta.deps)) {
+      if (
+        typeof meta?.name !== "string" ||
+        typeof meta.vers !== "string" ||
+        !Array.isArray(meta.deps)
+      ) {
         return malformed("metadata lacks name, vers or deps");
       }
       const content = body.subarray(8 + length);
       const versions = this.crates.get(meta.name) ?? [];
       if (versions.some((v) => v.line.vers === meta.vers)) {
-        return answer(200, { errors: [{ detail: `crate version \`${meta.vers}\` is already uploaded` }] });
+        return answer(200, {
+          errors: [{ detail: `crate version \`${meta.vers}\` is already uploaded` }],
+        });
       }
       const deps = meta.deps.map((d) => ({
         name: d.explicit_name_in_toml ?? d.name,
@@ -430,6 +440,8 @@ export class CratesDouble extends Double {
         "text/plain",
       );
     }
-    return answer(404, { errors: [{ detail: `the crates double does not serve ${url.pathname}` }] });
+    return answer(404, {
+      errors: [{ detail: `the crates double does not serve ${url.pathname}` }],
+    });
   }
 }

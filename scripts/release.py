@@ -516,11 +516,14 @@ def crate_serves(version):
     if status == 404:
         return False
     expect(status == 200, f'the crates.io index answered {status} for {CRATE}', 're-run once it answers')
+    lines = [line for line in body.decode('utf-8', 'replace').splitlines() if line.strip()]
+    expect(lines, f'the crates.io index answered 200 with no entry for {CRATE}', 're-run once it answers normally')
     versions = []
-    for line in body.decode('utf-8', 'replace').splitlines():
-        if line.strip():
-            entry = json_of(line, f'the index entry for {CRATE}', lambda v: isinstance(v, dict) and isinstance(v.get('vers'), str))
-            versions.append(entry['vers'])
+    for line in lines:
+        entry = json_of(line, f'the index entry for {CRATE}', lambda v: isinstance(v, dict) and v.get('name') == CRATE
+                        and isinstance(v.get('vers'), str) and isinstance(v.get('cksum'), str)
+                        and isinstance(v.get('deps'), list))
+        versions.append(entry['vers'])
     return version in versions
 
 

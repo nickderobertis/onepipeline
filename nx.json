@@ -232,6 +232,9 @@
     "release-compat": {
       "cache": false
     },
+    "release-journeys": {
+      "cache": false
+    },
     "workload": {
       "cache": false
     },

@@ -387,6 +387,9 @@ describe("publish asks every registry before it writes anything", () => {
       crates.refuseNext("GET", /^\/index\//, 200, "no version here");
       result = await publishWith(github, crates.env());
       assert.match(result.stderr, /the index entry for onepipeline is not the shape/);
+      crates.refuseNext("GET", /^\/index\//, 200, "", true);
+      result = await publishWith(github, crates.env());
+      assert.match(result.stderr, /answered 200 with no entry for onepipeline/);
       assert.equal(crates.writes().length, 0);
     } finally {
       await Promise.all([github.stop(), crates.stop()]);
@@ -801,6 +804,7 @@ describe("release-plz.yml's auto-merge step", () => {
         "not json",
         '[{"number":"12","node_id":7,"head":{"ref":"release-plz-a"}}]',
         '[{"number":12,"node_id":"PR_node_12","head":{"ref":"release-plz-a","repo":{"full_name":5}}}]',
+        '[{"number":12,"node_id":"","head":{"ref":"release-plz-a","repo":{"full_name":"nickderobertis/onepipeline"}}}]',
       ]) {
         github.pullsBody = body;
         const result = await runStep(github);

@@ -50,10 +50,11 @@ status="$(request "$api/repos/$GITHUB_REPOSITORY/pulls?state=open&per_page=100")
 # is refused rather than mistaken for "no release PR".
 jq -ce --arg repo "$GITHUB_REPOSITORY" '
   if type == "array" and all(.[]; (.number | type) == "number" and (.node_id | type) == "string"
+                              and .node_id != ""
                               and (.head.ref | type) == "string"
                               and ((.head.repo | type) == "null" or (.head.repo.full_name | type) == "string"))
   then [.[] | select((.head.ref | startswith("release-plz-")) and .head.repo.full_name? == $repo)
-              | select(.node_id != "") | {number, node_id}]
+              | {number, node_id}]
   else error("not a pull request list") end' "$work/body" >"$work/release-prs" 2>/dev/null \
   || fail "GitHub's pull request list is not the JSON array of pull requests it documents" "re-run the job once GitHub answers normally"
 count="$(jq length "$work/release-prs")"
