@@ -674,6 +674,15 @@ fn the_round_quota_reporter_refuses_missing_and_malformed_records() {
         );
     }
     std::fs::write(&record, whole_round(6).to_string()).unwrap();
+    // A result that cannot be written is a failure, and names what to fix.
+    let unwritable = budget_report(&world.root, &world.root);
+    assert!(!unwritable.status.success());
+    assert!(
+        String::from_utf8_lossy(&unwritable.stderr)
+            .contains("ensure ONEBUDGETSPEC_RESULT names a writable file"),
+        "{}",
+        String::from_utf8_lossy(&unwritable.stderr)
+    );
     let output = budget_report(&world.root, &result);
     assert!(
         output.status.success(),

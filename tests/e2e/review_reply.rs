@@ -1927,6 +1927,40 @@ fn a_decline_whose_read_of_the_change_request_fails_posts_nothing_and_posts_once
         .contains("label=declined"));
 }
 
+/// A decline of a comment its author deleted after the pass surfaced it is refused
+/// `decline-not-posted` naming the comment as gone, with nothing drafted or posted.
+#[test]
+fn a_decline_of_a_comment_deleted_since_it_was_read_posts_nothing() {
+    let world = team_world("decline-deleted");
+    let run = "deleted";
+    let (_, host) = launched_with_replies(&world, run);
+    let gone = conversation(1146, 1);
+    add(&host, 1, gone.clone());
+    review(&world, run);
+    // Its author deletes it: the double offers no such move, so its document is
+    // replaced by the same state without the comment, as the host would then answer.
+    let mut state = host.state().expect("the host's state");
+    state
+        .review_comments
+        .get_mut(&ChangeId("1".to_owned()))
+        .expect("the change request's comments")
+        .retain(|comment| comment.id != gone.id);
+    FileHost::seeded(world.fakes.join("review-host.json"), state).expect("host re-seeded");
+    let refusal = rejected(
+        &world,
+        run,
+        &decline(&world, run, "a", &[&gone], "out of scope"),
+    );
+    assert_eq!(refusal["kind"], "decline-not-posted", "{refusal}");
+    assert!(
+        refusal["detail"].as_str().is_some_and(|detail| detail
+            .contains(&format!("comment {} is no longer on", gone.id.0))),
+        "{refusal}"
+    );
+    assert!(drafter_tasks(&world).is_empty());
+    assert!(posts(&world).is_empty());
+}
+
 /// A decline of a comment a rework's reply already answers is refused
 /// `already-answered` naming that reply, with nothing drafted or posted.
 #[test]
