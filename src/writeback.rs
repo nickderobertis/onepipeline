@@ -1266,7 +1266,11 @@ fn snapshot_of(
 
 /// Each node whose dispatch has a session open and has not settled, with what its item's
 /// `onepipeline.dispatch` says: the branch the session works on, the base it opened against
-/// and when it opened — off the session's own `session-opened`, the last one for the node.
+/// and when it opened — off the session's own `session-opened`, the last session for the node,
+/// and the first record of that session the journal holds: one open is journalled twice, as
+/// the dispatch relays it and as `onevcs` streams it, each with its own stamp, and taking the
+/// later record would move `opened_at` — and write the item again — for a session that never
+/// changed.
 ///
 /// A session that named no base, or a record carrying no time, is left out rather than
 /// written half: a host that pins the node needs the branch and the base together.
@@ -1280,6 +1284,7 @@ fn dispatches(
     }
     /// What a node's `session-opened` said: the base it opened against, and when.
     struct Opened {
+        token: Option<String>,
         base: crate::vcs::BranchName,
         // llmlint: ignore[invalid_states_unrepresentable] the journal record's own `ts`, which onemessagebus's `Envelope` declares as a `String` holding an RFC 3339 instant, copied onto the store verbatim as `StoredDispatch::opened_at`; this crate has no timestamp type to parse it into and back out of, and every other `ts` it reads stays a string.
         at: String,
@@ -1297,6 +1302,14 @@ fn dispatches(
         else {
             continue;
         };
+        let token = event
+            .payload
+            .get("token")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        if token.is_some() && opened.get(&node).is_some_and(|held| held.token == token) {
+            continue;
+        }
         if let Some(base) = event
             .payload
             .get("base")
@@ -1306,6 +1319,7 @@ fn dispatches(
             opened.insert(
                 node,
                 Opened {
+                    token,
                     base,
                     at: event.ts.clone(),
                 },
@@ -1314,7 +1328,7 @@ fn dispatches(
     }
     open.into_iter()
         .filter_map(|(node, session)| {
-            let Opened { base, at } = opened.remove(&node)?;
+            let Opened { base, at, .. } = opened.remove(&node)?;
             let dispatch = crate::continuation::StoredDispatch {
                 branch: session.branch().as_str().to_owned(),
                 base: base.as_str().to_owned(),
@@ -3056,8 +3070,11 @@ fn difference(
                 .collect::<Result<_, _>>()?,
         );
     }
+    // The edges as a set: a plan edit that reorders a node's `deps` leaves the board's
+    // blocking edges exactly as they stand, so it writes none.
+    let set = |edges: &[String]| edges.iter().cloned().collect::<BTreeSet<String>>();
     let edges_moved = match held.edges {
-        Edges::Landed => was.depends_on != is.depends_on,
+        Edges::Landed => set(&was.depends_on) != set(&is.depends_on),
         Edges::Unread => !is.depends_on.is_empty(),
     };
     if edges_moved {

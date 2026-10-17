@@ -5997,7 +5997,7 @@ for each engine-owned key whose value moved, `metadata_remove` for each one no l
 (a retry's new head carries no settlement or landing keys of its own yet), `content` and `title`
 where the text moved, `delivers` where it moved — the store re-evaluates each ticket as `task
 status` does — and `depends_on`, the whole declared set with each far end the item its lineage's
-root keys, where the edges moved. Labels, repositories, project membership and every key the
+root keys, where the set of edges moved (a `deps` reordered moves none). Labels, repositories, project membership and every key the
 engine does not own are never named, so a person's edit to any field stands until the run next
 changes that same field. The baseline advances per item as each update lands, recording the
 fields the store says it wrote. An item that does not exist — an `add`ed node — is created by
@@ -9862,7 +9862,9 @@ labelled with the head's own id would name a node the launched plan does not hol
 A task key, `{"branch": string, "base": string, "opened_at": RFC 3339}`, written by
 the projection that follows a node's session opening and removed by the one that
 follows its settlement. `branch` is the session's, `base` the one `onevcs`'s
-`session-opened` names, and `opened_at` that record's own time. A cold host reads it
+`session-opened` names, and `opened_at` the time of the first record of that session the
+journal holds — an open is journalled twice, as the dispatch relays it and as `onevcs`
+streams it, and the second never moves the key. A cold host reads it
 to pin an in-flight node to the branch it was working on.
 
 ### `onepipeline.driver`
@@ -11654,7 +11656,10 @@ against the public types, the registered documents and both bundles.
 `tests/e2e/review_round.rs`'s
 `the_busy_review_round_ends_answered_and_true_and_records_what_it_spent` runs the busy
 round `review-round-github-quota` states and records its telemetry, which
-`scripts/review-round-quota-budget.sh` charges for that budget in the root `budgets.yaml`.
+`scripts/review-round-quota-budget.sh` charges for that budget in the root `budgets.yaml`;
+it also holds that the round makes no board write the store answers as changing nothing,
+that each reworked node's item is written its Queued claim, start, dispatch and settlement
+once each, and that no restack's or readjustment's open reads the base's branch rules.
 The live tier's `tests/smoke/review.rs`,
 `review_comments_found_on_one_host_are_reworked_and_declined_on_a_cold_one_from_the_store`,
 drives the same rework and decline against real pull-request comments on the scratch

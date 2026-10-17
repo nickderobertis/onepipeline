@@ -397,6 +397,8 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
         .unwrap();
 
     let mut phases = Vec::new();
+    let round_from = projection_lines(&world, run).len();
+    let mut reworked = Vec::new();
     timed(&world, &host, run, "pass-1", &mut phases, || {
         passed(&world.run(&["review", run]), "the first pass");
     });
@@ -420,6 +422,7 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
             &format!("{node}, as the review asked\n"),
         );
         world.script(&format!("{node}-rework-1.work-file"), file);
+        let from = projection_lines(&world, run).len();
         timed(&world, &host, run, name, &mut phases, || {
             passed(
                 &world.run_with_stdin(
@@ -433,6 +436,7 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
             );
             passed(&world.run(&["adopt", run]), name);
         });
+        reworked.push((node, from, projection_lines(&world, run).len()));
     }
     // The bottom draft merged by a person mid-round, its branch kept — no call of the run's.
     let person = std::process::Command::new(crate::harness::double("fake-gh"))
@@ -514,6 +518,65 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
             changed_against(&world, &repo, &base, &branch),
             [format!("{own}.md")],
             "{node} shows more than its own change"
+        );
+    }
+
+    // A board task is written only where the write changes what its item shows: no update
+    // the round made is one the store answered as changing nothing.
+    let projections = projection_lines(&world, run);
+    let unchanged: Vec<&Value> = projections[round_from..]
+        .iter()
+        .filter(|record| record["actions"]["unchanged"].as_u64().unwrap_or_default() > 0)
+        .collect();
+    assert!(
+        unchanged.is_empty(),
+        "writes that changed nothing: {unchanged:?}"
+    );
+    // Each reworked node's item moves as it did before writes that changed nothing were
+    // dropped: the Queued claim reopening it with the rework's task and record, its start,
+    // its dispatch once, and its settlement — and ends there.
+    let tasks = world.store_tasks(&project);
+    for (node, from, to) in reworked {
+        let wrote: Vec<(&Value, &Value)> = projections[from..to]
+            .iter()
+            .filter(|record| {
+                record["items"].as_array().unwrap().contains(&json!(node))
+                    && record["calls"]["task-update"].as_u64().is_some()
+            })
+            .map(|record| (&record["updated_fields"], &record["actions"]["reopened"]))
+            .collect();
+        assert_eq!(
+            wrote,
+            [
+                (
+                    &json!({"content": 1, "status": 1, "metadata": 1}),
+                    &json!(1)
+                ),
+                (&json!({"status": 1}), &json!(0)),
+                (&json!({"metadata": 1}), &json!(0)),
+                (&json!({"status": 1, "metadata": 1}), &json!(0)),
+            ],
+            "{node}'s writes"
+        );
+        let item = &tasks
+            .iter()
+            .find(|task| task["item"]["metadata"]["onepipeline.id"] == node)
+            .unwrap_or_else(|| panic!("{node} has an item: {tasks:?}"))["item"];
+        assert_eq!(item["status"]["name"], "done", "{item}");
+        let metadata = item["metadata"].as_object().unwrap();
+        for key in [
+            "onepipeline.rework",
+            "onepipeline.settlement",
+            "onepipeline.change_url",
+        ] {
+            assert!(
+                metadata.contains_key(key),
+                "{node} carries no {key}: {item}"
+            );
+        }
+        assert!(
+            !metadata.contains_key("onepipeline.dispatch"),
+            "{node} still carries its dispatch: {item}"
         );
     }
 
