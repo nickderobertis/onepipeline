@@ -111,8 +111,9 @@ async function services() {
     if (req.method === "PUT" && npm.refuseNextPublish) {
       npm.refuseNextPublish = false;
       req.resume();
-      res.writeHead(503, { "content-type": "application/json" });
-      res.end('{"error":"the registry is not answering"}');
+      // A 4xx, because npm retries a 5xx itself and would succeed the second time.
+      res.writeHead(403, { "content-type": "application/json" });
+      res.end('{"error":"You do not have permission to publish this package"}');
       return;
     }
     served(req, res);
