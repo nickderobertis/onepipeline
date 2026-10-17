@@ -424,6 +424,73 @@ sys.stdout.buffer.write(buffer.getvalue())
     ["CHANGELOG.md", "file"],
   ];
 
+  it("follows a download's redirect without the token, and refuses one to plaintext", async () => {
+    const github = await new GitHubDouble().start();
+    const release = github.addRelease(TAG);
+    const content = archive([["README.md"], ["LICENSE"], ["CHANGELOG.md"]]);
+    const file = `onepipeline-v${VERSION}-x86_64-unknown-linux-gnu.tar.gz`;
+    const id = github.nextId++;
+    release.assets.push({ id, name: file, content });
+    release.assets.push({
+      id: github.nextId++,
+      name: `onepipeline-v${VERSION}-x86_64-unknown-linux-gnu.sha256`,
+      content: Buffer.from(`${createHash("sha256").update(content).digest("hex")}  ${file}\n`),
+    });
+    const out = scratch("release-redirect");
+    const env = releaseEnv(github, out, { PYPI_PUBLISH: "false", NPM_PUBLISH: "false" });
+    try {
+      // Storage answers GitHub's download URL with a redirect: followed, and the
+      // archive it serves is the one judged (this one has no executable).
+      github.redirectNext(
+        "GET",
+        new RegExp(`^/download/${id}/`),
+        `${github.url}/moved/${id}/${file}`,
+      );
+      let result = await run("just", ["release-linux", "verify"], { env });
+      assert.equal(result.code, 1, said(result));
+      assert.ok(
+        github.requests.some((r) => r.path.startsWith(`/moved/${id}/`)),
+        "the redirect was followed",
+      );
+      assert.match(result.stderr, /\.tar\.gz is not \[.*\], each a regular file/);
+      github.redirectNext(
+        "GET",
+        new RegExp(`^/download/${id}/`),
+        `http://192.0.2.1/moved/${id}/${file}`,
+      );
+      result = await run("just", ["release-linux", "verify"], { env });
+      assert.equal(result.code, 1, said(result));
+      assert.match(result.stderr, /http:\/\/192\.0\.2\.1\S* is not an HTTPS URL/);
+    } finally {
+      await github.stop();
+      rmSync(out, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a repository that is not an owner and a name, before asking GitHub", async () => {
+    const github = await new GitHubDouble().start();
+    const out = scratch("release-repo");
+    try {
+      const result = await run("just", ["release-linux", "verify"], {
+        env: releaseEnv(github, out, { GITHUB_REPOSITORY: "owner/name/releases?x=1" }),
+      });
+      assert.equal(result.code, 1, said(result));
+      assert.match(
+        result.stderr,
+        /GITHUB_REPOSITORY 'owner\/name\/releases\?x=1' is not an owner\/name/,
+      );
+      const step = await run("bash", ["release/release-pr-auto-merge.sh"], {
+        env: { ...github.env(), GITHUB_REPOSITORY: "owner/{a,b}" },
+      });
+      assert.equal(step.code, 1, said(step));
+      assert.match(step.stderr, /is not an owner\/name/);
+      assert.deepEqual(github.requests, []);
+    } finally {
+      await github.stop();
+      rmSync(out, { recursive: true, force: true });
+    }
+  });
+
   it("extracts a Windows zip that is the documents and onepipeline.exe, then smokes what it unpacked", async () => {
     const result = await verifyWindowsZip([...documents, ["onepipeline.exe", "file"]]);
     // A Windows executable cannot run here, so the smoke refuses to stand in

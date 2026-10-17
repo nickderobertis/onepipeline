@@ -28,6 +28,9 @@ fail() {
 for name in GITHUB_TOKEN GITHUB_REPOSITORY; do
   [ -n "${!name:-}" ] || fail "$name is not set" "run this as release-plz.yml does, with $name in the environment"
 done
+# Spliced into every request's path, so an owner and a name and nothing else.
+[[ "$GITHUB_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] \
+  || fail "GITHUB_REPOSITORY '$GITHUB_REPOSITORY' is not an owner/name" "set it to owner/name, as Actions does"
 api="${GITHUB_API_URL:-https://api.github.com}"
 graphql="${GITHUB_GRAPHQL_URL:-https://api.github.com/graphql}"
 # The token is sent to both, so each must be HTTPS, or HTTP to this machine —

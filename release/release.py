@@ -160,6 +160,9 @@ def require_github():
     for name in ['GITHUB_TOKEN', 'GITHUB_REPOSITORY']:
         expect(os.environ.get(name), f'{name} is not set, so the Release cannot be read or written',
                f'set {name}, as every Actions job has it')
+    # It is spliced into every API path, so it is an owner and a name and nothing else.
+    expect(re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', os.environ['GITHUB_REPOSITORY']),
+           f"GITHUB_REPOSITORY '{os.environ['GITHUB_REPOSITORY']}' is not an owner/name", 'set it to owner/name, as Actions does')
 
 
 def guard(phase, dry_run=False):

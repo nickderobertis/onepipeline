@@ -275,7 +275,7 @@ export class GitHubDouble extends Double {
       release.assets.push(asset);
       return answer(201, this.#asset(asset));
     }
-    found = path.match(/^\/download\/(\d+)\/[^/]+$/);
+    found = path.match(/^\/(?:download|moved)\/(\d+)\/[^/]+$/);
     if (req.method === "GET" && found) {
       const asset = this.releases.flatMap((r) => r.assets).find((a) => a.id === Number(found[1]));
       return asset ? answer(200, asset.content) : answer(404, { message: "Not Found" });
