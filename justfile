@@ -666,7 +666,8 @@ wheel-linux target out="dist":
 # builds each target once, packages archive, wheel and npm package from that one
 # binary and test-installs them; `publish` uploads them; `verify` installs them
 # back from the registries and runs them. `plan` lists every file, package and
-# wheel tag without building; `dry-run` builds and publishes nothing. Outside
+# wheel tag without building; `dry-run` builds and test-installs, then lists what
+# it would publish and publishes nothing. Outside
 # `check` and `gate`: building needs Docker (Linux) or that platform's own
 # toolchain, and publishing needs the release's credentials.
 # Release the Linux artifacts, one PHASE at a time (plan, build, publish, verify, dry-run).

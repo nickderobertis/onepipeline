@@ -419,16 +419,22 @@ describe("publishing and verifying the Linux artifacts", () => {
   it("installs the version back from every registry and runs it", async () => {
     const verified = await run("just", ["release-linux", "verify"], { env: env() });
     assert.equal(verified.code, 0, said(verified));
-    for (const label of [
-      "Release archive",
-      "PyPI onepipeline-cli",
-      "npm onepipeline-cli-linux-x64",
-    ]) {
-      assert.match(
-        verified.stdout + verified.stderr,
-        new RegExp(`${label}.*surface smoke test passed for ${VERSION.replaceAll(".", "\\.")}`),
-      );
-    }
+    assert.match(
+      verified.stdout,
+      new RegExp(
+        `^release: every linux artifact of ${VERSION.replaceAll(".", "\\.")} installs from its registry and runs$`,
+        "m",
+      ),
+    );
+    // Each install read the file back from its registry.
+    assert.ok(
+      s.github.requests.some((r) => r.path.startsWith("/download/")),
+      "the archive was downloaded",
+    );
+    assert.ok(
+      s.pypi.requests.some((r) => r.path.startsWith("/files/")),
+      "pip fetched the wheel",
+    );
   });
 });
 
@@ -631,18 +637,71 @@ describe("a registry switched off", () => {
       const verified = await run("just", ["release-linux", "verify"], { env });
       assert.equal(verified.code, 0, said(verified));
       assert.match(
-        verified.stdout + verified.stderr,
-        /Release archive .*surface smoke test passed/,
+        verified.stdout,
+        /installs from its registry and runs; skipped PyPI \(PYPI_PUBLISH off\), npm \(NPM_PUBLISH off\)/,
       );
-      assert.doesNotMatch(
-        verified.stdout + verified.stderr,
-        /PyPI onepipeline-cli|npm onepipeline-cli-linux-x64/,
+      assert.ok(
+        s.github.requests.some((r) => r.path.startsWith("/download/")),
+        "the archive was downloaded",
       );
+      assert.deepEqual(s.pypi.requests, [], "PyPI was not asked");
       const typo = await run("just", ["release-linux", "publish"], {
         env: { ...env, NPM_PUBLISH: "yes" },
       });
       assert.equal(typo.code, 1, said(typo));
       assert.match(typo.stderr, /NPM_PUBLISH is 'yes', which neither turns publishing on nor off/);
+    } finally {
+      await s.stop();
+    }
+  });
+});
+
+describe("publish's own verification", () => {
+  it("fails when the launcher it published does not run, and records that it shipped", async () => {
+    const s = await services();
+    try {
+      // Every platform out, but npm's linux-x64 package carries another version.
+      for (const artifact of linux.artifacts) {
+        if (artifact.destination === "github-release") {
+          s.github
+            .release(TAG)
+            .assets.push({
+              id: s.github.nextId++,
+              name: artifact.file,
+              content: readFileSync(artifact.path),
+            });
+        } else if (artifact.destination === "pypi") {
+          s.pypi.serve(artifact.file, readFileSync(artifact.path));
+        }
+      }
+      const fake = join(s.home, "onepipeline");
+      writeFileSync(fake, "#!/bin/sh\necho 'onepipeline 9.9.9'\n", { mode: 0o755 });
+      await npmPublish(s, await platformPackage(TARGET, fake));
+      await otherPlatformsPublished(s, linux);
+      const out = mkdtempSync(join(SCRATCH, "launcher-verify-"));
+      const env = { ...s.env, CARGO_REGISTRY_TOKEN: "", ONEPIPELINE_RELEASE_OUT: out };
+      const result = await run("just", ["release-publish", "publish"], { env });
+      assert.equal(result.code, 1, said(result));
+      assert.match(result.stderr, /npm onepipeline-cli .*reports 'onepipeline 9\.9\.9'/);
+      assert.deepEqual(s.npm.visible("onepipeline-cli"), [VERSION], "the launcher was published");
+      const results = JSON.parse(readFileSync(join(out, "common", "publish-results.json"), "utf8"));
+      assert.deepEqual(results["npm-launcher"], { published: "success", verified: "failure" });
+      const jobs = {};
+      for (const key of ["LINUX", "MACOS", "WINDOWS"]) jobs[`${key}_RESULT`] = "success";
+      const recorded = await run("just", ["release-outcome"], { env: { ...env, ...jobs } });
+      assert.equal(recorded.code, 0, said(recorded));
+      const record = JSON.parse(
+        s.github
+          .release(TAG)
+          .assets.find((a) => a.name === "release-outcome.json")
+          .content.toString(),
+      );
+      const npm = record.targets.find((t) => t.id === "npm:onepipeline-cli");
+      assert.deepEqual(
+        [npm.outcome, npm.published, npm.verified],
+        ["shipped-unverified", "success", "failure"],
+      );
+      rmSync(out, { recursive: true, force: true });
     } finally {
       await s.stop();
     }
@@ -724,8 +783,10 @@ describe("publish: the platform-independent artifacts", () => {
       [VERSION],
     );
     assert.deepEqual(s.npm.visible("onepipeline-cli"), [VERSION]);
-    assert.match(rerun.stdout + rerun.stderr, /crates\.io onepipeline .*surface smoke test passed/);
-    assert.match(rerun.stdout + rerun.stderr, /npm onepipeline-cli .*surface smoke test passed/);
+    assert.ok(
+      s.crates.requests.some((r) => /\/download$/.test(r.path)),
+      "cargo installed the crate from the registry",
+    );
     assert.match(rerun.stdout, /every registry serves .* for every platform/);
     assert.match(s.github.release(TAG).body, /^<!-- linked-engines -->$/m);
     assert.equal(

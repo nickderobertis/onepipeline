@@ -258,7 +258,10 @@ def glibc_needed(binary):
     """The highest GLIBC_ symbol version a Linux binary requires."""
     expect(shutil.which('objdump'), 'objdump not found, so the glibc floor cannot be read',
            'install binutils, then re-run')
-    symbols = subprocess.run(['objdump', '-T', str(binary)], text=True, capture_output=True, check=True).stdout
+    read = subprocess.run(['objdump', '-T', str(binary)], text=True, capture_output=True)
+    expect(read.returncode == 0, f'objdump cannot read {binary.name} as a Linux executable: {read.stderr.strip()}',
+           'rebuild the wheel; its executable is not an ELF binary objdump can read')
+    symbols = read.stdout
     versions = {tuple(int(part) for part in found) for found in re.findall(r'GLIBC_(\d+)\.(\d+)', symbols)}
     return max(versions) if versions else (0, 0)
 
@@ -276,6 +279,12 @@ def conform(platform, version, artifacts):
     expect([[a.get(f) for f in fields] for a in artifacts] == [[a[f] for f in fields] for a in planned],
            f"the build's files {[a.get('file') for a in artifacts]} are not the plan's {[a['file'] for a in planned]}",
            'make the build produce the planned files, or change the plan and its test deliberately')
+    for artifact, wanted in zip(artifacts, planned):
+        expect(set(artifact) == set(wanted) | {'path', 'sha256'} and isinstance(artifact['path'], str)
+               and isinstance(artifact['sha256'], str) and re.fullmatch('[0-9a-f]{64}', artifact['sha256'])
+               and all(artifact[key] == wanted[key] for key in wanted),
+               f"the build's entry for {artifact.get('file')} is not the plan's {wanted['file']} with its path and hash",
+               'rebuild into an empty directory; build.json is written by the build phase alone')
     for artifact in artifacts:
         floor = GLIBC_FLOOR.get(artifact['target'])
         if artifact['kind'] != 'wheel' or not floor:
@@ -299,7 +308,7 @@ def compile_wheel(platform, target, out):
         except ValueError as error:
             raise Refused(f'{out} is outside the checkout, which the manylinux container cannot see',
                           'pass --out a directory inside the repository') from error
-        run('just', 'wheel-linux', target, str(relative))
+        run('just', 'wheel-linux', target, str(relative), capture=True)
         found = list(wheels.glob('*.whl'))
         expect(len(found) == 1, f'the {target} build left {len(found)} wheels', 'rebuild into an empty directory')
         return found[0]
@@ -476,7 +485,11 @@ def npm_serves(package, version):
     view = subprocess.run([shutil.which('npm') or 'npm', 'view', f'{package}@{version}', 'version', '--prefer-online'],
                           text=True, capture_output=True)
     if view.returncode == 0:
-        return view.stdout.strip() == version
+        # npm prints nothing for a version a package it knows does not have.
+        answered = view.stdout.strip()
+        expect(answered in ('', version), f"npm answered '{answered}' for {package}@{version}",
+               're-run once the npm registry answers normally')
+        return answered == version
     if 'E404' in view.stderr or '404 Not Found' in view.stderr:
         return False
     raise Refused(f'npm could not be asked about {package}@{version}: {view.stderr.strip()}',
@@ -538,20 +551,21 @@ def publish(args):
             '--check-url', index, *[str(wheel) for wheel in wheels], env=env)
     for artifact in uploads:
         if artifact['destination'] == 'npm':
-            run('bash', str(SCRIPTS / 'publish-npm.sh'), artifact['path'])
+            run('bash', str(SCRIPTS / 'publish-npm.sh'), artifact['path'], capture=True)
     say(f"published {args.platform}'s {len(uploads)} artifact(s) for {version} "
         f"({len(uploaded)} Release asset(s) uploaded, the rest already there){skipped(channels, ['pypi', 'npm'])}")
 
 
 def smoke(directory, version, label):
     env = dict(os.environ, PATH=f'{directory}{os.pathsep}{os.environ["PATH"]}')
-    run('bash', str(SCRIPTS / 'smoke-published.sh'), '--expect-version', version, '--label', label, env=env)
+    run('bash', str(SCRIPTS / 'smoke-published.sh'), '--expect-version', version, '--label', label, env=env,
+        capture=True)
 
 
 def retry_install(label, action, *command):
     budget = os.environ.get('ONEPIPELINE_RELEASE_VERIFY_BUDGET', '600')
     run('bash', str(SCRIPTS / 'retry-install.sh'), '--budget', budget, '--label', label,
-        '--action', action, '--', *command)
+        '--action', action, '--', *command, capture=True)
 
 
 def unpack(archive, into):
@@ -663,10 +677,12 @@ def publish_common(args):
     missing = availability(version, channels)
     expect(not missing, 'not every platform is published, so nothing platform-independent is: missing '
            + '; '.join(missing), 're-run the build job that publishes what is missing, then this one')
+    # Every registry is asked before anything is written.
+    crate_published = crate_serves(version) if channels['crate'] else None
     Release(tag).notes(run('just', 'linked-engines', capture=True))
     if channels['crate']:
         record('crate', 'published', 'failure')
-        if not crate_serves(version):
+        if not crate_published:
             # crates.io takes the token from CARGO_REGISTRY_TOKEN; a registry
             # named by its index is handed it explicitly.
             token = ['--token', os.environ['CARGO_REGISTRY_TOKEN']] if crate_registry() else []
@@ -675,8 +691,9 @@ def publish_common(args):
         record('crate', 'published', 'success')
     if channels['npm']:
         record('npm-launcher', 'published', 'failure')
+        # llmlint: ignore[work_goes_through_command_surface] `onepipeline-npm:build` writes the fixed `dist/npm` and runs through Nx, which would install the whole workspace's node_modules into the publish job for one manifest; this stamps the launcher into the job's own output directory with the same script, as build-staged-release.py's staged install does.
         launcher = run('node', str(SCRIPTS / 'npm-build.mjs'), 'launcher', '--out', str(out / 'npm'), capture=True).strip()
-        run('bash', str(SCRIPTS / 'publish-npm.sh'), launcher)
+        run('bash', str(SCRIPTS / 'publish-npm.sh'), launcher, capture=True)
         record('npm-launcher', 'published', 'success')
     with tempfile.TemporaryDirectory() as scratch:
         scratch = Path(scratch)
@@ -746,6 +763,11 @@ def outcome(args):
     out = out_dir(argparse.Namespace(out=args.out, platform='common'))
     out.mkdir(parents=True, exist_ok=True)
     results = publish_results(out)
+    for platform in PLATFORMS:
+        for phase in ['RESULT', 'PUBLISHED', 'VERIFIED']:
+            value = os.environ.get(f'{platform.upper()}_{phase}', '')
+            expect(value in ('', *RESULTS), f"{platform.upper()}_{phase} is '{value}', not a job or step result GitHub reports",
+                   'pass success, failure, cancelled or skipped')
     builds = []
     for platform in PLATFORMS:
         key = platform.upper()
@@ -768,10 +790,12 @@ def outcome(args):
     for target, (published, verified) in targets.items():
         arguments += ['--target', target, '--published', published, '--verified', verified]
     run('node', str(SCRIPTS / 'release-outcome.mjs'), '--out', str(document), '--version', version,
-        '--run-url', run_url, *arguments)
+        '--run-url', run_url, *arguments, capture=True)
     # Replaced on a re-run, because a re-run is how a release moves out of
     # `shipped-unverified`, and the record has to move with it.
     Release(tag).upload(document, replace=True)
+    record = json.loads(document.read_text())
+    say(f"recorded {record['outcome']} for {version} as {OUTCOME_FILE} on the Release")
 
 
 def main():

@@ -30,7 +30,8 @@ import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { parse } from "yaml";
 import { evaluate } from "../workflow-graph.mjs";
-import { GitHubDouble } from "./support/release-doubles.mjs";
+import { CratesDouble, GitHubDouble, PyPIDouble } from "./support/release-doubles.mjs";
+import { Registry } from "../../npm/test/registry-support.mjs";
 
 const ROOT = process.cwd();
 const VERSION = readFileSync(join(ROOT, "Cargo.toml"), "utf8").match(
@@ -200,6 +201,197 @@ describe("an ineligible release", () => {
       );
     });
   }
+});
+
+describe("a release phase refuses what it cannot trust", () => {
+  let github;
+  before(async () => {
+    github = await new GitHubDouble().start();
+    github.addRelease(TAG);
+  });
+  after(() => github.stop());
+
+  it("leaves a non-empty directory it did not make alone, and builds nothing into it", async () => {
+    const out = scratch("release-foreign");
+    mkdirSync(join(out, "linux"));
+    writeFileSync(join(out, "linux", "somebody-elses.txt"), "keep me");
+    try {
+      const result = await run("just", ["release-linux", "build"], {
+        env: releaseEnv(github, out),
+      });
+      assert.equal(result.code, 1, said(result));
+      assert.match(result.stderr, /is not empty and is not a directory this script made/);
+      assert.equal(readFileSync(join(out, "linux", "somebody-elses.txt"), "utf8"), "keep me");
+    } finally {
+      rmSync(out, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a build manifest it did not write, before asking GitHub anything", async () => {
+    const out = scratch("release-manifest");
+    mkdirSync(join(out, "linux"));
+    const plan = JSON.parse((await run("just", ["release-linux", "plan"])).stdout);
+    const good = {
+      schema_version: 1,
+      platform: "linux",
+      tag: TAG,
+      version: VERSION,
+      artifacts: plan.artifacts,
+    };
+    try {
+      for (const [manifest, reason] of [
+        ["{not json", /no build in/],
+        [{ ...good, schema_version: 2 }, /is not a build this script wrote/],
+        [{ ...good, extra: true }, /is not a build this script wrote/],
+        [{ ...good, artifacts: "everything" }, /lists no artifacts/],
+        [{ ...good, artifacts: plan.artifacts.slice(1) }, /are not the plan's/],
+        [
+          {
+            ...good,
+            artifacts: plan.artifacts.map((a) => ({ ...a, path: a.file, sha256: "nope" })),
+          },
+          /is not the plan's .* with its path and hash/,
+        ],
+      ]) {
+        writeFileSync(
+          join(out, "linux", "build.json"),
+          typeof manifest === "string" ? manifest : JSON.stringify(manifest),
+        );
+        const before = github.requests.length;
+        const result = await run("just", ["release-linux", "publish"], {
+          env: releaseEnv(github, out),
+        });
+        assert.equal(result.code, 1, said(result));
+        assert.match(result.stderr, reason, said(result));
+        assert.deepEqual(github.requests.slice(before), []);
+      }
+    } finally {
+      rmSync(out, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to verify against a Release that is missing, unreachable, malformed or incomplete", async () => {
+    const out = scratch("release-verify");
+    try {
+      const verify = (overrides) =>
+        run("just", ["release-linux", "verify"], { env: releaseEnv(github, out, overrides) });
+      let result = await verify({
+        RELEASE_TAG: TAG,
+        GITHUB_REPOSITORY: "nickderobertis/elsewhere",
+      });
+      assert.equal(result.code, 1, said(result));
+      assert.match(result.stderr, /GitHub answered 404 for the Release tagged/);
+      result = await verify({ GITHUB_API_URL: "http://127.0.0.1:9" });
+      assert.equal(result.code, 1, said(result));
+      assert.match(result.stderr, /did not answer/);
+      github.assetsBody = '{"not":"a list"}';
+      result = await verify({});
+      github.assetsBody = null;
+      assert.equal(result.code, 1, said(result));
+      assert.match(result.stderr, /the Release assets is not the shape the service documents/);
+      result = await verify({});
+      assert.equal(result.code, 1, said(result));
+      assert.match(
+        result.stderr,
+        /the Release serves no onepipeline-v\S+-x86_64-unknown-linux-gnu\.tar\.gz/,
+      );
+      github.release(TAG).assets.push({
+        id: 9001,
+        name: `onepipeline-v${VERSION}-x86_64-unknown-linux-gnu.tar.gz`,
+        content: Buffer.from("x"),
+      });
+      result = await verify({});
+      github.release(TAG).assets = [];
+      assert.equal(result.code, 1, said(result));
+      assert.match(
+        result.stderr,
+        /the Release serves no onepipeline-v\S+-x86_64-unknown-linux-gnu\.sha256/,
+      );
+    } finally {
+      rmSync(out, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("publish asks every registry before it writes anything", () => {
+  /// A Release carrying every platform's planned assets, as the build jobs leave it.
+  async function everyPlatformOnTheRelease() {
+    const github = await new GitHubDouble().start();
+    const release = github.addRelease(TAG);
+    for (const platform of ["linux", "macos", "windows"]) {
+      for (const artifact of JSON.parse((await run("just", [`release-${platform}`, "plan"])).stdout)
+        .artifacts) {
+        if (artifact.destination === "github-release") {
+          release.assets.push({
+            id: github.nextId++,
+            name: artifact.file,
+            content: Buffer.from(artifact.file),
+          });
+        }
+      }
+    }
+    return github;
+  }
+
+  async function publishWith(github, overrides) {
+    const before = github.writes().length;
+    const result = await run("just", ["release-publish", "publish"], {
+      env: releaseEnv(github, scratch("release-common"), {
+        PYPI_PUBLISH: "false",
+        NPM_PUBLISH: "false",
+        ...overrides,
+      }),
+    });
+    assert.equal(result.code, 1, said(result));
+    assert.equal(github.writes().length, before, "the Release was not written to, notes included");
+    return result;
+  }
+
+  it("refuses when PyPI fails or garbles its answer", async () => {
+    const github = await everyPlatformOnTheRelease();
+    const pypi = await new PyPIDouble().start();
+    try {
+      pypi.refuseNext("GET", /\/json$/, 500);
+      let result = await publishWith(github, { ...pypi.env(), PYPI_PUBLISH: "true" });
+      assert.match(result.stderr, /PyPI answered 500/);
+      pypi.refuseNext("GET", /\/json$/, 200, "not a release");
+      result = await publishWith(github, { ...pypi.env(), PYPI_PUBLISH: "true" });
+      assert.match(result.stderr, /is not the shape the service documents/);
+    } finally {
+      await Promise.all([github.stop(), pypi.stop()]);
+    }
+  });
+
+  it("refuses when npm cannot be asked", async () => {
+    const github = await everyPlatformOnTheRelease();
+    const npm = new Registry();
+    await npm.start();
+    const home = scratch("npm-home");
+    try {
+      npm.refuseWith(401);
+      const result = await publishWith(github, { ...npm.npmEnv(home), NPM_PUBLISH: "true" });
+      assert.match(result.stderr, /npm could not be asked about onepipeline-cli-/);
+    } finally {
+      await Promise.all([github.stop(), npm.stop()]);
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses when the crates.io index fails or garbles its answer", async () => {
+    const github = await everyPlatformOnTheRelease();
+    const crates = await new CratesDouble().start();
+    try {
+      crates.refuseNext("GET", /^\/index\//, 500);
+      let result = await publishWith(github, crates.env());
+      assert.match(result.stderr, /the crates\.io index answered 500/);
+      crates.refuseNext("GET", /^\/index\//, 200, "no version here");
+      result = await publishWith(github, crates.env());
+      assert.match(result.stderr, /the index entry for onepipeline is not the shape/);
+      assert.equal(crates.writes().length, 0);
+    } finally {
+      await Promise.all([github.stop(), crates.stop()]);
+    }
+  });
 });
 
 describe("a lock that links an engine twice", () => {
@@ -479,7 +671,10 @@ describe("the release outcome record", () => {
       env: releaseEnv(github, out, { LINUX_RESULT: "succeeded" }),
     });
     assert.equal(result.code, 1, said(result));
-    assert.match(result.stderr, /'succeeded' is not a job or step result GitHub reports/);
+    assert.match(
+      result.stderr,
+      /LINUX_RESULT is 'succeeded', not a job or step result GitHub reports/,
+    );
   });
 });
 

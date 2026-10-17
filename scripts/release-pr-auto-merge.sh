@@ -76,7 +76,9 @@ jq -n --arg id "$node" '{
   variables: {id: $id}
 }' >"$work/mutation"
 status="$(request -X POST -H "Content-Type: application/json" --data-binary "@$work/mutation" "$graphql")"
-if [ "$status" != 200 ] || ! jq -e '(.errors | length // 0) == 0 and .data.enablePullRequestAutoMerge.pullRequest.autoMergeRequest != null' "$work/body" >/dev/null 2>&1; then
+if [ "$status" != 200 ] || ! jq -e --argjson number "$number" '(.errors | length // 0) == 0
+      and .data.enablePullRequestAutoMerge.pullRequest.number == $number
+      and .data.enablePullRequestAutoMerge.pullRequest.autoMergeRequest.mergeMethod == "SQUASH"' "$work/body" >/dev/null 2>&1; then
   fail "GitHub refused auto-merge on release PR #$number (HTTP $status): $(jq -r '[.errors[]?.message] | join("; ")' "$work/body" 2>/dev/null || head -c 300 "$work/body")" \
     "allow auto-merge in the repository settings and check RELEASE_PLZ_TOKEN can write pull requests, then re-run the job"
 fi

@@ -37,7 +37,8 @@ name: Release
 #
 # PyPI and npm publish only while the PYPI_PUBLISH / NPM_PUBLISH repository
 # variables are 'true' — the operator's switch, so a fork does not publish — and
-# a registry switched on with an empty token is refused before anything builds.
+# a registry switched on with an empty token is refused before anything uploads.
+# Only the publish steps are handed the tokens.
 # The crate publishes while CARGO_REGISTRY_TOKEN is set.
 
 on:

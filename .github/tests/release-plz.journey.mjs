@@ -238,6 +238,9 @@ describe("release-plz.yml's job", () => {
 
   it("on an eligible push, prepares the version bump and the changelog, and asks to auto-merge", async () => {
     const repo = scratchRepository(mkdtempSync(join(base, "push-")));
+    // The release PR release-plz keeps open, beside an unrelated one.
+    github.addPull(41, "feat/unrelated");
+    github.addPull(42, "release-plz-2026-10-17T00-00-00Z");
     const before = github.requests.length;
     const { ran, calls } = await runJob({
       repo,
@@ -265,14 +268,21 @@ describe("release-plz.yml's job", () => {
     assert.match(changelog, /greet whoever runs it/);
     assert.equal(git(repo, "tag", "--list"), "v0.1.0", "no tag is created");
     assert.equal(git(repo, "remote"), "", "no remote exists, so none was written");
-    const asked = github.requests.slice(before);
-    assert.ok(
-      asked.some((r) => r.path.endsWith("/pulls") && r.method === "GET"),
-      "the auto-merge step looked for the release PR",
+    assert.ok(github.requests.slice(before).some((r) => r.path.endsWith("/pulls")));
+    assert.equal(github.graphql.length, 1, "one request to merge");
+    assert.match(github.graphql[0].query, /enablePullRequestAutoMerge/);
+    assert.equal(github.graphql[0].variables.id, "PR_node_42");
+    assert.deepEqual(
+      github.pulls.map((p) => [p.number, p.autoMerge ?? null]),
+      [
+        [41, null],
+        [42, "SQUASH"],
+      ],
     );
     assert.deepEqual(
       github.writes().filter((r) => r.path !== "/graphql"),
       [],
+      "nothing else was written",
     );
   });
 
