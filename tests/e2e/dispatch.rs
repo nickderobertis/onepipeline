@@ -898,16 +898,12 @@ fn a_dispatchs_scratch_directory_reaches_the_turn_the_library_backend_runs() {
         world.dump()
     );
     assert!(
-        at.is_dir(),
-        "the turn was handed {}, which is not a directory that exists\n{}",
-        at.display(),
-        world.dump()
+        !at.exists(),
+        "settled scratch still exists: {}",
+        at.display()
     );
-    std::fs::write(
-        at.join("written"),
-        "by a journey standing where the turn stood",
-    )
-    .unwrap_or_else(|error| panic!("{} is not writable: {error}", at.display()));
+    assert!(!world.run_file("scratch", "scratch").exists());
+    assert_eq!(world.events_of("scratch", "scratch-removed").len(), 1);
 }
 
 /// Every reading a turn took of the scratch directory it was given, as
@@ -1024,13 +1020,10 @@ fn concurrent_dispatches_each_hold_their_own_scratch_directory_throughout() {
             "{job} was given {at:?}, which is not absolute"
         );
         assert!(
-            at.is_dir(),
-            "{job}'s scratch directory {} is gone\n{}",
-            at.display(),
-            world.dump()
+            !at.exists(),
+            "settled scratch still exists: {}",
+            at.display()
         );
-        std::fs::write(at.join("read-back"), job)
-            .unwrap_or_else(|error| panic!("{} is not writable: {error}", at.display()));
         each.push(at);
     }
     assert_ne!(
@@ -3924,6 +3917,27 @@ fn the_codex_double_answers_each_exec_line_oneharness_builds_and_refuses_each_it
             "-",
         ][..],
         &["exec", "resume", "thread-1", "--json", "Do build."][..],
+        &[
+            "exec",
+            "-c",
+            "features.plugins=false",
+            "--json",
+            "Do build.",
+        ][..],
+        &["exec", "-c", "features.plugins=true", "--json", "Do build."][..],
+        &[
+            "exec",
+            "-c",
+            "features.plugins=false",
+            "-c",
+            "features.apps=false",
+            "-c",
+            "analytics.enabled=false",
+            "-c",
+            "model_catalog_json=\"/catalog.json\"",
+            "--json",
+            "Do build.",
+        ][..],
     ] {
         let answered = sent(argv);
         let said = String::from_utf8_lossy(&answered.stdout).to_string();
@@ -3986,6 +4000,14 @@ fn the_codex_double_answers_each_exec_line_oneharness_builds_and_refuses_each_it
             "two were sent",
         ),
         (&["exec", "--json"][..], "no prompt"),
+        (
+            &["exec", "-c", "model=o3", "--json", "Do build."][..],
+            "no setting \"model=o3\"",
+        ),
+        (
+            &["exec", "--json", "Do build.", "-c"][..],
+            "-c takes a setting",
+        ),
     ] {
         let refused = sent(argv);
         let said = String::from_utf8_lossy(&refused.stderr).to_string();
@@ -4027,7 +4049,7 @@ fn turns_dispatched(world: &World, run: &str, node: &str, step: Option<&str>) ->
         .as_str()
         .expect("the sibling publishes the config it launched the member with");
     let text = std::fs::read_to_string(config).expect("that configuration is on disk");
-    let effective: Value = serde_norway::from_str(&text).expect("it parses");
+    let effective: Value = onepipeline_testfakes::yaml::from_str(&text).expect("it parses");
     effective["user"]["max_turns"]
         .as_u64()
         .unwrap_or_else(|| panic!("{config} states no turn ceiling: {text}"))
@@ -4189,7 +4211,7 @@ fn settled_report(world: &World, run: &str) -> Value {
 
 /// The provider block onejudge read the dispatch of the worker in `run` from.
 fn provider_block(world: &World, run: &str) -> Value {
-    let effective: Value = serde_norway::from_str(&config_of(world, run, "worker"))
+    let effective: Value = onepipeline_testfakes::yaml::from_str(&config_of(world, run, "worker"))
         .expect("the member's effective onejudge config parses");
     effective["provider"].clone()
 }

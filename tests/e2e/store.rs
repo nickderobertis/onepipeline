@@ -912,9 +912,10 @@ fn amend(path: &std::path::Path, edit: impl FnOnce(&mut serde_json::Map<String, 
         .split_once("---\n")
         .expect("a store document closes its front matter");
     let mut parsed: serde_json::Map<String, Value> =
-        serde_norway::from_str(front).expect("the front matter is YAML");
+        onepipeline_testfakes::yaml::from_str(front).expect("the front matter is YAML");
     edit(&mut parsed);
-    let rendered = serde_norway::to_string(&parsed).expect("the front matter renders");
+    let rendered =
+        onepipeline_testfakes::yaml::to_string(&parsed).expect("the front matter renders");
     std::fs::write(path, format!("---\n{rendered}---\n{body}")).expect("the document is written");
 }
 
@@ -2446,9 +2447,13 @@ fn a_projection_that_keeps_failing_is_retried_further_and_further_apart() {
          operator watching the board would notice",
         waited[0]
     );
+    // Strictly longer rather than some multiple: every interval read here also carries one
+    // attempt's own runtime and the poll's lag, which on a loaded Windows runner came to about
+    // half a second and read the quarter-second first step as 703ms against a second of 899ms.
+    // How far the schedule grows is the next assertion's, read where that overhead is small.
     for pair in waited.windows(2) {
         assert!(
-            pair[1] >= pair[0] * 2,
+            pair[1] > pair[0],
             "the destination was asked again after {:?} and then after {:?}, which is not a \
              schedule that grows: {waited:?}",
             pair[0],
@@ -4421,8 +4426,9 @@ fn assertions(source: &str) -> Vec<String> {
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 
-/// Enabling the source cache changes neither unpinned plan reads nor settlement
-/// projections, including a failed settlement followed by recovery.
+/// Enabling the source cache changes neither unpinned plan reads — a project read by
+/// `plan check` and by the launch — nor settlement projections, including a failed
+/// settlement followed by recovery.
 #[test]
 fn a_cache_enabled_github_store_reads_and_writes_like_an_uncached_store() {
     use crate::linear_writeback::{
@@ -4451,6 +4457,38 @@ fn a_cache_enabled_github_store_reads_and_writes_like_an_uncached_store() {
             "sources:\n  board:\n    plugin: github-projects\n    cache:\n      enabled: {enabled}\n      dir: cache\n    config:\n      owner: generic\n      project_number: 1\n      token_env: ONEPIPELINE_LOOPBACK_BOARD_TOKEN\n      endpoint: {}/graphql\n      status_mapping:\n        todo: Todo\n        queued: Queued\n        in-progress: In Progress\n        unknown: Needs Attention\n        done: Done\n        cancelled: Canceled\n",
             served.url
         )).expect("store configuration");
+        // One project read through the engine's own plan loader, twice: an unpinned read
+        // is never answered from the cache, so the second costs what the first did.
+        let project_reads: Vec<_> = (0..2)
+            .map(|_| {
+                let before = served.state()["requests"]
+                    .as_array()
+                    .expect("requests")
+                    .len();
+                let checked = from_the_launch_directory(
+                    &world,
+                    &launch,
+                    &["plan", "check", "board:plan", "--json"],
+                )
+                .output()
+                .expect("plan check runs");
+                assert_eq!(
+                    checked.status.code(),
+                    Some(0),
+                    "{}",
+                    String::from_utf8_lossy(&checked.stderr)
+                );
+                let report: Value =
+                    serde_json::from_slice(&checked.stdout).expect("plan check --json is JSON");
+                let state = served.state();
+                let requests = state["requests"].as_array().expect("requests")[before..]
+                    .iter()
+                    .map(|request| request["query"].clone())
+                    .collect::<Vec<_>>();
+                assert!(!requests.is_empty(), "the project read reached the board");
+                (report, requests)
+            })
+            .collect();
         let start =
             from_the_launch_directory(&world, &launch, &["start", "board:plan", "--detach"]);
         world.run_on(start, "start --detach").exited(0);
@@ -4563,6 +4601,7 @@ fn a_cache_enabled_github_store_reads_and_writes_like_an_uncached_store() {
         assert_eq!(result["state"], "complete", "{result}");
         let state = served.state();
         (
+            project_reads,
             state["issues"].clone(),
             state["requests"].as_array().expect("requests").len(),
             costs,

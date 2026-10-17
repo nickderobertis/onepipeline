@@ -167,6 +167,9 @@ pub struct Cli {
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 #[command(rename_all = "kebab-case")]
 pub enum Command {
+    /// Manage dispatch scratch of ended runs.
+    #[command(subcommand)]
+    Scratch(ScratchCommand),
     /// Execute a plan: drive its DAG continuously to settlement.
     Start(StartArgs),
     /// Read a plan without launching it.
@@ -1764,6 +1767,16 @@ pub struct TelemetryArgs {
     /// Print `--changes` as its JSON document.
     #[arg(long, requires = "changes")]
     pub json: bool,
+}
+
+/// Manager actions on dispatch scratch.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum ScratchCommand {
+    /// Remove the scratch of one ended, undriven run.
+    Discard {
+        /// The run id under the runs root.
+        run: String,
+    },
 }
 
 /// Arguments for an explicit, non-interactive review discovery pass.

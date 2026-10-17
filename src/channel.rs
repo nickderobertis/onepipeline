@@ -748,7 +748,7 @@ pub enum Command {
     /// labelled `declined` in its marker, before the edit commits as
     /// `decline-applied`. The posted reply is the decline's whole record; nothing
     /// is written to the plan store, no branch moves and no worker is dispatched.
-    /// See `docs/contract-divergences.md` entry 127.
+    /// See `docs/contract-divergences.md` entry 129.
     Decline {
         /// The node whose draft carries the comments.
         id: String,
@@ -766,7 +766,7 @@ pub enum Command {
 /// read of the node found is named again once `onepipeline review` has read it, a
 /// blank reason is restated, a comment a reply already answers needs nothing, and
 /// a decline whose replies did not all reach the host is sent again, posting only
-/// the ones still missing. See `docs/contract-divergences.md` entry 127.
+/// the ones still missing. See `docs/contract-divergences.md` entry 129.
 // llmlint: ignore-block[invalid_states_unrepresentable] node and comment ids and URLs are the strings the `decline` op carried and the host answered, as every other channel record carries them; this is a refusal's account of them, never parsed back into a decision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]

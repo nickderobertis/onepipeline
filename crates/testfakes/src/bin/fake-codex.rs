@@ -11,10 +11,12 @@
 //! cleanly, so only the structured error can classify the attempt as failed.
 //!
 //! It speaks the `codex exec` line oneharness builds — `codex exec [resume ID]
-//! [--dangerously-bypass-approvals-and-sandbox | --sandbox read-only|
-//! workspace-write] [--model M] [--json] (PROMPT | -)` — and refuses any other,
-//! so a line oneharness starts sending that this double does not speak is a
-//! refusal a journey reads rather than an argument it silently swallows.
+//! [-c features.plugins=false|true] [-c features.apps=false|true]
+//! [-c analytics.enabled=false|true] [-c model_catalog_json=PATH] [--dangerously-bypass-approvals-and-sandbox |
+//! --sandbox read-only|workspace-write] [--model M] [--json] (PROMPT | -)` — and
+//! refuses any other, so a line oneharness starts sending that this double does
+//! not speak is a refusal a journey reads rather than an argument it silently
+//! swallows.
 
 use onepipeline_testfakes as fake;
 use std::process::ExitCode;
@@ -51,6 +53,16 @@ fn main() -> ExitCode {
 // that is not below is a refusal there rather than a double that reads differently.
 const SANDBOXES: [&str; 2] = ["read-only", "workspace-write"];
 
+/// The `-c` settings oneharness starts every Codex launch with, in either state.
+const SETTINGS: [&str; 6] = [
+    "features.plugins=false",
+    "features.plugins=true",
+    "features.apps=false",
+    "features.apps=true",
+    "analytics.enabled=false",
+    "analytics.enabled=true",
+];
+
 /// Whether `args` is a `codex exec` line oneharness builds, or why it is not.
 ///
 /// The verb first, then its options in any order, then exactly one prompt —
@@ -82,6 +94,16 @@ fn declared(args: &[String]) -> Result<(), String> {
                     .ok_or("codex's --sandbox takes a value, and nothing followed it")?;
                 if !SANDBOXES.contains(&sandbox) {
                     return Err(format!("codex takes no sandbox {sandbox:?}"));
+                }
+            }
+            // The config overrides oneharness sends: Codex's plugins, apps and
+            // analytics, each off unless the run opted in, and the shared model catalog.
+            "-c" => {
+                let setting = rest
+                    .next()
+                    .ok_or("codex's -c takes a setting, and nothing followed it")?;
+                if !SETTINGS.contains(&setting) && !setting.starts_with("model_catalog_json=") {
+                    return Err(format!("codex takes no setting {setting:?} here"));
                 }
             }
             "--model" => {

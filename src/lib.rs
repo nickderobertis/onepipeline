@@ -122,6 +122,7 @@ mod vcs;
 mod watch;
 mod watchers;
 mod writeback;
+mod yaml;
 
 pub use error::{Error, Result};
 
@@ -162,3 +163,5 @@ pub fn run(cli: cli::Cli) -> Result<i32> {
     flow::take_inherited();
     driver::dispatch(cli)
 }
+
+mod scratch;

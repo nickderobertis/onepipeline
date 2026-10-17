@@ -931,9 +931,23 @@ pub struct Writeback {
     per_item: NonZeroU64,
     /// The claim this driver writes on the project, once it has made one.
     held: Mutex<Option<crate::payload::DriverClaim>>,
-    /// The claim of the run that took the project over, once one has: from then on this
-    /// driver writes nothing more to it, its board being that run's. Set once, never cleared.
-    retired: std::sync::OnceLock<crate::payload::DriverClaim>,
+    /// Whose board the project is: this driver's, or — once another run has taken it over —
+    /// that run's, while this one hands it over and then for good.
+    board: Mutex<Board>,
+}
+
+/// Whose board a driver's projections write to.
+#[derive(Debug, Clone, PartialEq)]
+enum Board {
+    /// This driver's: it writes its claim and, at closeout, its release.
+    Driving,
+    /// Another run has taken the project over and waits on this driver: what it projects
+    /// now — what it settled, so that run starts from it — never writes the claim, and none
+    /// of it is a closeout's release.
+    HandingOver,
+    /// The run that took the project over, by its claim: this driver writes nothing more to
+    /// it. Never left.
+    Retired(crate::payload::DriverClaim),
 }
 
 impl Writeback {
@@ -962,7 +976,7 @@ impl Writeback {
             pending,
             per_item,
             held: Mutex::new(None),
-            retired: std::sync::OnceLock::new(),
+            board: Mutex::new(Board::Driving),
         };
         // The project is retained in each snapshot rather than in the worker so a malformed
         // old launch record disables projection without weakening LaunchRecord's compatibility.
@@ -991,6 +1005,7 @@ impl Writeback {
             .lock()
             .ok()
             .and_then(|held| held.clone())
+            .filter(|_| !self.is_handing_over())
             .map_or(DriverWrite::Leave, DriverWrite::Hold);
         if let Some(snapshot) = snapshot_of(paths, launch, state, statuses, Claim::Held, driver) {
             self.queue(snapshot);
@@ -1008,11 +1023,46 @@ impl Writeback {
     /// Write nothing more to the project: another run has taken it over, and what this
     /// driver projected after that would be written over that run's own.
     pub(crate) fn retire(&self, by: &crate::payload::DriverClaim) {
-        let _ = self.retired.set(by.clone());
+        if let Ok(mut board) = self.board.lock() {
+            if !matches!(*board, Board::Retired(_)) {
+                *board = Board::Retired(by.clone());
+            }
+        }
         let (lock, ready) = &*self.pending;
         if let Ok(mut pending) = lock.lock() {
             pending.latest = None;
             ready.notify_all();
+        }
+    }
+
+    /// Another run has taken the project over and starts on what this driver leaves on the
+    /// board: go on projecting what this driver settles, but never its claim — the queued
+    /// projection included — and no closeout's release.
+    pub(crate) fn hand_over(&self) {
+        if let Ok(mut board) = self.board.lock() {
+            if *board == Board::Driving {
+                *board = Board::HandingOver;
+            }
+        }
+        let (lock, _) = &*self.pending;
+        if let Ok(mut pending) = lock.lock() {
+            if let Some(latest) = pending.latest.as_mut() {
+                latest.driver = DriverWrite::Leave;
+            }
+        }
+    }
+
+    fn is_handing_over(&self) -> bool {
+        self.board
+            .lock()
+            .is_ok_and(|board| *board == Board::HandingOver)
+    }
+
+    /// Wait, at most `within`, for every projection this driver handed the worker to land.
+    pub(crate) fn wait_until_landed(&self, within: Duration) {
+        let deadline = Instant::now() + within;
+        while self.still_landing() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
         }
     }
 
@@ -1025,7 +1075,9 @@ impl Writeback {
 
     /// Whether another run took the project over, so this driver writes nothing more to it.
     pub(crate) fn is_retired(&self) -> bool {
-        self.retired.get().is_some()
+        self.board
+            .lock()
+            .is_ok_and(|board| matches!(*board, Board::Retired(_)))
     }
 
     /// The same, for the snapshot a closeout projects: a node that never started is written
@@ -1037,7 +1089,7 @@ impl Writeback {
         state: &RunState,
         statuses: &BTreeMap<String, NodeStatus>,
     ) {
-        if self.is_retired() {
+        if self.is_retired() || self.is_handing_over() {
             return;
         }
         let driver = DriverWrite::Release {
@@ -1418,6 +1470,100 @@ fn launch_wait(per_item: NonZeroU64, pending: &Pending) -> Duration {
     .within()
 }
 
+/// The file in the run's directory a driver's worker holds locked for the whole of each
+/// attempt, from its first store call to its record.
+///
+/// An attempt's writes land in the store before the landed baseline says so, and a stop's
+/// release reads only the baseline: an item the worker created for a live `add` and had not
+/// yet recorded is one no id the run holds can find again. A driver ended inside that window
+/// left the item `queued` on the board, released by nothing. A stop therefore takes this lock
+/// before it signals the driver — see [`hold_landing`] — so the attempt in flight lands whole
+/// first, and the next one cannot start.
+const LANDING_LOCK_FILE: &str = "writeback-landing.lock";
+
+/// How often a stop looks again at a lock an attempt in flight holds.
+const LANDING_POLL: Duration = Duration::from_millis(50);
+
+fn landing_lock(run_dir: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(run_dir.join(LANDING_LOCK_FILE))
+}
+
+/// Hold the run's write-back still for a `stop`: wait for the driver's attempt in flight to
+/// land and be recorded, and keep the next from starting for as long as the answer is held.
+///
+/// Taken before the driver is signalled and held across [`release_stopped`], so the release
+/// reads a baseline naming every item the driver wrote. The wait is bounded by what one
+/// attempt carrying every lineage of the run is allowed, and said on standard error while it
+/// lasts; past it, or where the lock cannot be taken at all, the stop goes on unheld, as a
+/// stop did before the lock existed, and says so. `None` is that: nothing is held.
+pub(crate) fn hold_landing(paths: &RunPaths, launch: &LaunchRecord) -> Option<std::fs::File> {
+    // A launch naming no project has no write-back to wait for.
+    if launch.project.parse::<QualifiedId>().is_err() {
+        return None;
+    }
+    let file = match landing_lock(&paths.dir) {
+        Ok(file) => file,
+        // llmlint: ignore-block[changed_behavior_has_e2e] a run directory the stopping process
+        // cannot open a file in is one whose `run-stopped` it cannot journal either, so the
+        // stop fails a moment later whatever this arm does; no journey arranges it.
+        Err(error) => {
+            eprintln!(
+                "onepipeline: run '{}': the write-back's {LANDING_LOCK_FILE} cannot be opened \
+                 ({error}); the driver is stopped without waiting for a projection it may be \
+                 landing",
+                paths.run
+            );
+            return None;
+        } // llmlint: ignore-end[changed_behavior_has_e2e]
+    };
+    // The bound is sized only once an attempt is found holding the lock. Sizing it folds the
+    // run's journal, and a stop of a run nothing is landing for — every run a teardown of a
+    // host-sized root stops — takes the lock at once and must read nothing more than it did
+    // before the lock existed.
+    let mut waiting: Option<(Duration, Instant)> = None;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Some(file),
+            Err(std::fs::TryLockError::WouldBlock)
+                if waiting.is_none_or(|(_, until)| Instant::now() < until) =>
+            {
+                if waiting.is_none() {
+                    let bound = Deadline::Write {
+                        per_item: per_item_budget(launch),
+                        items: crate::checkpoint::Projected::open(paths).statuses().len(),
+                    }
+                    .within();
+                    eprintln!(
+                        "onepipeline: run '{}': waiting up to {} seconds for the write-back's \
+                         projection in flight to land before its driver is stopped",
+                        paths.run,
+                        bound.as_secs()
+                    );
+                    waiting = Some((bound, Instant::now() + bound));
+                }
+                std::thread::sleep(LANDING_POLL);
+            }
+            // llmlint: ignore-block[changed_behavior_has_e2e] an attempt holds the lock no longer
+            // than its own store deadlines, each of which cancels the call it bounds, so a
+            // journey reaching this arm would have to hold one store call past the sixty-second
+            // floor: the cancellation `writeback_budget` already drives.
+            Err(error) => {
+                eprintln!(
+                    "onepipeline: run '{}': the write-back's projection in flight could not be \
+                     waited out ({error}); its driver is stopped anyway, and an item it was \
+                     creating may be left claimed",
+                    paths.run
+                );
+                return None;
+            } // llmlint: ignore-end[changed_behavior_has_e2e]
+        }
+    }
+}
+
 /// Release what a run a `stop` ended had claimed and never started: one projection, in the
 /// stopping process, carrying exactly the unstarted nodes the landed baseline says are
 /// `queued` and writing each of them `todo`.
@@ -1613,6 +1759,18 @@ fn worker(
                 || member_sources(&store, &snapshot.project),
             )
         });
+        let landing = landing_lock(&run_dir).and_then(|file| file.lock().map(|()| file));
+        // llmlint: ignore-block[changed_behavior_has_e2e] a run directory the driver cannot open a
+        // file in is one it cannot write this attempt's record into either, a line below; the
+        // arm only says so and lands the attempt as one did before the lock existed, and no
+        // journey arranges a run directory its own driver cannot write.
+        if let Err(error) = &landing {
+            eprintln!(
+                "onetaskgraph write-back for '{}' could not hold {LANDING_LOCK_FILE}: {error}; \
+                 a stop made while this attempt lands may not release what it writes",
+                snapshot.project
+            );
+        } // llmlint: ignore-end[changed_behavior_has_e2e]
         let at = crate::sys::now_rfc3339();
         let started = Instant::now();
         let attempted = project(
@@ -1627,6 +1785,7 @@ fn worker(
             &run_dir,
             &ProjectionRecord::of(at, &snapshot.project, started.elapsed(), &attempted),
         );
+        drop(landing);
         let Attempted {
             items,
             result: attempt,
@@ -1896,6 +2055,16 @@ pub(crate) fn landed_claim(run_dir: &Path) -> Option<Value> {
 /// build cannot read, which may be one — so a read of it would be asked inside the wait.
 pub(crate) fn store_asked_to_wait(run_dir: &Path) -> bool {
     !matches!(AskedWait::kept(run_dir), Kept::Nothing)
+}
+
+/// How long the wait the run's store asked for has left: `None` where it asked for none, and
+/// the recheck of a kept wait this build cannot read where that is what is kept.
+pub(crate) fn store_wait_left(run_dir: &Path) -> Option<Duration> {
+    match AskedWait::kept(run_dir) {
+        Kept::Nothing => None,
+        Kept::Left(left) => Some(left),
+        Kept::Unreadable(_) => Some(UNREADABLE_WAIT_RECHECK),
+    }
 }
 
 /// How often a driver looks again at a kept wait it could not read, while it asks the store
@@ -2340,6 +2509,41 @@ fn carry_the_difference(
             let ours = matches!(&read, Ok(Some(claim)) if claim.names(run, host));
             if !ours {
                 let successor = !matches!(read, Ok(None));
+                // A run letting go has nothing of its own in progress, so it acknowledges the
+                // claim that took the project over where nothing has yet: a takeover waiting on
+                // a driver that never read it starts now, rather than waiting it out — or, over
+                // a claim stating no lease, waiting for good. Written before the baseline moves
+                // past this run's claim, so an attempt the store fails asks again.
+                let stored = match crate::continuation::acknowledgement_over(
+                    snapshot.project.as_str(),
+                    &metadata,
+                    run,
+                    host,
+                ) {
+                    Some(acknowledged) => {
+                        let named = MetadataKey::new(DRIVER_KEY.to_owned()).map_err(|why| {
+                            Failed::from(format!("project key '{DRIVER_KEY}': {why}"))
+                        })?;
+                        attempt
+                            .call(
+                                StoreCall::ProjectMetadataSet,
+                                Deadline::Floor,
+                                attempt.engine.set_project_metadata(
+                                    &snapshot.project.global(),
+                                    &named,
+                                    &acknowledged,
+                                ),
+                            )?
+                            .map_err(|error| Failed::engine(PROJECT_METADATA_SET, &error))?;
+                        eprintln!(
+                            "onepipeline: run '{run}' let go of {} and acknowledged the run that \
+                             took it over",
+                            snapshot.project.as_str()
+                        );
+                        acknowledged
+                    }
+                    None => stored,
+                };
                 baseline
                     .landed
                     .project_metadata
@@ -2704,6 +2908,11 @@ fn create(
         )
         .map_err(|failed| carrying.failed(failed))?
         .map_err(|error| carrying.failed(Failed::engine(PROJECT_COPY, &error)))?;
+    // The items are on the board and the baseline does not say so yet: the window a stop
+    // waits out through [`hold_landing`].
+    if let Err(error) = crate::ordering::meet("ONEPIPELINE_TEST_PROJECTION_LANDED_GATE") {
+        eprintln!("{error}");
+    }
     let counted = actions(&report);
     let into = carrying.actions();
     into.created = into.created.saturating_add(counted.created);
@@ -3105,9 +3314,7 @@ fn shadow_origin(path: &Path) -> Option<GlobalId> {
         .strip_prefix("---\n")
         .and_then(|rest| rest.split_once("\n---\n"))
         .ok_or_else(|| "it opens and closes no front matter".to_owned())
-        .and_then(|(front, _)| {
-            serde_norway::from_str::<Value>(front).map_err(|error| error.to_string())
-        })
+        .and_then(|(front, _)| crate::yaml::from_str::<Value>(front))
         .and_then(|front| match &front["metadata"][GlobalId::ORIGIN_KEY] {
             Value::Null => Ok(None),
             Value::String(origin) => origin
@@ -3687,7 +3894,7 @@ struct ReworkProjected {
     // llmlint: ignore-end[invalid_states_unrepresentable]
     comments: Vec<crate::channel::ReworkComment>,
     /// The superseded node's settled head, so a host continuing the lineage can tell
-    /// the commits the rework added from the ones before it (entry 127). Omitted where
+    /// the commits the rework added from the ones before it (entry 129). Omitted where
     /// the run's record holds none.
     // llmlint: ignore[invalid_states_unrepresentable] copied from the run's own record, whose `heads` hold every node's settled head as the `String` the settlement carries — the crate has no commit-id type to hold it as — and the one reader of it, `continuation::rework_provenance`, refuses anything but a full commit id at the store's boundary.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3947,7 +4154,7 @@ fn task_document(
 /// place is truncated first, so a listing arriving in that window parses an empty file and
 /// reports the run's own board as malformed.
 fn document(path: &Path, front: &Value, body: &str) -> Result<(), String> {
-    let yaml = serde_norway::to_string(front).map_err(|e| e.to_string())?;
+    let yaml = crate::yaml::to_string(front)?;
     crate::ledger::write_atomic(
         path,
         format!("---\n{yaml}---\n{body}").as_bytes(),
@@ -5815,7 +6022,7 @@ mod tests {
             pending: Arc::new((Mutex::new(Pending::default()), Condvar::new())),
             per_item: DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS,
             held: Mutex::new(None),
-            retired: std::sync::OnceLock::new(),
+            board: Mutex::new(super::Board::Driving),
         };
         writeback.closing_out_until(Instant::now() + super::CLOSEOUT_WAIT, Pending::unlanded);
         assert!(
@@ -6407,7 +6614,7 @@ mod tests {
             .split_once("---\n")
             .expect("a projected document closes its front matter");
         (
-            serde_norway::from_str(front).expect("the front matter is YAML"),
+            crate::yaml::from_str(front).expect("the front matter is YAML"),
             body.to_owned(),
         )
     }
@@ -6526,6 +6733,156 @@ mod tests {
                     .join(format!("{}.md", super::task_file(node))),
             )
         }
+    }
+
+    /// What the base's write-back wrote for [`yaml_sensitive`], read back by the store, captured
+    /// there and committed.
+    const SHADOW_READ_BACK: &str =
+        include_str!("../tests/fixtures/real-documents/writeback-read-back.json");
+
+    /// The fixture with values a YAML writer could change the meaning of: words a YAML 1.1
+    /// reader takes for booleans, number-, date- and null-like strings, a title past the width
+    /// a folding writer folds at, flow indicators, comment marks and quotes, and multi-line
+    /// content holding blank and whitespace-only lines.
+    fn yaml_sensitive() -> Fixture {
+        let mut fixture = Fixture::new("yaml-sensitive");
+        let design = fixture
+            .snapshot
+            .nodes
+            .get_mut("design")
+            .expect("design exists");
+        design.title = Some(
+            "on: the 1.0 release — design it [carefully], {first}, # not a comment, and keep this \
+             one title well past eighty characters"
+                .to_owned(),
+        );
+        design.task = Some(
+            "## What\nyes\n\n  indented: 0012\n\t\n- no\n\n## Acceptance criteria\n- \
+                       \"quoted\" and 'single' — 2026-10-14\n"
+                .to_owned(),
+        );
+        let build = fixture
+            .snapshot
+            .nodes
+            .get_mut("build")
+            .expect("build exists");
+        build.title = Some("yes".to_owned());
+        build.task = Some("null".to_owned());
+        fixture.destination = destination(
+            "A person's own board: \"quoted\" # and on: yes",
+            &["planning", "on", "0012"],
+        );
+        fixture.destination.metadata.extend([
+            ("authored.on".to_owned(), json!("on")),
+            ("authored.number".to_owned(), json!("1e3")),
+            ("authored.date".to_owned(), json!("2026-10-14T00:00:00Z")),
+            ("authored.float".to_owned(), json!(1.5)),
+            ("authored.flag".to_owned(), json!(true)),
+            ("authored.none".to_owned(), Value::Null),
+            (
+                "authored.nested".to_owned(),
+                json!({"list": ["~", "0x1F", ""], "y": "n"}),
+            ),
+        ]);
+        fixture
+    }
+
+    /// A store answer as the values it read: less where on disk the document sits and the
+    /// digest of its bytes, which a writer may quote or fold differently for the same values.
+    fn read_value(item: impl serde::Serialize) -> Value {
+        let mut value = serde_json::to_value(item).expect("a store value serialises");
+        let fields = value.as_object_mut().expect("a store item is an object");
+        fields.remove("location");
+        fields.remove("version");
+        value
+    }
+
+    /// The shadow store's project and task documents, written by the real write-back from
+    /// [`yaml_sensitive`], read back by the linked `local-md` source to the values the base's
+    /// write-back produced, and edited in place by it — a task's status and metadata, the
+    /// project's metadata — leaving every other value as it read.
+    #[test]
+    fn the_shadow_documents_read_back_and_edit_in_place_as_the_base_wrote_them() {
+        let fixture = yaml_sensitive();
+        fixture.project();
+        let store = crate::taskgraph::Store::at(fixture.dir.to_path_buf());
+        let attempt = super::Attempt::open(&store, &fixture.snapshot)
+            .unwrap_or_else(|failed| panic!("{}", failed.reason));
+        let project = super::shadow_id(&super::project_file(&fixture.snapshot.project));
+        let read_project = || {
+            let answer = attempt
+                .runtime
+                .block_on(attempt.engine.project(&project))
+                .expect("the shadow source answers");
+            read_value(
+                super::shown(super::PROJECT_SHOW, &project, answer)
+                    .unwrap_or_else(|failed| panic!("{}", failed.reason))
+                    .item,
+            )
+        };
+        let read_task = |node: &str| {
+            let id = super::member_id(&fixture.snapshot, node);
+            let answer = attempt
+                .runtime
+                .block_on(attempt.engine.task(&id))
+                .expect("the shadow source answers");
+            read_value(
+                super::shown(super::TASK_SHOW, &id, answer)
+                    .unwrap_or_else(|failed| panic!("{}", failed.reason))
+                    .item,
+            )
+        };
+        let read = json!({
+            "project": read_project(),
+            "tasks": {"build": read_task("build"), "design": read_task("design")},
+        });
+        let expected: Value =
+            serde_json::from_str(SHADOW_READ_BACK).expect("the captured values are JSON");
+        assert_eq!(read, expected, "the shadow documents read back differently");
+
+        let design = super::member_id(&fixture.snapshot, "design");
+        let key = MetadataKey::new("authored.reviewed".to_owned()).expect("a metadata key");
+        let status = onetaskgraph_plugin_api::Status {
+            category: StatusCategory::Cancelled,
+            name: "cancelled".to_owned(),
+        };
+        attempt
+            .runtime
+            .block_on(attempt.engine.update_task(
+                &design,
+                &TaskUpdate {
+                    status: Some(status.clone()),
+                    metadata_set: BTreeMap::from([(key.clone(), json!("on"))]),
+                    ..TaskUpdate::default()
+                },
+            ))
+            .expect("the store edits the task document in place");
+        let mut edited = read["tasks"]["design"].clone();
+        edited["status"] = json!(status);
+        edited["metadata"]["authored.reviewed"] = json!("on");
+        assert_eq!(
+            read_task("design"),
+            edited,
+            "the edit changed more of the task than its status and one metadata key"
+        );
+
+        attempt
+            .runtime
+            .block_on(
+                attempt
+                    .engine
+                    .set_project_metadata(&project, &key, &json!("yes")),
+            )
+            .expect("the store edits the project document in place");
+        let mut edited = read["project"].clone();
+        edited["metadata"]["authored.reviewed"] = json!("yes");
+        let after = read_project();
+        assert_eq!(after["metadata"], edited["metadata"]);
+        assert_eq!(
+            (&after["title"], &after["content"], &after["labels"]),
+            (&edited["title"], &edited["content"], &edited["labels"]),
+            "the edit changed more of the project than one metadata key"
+        );
     }
 
     /// The same engine reads the stable local shadow again after each command ends.

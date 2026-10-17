@@ -261,11 +261,13 @@ pub enum PipelineKind {
     /// One pool-maintenance sweep an idle driver ran did something.
     ///
     /// Written once per sweep, and only where some slot ran, some identity was
-    /// `claimed` by another run, or some identity failed — a sweep on which every
+    /// `claimed` by another run, some identity's `onevcs.toml` was
+    /// `maintenance-unreadable`, or some identity failed — a sweep on which every
     /// identity answered `no-maintain-command`, `no-slots` or `not-due` writes
     /// nothing. Carries `started_at` and, per identity it records, the `every` it
-    /// was maintained on and the sibling's own `outcome` — per slot, what ran and
-    /// how it ended — or the `error` that stood in for one.
+    /// was maintained on and the sibling's own `outcome` — per slot, what ran, how
+    /// it ended and its worktree's `disk` around it — or the `error` that stood in
+    /// for one.
     PoolMaintenance,
     /// One live dispatch a host shutdown acted on: what its interrupt was
     /// answered with, and how it ended.
@@ -368,16 +370,17 @@ pub enum PipelineKind {
     /// Written by `start --take-over` beside its `run-started`, only where the
     /// project's `onepipeline.driver` named a claim; carries that claim whole as
     /// `previous` — its `run`, `host`, `session`, `pid` and `claimed_at`. The run it
-    /// names stops at its own next claim check. Entry 119 of
-    /// `docs/contract-divergences.md` records it.
+    /// names stops at its own next read of the claim. Entries 119 and 128 of
+    /// `docs/contract-divergences.md` record it.
     DriverTakenOver,
     /// A driver found its project claimed by another run, and stopped.
     ///
-    /// Written by the driver that read the claim, once, at the check that found
-    /// it — at launch or adoption, at the start of a pass that would dispatch or
-    /// publish, or on its idle check — carrying the claim it found as `by`. After
-    /// it the driver dispatches and publishes nothing, and ends once its
-    /// dispatches in flight have settled unpublished. Entry 119 records it.
+    /// Written by the driver that read the claim, once, at the read that found
+    /// it — at adoption, or at the read it makes once per claim interval —
+    /// carrying the claim it found as `by`. After it the driver dispatches and
+    /// publishes nothing, and once its dispatches in flight have settled
+    /// unpublished it acknowledges that claim and ends. Entries 119 and 128
+    /// record it.
     DriverSuperseded,
     /// A manager landing registered its ownership and subjects with its flow,
     /// before it drafted, forwarded or touched anything. Kept in the landing's
@@ -395,6 +398,10 @@ pub enum PipelineKind {
     /// A manager landing's process was proved gone with no ending recorded,
     /// written by the reader that proved it.
     LandingDied,
+    /// Dispatch scratch was removed at success or on request.
+    ScratchRemoved,
+    /// Dispatch scratch was measured and kept at a non-success ending or pause.
+    ScratchRetained,
 }
 
 impl PipelineKind {
@@ -463,6 +470,8 @@ impl PipelineKind {
             Self::LandingFinished => "landing-finished",
             Self::LandingRefused => "landing-refused",
             Self::LandingDied => "landing-died",
+            Self::ScratchRemoved => "scratch-removed",
+            Self::ScratchRetained => "scratch-retained",
         }
     }
 
@@ -554,6 +563,8 @@ pub const PIPELINE_KINDS: &[PipelineKind] = &[
     PipelineKind::LandingFinished,
     PipelineKind::LandingRefused,
     PipelineKind::LandingDied,
+    PipelineKind::ScratchRemoved,
+    PipelineKind::ScratchRetained,
 ];
 
 /// The id of a stored artifact.

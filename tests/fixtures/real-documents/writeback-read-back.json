@@ -1,0 +1,97 @@
+{
+  "project": {
+    "id": "706c616e733a626f617264",
+    "title": "A person's own board: \"quoted\" # and on: yes",
+    "content": "A person's own description.",
+    "status": {
+      "category": "backlog",
+      "name": "backlog"
+    },
+    "labels": [
+      {
+        "id": "planning",
+        "name": "planning",
+        "color": null
+      },
+      {
+        "id": "on",
+        "name": "on",
+        "color": null
+      },
+      {
+        "id": "0012",
+        "name": "0012",
+        "color": null
+      }
+    ],
+    "url": null,
+    "repositories": [],
+    "created_at": null,
+    "updated_at": null,
+    "metadata": {
+      "authored.date": "2026-10-14T00:00:00Z",
+      "authored.flag": true,
+      "authored.float": 1.5,
+      "authored.nested": {
+        "list": [
+          "~",
+          "0x1F",
+          ""
+        ],
+        "y": "n"
+      },
+      "authored.none": null,
+      "authored.note": "keep this value",
+      "authored.number": "1e3",
+      "authored.on": "on",
+      "authored.owner": "a person",
+      "onetaskgraph.origin": "plans:board"
+    }
+  },
+  "tasks": {
+    "build": {
+      "id": "706c616e733a626f617264/6275696c64",
+      "key": null,
+      "title": "yes",
+      "content": "null",
+      "status": {
+        "category": "done",
+        "name": "done"
+      },
+      "priority": "none",
+      "labels": [],
+      "project": "706c616e733a626f617264",
+      "url": null,
+      "repositories": [],
+      "created_at": null,
+      "updated_at": null,
+      "metadata": {
+        "onepipeline.id": "build",
+        "onepipeline.node": "build",
+        "onepipeline.persona": "engineer"
+      }
+    },
+    "design": {
+      "id": "706c616e733a626f617264/64657369676e",
+      "key": null,
+      "title": "on: the 1.0 release — design it [carefully], {first}, # not a comment, and keep this one title well past eighty characters",
+      "content": "## What\nyes\n\n  indented: 0012\n\t\n- no\n\n## Acceptance criteria\n- \"quoted\" and 'single' — 2026-10-14",
+      "status": {
+        "category": "done",
+        "name": "done"
+      },
+      "priority": "none",
+      "labels": [],
+      "project": "706c616e733a626f617264",
+      "url": null,
+      "repositories": [],
+      "created_at": null,
+      "updated_at": null,
+      "metadata": {
+        "onepipeline.id": "design",
+        "onepipeline.node": "design",
+        "onepipeline.persona": "engineer"
+      }
+    }
+  }
+}

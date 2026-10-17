@@ -1833,12 +1833,12 @@ fn as_an_older_build_wrote_it(world: &World) {
             }
             let rest = text.strip_prefix("---\n").expect("front matter");
             let (front, body) = rest.split_once("\n---\n").expect("front matter ends");
-            let mut front: Value = serde_norway::from_str(front).expect("front matter parses");
+            let mut front: Value = onepipeline_testfakes::yaml::from_str(front).expect("front matter parses");
             let record = front["metadata"]["onepipeline.rework"]
                 .as_object_mut()
                 .expect("a rework record");
             assert!(record.remove("replaces_head").is_some());
-            let front = serde_norway::to_string(&front).expect("front matter renders");
+            let front = onepipeline_testfakes::yaml::to_string(&front).expect("front matter renders");
             std::fs::write(&path, format!("---\n{front}---\n{body}"))
                 .expect("the document is written");
             rewritten += 1;

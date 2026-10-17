@@ -1,5 +1,5 @@
 {
-  "version": "1.5.0",
+  "version": "1.7.0",
   "description": "The agent stack's event envelope, filter, artifact reference and labels, and the payload of every onepipeline pipeline kind, as onepipeline declares them.",
   "schemas": [
     {
@@ -1640,7 +1640,7 @@
                 "description": "The decline's replies could not all be drafted or posted. Any posted before\nthe failure stay on the host, and sending the decline again posts only the\nrest."
               }
             ],
-            "description": "Why the reconciler refused a [`Command::Decline`], by kind.\n\nIts [`Display`](std::fmt::Display) is the refusal's `reason` on the command's\noutcome. The kinds are the ones a planner acts on differently: a comment no\nread of the node found is named again once `onepipeline review` has read it, a\nblank reason is restated, a comment a reply already answers needs nothing, and\na decline whose replies did not all reach the host is sent again, posting only\nthe ones still missing. See `docs/contract-divergences.md` entry 127."
+            "description": "Why the reconciler refused a [`Command::Decline`], by kind.\n\nIts [`Display`](std::fmt::Display) is the refusal's `reason` on the command's\noutcome. The kinds are the ones a planner acts on differently: a comment no\nread of the node found is named again once `onepipeline review` has read it, a\nblank reason is restated, a comment a reply already answers needs nothing, and\na decline whose replies did not all reach the host is sent again, posting only\nthe ones still missing. See `docs/contract-divergences.md` entry 129."
           }
         }
       }
@@ -4391,6 +4391,17 @@
               "claimed_at": {
                 "type": "string",
                 "description": "When the claim was written, RFC 3339."
+              },
+              "lease": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ClaimLease"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The terms the claiming driver's lease runs on, which a run taking the project over\nwaits out; absent from a claim written by a build that kept no lease."
               }
             },
             "required": [
@@ -4400,6 +4411,28 @@
               "claimed_at"
             ],
             "description": "A project's `onepipeline.driver` claim: the run driving it, the host and launching\nsession that run is driven from, its driver's pid, and when it claimed.\n\nThe document a journal record carries, and so no stricter than any other payload here;\nthe store's copy is external input, and `continuation::claim_of` refuses one carrying a\nkey this shape does not name before it is read as one."
+          },
+          "ClaimLease": {
+            "type": "object",
+            "properties": {
+              "interval_seconds": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 1,
+                "description": "The driver's claim interval, in whole seconds."
+              },
+              "cancel_grace_seconds": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 1,
+                "description": "The driver's cancel grace, in whole seconds."
+              }
+            },
+            "required": [
+              "interval_seconds",
+              "cancel_grace_seconds"
+            ],
+            "description": "The terms a claiming driver's lease runs on: how often it reads its claim, and how long\na dispatch its lease ends has to stop before it is killed."
           }
         }
       }
@@ -4448,6 +4481,17 @@
               "claimed_at": {
                 "type": "string",
                 "description": "When the claim was written, RFC 3339."
+              },
+              "lease": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ClaimLease"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The terms the claiming driver's lease runs on, which a run taking the project over\nwaits out; absent from a claim written by a build that kept no lease."
               }
             },
             "required": [
@@ -4457,6 +4501,28 @@
               "claimed_at"
             ],
             "description": "A project's `onepipeline.driver` claim: the run driving it, the host and launching\nsession that run is driven from, its driver's pid, and when it claimed.\n\nThe document a journal record carries, and so no stricter than any other payload here;\nthe store's copy is external input, and `continuation::claim_of` refuses one carrying a\nkey this shape does not name before it is read as one."
+          },
+          "ClaimLease": {
+            "type": "object",
+            "properties": {
+              "interval_seconds": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 1,
+                "description": "The driver's claim interval, in whole seconds."
+              },
+              "cancel_grace_seconds": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 1,
+                "description": "The driver's cancel grace, in whole seconds."
+              }
+            },
+            "required": [
+              "interval_seconds",
+              "cancel_grace_seconds"
+            ],
+            "description": "The terms a claiming driver's lease runs on: how often it reads its claim, and how long\na dispatch its lease ends has to stop before it is killed."
           }
         }
       }
@@ -4985,6 +5051,144 @@
               "branch"
             ],
             "description": "One branch a landing advances, in the identity it belongs to."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.scratch-removed@2",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "trigger": {
+            "$ref": "#/$defs/ScratchTrigger"
+          },
+          "dirs": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "bytes": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "failed": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/ScratchFailure"
+            }
+          }
+        },
+        "required": [
+          "trigger",
+          "dirs",
+          "bytes",
+          "failed"
+        ],
+        "description": "The scratch removed at one ending or manager request.",
+        "title": "ScratchRemoved",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "ScratchTrigger": {
+            "type": "string",
+            "enum": [
+              "success",
+              "discard"
+            ],
+            "description": "Why scratch is removed."
+          },
+          "ScratchFailure": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "$ref": "#/$defs/AbsolutePath"
+              },
+              "error": {
+                "$ref": "#/$defs/ScratchError"
+              }
+            },
+            "required": [
+              "path",
+              "error"
+            ],
+            "description": "A directory removal that the filesystem refused."
+          },
+          "AbsolutePath": {
+            "type": "string",
+            "pattern": "^(?:/|[A-Za-z]:[\\\\/]|\\\\\\\\[^\\\\]+\\\\[^\\\\]+)"
+          },
+          "ScratchError": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.scratch-retained@2",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "ending": {
+            "$ref": "#/$defs/ScratchEnding"
+          },
+          "dirs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/ScratchDir"
+            }
+          },
+          "total_bytes": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "ending",
+          "dirs",
+          "total_bytes"
+        ],
+        "description": "Scratch kept for inspection or retry.",
+        "title": "ScratchRetained",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "ScratchEnding": {
+            "type": "string",
+            "enum": [
+              "failed",
+              "unfinished",
+              "stopped",
+              "paused"
+            ],
+            "description": "A non-success ending or pause."
+          },
+          "ScratchDir": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "$ref": "#/$defs/AbsolutePath"
+              },
+              "bytes": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "path",
+              "bytes"
+            ],
+            "description": "A directory's allocated disk usage at an ending."
+          },
+          "AbsolutePath": {
+            "type": "string",
+            "pattern": "^(?:/|[A-Za-z]:[\\\\/]|\\\\\\\\[^\\\\]+\\\\[^\\\\]+)"
           }
         }
       }

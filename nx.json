@@ -125,6 +125,15 @@
       "{workspaceRoot}/clippy.toml",
       "{workspaceRoot}/rustfmt.toml"
     ],
+    "poolWorkloadSource": [
+      "rustBuild",
+      "{workspaceRoot}/tests/pool_workload/**/*",
+      "{workspaceRoot}/tests/e2e/harness.rs",
+      "{workspaceRoot}/personas/**/*",
+      "{workspaceRoot}/graphs/**/*",
+      "{workspaceRoot}/clippy.toml",
+      "{workspaceRoot}/rustfmt.toml"
+    ],
     "releaseCompatSource": [
       "rustBuild",
       "{workspaceRoot}/tests/release_channel/**/*",
@@ -223,6 +232,9 @@
     "release-compat": {
       "cache": false
     },
+    "workload": {
+      "cache": false
+    },
     "lint-llm-diff": {
       "cache": true,
       "inputs": [
@@ -250,6 +262,12 @@
       ]
     },
     "screenshots-bless": {
+      "cache": false
+    },
+    "budgets": {
+      "cache": false
+    },
+    "budgets-host": {
       "cache": false
     }
   }

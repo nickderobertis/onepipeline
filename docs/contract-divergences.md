@@ -11,14 +11,14 @@ owns the contract**, and `docs/contract.md` was amended to carry each ruling. Th
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22, 33, 35–40, 46–73, 76, 80, 84–88, 92, 93, 95, 98, 111, 113–115, 117, 119–126 are open**, except **52**, which entry 60
+Entries **10–22, 33, 35–40, 46–73, 76, 80, 84–88, 92, 93, 95, 98, 111, 113–115, 117, 119–127 are open**, except **52**, which entry 60
 supersedes: that proposal added a second manager-note op beside `context`, and 60
 collapses the two into one, so the shape lives in 60 and 52 keeps only the
 history that produced it. Each open entry states what the code does today and the
 proposal it is waiting on. Most are questions for a *producer* rather than for
 this crate, because `oneagentgraph` and `onevcs` are independent tools that expose
 general integration hooks only and nothing in them may know about this one; the
-rest — 36 to 40, 46 to 73, 80, 84 to 88, 92, 93, 95, 98, 111, 113 to 115, 117, 119–126 — are for the planner who owns the contract, and
+rest — 36 to 40, 46 to 73, 80, 84 to 88, 92, 93, 95, 98, 111, 113 to 115, 117, 119–127 — are for the planner who owns the contract, and
 name the sentence in it they would change. Entry 40 is for both: its plan-schema and event-kind
 halves are the contract owner's, and the two things it could not compile are
 `onevcs`'s. Entry 76 is for `onemessagebus` and for a node of this crate's own. An
@@ -7756,6 +7756,11 @@ pass a closing driver stopped at an identity boundary.
 **A node pinned to a branch a pass retired still dispatches**: `onevcs` cuts the named
 branch fresh from the base.
 
+**The maintenance record beside it.** The `pool-maintenance` record the same sweep journals
+for its maintenance pass is written on entry 97's condition, which since `onevcs` 0.50.0
+also covers an identity answered `maintenance-unreadable`, and its per-identity payload is
+that library's report unchanged, each `ran` slot carrying its `disk`.
+
 Driven end to end by `tests/e2e/retirement.rs` against the linked `onevcs` over real git
 and a bare origin: the recording on each of the three landing paths, with the first
 attempt's branch then classified `superseded-with-changes` by that library while it still
@@ -8081,6 +8086,28 @@ maintenance pass was cut short, `branches-retired` is written with empty `retire
 and every enumerated identity unreached; where the identities could not be enumerated, the
 `error` record is written with no `cut_short`. `results` renders the cut on the
 `pool-maintenance` lines it prints. Reversing this costs one optional key on two documents.
+
+**Since `onevcs` 0.50.0: one more record condition, and the freed bytes.** A proposal to
+the planner who owns the contract, carried by the plan that linked that release;
+`docs/contract.md`'s record clause is unchanged until that ruling. That release runs the
+maintenance command a repository declares in its own `onevcs.toml`, read from its
+publication checkout's base, before the host's `maintain`; a declaration it cannot read runs
+nothing and answers `IdentityOutcome::MaintenanceUnreadable`. So a `pool-maintenance` record
+is journalled when some slot `ran`, is `unavailable` or is `broken`, or some identity was
+`claimed`, failed, or answered `maintenance-unreadable` — the last because that repository's
+cleanup has stopped and nothing else would say so. A pass in which nothing ran and nothing
+went wrong still writes nothing. The per-identity payload is still the sibling's own
+`IdentityOutcome` as it serializes it, so the new outcome reads
+`{"maintenance-unreadable": {"reason": …}}` and every `ran` slot carries `disk`,
+`{"before_bytes", "after_bytes"}` — its worktree's allocated bytes immediately before and
+after the command — or `null` where a measure failed. `outcome` was already that library's
+JSON, so `agent.pipeline.pool-maintenance@2` keeps its version. `results` prints, directly
+under the sweep's header, `pool maintenance: freed <X.X> GiB across <n> slot(s) (<name> <X.X>
+GiB, …)` for a pass in which some slot's `before_bytes` exceeds its `after_bytes` — counting
+only those slots, naming each identity by its key's last path segment with its slots summed,
+largest first — and `<identity> — maintenance unreadable: <reason>` among the per-identity
+lines. `tests/e2e/maintenance.rs` drives each condition, the freed line, a slot that grew and
+one whose `disk` is `null` over real pooled slots.
 
 **Where it is held.** `tests/e2e/maintenance.rs`'s
 `a_closing_driver_stops_its_sweep_after_the_identity_in_progress` settles a run inside the
@@ -9916,6 +9943,9 @@ cannot be launched.
 
 ### The supersession check
 
+*Entry 128 replaces when this check reads the claim, and adds the takeover's wait and the
+acknowledgement; what follows is what this entry proposed.*
+
 A live driver reads the claim at launch — the launch's own read, which refused or
 admitted it, covers its driver's first pass — and at adoption, before its first
 projection; once at the start of each pass that would dispatch or publish — at the first dispatch
@@ -9949,8 +9979,8 @@ no such guard — each host cuts its branch under its own prefix — so two host
 first-publishing one node at the same instant can each open one; that is an accepted
 limit, by the manager's ruling.
 
-**A test seam.** `ONEPIPELINE_IDLE_CLAIM_CHECK_SECONDS` shortens the 600-second idle
-check, in whole seconds. It exists so a journey can show an idle driver noticing a
+**A test seam.** *Retired by entry 128, whose setting replaces it.*
+`ONEPIPELINE_IDLE_CLAIM_CHECK_SECONDS` shortened the 600-second idle check, in whole seconds. It exists so a journey can show an idle driver noticing a
 takeover without waiting ten minutes; nothing an operator configures sets it.
 
 **What would close it.** A ruling adding the read settlement, the two keys, the
@@ -10015,10 +10045,9 @@ a fresh `ONEVCS_HOME` and a `HOSTNAME` of its own:
   `a_launch_whose_store_cannot_be_read_is_refused_rather_than_read_as_unclaimed`,
   `a_successors_claim_survives_the_closeout_and_the_stop_of_the_run_it_took_over` and
   `an_adoption_after_a_takeover_supersedes_before_it_projects_or_dispatches`;
-- supersession: `a_superseded_driver_reads_the_claim_at_the_pass_that_would_dispatch_and_dispatches_nothing`,
-  `a_pass_that_dispatches_three_nodes_reads_the_claim_once` (the store's own count of
-  project reads), `a_superseded_driver_publishes_nothing_after_the_check_but_finishes_a_publication_under_way`,
-  `an_idle_superseded_driver_notices_within_one_idle_check_and_publishes_nothing`, and
+- supersession, as entry 128 now has it: `a_superseded_driver_starts_nothing_once_it_has_read_the_takeover`,
+  `a_pass_that_dispatches_three_nodes_reads_the_store_for_none_of_them` (the store's own
+  count of project reads), `a_superseded_driver_notices_within_one_interval_and_publishes_nothing`, and
   `two_cold_hosts_launching_one_project_at_once_leave_one_driver_and_every_draft_alone`.
 
 `tests/e2e/store.rs`'s two relaunch journeys now continue what they relaunch, the
@@ -10161,7 +10190,7 @@ Warm and cold are the design targets; the 10x bound is a temporary relaxation fr
 its 0.5 s design target, by the user's ruling of 2026-10-11 to land now, and a
 later gap-closing run owns the remaining 10x warm cost. Each was last measured on
 onevcs 0.48.0, whose decision read reads only the sessions the launcher label
-selects (onevcs #356, first released in 0.45.0); this build links 0.48.1, on which
+selects (onevcs #356, first released in 0.45.0); this build links 0.52.0, on which
 none was re-measured.
 
 ```json
@@ -10527,9 +10556,10 @@ and JSON results renderer to their SDK calls. `tests/contract.rs`'s
 above, and the recorded `review-comments-read` in `tests/recorded/pipeline-kinds.jsonl`
 comes from the discovery journey.
 
-The planner's dependency ruling retains `onevcs` 0.48.1 and `onevcs-testing` 0.17.0:
-those releases already carry this API; testing 0.18.0 requires onevcs 0.49.0 and
-would resolve a second engine under this manifest's unchanged pin.
+The planner's dependency ruling retained `onevcs` 0.48.1 and `onevcs-testing` 0.17.0
+for this change: those releases already carry this API; testing 0.18.0 requires
+onevcs 0.49.0 and would have resolved a second engine under the manifest's pin of the
+time. The link has since moved to `onevcs` 0.52.0 and `onevcs-testing` 0.19.4.
 
 ## 123. A manager's own landing could die or block with nothing holding its session — OPEN
 
@@ -10902,7 +10932,7 @@ branch on the origin and its verdict off its first trigger's read.
 per group and one `retarget_change` or `reopen_change` call per affected change request,
 none bypassing `onevcs`; a retarget writes the description the driver's own batched
 read returned, which a whole-journal re-fold keeps, and a draft no such read answered is
-left owed rather than read alone. Inside each call the linked `onevcs` 0.51.2 — whose two calls
+left owed rather than read alone. Inside each call the linked `onevcs` 0.52.0 — whose two calls
 are unchanged since 0.49.0 — makes its own: a
 `retarget_change` two single-change standings reads (before and after its write) and
 the repository's visibility read its write guard makes; a `reopen_change` two
@@ -10932,9 +10962,9 @@ verdict. The host-call bounds are asserted on its recorded `gh` invocations. The
 journeys keep reading feedback from `onevcs-testing`'s `FileHost` through `fake-gh`'s
 GraphQL adapter.
 
-**A test seam.** The idle journey shortens the idle claim interval through
-`ONEPIPELINE_IDLE_CLAIM_CHECK_SECONDS`, entry 119's seam; nothing an operator
-configures sets it.
+**A test seam.** The idle journey shortened the idle claim interval through
+`ONEPIPELINE_IDLE_CLAIM_CHECK_SECONDS`, entry 119's seam; entry 128 retires it, and the
+journey shortens the claim interval through that entry's setting instead.
 
 ```json
 {
@@ -11023,7 +11053,358 @@ reads it green. `tests/contract.rs`'s `the_readjustment_is_what_the_divergence_r
 holds the block above against the public types, the registered documents and the
 published bundles.
 
-## 127. A reviewer was never answered where they left a comment — OPEN
+## 127. Dispatch scratch accumulated for the lifetime of the run directory — OPEN
+
+**Departure.** Divergence 48 says dispatch scratch is thrown away with the run.
+Run directories retain journals and reports indefinitely, so scratch never ended.
+
+**Proposal, approved for the scratch-reclamation plan.** A run reaching
+`SETTLED` removes every directory beneath its `scratch/`, then that root. At
+`ENDED failed`, `ENDED unfinished`, `ENDED stopped` and `PAUSED`, it measures and
+keeps scratch. The first ending producer journals exactly one account: the driver
+letting go, stop after `run-stopped`, or a reply applying an edit to an undriven
+run. This is independent of run-end hooks. A run made live and ending again gets
+a fresh record. `HOST SHUTDOWN` and run-level `PARKED` get none.
+
+The two new `PipelineKind`s register at `agent.pipeline.<kind>@2`:
+
+```json
+{
+  "event_kinds": ["scratch-removed", "scratch-retained"],
+  "scratch-removed": {"trigger": "success", "dirs": 3, "bytes": 4096, "failed": []},
+  "scratch-retained": {"ending": "failed", "dirs": [{"path": "/absolute/run/scratch/dispatch", "bytes": 4096}], "total_bytes": 4096},
+  "bundle_versions": {"events": "1.5.0"}
+}
+```
+
+Removal's `trigger` is `success` or `discard`; each `failed` item is an absolute
+`path` and nonempty `error`. Retention's `ending` is `failed`, `unfinished`,
+`stopped` or `paused`. Bytes are allocated disk usage, measured in one walk at
+that ending or removal, never by a view. Existing journal envelopes stay at 2;
+the additive published events bundle rises to 1.5.0 and is regenerated.
+
+`status RUN` beside free space and `results RUN` after hooks and maintenance read
+the latest scratch record. A retained record prints:
+
+```text
+  scratch kept: <N> dir(s), <X.X> GiB — remove with: onepipeline scratch discard <run-id>
+    <absolute dir>  <X.X> GiB
+```
+
+Directories are largest first. Status lists five, then
+`    … and <k> more, <X.X> GiB — full list: onepipeline results <run-id>`;
+results lists all. While paused the header ends
+`— kept while paused; discard with onepipeline scratch discard <run-id> once the run ends`.
+A partial removal prints in both views
+`  scratch: <k> dir(s) could not be removed: <first path>: <error>`.
+A run whose reading is neither an ending nor a pause (`ACTIVE`, `PARKED`,
+`DRIVER DEAD`, `HOST SHUTDOWN`), including one made live again after an ending,
+prints neither line until its next ending writes a fresh record.
+Neither view walks scratch. `RunReading` and planner surfaces do not change.
+
+`onepipeline scratch discard RUN` resolves exactly one id under the runs root,
+admitting only undriven `SETTLED` or `ENDED failed|unfinished|stopped`, including
+old runs without scratch records. It refuses all other states, unknown and
+path-like ids, and a symlink scratch root, with exit 2 and nothing deleted.
+Links within scratch are removed as links. No journal, report, launch record or
+other run file is removed. Complete removal (including nothing) exits 0;
+partial filesystem failure exits 1 and names every failure on stderr.
+
+Stdout is `removed <N> scratch dir(s) of run <run-id>, <X.X> GiB freed:`, then
+`  <absolute dir>  <X.X> GiB` per removed directory, largest first. With nothing:
+`removed 0 scratch dir(s) of run <run-id>, 0.0 GiB freed` without a list.
+Stderr refusals are `onepipeline scratch discard: run <run-id> is <WORD>, not ended; its scratch is kept and nothing was deleted`,
+`onepipeline scratch discard: <run dir>/scratch is a symlink; nothing was deleted`,
+or `onepipeline scratch discard: no run named '<arg>' under the runs root; deleted nothing`.
+Each filesystem failure is `onepipeline scratch discard: could not remove <absolute dir>: <error>`.
+
+**Manager ruling.** The plan fixes this behavior, revoking divergence 48's lifetime
+restatement. The manager approved the next free entry, then 123 (114 and 122 were
+occupied), and the events bundle's next minor, then 1.4.0 (1.3.0 is entry 122's), with
+new payloads at 2. Entry 123 and bundle 1.4.0 were then taken on `main` by the manager
+landings, so merging `main` moved this record to 124 and the bundle to 1.5.0 under that
+same next-free ruling; a later merge of `main`, whose review readjustment took 124
+through 126 at bundle 1.4.0, moved this record to 127, its bundle staying 1.5.0. Public `verbs::` functions keep CLI parity:
+`scratch_discard(root: &Path, run: &str) -> Result<ScratchDiscard>`,
+`ScratchDiscard::exit_code()`, `render_scratch_discard` for stdout and
+`render_scratch_discard_errors` for stderr. `cli::ScratchCommand::Discard { run }`
+is parsing over that call. Land's temporary drafting scratch and historical
+automatic cleanup are outside this proposal.
+
+The manager also ruled that `summary.json` and `checkpoint.json` may refresh as
+normal derived caches when discard appends or reads; all other files outside
+scratch retain their bytes, including the prior journal as an unchanged prefix.
+
+Driver handling uses its own settlement fold, inside the final handover before
+releasing ownership, rather than inferring an ending from its still-live pid.
+The manager directed this after the released-driver liveness investigation.
+
+The manager approved the conservative unreadable-journal guard: a non-strict
+fold cannot prove its displayed ending. Discard refuses it with exit 2 and the
+existing known-run refusal line naming that displayed word; automatic handling
+keeps scratch untouched. No new word, field or planner surface is introduced.
+The driver and an undriven replying writer record scratch inside their final
+handover before releasing ownership, using their own settlement fold.
+
+For partial removal the manager ruled that the public `scratch-removed.dirs` and
+`bytes` count only fully removed dispatch directories, agreeing with stdout.
+Failed directories remain named in `failed`; private workload telemetry separately
+accounts for every entry, directory and byte walked.
+
+The manager approved prevalidating every top-level dispatch path before any
+walk or deletion. A non-UTF-8 path cannot be represented by the fixed payload:
+automatic handling keeps scratch with a diagnostic, and discard refuses with
+exit 2 naming `scratch path is not UTF-8`, leaving scratch and journal unchanged.
+This is the same invalid-filesystem-input class as symlink and unreadable roots.
+
+## 128. Every running driver read its project's claim at every pass that would dispatch or publish — OPEN
+
+**Proposal, for the planner who owns the contract: one setting,
+`ONEPIPELINE_CLAIM_INTERVAL_SECONDS`; `acknowledged` and `lease` fields on entry 119's
+`onepipeline.driver` claim; and one more project key beside it, `onepipeline.publishing`;
+entry 119's idle check and its seam, `ONEPIPELINE_IDLE_CLAIM_CHECK_SECONDS`, are
+retired.** Entry 119's supersession check had
+every running driver read its project's claim at the start of each pass that would
+dispatch or publish, so that a driver another one had taken over stopped at its next
+pass. On a GitHub Projects board each read is a quota call, and a busy review round made
+about 31 of them, almost every one confirming that nothing had changed. By the user's
+ruling — "yes redesign adopter should read the claim" — the waiting moves onto the
+adopter: takeovers are rare and deliberate, so the takeover, not every running driver,
+carries the cost. The rules below are this build's; the contract's wording, and entry
+119's, are unchanged until it is ruled on.
+
+### The interval, and the lease a read gives
+
+A running driver reads the claim **once per claim interval** — 300 seconds unless
+`ONEPIPELINE_CLAIM_INTERVAL_SECONDS` names a positive whole number of seconds, a day at
+most — whatever
+it is doing, busy or idle: a read is due once the previous one *began* an interval ago,
+and never sooner. A launch's driver starts on the read that let it launch, and an
+adoption's first pass reads before it claims anything, as before. A read the store has
+asked to be left alone over is skipped — it asks nothing and renews nothing — and the next
+is due once that wait has passed, or an interval on, whichever is sooner. Each read is
+bounded at 20 seconds.
+
+A read that finds the project still this driver's — its own claim, the claim its launch
+knowingly took over, or none where its own claim never landed — **confirms its lease from
+the moment the read began**. One that finds none where its own had landed confirms
+nothing: somebody else released the project — the run that took it over may have finished
+it — so the driver starts nothing on it, and says so on its log. One that fails confirms
+nothing either: where entry 119 had a failed read answer nothing and the driver go on, the
+driver now goes on with what it has in progress and starts nothing until a read confirms
+it. The lease is what every start asks; no start asks the store:
+
+- a driver **starts a dispatch** — a node's, a restack's or a readjustment's — **or a
+  publication** only while its newest confirming read began less than one interval ago,
+  asked at the moment of the start, after anything that could have held it. A publication
+  asked for on an older read waits for the next read, which is due by then;
+- a driver **fences its publications**: before any publication starts it writes the
+  project's `onepipeline.publishing` — `{"run", "host", "nodes", "at"}`, the nodes whose
+  publications are under way — and starts it only once that write has landed and the lease
+  still admits it; once a publication has settled it writes the key again without that
+  node, `null` for none. A write the store refuses starts nothing, and is made again five
+  seconds later. A superseded driver reads the key before it clears it, and clears only its
+  own;
+- a driver whose newest confirming read is **two intervals and the 20-second read deadline
+  old ends every dispatch it has in progress that is not publishing** — so the read due at
+  two intervals is given its whole deadline, and one read the board fails is not alone a
+  lapse — cooperatively, killed after the cancel grace
+  (`ONEPIPELINE_CANCEL_GRACE_SECONDS`) — through a watchdog thread of the lease's own, so
+  neither a slow call nor a held step of the reconcile loop delays it. It goes on reading
+  once per interval, and starts again on a read that confirms it.
+
+A read that finds another run's claim **supersedes** the driver, as entry 119 says: it
+starts nothing more, a dispatch in flight settles unpublished with its branch kept — or is
+ended by the lease's watchdog, if it is still running two intervals after the last read
+that found the project this driver's — and a publication already under way finishes. Two
+things differ. It goes on projecting what it settles — never the claim, and no closeout's
+release — so the run that took over starts from it; and once nothing of its own is in
+progress and that projection has landed (waited for at most one interval), it retires its
+write-back and **acknowledges the claim**. A driver whose lease had already lapsed when it
+read the takeover projects nothing more, as before — the run that took over may be writing
+to the board already — but still acknowledges once nothing of its own is in progress. An
+adoption whose first read finds the takeover held no lease and started nothing; it owes no
+acknowledgement, and writes nothing.
+
+### The acknowledgement
+
+The superseded driver writes the claim that superseded it back, exactly as it read it,
+with one more key: `acknowledged: {"run", "host", "at"}` — its own run, its host and an
+RFC 3339 instant. It is written once, bounded at 20 seconds, and not written inside a
+wait the store asked for; what could not be written is said on standard error. A claim
+carrying it reads as the claim it was everywhere a claim is read, so it refuses a launch
+and admits a `--take-over` exactly as one without it; an `acknowledged` that is not that
+shape refuses the claim as entry 119's keys do. A run that lets go of the project — at its
+closeout, or at a `stop` whose teardown was clean — has nothing of its own in progress
+either: where the read its release makes first finds another run's claim nothing has
+acknowledged, it writes that acknowledgement instead of releasing, so a takeover waiting
+on a driver that ended before it ever read the takeover starts then. The next projection of the driver that
+took over writes its claim without it.
+
+### The lease a claim states
+
+Every claim this build writes states the terms its driver's lease runs on —
+`lease: {"interval_seconds", "cancel_grace_seconds"}`, the interval and the cancel grace
+that host was given — because a run taking the project over has to wait out *that*
+driver's lease, not its own: hosts are configured one by one, and an adopter given a
+shorter grace would otherwise stop waiting while the displaced driver's killed dispatch
+still had time to run. A `lease` naming an interval outside 1 to 86 400 seconds, a grace
+of zero, or any other key refuses the claim, as entry 119's keys do. It is optional: a
+claim without one is a claim a build that kept no lease wrote, which the events bundle
+still reads, and it is omitted from no claim this build writes. The `DriverClaim` payload
+gains it, so `schemas/events.json` rises to `1.6.0`. Merging `main`,
+whose scratch reclamation (entry 127) took that number and bundle `1.5.0` first, moved this
+record from 127 to 128 and its bundle from `1.5.0` to `1.6.0`: the next free entry and the
+bundle's next minor.
+
+### The takeover
+
+`start --take-over` over a claim — or over a value that is not one — writes its own claim
+on the project before it continues anything, after every check the launch makes, naming
+the run it is about to mint, this host, the launching session, the launcher's pid and the
+instant. It then **starts nothing** until the claim on the store carries an
+`acknowledged`, or until the displaced driver is **proven to have stopped**: **the
+takeover wait** — two of the intervals its claim's `lease` states and the read deadline,
+plus the cancel grace it states, plus ten seconds — has passed since the adopter's write
+landed, *and* a read after that finds no `onepipeline.publishing` naming the displaced run
+on its host. A fence that still names one holds the takeover for as long as it stands —
+until it is cleared or the displaced driver acknowledges — and is said once, naming the
+nodes and when they were fenced; one the read cannot make out holds it until an
+acknowledgement. A claim stating no `lease` — or a value that is not a claim — names a
+driver no wait outlasts, so its takeover starts **only on an acknowledgement**, which a
+driver of this build writes once it reads the adopter's claim; taken over on the displaced
+run's own host, that host's records prove a run that nothing drives, as before. Waiting,
+it reads the claim every tenth of its own interval, at least one and at most thirty
+seconds apart, and says on standard error what it waits on and how long; a claim naming another run that replaces
+its own while it waits refuses the launch as `ProjectDriven`, exit 2. Once it may start,
+it **reads the project again**, and continues and pins from that read — so what the
+displaced driver settled while it was being taken over is continued rather than
+dispatched again — and its write-back starts from it.
+
+**Why the wait and the fence are enough.** Every read the displaced driver began before
+the adopter's claim landed began before the wait did. So no start that read allows comes
+later than one of its intervals into the wait, and no dispatch it keeps outlives two of
+them, the read deadline and its own cancel grace into it: by the wait's end the displaced
+driver can start nothing — a read it makes now finds the adopter's claim — and has no
+dispatch in progress. A publication is not bounded by any wait — its push and its change
+request are with the host, and ending the driver does not take back what the host was
+already asked — so it is fenced instead: its fence landed before it started, so before
+one interval into the wait, and stands until it has settled. A read past the wait that
+finds no fence of the displaced driver's therefore finds none of its publications under
+way, and none can start after it. A dead driver is the same case with nothing to read; one
+that died mid-publication leaves its fence standing, and its takeover waits for an
+acknowledgement that does not come — taken over on its own host, that host's records prove
+it gone. The bound assumes only that clocks on the two hosts run at the same rate.
+
+**The same host.** A claim naming a run of this host, under this host's runs root, whose
+ownership lock is free has no driver, which the host's own records prove: `--take-over`
+writes nothing first and waits on nothing, as before. An `adopt` reads the claim on its
+first pass, as before; a displacement the run's own records carry — its lock, its launch
+record — works as it did.
+
+### What this does not change
+
+Entry 119's limits stand: the claim is not atomic, and two launches reading no claim at
+the same moment both launch, the later claim winning and the other driver stopping at its
+next read — now up to one interval after it. The fence is not atomic either: a write of it
+the store refused may still land later, over a newer one, and a superseded driver's read
+and clear are two calls. Each costs a store write before a pass's publications start and
+one once they have settled, which the comparable plan's record counts. The acknowledgement is written over the claim
+without a read beside it: a third launch's claim written in that instant is replaced, and
+that launch is then refused at its next look, which is the safe end of that race.
+
+```json
+{
+  "setting": "ONEPIPELINE_CLAIM_INTERVAL_SECONDS",
+  "claim_interval_seconds": 300,
+  "max_claim_interval_seconds": 86400,
+  "claim_read_deadline_seconds": 20,
+  "lease": {"starts_within_intervals": 1, "dispatches_end_after_intervals": 2, "plus_read_deadline": true},
+  "takeover_wait": {"intervals": 2, "plus_read_deadline": true, "cancel_grace": "ONEPIPELINE_CANCEL_GRACE_SECONDS", "slack_seconds": 10, "terms": "the displaced claim's lease", "without_terms": "acknowledgement only"},
+  "takeover_poll": {"per_interval": 10, "min_seconds": 1, "max_seconds": 30},
+  "acknowledged_key": "acknowledged",
+  "driver": {
+    "run": "drafts-2",
+    "host": "host-b",
+    "session": "claude-code:3f9a1c2e",
+    "pid": 41790,
+    "claimed_at": "2026-10-16T09:40:58.551Z",
+    "lease": {"interval_seconds": 300, "cancel_grace_seconds": 300},
+    "acknowledged": {"run": "drafts", "host": "builder", "at": "2026-10-16T09:42:01.002Z"}
+  },
+  "publishing_key": "onepipeline.publishing",
+  "publishing": {"run": "drafts", "host": "builder", "nodes": ["x"], "at": "2026-10-16T09:40:12.090Z"},
+  "fence_retry_seconds": 5,
+  "bundle_versions": {"events": "1.6.0"},
+  "retired": ["ONEPIPELINE_IDLE_CLAIM_CHECK_SECONDS"],
+  "loop_stats_count": "claim_reads"
+}
+```
+
+**What this build does.** `tests/e2e/continuation.rs` drives it through the compiled binary
+over a real `local-md` store — the scripted one where a journey counts the store's own
+calls — the real linked `onevcs` over a real origin, and GitHub at `onevcs`'s `ONEVCS_GH`
+seam shared by every host, with two real drivers on two hosts. A journey holds the
+displaced driver at a chosen point through two test failpoints, `ONEPIPELINE_TEST_CLAIM_READ_GATE`
+before each read of the claim and `ONEPIPELINE_TEST_CLAIM_BEGIN_GATE` before the start of a
+dispatch of the node `ONEPIPELINE_TEST_CLAIM_BEGIN_NODE` names, each met only where a
+journey sets it:
+
+- the reads: `a_running_driver_reads_its_claim_at_most_once_per_interval` counts, over a
+  driver woken five times a second, its own `claim_reads` (its `ONEPIPELINE_LOOP_STATS`
+  report) and the store's own count of project reads, in windows inside one interval and
+  across four;
+- the fence: `a_publication_held_past_the_whole_takeover_wait_holds_the_takeover_until_it_has_finished`
+  holds the displaced driver's push at the host for longer than the whole takeover wait —
+  with the displaced driver given a longer interval and cancel grace than the adopter, so
+  the adopter's own terms would have let it start — and asserts that the adopter mints
+  nothing while it is held, says what it waits on, starts once the publication has
+  finished, and that no dispatch or publication of the two overlapped; and
+  `a_takeover_over_a_claim_stating_no_lease_starts_only_on_an_acknowledgement` holds a
+  takeover over a claim stating no lease past the wait its own terms would give, and starts
+  it on the displaced driver's acknowledgement;
+  `a_publication_whose_fence_the_board_refuses_starts_once_a_later_write_lands`,
+  `a_takeover_finding_a_fence_it_cannot_read_waits_until_it_is_cleared` and
+  `a_superseded_driver_whose_read_before_clearing_its_fence_fails_still_hands_over` drive
+  the fence's failures;
+- the four interleavings, each asserting from both drivers' records that every dispatch of
+  the displaced driver — and so the publication it made — had settled before the adopter's
+  first dispatch, that the displaced driver started none after it read the takeover, that no
+  node was dispatched by both, and that the shared host was asked for one change request
+  per branch: `a_takeover_while_the_displaced_driver_dispatches_starts_once_it_has_finished`,
+  `a_takeover_while_the_displaced_driver_publishes_starts_once_the_publication_has_finished`,
+  `a_takeover_of_an_idle_driver_starts_on_its_acknowledgement_within_the_interval` — the
+  live driver's acknowledgement, with the adopter starting inside one interval of its
+  claim landing — and `a_displaced_driver_held_past_its_lease_starts_nothing_when_it_resumes`;
+- `a_takeover_whose_displaced_driver_died_proceeds_once_its_lease_has_run_out`,
+  `a_displaced_driver_resuming_after_its_adopter_finished_starts_nothing`, and
+  `a_takeover_replaced_while_it_waits_is_refused_and_the_one_that_replaced_it_starts`;
+- the board failing: `a_takeover_whose_claim_the_board_refuses_is_refused_before_anything_is_minted`,
+  `a_takeover_waits_out_a_board_that_refuses_a_poll_and_the_acknowledgement`,
+  `a_driver_whose_reads_keep_failing_ends_its_dispatch_once_its_lease_lapses` and
+  `a_publication_asked_for_on_a_stale_lease_waits_for_the_next_read`; and
+  `a_settlement_dispatch_or_claim_that_is_not_one_refuses_the_launch` refuses an
+  `acknowledged` that is not one;
+- entry 119's journeys that asserted a claim read at each pass that would dispatch or
+  publish now assert the lease: `a_superseded_driver_starts_nothing_once_it_has_read_the_takeover`,
+  `a_pass_that_dispatches_three_nodes_reads_the_store_for_none_of_them`,
+  `a_superseded_driver_notices_within_one_interval_and_publishes_nothing` and
+  `a_withheld_publication_puts_its_branch_on_the_origin_when_nothing_else_has`, each
+  takeover now waited on in the background; `a_successors_claim_survives_the_closeout_and_the_stop_of_the_run_it_took_over`
+  stops a driver its successor waits on, whose stop acknowledges the successor's claim; `an_adoption_whose_claim_read_is_not_answered_starts_nothing_until_a_read_answers`
+  replaces entry 119's journey of an adoption that went on driving past an unanswered read; and
+  `a_claim_of_this_hosts_own_run_refuses_a_launch_naming_adopt_live_or_gone` takes a gone
+  run of this host over without waiting, as `tests/e2e/bus_config.rs`'s two takeovers now
+  do. `tests/e2e/rework.rs`'s `a_takeover_before_a_reworks_push_prevents_its_driver_from_starting_a_restack`
+  and `tests/smoke/continuation.rs`'s live journey wait on their takeover in the background.
+
+`src/continuation.rs`'s unit tests hold the interval and the setting's fallback, the
+lease's two bounds and its watchdog, the wait's sum over the displaced claim's own terms,
+the acknowledged claim's shape and its refusals, a claim's `lease` and a driver's
+publications and their refusals, and the block above against the constants, the claim boundary and the
+README.
+
+## 129. A reviewer was never answered where they left a comment — OPEN
 
 **Proposal, for the planner who owns the contract: one launch flag and launch-config
 key, `--review-reply-graph` / `review_reply_graph`; one reserved persona and history
@@ -11213,9 +11594,14 @@ launch setting.
   "results_golden": "tests/golden/review-results-v2.json",
   "checkpoint_schema_version": 13,
   "test_seams": ["after-reply-post", "after-decline-post", "after-edit-rejected"],
-  "bundle_versions": {"events": "1.5.0", "planner_channel": "1.5.0"}
+  "bundle_versions": {"events": "1.7.0", "planner_channel": "1.5.0"}
 }
 ```
+
+Merging `main`, whose scratch reclamation (entry 127) and claim lease (entry 128) took
+that number and the events bundles `1.5.0` and `1.6.0` first, moved this record from 127
+to 129 and its events bundle from `1.5.0` to `1.7.0`: the next free entry and the
+bundle's next minor. The planner-channel bundle, which neither raised, stays `1.5.0`.
 
 **What this build does.** `tests/e2e/review_reply.rs` drives every rule through the
 compiled binary and the real linked `onevcs` over real git, with GitHub at `onevcs`'s

@@ -35,9 +35,9 @@ use crate::{authenticated_user, git, git_credentials, run_stamp, scratch_repo};
 /// `repo` the plan's lifecycle nodes name: a cold host has a clone of its own.
 const ALIAS: &str = "continue-smoke";
 
-/// The idle claim check every driver here runs under, shortened through entry 119's test
-/// seam so a driver with nothing to dispatch notices a takeover inside the journey.
-const IDLE_CHECK_SECONDS: &str = "5";
+/// The claim interval every driver here runs under, shortened through entry 128's setting
+/// so a driver notices a takeover inside the journey.
+const CLAIM_INTERVAL_SECONDS: &str = "10";
 
 /// How long a step may take against the real services before the journey gives up on it.
 const PATIENCE: Duration = Duration::from_secs(120);
@@ -463,7 +463,7 @@ pub(crate) fn onepipeline(world: &World, args: &[&str]) -> Command {
         .current_dir(&world.project)
         .env("GH_TOKEN", gh_token())
         .env("GIT_CONFIG_GLOBAL", git_credentials(world))
-        .env("ONEPIPELINE_IDLE_CLAIM_CHECK_SECONDS", IDLE_CHECK_SECONDS);
+        .env("ONEPIPELINE_CLAIM_INTERVAL_SECONDS", CLAIM_INTERVAL_SECONDS);
     command
 }
 
@@ -679,11 +679,13 @@ fn a_stored_project_is_carried_on_by_a_cold_host_that_takes_it_over() {
             && refusal.contains("--take-over"),
         "{refusal}"
     );
-    let taken = ran(&mut onepipeline(
-        &second,
-        &["start", &project, "--detach", "--take-over"],
-    ));
-    assert!(taken.status.success(), "the takeover: {}", said(&taken));
+    // The takeover starts nothing until the first driver has let go, so it is waited on
+    // once that driver has been let finish below.
+    let taking = onepipeline(&second, &["start", &project, "--detach", "--take-over"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the takeover starts");
     until("the second host's claim to reach the store", || {
         claim(&first, &project)["host"] == "smoke-host-b"
     });
@@ -714,15 +716,22 @@ fn a_stored_project_is_carried_on_by_a_cold_host_that_takes_it_over() {
         after.is_empty(),
         "the superseded driver started work after its check: {after:?}"
     );
-    let taken_over = second.events_of(&run, "driver-taken-over");
-    assert_eq!(taken_over[0]["payload"]["previous"], held);
-
-    // Let the node above the stack go: the first driver ends, the second carries on.
+    // Let the node above the stack go: the first driver ends, acknowledges the takeover,
+    // and the second carries on.
     first.release("turn.go");
     first.release("turn.settle");
     until("the first driver to end", || {
         first.run_file(&run, "result.json").is_file()
     });
+    let taken = taking.wait_with_output().expect("the takeover answers");
+    assert!(taken.status.success(), "the takeover: {}", said(&taken));
+    assert!(
+        String::from_utf8_lossy(&taken.stderr).contains("acknowledged the takeover"),
+        "the takeover: {}",
+        said(&taken)
+    );
+    let taken_over = second.events_of(&run, "driver-taken-over");
+    assert_eq!(taken_over[0]["payload"]["previous"], held);
     until("the second driver to settle", || {
         second.run_file(&run, "result.json").is_file()
     });

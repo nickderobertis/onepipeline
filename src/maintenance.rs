@@ -39,10 +39,12 @@
 //!
 //! What reaches the run's record is **one** `pool-maintenance` entry per sweep
 //! that did something — a slot ran, a due slot could not be maintained, an
-//! identity was `Claimed`, its maintenance configuration could not be read, or
-//! one failed — carrying per identity and slot what ran and how it ended. A
-//! sweep on which every identity answered `NoMaintainCommand`, `NoSlots`,
-//! `NotDue` or `InUse` writes nothing: those are
+//! identity was `Claimed`, one's `onevcs.toml` could not be read
+//! (`MaintenanceUnreadable`), or one failed — carrying per identity and slot what
+//! ran, how it ended, and the slot's `disk` before and after it, as the sibling
+//! reports them. Which command runs is the sibling's to resolve: the repository's
+//! own declaration, else the host's `maintain`. A sweep on which every identity answered
+//! `NoMaintainCommand`, `NoSlots`, `NotDue` or `InUse` writes nothing: those are
 //! the schedule and the pool working, they are the common case on a schedule
 //! measured in days, and a record of them would be a record of nothing.
 //!
@@ -175,8 +177,7 @@ impl MaintenanceConfig {
             source,
         })?;
         let named = |why: String| Error::Invalid(format!("{spelling} {}: {why}", path.display()));
-        let config: Self =
-            serde_norway::from_str(&text).map_err(|failure| named(failure.to_string()))?;
+        let config: Self = crate::yaml::from_str(&text).map_err(named)?;
         if config.version != SCHEDULE_VERSION {
             return Err(named(format!(
                 "`version` is {}, and this build reads {SCHEDULE_VERSION} — set `version: \
@@ -910,6 +911,7 @@ pub(crate) fn results_lines(view: &crate::views::RunView) -> String {
                 crate::views::one_line
             )
     );
+    out.push_str(&freed_line(&record.payload));
     if let Some(error) = record.payload.get("error").and_then(Value::as_str) {
         out.push_str(&format!(
             "      the host's identities could not be enumerated: {}\n",
@@ -938,6 +940,15 @@ pub(crate) fn results_lines(view: &crate::views::RunView) -> String {
             (Some(error), _) => format!("failed — {}", crate::views::one_line(error)),
             (None, Some(outcome)) => {
                 match serde_json::from_value::<IdentityOutcome>(outcome.clone()) {
+                    // Not on a cadence: nothing was due or run, because the
+                    // repository's own declaration could not be read.
+                    Ok(outcome @ IdentityOutcome::MaintenanceUnreadable { .. }) => {
+                        out.push_str(&format!(
+                            "      {identity} — {}\n",
+                            identity_phrase(&outcome)
+                        ));
+                        continue;
+                    }
                     Ok(outcome) => identity_phrase(&outcome),
                     Err(_) => "an outcome this build does not read".to_owned(),
                 }
@@ -967,15 +978,81 @@ pub(crate) fn results_lines(view: &crate::views::RunView) -> String {
     out
 }
 
+/// The record's `freed` summary line, or nothing where no slot freed bytes.
+///
+/// A slot frees `before_bytes - after_bytes` of the `disk` the sibling measured
+/// around its command, where that is above zero: one that grew, or whose `disk`
+/// is `null` because a measure failed, frees nothing and is not counted. Each
+/// identity is named by its key's last path segment with its slots summed,
+/// largest first, equal figures in the record's own order.
+fn freed_line(payload: &Map<String, Value>) -> String {
+    let mut by_identity: Vec<(String, u64)> = Vec::new();
+    let mut slots = 0usize;
+    for entry in payload
+        .get("identities")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(Ok(IdentityOutcome::Slots(maintained))) = entry
+            .get("outcome")
+            .map(|outcome| serde_json::from_value::<IdentityOutcome>(outcome.clone()))
+        else {
+            continue;
+        };
+        let freed: Vec<u64> = maintained
+            .iter()
+            .filter_map(|slot| match &slot.outcome {
+                SlotOutcome::Ran {
+                    disk: Some(disk), ..
+                } => disk
+                    .before_bytes
+                    .checked_sub(disk.after_bytes)
+                    .filter(|freed| *freed > 0),
+                _ => None,
+            })
+            .collect();
+        if freed.is_empty() {
+            continue;
+        }
+        slots += freed.len();
+        let name = entry.get("identity").and_then(Value::as_str).map_or_else(
+            || "an unnamed identity".to_owned(),
+            |identity| crate::views::one_line(identity.rsplit('/').next().unwrap_or(identity)),
+        );
+        by_identity.push((
+            name,
+            freed
+                .iter()
+                .fold(0u64, |sum, bytes| sum.saturating_add(*bytes)),
+        ));
+    }
+    if by_identity.is_empty() {
+        return String::new();
+    }
+    by_identity.sort_by_key(|(_, bytes)| std::cmp::Reverse(*bytes));
+    let total = by_identity
+        .iter()
+        .fold(0u64, |sum, (_, bytes)| sum.saturating_add(*bytes));
+    format!(
+        "  pool maintenance: freed {} across {slots} slot(s) ({})\n",
+        crate::freespace::gib(total),
+        by_identity
+            .iter()
+            .map(|(name, bytes)| format!("{name} {}", crate::freespace::gib(*bytes)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
 /// One identity's outcome, in the sibling's own words.
 fn identity_phrase(outcome: &IdentityOutcome) -> String {
     match outcome {
         IdentityOutcome::NoMaintainCommand => "no maintain command".to_owned(),
+        IdentityOutcome::MaintenanceUnreadable { reason } => {
+            format!("maintenance unreadable: {}", crate::views::one_line(reason))
+        }
         IdentityOutcome::NoSlots => "no slots".to_owned(),
-        IdentityOutcome::MaintenanceUnreadable { reason } => format!(
-            "maintenance configuration unreadable — {}",
-            crate::views::one_line(reason)
-        ),
         IdentityOutcome::Claimed { by_pid } => {
             format!("claimed — another pool maintain (pid {by_pid}) was maintaining it")
         }
@@ -1639,9 +1716,65 @@ mod tests {
             .is_some_and(|error| error.contains("the registry could not be read")));
     }
 
+    /// A slot frees only what its `disk` shows it shrank by: one that grew, one
+    /// whose measure failed and one whose `disk` is absent free nothing, and do not
+    /// stop the others being summed, counted and ordered.
+    #[test]
+    fn the_freed_line_sums_only_the_slots_that_shrank_largest_identity_first() {
+        let gib = 1024 * 1024 * 1024;
+        let slot = |number, disk: Option<(u64, u64)>| SlotMaintenance {
+            number,
+            outcome: SlotOutcome::Ran {
+                outcome: MaintenanceOutcome::Succeeded,
+                duration_ms: 1,
+                log: None,
+                disk: disk.map(|(before_bytes, after_bytes)| onevcs::SlotDisk {
+                    before_bytes,
+                    after_bytes,
+                }),
+            },
+        };
+        let sweep = PoolsMaintained {
+            started_at: "2026-09-20T00:00:00.000Z".into(),
+            identities: Ok(vec![
+                quiet(
+                    "github.com/owner/small",
+                    IdentityOutcome::Slots(vec![
+                        slot(1, Some((gib, gib / 2))),
+                        slot(2, Some((0, gib))),
+                        slot(3, None),
+                    ]),
+                ),
+                quiet(
+                    "github.com/owner/large",
+                    IdentityOutcome::Slots(vec![slot(1, Some((3 * gib, gib)))]),
+                ),
+                quiet(
+                    "github.com/owner/grew",
+                    IdentityOutcome::Slots(vec![slot(1, Some((gib, gib)))]),
+                ),
+            ]),
+            unreached: Vec::new(),
+        };
+        assert_eq!(
+            freed_line(&sweep.payload()),
+            "  pool maintenance: freed 2.5 GiB across 2 slot(s) (large 2.0 GiB, small 0.5 GiB)\n"
+        );
+
+        let nothing = PoolsMaintained {
+            started_at: "2026-09-20T00:00:00.000Z".into(),
+            identities: Ok(vec![quiet(
+                "github.com/owner/grew",
+                IdentityOutcome::Slots(vec![slot(1, Some((1, 2))), slot(2, None)]),
+            )]),
+            unreached: Vec::new(),
+        };
+        assert_eq!(freed_line(&nothing.payload()), "");
+    }
+
     /// A sweep on which nothing was due and nothing was wrong writes nothing; one
     /// on which a slot ran, a due slot could not be maintained, an identity was
-    /// claimed or one failed writes one record carrying exactly those identities,
+    /// claimed, one's declaration was unreadable or one failed writes one record carrying exactly those identities,
     /// each with the sibling's own outcome shape.
     #[test]
     fn a_sweep_is_recorded_where_something_ran_or_a_due_slot_could_not_and_never_otherwise() {
@@ -1697,30 +1830,22 @@ mod tests {
             assert!(held.is_recorded(), "{kept:?} was not recorded");
         }
 
-        // A configuration the sibling could not read ran nothing, but it is a
-        // refusal rather than the schedule working, so it is recorded the way a
-        // failed identity is — in the sibling's own shape.
+        // So is a repository whose own declaration could not be read: its
+        // maintenance has stopped, and nothing else would say so.
         let unreadable = PoolsMaintained {
             started_at: "2026-09-20T00:00:00.000Z".into(),
-            identities: Ok(vec![
-                quiet("a", IdentityOutcome::NoSlots),
-                quiet(
-                    "b",
-                    IdentityOutcome::MaintenanceUnreadable {
-                        reason: "onevcs.toml could not be parsed".into(),
-                    },
-                ),
-            ]),
+            identities: Ok(vec![quiet(
+                "a",
+                IdentityOutcome::MaintenanceUnreadable {
+                    reason: "onevcs.toml: invalid type".into(),
+                },
+            )]),
             unreached: Vec::new(),
         };
         assert!(unreadable.is_recorded());
-        let payload = Value::Object(unreadable.payload());
-        let identities = payload["identities"].as_array().expect("an array");
-        assert_eq!(identities.len(), 1, "{payload}");
-        assert_eq!(identities[0]["identity"], "b");
         assert_eq!(
-            identities[0]["outcome"]["maintenance-unreadable"]["reason"],
-            "onevcs.toml could not be parsed"
+            Value::Object(unreadable.payload())["identities"][0]["outcome"],
+            json!({"maintenance-unreadable": {"reason": "onevcs.toml: invalid type"}})
         );
 
         let something = PoolsMaintained {
@@ -1820,10 +1945,7 @@ mod tests {
                     outcome: MaintenanceOutcome::Succeeded,
                     duration_ms: 12,
                     log: Some(onevcs::ArtifactId("a-1".into())),
-                    disk: Some(onevcs::SlotDisk {
-                        before_bytes: 4_096,
-                        after_bytes: 1_024,
-                    }),
+                    disk: None,
                 },
                 "ran — succeeded in 12 ms, log a-1",
             ),
@@ -1869,9 +1991,9 @@ mod tests {
         assert_eq!(identity_phrase(&IdentityOutcome::NoSlots), "no slots");
         assert_eq!(
             identity_phrase(&IdentityOutcome::MaintenanceUnreadable {
-                reason: "onevcs.toml: expected a table\nat line 3".into(),
+                reason: "onevcs.toml\nline 4".into()
             }),
-            "maintenance configuration unreadable — onevcs.toml: expected a table at line 3"
+            "maintenance unreadable: onevcs.toml line 4"
         );
         assert_eq!(
             identity_phrase(&IdentityOutcome::Slots(vec![

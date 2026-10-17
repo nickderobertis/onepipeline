@@ -476,6 +476,11 @@ struct HostShutdown {
     branches: Option<BTreeMap<(String, String), crate::payload::PreservedWord>>,
 }
 
+/// Whether this run is still awaiting adoption after a host shutdown.
+pub(crate) fn host_shutdown(view: &RunView) -> bool {
+    HostShutdown::of(view).is_some()
+}
+
 impl HostShutdown {
     /// The shutdown this run is under, or `None` for a run that is not.
     ///
@@ -2752,6 +2757,7 @@ pub(crate) fn status_reporting(view: &RunView, providers: Providers) -> String {
                 .parent()
                 .unwrap_or_else(|| Path::new(ledger::DEFAULT_RUNS_DIR)),
         ));
+        out.push_str(&crate::scratch::lines(view, Some(5)));
         if providers == Providers::Reported {
             if let Some(health) = crate::agentgraph::health() {
                 out.push_str(&format!("  providers: {health}\n"));
@@ -4480,6 +4486,7 @@ pub fn results(view: &RunView) -> String {
     out.push_str(&crate::hooks::results_lines(view));
     // And the last maintenance sweep that did something, for the same reason.
     out.push_str(&crate::maintenance::results_lines(view));
+    out.push_str(&crate::scratch::lines(view, None));
     out.push_str(&journal_loss_line(view));
     out
 }

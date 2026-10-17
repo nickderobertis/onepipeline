@@ -6,7 +6,7 @@
 //! `sha256(<lineage root>:<comment id>:<revision>)` — so whether a comment is
 //! answered is read off the host, and recovery is that read: a reply the host
 //! accepted is seen by the next read and never posted again, and one it never
-//! accepted leaves the comment owed. See `docs/contract-divergences.md` entry 127.
+//! accepted leaves the comment owed. See `docs/contract-divergences.md` entry 129.
 
 use crate::{
     error::{Error, Result},
@@ -210,7 +210,7 @@ pub(crate) fn links(body: &str, url: &str) -> bool {
     false
 }
 
-/// The drafter's structured result in the shape entry 127 states it: `replies` and
+/// The drafter's structured result in the shape entry 129 states it: `replies` and
 /// nothing else, whatever the graph's own schema admits beside it.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1197,18 +1197,18 @@ mod tests {
         assert!(validated(&drafting(true), &exact).is_ok());
     }
 
-    /// Entry 127's block, out of the divergence record this build ships.
+    /// Entry 129's block, out of the divergence record this build ships.
     fn entry_127() -> Value {
         include_str!("../docs/contract-divergences.md")
             .split("\n## ")
-            .find(|entry| entry.starts_with("127."))
+            .find(|entry| entry.starts_with("129."))
             .and_then(|entry| entry.split("```json").nth(1))
             .and_then(|rest| rest.split("```").next())
-            .map(|block| serde_json::from_str(block).expect("entry 127's block is JSON"))
-            .expect("the record carries entry 127's block")
+            .map(|block| serde_json::from_str(block).expect("entry 129's block is JSON"))
+            .expect("the record carries entry 129's block")
     }
 
-    /// What entry 127 states of the drafter, the reply and the records behind them is
+    /// What entry 129 states of the drafter, the reply and the records behind them is
     /// what the private types read and write.
     #[test]
     fn the_drafter_the_reply_and_the_records_are_entry_127s() {
@@ -1307,7 +1307,7 @@ mod tests {
                     serde_json::from_value::<crate::payload::ReviewReplyNotDrafted>(record.clone())
                         .map(|_| ())
                 }
-                other => panic!("entry 127 records {other}, which no payload here is"),
+                other => panic!("entry 129 records {other}, which no payload here is"),
             };
             read.unwrap_or_else(|why| panic!("{kind}: {why}"));
         }

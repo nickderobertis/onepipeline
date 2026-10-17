@@ -51,7 +51,7 @@ oneharness-core = { workspace = true }
 # The graph document's own reader, so the observer double runs the judge-side
 # provider the graph *declares* rather than one it remembered: a graph that named
 # a different provider would otherwise still be supervised by this copy.
-serde_norway = "0.9"
+serde-saphyr = { workspace = true }
 # The store's reference plugin host, the plugin it hosts, and the plugin API whose
 # types `scripted-source` reads its scenario through; see `src/hosted.rs`.
 onetaskgraph-core = { workspace = true }
@@ -71,6 +71,16 @@ tokio = { workspace = true, features = ["rt"] }
 # what a process does with a signal is not a `std` question on this MSRV floor.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# What `containment` ends a test's processes through on that platform: a job
+# object the test process joins, which every process it starts joins after it.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
+] }
 
 [[bin]]
 name = "fake-oneagentgraph"

@@ -11,6 +11,13 @@
 //! one-thread tests finish while tests outside the group hold the slots a queued
 //! four-thread test needs.
 //!
+//! # A test that leaves a process running
+//!
+//! A test that returns while a process it started still holds its output is a
+//! `LEAK`, which nextest counts as a pass, and on Windows that process holds the
+//! pipe a CI step tees the run through. The `ci` profile fails such a test by
+//! name instead; driven here through the configuration verbatim.
+//!
 //! # After a failure
 //!
 //! `scripts/rerun-failed.sh` is what CI runs once a test step has failed. These
@@ -382,6 +389,346 @@ fn a_run_ended_with_tests_unrun_and_no_reason_is_named_by_nextests_exit_status()
     assert!(
         text.contains("nothing to re-run") && text.contains("verdict stays failed"),
         "with no failed test there is nothing to re-run, and the verdict stands:\n{text}"
+    );
+}
+
+/// Where each process the fixture's tests start writes its pid, one empty file
+/// named for it, under the fixture's root.
+const LINGERERS: &str = "lingerers";
+
+/// One test that returns while a process it started still holds its output, one
+/// that waits for what it started, and the program both start: this binary
+/// again, which records its pid under [`LINGERERS`] and sleeps when told it is
+/// the one started.
+const LEAKING_E2E: &str = r#"
+fn start_the_lingerer() -> std::process::Child {
+    std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "lingers_when_started_by_another_test"])
+        .env("FIXTURE_LINGER", "1")
+        .spawn()
+        .unwrap()
+}
+#[test]
+fn lingers_when_started_by_another_test() {
+    if std::env::var_os("FIXTURE_LINGER").is_some() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lingerers");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(std::process::id().to_string()), "").unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(3));
+    }
+}
+#[test]
+fn leaves_a_process_holding_its_output() {
+    start_the_lingerer();
+}
+#[test]
+fn waits_for_what_it_started() {
+    start_the_lingerer().wait().unwrap();
+}
+"#;
+
+fn leaking_fixture(case: &str) -> Fixture {
+    Fixture::new(
+        case,
+        SCHEDULING_MANIFEST,
+        &[
+            ("src/lib.rs", ""),
+            (".config/nextest.toml", &repository_config()),
+            ("tests/e2e.rs", LEAKING_E2E),
+            ("tests/note.rs", "#[test]\nfn one() {}\n"),
+            ("tests/release_channel.rs", "#[test]\nfn one() {}\n"),
+            ("tests/oneagentgraph_liveness.rs", "#[test]\nfn one() {}\n"),
+        ],
+    )
+}
+
+/// The pids the fixture's started processes recorded under [`LINGERERS`] that
+/// have not ended by `patience` from now, waited for together.
+///
+/// Every one of them is a deliberate leak of an inner run, and on Windows each
+/// inherits every inheritable handle in its chain of ancestors — this test's own
+/// output among them, which `cargo nextest` reads it through. One still running
+/// when this test returns holds that output past its end, and the outer run
+/// marks this test `LEAK`. So it waits them out rather than returning first.
+fn lingerers_outliving(fixture: &Fixture, patience: std::time::Duration) -> (usize, Vec<u32>) {
+    let pids: Vec<u32> = fs::read_dir(fixture.path(LINGERERS))
+        .expect("the fixture's started processes recorded their pids")
+        .map(|entry| {
+            let name = entry.expect("a recorded pid reads").file_name();
+            name.to_str()
+                .and_then(|pid| pid.parse().ok())
+                .unwrap_or_else(|| panic!("{name:?} names no pid"))
+        })
+        .collect();
+    let deadline = std::time::Instant::now() + patience;
+    loop {
+        let running: Vec<u32> = pids
+            .iter()
+            .copied()
+            .filter(|pid| !onepipeline_testfakes::containment::process_ended(*pid))
+            .collect();
+        if running.is_empty() || std::time::Instant::now() >= deadline {
+            return (pids.len(), running);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// Under the profile CI's cross-platform legs run, a test that returns while a
+/// process it started still holds its output fails the run and is named for it,
+/// and `rerun-failed` reads that as the failure it is. Under the default profile
+/// the same test is still a leaky pass. Every process those runs leak has ended,
+/// by its pid, before this test returns, so this test leaks nothing itself.
+#[test]
+fn a_test_leaving_a_process_holding_its_output_fails_the_ci_profile_by_name() {
+    let fixture = leaking_fixture("leak-fails");
+    archive(&fixture);
+    let leaker = "nextest-scheduling-fixture::e2e leaves_a_process_holding_its_output";
+
+    let (output, log) = fixture.nextest_run(&["--no-fail-fast"]);
+    assert!(
+        output.status.success() && log.contains("passed (1 leaky)"),
+        "under the default profile a leak is still counted as a leaky pass:\n{log}"
+    );
+
+    let (output, log) = fixture.nextest_run(&["--no-fail-fast", "--profile", "ci"]);
+    assert!(
+        !output.status.success(),
+        "under the ci profile a test that left a process holding its output passed:\n{log}"
+    );
+    assert!(
+        log.lines()
+            .any(|line| line.trim_start().starts_with("LEAK-FAIL ") && line.ends_with(leaker)),
+        "the ci profile's failure does not name the test that leaked:\n{log}"
+    );
+    for passing in [
+        "waits_for_what_it_started",
+        "lingers_when_started_by_another_test",
+    ] {
+        assert!(
+            log.lines()
+                .any(|line| line.trim_start().starts_with("PASS ")
+                    && line.ends_with(&format!("e2e {passing}"))),
+            "{passing} did not pass beside the leak:\n{log}"
+        );
+    }
+
+    let (report, text) = fixture.rerun_failed_in(
+        &known_flakes(),
+        &["cargo", "nextest", "run"],
+        &[("NEXTEST_PROFILE", "ci")],
+    );
+    assert_eq!(
+        report.status.code(),
+        Some(1),
+        "a run failed by a leak is reported as failed:\n{text}"
+    );
+    let times = rerun_times();
+    assert!(
+        text.lines().any(|line| line.starts_with(&format!(
+            "  {leaker}: failed {times} of {times} re-runs; fails every time"
+        ))),
+        "the leak is not re-run as the failure it is:\n{text}"
+    );
+
+    let (recorded, running) = lingerers_outliving(&fixture, std::time::Duration::from_secs(60));
+    assert!(
+        recorded >= 2 + times,
+        "only {recorded} started processes recorded their pids, fewer than the runs leaked"
+    );
+    assert!(
+        running.is_empty(),
+        "pids {running:?} the inner runs leaked were still running when this test returned"
+    );
+}
+
+/// The journey the `ci` profile gives longer, under the name its filter matches,
+/// and one beside it in the same module. The fixture puts both in the `e2e` and
+/// `note` binaries, so the same name in another binary is one the store journey's
+/// filter does not reach. `STORE` and `BESIDE` are milliseconds, which the fixture
+/// writes as [`STORE_MILLIS`] and [`BESIDE_MILLIS`].
+const LONG_JOURNEY_E2E: &str = r#"
+mod readjust {
+    #[test]
+    fn the_store_is_written_only_for_what_its_projection_holds_changed() {
+        std::thread::sleep(std::time::Duration::from_millis(STORE));
+    }
+    #[test]
+    fn beside_it() {
+        std::thread::sleep(std::time::Duration::from_millis(BESIDE));
+    }
+}
+"#;
+
+/// The period [`long_journey_fixture`] scales the configuration's 60s to, so a
+/// run proves which test is given how many periods without waiting ten minutes.
+const SCALED_PERIOD_MILLIS: u64 = 4_000;
+
+/// Past the nine periods Windows gives every test, and short of the store
+/// journey's ten, by two seconds each way. Only ten periods pass it.
+const STORE_MILLIS: u64 = 38_000;
+const _: () =
+    assert!(STORE_MILLIS > SCALED_PERIOD_MILLIS * 9 && STORE_MILLIS < SCALED_PERIOD_MILLIS * 10);
+
+/// Past six periods and short of nine, by six seconds each way. Only the
+/// Windows bound passes it.
+const BESIDE_MILLIS: u64 = 30_000;
+const _: () =
+    assert!(BESIDE_MILLIS > SCALED_PERIOD_MILLIS * 6 && BESIDE_MILLIS < SCALED_PERIOD_MILLIS * 9);
+
+/// The ci profile's override that scopes a bound to Windows, as the
+/// configuration spells it.
+const WINDOWS_ONLY: &str = "platform = 'cfg(windows)'";
+
+/// `config` with every `slow-timeout` period scaled from 60s to
+/// [`SCALED_PERIOD_MILLIS`] and nothing else changed.
+fn long_journey_fixture(name: &str, config: &str) -> Fixture {
+    assert!(
+        config.matches("period = \"60s\"").count() >= 3,
+        "the default limit and the ci overrides are no longer in 60s periods:\n{config}"
+    );
+    let scaled = config.replace(
+        "period = \"60s\"",
+        &format!("period = \"{SCALED_PERIOD_MILLIS}ms\""),
+    );
+    let journeys = LONG_JOURNEY_E2E
+        .replace("STORE", &STORE_MILLIS.to_string())
+        .replace("BESIDE", &BESIDE_MILLIS.to_string());
+    Fixture::new(
+        name,
+        SCHEDULING_MANIFEST,
+        &[
+            ("src/lib.rs", ""),
+            (".config/nextest.toml", &scaled),
+            ("tests/e2e.rs", &journeys),
+            ("tests/note.rs", &journeys),
+            ("tests/release_channel.rs", "#[test]\nfn one() {}\n"),
+            ("tests/oneagentgraph_liveness.rs", "#[test]\nfn one() {}\n"),
+        ],
+    )
+}
+
+/// Run `config`'s long journeys under the ci profile, and hold what each is
+/// given. The store journey passes on its own ten periods on every platform.
+/// The same name in the `note` binary is outside that filter and times out under
+/// both six and nine. The journeys beside it pass when the bound is raised,
+/// which is nine periods, and time out when it is not, which is six.
+fn holds_the_ci_limits(name: &str, config: &str, raised: bool) {
+    let fixture = long_journey_fixture(name, config);
+    let (output, log) = fixture.nextest_run(&["--no-fail-fast", "--profile", "ci"]);
+    assert!(!output.status.success(), "{log}");
+    let journey = "readjust::the_store_is_written_only_for_what_its_projection_holds_changed";
+    let ended = |status: &str, test: &str| {
+        log.lines()
+            .any(|line| line.trim_start().starts_with(status) && line.ends_with(test))
+    };
+    assert!(
+        ended("PASS ", &format!("e2e {journey}")),
+        "the store journey was not given ten periods under the ci profile:\n{log}"
+    );
+    assert!(
+        ended("TIMEOUT ", &format!("note {journey}")),
+        "note {journey} was given the store journey's ten periods under the ci profile:\n{log}"
+    );
+    let (status, given) = if raised {
+        ("PASS ", "was not given the raised bound")
+    } else {
+        ("TIMEOUT ", "was given more than six periods")
+    };
+    for other in ["e2e readjust::beside_it", "note readjust::beside_it"] {
+        assert!(
+            ended(status, other),
+            "{other} {given} under the ci profile:\n{log}"
+        );
+    }
+}
+
+/// Under the profile CI's cross-platform legs run, the one journey
+/// `.config/nextest.toml` names is given ten periods, 600s, before nextest ends
+/// it. Every other test keeps the six it had here, unless this host is Windows,
+/// where it is given nine: the same module's other test, and a test of the same
+/// name in another binary, are ended at whichever applies.
+#[test]
+fn the_ci_profile_gives_the_store_journey_ten_periods_and_no_other_test_more() {
+    let config: toml::Value = toml::from_str(&repository_config()).expect("the config parses");
+    let override_ = config["profile"]["ci"]["overrides"]
+        .as_array()
+        .and_then(|overrides| {
+            overrides.iter().find(|entry| {
+                entry["filter"].as_str().is_some_and(|filter| {
+                    filter.contains(
+                        "readjust::the_store_is_written_only_for_what_its_projection_holds_changed",
+                    )
+                })
+            })
+        })
+        .expect("the ci profile overrides the store journey's limit");
+    assert_eq!(
+        override_["slow-timeout"]["period"].as_str(),
+        Some("60s"),
+        "{override_}"
+    );
+    assert_eq!(
+        override_["slow-timeout"]["terminate-after"].as_integer(),
+        Some(10),
+        "the store journey is given 600s: {override_}"
+    );
+    holds_the_ci_limits("long-journey", &repository_config(), cfg!(windows));
+}
+
+/// On Windows alone, the ci profile gives every test but the store journey nine
+/// periods, 540s, for the runner image's slowdown; Linux and macOS keep six.
+///
+/// The test above runs the configuration as written on this host; this one runs
+/// it with the Windows condition inverted. Between them this host is on each side
+/// of that condition, whatever platform it is, so it sees both the raised bound
+/// and the unraised one.
+#[test]
+fn the_ci_profile_gives_every_other_test_nine_periods_on_windows_alone() {
+    let text = repository_config();
+    let config: toml::Value = toml::from_str(&text).expect("the config parses");
+    let overrides = config["profile"]["ci"]["overrides"]
+        .as_array()
+        .expect("the ci profile has overrides");
+    let windows: Vec<_> = overrides
+        .iter()
+        .filter(|entry| entry.get("platform").is_some())
+        .collect();
+    assert_eq!(
+        windows.len(),
+        1,
+        "the ci profile scopes one override, and only one, by platform: {overrides:?}"
+    );
+    let windows = windows[0];
+    assert_eq!(
+        windows["platform"].as_str(),
+        Some("cfg(windows)"),
+        "{windows}"
+    );
+    assert!(
+        windows.get("filter").is_none(),
+        "the Windows bound reaches every test, not a filter's: {windows}"
+    );
+    assert_eq!(
+        windows["slow-timeout"]["period"].as_str(),
+        Some("60s"),
+        "{windows}"
+    );
+    assert_eq!(
+        windows["slow-timeout"]["terminate-after"].as_integer(),
+        Some(9),
+        "every test on Windows is given 540s: {windows}"
+    );
+    assert_eq!(
+        text.matches(WINDOWS_ONLY).count(),
+        1,
+        "the Windows condition is not spelled as this test inverts it:\n{text}"
+    );
+
+    holds_the_ci_limits(
+        "windows-bound-inverted",
+        &text.replace(WINDOWS_ONLY, "platform = 'cfg(not(windows))'"),
+        !cfg!(windows),
     );
 }
 
@@ -1050,7 +1397,8 @@ fn the_scripts_refuse_what_they_cannot_run() {
 // proven on GitHub by the demonstration run recorded on this change request.
 #[test]
 fn the_rerun_steps_run_only_after_a_failure_and_are_bounded_by_what_they_run() {
-    // `ci.yml` holds the gate and the cross legs; `release-sweep.yml` the full
+    // `ci.yml` holds gate, Windows cross, PR Mac and manual Mac diagnostics;
+    // `release-sweep.yml` holds the full
     // sweep on the release pull request, which re-runs its failures the same way.
     let workflow = [
         ".github/workflows/ci.yml",
@@ -1082,8 +1430,8 @@ fn the_rerun_steps_run_only_after_a_failure_and_are_bounded_by_what_they_run() {
         })
         .count();
     assert_eq!(
-        archived_runs, 3,
-        "the gate step, the cross step and the release sweep archive their build"
+        archived_runs, 5,
+        "gate, Windows cross, PR Mac, manual Mac and release sweep archive their build"
     );
 
     let steps: Vec<&str> = workflow
@@ -1092,8 +1440,8 @@ fn the_rerun_steps_run_only_after_a_failure_and_are_bounded_by_what_they_run() {
         .collect();
     assert_eq!(
         steps.len(),
-        3,
-        "one rerun step each in gate, cross and the release sweep"
+        5,
+        "one rerun step each in gate, Windows cross, PR Mac, manual Mac and release sweep"
     );
     for step in steps {
         let field = |key: &str| {

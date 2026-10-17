@@ -712,8 +712,21 @@ resolver = "2"
 # **requirement**, because `^0.48` admits no 0.49.x; `onevcs-testing` 0.18.0
 # requires exactly `=0.49.0`, so the pair moves as one.
 #
-# `onevcs` 0.51.2 is the floor because it is the release the operation-progress
-# producer supplied for this crate's manager landings; it carries the
+# The floor may not fall below `onevcs` 0.50.0, the first release whose
+# `pool_maintain` runs a repository's own `onevcs.toml` declaration:
+# `src/maintenance.rs` matches `IdentityOutcome::MaintenanceUnreadable` and reads
+# `SlotOutcome::Ran`'s `disk`, neither of which an earlier release defines.
+#
+# `onevcs` 0.52.0 is the floor because it is the release the declared-maintenance
+# producer supplied for this crate's idle pool maintenance, the `onevcs.toml`
+# reading 0.50.0 brought. It also adds `SessionRequest::caller_merges_base`
+# (onevcs #434), which every request this crate builds sets `false`, so a
+# session open still runs onevcs's rules probe as before. A **requirement**,
+# because `^0.51` admits no 0.52.x; `onevcs-testing` 0.19.4 requires exactly
+# `=0.52.0`, so the pair moves as one. 0.51.3 below it carried the same
+# declared-maintenance reading, released again with no change to the library's
+# source. 0.51.2 below that is the release the operation-progress producer
+# supplied for this crate's manager landings; it carries the
 # **operation handle** of 0.51.1 below, and narrows which package names its
 # workspace boundary takes for conventional test and tooling ones (onevcs #407).
 # 0.51.1 carries the **operation handle** a
@@ -727,8 +740,7 @@ resolver = "2"
 # is itself a member (onevcs boundary-root-members), the library this crate's
 # manager publication and worker closeout run. It requires the bus at `^0.9.1`,
 # which the bus pin below admits. A **requirement**, because `^0.50` admits no
-# 0.51.x; `onevcs-testing` 0.19.2 requires exactly `=0.51.2`, so the pair moves as
-# one.
+# 0.51.x.
 #
 # `oneagentgraph` 0.5.4 is the floor because it relays a turn's `message` and
 # `reasoning` items as `turn-activity` under their own kind — the agent's words,
@@ -772,8 +784,8 @@ resolver = "2"
 rust-version = "1.97"
 
 [workspace.dependencies]
-oneagentgraph = "0.5.6"
-onevcs = "0.51.2"
+oneagentgraph = "0.5.13"
+onevcs = "0.52.0"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is
@@ -795,7 +807,10 @@ onevcs = "0.51.2"
 # the `open` profile alone; this crate now declares the stack vocabulary and
 # reads its recorded streams. A **requirement**, because `^0.8` admits no
 # 0.9.x, and the four siblings beside it require exactly it.
-onemessagebus = "0.9.0"
+#
+# 0.9.1 reads and writes its YAML through `serde-saphyr` rather than a libyaml
+# translation, as every sibling release linked beside it does.
+onemessagebus = "0.9.1"
 # **Not a third sibling this crate composes** — nothing here launches, calls, or
 # spawns onejudge. It is one vocabulary: the verdicts a two-party member settles
 # on, which `oneagentgraph` copies onto the `member-settled` this crate relays.
@@ -886,7 +901,10 @@ onemessagebus = "0.9.0"
 # the prompt the harness double is handed under each. A **requirement** for the
 # same pre-1.0 reason as every raise above: `^0.17` admits no 0.19.x.
 # `oneagentgraph` 0.5.6 requires it.
-onejudge = "0.19.0"
+#
+# **0.19.5 reads and writes YAML through `serde-saphyr`**, so no libyaml
+# translation reaches this build through it; `oneagentgraph` 0.5.13 requires it.
+onejudge = "0.19.5"
 # **Test-support only**, and named for one reason: `crates/testfakes`'s
 # `oneharness` double writes the report onejudge reads back, and that report is
 # oneharness's own typed contract. Written by hand it would be fifty fields of
@@ -972,7 +990,12 @@ onejudge = "0.19.0"
 # `status: completed | failed`, and `render_event` draws a `✗ <tool>  failed` line
 # (oneharness #1403), which the run views draw a turn's activity through. Inside
 # `^0.24.0`, so `oneagentgraph` and `onejudge` resolve this one copy with it.
-oneharness-core = "0.24.1"
+#
+# **0.28.x** is the core `oneagentgraph` 0.5.13 and `onejudge` 0.19.5 each
+# require, so the three move together; no earlier caret admits a 0.28.x pre-1.0.
+# It starts Codex with apps and analytics off, which `crates/testfakes`'s
+# `fake-codex` speaks.
+oneharness-core = "0.28.2"
 # The sibling's own test-support crate, from the **same** revision as the library
 # it implements — here by resolving both from the registry at the releases cut
 # from one commit, each release of this crate requiring the exact `onevcs` it was
@@ -983,7 +1006,7 @@ oneharness-core = "0.24.1"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.19.2"
+onevcs-testing = "0.19.4"
 # The store, linked: `src/taskgraph.rs` says how the engine calls it. `-plugin-api` is
 # named for the values the store answers with, and `-local-md` for the plugin
 # `crates/testfakes` hosts in process.
@@ -1004,18 +1027,40 @@ onevcs-testing = "0.19.2"
 # **0.6.0 carries comments across copies and adds per-source caches**. Engine
 # reads remain unpinned, including settlement write-back reads. The plugin API
 # adds public Task and Comment fields and CopyLink, making this a breaking link.
+#
+# **0.7.0 caches project and document reads**, adding version fields to the public
+# Project and Document and `forward_edges` to VersionCoverage: breaking again. Its GitHub
+# token moves from gh2 to gh3, which never orders a gh2 value, so a task version
+# recorded before this release costs one more read and is never served from cache; the
+# engine keeps versions opaque and translates nothing.
 # `justfile`'s `onetaskgraph-version` moves with this release.
-onetaskgraph-core = "=0.6.0"
-onetaskgraph-plugin-api = "=0.6.0"
-onetaskgraph-local-md = "=0.6.0"
+#
+# **No earlier release than 0.7.1**: a plan drafted in a private source reaches the
+# board with no origin recorded, and only 0.7.1's document copy still files its
+# documents under the board's plan. `tests/e2e/multi_source.rs` fails on 0.7.0.
+# 0.7.1 is also the release onetaskgraph's move onto `serde-saphyr` published; its
+# local-md source is what reads back and edits the run's write-back shadow documents
+# (`src/writeback.rs`).
+onetaskgraph-core = "=0.7.1"
+onetaskgraph-plugin-api = "=0.7.1"
+onetaskgraph-local-md = "=0.7.1"
+# Test-support only: the budget checker's own library, at exactly the release `justfile`'s
+# `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
+onebudgetspec-core = "=0.1.5"
 # Not engines: two crates both members use, pinned once so they build against one version.
 # `just engines-current` reads only the engines its script names.
 sha2 = "0.10"
 tokio = "1"
+# The YAML reader and writer, and the fleet's one: safe Rust, so no libyaml
+# translation reaches this build. `deny.toml`'s `[bans]` refuses every crate it
+# replaced.
+serde-saphyr = "1.3"
+# Windows only, and for the same reason: each member names the features it calls.
+windows-sys = "0.61"
 
 [package]
 name = "onepipeline"
-version = "0.72.0"
+version = "0.74.1"
 edition = "2021"
 rust-version.workspace = true
 description = "Execute a task DAG over oneagentgraph and onevcs, merging their event streams into one."
@@ -1112,9 +1157,9 @@ serde = { version = "1", features = ["derive"] }
 # read back as `0.12` without it.
 serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 # Plan files are JSON; the executor-rules file and the agent-graph configs are
-# YAML. serde_norway is the maintained fork of the deprecated serde_yaml, and is
-# the same reader the sibling crates use.
-serde_norway = "0.9"
+# YAML, read and written through the reader the sibling crates use — see
+# `[workspace.dependencies]`.
+serde-saphyr = { workspace = true }
 # A plan is one project of a store, assembled out of reserved metadata keys, and
 # the refusal it earns has to name the key a person has to fix. `serde_json`'s
 # own error says the type it wanted and not where it wanted it, which for a
@@ -1180,7 +1225,7 @@ async-trait = "0.1"
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = [
+windows-sys = { workspace = true, features = [
   "Win32_Foundation",
   "Win32_Storage_FileSystem",
   "Win32_System_Console",
@@ -1232,8 +1277,8 @@ onevcs-testing = { workspace = true }
 # TOML they are rather than scanned for a substring that might not be one.
 toml = "1"
 # `tests/budgets.rs` loads `budgets.yaml` and parses the result its command writes through the
-# checker's own library, at exactly the release `justfile`'s `onebudgetspec-version` installs.
-onebudgetspec-core = "=0.1.1"
+# checker's own library; the pin is in `[workspace.dependencies]`.
+onebudgetspec-core = { workspace = true }
 
 [[test]]
 name = "e2e"
@@ -1279,6 +1324,20 @@ path = "tests/release_channel/main.rs"
 [[test]]
 name = "stop_verdict"
 path = "tests/stop_verdict/main.rs"
+
+# The pool-maintenance workload journey: one idle sweep over 25 real pooled slots
+# across 20 declaring identities, recorded for `pool-maintenance-engine-seconds`.
+# Its own binary and its own Nx project (`tests/pool_workload/project.json`), run
+# only by that project's `workload` target (`just workload`), so no per-change
+# selection runs it; its `check` lints it and stops there.
+[[test]]
+name = "pool_workload"
+path = "tests/pool_workload/main.rs"
+
+# Large scratch telemetry is a release workload, excluded from per-change tests.
+[[test]]
+name = "scratch_workload"
+path = "tests/scratch_workload/main.rs"
 
 # A CLI binary: optimize for a small, fast-starting artifact.
 [profile.release]

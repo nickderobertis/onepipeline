@@ -7,8 +7,8 @@
 // do locally is publish to the registry; `.github/workflows/release.yml` and
 // `published-smoke.yml` cover that against the real npm.
 
-import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, existsSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { after, before, describe, it } from "node:test";
@@ -24,7 +24,6 @@ function hostTarget() {
   const targets = {
     "linux-x64": "x86_64-unknown-linux-gnu",
     "linux-arm64": "aarch64-unknown-linux-gnu",
-    "darwin-x64": "x86_64-apple-darwin",
     "darwin-arm64": "aarch64-apple-darwin",
     "win32-x64": "x86_64-pc-windows-msvc",
   };
@@ -33,11 +32,19 @@ function hostTarget() {
   return target;
 }
 
+// The staged release builds compile the crate for an explicit `--target`, which
+// takes minutes from cold. In the shared `target/` they would hold its build lock
+// all that time, and a test elsewhere in the gate building into `target/debug`
+// (`tests/build_config.rs`) timed out waiting behind them. Their own directory
+// keeps them out of that lock and still reuses its build on the next run.
+const STAGED_TARGET_DIR = join(REPO_ROOT, "target", "npm-staged");
+
 function run(command, args, options = {}) {
   return execFileSync(command, args, {
     cwd: REPO_ROOT,
     encoding: "utf8",
     ...options,
+    env: { ...process.env, CARGO_TARGET_DIR: STAGED_TARGET_DIR, ...options.env },
   });
 }
 
@@ -105,25 +112,27 @@ describe("the npm distribution", () => {
 
     // The real binary the package will carry. Debug rather than release: this
     // proves the packaging, and a release build would cost the gate minutes.
-    run("cargo", ["build", "--locked", "--quiet"]);
 
     work = mkdtempSync(join(tmpdir(), "onepipeline-npm-"));
     dist = join(work, "dist");
-    platformDir = run("node", [
-      "scripts/npm-build.mjs",
-      "platform",
+    run(process.platform === "win32" ? "python" : "python3", [
+      "scripts/build-staged-release.py",
       "--target",
       hostTarget(),
-      "--binary",
-      join("target", "debug", "onepipeline"),
+      "--profile",
+      "dev",
+      "--install",
       "--out",
       dist,
-    ]).trim();
+    ]);
+    const record = JSON.parse(readFileSync(join(dist, `${hostTarget()}.json`), "utf8"));
+    platformDir = join(dist, "npm", `onepipeline-cli-${process.platform}-${process.arch}`);
+    platformTgz = record.npm;
     launcherDir = run("node", ["scripts/npm-build.mjs", "launcher", "--out", dist]).trim();
 
     const tarballs = join(work, "tgz");
     mkdirSync(tarballs);
-    platformTgz = pack(platformDir, tarballs);
+
     launcherTgz = pack(launcherDir, tarballs);
   });
 
@@ -141,6 +150,289 @@ describe("the npm distribution", () => {
     assert.equal(platform.version, version);
     assert.deepEqual(platform.os, [process.platform]);
     assert.deepEqual(platform.cpu, [process.arch]);
+  });
+
+  it("reuses the wheel payload byte for byte in the archive and npm tarball", () => {
+    const result = run(process.platform === "win32" ? "python" : "python3", [
+      "scripts/build-staged-release.py",
+      "--verify",
+      join(dist, `${hostTarget()}.json`),
+    ]);
+    assert.match(result, /verified binary reuse/);
+  });
+
+  it("delivers real native packages through the declared flat Darwin publication transport", () => {
+    const workflow = readFileSync(join(REPO_ROOT, ".github/workflows/release.yml"), "utf8");
+    const record = JSON.parse(readFileSync(join(dist, `${hostTarget()}.json`), "utf8"));
+    for (const [artifact, field, publication] of [
+      ["wheels-darwin", "wheel", "dist"],
+      ["npm-darwin", "npm", "npm-artifacts"],
+    ]) {
+      const matches = [
+        ...workflow.matchAll(new RegExp(`name: ${artifact}\\n\\s+path: ([^\\n]+)`, "g")),
+      ];
+      assert.equal(matches.length, 1, `${artifact} has one declared upload source`);
+      const downloaded = join(work, "transport", publication);
+      const files = JSON.parse(
+        run(process.platform === "win32" ? "python" : "python3", [
+          "npm/test/artifact-transport.py",
+          matches[0][1].trim(),
+          dist,
+          downloaded,
+        ]),
+      );
+      assert.equal(files.length, 1, "this native journey builds one real host target");
+      const expected = join(downloaded, record[field].split(/[\\/]/).at(-1));
+      assert.ok(existsSync(expected), `${artifact} must reach the publisher's flat directory`);
+      assert.deepEqual(readFileSync(expected), readFileSync(record[field]));
+    }
+    assert.match(workflow, /packages-dir: dist/);
+    assert.match(workflow, /npm-artifacts\/\*\.tgz/);
+    for (const escaping of [
+      "staged-release/../outside/*.whl",
+      "staged-release//tmp/*.whl",
+      "staged-release/./publish-wheels/*.whl",
+    ]) {
+      const refused = spawnSync(
+        process.platform === "win32" ? "python" : "python3",
+        ["npm/test/artifact-transport.py", escaping, dist, join(work, "transport", "escape")],
+        { cwd: REPO_ROOT, encoding: "utf8" },
+      );
+      assert.notEqual(refused.status, 0, escaping);
+      assert.match(refused.stderr, /escapes its root/);
+      assert.equal(existsSync(join(work, "transport", "escape")), false);
+    }
+  });
+
+  it("refuses a staged record whose payload hash disagrees with the real packages", () => {
+    const record = JSON.parse(readFileSync(join(dist, `${hostTarget()}.json`), "utf8"));
+    record.binary_sha256 = "0".repeat(64);
+    const bad = join(work, "invalid-record.json");
+    writeFileSync(bad, JSON.stringify(record));
+    assert.throws(
+      () =>
+        run(
+          process.platform === "win32" ? "python" : "python3",
+          ["scripts/build-staged-release.py", "--verify", bad],
+          { stdio: ["ignore", "pipe", "pipe"] },
+        ),
+      /payload hash mismatch/,
+    );
+  });
+
+  for (const [mutation, reason] of [
+    ...Array.from({ length: 6 }, (_, i) => [`version-invalid-${i}`, "invalid staged version"]),
+    ["wheel-primary", "omitted the primary executable"],
+    ["npm-missing", "omitted required members"],
+    ["hash-syntax", "invalid payload hash"],
+    ["inventory-empty", "invalid executable inventory"],
+    ["inventory-type", "invalid executable inventory"],
+    ["inventory-unsafe", "invalid executable inventory"],
+    ["wheel-encrypted-flagged", "encrypted"],
+    ["archive-truncated", "Compressed file ended"],
+    ["wheel-duplicate", "unsafe wheel member: duplicate.data"],
+    ["wheel-path", "invalid wheel executable inventory"],
+    ["sbom-object", "invalid SBOM"],
+    ["npm-object", "invalid npm manifest object"],
+    ["npm-directory", "unexpected npm archive member"],
+    ["npm-name", "npm target identity mismatch"],
+    ["npm-os", "npm target identity mismatch"],
+    ["npm-cpu", "npm target identity mismatch"],
+    ["npm-unsafe", "unsafe or duplicate"],
+    ["npm-duplicate", "unsafe or duplicate"],
+    ["npm-link", "unexpected npm archive member"],
+    ["npm-unexpected", "unexpected npm archive member"],
+    ["npm-executable", "unexpected executable npm archive member"],
+    ["npm-mode", "npm executable lacks execute permission"],
+    ["archive-mode", "archive executable lacks execute permission"],
+    ["wheel-extra-tag", "wheel architecture tag mismatch"],
+    ["archive-doc-directory", "not a regular file"],
+    ["archive-doc-symlink", "not a regular file"],
+    ["archive-doc-hardlink", "not a regular file"],
+    ["archive-directory", "not a regular file"],
+    ["schema", "unsupported staged record schema"],
+    ["unknown", "missing or unknown fields"],
+    ["missing", "missing or unknown fields"],
+    ["field-type", "invalid staged record field"],
+    ["target", "unsupported target"],
+    ["tag", "tag/version mismatch"],
+    ["inventory", "inventory differs"],
+    ["wheel-version", "wheel name/version mismatch"],
+    ["wheel-arch", "wheel architecture tag mismatch"],
+    ["sbom", "invalid SBOM"],
+    ["no-sbom", "missing SBOM"],
+    ["no-metadata", "wheel is missing its .dist-info/METADATA"],
+    ["no-wheel-tags", "wheel is missing its .dist-info/WHEEL"],
+    ["wheel-traversal", "unsafe wheel member: ../escape"],
+    ["wheel-symlink", "wheel member is not a regular file"],
+    ["wheel-dist-info", "exactly one .dist-info directory"],
+    ["wheel-data-scheme", "unsafe wheel member"],
+    ["wheel-filename", "wheel filename tags differ from its WHEEL tags"],
+    ["wheel-filename-version", "wheel filename name/version mismatch"],
+    ["wheel-repeat", "wheel repeats a member"],
+    ["macho", "Mach-O architecture mismatch"],
+    ["archive-layout", "archive layout mismatch"],
+    ["archive-payload", "archive executable differs"],
+    ["npm-payload", "npm executable differs"],
+    ["npm-version", "npm version mismatch"],
+    ["archive-name", "archive name mismatch"],
+    ["checksum", "archive checksum mismatch"],
+  ])
+    it(`rejects real staged artifact corruption: ${mutation}`, () => {
+      const python = process.platform === "win32" ? "python" : "python3";
+      const bad = run(python, [
+        "npm/test/staged-mutation.py",
+        join(dist, `${hostTarget()}.json`),
+        mutation,
+        join(work, `mutation-${mutation}`),
+      ]).trim();
+      assert.throws(
+        () =>
+          run(python, ["scripts/build-staged-release.py", "--verify", bad], {
+            stdio: ["ignore", "pipe", "pipe"],
+          }),
+        (error) => {
+          assert.equal(error.status, 1);
+          assert.ok(error.stderr.includes(reason), error.stderr);
+          assert.match(error.stderr, /next:.*regenerate/);
+          return true;
+        },
+      );
+    });
+
+  it("rejects traversal targets before creating directories or invoking the packager", () => {
+    const out = join(work, "unsafe-target");
+    assert.throws(
+      () =>
+        run(
+          process.platform === "win32" ? "python" : "python3",
+          ["scripts/build-staged-release.py", "--target", "../../escape", "--out", out],
+          { stdio: ["ignore", "pipe", "pipe"] },
+        ),
+      /unsupported target/,
+    );
+    assert.equal(existsSync(out), false);
+    assert.equal(existsSync(join(work, "escape")), false);
+  });
+
+  it("rejects an unsafe Cargo version before creating output directories", () => {
+    const badRepo = join(work, "bad-version-repo");
+    mkdirSync(join(badRepo, "scripts"), { recursive: true });
+    writeFileSync(
+      join(badRepo, "scripts/npm-build.mjs"),
+      readFileSync(join(REPO_ROOT, "scripts/npm-build.mjs")),
+    );
+    writeFileSync(
+      join(badRepo, "Cargo.toml"),
+      '[package]\nname="onepipeline"\nversion="../../escape"\n',
+    );
+    const out = join(badRepo, "out");
+    assert.throws(
+      () =>
+        run(
+          process.platform === "win32" ? "python" : "python3",
+          [
+            join(REPO_ROOT, "scripts/build-staged-release.py"),
+            "--target",
+            hostTarget(),
+            "--out",
+            out,
+          ],
+          { cwd: badRepo, stdio: ["ignore", "pipe", "pipe"] },
+        ),
+      /invalid staged version/,
+    );
+    assert.equal(existsSync(out), false);
+  });
+
+  it("propagates a real installer runtime failure with a recovery action", () => {
+    const out = join(work, "failed-install");
+    assert.throws(
+      () =>
+        run(
+          process.platform === "win32" ? "python" : "python3",
+          [
+            "scripts/build-staged-release.py",
+            "--target",
+            hostTarget(),
+            "--profile",
+            "dev",
+            "--install",
+            "--out",
+            out,
+            "--python",
+            join(work, "missing-python-runtime"),
+          ],
+          { stdio: ["ignore", "pipe", "pipe"] },
+        ),
+      (error) => {
+        assert.equal(error.status, 1);
+        assert.match(error.stderr, /missing-python-runtime/);
+        assert.match(error.stderr, /next:.*regenerate/);
+        return true;
+      },
+    );
+  });
+
+  it("surfaces an installed-wheel smoke failure from self-consistent corrupt version metadata", () => {
+    const python = process.platform === "win32" ? "python" : "python3";
+    const bad = run(python, [
+      "npm/test/staged-mutation.py",
+      join(dist, `${hostTarget()}.json`),
+      "installed-wheel-version",
+      join(work, "wrong-installed-version"),
+    ]).trim();
+    assert.throws(
+      () =>
+        run(
+          python,
+          [
+            "scripts/build-staged-release.py",
+            "--verify",
+            bad,
+            "--install",
+            "--out",
+            join(work, "wheel-smoke-failure"),
+          ],
+          { stdio: ["ignore", "pipe", "pipe"] },
+        ),
+      (error) => {
+        assert.equal(error.status, 1);
+        assert.match(error.stderr, /staged wheel.*reports.*not 'onepipeline 0.0.0'/);
+        assert.match(error.stderr, /ACTION:.*reinstall pinned/);
+        assert.match(error.stderr, /next:.*regenerate/);
+        return true;
+      },
+    );
+  });
+
+  it("surfaces an installed-npm smoke failure when the selected real runtime cannot run the launcher", () => {
+    const python = process.platform === "win32" ? "python" : "python3";
+    const incompatible = run(python, ["-c", "import sys; print(sys.executable)"]).trim();
+    assert.throws(
+      () =>
+        run(
+          python,
+          [
+            "scripts/build-staged-release.py",
+            "--verify",
+            join(dist, `${hostTarget()}.json`),
+            "--install",
+            "--out",
+            join(work, "npm-smoke-failure"),
+            "--node",
+            incompatible,
+          ],
+          { stdio: ["ignore", "pipe", "pipe"] },
+        ),
+      (error) => {
+        assert.equal(error.status, 1);
+        assert.match(error.stderr, /staged npm.*--version.*did not run/);
+        assert.match(error.stderr, /ACTION:.*check the platform package/);
+        assert.match(error.stderr, /next:.*regenerate/);
+        return true;
+      },
+    );
   });
 
   it("puts a working `onepipeline` on PATH", () => {
@@ -174,4 +466,90 @@ describe("the npm distribution", () => {
     assert.match(failed.stderr, /Reinstall with optional/);
     assert.match(failed.stderr, /pip install onepipeline-cli/);
   });
+
+  it("refuses Intel macOS by name rather than looking for a package no release ships", () => {
+    const project = mkdtempSync(join(work, "app-"));
+    installInto(project, [launcherTgz]);
+    const manifest = JSON.parse(
+      readFileSync(join(project, "node_modules", "onepipeline-cli", "package.json"), "utf8"),
+    );
+    assert.ok(
+      !Object.keys(manifest.optionalDependencies).some((name) => name.includes("darwin-x64")),
+      "the launcher must not pin an Intel macOS package",
+    );
+    // This host is not an Intel Mac, so the installed launcher runs under the
+    // identity Node reports there; everything after that is the real launcher.
+    const shim = join(project, "intel-mac.cjs");
+    writeFileSync(
+      shim,
+      'Object.defineProperty(process, "platform", { value: "darwin" });\n' +
+        'Object.defineProperty(process, "arch", { value: "x64" });\n',
+    );
+    const launcher = join(project, "node_modules", "onepipeline-cli", "bin", "onepipeline.js");
+    const refused = spawnSync(process.execPath, ["--require", shim, launcher, "--version"], {
+      cwd: project,
+      encoding: "utf8",
+    });
+    assert.equal(refused.status, 1, refused.stderr);
+    assert.equal(refused.stdout, "");
+    assert.match(refused.stderr, /Intel macOS \(darwin-x64\) is no longer supported/);
+    assert.match(refused.stderr, /cargo install onepipeline --locked/);
+    assert.doesNotMatch(refused.stderr, /platform package|unsupported platform/);
+  });
+});
+
+it("refuses to stage an Intel macOS target, which no release builds any more", () => {
+  const work = mkdtempSync(
+    join(process.env.ONEPIPELINE_NODE_SCRATCH_DIR ?? tmpdir(), "intel-mac-"),
+  );
+  const out = join(work, "stage");
+  try {
+    const refused = spawnSync(
+      process.platform === "win32" ? "python" : "python3",
+      ["scripts/build-staged-release.py", "--target", "x86_64-apple-darwin", "--out", out],
+      { cwd: REPO_ROOT, encoding: "utf8" },
+    );
+    assert.equal(refused.status, 1, refused.stderr);
+    assert.match(refused.stderr, /unsupported target; choose one of: .*aarch64-apple-darwin/);
+    assert.doesNotMatch(refused.stderr, /choose one of: .*x86_64-apple-darwin/);
+    assert.equal(existsSync(out), false);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+it("refuses a mismatched release tag before building artifacts", () => {
+  const work = mkdtempSync(
+    join(process.env.ONEPIPELINE_NODE_SCRATCH_DIR ?? tmpdir(), "tag-mismatch-"),
+  );
+  const out = join(work, "stage");
+  try {
+    assert.throws(
+      () =>
+        run(
+          process.platform === "win32" ? "python" : "python3",
+          [
+            "scripts/build-staged-release.py",
+            "--target",
+            hostTarget(),
+            "--out",
+            out,
+            "--profile",
+            "dev",
+            "--tag",
+            "v0.0.0",
+          ],
+          { stdio: ["ignore", "pipe", "pipe"] },
+        ),
+      (error) => {
+        assert.equal(error.status, 1);
+        assert.match(error.stderr, /release tag differs from Cargo.toml version/);
+        assert.match(error.stderr, /next:.*regenerate/);
+        return true;
+      },
+    );
+    assert.equal(existsSync(out), false);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
 });
