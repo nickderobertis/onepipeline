@@ -210,9 +210,7 @@ describe("release-plz.yml's job", () => {
     }
   });
 
-  // The cases release-plz.yml's `guard` job decided: the token is set, or it
-  // is not.
-  it("without RELEASE_PLZ_TOKEN, says how to enable releases and runs nothing else", async () => {
+  it("guard, token unset: says how to enable releases and runs nothing else", async () => {
     const repo = scratchRepository(mkdtempSync(join(base, "no-token-")));
     const { ran, calls } = await runJob({
       repo,
@@ -235,7 +233,7 @@ describe("release-plz.yml's job", () => {
     assert.deepEqual(github.writes(), []);
   });
 
-  it("on an eligible push, prepares the version bump and the changelog, and asks to auto-merge", async () => {
+  it("guard, token set, on an eligible push: prepares the version bump and the changelog, and asks to auto-merge", async () => {
     const repo = scratchRepository(mkdtempSync(join(base, "push-")));
     // The release PR release-plz keeps open, beside an unrelated one.
     github.addPull(41, "feat/unrelated");

@@ -89,7 +89,6 @@ function resolve(v, context, status) {
     return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, resolve(x, context, status)]));
   return v;
 }
-/// The targets a release build job builds: its recipe's own plan.
 const planCache = new Map();
 function releaseTargets(root, platform) {
   const key = `${root}\0${platform}`;
