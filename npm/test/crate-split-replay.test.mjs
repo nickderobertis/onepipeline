@@ -536,6 +536,28 @@ test("--today refuses an nx.json whose inputs cannot be expanded", () => {
     /rustBuild holds \{"files":"x"\}, which is no Nx input/,
   );
   refused(
+    today({ rustBuild: ["{workspaceRoot}/crates/**/*", { env: 7 }], e2eSource: [] }),
+    /rustBuild holds \{"env":7\}, which is no Nx input/,
+  );
+  refused(
+    today({
+      rustBuild: ["{workspaceRoot}/crates/**/*", { env: "X", files: "src/**" }],
+      e2eSource: [],
+    }),
+    /which is no Nx input/,
+  );
+  writeFileSync(join(dir, "nx.json"), "{ not json");
+  refused(
+    ["--today", "--repo", dir, "--out", join(scratch, "x")],
+    /nx\.json cannot give today's shape: .*JSON/,
+  );
+  today({ rustBuild: ["{workspaceRoot}/crates/**/*"], e2eSource: [] });
+  rmSync(join(dir, "tests", "e2e", "main.rs"));
+  refused(
+    ["--today", "--repo", dir, "--out", join(scratch, "x")],
+    /tests\/e2e\/main\.rs cannot be read/,
+  );
+  refused(
     today({ rustBuild: ["{workspaceRoot}/Cargo.lock"], e2eSource: [] }),
     /rustBuild names no source/,
   );
@@ -732,4 +754,15 @@ test("--exclude leaves out the changes whose subjects it matches", () => {
     result.perChange.map((change) => change.subject),
     ["test: suite one", "fix: the lock", "docs: the readme"],
   );
+});
+
+test("a mapping file that is missing or is not JSON is refused naming it", () => {
+  const torn = join(scratch, "torn-mapping.json");
+  writeFileSync(torn, '{"crates": ');
+  for (const file of [torn, join(scratch, "no-such-mapping.json")]) {
+    refused(
+      ["--mapping", file, "--out", join(scratch, "x"), "--repo", repo],
+      new RegExp(`${file.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&")} cannot be read as JSON`),
+    );
+  }
 });
