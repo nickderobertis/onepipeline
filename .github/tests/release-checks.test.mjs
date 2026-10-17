@@ -369,7 +369,10 @@ sys.stdout.buffer.write(buffer.getvalue())
     // archive was accepted and unpacked.
     assert.equal(result.code, 1, said(result));
     assert.doesNotMatch(result.stderr, /each a regular file|put no onepipeline executable/);
-    assert.match(result.stderr, /PATH resolves onepipeline to .*, not the one Release archive \S+\.zip installed in/);
+    assert.match(
+      result.stderr,
+      /PATH resolves onepipeline to .*, not the one Release archive \S+\.zip installed in/,
+    );
   });
 
   for (const [name, members] of [
@@ -616,6 +619,37 @@ describe("the release outcome record", () => {
     await Promise.all([github.stop(), crates.stop(), npm.stop()]);
     rmSync(out, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });
+  });
+
+  it("on a fresh runner with no results, records a launcher npm already serves as shipped, not verified", async () => {
+    rmSync(join(out, "common", "publish-results.json"), { force: true });
+    const launcher = execFileSync(
+      "node",
+      ["scripts/npm-build.mjs", "launcher", "--out", scratch("launcher")],
+      {
+        cwd: ROOT,
+        encoding: "utf8",
+      },
+    ).trim();
+    const published = await run("npm", ["publish", launcher, "--access", "public"], {
+      env: { ...ambient },
+    });
+    assert.equal(published.code, 0, said(published));
+    const jobs = {};
+    for (const key of ["LINUX", "MACOS", "WINDOWS"]) {
+      Object.assign(jobs, {
+        [`${key}_RESULT`]: "success",
+        [`${key}_PUBLISHED`]: "success",
+        [`${key}_VERIFIED`]: "success",
+      });
+    }
+    const result = await run("just", ["release-outcome"], { env: releaseEnv(github, out, jobs) });
+    assert.equal(result.code, 0, said(result));
+    assert.deepEqual(states(recorded())["npm:onepipeline-cli"], [
+      "shipped-unverified",
+      "success",
+      "skipped",
+    ]);
   });
 
   it("on a fresh runner with no results, records what the registries already serve as shipped", async () => {
