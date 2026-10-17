@@ -1,0 +1,15 @@
+nx 23.1.1
+failing task, under load: runs=50 lost_stdout_line=12 lost_stderr_line=12
+cached replay through a pipe: runs=50 missing_last_line=50 min_bytes=62306; to a file: bytes=226278
+nx 23.3.0
+failing task, under load: runs=50 lost_stdout_line=5 lost_stderr_line=5
+cached replay through a pipe: runs=50 missing_last_line=0 min_bytes=226412; to a file: bytes=226278
+nx 24.0.0-beta.2
+failing task, under load: runs=50 lost_stdout_line=6 lost_stderr_line=6
+cached replay through a pipe: runs=50 missing_last_line=0 min_bytes=226412; to a file: bytes=226278
+nx 24.0.0-canary.20261016-5ef7804
+failing task, under load: runs=50 lost_stdout_line=8 lost_stderr_line=8
+cached replay through a pipe: runs=50 missing_last_line=0 min_bytes=226412; to a file: bytes=226278
+nx 23.1.2
+failing task, under load: runs=50 lost_stdout_line=3 lost_stderr_line=3
+cached replay through a pipe: runs=50 missing_last_line=0 min_bytes=226411; to a file: bytes=226278
