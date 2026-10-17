@@ -348,6 +348,11 @@ impl Executor for LocalExecutor {
                         node,
                         attempt: req.attempt,
                     }
+                } else if req.labels.persona.as_deref() == Some(crate::reply::PERSONA) {
+                    crate::agents::Launched::ReviewReply {
+                        node,
+                        attempt: req.attempt,
+                    }
                 } else {
                     crate::agents::Launched::Node {
                         node,
@@ -699,7 +704,11 @@ fn node_sets(
     labels: &Labels,
     controls: &NodeControls,
 ) -> Result<Vec<String>> {
-    if labels.persona.as_deref() == Some(crate::lifecycle::PR_AUTHOR_PERSONA) {
+    // The reply drafter is composed on the drafting graph's terms: its graph is the
+    // operator's whole statement about how a reply is drafted.
+    if labels.persona.as_deref() == Some(crate::lifecycle::PR_AUTHOR_PERSONA)
+        || labels.persona.as_deref() == Some(crate::reply::PERSONA)
+    {
         return Ok(Vec::new());
     }
     let (run_sets, own_sets) = if let (Some(record), Some(run), Some(node)) =
@@ -1103,6 +1112,10 @@ mod tests {
         assert!(
             sets(crate::lifecycle::PR_AUTHOR_PERSONA).is_empty(),
             "the drafting dispatch was given a member this graph never declared"
+        );
+        assert!(
+            sets(crate::reply::PERSONA).is_empty(),
+            "the reply drafting was given a member its graph never declared"
         );
         // The node's own work, under the same run and the same record.
         assert_eq!(

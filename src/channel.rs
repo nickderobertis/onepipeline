@@ -233,6 +233,7 @@ pub fn op_of(command: &Command) -> &'static str {
         Command::Settle { .. } => "settle",
         Command::Rework { .. } => "rework",
         Command::Retitle { .. } => "retitle",
+        Command::Decline { .. } => "decline",
     }
 }
 
@@ -251,7 +252,8 @@ pub fn target_of(command: &Command) -> Option<String> {
         | Command::Settle { id, .. }
         | Command::Amend { id, .. }
         | Command::Rework { id, .. }
-        | Command::Retitle { id, .. } => Some(id.clone()),
+        | Command::Retitle { id, .. }
+        | Command::Decline { id, .. } => Some(id.clone()),
         Command::Attest { reference } => Some(reference.clone()),
         Command::Finding { id, .. } => id.clone(),
         Command::Review { .. } | Command::Readjust { .. } | Command::Complete { .. } => None,
@@ -738,9 +740,110 @@ pub enum Command {
         /// Why. Blank is refused rather than recorded.
         reason: String,
     },
+    /// Decline review comments on a node's draft, answering each in its thread
+    /// with a terse reply saying why it was left.
+    ///
+    /// Applying it **is** posting its replies: the run's reply drafter drafts one
+    /// per named comment from the `reason`, and each is posted on the host,
+    /// labelled `declined` in its marker, before the edit commits as
+    /// `decline-applied`. The posted reply is the decline's whole record; nothing
+    /// is written to the plan store, no branch moves and no worker is dispatched.
+    /// See `docs/contract-divergences.md` entry 129.
+    Decline {
+        /// The node whose draft carries the comments.
+        id: String,
+        /// The comments declined, each one a read of that node's draft found.
+        comments: Vec<ReworkComment>,
+        /// Why they are left. Blank is refused rather than recorded.
+        reason: String,
+    },
 }
 
-/// One review comment a [`Command::Rework`] answers: its id on the host, and
+/// Why the reconciler refused a [`Command::Decline`], by kind.
+///
+/// Its [`Display`](std::fmt::Display) is the refusal's `reason` on the command's
+/// outcome. The kinds are the ones a planner acts on differently: a comment no
+/// read of the node found is named again once `onepipeline review` has read it, a
+/// blank reason is restated, a comment a reply already answers needs nothing, and
+/// a decline whose replies did not all reach the host is sent again, posting only
+/// the ones still missing. See `docs/contract-divergences.md` entry 129.
+// llmlint: ignore-block[invalid_states_unrepresentable] node and comment ids and URLs are the strings the `decline` op carried and the host answered, as every other channel record carries them; this is a refusal's account of them, never parsed back into a decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+#[non_exhaustive]
+pub enum Refusal {
+    /// The comment was never read for the node: no `onepipeline review` of this
+    /// run found it on the node's draft.
+    CommentNotRead {
+        /// The node the decline named.
+        node: String,
+        /// The comment no read found there.
+        comment: String,
+    },
+    /// The decline's reason was blank.
+    BlankReason {
+        /// The node the decline named.
+        node: String,
+    },
+    /// A marked reply already answers the comment's current revision, so there is
+    /// nothing to post.
+    AlreadyAnswered {
+        /// The node the decline named.
+        node: String,
+        /// The comment already answered.
+        comment: String,
+        /// Where that reply is read.
+        url: String,
+    },
+    /// The decline's replies could not all be drafted or posted. Any posted before
+    /// the failure stay on the host, and sending the decline again posts only the
+    /// rest.
+    DeclineNotPosted {
+        /// The node the decline named.
+        node: String,
+        /// The comments it named.
+        comments: Vec<String>,
+        /// What failed.
+        detail: String,
+    },
+}
+// llmlint: ignore-end[invalid_states_unrepresentable]
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CommentNotRead { node, comment } => write!(
+                f,
+                "decline: node '{node}': comment {comment} was not read for it — run \
+                 `onepipeline review` and decline a comment it surfaced"
+            ),
+            Self::BlankReason { node } => {
+                write!(f, "decline: node '{node}': the reason cannot be blank")
+            }
+            Self::AlreadyAnswered { node, comment, url } => write!(
+                f,
+                "decline: node '{node}': comment {comment} is already answered by {url}"
+            ),
+            Self::DeclineNotPosted {
+                node,
+                comments,
+                detail,
+            } => write!(
+                f,
+                "decline: node '{node}': the replies to {} were not all posted: {detail}",
+                comments.join(", ")
+            ),
+        }
+    }
+}
+
+impl From<Refusal> for crate::Error {
+    fn from(refusal: Refusal) -> Self {
+        Self::Rejected(refusal)
+    }
+}
+
+/// One review comment a [`Command::Rework`] or a [`Command::Decline`] answers: its id on the host, and
 /// where a person reads it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -869,6 +972,10 @@ impl SurfaceKind {
     /// A rework's change request whose title nothing verified still describes the
     /// change, raised non-blocking and answered by a `retitle` of its node.
     pub const TITLE_UNVERIFIED: &'static str = "title-unverified";
+    /// Review comments a rework answered whose reply could not be drafted or
+    /// posted, raised non-blocking; the reply is drafted again by the next
+    /// `onepipeline review`.
+    pub const REVIEW_REPLY_PENDING: &'static str = "review-reply-pending";
     /// The engine's check-in kind.
     pub fn check_in() -> Self {
         Self(Self::CHECK_IN.into())

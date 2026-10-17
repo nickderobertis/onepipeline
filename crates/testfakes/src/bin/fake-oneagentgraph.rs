@@ -564,6 +564,39 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         (None, _) => node.clone(),
     };
 
+    // A review comment's reply drafting is a drafter and nothing else: it runs in a
+    // scratch directory that is no worktree, so none of the node's own scripts —
+    // its work, its commits, its publication — are this dispatch's. Scripted under
+    // `review-reply.*` alone: `review-reply.wait` holds it until `review-reply.go`,
+    // `review-reply.fail` fails it with that exit code, and its answer is
+    // `review-reply.result` or one composed from its task (see [`fake::replied_answer`]),
+    // after `review-reply.refused-first` where scripted, or none at all under
+    // `review-reply.unanswered`.
+    if persona.as_deref() == Some("review-reply") {
+        if dir.join("review-reply.wait").exists() {
+            fake::wait_for(&dir.join("review-reply.go"));
+        }
+        if let Some(code) = fake::node_script(dir, "review-reply", "fail") {
+            let Ok(code) = code.parse::<u8>() else {
+                fake::fail(&format!(
+                    "review-reply.fail holds {code:?}, which is not an exit code"
+                ));
+            };
+            eprintln!("the reply drafter could not draft");
+            return ExitCode::from(code);
+        }
+        emit(
+            args,
+            dir,
+            &format!("{node}.review-reply"),
+            &node,
+            None,
+            &task,
+            None,
+        );
+        return ExitCode::SUCCESS;
+    }
+
     // The scratch directory the engine promised this dispatch, taken as the
     // dispatch itself takes it: out of its own environment, and before any
     // scripted behaviour, so a dispatch scripted to produce nothing uses it too.
@@ -3166,6 +3199,42 @@ fn report_of(
     verdicts: Vec<serde_json::Value>,
     judged: &[oneagentgraph::event::JudgeDecided],
 ) -> serde_json::Value {
+    if let Some(answer) = fake::replied_answer(task, &fake::script_dir()) {
+        // Validated against the reply graph's own schema, as the producer validates.
+        let schema = drafting_schema(args);
+        let dir = fake::script_dir();
+        let mut results = Vec::new();
+        // `review-reply.refused-first`: a first harness's answer, held to the same schema,
+        // ahead of the one composed — the result a reader must step past when it refuses.
+        if let Some(first) = fake::node_script(&dir, "review-reply", "refused-first") {
+            let first: serde_json::Value = serde_json::from_str(&first).unwrap_or_else(|error| {
+                fake::fail(&format!("review-reply.refused-first is not JSON: {error}"))
+            });
+            results.push(serde_json::json!({
+                "harness": "codex", "status": "ok", "text": "Drafted something else.",
+                "schema_valid": schema.validate(&first).is_ok(), "structured": first,
+            }));
+        }
+        // `review-reply.unanswered`: the turn ended without a structured answer at all.
+        results.push(
+            if fake::node_script(&dir, "review-reply", "unanswered").is_some() {
+                serde_json::json!({
+                    "harness": "claude-code", "status": "ok", "text": "I could not draft.",
+                    "structured": null, "schema_valid": null,
+                })
+            } else {
+                serde_json::json!({
+                    "harness": "claude-code", "status": "ok", "text": "Drafted the replies.",
+                    "schema_valid": schema.validate(&answer).is_ok(), "structured": answer,
+                })
+            },
+        );
+        return serde_json::json!({
+            "schema_version": "0.6",
+            "results": results,
+            "usage": {"input_tokens": 30, "output_tokens": 15, "cost_usd": 0.01},
+        });
+    }
     if let Some(answer) = drafted_answer(task, &fake::script_dir()) {
         // A candidate the identity chain stepped past: it ran nothing, so it
         // answered nothing, and a consumer that read the first entry rather than

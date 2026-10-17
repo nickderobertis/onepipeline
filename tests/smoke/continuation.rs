@@ -84,15 +84,15 @@ fn claim(world: &World, project: &str) -> Value {
 /// What one invocation of the journey opened on the scratch repository: the pull requests,
 /// by number, and the branches every host recorded publishing under the run's prefix.
 #[derive(Default)]
-struct Tracked {
-    pulls: BTreeSet<u64>,
-    branches: BTreeSet<String>,
+pub(crate) struct Tracked {
+    pub(crate) pulls: BTreeSet<u64>,
+    pub(crate) branches: BTreeSet<String>,
 }
 
 impl Tracked {
     /// Add what `world` recorded for `run`: every `branch`, `url` and `change_url` its
     /// journal's `onevcs` records and settlements carry, wherever in the payload they sit.
-    fn read(&mut self, world: &World, run: &str, slug: &str, prefix: &str) {
+    pub(crate) fn read(&mut self, world: &World, run: &str, slug: &str, prefix: &str) {
         let pulls = format!("https://github.com/{slug}/pull/");
         for event in world.journal(run) {
             if event["source"] != "vcs" && event["kind"] != "node-settled" {
@@ -137,20 +137,20 @@ impl Tracked {
 /// every world, it drops after them, once each has stopped the drivers it started, which
 /// would otherwise go on publishing after it was cleaned. A failure there is printed, since
 /// a panic while unwinding would abort the report of the one that got it there.
-struct Created {
-    slug: String,
-    stamp: String,
-    /// The prefix every branch of the run is cut under — the run's id and a `/` — once the
-    /// first launch has minted it.
-    prefix: Option<String>,
-    cleaned: bool,
+pub(crate) struct Created {
+    pub(crate) slug: String,
+    pub(crate) stamp: String,
+    /// The prefixes every branch of the run is cut under — here the run's id and a `/`, once
+    /// the first launch has minted it; on a board, each task's issue number and a `/`.
+    pub(crate) prefixes: Vec<String>,
+    pub(crate) cleaned: bool,
 }
 
 /// What a cleanup met: each step it took, and every failure.
 #[derive(Default)]
-struct Cleanup {
-    observed: Vec<String>,
-    failures: Vec<String>,
+pub(crate) struct Cleanup {
+    pub(crate) observed: Vec<String>,
+    pub(crate) failures: Vec<String>,
 }
 
 impl Cleanup {
@@ -160,9 +160,9 @@ impl Cleanup {
 }
 
 impl Created {
-    /// Close and delete everything `tracked` names and everything the stamp and the prefix
+    /// Close and delete everything `tracked` names and everything the stamp and the prefixes
     /// find, then read each back.
-    fn clean(&mut self, tracked: &Tracked) -> Cleanup {
+    pub(crate) fn clean(&mut self, tracked: &Tracked) -> Cleanup {
         self.cleaned = true;
         let mut cleanup = Cleanup::default();
         let mut pulls = tracked.pulls.clone();
@@ -195,13 +195,13 @@ impl Created {
         branches.extend(self.remote_branches(&mut cleanup));
         for branch in &branches {
             if !self
-                .prefix
-                .as_deref()
-                .is_some_and(|prefix| branch.starts_with(prefix))
+                .prefixes
+                .iter()
+                .any(|prefix| branch.starts_with(prefix.as_str()))
             {
                 cleanup.failed(format!(
-                    "{branch} is outside the run's prefix {:?}, so it is not deleted",
-                    self.prefix
+                    "{branch} is outside the run's prefixes {:?}, so it is not deleted",
+                    self.prefixes
                 ));
                 continue;
             }
@@ -343,34 +343,36 @@ impl Created {
         }
     }
 
-    /// Every branch on the remote under the run's prefix.
+    /// Every branch on the remote under one of the run's prefixes.
     fn remote_branches(&self, cleanup: &mut Cleanup) -> BTreeSet<String> {
-        let Some(prefix) = &self.prefix else {
-            return BTreeSet::new();
-        };
-        let listed = match gh_try(&[
-            "api",
-            &format!("repos/{}/git/matching-refs/heads/{prefix}", self.slug),
-        ]) {
-            Ok(listed) => listed,
-            Err(refusal) => {
-                cleanup.failed(format!("listing branches under {prefix}: {refusal}"));
-                return BTreeSet::new();
-            }
-        };
-        let refs: Vec<Value> = match serde_json::from_str(&listed) {
-            Ok(refs) => refs,
-            Err(why) => {
-                cleanup.failed(format!("reading branches under {prefix}: {why}: {listed}"));
-                return BTreeSet::new();
-            }
-        };
-        refs.iter()
-            .filter_map(|reference| reference["ref"].as_str())
-            .filter_map(|reference| reference.strip_prefix("refs/heads/"))
-            .filter(|branch| branch.starts_with(prefix.as_str()))
-            .map(str::to_owned)
-            .collect()
+        let mut branches = BTreeSet::new();
+        for prefix in &self.prefixes {
+            let listed = match gh_try(&[
+                "api",
+                &format!("repos/{}/git/matching-refs/heads/{prefix}", self.slug),
+            ]) {
+                Ok(listed) => listed,
+                Err(refusal) => {
+                    cleanup.failed(format!("listing branches under {prefix}: {refusal}"));
+                    continue;
+                }
+            };
+            let refs: Vec<Value> = match serde_json::from_str(&listed) {
+                Ok(refs) => refs,
+                Err(why) => {
+                    cleanup.failed(format!("reading branches under {prefix}: {why}: {listed}"));
+                    continue;
+                }
+            };
+            branches.extend(
+                refs.iter()
+                    .filter_map(|reference| reference["ref"].as_str())
+                    .filter_map(|reference| reference.strip_prefix("refs/heads/"))
+                    .filter(|branch| branch.starts_with(prefix.as_str()))
+                    .map(str::to_owned),
+            );
+        }
+        branches
     }
 }
 
@@ -391,7 +393,7 @@ impl Drop for Created {
 
 /// The open pull requests whose head is `branch` on `slug`; a listing GitHub refused, or one
 /// that does not read, fails the journey rather than reading as none.
-fn open_pulls(slug: &str, branch: &str) -> Vec<Value> {
+pub(crate) fn open_pulls(slug: &str, branch: &str) -> Vec<Value> {
     let listed = gh_try(&[
         "pr",
         "list",
@@ -412,7 +414,7 @@ fn open_pulls(slug: &str, branch: &str) -> Vec<Value> {
 /// One host of the journey: a world of its own, with a clone of the scratch repository
 /// registered under [`ALIAS`], and the publication rules a team's drafts are kept under. Its
 /// store is the world's own, which every host made from one world shares.
-fn host(world: World, slug: &str) -> World {
+pub(crate) fn host(world: World, slug: &str) -> World {
     git_credentials(&world);
     let at = world
         .home
@@ -447,7 +449,7 @@ fn host(world: World, slug: &str) -> World {
 
 /// The credential `gh` holds for this user: what every `gh` a driver runs authenticates
 /// with, since a world points `XDG_CONFIG_HOME` — where `gh` keeps its own login — at itself.
-fn gh_token() -> String {
+pub(crate) fn gh_token() -> String {
     std::env::var("GH_TOKEN")
         .ok()
         .filter(|token| !token.trim().is_empty())
@@ -455,7 +457,7 @@ fn gh_token() -> String {
 }
 
 /// Run `onepipeline` on `world` against the real services, from its project directory.
-fn onepipeline(world: &World, args: &[&str]) -> Command {
+pub(crate) fn onepipeline(world: &World, args: &[&str]) -> Command {
     let mut command = world.real_cmd(args);
     command
         .current_dir(&world.project)
@@ -465,11 +467,11 @@ fn onepipeline(world: &World, args: &[&str]) -> Command {
     command
 }
 
-fn ran(command: &mut Command) -> Output {
+pub(crate) fn ran(command: &mut Command) -> Output {
     command.output().expect("the binary runs")
 }
 
-fn said(output: &Output) -> String {
+pub(crate) fn said(output: &Output) -> String {
     format!(
         "exit {:?}\nstdout: {}\nstderr: {}",
         output.status.code(),
@@ -479,12 +481,12 @@ fn said(output: &Output) -> String {
 }
 
 /// Wait for `ready`, reading the real services, or fail naming `what`.
-fn until(what: &str, ready: impl FnMut() -> bool) {
+pub(crate) fn until(what: &str, ready: impl FnMut() -> bool) {
     until_or(what, ready, String::new);
 }
 
 /// [`until`], failing with what `why` says the hosts recorded.
-fn until_or(what: &str, mut ready: impl FnMut() -> bool, why: impl Fn() -> String) {
+pub(crate) fn until_or(what: &str, mut ready: impl FnMut() -> bool, why: impl Fn() -> String) {
     let deadline = Instant::now() + PATIENCE;
     while Instant::now() < deadline {
         if ready() {
@@ -496,7 +498,7 @@ fn until_or(what: &str, mut ready: impl FnMut() -> bool, why: impl Fn() -> Strin
 }
 
 /// What a run's driver said and what its projections recorded, for a failure to name.
-fn recorded(world: &World, run: &str) -> String {
+pub(crate) fn recorded(world: &World, run: &str) -> String {
     let read = |file: &str| std::fs::read_to_string(world.run_file(run, file)).unwrap_or_default();
     let log = read("driver.log");
     let tail: Vec<&str> = log.lines().rev().take(20).collect();
@@ -519,7 +521,7 @@ fn dispatched(world: &World, run: &str) -> Vec<String> {
 }
 
 /// A lifecycle node of the plan, publishing to the scratch repository under [`ALIAS`].
-fn change(id: &str, deps: &[&str], stamp: &str) -> Value {
+pub(crate) fn change(id: &str, deps: &[&str], stamp: &str) -> Value {
     json!({
         "id": id,
         "repo": ALIAS,
@@ -547,7 +549,7 @@ fn a_stored_project_is_carried_on_by_a_cold_host_that_takes_it_over() {
     let mut residue = Created {
         slug: slug.clone(),
         stamp: stamp.clone(),
-        prefix: None,
+        prefixes: Vec::new(),
         cleaned: false,
     };
 
@@ -593,7 +595,7 @@ fn a_stored_project_is_carried_on_by_a_cold_host_that_takes_it_over() {
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .next()
         .expect("the launch minted a run");
-    residue.prefix = Some(format!("{run}/"));
+    residue.prefixes = vec![format!("{run}/")];
     let mut saw_dispatch = None;
     let early = |what: &str| {
         if first.run_file(&run, "result.json").is_file() {

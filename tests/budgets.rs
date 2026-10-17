@@ -284,6 +284,79 @@ fn the_budgets_file_registers_the_host_view_budget() {
     assert!(ci.contains("just host-view-budget \"$(command -v onepipeline)\""));
 }
 
+/// The review round's quota budget, as `budgets.yaml` registers it: reported by its command off
+/// the record the e2e tier's busy-round journey writes, at most 45 quota units, and read by the
+/// `budgets` target only after that tier has written the record — a record the tier declares
+/// among its outputs, so a cached replay of it restores the file the reporter reads.
+#[test]
+fn the_budgets_file_registers_the_review_round_quota_budget() {
+    let loaded = onebudgetspec_core::load(&[root().join("budgets.yaml")], false)
+        .unwrap_or_else(|error| panic!("budgets.yaml does not load: {error}"));
+    let budget = loaded
+        .files()
+        .iter()
+        .flat_map(|file| &file.contents.budgets)
+        .find(|budget| budget.id == "review-round-github-quota")
+        .expect("budgets.yaml registers review-round-github-quota");
+    assert_eq!(budget.measure, Measure::Reported);
+    assert_eq!(budget.unit, "quota-units");
+    assert_eq!(budget.direction, Direction::Max);
+    assert!(
+        (budget.threshold - 45.0).abs() < f64::EPSILON,
+        "{}",
+        budget.threshold
+    );
+    assert_eq!(
+        budget.command,
+        ["bash", "scripts/review-round-quota-budget.sh"],
+        "the budget's command is not the committed reporter"
+    );
+    assert!(budget.labels.is_empty(), "{:?}", budget.labels);
+    let journeys =
+        std::fs::read_to_string(root().join("tests/e2e/review_round.rs")).expect("the journeys");
+    assert!(journeys.contains(
+        "#[test]\nfn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent()"
+    ));
+    let project: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root().join("project.json")).expect("project.json"),
+    )
+    .expect("project.json parses");
+    let target = &project["targets"]["budgets"];
+    assert!(target["dependsOn"][0]["projects"]
+        .as_array()
+        .expect("the budgets target depends on the e2e tier")
+        .contains(&serde_json::json!("onepipeline-e2e")));
+    assert!(target["inputs"]
+        .as_array()
+        .expect("the budgets target names its inputs")
+        .contains(&serde_json::json!(
+            "{workspaceRoot}/scripts/review-round-quota-budget.*"
+        )));
+    let reporter = std::fs::read_to_string(root().join("scripts/review-round-quota-budget.mjs"))
+        .expect("the reporter reads");
+    let record = reporter
+        .lines()
+        .find_map(|line| line.strip_prefix("const record = \""))
+        .and_then(|rest| rest.strip_suffix("\";"))
+        .expect("the reporter names the record it reads");
+    assert!(
+        journeys.contains(&format!("pub(crate) const RECORD: &str = \"{record}\";")),
+        "the busy-round journey writes a record other than {record}"
+    );
+    let e2e: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root().join("tests/e2e/project.json"))
+            .expect("tests/e2e/project.json"),
+    )
+    .expect("tests/e2e/project.json parses");
+    assert!(
+        e2e["targets"]["test"]["outputs"]
+            .as_array()
+            .expect("the e2e tier names its outputs")
+            .contains(&serde_json::json!(format!("{{workspaceRoot}}/{record}"))),
+        "the e2e tier's outputs leave out {record}, so a cached replay of it restores no record"
+    );
+}
+
 /// The reporter, run from `cwd` with the result going to `result` when one is named.
 #[cfg(unix)]
 fn host_view_report(

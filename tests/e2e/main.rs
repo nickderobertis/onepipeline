@@ -239,6 +239,8 @@ mod retirement;
 // Same grounds as `mod retirement` above.
 mod readjust;
 mod review;
+mod review_reply;
+mod review_round;
 mod rework;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod run_end_hooks;

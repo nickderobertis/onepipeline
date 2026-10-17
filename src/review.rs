@@ -19,9 +19,21 @@ use std::collections::{BTreeMap, BTreeSet};
 #[serde(tag = "state", rename_all = "kebab-case", deny_unknown_fields)]
 pub(crate) enum State {
     Pending,
-    BeingReworked { rework: String },
-    Answered { reply_url: String },
-    Declined { reply_url: String },
+    BeingReworked {
+        rework: String,
+    },
+    Answered {
+        reply_url: String,
+        /// The rework whose commits answered it, where the run's record names one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rework: Option<String>,
+        /// The short sha of each commit its reply links.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        commits: Vec<String>,
+    },
+    Declined {
+        reply_url: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,7 +53,7 @@ pub(crate) fn key(root: &str, comment: &ReviewComment) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn root<'a>(state: &'a RunState, node: &'a str) -> &'a str {
+pub(crate) fn root<'a>(state: &'a RunState, node: &'a str) -> &'a str {
     let mut current = node;
     let mut seen = BTreeSet::new();
     while seen.insert(current) {
@@ -57,7 +69,7 @@ fn root<'a>(state: &'a RunState, node: &'a str) -> &'a str {
     current
 }
 
-fn derive(
+pub(crate) fn derive(
     state: &RunState,
     node: &str,
     comment: &ReviewComment,
@@ -84,6 +96,11 @@ fn derive(
         } else {
             State::Answered {
                 reply_url: reply.url.clone(),
+                rework: answered_by(state, node, &comment.id.0),
+                commits: crate::reply::linked_commits(&reply.body)
+                    .into_iter()
+                    .map(|sha| sha.chars().take(SHORT_SHA).collect())
+                    .collect(),
             }
         };
     }
@@ -114,6 +131,41 @@ fn derive(
         return State::BeingReworked { rework };
     }
     State::Pending
+}
+
+/// How many characters of a sha a view shows.
+const SHORT_SHA: usize = 7;
+
+/// The rework whose provenance names `comment` in `node`'s lineage: the continued
+/// lineage's own, or the newest of the reworks this host applied to it.
+fn answered_by(state: &RunState, node: &str, comment: &str) -> Option<String> {
+    if let Some(continued) = state
+        .continued_reworks
+        .get(node)
+        .filter(|record| record.comments.iter().any(|named| named.id == comment))
+    {
+        return Some(continued.replacement.clone());
+    }
+    let lineage = root(state, node);
+    let mut found = None;
+    let mut current = lineage;
+    let mut seen = BTreeSet::new();
+    while seen.insert(current) {
+        let Some(record) = state.reworks.get(current) else {
+            match state.superseded.get(current) {
+                Some(next) => {
+                    current = next;
+                    continue;
+                }
+                None => break,
+            }
+        };
+        if record.comments.iter().any(|named| named.id == comment) {
+            found = Some(record.replacement.clone());
+        }
+        current = &record.replacement;
+    }
+    found
 }
 
 fn drafts(state: &RunState) -> impl Iterator<Item = (&str, String)> {
@@ -240,6 +292,7 @@ pub(crate) fn pass(
         })
         .map(|(repo, detail)| format!("{repo}: {detail}"))
         .collect();
+    let mut answerable = Vec::new();
     for (node, url, read) in detection.reviews {
         let node = node.as_str();
         let read = match read {
@@ -287,7 +340,11 @@ pub(crate) fn pass(
             failpoint("after-surface")?;
             record_surface(paths, journal, &surface)?;
         }
+        answerable.push((node.to_owned(), url, read));
     }
+    // The last step: every reply a settled rework owes, drafted and posted out of the
+    // reads just made, so the pass returns with nothing it could do left undone.
+    answer_owed(paths, state, journal, &channel, &answerable, &mut failures)?;
     if failures.is_empty() {
         Ok(())
     } else {
@@ -298,6 +355,180 @@ pub(crate) fn pass(
     }
 }
 
+/// Draft and post every reply the pass's reads show owed: one drafting per rework
+/// replacement, each reply one POST. A drafting that posts nothing is journalled
+/// `review-reply-not-drafted` and surfaced `review-reply-pending`, and is drafted
+/// again by the next pass; a post the host refused is the pass's failure.
+fn answer_owed(
+    paths: &RunPaths,
+    state: &RunState,
+    journal: &mut Journal,
+    channel: &ChannelState,
+    reads: &[(String, String, onevcs::ReviewRead)],
+    failures: &mut Vec<String>,
+) -> Result<()> {
+    let launch: crate::ledger::LaunchRecord = crate::ledger::read_json(&paths.launch())?;
+    let scope = crate::boundary::of_run(&crate::boundary::plan_now(state)).term_scope();
+    for (node, url, read) in reads {
+        let owed = match crate::reply::owed(paths, state, node, url, read) {
+            Ok(Some(owed)) => owed,
+            Ok(None) => continue,
+            Err(why) => {
+                let named = state
+                    .graph
+                    .get(node)
+                    .map(|_| crate::reply::provenance(state, node))
+                    .and_then(|provenance| provenance.map(|rework| rework.comments))
+                    .unwrap_or_default();
+                not_drafted(paths, journal, channel, node, named, &why)?;
+                continue;
+            }
+        };
+        let named = owed.drafting.comment_ids();
+        let Some(graph) = launch.review_reply_graph() else {
+            not_drafted(
+                paths,
+                journal,
+                channel,
+                node,
+                named,
+                &crate::reply::NotDrafted::unconfigured(),
+            )?;
+            continue;
+        };
+        let drafted =
+            match crate::reply::draft(paths, graph, node, &owed.drafting, &mut |envelope| {
+                if let Err(error) = journal.relay(&envelope) {
+                    eprintln!("onepipeline: a reply drafting's event was not journalled: {error}");
+                }
+            }) {
+                Ok(drafted) => drafted,
+                Err(why) => {
+                    not_drafted(paths, journal, channel, node, named, &why)?;
+                    continue;
+                }
+            };
+        for reply in drafted {
+            let Some(comment) = owed
+                .drafting
+                .comments
+                .iter()
+                .find(|comment| comment.id.0 == reply.comment)
+            else {
+                continue;
+            };
+            let key = crate::reply::key_of(&owed.root, comment);
+            let posted = match crate::reply::post(
+                url,
+                &reply.comment,
+                &reply.body,
+                &key,
+                reply.disposition,
+                scope.clone(),
+            ) {
+                Ok(posted) => posted,
+                Err(error) => {
+                    failures.push(format!(
+                        "{node} ({url}): the reply to {} was not posted: {error}",
+                        reply.comment
+                    ));
+                    break;
+                }
+            };
+            failpoint("after-reply-post")?;
+            let linked = crate::reply::linked_commits(&reply.body);
+            journal.emit(
+                PipelineKind::ReviewReplyPosted,
+                journal::labels(&paths.run, Some(node)),
+                crate::engine::payload_of(&crate::payload::ReviewReplyPosted {
+                    node: node.clone(),
+                    comment: reply.comment.clone(),
+                    disposition: reply.disposition,
+                    url: posted.url,
+                    commits: owed
+                        .drafting
+                        .commits()
+                        .iter()
+                        .filter(|commit| {
+                            linked
+                                .iter()
+                                .any(|sha| commit.sha.starts_with(sha.as_str()))
+                        })
+                        .map(|commit| commit.sha.clone())
+                        .collect(),
+                })?,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Journal a drafting that posted nothing, and surface it once per set of owed
+/// revisions: non-blocking, since the next pass drafts it again.
+fn not_drafted(
+    paths: &RunPaths,
+    journal: &mut Journal,
+    channel: &ChannelState,
+    node: &str,
+    comments: Vec<String>,
+    why: &crate::reply::NotDrafted,
+) -> Result<()> {
+    let record = crate::reply::not_drafted(node, comments.clone(), why);
+    journal.emit(
+        PipelineKind::ReviewReplyNotDrafted,
+        journal::labels(&paths.run, Some(node)),
+        crate::engine::payload_of(&record)?,
+    )?;
+    let digest = Sha256::digest(format!("{node}:{}:{:?}", comments.join(","), why.ending));
+    let correlation = format!(
+        "review-reply-pending:{}",
+        digest
+            .iter()
+            .take(8)
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    let already = crate::ledger::read_lines(&paths.channel("surfaces.jsonl"))
+        .iter()
+        .filter_map(|line| serde_json::from_str::<Surface>(line).ok())
+        .any(|surface| {
+            surface
+                .correlation
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref()
+                == Some(correlation.as_str())
+        });
+    if already {
+        return Ok(());
+    }
+    let correlation = correlation
+        .parse()
+        .map_err(|error| Error::Invalid(format!("review reply correlation: {error}")))?;
+    let surface = channel.push(Surface {
+        id: 0,
+        kind: crate::channel::SurfaceKind::REVIEW_REPLY_PENDING.to_owned(),
+        message: format!(
+            "Node {node}: the replies to review comments {} were not posted ({}): {}. \
+             `onepipeline review` drafts them again.",
+            comments.join(", "),
+            serde_json::to_value(why.ending)
+                .ok()
+                .and_then(|word| word.as_str().map(str::to_owned))
+                .unwrap_or_default(),
+            why.detail
+        ),
+        source: crate::channel::source::RECONCILER.to_owned(),
+        blocking: false,
+        queued_at: crate::sys::now_millis(),
+        workstream: Some(node.to_owned()),
+        abandoned: false,
+        asker: None,
+        correlation: Some(correlation),
+    })?;
+    record_surface(paths, journal, &surface)
+}
+
 pub(crate) fn lines(comments: &BTreeMap<String, Vec<Comment>>) -> String {
     let mut text = String::new();
     for (node, comments) in comments {
@@ -305,7 +536,22 @@ pub(crate) fn lines(comments: &BTreeMap<String, Vec<Comment>>) -> String {
             let state = match &comment.state {
                 State::Pending => "pending".to_owned(),
                 State::BeingReworked { rework } => format!("being reworked by {rework}"),
-                State::Answered { reply_url } => format!("answered: {reply_url}"),
+                State::Answered {
+                    reply_url,
+                    rework,
+                    commits,
+                } => {
+                    let by = rework
+                        .as_ref()
+                        .map(|rework| format!(" by {rework}"))
+                        .unwrap_or_default();
+                    let linked = if commits.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({})", commits.join(", "))
+                    };
+                    format!("answered{by}{linked}: {reply_url}")
+                }
                 State::Declined { reply_url } => format!("declined: {reply_url}"),
             };
             text.push_str(&format!(
@@ -354,7 +600,12 @@ fn record_surface(paths: &RunPaths, journal: &mut Journal, surface: &Surface) ->
 }
 
 // llmlint: ignore-block[invalid_states_unrepresentable] Entry 122 fixes this output-only JSON document’s run and node ids as strings. They borrow the recorded RunPaths and validated graph identities; these DTOs never accept or execute external input. Changing their serialized shape would change that agreed view contract.
-/// The first JSON results view; comment lists are absent when empty.
+/// The JSON results view's schema version: **2** since an answered comment names the
+/// rework that answered it and the commits its reply links (entry 129), both omitted
+/// where empty, so a version-1 reader reads every version-2 document's other fields.
+pub(crate) const RESULTS_SCHEMA_VERSION: u32 = 2;
+
+/// The JSON results view; comment lists are absent when empty.
 #[derive(Serialize)]
 pub(crate) struct ResultsDocument<'a> {
     pub(crate) schema_version: u32,
