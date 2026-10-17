@@ -22,6 +22,11 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 export const SCHEMA = 2;
+/**
+ * The schemas this reads: 2, and 1 — which is 2 without the `unfinished` ending,
+ * so records a leg wrote before schema 2 are read as they were written.
+ */
+export const READS = [1, 2];
 /** How a record was written; `unfinished` is a test the runner ended before it did. */
 export const ENDINGS = ["test-thread", "process-exit", "unfinished"];
 export const CATEGORIES = ["spawn", "git", "build", "fixture", "wait", "fs"];
@@ -42,7 +47,9 @@ const isCount = (value) => Number.isSafeInteger(value) && value >= 0;
 /** Why `record` is not a record this reader can fold, or `undefined` when it is one. */
 export function recordProblem(record) {
   if (record === null || typeof record !== "object") return "it is not an object";
-  if (record.schema !== SCHEMA) return `it is schema ${record.schema}, and this reads ${SCHEMA}`;
+  if (!READS.includes(record.schema)) {
+    return `it is schema ${record.schema}, and this reads ${READS.join(" and ")}`;
+  }
   for (const field of ["binary", "test"]) {
     if (typeof record[field] !== "string" || record[field] === "") return `${field} is not a name`;
   }
@@ -50,12 +57,29 @@ export function recordProblem(record) {
     if (!isSeconds(record[field])) return `${field} is not a nonnegative number`;
   }
   if (record.run_id !== null && typeof record.run_id !== "string") return "run_id is not a string";
-  if (!ENDINGS.includes(record.ended)) return `ended is not one of ${ENDINGS.join(", ")}`;
+  const endings = record.schema === 1 ? ENDINGS.filter((e) => e !== "unfinished") : ENDINGS;
+  if (!endings.includes(record.ended)) return `ended is not one of ${endings.join(", ")}`;
   if (record.attempt !== null && !isCount(record.attempt)) return "attempt is not a count";
   for (const category of CATEGORIES) {
     const tally = record.categories?.[category];
     if (!isCount(tally?.count)) return `categories.${category}.count is not a count`;
-    if (!isSeconds(tally?.s)) return `categories.${category}.s is not a nonnegative number`;
+    for (const field of ["s", "inclusive_s", "background_s"]) {
+      if (!isSeconds(tally?.[field])) {
+        return `categories.${category}.${field} is not a nonnegative number`;
+      }
+    }
+    if (!isCount(tally.background_count)) {
+      return `categories.${category}.background_count is not a count`;
+    }
+  }
+  const programs = record.programs;
+  if (programs === null || typeof programs !== "object" || Array.isArray(programs)) {
+    return "programs is not an object";
+  }
+  for (const [program, entry] of Object.entries(programs)) {
+    if (!isCount(entry?.count) || !isSeconds(entry?.s)) {
+      return `programs.${program} is not a count and a number of seconds`;
+    }
   }
   if (!isCount(record.categories.wait.polls)) return "categories.wait.polls is not a count";
   // The writer's categories are exclusive and its remainder is what they leave, so a

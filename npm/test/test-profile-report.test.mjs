@@ -25,7 +25,13 @@ function record(test, { run = "now", attempt = 1, startedAt = 100, wall, spent =
   for (const category of CATEGORIES) {
     const s = spent[category] ?? 0;
     attributed += s;
-    categories[category] = { count: s > 0 ? 1 : 0, s, inclusive_s: s };
+    categories[category] = {
+      count: s > 0 ? 1 : 0,
+      s,
+      inclusive_s: s,
+      background_count: 0,
+      background_s: 0,
+    };
   }
   categories.wait.polls = 0;
   return {
@@ -38,6 +44,7 @@ function record(test, { run = "now", attempt = 1, startedAt = 100, wall, spent =
     ended: "test-thread",
     wall_s: wall,
     categories,
+    programs: {},
     unattributed_s: wall - attributed,
   };
 }
@@ -212,7 +219,7 @@ test("a file that is not a record of this schema is refused by its path", () => 
   writeFileSync(join(dir, "e2e", "newer.json"), JSON.stringify({ ...golden, schema: SCHEMA + 1 }));
   refused(
     ["--out", join(scratch, "x"), `other=${dir}`],
-    /newer\.json is not a test-profile record: it is schema 3, and this reads 2/,
+    /newer\.json is not a test-profile record: it is schema 3, and this reads 1 and 2/,
     /next: remove .*newer\.json, or rerun the test that wrote it/,
   );
   const broken = join(scratch, "broken");
@@ -336,6 +343,28 @@ test("each field a record must carry is checked, and the record that lacks it re
     ],
     [{ categories: undefined }, /categories\.spawn\.count is not a count/],
     [{ ended: "crashed" }, /ended is not one of test-thread, process-exit, unfinished/],
+    [{ schema: 1, ended: "unfinished" }, /ended is not one of test-thread, process-exit$/m],
+    [
+      { categories: { ...golden.categories, git: { ...golden.categories.git, inclusive_s: -1 } } },
+      /categories\.git\.inclusive_s is not a nonnegative number/,
+    ],
+    [
+      {
+        categories: { ...golden.categories, git: { ...golden.categories.git, background_s: "x" } },
+      },
+      /categories\.git\.background_s is not a nonnegative number/,
+    ],
+    [
+      {
+        categories: {
+          ...golden.categories,
+          git: { ...golden.categories.git, background_count: 0.5 },
+        },
+      },
+      /categories\.git\.background_count is not a count/,
+    ],
+    [{ programs: [] }, /programs is not an object/],
+    [{ programs: { git: { count: 1 } } }, /programs\.git is not a count and a number of seconds/],
     [{ wall_s: 0.5 }, /its categories hold .* of a 0\.5s test/],
     [{ unattributed_s: 0.5 }, /unattributed_s 0\.5 is not what its categories leave of wall_s/],
   ];
@@ -384,4 +413,11 @@ test("a test the runner ended is read from its last heartbeat and counted as unf
   assert.equal(read.breakdown.total.tests, 2);
   assert.equal(read.breakdown.total.unfinished, 1);
   assert.match(report(`unfinished=${dir}`), /2 tests, 361\.0 test-s, 1 of them unfinished/);
+});
+
+test("a schema-1 record, written before the unfinished ending, is read as it was written", () => {
+  const dir = join(scratch, "schema-1");
+  write(dir, [{ ...record("a::old", { wall: 2 }), schema: 1 }]);
+  const [read] = JSON.parse(report("--json", `old=${dir}`)).platforms;
+  assert.equal(read.breakdown.total.tests, 1);
 });

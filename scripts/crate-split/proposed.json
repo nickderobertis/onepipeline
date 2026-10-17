@@ -149,7 +149,8 @@
         "examples/**",
         "tests/e2e/github_loopback.py",
         "tests/e2e/linear_loopback.rs",
-        "tests/e2e/budget_result.rs"
+        "tests/e2e/budget_result.rs",
+        "tests/golden/writeback-comparable-plan.json"
       ],
       "crates": [
         "onepipeline"
