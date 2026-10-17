@@ -117,6 +117,58 @@ describe("a Windows staged record's zip archive", () => {
     });
   }
 
+  it("packages a win_amd64 wheel into the zip archive and npm package that carry its executable", () => {
+    const out = mkdtempSync(join(work, "packaged-"));
+    const built = JSON.parse(
+      execFileSync("python3", ["-c", ASSEMBLE, out, VERSION, payload, "none"], {
+        cwd: REPO_ROOT,
+        encoding: "utf8",
+      }),
+    );
+    // The packager itself, as a Windows build job's build phase calls it.
+    const record = JSON.parse(
+      execFileSync(
+        "python3",
+        [
+          "-c",
+          "import importlib.util,json,sys\nfrom pathlib import Path\n" +
+            "spec=importlib.util.spec_from_file_location('staged','scripts/build-staged-release.py')\n" +
+            "staged=importlib.util.module_from_spec(spec); spec.loader.exec_module(staged)\n" +
+            "print(json.dumps(staged.package(sys.argv[1], Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4])))",
+          TARGET,
+          built.wheel,
+          join(out, "staged"),
+          VERSION,
+        ],
+        { cwd: REPO_ROOT, encoding: "utf8" },
+      )
+        .trim()
+        .split("\n")
+        .at(-1),
+    );
+    assert.equal(record.archive.split("/").at(-1), `onepipeline-v${VERSION}-${TARGET}.zip`);
+    const listed = JSON.parse(
+      execFileSync(
+        "python3",
+        [
+          "-c",
+          "import hashlib,json,sys,zipfile\nz=zipfile.ZipFile(sys.argv[1])\n" +
+            "print(json.dumps({'names': sorted(z.namelist()), 'exe': hashlib.sha256(z.read('onepipeline.exe')).hexdigest(), 'zip': hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest()}))",
+          record.archive,
+        ],
+        { encoding: "utf8" },
+      ),
+    );
+    assert.deepEqual(listed.names, ["CHANGELOG.md", "LICENSE", "README.md", "onepipeline.exe"]);
+    assert.equal(listed.exe, record.binary_sha256, "the archive carries the wheel's executable");
+    const checksum = readFileSync(record.archive.replace(/\.zip$/, ".sha256"), "utf8");
+    assert.equal(checksum, `${listed.zip}  onepipeline-v${VERSION}-${TARGET}.zip\n`);
+    assert.match(
+      record.npm,
+      new RegExp(`onepipeline-cli-win32-x64-${VERSION.replaceAll(".", "\\.")}\\.tgz$`),
+    );
+  });
+
   it("verifies when the archive carries the wheel's executable and the documents", () => {
     const result = verify("none");
     assert.equal(result.status, 0, result.stderr);
