@@ -163,11 +163,14 @@ pub(crate) struct Drafted {
 }
 
 /// Every commit URL `body` carries: a link whose path names `commit/<sha>` or
-/// `commits/<sha>`, by its sha — whichever commits the drafting was handed.
+/// `commits/<sha>`, by its sha — whichever commits the drafting was handed. Read with its
+/// percent-escapes decoded, as the host resolves the link, so a path that spells a
+/// character of either as an escape still names its commit.
 pub(crate) fn linked_commits(body: &str) -> Vec<String> {
+    let body = percent_decoded(body);
     let mut found = Vec::new();
     for marker in ["/commit/", "/commits/"] {
-        let mut rest = body;
+        let mut rest = body.as_str();
         while let Some(at) = rest.find(marker) {
             rest = &rest[at + marker.len()..];
             let sha: String = rest.chars().take_while(char::is_ascii_hexdigit).collect();
@@ -177,6 +180,31 @@ pub(crate) fn linked_commits(body: &str) -> Vec<String> {
         }
     }
     found
+}
+
+/// `text` with each `%XX` escape of an ASCII character replaced by that character, and
+/// everything else, a malformed escape included, as it was.
+fn percent_decoded(text: &str) -> String {
+    let mut decoded = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find('%') {
+        decoded.push_str(&rest[..at]);
+        let escape = rest
+            .get(at + 1..at + 3)
+            .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+        match escape.filter(u8::is_ascii) {
+            Some(byte) => {
+                decoded.push(char::from(byte));
+                rest = &rest[at + 3..];
+            }
+            None => {
+                decoded.push('%');
+                rest = &rest[at + 1..];
+            }
+        }
+    }
+    decoded.push_str(rest);
+    decoded
 }
 
 /// Whether `body` links `url` itself: an occurrence that begins and ends where the URL
@@ -1395,6 +1423,13 @@ mod tests {
             vec!["abcdef1234".to_owned(), "0123456789".to_owned()]
         );
         assert!(linked_commits("https://github.com/o/r/commit/abc").is_empty());
+        assert_eq!(
+            linked_commits(
+                "https://github.com/o/r/commit/%61bcdef0123 and %2Fcommits%2F%3012345678"
+            ),
+            vec!["abcdef0123".to_owned(), "012345678".to_owned()]
+        );
+        assert!(linked_commits("100% done, %zz and a trailing %").is_empty());
         assert_eq!(
             commit_url("https://github.com/o/r/pull/7", "abc"),
             "https://github.com/o/r/commit/abc"

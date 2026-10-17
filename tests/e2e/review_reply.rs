@@ -767,6 +767,13 @@ fn every_decline_refusal_reaches_the_outcome_by_kind_and_posts_nothing_it_should
             ),
             "carries a commit URL",
         ),
+        (
+            one(
+                "declined",
+                "see https://github.com/owner/service/commit/%61bcdef0123456789".to_owned(),
+            ),
+            "carries a commit URL",
+        ),
         (one("answered", "fixed".to_owned()), "drafted as `answered`"),
     ] {
         world.script("review-reply.result", &result);
