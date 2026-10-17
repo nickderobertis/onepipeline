@@ -266,6 +266,108 @@ fn a_journeys_record_carries_what_it_spent_time_on_and_its_neighbours_does_not()
     }
 }
 
+/// A test that builds a fixture with git nested inside it, then runs git and a
+/// sleep on a thread it starts: every figure a record carries beyond `s` —
+/// `inclusive_s`, `background_count`, `background_s` — has something to hold.
+const LAYERED: &str = "profiling::a_profiled_journey_nests_work_and_works_on_a_thread_it_started";
+
+/// Set in the one child process that runs [`LAYERED`]: where it writes the
+/// totals it holds in memory once its work is done, for the record to be held to.
+const SNAPSHOT_TO: &str = "ONEPIPELINE_PROFILE_FIXTURE_SNAPSHOT";
+
+/// The test [`LAYERED`] names.
+#[test]
+fn a_profiled_journey_nests_work_and_works_on_a_thread_it_started() {
+    let world = World::new("profile-layered");
+    let checkout = world.root.join("background");
+    profile::fs::create_dir_all(&checkout).expect("a directory to run git in");
+    world.repository("local-direct", &[]);
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            git(&world, &checkout, &["init", "--initial-branch=main"]);
+            profile::thread::sleep(std::time::Duration::from_millis(5));
+        });
+    });
+    drop(world);
+    let Some(to) = std::env::var_os(SNAPSHOT_TO) else {
+        return;
+    };
+    let totals = profile::snapshot();
+    let categories: serde_json::Map<String, Value> = Category::ALL
+        .iter()
+        .map(|category| {
+            let tally = totals.of(*category);
+            (
+                category.name().to_owned(),
+                serde_json::json!({
+                    "count": tally.count,
+                    "s": tally.time.as_secs_f64(),
+                    "inclusive_s": tally.inclusive.as_secs_f64(),
+                    "background_count": tally.background_count,
+                    "background_s": tally.background.as_secs_f64(),
+                }),
+            )
+        })
+        .collect();
+    // Through `std::fs` rather than `profile::fs`, so writing the totals down is
+    // not itself a filesystem operation the record then holds and they do not.
+    std::fs::write(to, Value::Object(categories).to_string()).expect("the totals are written");
+}
+
+/// What a record says of each category is what the test held in memory when it
+/// ended — its own and inclusive time, and the count and time of the work on a
+/// thread it started — and none of it is zero where the test did that work.
+#[test]
+fn a_records_inclusive_and_background_figures_are_the_ones_the_test_measured() {
+    let world = World::new("profile-layered-record");
+    let records = world.root.join("profiles");
+    let totals = world.root.join("totals.json");
+    let ran = Command::new(std::env::current_exe().expect("this suite's own binary"))
+        .args(["--exact", LAYERED, "--nocapture"])
+        .env(profile::DIR_ENV, &records)
+        .env(SNAPSHOT_TO, &totals)
+        .env_remove("NEXTEST_TEST_NAME")
+        .output()
+        .expect("the suite runs");
+    passed(LAYERED, &ran);
+    let record = read_record(&records.join("e2e").join(file_of(LAYERED)));
+    let measured = read_record(&totals);
+    for category in Category::ALL {
+        let name = category.name();
+        for field in [
+            "count",
+            "s",
+            "inclusive_s",
+            "background_count",
+            "background_s",
+        ] {
+            assert_eq!(
+                record["categories"][name][field], measured[name][field],
+                "{LAYERED}'s record says other than it measured of {name}.{field}: {record:#}"
+            );
+        }
+    }
+    let figure = |category: &str, field: &str| {
+        record["categories"][category][field]
+            .as_f64()
+            .unwrap_or_default()
+    };
+    assert!(
+        figure("fixture", "inclusive_s") > figure("fixture", "s"),
+        "the fixture's git was not inside its inclusive time: {record:#}"
+    );
+    for category in ["git", "wait"] {
+        assert!(
+            figure(category, "background_count") >= 1.0,
+            "the started thread's {category} was not counted: {record:#}"
+        );
+        assert!(
+            figure(category, "background_s") > 0.0,
+            "the started thread's {category} took no time: {record:#}"
+        );
+    }
+}
+
 /// A fixture's own time is what it spent outside the work nested in it, and the
 /// work nested in it is recorded where it happened: the two add up to the
 /// fixture's whole time to the nanosecond, so no moment is in two categories.
