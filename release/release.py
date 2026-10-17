@@ -851,21 +851,51 @@ def outcome(args):
             value = os.environ.get(f'{platform.upper()}_{phase}', '')
             expect(value in ('', *RESULTS), f"{platform.upper()}_{phase} is '{value}', not a job or step result GitHub reports",
                    'pass success, failure, cancelled or skipped')
-    builds = []
+    builds = {}
     for platform in PLATFORMS:
         key = platform.upper()
         job = os.environ.get(f'{key}_RESULT') or 'skipped'
-        builds.append({phase: os.environ.get(f'{key}_{phase.upper()}') or job for phase in ['published', 'verified']})
+        builds[platform] = {phase: os.environ.get(f'{key}_{phase.upper()}') or job
+                            for phase in ['published', 'verified']}
+
+    def shipped(registry):
+        """Each build's (published, verified) into one registry, floored at what it already serves.
+
+        A re-run whose build stops before publishing reports nothing shipped,
+        though an earlier run may have shipped that platform; what it shipped is
+        shipped, and not verified by this run.
+        """
+        served = None
+
+        def serves(artifact):
+            nonlocal served
+            if registry == 'npm':
+                return npm_serves(artifact['package'].split(':', 1)[1], version)
+            served = pypi_files(version) if served is None else served
+            return artifact['file'] in served
+
+        rows = []
+        for platform, build in builds.items():
+            files = [a for a in plan(platform, version)['artifacts'] if a['destination'] == registry]
+            if build['published'] != 'success' and all(serves(a) for a in files):
+                rows.append(('success', 'skipped'))
+            else:
+                rows.append((build['published'], build['verified']))
+        return rows
+
     crate, pypi, npm = OUTCOME_TARGETS
     launcher = results['npm-launcher']
-    targets = {
-        crate: (results['crate']['published'], results['crate']['verified']),
-        pypi: (registry_outcome([b['published'] for b in builds], [b['verified'] for b in builds])
-               if switch('PYPI_PUBLISH') else ('skipped', 'skipped')),
-        npm: (registry_outcome([b['published'] for b in builds] + [launcher['published']],
-                               [b['verified'] for b in builds] + [launcher['verified']])
-              if switch('NPM_PUBLISH') else ('skipped', 'skipped')),
-    }
+    targets = {crate: (results['crate']['published'], results['crate']['verified'])}
+    if switch('PYPI_PUBLISH'):
+        rows = shipped('pypi')
+        targets[pypi] = registry_outcome([p for p, _ in rows], [v for _, v in rows])
+    else:
+        targets[pypi] = ('skipped', 'skipped')
+    if switch('NPM_PUBLISH'):
+        rows = shipped('npm') + [(launcher['published'], launcher['verified'])]
+        targets[npm] = registry_outcome([p for p, _ in rows], [v for _, v in rows])
+    else:
+        targets[npm] = ('skipped', 'skipped')
     document = out / OUTCOME_FILE
     run_url = (f"{os.environ.get('GITHUB_SERVER_URL', 'https://github.com')}/{os.environ['GITHUB_REPOSITORY']}"
                f"/actions/runs/{os.environ.get('GITHUB_RUN_ID', '0')}")

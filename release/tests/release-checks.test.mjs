@@ -762,20 +762,26 @@ describe("the release outcome record", () => {
   let out;
   let crates;
   let npm;
+  let pypi;
   let home;
   before(async () => {
     github = await new GitHubDouble().start();
     github.addRelease(TAG);
     out = scratch("release-outcome");
     crates = await new CratesDouble().start();
+    pypi = await new PyPIDouble().start();
     npm = new Registry();
     await npm.start();
     home = scratch("npm-home");
-    ambient = { ...npmConfig(npm, home), ONEPIPELINE_CRATE_REGISTRY: `${crates.url}/index/` };
+    ambient = {
+      ...npmConfig(npm, home),
+      ...pypi.env(),
+      ONEPIPELINE_CRATE_REGISTRY: `${crates.url}/index/`,
+    };
   });
   after(async () => {
     ambient = {};
-    await Promise.all([github.stop(), crates.stop(), npm.stop()]);
+    await Promise.all([github.stop(), crates.stop(), pypi.stop(), npm.stop()]);
     rmSync(out, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });
   });
@@ -1005,6 +1011,59 @@ describe("the release outcome record", () => {
       "success",
       "success",
     ]);
+  });
+
+  it("records every publisher succeeding but a verification cancelled or skipped as not verified", async () => {
+    for (const verification of ["cancelled", "skipped"]) {
+      launcherResults("success", "success");
+      const result = await run("just", ["release-outcome"], {
+        env: releaseEnv(github, out, allJobs({}, { LINUX: verification })),
+      });
+      assert.equal(result.code, 0, said(result));
+      const record = recorded();
+      assert.equal(record.outcome, "shipped-unverified");
+      for (const id of ["pypi:onepipeline-cli", "npm:onepipeline-cli"]) {
+        assert.deepEqual(states(record)[id], ["shipped-unverified", "success", verification], id);
+      }
+    }
+  });
+
+  it("on a re-run whose build stops before publishing, records what an earlier run shipped as shipped", async () => {
+    launcherResults("success", "success");
+    // The earlier run shipped Linux's wheel and npm package; this run's Linux
+    // build failed before its publish step, so it reports nothing published.
+    pypi.serve(
+      `onepipeline_cli-${VERSION}-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl`,
+      "wheel",
+    );
+    const platform = scratch("linux-x64-package");
+    writeFileSync(
+      join(platform, "package.json"),
+      JSON.stringify({ name: "onepipeline-cli-linux-x64", version: VERSION }),
+    );
+    const published = await run("npm", ["publish", platform, "--access", "public"], {
+      env: { ...ambient },
+    });
+    assert.equal(published.code, 0, said(published));
+    try {
+      const failed = {
+        LINUX_RESULT: "failure",
+        LINUX_PUBLISHED: "skipped",
+        LINUX_VERIFIED: "skipped",
+      };
+      const result = await run("just", ["release-outcome"], {
+        env: releaseEnv(github, out, { ...allJobs({}, {}), ...failed }),
+      });
+      assert.equal(result.code, 0, said(result));
+      const record = recorded();
+      assert.equal(record.outcome, "shipped-unverified");
+      for (const id of ["pypi:onepipeline-cli", "npm:onepipeline-cli"]) {
+        assert.deepEqual(states(record)[id], ["shipped-unverified", "success", "skipped"], id);
+      }
+    } finally {
+      pypi.files.clear();
+      npm.packages.delete("onepipeline-cli-linux-x64");
+    }
   });
 
   it("records a registry switched off as skipped", async () => {
