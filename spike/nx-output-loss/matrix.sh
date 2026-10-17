@@ -30,6 +30,9 @@ configs+=(
   "--arrangement onepipeline --invoke nxsh --terminal ci --nx-patch close"
   "--arrangement onepipeline --invoke nx --terminal ci --nx-patch close"
   "--arrangement onepipeline --invoke nxsh-show --terminal ci --mode replay"
+  "--arrangement onepipeline --invoke nxsh --terminal ci --direct false"
+  "--arrangement onepipeline --invoke nx --terminal ci --direct false"
+  "--arrangement ai-orchestrator --invoke nxsh --terminal ci --direct false"
 )
 for terminal in notty ci; do
   for invoke in nx nxsh; do
