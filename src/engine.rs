@@ -6889,7 +6889,8 @@ fn review_change_for(state: &Projected, node: &str) -> Option<String> {
 
 /// Claim the standings read owed by this pass's placements on unlanded drafts and its
 /// restacks, for each node not read for yet, once per node however many passes it is
-/// held across: marks those nodes read for, and answers whether any were.
+/// held across: marks those nodes read for, records the heads those restacks bring
+/// their drafts onto as the verdicts the read defers, and answers whether any were.
 fn claim_placement_reads(
     state: &mut Projected,
     statuses: &BTreeMap<String, NodeStatus>,
@@ -6910,6 +6911,7 @@ fn claim_placement_reads(
         })
         .map(|node| node.id.clone())
         .collect();
+    let mut onto = BTreeSet::new();
     wanted.extend(
         crate::stack::restacks_owed(state, statuses, &|node| {
             in_flight.contains_key(node)
@@ -6924,6 +6926,7 @@ fn claim_placement_reads(
                 .iter()
                 .map(|onto| onto.head.clone())
                 .collect();
+            onto.extend(heads.iter().cloned());
             format!("{}@{}", owed.node, heads.join(","))
         }),
     );
@@ -6935,6 +6938,7 @@ fn claim_placement_reads(
         return false;
     }
     state.readjust.placed.extend(fresh);
+    state.readjust.deferred = onto;
     true
 }
 
