@@ -64,8 +64,8 @@ and is never resolved unilaterally.
 `just --list` is the index; do not hand-roll equivalents. `just check` is the
 deterministic gate and `just gate` is the complete pre-push bar — `check` plus
 the diff-scoped llmlint tier — and a change is not done until `gate` is green.
-That tier is plain llmlint under Nx's cache: a pass replays only for the same
-tree, base commit and `llmlint fingerprint`, and a failure is always judged again.
+That tier is plain llmlint under Nx's cache and stays unwrapped: a fault in it is
+fixed in Nx, llmlint or the recipe's run configuration, never by a script here.
 A recipe that needs the network, a second toolchain, or a credential sits outside
 both, says why in its justfile comment, and runs in CI as its own job, through
 the recipe rather than around it.
