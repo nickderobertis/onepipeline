@@ -413,7 +413,8 @@
         "oneharness.toml",
         "clippy.toml",
         "rustfmt.toml",
-        "tests/e2e/profiling.rs"
+        "tests/e2e/profiling.rs",
+        "tests/golden/test-profile-record-v2.json"
       ],
       "crates": [
         "onepipeline"

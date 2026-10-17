@@ -125,10 +125,11 @@ after(() => rmSync(scratch, { recursive: true, force: true }));
 
 // The proposed split, held to the e2e binary it proposes to divide: every module
 // `tests/e2e/main.rs` declares is in exactly one suite (or is a support file one
-// suite lists), and every repository file a module's tests read by a literal path
-// is an input of that module's suite. A module added, renamed or given a new
+// suite lists), and every repository file a module's tests read by a literal path,
+// or by a `const` holding one, is an input of that module's suite. A path built at
+// run time (`format!`) is not read here. A module added, renamed or given a new
 // runtime file without the proposal following fails here.
-test("the proposed split names every e2e module once and every file its tests read", () => {
+test("the proposed split names every e2e module once and every file its tests name by a literal or const path", () => {
   const proposal = JSON.parse(
     readFileSync(join(root, "scripts", "crate-split", "proposed.json"), "utf8"),
   );
@@ -154,8 +155,14 @@ test("the proposed split names every e2e module once and every file its tests re
       Object.keys(proposal.suites).find((name) => compiled.suites[name].own(file));
     assert.ok(suite, `${module} is in no suite of the proposal`);
     assert.ok(compiled.suites[suite].own(file), `${suite} does not list ${file}`);
+    const constants = new Map(
+      [...source.matchAll(/const (\w+): &str =\s*"([^"]+)";/g)].map((m) => [m[1], m[2]]),
+    );
     const reads = [
       ...[...source.matchAll(/repo_file\(\s*"([^"]+)"/g)].map((m) => m[1]),
+      ...[...source.matchAll(/(?:repo_file\(|CARGO_MANIFEST_DIR"\)\)\s*\.join\()\s*(\w+)\s*\)/g)]
+        .map((m) => constants.get(m[1]))
+        .filter((path) => path !== undefined),
       ...[...source.matchAll(/CARGO_MANIFEST_DIR"\)\)\s*\.join\("([^"]+)"/g)].map((m) => m[1]),
       ...[...source.matchAll(/include_str!\("([^"]+)"/g)].map((m) =>
         join("tests/e2e", m[1]).replaceAll("\\", "/"),
