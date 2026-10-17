@@ -400,14 +400,27 @@ export function todaysMapping(repo) {
     if (!Object.hasOwn(named, name) || !Array.isArray(inputs)) {
       throw refuse(`${name} is not a list of inputs`);
     }
-    // An object input (`dependentTasksOutputFiles` and the like) names no source file.
-    return inputs
-      .filter((input) => typeof input === "string")
-      .flatMap((input) =>
-        Object.hasOwn(named, input)
+    return inputs.flatMap((input) => {
+      if (typeof input === "string") {
+        return Object.hasOwn(named, input)
           ? expand(input, [...seen, name])
-          : [input.replace("{workspaceRoot}/", "")],
-      );
+          : [input.replace("{workspaceRoot}/", "")];
+      }
+      // Nx's object inputs: a `fileset` names files; the others name none.
+      if (input !== null && typeof input === "object" && !Array.isArray(input)) {
+        if (typeof input.fileset === "string")
+          return [input.fileset.replace("{workspaceRoot}/", "")];
+        const fileless = [
+          "dependentTasksOutputFiles",
+          "externalDependencies",
+          "runtime",
+          "env",
+          "input",
+        ];
+        if (Object.keys(input).some((key) => fileless.includes(key))) return [];
+      }
+      throw refuse(`${name} holds ${JSON.stringify(input)}, which is no Nx input`);
+    });
   };
   const build = expand("rustBuild");
   const sources = build.filter((glob) => /^(src|crates|schemas)\//.test(glob));

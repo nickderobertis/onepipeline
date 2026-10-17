@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { compileMapping, globToRegExp } from "../../scripts/crate-split-replay.mjs";
+import { compileMapping, globToRegExp, todaysMapping } from "../../scripts/crate-split-replay.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const golden = JSON.parse(
@@ -326,6 +326,26 @@ test("the Markdown result tables each suite", () => {
   assert.match(text, /Source files no crate claims: crates\/gamma\/src\/lib\.rs\./);
 });
 
+test("--today reads a fileset input as the files it names, and an env input as none", () => {
+  const dir = join(scratch, "object-inputs");
+  mkdirSync(join(dir, "tests", "e2e"), { recursive: true });
+  writeFileSync(join(dir, "tests", "e2e", "main.rs"), "mod one;\n");
+  writeFileSync(
+    join(dir, "nx.json"),
+    JSON.stringify({
+      namedInputs: {
+        rustBuild: [{ fileset: "{workspaceRoot}/crates/**/*" }, { env: "RUSTFLAGS" }],
+        e2eSource: ["rustBuild", "{workspaceRoot}/tests/**/*"],
+      },
+    }),
+  );
+  const today = todaysMapping(dir);
+  assert.deepEqual(today.crates.onepipeline.paths, ["crates/**/*"]);
+  assert.deepEqual(today.shared, []);
+  assert.deepEqual(today.suites.e2e.paths, ["tests/**/*"]);
+  assert.deepEqual(today.suites.e2e.modules, ["one", "harness"]);
+});
+
 test("--today reads today's shape from the repository's own nx.json and e2e binary", () => {
   const result = written(["--today", ...window()]);
   assert.deepEqual(Object.keys(result.suites), ["e2e"]);
@@ -507,6 +527,14 @@ test("--today refuses an nx.json whose inputs cannot be expanded", () => {
     /rustBuild -> a -> rustBuild is a cycle/,
   );
   refused(today({ rustBuild: "src/**" }), /rustBuild is not a list of inputs/);
+  refused(
+    today({ rustBuild: ["{workspaceRoot}/crates/**/*", 7], e2eSource: [] }),
+    /rustBuild holds 7, which is no Nx input/,
+  );
+  refused(
+    today({ rustBuild: ["{workspaceRoot}/crates/**/*", { files: "x" }], e2eSource: [] }),
+    /rustBuild holds \{"files":"x"\}, which is no Nx input/,
+  );
   refused(
     today({ rustBuild: ["{workspaceRoot}/Cargo.lock"], e2eSource: [] }),
     /rustBuild names no source/,
