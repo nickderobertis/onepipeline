@@ -1,0 +1,20 @@
+
+[2m> [22m[2mnx run[22m onepipeline:lint-plain
+
+[2m> [22mllmlint --diff --diff-base $LLMLINT_DIFF_BASE_SHA
+
+Warning: command "llmlint --diff --diff-base $LLMLINT_DIFF_BASE_SHA" exited with non-zero status code
+[2m[31m[39m[22m
+
+[7m[1m[31m NX [39m[22m[27m  [31mRunning target [1mlint-plain[22m for project onepipeline failed[39m
+
+[2mFailed tasks:[22m
+
+[2m-[22m onepipeline:lint-plain
+
+[2mHint: run the command with[22m --verbose [2mfor more details.[22m
+
+  Run duration:      159ms
+  Critical path:     139ms (1 task)
+  Recoverable time:  <1ms
+nx: targets failed; fix the reported findings above and rerun the same 'just' recipe (full output: /home/whoop/ai-orchestrator/runs/brief-llmlint-plain-nx-cache-2026-10-16-spikes/scratch/24971-1/nxloss/ws-onepipeline-s1/.logs/nx.log)
