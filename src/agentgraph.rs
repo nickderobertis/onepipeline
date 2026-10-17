@@ -1389,14 +1389,27 @@ impl ProcessGraphRun {
     /// graph that announced itself and then died started — the launch is what
     /// starts it, and a driver that dies afterwards is what `DRIVER DEAD` and
     /// `adopt` are for.
+    ///
+    /// Whether it has exited is asked *before* the log is read, never after. A
+    /// graph writes its announcement before it exits, so a log read after an
+    /// exit was seen holds every line the graph will ever write; read the other
+    /// way round, a graph that announced itself and exited between the two would
+    /// be taken as started with no run id to address it by.
     fn await_logged_line(&mut self) -> Result<()> {
         let deadline = Instant::now() + startup_timeout();
         loop {
+            // llmlint: ignore-block[changed_behavior_has_e2e] the two orders differ only for an
+            // announcement written inside one iteration, between these two statements, which no
+            // driver outside this process can schedule: a graph that announced and exited before
+            // the look reads the same either way. The journey that exposes the race is
+            // `driver::the_shipped_bound_is_eight_restarts_and_an_unreadable_one_falls_back_to_it`,
+            // which counts every observer's run id and failed intermittently with the read first.
+            let waited = held(&self.child).try_wait();
             if let Some(announcement) = self.logged_envelope() {
                 self.run_id = announced_run(&announcement);
                 return Ok(());
             }
-            let waited = held(&self.child).try_wait();
+            // llmlint: ignore-end[changed_behavior_has_e2e]
             match waited {
                 Err(error) => {
                     return Err(sibling(format!(
@@ -3503,7 +3516,7 @@ mod tests {
 
         fn read(version: u32) -> std::result::Result<(), String> {
             let graph: oneagentgraph::config::GraphConfig =
-                serde_norway::from_str(&document(version)).map_err(|error| error.to_string())?;
+                crate::yaml::from_str(&document(version))?;
             oneagentgraph::config::validate(&graph).map_err(|refusal| refusal.to_string())
         }
 

@@ -774,9 +774,9 @@ fn host_prefix() -> Result<String, String> {
     };
     let path = onevcs::branches::default_path().map_err(|error| unreadable(error.to_string()))?;
     match std::fs::read_to_string(&path) {
-        Ok(raw) => serde_norway::from_str::<onevcs::branches::BranchesFile>(&raw)
+        Ok(raw) => crate::yaml::from_str::<onevcs::branches::BranchesFile>(&raw)
             .map(|file| file.prefix)
-            .map_err(|error| unreadable(error.to_string())),
+            .map_err(unreadable),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
         Err(error) => Err(unreadable(error.to_string())),
     }

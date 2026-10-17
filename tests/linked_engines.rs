@@ -69,13 +69,17 @@ fn repo_root() -> PathBuf {
 /// every other test here asserts that what it expects is present, which on its
 /// own would say nothing about an engine added to the script and to nothing
 /// else.
-const SIBLINGS: [&str; 6] = [
+const SIBLINGS: [&str; 10] = [
     "oneagentgraph",
     "onevcs",
     "onevcs-testing",
     "onejudge",
     "oneharness-core",
     "onetaskgraph-core",
+    "onetaskgraph-plugin-api",
+    "onetaskgraph-local-md",
+    "onemessagebus",
+    "onebudgetspec-core",
 ];
 
 /// The path of the script both recipes run.
@@ -262,6 +266,9 @@ fn index_record(name: &str, version: &str, yanked: bool, requires: &[Requirement
 /// requires the harness core, the test-support crate requires the engine it
 /// doubles — but the requirements are synthesized, not the registry's.
 ///
+/// The store's family requires itself exactly, as its own lock-step releases do,
+/// so those edges carry the manifest's `=` pin as written rather than a caret of it.
+///
 /// The one `dev` entry is the real graph's too — `oneagentgraph` requires
 /// `onevcs` as a dev-dependency, at a window this manifest does not admit — and
 /// it is here because it is the entry a reader gets wrong first: cargo never
@@ -269,14 +276,21 @@ fn index_record(name: &str, version: &str, yanked: bool, requires: &[Requirement
 /// `oneagentgraph` release back on a requirement no build ever meets.
 fn requires_admitted(name: &str) -> Vec<(String, String, &'static str)> {
     let caret = |dep: &str| (dep.to_string(), format!("^{}", required(dep)), "normal");
+    let exact = |dep: &str| (dep.to_string(), required(dep), "normal");
     match name {
         "oneagentgraph" => vec![
             caret("oneharness-core"),
             caret("onejudge"),
             ("onevcs".to_string(), "^0.1.0".to_string(), "dev"),
         ],
-        "onejudge" => vec![caret("oneharness-core")],
+        "onejudge" => vec![caret("oneharness-core"), caret("onemessagebus")],
+        "onevcs" => vec![caret("onemessagebus")],
         "onevcs-testing" => vec![caret("onevcs")],
+        "onetaskgraph-core" => vec![
+            exact("onetaskgraph-plugin-api"),
+            exact("onetaskgraph-local-md"),
+        ],
+        "onetaskgraph-local-md" => vec![exact("onetaskgraph-plugin-api")],
         _ => Vec::new(),
     }
 }
@@ -1602,16 +1616,16 @@ fn tree(case: &str, engines: &[Engine]) -> Tree {
     }
 }
 
-/// A sound tree, whose six engines between them take every requirement shape this
+/// A sound tree, whose ten engines between them take every requirement shape this
 /// check models that this repository's own caret pins do not: the other caret shapes
 /// cargo defines, and the exact `=` pin the store's lock-step family takes.
 ///
 /// Each one is served a release *just* outside its window — 3.0.0 against
 /// `^2.1`, 1.0.0 against `^0`, 0.0.4 against `^0.0.3`, 0.1.0 against `^0.0`,
-/// 2.0.0 against `^1`, 0.2.45 against `=0.2.44` — so a window computed by any
+/// 2.0.0 against `^1`, 0.2.45 against `=0.2.44`, 0.10.0 against `^0.9.1` — so a window computed by any
 /// other rule reports the engine as behind, or stops finding the locked copy at
 /// all.
-const REQUIREMENT_SHAPES: [Engine; 6] = [
+const REQUIREMENT_SHAPES: [Engine; 10] = [
     Engine {
         name: "oneagentgraph",
         requirement: "2.1",
@@ -1654,11 +1668,39 @@ const REQUIREMENT_SHAPES: [Engine; 6] = [
         served: &["0.2.44", "0.2.45"],
         requires: &[],
     },
+    Engine {
+        name: "onetaskgraph-plugin-api",
+        requirement: "=0.2.44",
+        locked: &["0.2.44"],
+        served: &["0.2.44", "0.2.45"],
+        requires: &[],
+    },
+    Engine {
+        name: "onetaskgraph-local-md",
+        requirement: "=0.2.44",
+        locked: &["0.2.44"],
+        served: &["0.2.44", "0.2.45"],
+        requires: &[],
+    },
+    Engine {
+        name: "onemessagebus",
+        requirement: "0.9.1",
+        locked: &["0.9.4"],
+        served: &["0.9.1", "0.9.4", "0.10.0"],
+        requires: &[],
+    },
+    Engine {
+        name: "onebudgetspec-core",
+        requirement: "=0.1.5",
+        locked: &["0.1.5"],
+        served: &["0.1.5", "0.1.6"],
+        requires: &[],
+    },
 ];
 
 /// `REQUIREMENT_SHAPES` with one engine replaced, so a refusal test states only the
 /// one thing it is about.
-fn but(replacement: Engine) -> [Engine; 6] {
+fn but(replacement: Engine) -> [Engine; 10] {
     REQUIREMENT_SHAPES.map(|engine| {
         if engine.name == replacement.name {
             Engine { ..replacement }
@@ -1692,6 +1734,97 @@ fn the_windows_this_check_computes_are_cargos_own_caret_rules() {
             engine.name,
             engine.requirement,
             said(&run)
+        );
+    }
+}
+
+/// Each engine the store's lock-step family, the bus and the budget checker's
+/// library add is held to the count and the window on its own, not through a
+/// neighbour standing in for it.
+///
+/// The family's core resolving once says nothing about how many copies of the
+/// plugin API or the local-md source the graph carries, so each of these is
+/// driven three ways in a tree that is otherwise sound: split across two
+/// versions, which is refused before the registry is asked (exit 1); resolved
+/// below its own requirement, which is a lock the manifest disagrees with (exit
+/// 3); and as `REQUIREMENT_SHAPES` holds it, which passes and names the version.
+#[test]
+fn each_added_engine_is_refused_split_or_below_its_requirement_and_reported_when_sound() {
+    // (name, the lock split across two copies, the lock below the requirement)
+    type Case = (
+        &'static str,
+        &'static [&'static str],
+        &'static [&'static str],
+    );
+    let cases: [Case; 4] = [
+        ("onetaskgraph-plugin-api", &["0.2.44", "0.3.0"], &["0.2.43"]),
+        ("onetaskgraph-local-md", &["0.2.44", "0.3.0"], &["0.2.43"]),
+        ("onemessagebus", &["0.9.4", "0.8.2"], &["0.9.0"]),
+        ("onebudgetspec-core", &["0.1.5", "0.1.4"], &["0.1.4"]),
+    ];
+    let sound = tree("added-sound", &REQUIREMENT_SHAPES);
+    let run = linked_engines(&sound.args());
+    assert!(
+        run.status.success(),
+        "a tree resolving one copy of every engine inside its window was refused:\n{}",
+        said(&run)
+    );
+    let report = String::from_utf8_lossy(&run.stdout);
+    for (name, split_lock, below_lock) in cases {
+        let shape = REQUIREMENT_SHAPES
+            .iter()
+            .find(|engine| engine.name == name)
+            .unwrap_or_else(|| panic!("`{name}` has a sound shape"));
+        let locked = shape.locked[0];
+        assert!(
+            report.contains(&format!("{name} {locked}")),
+            "the check passed without reporting `{name}`, so a green run is not evidence \
+             about it:\n{}",
+            said(&run)
+        );
+
+        let split = tree(
+            &format!("added-split-{name}"),
+            &but(Engine {
+                locked: split_lock,
+                ..*shape
+            }),
+        );
+        let refused = linked_engines(&split.args());
+        assert_eq!(
+            refused.status.code(),
+            Some(1),
+            "a lock carrying `{name}` at two versions has to fail the check:\n{}",
+            said(&refused)
+        );
+        assert!(
+            String::from_utf8_lossy(&refused.stderr)
+                .contains(&format!("{name}: {}", split_lock.join(" "))),
+            "the refusal does not name `{name}` and both versions it is split at:\n{}",
+            said(&refused)
+        );
+
+        let stale = tree(
+            &format!("added-below-{name}"),
+            &but(Engine {
+                locked: below_lock,
+                ..*shape
+            }),
+        );
+        let refused = linked_engines(&stale.args());
+        assert_eq!(
+            refused.status.code(),
+            Some(3),
+            "a lock resolving `{name}` below its own requirement has to fail the check:\n{}",
+            said(&refused)
+        );
+        assert!(
+            String::from_utf8_lossy(&refused.stderr).contains(&format!(
+                "resolves no '{name}' that '{}' permits",
+                shape.requirement
+            )),
+            "the refusal does not name `{name}` and the requirement its copy is below:\n{}",
+            said(&refused)
         );
     }
 }

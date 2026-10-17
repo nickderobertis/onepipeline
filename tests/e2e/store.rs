@@ -912,9 +912,10 @@ fn amend(path: &std::path::Path, edit: impl FnOnce(&mut serde_json::Map<String, 
         .split_once("---\n")
         .expect("a store document closes its front matter");
     let mut parsed: serde_json::Map<String, Value> =
-        serde_norway::from_str(front).expect("the front matter is YAML");
+        onepipeline_testfakes::yaml::from_str(front).expect("the front matter is YAML");
     edit(&mut parsed);
-    let rendered = serde_norway::to_string(&parsed).expect("the front matter renders");
+    let rendered =
+        onepipeline_testfakes::yaml::to_string(&parsed).expect("the front matter renders");
     std::fs::write(path, format!("---\n{rendered}---\n{body}")).expect("the document is written");
 }
 

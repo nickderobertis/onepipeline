@@ -706,11 +706,9 @@ impl LaunchConfig {
             source,
         })?;
         let named = |why: String| Error::Invalid(format!("{}: {why}", path.display()));
-        let config: Self =
-            serde_norway::from_str(&text).map_err(|failure| named(failure.to_string()))?;
+        let config: Self = crate::yaml::from_str(&text).map_err(named)?;
         if config.schema_version < OVERRIDE_LIST_SCHEMA_VERSION {
-            let written: serde_json::Value =
-                serde_norway::from_str(&text).map_err(|failure| named(failure.to_string()))?;
+            let written: serde_json::Value = crate::yaml::from_str(&text).map_err(named)?;
             for (key, _, _) in KEYS_BY_VERSION
                 .iter()
                 .filter(|(_, version, _)| *version == OVERRIDE_LIST_SCHEMA_VERSION)
@@ -1304,7 +1302,7 @@ mod tests {
         // filters already means.
         for version in LAUNCH_CONFIG_SCHEMA_VERSIONS_READ {
             let minimal: LaunchConfig =
-                serde_norway::from_str(&format!("schema_version: {version}\n"))
+                crate::yaml::from_str(&format!("schema_version: {version}\n"))
                     .expect("a bare config parses");
             assert_eq!(minimal.schema_version, version);
             assert!(minimal.filters.is_empty());
@@ -1324,9 +1322,9 @@ mod tests {
     #[test]
     fn a_launch_config_round_trips_without_losing_or_inventing_a_field() {
         let full = golden();
-        let text = serde_norway::to_string(&full).expect("it serialises as YAML too");
+        let text = crate::yaml::to_string(&full).expect("it serialises as YAML too");
         assert_eq!(
-            serde_norway::from_str::<LaunchConfig>(&text).expect("it re-parses"),
+            crate::yaml::from_str::<LaunchConfig>(&text).expect("it re-parses"),
             full
         );
 

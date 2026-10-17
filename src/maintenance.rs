@@ -177,8 +177,7 @@ impl MaintenanceConfig {
             source,
         })?;
         let named = |why: String| Error::Invalid(format!("{spelling} {}: {why}", path.display()));
-        let config: Self =
-            serde_norway::from_str(&text).map_err(|failure| named(failure.to_string()))?;
+        let config: Self = crate::yaml::from_str(&text).map_err(named)?;
         if config.version != SCHEDULE_VERSION {
             return Err(named(format!(
                 "`version` is {}, and this build reads {SCHEDULE_VERSION} — set `version: \

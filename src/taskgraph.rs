@@ -1153,8 +1153,12 @@ fn node_id(metadata: &BTreeMap<String, Value>) -> std::result::Result<String, St
 /// `serde_json`'s own error says the type it wanted and not where it wanted it,
 /// and a project's fields are metadata keys a person wrote by hand — so the path
 /// is the whole of what makes the refusal actionable, and a nested one (a step's
-/// own budget, say) is unreachable without it.
-fn read<T: serde::de::DeserializeOwned>(document: Value) -> std::result::Result<T, String> {
+/// own budget, say) is unreachable without it. A graph document read once its
+/// overrides are applied is read through it for the same reason: it no longer
+/// carries the line a key was written on.
+pub(crate) fn read<T: serde::de::DeserializeOwned>(
+    document: Value,
+) -> std::result::Result<T, String> {
     serde_path_to_error::deserialize(document).map_err(|error| match error.path().to_string() {
         path if path == "." => error.into_inner().to_string(),
         path => format!("{path}: {}", error.into_inner()),
@@ -1960,7 +1964,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let write = |path: PathBuf, front: Value| {
             std::fs::create_dir_all(path.parent().expect("a folder")).expect("a store folder");
-            let yaml = serde_norway::to_string(&front).expect("front matter");
+            let yaml = crate::yaml::to_string(&front).expect("front matter");
             std::fs::write(
                 path,
                 format!(
