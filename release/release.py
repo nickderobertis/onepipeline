@@ -377,13 +377,26 @@ def built(platform, out, tag, version):
     return manifest
 
 
+class Redirects(urllib.request.HTTPRedirectHandler):
+    """A redirect is followed only without a credential, and only to HTTPS (or this machine)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        expect(not req.has_header('Authorization'), f'{req.full_url} redirected a request carrying a token to {newurl}',
+               're-run once the service answers normally; a token is never sent on to another URL')
+        origin(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+OPENER = urllib.request.build_opener(Redirects)
+
+
 def http(method, url, body=None, headers=None, token=None):
     request = urllib.request.Request(url, data=body, method=method, headers=dict(headers or {}))
     if token:
         request.add_header('Authorization', f'Bearer {token}')
     request.add_header('User-Agent', 'onepipeline-release')
     try:
-        with urllib.request.urlopen(request, timeout=120) as response:
+        with OPENER.open(request, timeout=120) as response:
             return response.status, response.read()
     except urllib.error.HTTPError as error:
         return error.code, error.read()

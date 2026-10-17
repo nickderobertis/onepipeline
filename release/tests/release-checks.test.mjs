@@ -320,6 +320,9 @@ describe("a release phase refuses what it cannot trust", () => {
 
 describe("a Release that names another host", () => {
   it("is refused before the token or a download goes there", async () => {
+    // Local registries, so the outcome's own registry questions stay on this machine.
+    const crates = await new CratesDouble().start();
+    ambient = { ONEPIPELINE_CRATE_REGISTRY: `${crates.url}/index/`, NPM_PUBLISH: "false" };
     const github = await new GitHubDouble().start();
     const release = github.addRelease(TAG);
     const out = scratch("release-hosts");
@@ -332,6 +335,17 @@ describe("a Release that names another host", () => {
       });
       assert.equal(plain.code, 1, said(plain));
       assert.match(plain.stderr, /http:\/\/192\.0\.2\.1 is not an HTTPS URL/);
+      // A token is never carried through a redirect, wherever it points.
+      github.redirectNext("GET", /\/releases\/tags\//, `${github.url}/elsewhere`);
+      const redirected = await run("just", ["release-outcome"], {
+        env: releaseEnv(github, out, { LINUX_RESULT: "success" }),
+      });
+      assert.equal(redirected.code, 1, said(redirected));
+      assert.match(redirected.stderr, /redirected a request carrying a token to/);
+      assert.ok(
+        !github.requests.some((r) => r.path === "/elsewhere"),
+        "the redirect was not followed",
+      );
       github.uploadOrigin = "https://uploads.example.com";
       let result = await run("just", ["release-outcome"], {
         env: releaseEnv(github, out, { LINUX_RESULT: "success" }),
@@ -359,6 +373,8 @@ describe("a Release that names another host", () => {
         /is not an HTTPS URL|download URL http:\/\/192\.0\.2\.1\S* is not GitHub's/,
       );
     } finally {
+      ambient = {};
+      await crates.stop();
       await github.stop();
       rmSync(out, { recursive: true, force: true });
     }
@@ -1115,6 +1131,38 @@ describe("release-plz.yml's auto-merge step", () => {
         );
       }
       assert.deepEqual(github.requests, []);
+    } finally {
+      await github.stop();
+    }
+  });
+
+  it("reads the host off the whole authority, not a prefix", async () => {
+    const github = await new GitHubDouble().start();
+    try {
+      const result = await run("bash", ["-eo", "pipefail", "-c", step.run], {
+        env: { ...github.env(), GITHUB_API_URL: "http://localhost:80@192.0.2.1" },
+      });
+      assert.equal(result.code, 1, said(result));
+      assert.match(result.stderr, /is not an HTTPS URL, and RELEASE_PLZ_TOKEN is sent to it/);
+      assert.deepEqual(github.requests, []);
+    } finally {
+      await github.stop();
+    }
+  });
+
+  it("finds the release PR past the first page, and refuses a second one there", async () => {
+    const github = await new GitHubDouble().start();
+    try {
+      for (let number = 1; number <= 140; number += 1) github.addPull(number, `feat/${number}`);
+      github.addPull(141, "release-plz-2026-10-17T00-00-00Z");
+      let result = await runStep(github);
+      assert.equal(result.code, 0, said(result));
+      assert.equal(github.graphql.at(-1).variables.id, "PR_node_141");
+      for (let number = 142; number <= 230; number += 1) github.addPull(number, `feat/${number}`);
+      github.addPull(231, "release-plz-another");
+      result = await runStep(github);
+      assert.equal(result.code, 1, said(result));
+      assert.match(result.stderr, /2 open release PRs \(#141, #231\)/);
     } finally {
       await github.stop();
     }

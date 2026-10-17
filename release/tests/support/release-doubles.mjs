@@ -38,6 +38,11 @@ class Double {
     this.refusals.push({ method, pattern, status, message, raw });
   }
 
+  /// Answer the next request matching `method` and `pattern` with a 302 to `location`.
+  redirectNext(method, pattern, location) {
+    this.refusals.push({ method, pattern, status: 302, location });
+  }
+
   /// Every request that could have written something.
   writes() {
     return this.requests.filter((r) => !["GET", "HEAD"].includes(r.method));
@@ -73,6 +78,10 @@ class Double {
         );
         if (refusal !== -1) {
           const [r] = this.refusals.splice(refusal, 1);
+          if (r.location) {
+            res.writeHead(302, { location: r.location, "content-length": 0 });
+            return res.end();
+          }
           return r.raw
             ? answer(r.status, r.message, "text/plain")
             : answer(r.status, { message: r.message });
@@ -215,7 +224,9 @@ export class GitHubDouble extends Double {
     }
     if (req.method === "GET" && path === `${repo}/pulls`) {
       if (this.pullsBody !== null) return answer(200, this.pullsBody, "application/json");
-      return answer(200, this.pulls);
+      const size = Number(url.searchParams.get("per_page") ?? 30);
+      const page = Number(url.searchParams.get("page") ?? 1);
+      return answer(200, this.pulls.slice((page - 1) * size, page * size));
     }
     if (req.method === "GET" && new RegExp(`^${repo}/commits/[0-9a-f]+/pulls$`).test(path)) {
       return answer(200, []);

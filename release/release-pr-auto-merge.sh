@@ -30,12 +30,14 @@ for name in GITHUB_TOKEN GITHUB_REPOSITORY; do
 done
 api="${GITHUB_API_URL:-https://api.github.com}"
 graphql="${GITHUB_GRAPHQL_URL:-https://api.github.com/graphql}"
-# The token is sent to both, so each must be HTTPS, or HTTP to this machine.
+# The token is sent to both, so each must be HTTPS, or HTTP to this machine —
+# read off the whole authority, so `http://localhost@elsewhere` is not local.
 for url in "$api" "$graphql"; do
-  case "$url" in
-    https://* | http://127.0.0.1:* | http://127.0.0.1/* | http://localhost:* | http://localhost/*) ;;
-    *) fail "$url is not an HTTPS URL, and RELEASE_PLZ_TOKEN is sent to it" "point GITHUB_API_URL and GITHUB_GRAPHQL_URL at GitHub's HTTPS API" ;;
-  esac
+  if ! [[ "$url" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?(/|$) ]] \
+    && ! [[ "$url" =~ ^http://(127\.0\.0\.1|localhost)(:[0-9]+)?(/|$) ]]; then
+    fail "$url is not an HTTPS URL, and RELEASE_PLZ_TOKEN is sent to it" \
+      "point GITHUB_API_URL and GITHUB_GRAPHQL_URL at GitHub's HTTPS API"
+  fi
 done
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -49,9 +51,21 @@ request() {
     || fail "GitHub did not answer at $api" "re-run the job once GitHub answers"
 }
 
-status="$(request "$api/repos/$GITHUB_REPOSITORY/pulls?state=open&per_page=100")"
-[ "$status" = 200 ] || fail "GitHub answered $status listing open pull requests: $(head -c 300 "$work/body")" \
-  "check that RELEASE_PLZ_TOKEN can read pull requests, then re-run"
+# Every page of open pull requests, so a release PR past the first hundred is
+# still found, and a second one is still refused.
+echo '[]' >"$work/pulls"
+page=1
+while :; do
+  status="$(request "$api/repos/$GITHUB_REPOSITORY/pulls?state=open&per_page=100&page=$page")"
+  [ "$status" = 200 ] || fail "GitHub answered $status listing open pull requests: $(head -c 300 "$work/body")" \
+    "check that RELEASE_PLZ_TOKEN can read pull requests, then re-run"
+  jq -e 'type == "array"' "$work/body" >/dev/null 2>&1 \
+    || fail "GitHub's pull request list is not the JSON array of pull requests it documents" "re-run the job once GitHub answers normally"
+  jq -s '.[0] + .[1]' "$work/pulls" "$work/body" >"$work/pulls.next" && mv "$work/pulls.next" "$work/pulls"
+  [ "$(jq length "$work/body")" -eq 100 ] || break
+  page=$((page + 1))
+  [ "$page" -le 50 ] || fail "more than 5000 open pull requests" "close some, then re-run"
+done
 
 # Every pull request is checked for the fields read here, so a malformed answer
 # is refused rather than mistaken for "no release PR".
@@ -63,7 +77,7 @@ jq -ce --arg repo "$GITHUB_REPOSITORY" '
                               and ((.head.repo | type) == "null" or (.head.repo.full_name | type) == "string"))
   then [.[] | select((.head.ref | startswith("release-plz-")) and .head.repo.full_name? == $repo)
               | {number, node_id}]
-  else error("not a pull request list") end' "$work/body" >"$work/release-prs" 2>/dev/null \
+  else error("not a pull request list") end' "$work/pulls" >"$work/release-prs" 2>/dev/null \
   || fail "GitHub's pull request list is not the JSON array of pull requests it documents" "re-run the job once GitHub answers normally"
 count="$(jq length "$work/release-prs")"
 case "$count" in
