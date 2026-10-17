@@ -1216,8 +1216,10 @@ mod tests {
     }
 
     /// The directory a dispatch's environment names, read back the way the run's
-    /// `scratch-retained` record will spell it.
-    fn handed_and_recorded(what: &str) -> (PathBuf, Vec<PathBuf>) {
+    /// `scratch-retained` record will spell it. Raw strings, not `Path`s: `Path`
+    /// equality compares components, so it calls two spellings of one directory
+    /// equal, while a reader of the record compares the text.
+    fn handed_and_recorded(what: &str) -> (std::ffi::OsString, Vec<std::ffi::OsString>) {
         let root = scratch_root(what);
         std::env::set_var(crate::ledger::RUNS_DIR_ENV, &root);
         let labels = Labels {
@@ -1236,7 +1238,10 @@ mod tests {
                 .expect("the run's scratch is listed");
         std::env::remove_var(crate::ledger::RUNS_DIR_ENV);
         let _ = std::fs::remove_dir_all(&root);
-        (PathBuf::from(handed), recorded)
+        (
+            PathBuf::from(handed).into_os_string(),
+            recorded.into_iter().map(PathBuf::into_os_string).collect(),
+        )
     }
 
     /// The run's `scratch-retained` record names the directory a dispatch was
