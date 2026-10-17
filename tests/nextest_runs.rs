@@ -1946,42 +1946,43 @@ fn leg_log(runs: &[LoggedRun<'_>]) -> String {
 /// The four projects' `test-quick` targets, as this repository declares them, and
 /// the justfile recipes they run.
 const INVENTORY_PROJECTS: [(&str, &str, &str); 4] = [
-    ("project.json", "onepipeline", "_crate-test-quick"),
+    ("project.json", "onepipeline", "just _crate-test-quick"),
     (
         "tests/e2e/project.json",
         "onepipeline-e2e",
-        "_e2e-test-quick",
+        "just _e2e-test-quick",
     ),
     (
         "tests/contract/project.json",
         "onepipeline-contract",
-        "_contract-test-quick",
+        "just _contract-test-quick",
     ),
     (
         "tests/note/project.json",
         "onepipeline-note-journeys",
-        "_note-test-quick",
+        "just _note-test-quick",
     ),
 ];
 
 const INVENTORY_JUSTFILE: &str = "_tier-test-quick filter:\n    @true\n\n_crate-test-quick: (_tier-test-quick rest-tier)\n\n_e2e-test-quick: _preflight (_tier-test-quick e2e-tier)\n\n_contract-test-quick: (_tier-test-quick contract-tier)\n\n_note-test-quick: (_tier-test-quick note-tier)\n";
 
-/// `node .github/windows-inventory.mjs`, from a fixture repository declaring the
-/// four projects, over `log`, with `args` after the log's path — or the usual
+/// `node .github/windows-inventory.mjs`, from a fixture repository declaring
+/// `projects` — path, name and `test-quick` command — over `log`, with `args` after the log's path — or the usual
 /// three when `args` is `None`. Exit code, the inventory written, and stderr.
 fn windows_inventory(
     case: &str,
+    projects: &[(&str, &str, &str)],
     justfile: &str,
     log: &str,
     args: Option<&[&str]>,
 ) -> (Option<i32>, String, String) {
-    let projects: Vec<(String, String)> = INVENTORY_PROJECTS
+    let projects: Vec<(String, String)> = projects
         .iter()
-        .map(|(path, name, recipe)| {
+        .map(|(path, name, command)| {
             (
                 (*path).to_owned(),
                 format!(
-                    "{{\"name\": \"{name}\", \"targets\": {{\"test-quick\": {{\"command\": \"just {recipe}\"}}}}}}"
+                    "{{\"name\": \"{name}\", \"targets\": {{\"test-quick\": {{\"command\": \"{command}\"}}}}}}"
                 ),
             )
         })
@@ -2004,9 +2005,16 @@ fn windows_inventory(
     (output.status.code(), stdout(&output), stderr(&output))
 }
 
-/// A log the extractor has to refuse: its case, the justfile beside it, the log,
+/// A log the extractor has to refuse: its case, the projects and justfile beside it, the log,
 /// the arguments after the log's path, and what the refusal says.
-struct Refused<'a>(&'a str, String, String, Option<&'a [&'a str]>, &'a str);
+struct Refused<'a>(
+    &'a str,
+    Vec<(&'a str, &'a str, &'a str)>,
+    String,
+    String,
+    Option<&'a [&'a str]>,
+    &'a str,
+);
 
 /// The inventory is written off a green leg's own log, every test it ran under the
 /// tier its project's `test-quick` target runs, read off where those are declared.
@@ -2017,6 +2025,7 @@ struct Refused<'a>(&'a str, String, String, Option<&'a [&'a str]>, &'a str);
 fn the_windows_inventory_is_every_test_a_finished_leg_ran_and_nothing_less() {
     let (code, written, said) = windows_inventory(
         "inventory-green",
+        &INVENTORY_PROJECTS,
         INVENTORY_JUSTFILE,
         &leg_log(&green_leg()),
         None,
@@ -2043,6 +2052,7 @@ fn the_windows_inventory_is_every_test_a_finished_leg_ran_and_nothing_less() {
     let cases: Vec<Refused<'_>> = vec![
         Refused(
             "inventory-usage",
+            INVENTORY_PROJECTS.to_vec(),
             INVENTORY_JUSTFILE.to_owned(),
             green.clone(),
             Some(&["11", "22"]),
@@ -2050,6 +2060,7 @@ fn the_windows_inventory_is_every_test_a_finished_leg_ran_and_nothing_less() {
         ),
         Refused(
             "inventory-surplus",
+            INVENTORY_PROJECTS.to_vec(),
             INVENTORY_JUSTFILE.to_owned(),
             green.clone(),
             Some(&["11", "22", "abc", "extra"]),
@@ -2057,6 +2068,7 @@ fn the_windows_inventory_is_every_test_a_finished_leg_ran_and_nothing_less() {
         ),
         Refused(
             "inventory-unknown-project",
+            INVENTORY_PROJECTS.to_vec(),
             INVENTORY_JUSTFILE.to_owned(),
             changed(&|runs| runs[0].project = "onepipeline-mystery"),
             None,
@@ -2064,6 +2076,7 @@ fn the_windows_inventory_is_every_test_a_finished_leg_ran_and_nothing_less() {
         ),
         Refused(
             "inventory-reported-twice",
+            INVENTORY_PROJECTS.to_vec(),
             INVENTORY_JUSTFILE.to_owned(),
             changed(&|runs| runs[2].tests.push("x::a")),
             None,
@@ -2071,6 +2084,7 @@ fn the_windows_inventory_is_every_test_a_finished_leg_ran_and_nothing_less() {
         ),
         Refused(
             "inventory-tier-twice",
+            INVENTORY_PROJECTS.to_vec(),
             INVENTORY_JUSTFILE.to_owned(),
             changed(&|runs| {
                 runs.pop();
@@ -2085,6 +2099,7 @@ fn the_windows_inventory_is_every_test_a_finished_leg_ran_and_nothing_less() {
         ),
         Refused(
             "inventory-unstarted",
+            INVENTORY_PROJECTS.to_vec(),
             INVENTORY_JUSTFILE.to_owned(),
             changed(&|runs| runs[1].starting = None),
             None,
@@ -2092,6 +2107,7 @@ fn the_windows_inventory_is_every_test_a_finished_leg_ran_and_nothing_less() {
         ),
         Refused(
             "inventory-unreported",
+            INVENTORY_PROJECTS.to_vec(),
             INVENTORY_JUSTFILE.to_owned(),
             changed(&|runs| {
                 runs[2].tests.pop();
@@ -2101,6 +2117,7 @@ fn the_windows_inventory_is_every_test_a_finished_leg_ran_and_nothing_less() {
         ),
         Refused(
             "inventory-overcounted",
+            INVENTORY_PROJECTS.to_vec(),
             INVENTORY_JUSTFILE.to_owned(),
             changed(&|runs| runs[2].summary = "3 tests run: 3 passed, 0 skipped".to_owned()),
             None,
@@ -2108,6 +2125,7 @@ fn the_windows_inventory_is_every_test_a_finished_leg_ran_and_nothing_less() {
         ),
         Refused(
             "inventory-failed",
+            INVENTORY_PROJECTS.to_vec(),
             INVENTORY_JUSTFILE.to_owned(),
             changed(&|runs| runs[2].summary = "2 tests run: 1 passed, 1 failed".to_owned()),
             None,
@@ -2115,6 +2133,7 @@ fn the_windows_inventory_is_every_test_a_finished_leg_ran_and_nothing_less() {
         ),
         Refused(
             "inventory-two-tier-recipe",
+            INVENTORY_PROJECTS.to_vec(),
             INVENTORY_JUSTFILE.replace(
                 "_note-test-quick: (_tier-test-quick note-tier)",
                 "_note-test-quick: (_tier-test-quick note-tier) (_tier-test-quick e2e-tier)",
@@ -2123,9 +2142,30 @@ fn the_windows_inventory_is_every_test_a_finished_leg_ran_and_nothing_less() {
             None,
             "onepipeline-note-journeys:test-quick runs _note-test-quick, which runs 2 tiers, not one",
         ),
+        Refused(
+            "inventory-not-a-recipe",
+            INVENTORY_PROJECTS
+                .iter()
+                .map(|&(path, name, command)| {
+                    (path, name, if name == "onepipeline-e2e" { "cargo nextest run" } else { command })
+                })
+                .collect(),
+            INVENTORY_JUSTFILE.to_owned(),
+            green.clone(),
+            None,
+            "onepipeline-e2e:test-quick runs \"cargo nextest run\", not one justfile recipe",
+        ),
+        Refused(
+            "inventory-no-projects",
+            Vec::new(),
+            INVENTORY_JUSTFILE.to_owned(),
+            green.clone(),
+            None,
+            "no project here has a `test-quick` target",
+        ),
     ];
-    for Refused(case, justfile, log, args, says) in cases {
-        let (code, written, said) = windows_inventory(case, &justfile, &log, args);
+    for Refused(case, projects, justfile, log, args, says) in cases {
+        let (code, written, said) = windows_inventory(case, &projects, &justfile, &log, args);
         assert_eq!(code, Some(1), "{case} was written:\n{written}");
         assert!(
             said.contains(says),
