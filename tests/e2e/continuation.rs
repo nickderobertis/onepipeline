@@ -1690,9 +1690,13 @@ fn restate_publishing(world: &World, project: &str, value: Value) {
 /// A publication whose fence the board refuses to take starts nothing: the driver says so,
 /// writes the fence again a few seconds later, and publishes once that write lands — one
 /// change request — and clears it once the publication has settled.
+///
+/// The claim interval is far longer than the fence's retry, so the next claim read cannot be
+/// what wakes the driver to write it again: the retry is due on its own clock, neither at
+/// once nor an interval later.
 #[test]
 fn a_publication_whose_fence_the_board_refuses_starts_once_a_later_write_lands() {
-    let world = takeover_world("fence-refused", 5).through_scripted_source();
+    let world = takeover_world("fence-refused", 60).through_scripted_source();
     world.script("x.work", "x's change\n");
     let x = world.rendezvous("x");
     let run = "fence-refused";
@@ -1709,6 +1713,20 @@ fn a_publication_whose_fence_the_board_refuses_starts_once_a_later_write_lands()
         run,
         "driver.log",
         "could not write its publications under way",
+    );
+    let refused_at = std::time::Instant::now();
+    let refused = world.store_asked("set_project_metadata");
+    world.until("the fence to be written again", |world| {
+        world.store_asked("set_project_metadata") > refused
+    });
+    let retried_after = refused_at.elapsed();
+    assert!(
+        retried_after >= std::time::Duration::from_secs(3),
+        "the fence was written again {retried_after:?} after the refusal, before its retry was due"
+    );
+    assert!(
+        retried_after < std::time::Duration::from_secs(30),
+        "the fence was written again only {retried_after:?} after the refusal"
     );
     world.until("the driver to end", |world| {
         world.run_file(run, "result.json").is_file()
