@@ -14,7 +14,8 @@
 // deterministic gate; the journeys that build and publish real artifacts are
 // `release-linux.journey.mjs`.
 
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   cpSync,
   existsSync,
@@ -311,6 +312,55 @@ describe("a release phase refuses what it cannot trust", () => {
       rmSync(out, { recursive: true, force: true });
     }
   });
+});
+
+describe("verification refuses a downloaded archive that is not the documents and the executable", () => {
+  /// A tar.gz and its checksum on the Release, built from `members` ([name, tar flag]).
+  function archive(members) {
+    const dir = scratch("archive");
+    const list = [];
+    for (const [name, kind] of members) {
+      if (kind === "symlink") execFileSync("ln", ["-s", "README.md", join(dir, name)]);
+      else writeFileSync(join(dir, name), `${name}\n`);
+      list.push(name);
+    }
+    const bytes = execFileSync("tar", ["-czf", "-", "-C", dir, ...list]);
+    rmSync(dir, { recursive: true, force: true });
+    return bytes;
+  }
+
+  for (const [name, members] of [
+    ["carries no executable", [["README.md"], ["LICENSE"], ["CHANGELOG.md"]]],
+    [
+      "links its executable to another file",
+      [["README.md"], ["LICENSE"], ["CHANGELOG.md"], ["onepipeline", "symlink"]],
+    ],
+  ]) {
+    it(`refuses an archive that ${name}, before running anything from it`, async () => {
+      const github = await new GitHubDouble().start();
+      const release = github.addRelease(TAG);
+      const content = archive(members);
+      const file = `onepipeline-v${VERSION}-x86_64-unknown-linux-gnu.tar.gz`;
+      release.assets.push({ id: github.nextId++, name: file, content });
+      release.assets.push({
+        id: github.nextId++,
+        name: `onepipeline-v${VERSION}-x86_64-unknown-linux-gnu.sha256`,
+        content: Buffer.from(`${createHash("sha256").update(content).digest("hex")}  ${file}\n`),
+      });
+      const out = scratch("release-verify");
+      try {
+        const result = await run("just", ["release-linux", "verify"], {
+          env: releaseEnv(github, out, { PYPI_PUBLISH: "false", NPM_PUBLISH: "false" }),
+        });
+        assert.equal(result.code, 1, said(result));
+        assert.match(result.stderr, /\.tar\.gz is not \[.*\], each a regular file/);
+        assert.doesNotMatch(result.stdout + result.stderr, /surface smoke test/);
+      } finally {
+        await github.stop();
+        rmSync(out, { recursive: true, force: true });
+      }
+    });
+  }
 });
 
 describe("publish asks every registry before it writes anything", () => {
@@ -696,6 +746,32 @@ describe("the release outcome record", () => {
       env: releaseEnv(github, out, { RELEASE_TAG: "v0.0.1" }),
     });
     assert.equal(rerun.code, 1, said(rerun));
+    const result = await run("just", ["release-outcome"], {
+      env: releaseEnv(github, out, allJobs({}, {})),
+    });
+    assert.equal(result.code, 0, said(result));
+    assert.deepEqual(states(recorded())["crate:onepipeline"], [
+      "shipped-verified",
+      "success",
+      "success",
+    ]);
+  });
+
+  it("keeps an earlier publish's result for a registry a re-run has switched off", async () => {
+    launcherResults("success", "success");
+    // The crate shipped on the earlier run; this one has no token and stops at
+    // the availability check, as a re-run with a platform still missing does.
+    const rerun = await run("just", ["release-publish", "publish"], {
+      env: releaseEnv(github, out, {
+        CARGO_REGISTRY_TOKEN: "",
+        PYPI_PUBLISH: "false",
+        NPM_PUBLISH: "false",
+      }),
+    });
+    assert.equal(rerun.code, 1, said(rerun));
+    assert.match(rerun.stderr, /not every platform is published/);
+    const results = JSON.parse(readFileSync(join(out, "common", "publish-results.json"), "utf8"));
+    assert.deepEqual(results.crate, { published: "success", verified: "success" });
     const result = await run("just", ["release-outcome"], {
       env: releaseEnv(github, out, allJobs({}, {})),
     });

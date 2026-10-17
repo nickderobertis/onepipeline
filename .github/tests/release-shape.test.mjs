@@ -47,7 +47,6 @@ const plans = Object.fromEntries(
   ]),
 );
 
-/// The release-targets.toml entries, read with Python's own TOML parser.
 const targets = JSON.parse(
   execFileSync(
     "python3",
@@ -204,7 +203,6 @@ describe("who uploads what", () => {
       .filter(([, , a]) => a.package === "pypi:onepipeline-cli")
       .map(([job]) => job);
     assert.deepEqual([...new Set(wheels)].sort(), ["build-linux", "build-macos", "build-windows"]);
-    // And nothing is uploaded that the declaration does not name.
     const declared = new Set(targets.target.flatMap((t) => [t.id, ...(t.covers ?? [])]));
     for (const [, , artifact] of uploads) {
       if (artifact.package)

@@ -4,7 +4,7 @@
 // Nothing here is stubbed. `scripts/npm-build.mjs` assembles the real packages
 // around the real compiled binary, `npm install` resolves them, and the launcher
 // resolves the platform package and execs the binary. Publishing to a registry
-// is `.github/tests/release-linux.journey.mjs`'s, against a local one, and each
+// is `tests/release_journeys/release-linux.journey.mjs`'s, against a local one, and each
 // release's build jobs install what the real npm serves.
 
 import { execFileSync, spawnSync } from "node:child_process";

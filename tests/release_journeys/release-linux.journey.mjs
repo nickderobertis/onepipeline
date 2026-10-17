@@ -548,7 +548,7 @@ describe("registry verification refuses what a user could not run", () => {
       rmSync(dir, { recursive: true, force: true });
       const result = await verify(s);
       assert.equal(result.code, 1, said(result));
-      assert.match(result.stderr, /Release archive \S+ put no onepipeline executable in/);
+      assert.match(result.stderr, /\.tar\.gz is not \[.*\], each a regular file/);
     } finally {
       await s.stop();
     }
