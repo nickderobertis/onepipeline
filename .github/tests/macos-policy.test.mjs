@@ -1299,6 +1299,9 @@ test("the budget wrapper diagnoses a fresh clone whose pinned checker is missing
   mkdirSync(join(fresh, ".github"), { recursive: true });
   writeFileSync(join(fresh, ".github/check-budgets.sh"), readFileSync(".github/check-budgets.sh"));
   writeFileSync(join(fresh, "justfile"), readFileSync("justfile"));
+  // The justfile evaluates `msrv-version` out of the manifest whatever is asked of
+  // it, so a clone without one fails there, before the diagnosis under test.
+  writeFileSync(join(fresh, "Cargo.toml"), readFileSync("Cargo.toml"));
   const result = spawnSync("bash", [join(fresh, ".github/check-budgets.sh")], { encoding: "utf8" });
   assert.equal(result.status, 1);
   assert.match(result.stderr, /pinned onebudgetspec is missing; run just bootstrap/);
