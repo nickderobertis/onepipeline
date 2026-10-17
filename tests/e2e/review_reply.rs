@@ -595,12 +595,12 @@ fn a_command_asks_a_repositorys_visibility_once_and_again_only_where_the_host_di
     );
 
     // The host answers: the decline's command asks once, and `onevcs`'s guard on the
-    // reply it posts once.
+    // reply it posts reads the answer that ask recorded rather than asking again.
     world.script("gh.visibility", "private");
     let from = world.invocations().len();
     let output = decline(&world, run, "a", &[&second], "Out of scope here.");
     assert_eq!(output.code, 0, "{}\n{}", output.stdout, output.stderr);
-    assert_eq!(visibility_probes(&world, from), 2);
+    assert_eq!(visibility_probes(&world, from), 1);
     the_reply_to(&host, 1, &first);
     the_reply_to(&host, 1, &second);
 }
