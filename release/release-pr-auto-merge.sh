@@ -30,6 +30,13 @@ for name in GITHUB_TOKEN GITHUB_REPOSITORY; do
 done
 api="${GITHUB_API_URL:-https://api.github.com}"
 graphql="${GITHUB_GRAPHQL_URL:-https://api.github.com/graphql}"
+# The token is sent to both, so each must be HTTPS, or HTTP to this machine.
+for url in "$api" "$graphql"; do
+  case "$url" in
+    https://* | http://127.0.0.1:* | http://127.0.0.1/* | http://localhost:* | http://localhost/*) ;;
+    *) fail "$url is not an HTTPS URL, and RELEASE_PLZ_TOKEN is sent to it" "point GITHUB_API_URL and GITHUB_GRAPHQL_URL at GitHub's HTTPS API" ;;
+  esac
+done
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 

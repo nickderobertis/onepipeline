@@ -324,6 +324,14 @@ describe("a Release that names another host", () => {
     const release = github.addRelease(TAG);
     const out = scratch("release-hosts");
     try {
+      const plain = await run("just", ["release-outcome"], {
+        env: releaseEnv(github, out, {
+          LINUX_RESULT: "success",
+          GITHUB_API_URL: "http://192.0.2.1",
+        }),
+      });
+      assert.equal(plain.code, 1, said(plain));
+      assert.match(plain.stderr, /http:\/\/192\.0\.2\.1 is not an HTTPS URL/);
       github.uploadOrigin = "https://uploads.example.com";
       let result = await run("just", ["release-outcome"], {
         env: releaseEnv(github, out, { LINUX_RESULT: "success" }),
@@ -1073,6 +1081,25 @@ describe("release-plz.yml's auto-merge step", () => {
     const result = await run("bash", ["-eo", "pipefail", "-c", step.run], { env });
     assert.equal(result.code, 1, said(result));
     assert.match(result.stderr, /GitHub did not answer at http:\/\/127\.0\.0\.1/);
+  });
+
+  it("refuses to send the token to a plaintext API", async () => {
+    const github = await new GitHubDouble().start();
+    try {
+      for (const name of ["GITHUB_API_URL", "GITHUB_GRAPHQL_URL"]) {
+        const result = await run("bash", ["-eo", "pipefail", "-c", step.run], {
+          env: { ...github.env(), [name]: "http://192.0.2.1" },
+        });
+        assert.equal(result.code, 1, said(result));
+        assert.match(
+          result.stderr,
+          /http:\/\/192\.0\.2\.1 is not an HTTPS URL, and RELEASE_PLZ_TOKEN is sent to it/,
+        );
+      }
+      assert.deepEqual(github.requests, []);
+    } finally {
+      await github.stop();
+    }
   });
 
   it("fails visibly on a pull request list that is not one", async () => {

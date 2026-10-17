@@ -426,6 +426,7 @@ class Release:
     def __init__(self, tag):
         require_github()
         self.api = os.environ.get('GITHUB_API_URL', 'https://api.github.com').rstrip('/')
+        api = origin(self.api)
         self.repo = os.environ['GITHUB_REPOSITORY']
         self.token = os.environ['GITHUB_TOKEN']
         status, body = self.call('GET', f'/repos/{self.repo}/releases/tags/{urllib.parse.quote(tag)}')
@@ -436,7 +437,6 @@ class Release:
                             and v.get('tag_name') == tag and (v.get('body') is None or isinstance(v['body'], str)))
         # The token goes where the upload URL says, so it must be GitHub's: the
         # API's own origin, or its uploads host.
-        api = origin(self.api)
         uploads = {api, (api[0], api[1].replace('api.', 'uploads.', 1))}
         expect(origin(self.data['upload_url']) in uploads, f"the Release's upload URL {self.data['upload_url']} is not GitHub's",
                're-run once GitHub answers normally')
