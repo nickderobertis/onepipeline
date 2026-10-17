@@ -1808,3 +1808,55 @@ fn the_shard_check_accounts_for_every_tier_and_refuses_a_split_it_cannot_prove()
         assert!(!said.contains("cross-shards: ok"), "{case}:\n{said}");
     }
 }
+
+/// Nx's answer to `show <args> --json`, asked through the workspace's one entry
+/// point to it.
+fn nx_shows(args: &[&str]) -> serde_json::Value {
+    let output = Command::new(bash())
+        .arg(repo_root().join("scripts/nx.sh"))
+        .arg("show")
+        .args(args)
+        .arg("--json")
+        .current_dir(repo_root())
+        .env("ONEPIPELINE_NX_SHOW_OUTPUT", "1")
+        .stdin(Stdio::null())
+        .output()
+        .expect("bash runs Nx");
+    assert!(
+        output.status.success(),
+        "nx show {args:?} failed:\n{}",
+        stderr(&output)
+    );
+    serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|error| panic!("nx show {args:?} is not JSON: {error}"))
+}
+
+/// Nx caches every `test-quick` target, and two shards of one tree differ in
+/// nothing but `ONEPIPELINE_TEST_PARTITION` — so unless that is one of a target's
+/// inputs, a warm cache replays one shard's pass for the next, which then runs
+/// nothing. Read off Nx's own resolution of each project's target, defaults merged:
+/// every cached `test-quick` is keyed on the partition.
+#[test]
+fn a_shards_cached_pass_never_stands_in_for_another_shards_run() {
+    let projects = nx_shows(&["projects", "--with-target", "test-quick"]);
+    let projects = projects
+        .as_array()
+        .expect("Nx lists the projects with a `test-quick` target");
+    assert!(!projects.is_empty(), "no project has a `test-quick` target");
+    let partition = serde_json::json!({ "env": "ONEPIPELINE_TEST_PARTITION" });
+    for project in projects {
+        let project = project.as_str().expect("a project is named");
+        let target = nx_shows(&["target", &format!("{project}:test-quick")]);
+        if target["cache"] != true {
+            continue;
+        }
+        let inputs = target["inputs"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{project}:test-quick resolves no inputs: {target}"));
+        assert!(
+            inputs.contains(&partition),
+            "{project}:test-quick is cached without the partition among its inputs, so one \
+             shard's pass replays for another: {inputs:?}"
+        );
+    }
+}
