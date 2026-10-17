@@ -1,40 +1,317 @@
 //! The live half of `docs/contract-divergences.md` entry 129: review comments on a real draft,
 //! found by one host, answered on a cold one continuing from the plan store.
 //!
-//! The store is one local Markdown root every host of the journey shares, as the continuation
-//! journey's is: which backend a project lives on is onetaskgraph's to test, not this
-//! repository's, so this journey needs no credential beyond the one the smoke publishes with.
-//! The drafts are on the scratch repository the lifecycle smoke uses. Host A drafts a stack of
-//! two, two review comments are posted on the bottom draft, and `onepipeline review` on A
-//! surfaces both; A's runs root and `ONEVCS_HOME` are then deleted, and host B — holding
-//! nothing but the store — continues the project, reworks the bottom draft for the first
-//! comment and declines the second. Every pull request and branch the journey made is removed
+//! The store is onetaskgraph's live-lane board — nickderobertis Projects #1, its issues in
+//! `nickderobertis/onetaskgraph-live-scratch` — declared as the source [`LIVE_SOURCE`] under the
+//! world's own configuration home, with the board's credential, `GH_PROJECTS_TOKEN`, and
+//! nothing of the operator's `plans` or `followups` sources: the world reads only the sources
+//! it declares. The plan is authored in a scratch `local-md` folder and copied onto the board,
+//! and both hosts launch it from the board. The drafts are on the scratch repository the
+//! lifecycle smoke uses. Host A drafts a stack of two, two review comments are posted on the
+//! bottom draft, and `onepipeline review` on A surfaces both; A's runs root and `ONEVCS_HOME`
+//! are then deleted, and host B — holding nothing but the board — continues the project,
+//! reworks the bottom draft for the first comment and declines the second. The board is read
+//! back at each step. Every pull request, branch and board issue the journey made is removed
 //! when it ends, however it ends.
 //!
 //! What it does not hold anybody to is a verdict GitHub alone decides: the scratch repository
 //! runs no checks, and each republication is read for whatever settlement it reached.
 
 // llmlint: ignore-file[e2e_not_mocked] nothing on the layer under test is substituted: the
-// compiled binary reads and writes its plan store through the linked `onetaskgraph`, and the
+// compiled binary reads and writes the live board through the linked `onetaskgraph`, and the
 // real `onevcs` reads review comments from, publishes to and replies on a real GitHub pull
 // request through real `git` and `gh`. The only stand-in is the paid model turn, at
 // oneharness's own documented per-harness override, as `main.rs` states for this whole tier.
 
 use std::collections::BTreeSet;
+use std::process::Command;
 
 use serde_json::{json, Value};
 
 use crate::continuation::{
     change, host, onepipeline, open_pulls, ran, recorded, said, Created, Tracked,
 };
-use crate::harness::{plan_of, World};
+use crate::harness::{plan_of, project_id, World};
 use crate::repo::{ensure_repo, gh, gh_try, missing};
 use crate::{authenticated_user, run_stamp, scratch_repo};
 
-/// Every reserved key the store's tasks of `project` carry, by node id.
-fn store_keys(world: &World, project: &str) -> Vec<(String, BTreeSet<String>)> {
-    world
-        .store_tasks(project)
+/// The name the live-lane board is declared under in each host's store configuration.
+const LIVE_SOURCE: &str = "live";
+
+/// The board's owner and number: onetaskgraph's live lane, which a journey may write to.
+const BOARD_OWNER: &str = "nickderobertis";
+const BOARD_NUMBER: u32 = 1;
+
+/// The repository the board files its issues in.
+const BOARD_REPOSITORY: &str = "nickderobertis/onetaskgraph-live-scratch";
+
+/// The variable the board's credential arrives under.
+const BOARD_TOKEN_ENV: &str = "GH_PROJECTS_TOKEN";
+
+/// The Status option each status category the engine writes lands on. `queued` is every node's
+/// claim before dispatch and `unknown` a settlement with no category of its own, so a board
+/// missing either refuses the run's projections; [`board_token`] refuses the journey first.
+const STATUS_OPTIONS: [(&str, &str); 6] = [
+    ("todo", "Todo"),
+    ("queued", "Queued"),
+    ("in-progress", "In Progress"),
+    ("unknown", "Needs attention"),
+    ("done", "Done"),
+    ("cancelled", "Cancelled"),
+];
+
+/// The board's credential, refused when it is missing or when the board lacks an option the
+/// engine writes to: either would fail the journey half way through, past what it created.
+fn board_token() -> String {
+    let token = std::env::var(BOARD_TOKEN_ENV)
+        .ok()
+        .filter(|token| !token.trim().is_empty())
+        .unwrap_or_else(|| {
+            panic!(
+                "{}",
+                missing(&format!(
+                    "{BOARD_TOKEN_ENV} is not set, and this journey's plan store is the \
+                     live-lane board, Projects #{BOARD_NUMBER} of {BOARD_OWNER}"
+                ))
+            )
+        });
+    let read = board_gh(
+        &token,
+        &[
+            "api",
+            "graphql",
+            "-f",
+            &format!(
+                "query={{user(login:\"{BOARD_OWNER}\"){{projectV2(number:{BOARD_NUMBER}){{\
+                 field(name:\"Status\"){{... on ProjectV2SingleSelectField{{options{{name}}}}}}}}}}}}"
+            ),
+            "--jq",
+            ".data.user.projectV2.field.options[].name",
+        ],
+    )
+    .unwrap_or_else(|why| panic!("{}", missing(&format!("the board did not answer: {why}"))));
+    let options: BTreeSet<String> = read
+        .lines()
+        .map(|name| name.trim().to_lowercase())
+        .collect();
+    let absent: Vec<&str> = STATUS_OPTIONS
+        .iter()
+        .map(|(_, option)| *option)
+        .filter(|option| !options.contains(&option.to_lowercase()))
+        .collect();
+    assert!(
+        absent.is_empty(),
+        "the live-lane board carries no Status option {absent:?}, which the engine writes; add \
+         them with `onetaskgraph sources status-options` or the board's own settings: {read}"
+    );
+    token
+}
+
+/// `gh` authenticated as the board's credential rather than the host's.
+fn board_gh(token: &str, args: &[&str]) -> Result<String, String> {
+    let output = Command::new("gh")
+        .args(args)
+        .env("GH_TOKEN", token)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|why| format!("gh does not run: {why}"))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        Err(format!(
+            "gh {args:?} exited {:?}: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+    }
+}
+
+/// Declare the board as [`LIVE_SOURCE`] in `world`'s configuration home, which every host made
+/// from it reads, and every store read of it here.
+fn declare_board(world: &World) {
+    let home = world.root.join("xdg").join("onetaskgraph");
+    std::fs::create_dir_all(&home).expect("the world's configuration home");
+    let mapping: String = STATUS_OPTIONS
+        .iter()
+        .map(|(category, option)| format!("        {category}: {option}\n"))
+        .collect();
+    std::fs::write(
+        home.join("config.yaml"),
+        format!(
+            "sources:\n  {LIVE_SOURCE}:\n    plugin: github-projects\n    config:\n      \
+             owner: {BOARD_OWNER}\n      project_number: {BOARD_NUMBER}\n      \
+             repository: {BOARD_REPOSITORY}\n      token_env: {BOARD_TOKEN_ENV}\n      \
+             status_mapping:\n        backlog: null\n{mapping}"
+        ),
+    )
+    .expect("the board's source is declared");
+}
+
+/// The setting that carries the board's credential to a store read made here.
+fn credential(token: &str) -> [(&str, &str); 1] {
+    [(BOARD_TOKEN_ENV, token)]
+}
+
+/// Author `plan` in a scratch `local-md` folder and copy it onto the board, answering the
+/// board project's qualified id. The copy writes nothing back to the folder.
+fn on_board(world: &World, token: &str, name: &str, plan: &Value) -> String {
+    let seed = world.store_apart("seed");
+    world.plan_in(&seed, name, plan);
+    let root = seed.to_string_lossy().into_owned();
+    let mut settings = vec![
+        ("ONETASKGRAPH_SOURCES__SEED__PLUGIN", "local-md"),
+        ("ONETASKGRAPH_SOURCES__SEED__CONFIG__ROOT", root.as_str()),
+    ];
+    settings.extend(credential(token));
+    let authored = crate::harness::global(&format!("seed:{}", project_id(name)));
+    let report = world.store_call_with(&settings, |engine| async move {
+        engine
+            .copy(&onetaskgraph_core::CopyRequest {
+                items: onetaskgraph_core::CopyItems::new(vec![authored]).expect("one item"),
+                scope: onetaskgraph_core::CopyScope::Projects { tasks: true },
+                destination: onetaskgraph_plugin_api::SourceName::new(LIVE_SOURCE)
+                    .expect("a source name"),
+                match_by: None,
+                recreate: false,
+                create: true,
+                dry_run: false,
+                comments: false,
+                no_link: true,
+                expect: None,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("the plan is copied onto the board: {error}"))
+    });
+    let project = report
+        .items
+        .first()
+        .and_then(|item| item.action.destination())
+        .unwrap_or_else(|| panic!("the copy names where the project landed: {report:?}"));
+    assert_eq!(project.source.as_str(), LIVE_SOURCE, "{report:?}");
+    project.to_string()
+}
+
+/// The board's issues the journey made, deleted however it ends: every issue of the board's
+/// repository whose title carries the run's stamp — the project's and each task's, a rework's
+/// replacement included, since a replacement keeps its node's title — and every one a board
+/// read of the project named. Deleting an issue removes its board item with it.
+struct BoardResidue {
+    token: String,
+    stamp: String,
+    seen: BTreeSet<u64>,
+    cleaned: bool,
+}
+
+impl BoardResidue {
+    /// Record every issue of the board's repository `tasks` name.
+    fn saw(&mut self, tasks: &[Value]) {
+        let issues = format!("https://github.com/{BOARD_REPOSITORY}/issues/");
+        let mut pending: Vec<&Value> = tasks.iter().collect();
+        while let Some(value) = pending.pop() {
+            match value {
+                Value::String(text) => {
+                    if let Some(number) = text
+                        .strip_prefix(&issues)
+                        .and_then(|rest| rest.split(['/', '#']).next())
+                        .and_then(|number| number.parse().ok())
+                    {
+                        self.seen.insert(number);
+                    }
+                }
+                Value::Array(values) => pending.extend(values),
+                Value::Object(fields) => pending.extend(fields.values()),
+                _ => {}
+            }
+        }
+    }
+
+    /// The issues of the board's repository the journey made, by number, with their node ids.
+    fn issues(&self) -> Result<Vec<(u64, String, String)>, String> {
+        let listed = board_gh(
+            &self.token,
+            &[
+                "api",
+                "--paginate",
+                "--slurp",
+                &format!("repos/{BOARD_REPOSITORY}/issues?state=all&per_page=100"),
+            ],
+        )?;
+        let pages: Vec<Vec<Value>> =
+            serde_json::from_str(&listed).map_err(|why| format!("{why}: {listed}"))?;
+        Ok(pages
+            .into_iter()
+            .flatten()
+            .filter_map(|issue| {
+                let number = issue["number"].as_u64()?;
+                let title = issue["title"].as_str()?.to_owned();
+                let node = issue["node_id"].as_str()?.to_owned();
+                (title.contains(&self.stamp) || self.seen.contains(&number))
+                    .then_some((number, title, node))
+            })
+            .collect())
+    }
+
+    /// Delete every issue [`BoardResidue::issues`] finds, then read the repository back.
+    fn clean(&mut self) -> (Vec<String>, Vec<String>) {
+        self.cleaned = true;
+        let (mut observed, mut failures) = (Vec::new(), Vec::new());
+        let found = match self.issues() {
+            Ok(found) => found,
+            Err(why) => return (observed, vec![format!("listing the board's issues: {why}")]),
+        };
+        for (number, title, node) in &found {
+            match board_gh(
+                &self.token,
+                &[
+                    "api",
+                    "graphql",
+                    "-f",
+                    "query=mutation($id:ID!){deleteIssue(input:{issueId:$id}){clientMutationId}}",
+                    "-f",
+                    &format!("id={node}"),
+                ],
+            ) {
+                Ok(_) => observed.push(format!("deleted board issue #{number} {title:?}")),
+                Err(why) => failures.push(format!("deleting board issue #{number}: {why}")),
+            }
+        }
+        match self.issues() {
+            Ok(left) if left.is_empty() => observed.push(format!(
+                "read back: none of the {} board issue(s) is left",
+                found.len()
+            )),
+            Ok(left) => failures.push(format!("board issues left after the cleanup: {left:?}")),
+            Err(why) => failures.push(format!("reading the board's issues back: {why}")),
+        }
+        (observed, failures)
+    }
+}
+
+impl Drop for BoardResidue {
+    fn drop(&mut self) {
+        if self.cleaned {
+            return;
+        }
+        let (observed, failures) = self.clean();
+        for step in &observed {
+            eprintln!("smoke: board cleanup after a failed journey: {step}");
+        }
+        for failure in &failures {
+            eprintln!("smoke: board cleanup after a failed journey FAILED: {failure}");
+        }
+    }
+}
+
+/// Every reserved key the board's tasks of `project` carry, by node id, read from the board
+/// itself; every issue the read names is recorded for the cleanup.
+fn store_keys(
+    world: &World,
+    board: &mut BoardResidue,
+    project: &str,
+) -> Vec<(String, BTreeSet<String>)> {
+    let tasks = world.store_tasks_with(&credential(&board.token), project);
+    board.saw(&tasks);
+    tasks
         .iter()
         .map(|task| {
             let metadata = &task["item"]["metadata"];
@@ -51,18 +328,22 @@ fn store_keys(world: &World, project: &str) -> Vec<(String, BTreeSet<String>)> {
         .collect()
 }
 
-/// The store holds no review state: no key naming a reply, a decline or a review, and
+/// The board holds no review state: no key naming a reply, a decline or a review, and
 /// `onepipeline.rework` only on a rework replacement — the task that supersedes another.
-fn holds_no_review_state(world: &World, project: &str, when: &str) {
-    let keys = store_keys(world, project);
-    println!("smoke: the store's keys {when}: {keys:?}");
+fn holds_no_review_state(world: &World, board: &mut BoardResidue, project: &str, when: &str) {
+    let keys = store_keys(world, board, project);
+    println!("smoke: the board's keys {when}: {keys:?}");
+    assert!(
+        !keys.is_empty(),
+        "{when}: the board holds no task of {project}"
+    );
     for (node, keys) in &keys {
         for key in keys {
             assert!(
                 !["reply", "replies", "decline", "review"]
                     .iter()
                     .any(|word| key.contains(word)),
-                "{when}: {node} carries {key} on the store"
+                "{when}: {node} carries {key} on the board"
             );
         }
         assert_eq!(
@@ -178,13 +459,20 @@ fn number(url: &Value) -> u64 {
 /// Two review comments on a real draft are surfaced by one host, and answered — one by a
 /// rework that pushes new commits onto the draft's existing pull request and restacks the
 /// draft above it, one by a decline posting exactly one reply — by a cold host continuing
-/// the project from the plan store, which holds no review state at any step.
+/// the project from the live-lane board, which holds no review state at any step.
 #[test]
-fn review_comments_found_on_one_host_are_reworked_and_declined_on_a_cold_one_from_the_store() {
+fn review_comments_found_on_one_host_are_reworked_and_declined_on_a_cold_one_from_the_board() {
     let slug = scratch_repo();
     authenticated_user();
+    let token = board_token();
     ensure_repo(&slug);
     let stamp = run_stamp();
+    let mut board = BoardResidue {
+        token: token.clone(),
+        stamp: stamp.clone(),
+        seen: BTreeSet::new(),
+        cleaned: false,
+    };
     let mut residue = Created {
         slug: slug.clone(),
         stamp: stamp.clone(),
@@ -197,6 +485,7 @@ fn review_comments_found_on_one_host_are_reworked_and_declined_on_a_cold_one_fro
         &slug,
     );
     first.write_graphs();
+    declare_board(&first);
     let graph = first.review_reply_graph();
     assert!(
         !World::substitutes_the_host(&first.real_cmd(&["start"])),
@@ -206,16 +495,24 @@ fn review_comments_found_on_one_host_are_reworked_and_declined_on_a_cold_one_fro
     first.script("harness.work", &format!("reviewed on the store {stamp}"));
     first.script("harness.work-per-task", "");
     let name = format!("review-{}", stamp.replace(['_', '.'], "-"));
-    let project = first.plan(
+    let project = on_board(
+        &first,
+        &token,
         &name,
         &plan_of(
             &name,
             vec![change("a", &[], &stamp), change("b", &["a"], &stamp)],
         ),
     );
-    println!("smoke: the plan is on the shared store as {project}");
+    println!("smoke: the plan is on the live-lane board as {project}");
+    holds_no_review_state(
+        &first,
+        &mut board,
+        &project,
+        "once the plan is on the board",
+    );
 
-    // Host A drafts the stack from the store.
+    // Host A drafts the stack from the board.
     let launched = ran(&mut onepipeline(
         &first,
         &[
@@ -249,8 +546,24 @@ fn review_comments_found_on_one_host_are_reworked_and_declined_on_a_cold_one_fro
     };
     let (a, b) = (settled(&first, "a"), settled(&first, "b"));
     println!("smoke: a settled {a}\nsmoke: b settled {b}");
+    for node in [&a, &b] {
+        if let Some((cut, _)) = node["branch"]
+            .as_str()
+            .and_then(|branch| branch.split_once('/'))
+        {
+            let prefix = format!("{cut}/");
+            if !residue.prefixes.contains(&prefix) {
+                residue.prefixes.push(prefix);
+            }
+        }
+    }
     let pull = number(&a["change_url"]);
-    holds_no_review_state(&first, &project, "after the first host drafted the stack");
+    holds_no_review_state(
+        &first,
+        &mut board,
+        &project,
+        "after the first host drafted the stack",
+    );
 
     // Two review comments on the bottom draft: one in its conversation, one a review's
     // summary, whose reply is a linked conversation comment.
@@ -299,9 +612,14 @@ fn review_comments_found_on_one_host_are_reworked_and_declined_on_a_cold_one_fro
         .copied()
         .cloned()
         .expect("the review's comment surfaced");
-    holds_no_review_state(&first, &project, "after the first host's review pass");
+    holds_no_review_state(
+        &first,
+        &mut board,
+        &project,
+        "after the first host's review pass",
+    );
 
-    // Every record host A keeps is deleted; host B holds nothing but the store.
+    // Every record host A keeps is deleted; host B holds nothing but the board.
     std::fs::remove_dir_all(&first.runs).expect("the first host's runs root is deleted");
     std::fs::remove_dir_all(first.onevcs_home()).expect("the first host's state is deleted");
     let second = host(first.on_host("smoke-review-b"), &slug);
@@ -340,7 +658,12 @@ fn review_comments_found_on_one_host_are_reworked_and_declined_on_a_cold_one_fro
             .collect::<Vec<_>>(),
         "the cold host's view of the comments is not the first host's"
     );
-    holds_no_review_state(&second, &project, "after the cold host's review pass");
+    holds_no_review_state(
+        &second,
+        &mut board,
+        &project,
+        "after the cold host's review pass",
+    );
 
     // B reworks the bottom draft for the first comment, in a file of its own so the draft
     // above it restacks over it cleanly.
@@ -429,7 +752,7 @@ fn review_comments_found_on_one_host_are_reworked_and_declined_on_a_cold_one_fro
         is_ancestor(&slug, &new_head, &b_head),
         "b was not restacked onto the rework's head {new_head}: b is at {b_head}"
     );
-    holds_no_review_state(&second, &project, "after the rework");
+    holds_no_review_state(&second, &mut board, &project, "after the rework");
     // The rework settled with its verdict deferred to the next trigger, which drafts and
     // posts the reply it owes: one, linking a commit the rework added.
     let reviewed = ran(&mut onepipeline(&second, &["review", &run]));
@@ -446,7 +769,7 @@ fn review_comments_found_on_one_host_are_reworked_and_declined_on_a_cold_one_fro
         "the reply links no commit the rework added: {}",
         answers[0]
     );
-    holds_no_review_state(&second, &project, "after the rework's reply");
+    holds_no_review_state(&second, &mut board, &project, "after the rework's reply");
 
     // B declines the second comment: exactly one reply in its thread, no commit linked.
     let holder = comment_views(&second, &run)
@@ -466,7 +789,7 @@ fn review_comments_found_on_one_host_are_reworked_and_declined_on_a_cold_one_fro
     assert_eq!(declines.len(), 1, "{declines:#?}");
     assert!(!declines[0].contains("/commit/"), "{}", declines[0]);
     assert!(declines[0].contains("label=declined"), "{}", declines[0]);
-    holds_no_review_state(&second, &project, "after the decline");
+    holds_no_review_state(&second, &mut board, &project, "after the decline");
     let finally = comment_views(&second, &run);
     println!("smoke: the cold host's view after the round: {finally:#?}");
     let state = |id: &str| {
@@ -493,11 +816,19 @@ fn review_comments_found_on_one_host_are_reworked_and_declined_on_a_cold_one_fro
         "the cleanup did not finish: {:#?}",
         cleanup.failures
     );
+    drop(second);
+    let (observed, failures) = board.clean();
+    for step in &observed {
+        println!("smoke: board cleanup: {step}");
+    }
+    assert!(
+        failures.is_empty(),
+        "the board's cleanup did not finish: {failures:#?}"
+    );
     let _ = gh_try(&["api", "rate_limit", "--jq", ".resources.graphql.remaining"]).map(|left| {
         println!(
             "smoke: graphql points left on the gh token: {}",
             left.trim()
         )
     });
-    drop(second);
 }
