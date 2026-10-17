@@ -334,6 +334,8 @@ test("each field a record must carry is checked, and the record that lacks it re
       /categories\.wait\.polls is not a count/,
     ],
     [{ categories: undefined }, /categories\.spawn\.count is not a count/],
+    [{ wall_s: 0.5 }, /its categories hold .* of a 0\.5s test/],
+    [{ unattributed_s: 0.5 }, /unattributed_s 0\.5 is not what its categories leave of wall_s/],
   ];
   cases.forEach(([change, message], i) => {
     const dir = join(scratch, `field-${i}`);

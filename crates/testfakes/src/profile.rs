@@ -362,12 +362,6 @@ fn leaf<T>(category: Category, work: impl FnOnce() -> T) -> T {
     work()
 }
 
-/// Run `work`, recorded as one `category`.
-pub fn timed<T>(category: Category, work: impl FnOnce() -> T) -> T {
-    let _span = span(category);
-    work()
-}
-
 /// Run `work` as one polling wait: what the predicate does inside it is recorded
 /// where it happens, and the rest — the sleeps between looks — is the wait's.
 pub fn polled<T>(work: impl FnOnce() -> T) -> T {

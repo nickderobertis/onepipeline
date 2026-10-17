@@ -586,3 +586,80 @@ fn each_filesystem_operation_counts_once_whether_or_not_it_succeeds() {
     assert_eq!(a.count - b.count, 15, "{after:?}");
     assert!(a.time > b.time, "{after:?}");
 }
+
+/// A process run to its status is one process, held for all of it; and a
+/// program named by its path is the program it is, so a git found on `PATH` and
+/// named in full is still git.
+#[test]
+fn a_status_and_a_program_named_by_its_path_are_counted_as_what_they_are() {
+    let world = World::new("profile-status");
+    world.run(&["--version"]).exited(0);
+    let git_on_path = std::env::split_paths(&std::env::var_os("PATH").expect("a PATH"))
+        .map(|dir| dir.join(format!("git{}", std::env::consts::EXE_SUFFIX)))
+        .find(|candidate| candidate.is_file())
+        .expect("git is on PATH");
+    let before = profile::snapshot();
+    let status = world
+        .cmd(&["--version"])
+        .stdout(std::process::Stdio::null())
+        .status()
+        .expect("the binary runs");
+    assert!(status.success());
+    let named = Command::new(&git_on_path)
+        .arg("--version")
+        .output()
+        .expect("git runs");
+    assert!(named.status.success());
+    let after = profile::snapshot();
+
+    let delta = |category: Category| after.of(category).count - before.of(category).count;
+    assert_eq!(delta(Category::Spawn), 1, "{after:?}");
+    assert_eq!(
+        delta(Category::Git),
+        1,
+        "{} is git: {after:?}",
+        git_on_path.display()
+    );
+    let held = |program: &str| {
+        let of = |s: &profile::Snapshot| s.programs.get(program).copied().unwrap_or_default();
+        (of(&after).0 - of(&before).0, of(&after).1 - of(&before).1)
+    };
+    let (count, time) = held("onepipeline");
+    assert_eq!(count, 1, "{after:?}");
+    assert_eq!(
+        time,
+        after.of(Category::Spawn).time - before.of(Category::Spawn).time,
+        "the status is all of the spawn time: {after:?}"
+    );
+    assert_eq!(held("git").0, 1, "{after:?}");
+}
+
+/// A record carries the run and attempt nextest names, and none when a test
+/// binary is run by hand.
+#[test]
+fn a_record_names_the_run_and_attempt_it_belongs_to() {
+    let world = World::new("profile-run-id");
+    for (run, attempt) in [(Some("a-run-of-this-suite"), Some("2")), (None, None)] {
+        let records = world.root.join(format!("profiles-{}", run.is_some()));
+        let mut child = Command::new(std::env::current_exe().expect("this suite's own binary"));
+        child
+            .args(["--exact", IDLE, "--nocapture"])
+            .env(profile::DIR_ENV, &records)
+            .env_remove("NEXTEST_TEST_NAME")
+            .env_remove("NEXTEST_RUN_ID")
+            .env_remove("NEXTEST_ATTEMPT");
+        if let (Some(run), Some(attempt)) = (run, attempt) {
+            child
+                .env("NEXTEST_RUN_ID", run)
+                .env("NEXTEST_ATTEMPT", attempt);
+        }
+        passed(IDLE, &child.output().expect("the suite runs"));
+        let record = read_record(&records.join("e2e").join(file_of(IDLE)));
+        assert_eq!(record["run_id"], serde_json::json!(run), "{record:#}");
+        assert_eq!(
+            record["attempt"],
+            serde_json::json!(attempt.map(|a| a.parse::<u64>().expect("a number"))),
+            "{record:#}"
+        );
+    }
+}

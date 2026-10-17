@@ -32,6 +32,8 @@ export class Refusal extends Error {
   }
 }
 
+/** How far a record's figures may disagree before they are not one writer's. */
+const SLACK_S = 0.01;
 const isSeconds = (value) => Number.isFinite(value) && value >= 0;
 const isCount = (value) => Number.isSafeInteger(value) && value >= 0;
 
@@ -53,6 +55,16 @@ export function recordProblem(record) {
     if (!isSeconds(tally?.s)) return `categories.${category}.s is not a nonnegative number`;
   }
   if (!isCount(record.categories.wait.polls)) return "categories.wait.polls is not a count";
+  // The writer's categories are exclusive and its remainder is what they leave, so a
+  // record whose figures do not add up was not written by it. The slack is for the
+  // rounding a figure written in decimal seconds carries.
+  const attributed = CATEGORIES.reduce((sum, category) => sum + record.categories[category].s, 0);
+  if (attributed > record.wall_s + SLACK_S) {
+    return `its categories hold ${attributed}s of a ${record.wall_s}s test`;
+  }
+  if (Math.abs(record.unattributed_s - Math.max(0, record.wall_s - attributed)) > SLACK_S) {
+    return `unattributed_s ${record.unattributed_s} is not what its categories leave of wall_s`;
+  }
   return undefined;
 }
 
