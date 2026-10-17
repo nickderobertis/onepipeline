@@ -526,6 +526,10 @@ test("--today refuses an nx.json whose inputs cannot be expanded", () => {
     }),
     /and --today reads only file globs/,
   );
+  refused(
+    today({ rustBuild: [{ fileset: "{workspaceRoot}/crates/**/*" }], e2eSource: [] }),
+    /rustBuild holds \{"fileset":.*\}, and --today reads only file globs/,
+  );
   writeFileSync(join(dir, "nx.json"), "{ not json");
   refused(
     ["--today", "--repo", dir, "--out", join(scratch, "x")],
