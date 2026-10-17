@@ -137,8 +137,8 @@ class Workspace {
   }
 
   /// `just lint-llm-diff`, with both streams piped, so neither is a terminal.
-  lint(base, env = {}) {
-    const result = spawnSync("just", ["lint-llm-diff", base], {
+  lint(base, env = {}, args = []) {
+    const result = spawnSync("just", ["lint-llm-diff", base, ...args], {
       cwd: this.root,
       encoding: "utf8",
       env: { ...this.env, ...env },
@@ -194,6 +194,16 @@ describe("just lint-llm-diff", () => {
     assert.ok(summary, first.output);
 
     replayed(ws, "judged-base", summary);
+  });
+
+  it("forwards --skip-nx-cache to Nx, judging a cached pass again", (t) => {
+    const ws = new Workspace(t);
+    const summary = judged(ws, "judged-base");
+    const forced = ws.lint("judged-base", {}, ["--skip-nx-cache"]);
+    assert.equal(forced.status, 0, forced.output);
+    assert.equal(ws.judgeCalls(), 2, `--skip-nx-cache replayed the pass:\n${forced.output}`);
+    assert.doesNotMatch(forced.output, CACHE_HIT, forced.output);
+    replayed(ws, "judged-base", forced.output.match(SUMMARY)?.[0] ?? summary);
   });
 
   it("judges a new base commit again, and replays each base's own pass", (t) => {

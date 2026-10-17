@@ -23,11 +23,25 @@ const flagValue = (flag) => {
   const at = args.indexOf(flag);
   return at === -1 ? undefined : args[at + 1];
 };
+// What a journey or llmlint hands this is checked before it is answered, so a
+// typo in a journey or a change in llmlint's schema fails loudly rather than
+// passing as a judge that held every rule.
+const refuse = (why) => {
+  process.stderr.write(`oneharness stand-in: ${why}\n`);
+  process.exit(2);
+};
+const verdict = process.env.STANDIN_VERDICT ?? "pass";
+if (!["pass", "fail", "none", "some"].includes(verdict)) {
+  refuse(`STANDIN_VERDICT is '${verdict}', not one of pass, fail, none or some`);
+}
 const schema = JSON.parse(readFileSync(flagValue("--schema"), "utf8"));
-const rules = Object.keys(schema.properties ?? {});
+const properties = schema?.properties;
+if (typeof properties !== "object" || properties === null || Array.isArray(properties)) {
+  refuse("the judge schema names no rules under `properties`");
+}
+const rules = Object.keys(properties);
 appendFileSync(process.env.STANDIN_LOG, `${JSON.stringify({ rules })}\n`);
 
-const verdict = process.env.STANDIN_VERDICT ?? "pass";
 const structured = {};
 const answered = verdict === "none" ? [] : verdict === "some" ? rules.slice(0, 1) : rules;
 for (const [index, rule] of answered.entries()) {
