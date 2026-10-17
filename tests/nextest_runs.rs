@@ -114,6 +114,9 @@ impl Fixture {
         // CI's test step sets it for the whole suite, naming the suite's own
         // archive: a fixture inheriting it would archive itself over that one.
         command.env_remove("ONEPIPELINE_TEST_ARCHIVE");
+        // And on a split leg it sets the suite's own share: a fixture inheriting
+        // it would run only that share of its own tests.
+        command.env_remove("ONEPIPELINE_TEST_PARTITION");
         // `ci.yml` sets the first for every job and Nx the second for every
         // task, and nextest then colours the counts these tests read;
         // `failed_step` asks for colour where it means to.
