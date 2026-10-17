@@ -2099,9 +2099,15 @@ pub(crate) fn drive_run(paths: &RunPaths, retained: Retained) -> Result<i32> {
         // the watch is the only writer of it from here, so a restart records the
         // graph it started beside the driver that started it.
         let mut watch = ObserverWatch::of(&paths, record, goal, output);
+        let beside = watch.gate();
         std::thread::scope(|scope| {
             scope.spawn(|| keep_the_run_watched(watched, &mut watch, &driving));
-            let settled = engine::drive_holding(&paths, lock);
+            let settled = engine::drive_holding(&paths, lock, &beside);
+            // The departing driver's window, held open where a journey asks: the
+            // run is let go of and this watch is still polling beside it.
+            if let Err(error) = crate::ordering::meet("ONEPIPELINE_TEST_LET_GO_GATE") {
+                eprintln!("onepipeline: {error}");
+            }
             driving.store(false, Ordering::Release);
             settled
         })?
@@ -2163,11 +2169,8 @@ fn keep_the_run_watched(
                 );
             }
         }
-        if observer.has_exited() {
-            observer_stopped_watching(&watch.paths.run);
-            if watch.restart(observer).is_none() {
-                return;
-            }
+        if observer.has_exited() && matches!(watch.stopped(observer), Stopped::Over) {
+            return;
         }
         std::thread::sleep(ATTACH_POLL);
     }
@@ -2255,6 +2258,23 @@ struct ObserverWatch<'a> {
     /// The bound, and how much of it has been spent.
     limit: u32,
     restarted: u32,
+    /// What every restart writes the record under, shut by the loop before it
+    /// lets go of the run: past that, the record is the next writer's.
+    gate: std::sync::Arc<engine::RecordGate>,
+    /// Whether this driver has said that an observer stopped as it let go, so a
+    /// watch polling through the release says it once.
+    said_let_go: bool,
+}
+
+/// What a watch did about an observer that stopped watching the run.
+enum Stopped {
+    /// Another is watching it now.
+    Restarted,
+    /// None, because the loop is letting go of the run and the record is no
+    /// longer this driver's to move.
+    LettingGo,
+    /// None, and nothing this driver runs will start another.
+    Over,
 }
 
 impl<'a> ObserverWatch<'a> {
@@ -2272,6 +2292,42 @@ impl<'a> ObserverWatch<'a> {
             output,
             limit: observer_restart_limit(),
             restarted: 0,
+            gate: std::sync::Arc::default(),
+            said_let_go: false,
+        }
+    }
+
+    /// The gate the loop beside this watch closes as it lets go of the run.
+    fn gate(&self) -> std::sync::Arc<engine::RecordGate> {
+        std::sync::Arc::clone(&self.gate)
+    }
+
+    /// Answer an observer that has stopped watching the run.
+    ///
+    /// A restart writes the record, so it happens only while the gate is held
+    /// open: the loop's release waits for a restart already under way, and one
+    /// asked for after that is not made.
+    fn stopped(&mut self, observer: &mut agentgraph::GraphRun) -> Stopped {
+        let gate = self.gate();
+        let Some(_writing) = gate.open_for_writing() else {
+            // Still said as a stop, because it is one: a run that settles before
+            // its watch next looks — an observer refused at once does — has its
+            // observer stop inside this window, and its reader is owed the stop.
+            if !self.said_let_go {
+                self.said_let_go = true;
+                eprintln!(
+                    "onepipeline: the observer graph for '{}' has stopped watching as this \
+                     driver let go of the run; its next driver starts its own",
+                    self.paths.run
+                );
+            }
+            return Stopped::LettingGo;
+        };
+        self.said_let_go = false;
+        observer_stopped_watching(&self.paths.run);
+        match self.restart(observer) {
+            Some(()) => Stopped::Restarted,
+            None => Stopped::Over,
         }
     }
 
@@ -2587,9 +2643,18 @@ fn attach(
     let mut chains = engine::ChainRecords::default();
 
     let driving = paths.clone();
+    let beside = watch.gate();
     let engine = std::thread::Builder::new()
         .name(format!("engine-{}", paths.run))
-        .spawn(move || engine::drive_holding(&driving, lock))
+        .spawn(move || {
+            let driven = engine::drive_holding(&driving, lock, &beside);
+            // The same window as a detached driver's, held where a journey asks:
+            // the run is let go of and the loop below is still watching it.
+            if let Err(error) = crate::ordering::meet("ONEPIPELINE_TEST_LET_GO_GATE") {
+                eprintln!("onepipeline: {error}");
+            }
+            driven
+        })
         .map_err(|e| Error::Invalid(format!("cannot start the engine loop: {e}")))?;
 
     loop {
@@ -2613,18 +2678,18 @@ fn attach(
         // unwatched run is the same failure either way.
         if let Some(run) = watched.as_deref_mut() {
             if run.has_exited() && !observer_gone {
-                observer_stopped_watching(&paths.run);
-                match watch.restart(run) {
+                match watch.stopped(run) {
                     // Whatever the replacement says is still the run's, so it is
                     // relayed like its predecessor's. The sender is here to be
                     // cloned: it is released only once the loop has finished, and
                     // a finished loop starts no observer to relay.
-                    Some(()) => {
+                    Stopped::Restarted => {
                         if let Some(tx) = relay.as_ref() {
                             relay_observer(paths, run, tx.clone())?;
                         }
                     }
-                    None => observer_gone = true,
+                    Stopped::LettingGo => {}
+                    Stopped::Over => observer_gone = true,
                 }
             }
         }
