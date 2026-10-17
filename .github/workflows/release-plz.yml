@@ -127,9 +127,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
           BASELINE: ${{ steps.baseline.outputs.arg }}
-        # The baseline argument is two words, or none, on purpose.
-        # shellcheck disable=SC2086
-        run: release-plz release-pr $BASELINE --git-token "$GITHUB_TOKEN"
+        run: |
+          # The baseline argument is two words, or none, so it is split on purpose.
+          # shellcheck disable=SC2086
+          release-plz release-pr $BASELINE --git-token "$GITHUB_TOKEN"
 
       - name: Merge the release PR automatically once its required checks pass
         if: "${{ steps.guard.outputs.enabled == 'true' && !startsWith(github.event.head_commit.message, 'chore: release') }}"
