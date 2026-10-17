@@ -2352,6 +2352,68 @@ fn a_driver_whose_reads_keep_failing_ends_its_dispatch_once_its_lease_lapses() {
     drop(held);
 }
 
+/// A driver whose reconcile loop is held — here at the start of another node — while a
+/// dispatch it has in progress outlives its lease still ends that dispatch: the lease's
+/// watchdog ends it from beside the loop, which reads no claim while it is held, and the
+/// held start then waits for a read to confirm the lease before it begins.
+#[test]
+fn a_dispatch_outliving_its_lease_is_ended_while_the_reconcile_loop_is_held() {
+    let interval = 5;
+    // llmlint: ignore-block[tests_mirror_real_usage] the property is the watchdog acting while
+    // the reconcile loop cannot, and no user-facing input holds that loop at a chosen instant.
+    // The failpoint only orders the real binary over the real store and agent doubles, and
+    // every outcome is asserted on the binary's own records.
+    let begins = crate::harness::Rendezvous::failpoint();
+    let world = World::new("lease-lapsed-held")
+        .with_env(CLAIM_INTERVAL_ENV, &interval.to_string())
+        .with_env(crate::harness::CANCEL_GRACE_ENV, "1")
+        .with_env(BEGIN_GATE, &begins.address())
+        .with_env(BEGIN_NODE, "y");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let x = world.rendezvous("x");
+    let run = "lapsed-held";
+    // `x` is held in progress; `y` waits on `z`, so its start comes on a later pass, after
+    // the watchdog has been handed `x`.
+    let mut plan = plan_of(
+        run,
+        vec![agent("x", &[]), agent("z", &[]), agent("y", &["z"])],
+    );
+    plan["concurrency"] = json!(3);
+    let project = world.plan(run, &plan);
+    world
+        .run_from(&world.project, &["start", &project, "--detach"])
+        .exited(0);
+    let in_progress = x.arrived();
+    let loop_held = begins.arrived();
+    world.until_within(
+        std::time::Duration::from_secs(120),
+        "the watchdog to end x while the loop is held",
+        |world| {
+            std::fs::read_to_string(world.run_file(run, "driver.log"))
+                .is_ok_and(|log| log.contains("ends its dispatches in progress — 'x'"))
+        },
+    );
+    let mut started = dispatched(&world, run);
+    started.sort();
+    assert_eq!(
+        started,
+        vec!["x".to_owned(), "z".to_owned()],
+        "y started past the hold"
+    );
+    loop_held.release();
+    // Every later pass that would start `y` meets the failpoint again: each is let through.
+    std::thread::spawn(move || loop {
+        begins.arrived().release();
+    });
+    world.until("the driver to end", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+    assert_eq!(settled(&world, run, "x")["status"], "cancelled");
+    assert_eq!(settled(&world, run, "z")["status"], "done");
+    assert_eq!(settled(&world, run, "y")["status"], "done");
+    drop(in_progress);
+}
+
 /// A publication asked for on a lease an interval old — the read due then refused by the
 /// board — waits for the next read, and starts once that read confirms the lease.
 #[test]
