@@ -240,7 +240,10 @@ fn release_linux_legs() -> Vec<(String, String)> {
         .iter()
         .map(|target| (target.as_str().unwrap().to_string(), runner.clone()))
         .collect();
-    assert!(!legs.is_empty(), "release.yml's build-linux builds a target");
+    assert!(
+        !legs.is_empty(),
+        "release.yml's build-linux builds a target"
+    );
     legs
 }
 

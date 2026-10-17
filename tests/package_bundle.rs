@@ -132,7 +132,12 @@ fn release_packaging_retains_every_target_and_installs_apple_silicon_before_publ
             &std::fs::read_to_string(root.join("scripts/release.py")).unwrap(),
         ),
     ] {
-        for word in ["x86_64-apple-darwin", "rosetta", "arch -x86_64", "darwin-x64"] {
+        for word in [
+            "x86_64-apple-darwin",
+            "rosetta",
+            "arch -x86_64",
+            "darwin-x64",
+        ] {
             assert!(
                 !forbidden.to_lowercase().contains(word),
                 "{path} still carries Intel macOS: {word}"
