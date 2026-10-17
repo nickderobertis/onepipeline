@@ -1743,8 +1743,39 @@ fn a_publication_whose_fence_the_board_refuses_starts_once_a_later_write_lands()
 /// once that is cleared, it starts.
 #[test]
 fn a_takeover_finding_a_fence_it_cannot_read_waits_until_it_is_cleared() {
+    a_takeover_waits_until_a_fence_it_cannot_read_is_cleared("fence-unreadable", |_| {
+        json!("x is publishing")
+    });
+}
+
+/// The same for a fence shaped as a driver's publications that names none: the displaced
+/// run and its host, publishing no node, which no driver writes.
+#[test]
+fn a_takeover_finding_a_fence_naming_no_publication_waits_until_it_is_cleared() {
+    a_takeover_waits_until_a_fence_it_cannot_read_is_cleared("fence-no-nodes", |claim| {
+        assert!(
+            claim["run"].is_string()
+                && claim["host"].is_string()
+                && claim["claimed_at"].is_string(),
+            "{claim}"
+        );
+        json!({
+            "run": claim["run"],
+            "host": claim["host"],
+            "nodes": [],
+            "at": claim["claimed_at"],
+        })
+    });
+}
+
+/// Store the fence `stored` makes of the displaced driver's claim once a shutdown has
+/// ended that driver, and show a takeover starting nothing until it is cleared.
+fn a_takeover_waits_until_a_fence_it_cannot_read_is_cleared(
+    name: &str,
+    stored: impl FnOnce(&Value) -> Value,
+) {
     let interval = 5;
-    let world = takeover_world("fence-unreadable", interval);
+    let world = takeover_world(name, interval);
     world.script("x.work", "x's change\n");
     let x = world.rendezvous("x");
     let run = "unreadable";
@@ -1757,7 +1788,8 @@ fn a_takeover_finding_a_fence_it_cannot_read_waits_until_it_is_cleared() {
     let shutdown = world.run(&["shutdown", run, "--grace", "1"]);
     assert!([0, 2].contains(&shutdown.code), "{}", shutdown.stderr);
     drop(mine);
-    restate_publishing(&world, &project, json!("x is publishing"));
+    let fence = stored(&stored_claim(&world, &project));
+    restate_publishing(&world, &project, fence);
 
     let successor = world.on_host("host-b");
     let taking = take_over_in_background(&successor, &project);
