@@ -404,6 +404,7 @@ test("an invocation with no window, revision or output it can use is refused bef
   );
   refused([...base, "--ref", "--output=/tmp/owned"], /is not a revision/);
   refused([...base, "--exclude", "("], /--exclude is not a pattern/);
+  refused([...base, "--run", "r"], /--run names a run of records, but no --records were given/);
   refused([...base, "--ref", "no-such-branch"], /the history of no-such-branch .* cannot be read/);
 });
 
@@ -525,6 +526,17 @@ test("--today refuses an nx.json whose inputs cannot be expanded", () => {
       e2eSource: [],
     }),
     /and --today reads only file globs/,
+  );
+  refused(
+    today({
+      rustBuild: ["{workspaceRoot}/crates/**/*", "!{workspaceRoot}/crates/x/**"],
+      e2eSource: [],
+    }),
+    /rustBuild holds !\{workspaceRoot\}\/crates\/x\/\*\*, and --today reads only plain workspace globs/,
+  );
+  refused(
+    today({ rustBuild: ["{workspaceRoot}/crates/**/*", "{projectRoot}/**/*"], e2eSource: [] }),
+    /reads only plain workspace globs/,
   );
   refused(
     today({ rustBuild: [{ fileset: "{workspaceRoot}/crates/**/*" }], e2eSource: [] }),

@@ -402,9 +402,14 @@ export function todaysMapping(repo) {
     }
     return inputs.flatMap((input) => {
       if (typeof input === "string") {
-        return Object.hasOwn(named, input)
-          ? expand(input, [...seen, name])
-          : [input.replace("{workspaceRoot}/", "")];
+        if (Object.hasOwn(named, input)) return expand(input, [...seen, name]);
+        const glob = input.replace("{workspaceRoot}/", "");
+        // An exclusion (`!…`) or another token (`{projectRoot}`) is Nx's to
+        // interpret, and read as a plain glob it would match the wrong files.
+        if (glob.startsWith("!") || glob.includes("{")) {
+          throw refuse(`${name} holds ${input}, and --today reads only plain workspace globs`);
+        }
+        return [glob];
       }
       // Only a glob names files outright; an object input (`fileset`, `env`, ...)
       // is refused rather than interpreted, so this keeps no copy of Nx's schema.
@@ -484,6 +489,12 @@ function main(argv) {
     } else throw new Refusal(`${arg} is not an option`, USAGE);
   }
   if (!options.out) throw new Refusal("--out names no file for the result", USAGE);
+  if (options.run !== undefined && options.records === undefined) {
+    throw new Refusal(
+      "--run names a run of records, but no --records were given",
+      "add --records DIR, or drop --run",
+    );
+  }
   if (today === (options.mapping !== undefined)) {
     throw new Refusal("name the split to replay: --mapping FILE, or --today, and not both", USAGE);
   }
