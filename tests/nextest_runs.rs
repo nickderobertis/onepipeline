@@ -1702,3 +1702,96 @@ fn a_split_leg_runs_every_test_in_exactly_one_shard_and_refuses_a_share_nothing_
         );
     }
 }
+
+/// A `ci.yml` splitting its Windows leg three ways, as the repository's own does
+/// two: a `cross` job with a `shard` axis and the partition it hands each shard.
+const SHARDS_CI: &str = "jobs:\n  cross:\n    strategy:\n      matrix:\n        os: [windows-latest]\n        shard: [1, 2, 3]\n    env:\n      ONEPIPELINE_TEST_PARTITION: count:${{ matrix.shard }}/3\n";
+
+/// A justfile laid out as the repository's is: each `_<project>-test-quick`
+/// recipe runs one tier through `_tier-test-quick`, beside the archive recipe.
+const SHARDS_JUSTFILE: &str = "lib-tier := \"kind(lib)\"\nsuite2-tier := \"binary(suite)\"\n\n_tier-test-quick filter:\n    @true\n\n_crate-test-quick: (_tier-test-quick lib-tier)\n\n_suite-test-quick: (_tier-test-quick suite2-tier)\n\n_crate-test-quick-archive:\n    @true\n";
+
+/// `just cross-shards`, run from a fixture repository holding `ci` and `justfile`
+/// beside the partition fixture's two binaries.
+fn cross_shards(case: &str, ci: &str, justfile: &str) -> (Output, String) {
+    let fixture = Fixture::new(
+        case,
+        "[package]\nname = \"partition-fixture\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[workspace]\n",
+        &[
+            ("src/lib.rs", PARTITION_TESTS),
+            ("tests/suite.rs", PARTITION_SUITE),
+            (".github/workflows/ci.yml", ci),
+            ("justfile", justfile),
+        ],
+    );
+    let locked = fixture
+        .command(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+        .args(["generate-lockfile", "--offline"])
+        .output()
+        .expect("cargo writes the fixture's lock");
+    assert!(locked.status.success(), "the fixture's lock is written");
+    let output = fixture
+        .command("node")
+        .arg(repo_root().join(".github/cross-shards.mjs"))
+        .stdin(Stdio::null())
+        .output()
+        .expect("node runs the check");
+    let said = format!("{}{}", stdout(&output), stderr(&output));
+    (output, said)
+}
+
+/// What says the Windows leg's split drops and repeats nothing: it lists every
+/// tier the justfile runs, whole and once per shard `ci.yml` hands out, and passes
+/// only when each test is in exactly one shard. A split it cannot account for —
+/// shards out of order, a partition that is not the axis's own, a tier it cannot
+/// place, no split at all — is refused by name rather than proved over less.
+#[test]
+fn the_shard_check_accounts_for_every_tier_and_refuses_a_split_it_cannot_prove() {
+    let (output, said) = cross_shards("shards-proved", SHARDS_CI, SHARDS_JUSTFILE);
+    assert!(output.status.success(), "the split is proved:\n{said}");
+    for line in [
+        "cross-shards: lib-tier: 5 tests, 2 + 2 + 1 across 3 shards",
+        "cross-shards: suite2-tier: 4 tests, 2 + 1 + 1 across 3 shards",
+        "cross-shards: ok, 9 tests across 2 tiers, each in exactly one of 3 shards",
+    ] {
+        assert!(said.contains(line), "no `{line}`:\n{said}");
+    }
+
+    for (case, ci, justfile, says) in [
+        (
+            "shards-misnumbered",
+            SHARDS_CI.replace("[1, 2, 3]", "[1, 3, 2]"),
+            SHARDS_JUSTFILE.to_owned(),
+            "the `shard` axis is [1,3,2], not 1 to 3 in order",
+        ),
+        (
+            "shards-mishanded",
+            SHARDS_CI.replace("}}/3", "}}/2"),
+            SHARDS_JUSTFILE.to_owned(),
+            "the `cross` job hands its shards \"count:${{ matrix.shard }}/2\"",
+        ),
+        (
+            "shards-unsplit",
+            SHARDS_CI.replace("        shard: [1, 2, 3]\n", ""),
+            SHARDS_JUSTFILE.to_owned(),
+            "the `cross` job has no `shard` axis",
+        ),
+        (
+            "shards-unplaced",
+            SHARDS_CI.to_owned(),
+            SHARDS_JUSTFILE.replace(
+                "_suite-test-quick: (_tier-test-quick suite2-tier)",
+                "_suite-test-quick: (_tier-test-quick suite2-tier) (_tier-test-quick lib-tier)",
+            ),
+            "_suite-test-quick runs 2 tiers through `_tier-test-quick`, not one",
+        ),
+    ] {
+        let (output, said) = cross_shards(case, &ci, &justfile);
+        assert_eq!(output.status.code(), Some(1), "{case} was proved:\n{said}");
+        assert!(
+            said.contains(says),
+            "{case} was refused without `{says}`:\n{said}"
+        );
+        assert!(!said.contains("cross-shards: ok"), "{case}:\n{said}");
+    }
+}
