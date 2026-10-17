@@ -561,6 +561,19 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
         probes, 1,
         "the decline asked the repository's visibility {probes} times"
     );
+    // Every restack and readjustment merges its moved base itself, and says so at its
+    // open, so no open asks whether the base requires an up-to-date branch.
+    let rule_reads: Vec<&Value> = record["phases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|phase| phase["gh"].as_array().unwrap().iter())
+        .filter(|call| call["endpoint"] == "REST rules")
+        .collect();
+    assert!(
+        rule_reads.is_empty(),
+        "base branch-rule reads: {rule_reads:?}"
+    );
     let replies: usize = record["phases"]
         .as_array()
         .unwrap()

@@ -1141,6 +1141,9 @@ fn restack_open(
         ));
     }; // llmlint: ignore-end[changed_behavior_has_e2e]
     request.branch_name = None;
+    // The restack merges a cleanly merging base in itself, below, so the open need not
+    // ask the host whether the base requires an up-to-date branch.
+    request.caller_merges_base = true;
     let graph = engine::node_graph(
         step.agent_graph.as_ref().or(node.agent_graph.as_ref()),
         &launch.node_graph,
@@ -1194,9 +1197,9 @@ fn restack_open(
     let mut session = crate::executor::open_session(&request, &labels)
         .map_err(|error| failed(error.to_string()))?;
     // A restack brings its base in whatever the identity's base-merge policy says: a
-    // session that opened clean on a base whose head its branch does not carry — the
-    // policy merges only on a conflict or a host requiring up-to-date branches — has
-    // that head merged here, its conflict handed on exactly as one the open stopped on.
+    // session that opened clean on a base whose head its branch does not carry — an open
+    // told the restack merges a clean base itself merges only on a conflict — has that
+    // head merged here, its conflict handed on exactly as one the open stopped on.
     if session.conflict.is_none() {
         session.conflict = crate::vcs::bring_base_in(&session).map_err(failed)?;
     }

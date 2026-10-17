@@ -10937,9 +10937,11 @@ are unchanged since 0.49.0 — makes its own: a
 `retarget_change` two single-change standings reads (before and after its write) and
 the repository's visibility read its write guard makes; a `reopen_change` two
 single-change standings reads, the same visibility read and the restore push. The
-restack's session open asks whether the host requires an up-to-date branch
-(`rules/branches/<base>`) and its visibility, as every continued session's base merge
-does.
+restack's session open declares that the engine merges the moved base itself
+(`onevcs`'s `caller_merges_base`), so it asks the repository's visibility and never
+whether the host requires an up-to-date branch (`rules/branches/<base>`); the busy review
+round (`the_busy_review_round_ends_answered_and_true_and_records_what_it_spent`) holds
+that none of its restacks or readjustments makes that read.
 
 **The SDK.** `verbs::readjust(paths, session, timeout) -> Result<ReadjustReceipt>`,
 `verbs::render_readjust` and `ReadjustReceipt::exit_code` (the `review` verb's shape,
