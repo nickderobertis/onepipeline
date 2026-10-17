@@ -549,3 +549,40 @@ fn nested_work_on_a_thread_the_test_started_is_counted_once() {
         before.of(Category::Fixture).count
     );
 }
+
+/// Every filesystem operation the profile replaces is one operation of `fs`,
+/// whether it succeeds or is refused.
+#[test]
+fn each_filesystem_operation_counts_once_whether_or_not_it_succeeds() {
+    use profile::fs;
+
+    let world = World::new("profile-fs");
+    let at = world.root.join("fs");
+    let before = profile::snapshot();
+    fs::create_dir(&at).expect("create_dir");
+    fs::create_dir_all(at.join("a/b")).expect("create_dir_all");
+    fs::write(at.join("one"), "one").expect("write");
+    assert_eq!(fs::read(at.join("one")).expect("read"), b"one");
+    assert_eq!(
+        fs::read_to_string(at.join("one")).expect("read_to_string"),
+        "one"
+    );
+    fs::copy(at.join("one"), at.join("two")).expect("copy");
+    fs::rename(at.join("two"), at.join("three")).expect("rename");
+    fs::hard_link(at.join("one"), at.join("linked")).expect("hard_link");
+    assert!(fs::metadata(at.join("linked")).expect("metadata").is_file());
+    fs::canonicalize(&at).expect("canonicalize");
+    assert_eq!(fs::read_dir(&at).expect("read_dir").count(), 4);
+    fs::remove_file(at.join("linked")).expect("remove_file");
+    fs::remove_dir(at.join("a/b")).expect("remove_dir");
+    fs::remove_dir_all(at.join("a")).expect("remove_dir_all");
+    assert!(
+        fs::read(at.join("never-written")).is_err(),
+        "a read of nothing fails"
+    );
+    let after = profile::snapshot();
+
+    let (a, b) = (after.of(Category::Fs), before.of(Category::Fs));
+    assert_eq!(a.count - b.count, 15, "{after:?}");
+    assert!(a.time > b.time, "{after:?}");
+}

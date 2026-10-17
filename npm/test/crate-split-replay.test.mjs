@@ -91,6 +91,10 @@ before(() => {
   commit("refactor: move a module between crates", "2026-10-25T00:00:00Z", {
     "crates/alpha/src/moved.rs": "a module that later moves crates\n",
   });
+  // A name git quotes in its line-separated output.
+  commit("feat: a file git quotes the name of", "2026-10-28T00:00:00Z", {
+    "crates/beta/src/naïve.rs": "b\n",
+  });
 
   const records = join(scratch, "records", "e2e");
   mkdirSync(records, { recursive: true });
@@ -635,4 +639,22 @@ test("a module named like an object's own property is weighed by its records and
   assert.equal(result.suites.one.testSeconds, 3);
   assert.equal(result.suites.two.testSeconds, 0);
   assert.deepEqual(result.summary.modulesInNoSuite, []);
+});
+
+test("a changed file whose name git would quote is matched by the name it has", () => {
+  const file = mappingFile("quoted", mapping(false));
+  const result = written([
+    "--mapping",
+    file,
+    "--repo",
+    repo,
+    "--ref",
+    "main",
+    "--since",
+    "2026-10-27T00:00:00Z",
+    "--until",
+    "2026-10-29T00:00:00Z",
+  ]);
+  assert.deepEqual(affectedBySubject(result), { "feat: a file git quotes the name of": ["two"] });
+  assert.deepEqual(result.summary.unclaimedFiles, []);
 });

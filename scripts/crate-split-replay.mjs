@@ -242,8 +242,16 @@ export function mergedChanges(repo, { ref, since, until, exclude }) {
       ...change,
       // Without rename detection, so a file moved from one owner to another
       // touches both: the one it left and the one it joined.
-      files: git(repo, ["diff", "--name-only", "--no-renames", `${change.commit}^1`, change.commit])
-        .split("\n")
+      // NUL-separated, so a name git would quote is matched as the name it is.
+      files: git(repo, [
+        "diff",
+        "-z",
+        "--name-only",
+        "--no-renames",
+        `${change.commit}^1`,
+        change.commit,
+      ])
+        .split("\0")
         .filter(Boolean),
     }));
 }
