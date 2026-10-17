@@ -774,6 +774,14 @@ fn a_rework_conflicting_with_the_draft_above_is_concluded_by_that_draft_s_worker
 /// A draft is restacked once its reworked parent has pushed, and not once its
 /// parent's checks have settled: the rework's checks are held pending until the
 /// draft above it has started its restack.
+///
+/// What settles the rework's checks is the trigger that reads their verdict — its
+/// `node-checks-read` — and not its node's settlement: a rework republished as a
+/// review draft settles `change-review-draft-unchecked` at its push, on its
+/// dispatch's thread, while the restack starts on the driver's next pass, and
+/// nothing orders those two. So the order held here is the restack's start against
+/// the verdict, which only the trigger this journey runs once the checks have
+/// passed can read.
 #[test]
 fn a_restack_starts_before_its_reworked_parent_s_checks_have_settled() {
     let world = team_world("rework-early").with_env("ONEVCS_CHECKS_TIMEOUT_SECONDS", "120");
@@ -821,14 +829,26 @@ fn a_restack_starts_before_its_reworked_parent_s_checks_have_settled() {
     world.until("b's restack to start", |world| {
         !world.events_of(run, "node-restack-started").is_empty()
     });
-    // The rework had pushed and has not settled: its checks are still running.
+    // The rework had pushed and its checks have not settled: they are still
+    // running, no verdict on them has been read, and if the rework's node has
+    // settled already it settled without one.
     assert!(
         !world
-            .events_of(run, "node-settled")
+            .events_of(run, "node-checks-read")
             .iter()
             .any(|event| event["labels"]["node"] == "a-rework-1"),
-        "the rework settled before the restack started"
+        "the rework's checks settled before the restack started"
     );
+    for settled in world
+        .events_of(run, "node-settled")
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == "a-rework-1")
+    {
+        assert_eq!(
+            settled["payload"]["outcome"], "change-review-draft-unchecked",
+            "the rework settled on its checks before the restack started: {settled}"
+        );
+    }
     assert!(world
         .events_of(run, "push")
         .iter()
@@ -854,12 +874,12 @@ fn a_restack_starts_before_its_reworked_parent_s_checks_have_settled() {
     }
     let ended = driver.wait_with_output().expect("the driver ends");
     assert!(ended.status.success(), "{ended:?}");
+    read_green(&world, run, &["a-rework-1", "b"]);
     let journal = world.journal(run);
     assert!(
         position(&journal, "node-restack-started", "b")
-            < position(&journal, "node-settled", "a-rework-1")
+            < position(&journal, "node-checks-read", "a-rework-1")
     );
-    read_green(&world, run, &["a-rework-1", "b"]);
 }
 
 /// A `retitle` reaching a run while its driver is live is staged by that driver
