@@ -515,6 +515,24 @@ describe("publish asks every registry before it writes anything", () => {
     return result;
   }
 
+  it("refuses a PyPI or crate registry reached over plaintext, before sending it anything", async () => {
+    const github = await everyPlatformOnTheRelease();
+    try {
+      for (const overrides of [
+        { PYPI_PUBLISH: "true", ONEPIPELINE_PYPI_JSON_URL: "http://192.0.2.1/pypi" },
+        {
+          CARGO_REGISTRY_TOKEN: "crates-not-a-real-token",
+          ONEPIPELINE_CRATE_REGISTRY: "http://192.0.2.1/index/",
+        },
+      ]) {
+        const result = await publishWith(github, overrides);
+        assert.match(result.stderr, /http:\/\/192\.0\.2\.1\S* is not an HTTPS URL/, said(result));
+      }
+    } finally {
+      await github.stop();
+    }
+  });
+
   it("refuses when PyPI fails or garbles its answer", async () => {
     const github = await everyPlatformOnTheRelease();
     const pypi = await new PyPIDouble().start();

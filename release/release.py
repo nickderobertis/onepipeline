@@ -406,7 +406,7 @@ def origin(url):
     parsed = urllib.parse.urlsplit(url)
     local = parsed.hostname in ('127.0.0.1', 'localhost', '::1')
     expect(parsed.scheme == 'https' or (parsed.scheme == 'http' and local),
-           f'{url} is not an HTTPS URL', 're-run once GitHub answers normally')
+           f'{url} is not an HTTPS URL', 'point it at the service over HTTPS')
     return parsed.scheme, parsed.netloc
 
 
@@ -489,9 +489,13 @@ class Release:
 
 
 def pypi_urls():
-    return (os.environ.get('ONEPIPELINE_PYPI_UPLOAD_URL', 'https://upload.pypi.org/legacy/'),
+    """Where PyPI is; each HTTPS, or HTTP to this machine, since the upload carries PYPI_TOKEN."""
+    urls = (os.environ.get('ONEPIPELINE_PYPI_UPLOAD_URL', 'https://upload.pypi.org/legacy/'),
             os.environ.get('ONEPIPELINE_PYPI_INDEX_URL', 'https://pypi.org/simple/'),
             os.environ.get('ONEPIPELINE_PYPI_JSON_URL', 'https://pypi.org/pypi').rstrip('/'))
+    for url in urls:
+        origin(url)
+    return urls
 
 
 def pypi_files(version):
@@ -522,7 +526,11 @@ def npm_serves(package, version):
 
 
 def crate_registry():
-    return os.environ.get('ONEPIPELINE_CRATE_REGISTRY', '')
+    """A crate registry's index other than crates.io's, checked like every URL a token goes to."""
+    registry = os.environ.get('ONEPIPELINE_CRATE_REGISTRY', '')
+    if registry:
+        origin(registry)
+    return registry
 
 
 def index_path(name):
