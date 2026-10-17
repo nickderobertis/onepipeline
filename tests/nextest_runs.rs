@@ -1678,6 +1678,7 @@ fn a_split_leg_runs_every_test_in_exactly_one_shard_and_refuses_a_share_nothing_
         "hash:1/2",
         "count:1/2 ",
         "slice:1/2",
+        "count:1/1000",
     ] {
         let (output, said) = fixture.script_line(
             &line,
@@ -1775,6 +1776,18 @@ fn the_shard_check_accounts_for_every_tier_and_refuses_a_split_it_cannot_prove()
             SHARDS_CI.replace("        shard: [1, 2, 3]\n", ""),
             SHARDS_JUSTFILE.to_owned(),
             "the `cross` job has no `shard` axis",
+        ),
+        (
+            "shards-no-leg",
+            "jobs:\n  gate:\n    runs-on: ubuntu-latest\n".to_owned(),
+            SHARDS_JUSTFILE.to_owned(),
+            "ci.yml has no `cross` job",
+        ),
+        (
+            "shards-no-tiers",
+            SHARDS_CI.to_owned(),
+            "_tier-test-quick filter:\n    @true\n".to_owned(),
+            "the justfile runs no tier through `_tier-test-quick`",
         ),
         (
             "shards-unplaced",
