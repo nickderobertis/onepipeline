@@ -9,7 +9,8 @@
 // as its `Starting` line said it would run and its `Summary` line says it ran,
 // each once: a log cut short, or one this cannot read, is refused rather than
 // written down as an inventory with tests missing.
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 
 function fail(message) {
   console.error(`windows-inventory: ${message}`);
@@ -20,13 +21,35 @@ const [log, run, job, commit] = process.argv.slice(2);
 if (!log || !run || !job || !commit || process.argv.length !== 6)
   fail("usage: windows-inventory.mjs <job log> <run> <job> <commit>");
 
-// The projects whose `test-quick` target runs a tier, and the tier each runs.
-const tierOf = {
-  onepipeline: "rest-tier",
-  "onepipeline-e2e": "e2e-tier",
-  "onepipeline-contract": "contract-tier",
-  "onepipeline-note-journeys": "note-tier",
-};
+// The projects whose `test-quick` target runs a tier, and the tier each runs, read
+// where they are declared: each project's `test-quick` command is `just <recipe>`,
+// and that recipe runs one tier through `_tier-test-quick`.
+function projectFiles(dir, depth) {
+  const found = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name.startsWith(".") || ["node_modules", "target"].includes(entry.name)) continue;
+    const path = join(dir, entry.name);
+    if (entry.isFile() && entry.name === "project.json") found.push(path);
+    else if (entry.isDirectory() && depth > 0) found.push(...projectFiles(path, depth - 1));
+  }
+  return found;
+}
+const justfile = readFileSync("justfile", "utf8");
+const tierOf = {};
+for (const file of projectFiles(".", 2)) {
+  const project = JSON.parse(readFileSync(file, "utf8"));
+  const command = project.targets?.["test-quick"]?.command;
+  if (command === undefined) continue;
+  const recipe = command.match(/^just (_[a-z0-9-]+-test-quick)$/)?.[1];
+  if (!recipe)
+    fail(`${project.name}:test-quick runs ${JSON.stringify(command)}, not one justfile recipe`);
+  const body = justfile.match(new RegExp(`^${recipe}:(.*)$`, "m"))?.[1];
+  const runs = [...(body ?? "").matchAll(/\(_tier-test-quick ([a-z0-9-]+)\)/g)].map((m) => m[1]);
+  if (runs.length !== 1)
+    fail(`${project.name}:test-quick runs ${recipe}, which runs ${runs.length} tiers, not one`);
+  tierOf[project.name] = runs[0];
+}
+if (!Object.keys(tierOf).length) fail("no project here has a `test-quick` target");
 
 const runs = [];
 let current = null;

@@ -1880,86 +1880,147 @@ fn the_shard_check_accounts_for_every_tier_and_refuses_a_split_it_cannot_prove()
     }
 }
 
-/// A green Windows leg's log, as GitHub serves it: a timestamp before each line,
-/// colour in the status lines, and each `test-quick` target's nextest run under the
-/// Nx line that started it.
-fn leg_log(e2e_summary: &str) -> String {
-    fn run(log: &mut String, project: &str, binary: &str, tests: &[&str], summary: &str) {
+/// One `test-quick` target's nextest run as a green Windows leg's log records it:
+/// under the Nx line that started it, with its `Starting` line, a status line per
+/// test it named, and its `Summary`.
+struct LoggedRun<'a> {
+    project: &'a str,
+    binary: &'a str,
+    tests: Vec<&'a str>,
+    starting: Option<usize>,
+    summary: String,
+}
+
+impl<'a> LoggedRun<'a> {
+    fn green(project: &'a str, binary: &'a str, tests: &[&'a str]) -> Self {
+        Self {
+            project,
+            binary,
+            tests: tests.to_vec(),
+            starting: Some(tests.len()),
+            summary: format!("{0} tests run: {0} passed, 0 skipped", tests.len()),
+        }
+    }
+}
+
+/// The four runs of a green leg, one per tier.
+fn green_leg() -> Vec<LoggedRun<'static>> {
+    vec![
+        LoggedRun::green("onepipeline-contract", "onepipeline::contract", &["a"]),
+        LoggedRun::green("onepipeline-note-journeys", "onepipeline::note", &["n"]),
+        LoggedRun::green("onepipeline-e2e", "onepipeline::e2e", &["x::b", "x::a"]),
+        LoggedRun::green("onepipeline", "onepipeline", &["unit"]),
+    ]
+}
+
+/// A job's log as GitHub serves it: a timestamp before each line, a byte-order
+/// mark before the first, and colour in the status lines.
+fn leg_log(runs: &[LoggedRun<'_>]) -> String {
+    let mut log = String::from("\u{feff}2026-10-17T07:22:19.0Z Current runner version\n");
+    for run in runs {
         log.push_str(&format!(
-            "2026-10-17T07:22:20.0Z > nx run {project}:test-quick\n"
+            "2026-10-17T07:22:20.0Z > nx run {}:test-quick\n",
+            run.project
         ));
-        log.push_str(&format!(
-            "2026-10-17T07:22:20.1Z \u{1b}[32;1m    Starting\u{1b}[0m {} tests across 1 binary\n",
-            tests.len()
-        ));
-        for (at, test) in tests.iter().enumerate() {
+        if let Some(starting) = run.starting {
             log.push_str(&format!(
-                "2026-10-17T07:22:20.2Z \u{1b}[32;1m        PASS\u{1b}[0m [   0.10{at}s] ({}/{}) \u{1b}[35;1m{binary}\u{1b}[0m {test}\n",
+                "2026-10-17T07:22:20.1Z \u{1b}[32;1m    Starting\u{1b}[0m {starting} tests across 1 binary\n"
+            ));
+        }
+        for (at, test) in run.tests.iter().enumerate() {
+            log.push_str(&format!(
+                "2026-10-17T07:22:20.2Z \u{1b}[32;1m        PASS\u{1b}[0m [   0.10{at}s] ({}/{}) \u{1b}[35;1m{}\u{1b}[0m {test}\n",
                 at + 1,
-                tests.len()
+                run.tests.len(),
+                run.binary
             ));
         }
         log.push_str(&format!(
-            "2026-10-17T07:22:20.3Z      Summary [   0.5s] {summary}\n"
+            "2026-10-17T07:22:20.3Z      Summary [   0.5s] {}\n",
+            run.summary
         ));
     }
-    let mut log = String::from("\u{feff}2026-10-17T07:22:19.0Z Current runner version\n");
-    run(
-        &mut log,
-        "onepipeline-contract",
-        "onepipeline::contract",
-        &["a"],
-        "1 test run: 1 passed, 0 skipped",
-    );
-    run(
-        &mut log,
-        "onepipeline-note-journeys",
-        "onepipeline::note",
-        &["n"],
-        "1 test run: 1 passed, 3 skipped",
-    );
-    run(
-        &mut log,
-        "onepipeline-e2e",
-        "onepipeline::e2e",
-        &["x::b", "x::a"],
-        e2e_summary,
-    );
-    run(
-        &mut log,
-        "onepipeline",
-        "onepipeline",
-        &["unit"],
-        "1 test run: 1 passed, 0 skipped",
-    );
     log
 }
 
+/// The four projects' `test-quick` targets, as this repository declares them, and
+/// the justfile recipes they run.
+const INVENTORY_PROJECTS: [(&str, &str, &str); 4] = [
+    ("project.json", "onepipeline", "_crate-test-quick"),
+    (
+        "tests/e2e/project.json",
+        "onepipeline-e2e",
+        "_e2e-test-quick",
+    ),
+    (
+        "tests/contract/project.json",
+        "onepipeline-contract",
+        "_contract-test-quick",
+    ),
+    (
+        "tests/note/project.json",
+        "onepipeline-note-journeys",
+        "_note-test-quick",
+    ),
+];
+
+const INVENTORY_JUSTFILE: &str = "_tier-test-quick filter:\n    @true\n\n_crate-test-quick: (_tier-test-quick rest-tier)\n\n_e2e-test-quick: _preflight (_tier-test-quick e2e-tier)\n\n_contract-test-quick: (_tier-test-quick contract-tier)\n\n_note-test-quick: (_tier-test-quick note-tier)\n";
+
+/// `node .github/windows-inventory.mjs`, from a fixture repository declaring the
+/// four projects, over `log`, with `args` after the log's path — or the usual
+/// three when `args` is `None`. Exit code, the inventory written, and stderr.
+fn windows_inventory(
+    case: &str,
+    justfile: &str,
+    log: &str,
+    args: Option<&[&str]>,
+) -> (Option<i32>, String, String) {
+    let projects: Vec<(String, String)> = INVENTORY_PROJECTS
+        .iter()
+        .map(|(path, name, recipe)| {
+            (
+                (*path).to_owned(),
+                format!(
+                    "{{\"name\": \"{name}\", \"targets\": {{\"test-quick\": {{\"command\": \"just {recipe}\"}}}}}}"
+                ),
+            )
+        })
+        .collect();
+    let mut files: Vec<(&str, &str)> = projects
+        .iter()
+        .map(|(path, text)| (path.as_str(), text.as_str()))
+        .collect();
+    files.push(("justfile", justfile));
+    files.push(("leg.log", log));
+    let fixture = Fixture::new(case, RERUN_MANIFEST, &files);
+    let output = fixture
+        .command("node")
+        .arg(repo_root().join(".github/windows-inventory.mjs"))
+        .arg(fixture.path("leg.log"))
+        .args(args.unwrap_or(&["11", "22", "abc"]))
+        .stdin(Stdio::null())
+        .output()
+        .expect("node runs the extractor");
+    (output.status.code(), stdout(&output), stderr(&output))
+}
+
+/// A log the extractor has to refuse: its case, the justfile beside it, the log,
+/// the arguments after the log's path, and what the refusal says.
+struct Refused<'a>(&'a str, String, String, Option<&'a [&'a str]>, &'a str);
+
 /// The inventory is written off a green leg's own log, every test it ran under the
-/// tier that ran it; a log whose counts do not add up — a run that did not finish,
-/// or one that reported fewer tests than it started — is refused rather than
-/// written down short.
+/// tier its project's `test-quick` target runs, read off where those are declared.
+/// A log whose counts do not add up, or that does not hold one finished run of each
+/// tier, and a project that does not run one tier, are refused rather than written
+/// down short.
 #[test]
 fn the_windows_inventory_is_every_test_a_finished_leg_ran_and_nothing_less() {
-    let fixture = Fixture::new("windows-inventory", RERUN_MANIFEST, &[]);
-    let inventory = |log: &str| {
-        fs::write(fixture.path("leg.log"), log).expect("the log is written");
-        let output = fixture
-            .command("node")
-            .arg(repo_root().join(".github/windows-inventory.mjs"))
-            .args([
-                fixture.path("leg.log").to_str().expect("a UTF-8 path"),
-                "11",
-                "22",
-                "abc",
-            ])
-            .stdin(Stdio::null())
-            .output()
-            .expect("node runs the extractor");
-        (output.status.code(), stdout(&output), stderr(&output))
-    };
-
-    let (code, written, said) = inventory(&leg_log("2 tests run: 2 passed, 0 skipped"));
+    let (code, written, said) = windows_inventory(
+        "inventory-green",
+        INVENTORY_JUSTFILE,
+        &leg_log(&green_leg()),
+        None,
+    );
     assert_eq!(code, Some(0), "{said}");
     assert_eq!(
         written,
@@ -1973,23 +2034,98 @@ fn the_windows_inventory_is_every_test_a_finished_leg_ran_and_nothing_less() {
          rest-tier\tonepipeline\tunit\n"
     );
 
-    for (case, log, says) in [
-        (
-            "fewer reported",
-            leg_log("3 tests run: 3 passed, 0 skipped"),
+    let changed = |change: &dyn Fn(&mut Vec<LoggedRun<'static>>)| {
+        let mut runs = green_leg();
+        change(&mut runs);
+        leg_log(&runs)
+    };
+    let green = leg_log(&green_leg());
+    let cases: Vec<Refused<'_>> = vec![
+        Refused(
+            "inventory-usage",
+            INVENTORY_JUSTFILE.to_owned(),
+            green.clone(),
+            Some(&["11", "22"]),
+            "usage: windows-inventory.mjs <job log> <run> <job> <commit>",
+        ),
+        Refused(
+            "inventory-surplus",
+            INVENTORY_JUSTFILE.to_owned(),
+            green.clone(),
+            Some(&["11", "22", "abc", "extra"]),
+            "usage: windows-inventory.mjs <job log> <run> <job> <commit>",
+        ),
+        Refused(
+            "inventory-unknown-project",
+            INVENTORY_JUSTFILE.to_owned(),
+            changed(&|runs| runs[0].project = "onepipeline-mystery"),
+            None,
+            "onepipeline-mystery:test-quick runs no tier this inventory knows",
+        ),
+        Refused(
+            "inventory-reported-twice",
+            INVENTORY_JUSTFILE.to_owned(),
+            changed(&|runs| runs[2].tests.push("x::a")),
+            None,
+            "e2e-tier: onepipeline::e2e x::a reported twice",
+        ),
+        Refused(
+            "inventory-tier-twice",
+            INVENTORY_JUSTFILE.to_owned(),
+            changed(&|runs| {
+                runs.pop();
+                runs.push(LoggedRun::green(
+                    "onepipeline-contract",
+                    "onepipeline::contract",
+                    &["a"],
+                ));
+            }),
+            None,
+            "the log holds 4 test-quick runs over contract-tier, note-tier, e2e-tier, not one of each tier",
+        ),
+        Refused(
+            "inventory-unstarted",
+            INVENTORY_JUSTFILE.to_owned(),
+            changed(&|runs| runs[1].starting = None),
+            None,
+            "note-tier: the run has no Starting or no Summary line, so it did not finish",
+        ),
+        Refused(
+            "inventory-unreported",
+            INVENTORY_JUSTFILE.to_owned(),
+            changed(&|runs| {
+                runs[2].tests.pop();
+            }),
+            None,
+            "e2e-tier: 1 tests named, 2 starting, 2 run and 2 passed",
+        ),
+        Refused(
+            "inventory-overcounted",
+            INVENTORY_JUSTFILE.to_owned(),
+            changed(&|runs| runs[2].summary = "3 tests run: 3 passed, 0 skipped".to_owned()),
+            None,
             "e2e-tier: 2 tests named, 2 starting, 3 run and 3 passed",
         ),
-        (
-            "cut short",
-            leg_log("2 tests run: 2 passed, 0 skipped")
-                .split("> nx run onepipeline:test-quick")
-                .next()
-                .expect("the log has a crate run")
-                .to_owned(),
-            "the log holds 3 test-quick runs",
+        Refused(
+            "inventory-failed",
+            INVENTORY_JUSTFILE.to_owned(),
+            changed(&|runs| runs[2].summary = "2 tests run: 1 passed, 1 failed".to_owned()),
+            None,
+            "e2e-tier: 2 tests named, 2 starting, 2 run and 1 passed",
         ),
-    ] {
-        let (code, written, said) = inventory(&log);
+        Refused(
+            "inventory-two-tier-recipe",
+            INVENTORY_JUSTFILE.replace(
+                "_note-test-quick: (_tier-test-quick note-tier)",
+                "_note-test-quick: (_tier-test-quick note-tier) (_tier-test-quick e2e-tier)",
+            ),
+            green.clone(),
+            None,
+            "onepipeline-note-journeys:test-quick runs _note-test-quick, which runs 2 tiers, not one",
+        ),
+    ];
+    for Refused(case, justfile, log, args, says) in cases {
+        let (code, written, said) = windows_inventory(case, &justfile, &log, args);
         assert_eq!(code, Some(1), "{case} was written:\n{written}");
         assert!(
             said.contains(says),
