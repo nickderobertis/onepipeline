@@ -575,13 +575,23 @@ def retry_install(label, action, *command):
         '--action', action, '--', *command, capture=True)
 
 
-def unpack(archive, into):
+def unpack(archive, target, into):
+    """Extract a downloaded archive, refused unless it is exactly the documents
+    and the target's executable, each a regular file."""
+    expected = sorted(['README.md', 'LICENSE', 'CHANGELOG.md', staged.binary_name(target)])
     into.mkdir(parents=True)
     if archive.name.endswith('.zip'):
         with zipfile.ZipFile(archive) as bundle:
+            members = bundle.infolist()
+            expect(sorted(m.filename for m in members) == expected and not any(
+                m.is_dir() or (m.external_attr >> 16) & 0o170000 not in (0, 0o100000) for m in members),
+                f'{archive.name} is not {expected}, each a regular file', 'delete the Release asset and re-run the build job')
             bundle.extractall(into)
     else:
         with tarfile.open(archive) as bundle:
+            members = bundle.getmembers()
+            expect(sorted(m.name for m in members) == expected and all(m.isfile() for m in members),
+                   f'{archive.name} is not {expected}, each a regular file', 'delete the Release asset and re-run the build job')
             bundle.extractall(into, filter='data')
 
 
@@ -602,7 +612,7 @@ def verify(args):
             expect(recorded and recorded[0] == hashlib.sha256(payload).hexdigest(),
                    f'{archive} on the Release does not match its {checksum}', 'delete both assets and re-run the build job')
             (scratch / archive).write_bytes(payload)
-            unpack(scratch / archive, scratch / 'archive' / target)
+            unpack(scratch / archive, target, scratch / 'archive' / target)
             smoke(scratch / 'archive' / target, version, f'Release archive {archive}')
             if channels['pypi']:
                 venv = scratch / 'pypi' / target
@@ -626,7 +636,7 @@ def verify(args):
 
 
 def availability(version, channels, common=False):
-    """What is missing from any registry for any platform, as one list."""
+    """Every planned artifact a registry does not serve, so one refusal names them all."""
     missing = []
     assets = Release(f'v{version}').assets()
     pypi = pypi_files(version) if channels['pypi'] else set()
@@ -660,10 +670,7 @@ def publish_common(args):
     args.platform = 'common'
     out = out_dir(args)
     out.mkdir(parents=True, exist_ok=True)
-    results = {'crate': {'published': 'skipped', 'verified': 'skipped'},
-               'npm-launcher': {'published': 'skipped', 'verified': 'skipped'}}
-    if not args.dry_run:
-        results_path(out).unlink(missing_ok=True)
+    results = {}
 
     def record(target=None, phase=None, result=None):
         if target:
@@ -681,6 +688,9 @@ def publish_common(args):
                 say(f"would publish {artifact['file']} to {artifact['destination']}")
         say(f"dry run: published nothing platform-independent{skipped(channels, ['crate', 'npm'])}")
         return
+    # A re-run starts from what an earlier run recorded, so a re-run refused
+    # before it publishes anything leaves that record standing.
+    results.update(publish_results(out))
     record()
     missing = availability(version, channels)
     expect(not missing, 'not every platform is published, so nothing platform-independent is: missing '

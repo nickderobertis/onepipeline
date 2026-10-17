@@ -74,7 +74,6 @@ function uploadsOf(step) {
   return [];
 }
 
-/// Every upload of every step of every job: [job, step index, artifact].
 const uploads = Object.entries(release.jobs).flatMap(([job, spec]) =>
   spec.steps.flatMap((step, index) => uploadsOf(step).map((artifact) => [job, index, artifact])),
 );

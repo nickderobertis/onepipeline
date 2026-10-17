@@ -690,6 +690,23 @@ describe("the release outcome record", () => {
     }
   });
 
+  it("keeps what an earlier publish recorded when a re-run is refused before publishing", async () => {
+    launcherResults("success", "success");
+    const rerun = await run("just", ["release-publish", "publish"], {
+      env: releaseEnv(github, out, { RELEASE_TAG: "v0.0.1" }),
+    });
+    assert.equal(rerun.code, 1, said(rerun));
+    const result = await run("just", ["release-outcome"], {
+      env: releaseEnv(github, out, allJobs({}, {})),
+    });
+    assert.equal(result.code, 0, said(result));
+    assert.deepEqual(states(recorded())["crate:onepipeline"], [
+      "shipped-verified",
+      "success",
+      "success",
+    ]);
+  });
+
   it("refuses a publish-results file it cannot read rather than reading it as nothing published", async () => {
     mkdirSync(join(out, "common"), { recursive: true });
     for (const content of ["{not json", JSON.stringify({ crate: { published: "yes" } })]) {

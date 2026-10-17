@@ -40,4 +40,7 @@ rules:
       include: ["nx.json", "**/project.json"]
       # Manager-approved exception: this task requires the release-only workload
       # outside test selection. Its check still reaches format-check and lint.
-      exclude: ["tests/scratch_workload/project.json"]
+      # Manager-approved exception (c-fd213c78320534b5cd7e92741d599934): the
+      # release journeys are a tier:live project, which must declare no `test`
+      # target. Its check still reaches format-check and lint.
+      exclude: ["tests/scratch_workload/project.json", "tests/release_journeys/project.json"]
