@@ -601,17 +601,29 @@ fn make_node_scratch_dir(labels: &Labels) -> Result<PathBuf> {
     const TRIES: u64 = 4096;
     static MINTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-    let base = match labels.run_id.as_deref() {
-        Some(run) => crate::ledger::RunPaths::under(&crate::ledger::runs_root(), run)
-            .dir
-            .join("scratch"),
-        None => std::env::temp_dir().join("onepipeline-scratch"),
-    };
     let ledger = |path: &Path| {
         let path = path.to_path_buf();
         move |source: std::io::Error| Error::Ledger { path, source }
     };
-    std::fs::create_dir_all(&base).map_err(ledger(&base))?;
+    // Absolute, because the value is read by a program whose working directory is
+    // its own business: a relative runs root — the default is one — would name a
+    // different place from the workspace a dispatch runs in. And spelled by the
+    // derivation the run's scratch record is, so the record names the directory
+    // the dispatch was handed — on Windows `canonicalize` alone answers the
+    // verbatim `\\?\` form and the record the plain one.
+    let base = match labels.run_id.as_deref() {
+        Some(run) => {
+            let paths = crate::ledger::RunPaths::under(&crate::ledger::runs_root(), run);
+            let made = paths.dir.join("scratch");
+            std::fs::create_dir_all(&made).map_err(ledger(&made))?;
+            crate::scratch::root(&paths).map_err(ledger(&made))?
+        }
+        None => {
+            let made = std::env::temp_dir().join("onepipeline-scratch");
+            std::fs::create_dir_all(&made).map_err(ledger(&made))?;
+            crate::templates::plain(std::fs::canonicalize(&made).map_err(ledger(&made))?)
+        }
+    };
     let pid = crate::sys::pid();
     for _ in 0..TRIES {
         let at = base.join(format!(
@@ -619,11 +631,7 @@ fn make_node_scratch_dir(labels: &Labels) -> Result<PathBuf> {
             MINTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         match std::fs::create_dir(&at) {
-            // Absolute, because the value is read by a program whose working
-            // directory is its own business: a relative runs root — the default
-            // is one — would name a different place from the workspace a
-            // dispatch runs in.
-            Ok(()) => return std::fs::canonicalize(&at).map_err(ledger(&at)),
+            Ok(()) => return Ok(at),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(ledger(&at)(error)),
         }
@@ -1176,6 +1184,12 @@ mod tests {
         // The same node, twice, which is what a retry is.
         let first = scratch(&labels);
         let second = scratch(&labels);
+        // Joined onto the root the run's scratch record names its directories under.
+        let run = crate::ledger::RunPaths::under(&root, "demo");
+        let recorded = crate::scratch::root(&run).expect("the run's scratch root resolves");
+        for at in [&first, &second] {
+            assert_eq!(at.parent(), Some(recorded.as_path()), "{}", at.display());
+        }
         assert_ne!(
             first, second,
             "a node asked again was handed the directory its first attempt had"

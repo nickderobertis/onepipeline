@@ -931,9 +931,23 @@ pub struct Writeback {
     per_item: NonZeroU64,
     /// The claim this driver writes on the project, once it has made one.
     held: Mutex<Option<crate::payload::DriverClaim>>,
-    /// The claim of the run that took the project over, once one has: from then on this
-    /// driver writes nothing more to it, its board being that run's. Set once, never cleared.
-    retired: std::sync::OnceLock<crate::payload::DriverClaim>,
+    /// Whose board the project is: this driver's, or — once another run has taken it over —
+    /// that run's, while this one hands it over and then for good.
+    board: Mutex<Board>,
+}
+
+/// Whose board a driver's projections write to.
+#[derive(Debug, Clone, PartialEq)]
+enum Board {
+    /// This driver's: it writes its claim and, at closeout, its release.
+    Driving,
+    /// Another run has taken the project over and waits on this driver: what it projects
+    /// now — what it settled, so that run starts from it — never writes the claim, and none
+    /// of it is a closeout's release.
+    HandingOver,
+    /// The run that took the project over, by its claim: this driver writes nothing more to
+    /// it. Never left.
+    Retired(crate::payload::DriverClaim),
 }
 
 impl Writeback {
@@ -962,7 +976,7 @@ impl Writeback {
             pending,
             per_item,
             held: Mutex::new(None),
-            retired: std::sync::OnceLock::new(),
+            board: Mutex::new(Board::Driving),
         };
         // The project is retained in each snapshot rather than in the worker so a malformed
         // old launch record disables projection without weakening LaunchRecord's compatibility.
@@ -991,6 +1005,7 @@ impl Writeback {
             .lock()
             .ok()
             .and_then(|held| held.clone())
+            .filter(|_| !self.is_handing_over())
             .map_or(DriverWrite::Leave, DriverWrite::Hold);
         if let Some(snapshot) = snapshot_of(paths, launch, state, statuses, Claim::Held, driver) {
             self.queue(snapshot);
@@ -1008,11 +1023,46 @@ impl Writeback {
     /// Write nothing more to the project: another run has taken it over, and what this
     /// driver projected after that would be written over that run's own.
     pub(crate) fn retire(&self, by: &crate::payload::DriverClaim) {
-        let _ = self.retired.set(by.clone());
+        if let Ok(mut board) = self.board.lock() {
+            if !matches!(*board, Board::Retired(_)) {
+                *board = Board::Retired(by.clone());
+            }
+        }
         let (lock, ready) = &*self.pending;
         if let Ok(mut pending) = lock.lock() {
             pending.latest = None;
             ready.notify_all();
+        }
+    }
+
+    /// Another run has taken the project over and starts on what this driver leaves on the
+    /// board: go on projecting what this driver settles, but never its claim — the queued
+    /// projection included — and no closeout's release.
+    pub(crate) fn hand_over(&self) {
+        if let Ok(mut board) = self.board.lock() {
+            if *board == Board::Driving {
+                *board = Board::HandingOver;
+            }
+        }
+        let (lock, _) = &*self.pending;
+        if let Ok(mut pending) = lock.lock() {
+            if let Some(latest) = pending.latest.as_mut() {
+                latest.driver = DriverWrite::Leave;
+            }
+        }
+    }
+
+    fn is_handing_over(&self) -> bool {
+        self.board
+            .lock()
+            .is_ok_and(|board| *board == Board::HandingOver)
+    }
+
+    /// Wait, at most `within`, for every projection this driver handed the worker to land.
+    pub(crate) fn wait_until_landed(&self, within: Duration) {
+        let deadline = Instant::now() + within;
+        while self.still_landing() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
         }
     }
 
@@ -1025,7 +1075,9 @@ impl Writeback {
 
     /// Whether another run took the project over, so this driver writes nothing more to it.
     pub(crate) fn is_retired(&self) -> bool {
-        self.retired.get().is_some()
+        self.board
+            .lock()
+            .is_ok_and(|board| matches!(*board, Board::Retired(_)))
     }
 
     /// The same, for the snapshot a closeout projects: a node that never started is written
@@ -1037,7 +1089,7 @@ impl Writeback {
         state: &RunState,
         statuses: &BTreeMap<String, NodeStatus>,
     ) {
-        if self.is_retired() {
+        if self.is_retired() || self.is_handing_over() {
             return;
         }
         let driver = DriverWrite::Release {
@@ -2005,6 +2057,16 @@ pub(crate) fn store_asked_to_wait(run_dir: &Path) -> bool {
     !matches!(AskedWait::kept(run_dir), Kept::Nothing)
 }
 
+/// How long the wait the run's store asked for has left: `None` where it asked for none, and
+/// the recheck of a kept wait this build cannot read where that is what is kept.
+pub(crate) fn store_wait_left(run_dir: &Path) -> Option<Duration> {
+    match AskedWait::kept(run_dir) {
+        Kept::Nothing => None,
+        Kept::Left(left) => Some(left),
+        Kept::Unreadable(_) => Some(UNREADABLE_WAIT_RECHECK),
+    }
+}
+
 /// How often a driver looks again at a kept wait it could not read, while it asks the store
 /// nothing on it: soon enough that repairing the file puts the board back in step promptly.
 const UNREADABLE_WAIT_RECHECK: Duration = Duration::from_secs(2);
@@ -2447,6 +2509,41 @@ fn carry_the_difference(
             let ours = matches!(&read, Ok(Some(claim)) if claim.names(run, host));
             if !ours {
                 let successor = !matches!(read, Ok(None));
+                // A run letting go has nothing of its own in progress, so it acknowledges the
+                // claim that took the project over where nothing has yet: a takeover waiting on
+                // a driver that never read it starts now, rather than waiting it out — or, over
+                // a claim stating no lease, waiting for good. Written before the baseline moves
+                // past this run's claim, so an attempt the store fails asks again.
+                let stored = match crate::continuation::acknowledgement_over(
+                    snapshot.project.as_str(),
+                    &metadata,
+                    run,
+                    host,
+                ) {
+                    Some(acknowledged) => {
+                        let named = MetadataKey::new(DRIVER_KEY.to_owned()).map_err(|why| {
+                            Failed::from(format!("project key '{DRIVER_KEY}': {why}"))
+                        })?;
+                        attempt
+                            .call(
+                                StoreCall::ProjectMetadataSet,
+                                Deadline::Floor,
+                                attempt.engine.set_project_metadata(
+                                    &snapshot.project.global(),
+                                    &named,
+                                    &acknowledged,
+                                ),
+                            )?
+                            .map_err(|error| Failed::engine(PROJECT_METADATA_SET, &error))?;
+                        eprintln!(
+                            "onepipeline: run '{run}' let go of {} and acknowledged the run that \
+                             took it over",
+                            snapshot.project.as_str()
+                        );
+                        acknowledged
+                    }
+                    None => stored,
+                };
                 baseline
                     .landed
                     .project_metadata
@@ -5918,7 +6015,7 @@ mod tests {
             pending: Arc::new((Mutex::new(Pending::default()), Condvar::new())),
             per_item: DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS,
             held: Mutex::new(None),
-            retired: std::sync::OnceLock::new(),
+            board: Mutex::new(super::Board::Driving),
         };
         writeback.closing_out_until(Instant::now() + super::CLOSEOUT_WAIT, Pending::unlanded);
         assert!(
