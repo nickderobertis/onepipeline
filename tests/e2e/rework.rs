@@ -2057,7 +2057,10 @@ fn a_restack_its_checks_refuse_is_asked_of_the_draft_s_worker_again() {
 /// the superseded driver must not begin the descendant restack that push owes.
 #[test]
 fn a_takeover_before_a_reworks_push_prevents_its_driver_from_starting_a_restack() {
-    let world = World::new("rework-takeover").with_env("ONEVCS_BRANCH_PREFIX", "me/");
+    let world = World::new("rework-takeover")
+        .with_env("ONEVCS_BRANCH_PREFIX", "me/")
+        .with_env("ONEPIPELINE_CLAIM_INTERVAL_SECONDS", "10")
+        .with_env(crate::harness::CANCEL_GRACE_ENV, "1");
     let go = world.fakes.join("push.go");
     let held = crate::harness::held_publication(&world, &go);
     world.repository("change-open", &held.argv());
@@ -2086,22 +2089,30 @@ fn a_takeover_before_a_reworks_push_prevents_its_driver_from_starting_a_restack(
     world.until("the rework's cleared publication to be held", |_| {
         held.holding()
     });
-    // The successor owns the project before the first driver's accepted push
-    // makes b's restack due. Hold its worker so it cannot push a competing head.
+    // The successor claims the project before the first driver's accepted push makes b's
+    // restack due, and starts nothing until that driver has let go.
     let successor = world.on_host("takeover-host");
-    let worker = successor.rendezvous("a");
-    successor
-        .run_from(
-            &successor.project,
-            &["start", &project, "--detach", "--take-over"],
-        )
-        .exited(0);
-    let theirs = worker.arrived();
+    let mut taking = successor.cmd(&["start", &project, "--detach", "--take-over"]);
+    let taking = taking
+        .current_dir(&successor.project)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the takeover starts");
+    world.until("the first driver to read the takeover", |world| {
+        !world.events_of(run, "driver-superseded").is_empty()
+    });
     held.release();
     world.until("the superseded driver to end", |world| {
-        !world.events_of(run, "driver-superseded").is_empty()
-            && world.run_file(run, "result.json").is_file()
+        world.run_file(run, "result.json").is_file()
     });
+    let taken = taking.wait_with_output().expect("the takeover answers");
+    assert_eq!(
+        taken.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&taken.stderr)
+    );
     assert_ne!(
         head_of(&world, &a_branch),
         old_head,
@@ -2114,7 +2125,6 @@ fn a_takeover_before_a_reworks_push_prevents_its_driver_from_starting_a_restack(
     );
     successor.run(&["stop", run]).exited(0);
     assert_eq!(successor.events_of(run, "run-stopped").len(), 1);
-    drop(theirs);
     assert_eq!(opened_from(&world, &a_branch), 1);
 }
 

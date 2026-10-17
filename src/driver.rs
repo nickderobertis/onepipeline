@@ -939,6 +939,55 @@ pub(crate) fn resolve_node_graphs(node: &mut Node, base: &Path) -> Result<()> {
     Ok(())
 }
 
+/// What a launch found where a project's claim goes.
+enum Found {
+    /// No claim: nobody drives the project.
+    Nothing,
+    /// A claim, naming the run that drives it.
+    Claim(crate::payload::DriverClaim),
+    /// Something that is not a claim, which only a takeover passes.
+    NotAClaim,
+}
+
+impl Found {
+    /// The claim found, where one was.
+    fn claim(&self) -> Option<crate::payload::DriverClaim> {
+        match self {
+            Self::Claim(claim) => Some(claim.clone()),
+            Self::Nothing | Self::NotAClaim => None,
+        }
+    }
+
+    /// Whether a driver may still stand behind what was found: a claim that is not one may
+    /// be standing over a driver too, and a takeover waits on it as on any other.
+    fn may_stand_over_a_driver(&self) -> bool {
+        !matches!(self, Self::Nothing)
+    }
+}
+
+/// Whether the driver `claim` names provably can no longer act, by this host's own records:
+/// a run of this host, under this runs root, that nothing drives — its ownership lock taken
+/// and let go again here. Anything else is a driver only its acknowledgement, or its lease
+/// running out, can say has let go.
+fn gone_from_this_host(root: &Path, claim: Option<&crate::payload::DriverClaim>) -> Result<bool> {
+    let Some(claim) =
+        claim.filter(|claim| claim.host == sys::hostname() && ledger::is_valid_run_id(&claim.run))
+    else {
+        return Ok(false);
+    };
+    let paths = RunPaths::under(root, &claim.run);
+    if !paths.dir.is_dir() {
+        return Ok(false);
+    }
+    Ok(match engine::take_if_undriven(&paths)? {
+        Some(lock) => {
+            lock.release();
+            true
+        }
+        None => false,
+    })
+}
+
 /// Mint a run id from the plan's name or the project's, made unique.
 ///
 /// The plan's own name first, which a project states as `onepipeline.name` or
@@ -1161,23 +1210,25 @@ fn start(args: &StartArgs) -> Result<i32> {
     // Read whole, keeping each task as the store answered it beside the plan: the rendered-only
     // check below reads each task's own record, and the write-back's landed baseline is seeded
     // from this one read, so its first projection reads nothing the launch has just read.
-    let read = store.read_plan(&project).map_err(Error::from)?;
+    let mut read = store.read_plan(&project).map_err(Error::from)?;
     graph::validate(&read.plan)?;
     // Who drives the project, off that same read: a read that failed has already refused
     // the launch above, so a claim is never defaulted to none.
     // A claim that is not one refuses the launch, unless the launch takes the project over:
     // otherwise a project whose claim a stranger mangled could never be launched again.
-    let claim = match crate::continuation::claim_of(project.as_str(), &read.project_metadata) {
-        Ok(claim) => claim,
+    let found = match crate::continuation::claim_of(project.as_str(), &read.project_metadata) {
+        Ok(Some(claim)) => Found::Claim(claim),
+        Ok(None) => Found::Nothing,
         Err(refused) if args.take_over => {
             eprintln!("onepipeline: --take-over passes a claim that is not one: {refused}");
-            None
+            Found::NotAClaim
         }
         Err(refused) => return Err(refused),
     };
+    let claim = found.claim();
     // What the project's last driver left on it, which a launch continues rather than runs
     // again — unless it is told `--fresh`.
-    let continuation = if args.fresh {
+    let mut continuation = if args.fresh {
         crate::continuation::Continuation::default()
     } else {
         crate::continuation::continuation_of(&read, claim.as_ref())?
@@ -1361,15 +1412,6 @@ fn start(args: &StartArgs) -> Result<i32> {
         )?,
     };
     crate::templates::check_plan(&templates, &read, &launch_dir)?;
-    let mut plan = read.plan.clone();
-    // A node that left a branch is pinned to it, as an adoption pins an abandoned dispatch:
-    // its next dispatch continues that branch, and its publication adopts the change request
-    // already open from it rather than opening a second.
-    for (id, branch) in &continuation.pinned {
-        if let Some(node) = plan.tasks.iter_mut().find(|node| &node.id == id) {
-            node.branch = Some(branch.as_str().to_owned());
-        }
-    }
 
     // The write-back's per-item budget, by the same three rungs. Every rung is *read*
     // rather than merely present: zero is no budget at all, and each rung refuses it by
@@ -1417,10 +1459,25 @@ fn start(args: &StartArgs) -> Result<i32> {
         .or(declared.dispatch_env_hook_timeout)
         .unwrap_or(crate::cli::DEFAULT_DISPATCH_ENV_HOOK_TIMEOUT_SECONDS);
     let node_graph_ref = resolve_graph(&engine::configured_node_graph(), &launch_dir)?;
-    resolve_plan_graphs(&mut plan, &launch_dir)?;
-    for node in &plan.tasks {
-        graph::validate_dispatch_sets(node, &node_graph_ref, &node_sets)?;
-    }
+    let launched = |read: &crate::taskgraph::Read,
+                    continuation: &crate::continuation::Continuation|
+     -> Result<Plan> {
+        let mut plan = read.plan.clone();
+        // A node that left a branch is pinned to it, as an adoption pins an abandoned
+        // dispatch: its next dispatch continues that branch, and its publication adopts the
+        // change request already open from it rather than opening a second.
+        for (id, branch) in &continuation.pinned {
+            if let Some(node) = plan.tasks.iter_mut().find(|node| &node.id == id) {
+                node.branch = Some(branch.as_str().to_owned());
+            }
+        }
+        resolve_plan_graphs(&mut plan, &launch_dir)?;
+        for node in &plan.tasks {
+            graph::validate_dispatch_sets(node, &node_graph_ref, &node_sets)?;
+        }
+        Ok(plan)
+    };
+    let mut plan = launched(&read, &continuation)?;
     // Before the run directory exists. A spec that could not be honoured is the
     // exit 2 it is, rather than a launch that has already minted a run and cut
     // sessions for it before a source refuses the filter it was handed.
@@ -1431,11 +1488,43 @@ fn start(args: &StartArgs) -> Result<i32> {
     // take the project over, and `--fresh` is refused while running afresh would open a
     // second change request beside one nothing has landed.
     crate::continuation::admit(claim.as_ref(), args.take_over)?;
+    let root = ledger::runs_root();
+    let run = mint_run_id(&plan, project.native(), &root);
+    // A takeover of a driver that may still be acting starts nothing until that driver has
+    // let go: its claim is written now, and the project is read again — what this launch
+    // continues, and what its write-back starts from — once the displaced driver has
+    // acknowledged it or can no longer act. A driver of this host whose run nothing drives
+    // has let go already, which this host's own records prove.
+    if args.take_over
+        && found.may_stand_over_a_driver()
+        && !gone_from_this_host(&root, claim.as_ref())?
+    {
+        let mine = crate::payload::DriverClaim {
+            run: run.clone(),
+            host: sys::hostname(),
+            session: crate::vcs::usable(&sys::launching_session()),
+            pid: sys::pid(),
+            claimed_at: sys::now_rfc3339(),
+            lease: Some(crate::continuation::lease_terms()),
+        };
+        crate::continuation::hand_over(
+            &store,
+            &project,
+            &mine,
+            claim.as_ref(),
+            &crate::boundary::of_run(&plan).scope,
+        )?;
+        read = store.read_plan(&project).map_err(Error::from)?;
+        graph::validate(&read.plan)?;
+        crate::templates::check_plan(&templates, &read, &launch_dir)?;
+        if !args.fresh {
+            continuation = crate::continuation::continuation_of(&read, claim.as_ref())?;
+        }
+        plan = launched(&read, &continuation)?;
+    }
     if args.fresh {
         crate::continuation::refuse_fresh_over_unlanded(project.as_str(), &read)?;
     }
-    let root = ledger::runs_root();
-    let run = mint_run_id(&plan, project.native(), &root);
     let holdings = concurrency::holders(&plan)?;
     let holders = &holdings.holders;
     // Every stale holder the sibling still has anybody to answer for. Since

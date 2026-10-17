@@ -1020,9 +1020,9 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), EVENTS_BUNDLE_VERSION);
     assert_eq!(
-        divergence_block("127.")["bundle_versions"]["events"],
+        divergence_block("128.")["bundle_versions"]["events"],
         EVENTS_BUNDLE_VERSION,
-        "the scratch bundle version must be the manager's recorded ruling"
+        "the events bundle version must be the one the claim lease entry records"
     );
     let carried: Vec<String> = bundle
         .schemas()
@@ -10660,10 +10660,9 @@ fn dispatch_scratch_lifetime_is_the_divergence_surface() {
     use onepipeline::cli::{Cli, Command, ScratchCommand};
     use onepipeline::event::{EventKind, PipelineKind};
     let contract = divergence_block("127.");
-    assert_eq!(
-        contract["bundle_versions"]["events"],
-        onepipeline::vocabulary::EVENTS_BUNDLE_VERSION
-    );
+    // The events bundle that first carried the scratch kinds; entry 128's claim
+    // lease raised the compiled-in one since, which that entry's own test pins.
+    assert_eq!(contract["bundle_versions"]["events"], "1.5.0");
     assert!(
         matches!(Cli::try_parse_from(["onepipeline", "scratch", "discard", "example"]).unwrap().command, Command::Scratch(ScratchCommand::Discard { run }) if run == "example")
     );
@@ -10970,7 +10969,8 @@ fn the_readjustment_is_what_the_divergence_record_names() {
     );
 
     // The events bundle that first carried the readjustment; entry 127's scratch
-    // kinds raised the compiled-in one since, which that entry's own test pins.
+    // kinds and entry 128's claim lease raised the compiled-in one since, which
+    // entry 128's own test pins.
     assert_eq!(
         block["bundle_versions"],
         json!({"events": "1.4.0", "planner_channel": DOCUMENT_VERSION})
@@ -11070,8 +11070,8 @@ fn the_manager_landing_contract_is_what_the_divergence_record_names() {
         serde_json::from_value::<onepipeline::vocabulary::Significance>(word.clone())
             .unwrap_or_else(|why| panic!("{kind}'s word {word} is not onevcs's: {why}"));
     }
-    // The bundle that first carried the landings; entry 127's scratch kinds
-    // raised it since, so the compiled-in bundle is that one or a later minor.
+    // The bundle that first carried the landings; entries 127 and 128 raised
+    // it since, so the compiled-in bundle is that one or a later minor.
     let release = |text: &str| -> (u64, u64, u64) {
         let parts: Vec<u64> = text
             .split('.')

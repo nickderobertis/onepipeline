@@ -579,8 +579,8 @@ pub(crate) enum Message {
     /// The note-delivery thread's answer for the one envelope it was handed:
     /// what each of its commands' conversations said. See [`NoteDeliveries`].
     NoteAnswered(Box<NoteAnswer>),
-    /// A lifecycle dispatch is ready to publish, and waits for the pass that reads the
-    /// project's claim to say whether it may. See [`publication_cleared`].
+    /// A lifecycle dispatch is ready to publish, and waits for a pass to say whether the
+    /// driver's claim lease lets it. See [`publication_cleared`].
     PublicationDue(Box<PublicationDue>),
     /// A rework's republication is ready, and waits for the pass that reads its change
     /// request's standing to say whether it is still open. See [`merged_during_rework`].
@@ -634,12 +634,16 @@ fn title_unverified_surface(title: &UnverifiedTitle) -> Surface {
     }
 }
 
-/// One publication waiting on the next pass's claim check.
+/// One publication waiting on a pass to say whether it may start.
 pub(crate) struct PublicationDue {
+    /// The node publishing, which the lease's watchdog stops holding to its lapse once it
+    /// is cleared: a publication under way is finished, not cut off.
+    // llmlint: ignore[invalid_states_unrepresentable] a node id is the plain `String` the loop's `in_flight` map keys by, from the graph-validated node the dispatch was started for.
+    pub(crate) node: String,
     pub(crate) answer: Sender<PublicationVerdict>,
 }
 
-/// What a pass's claim check answers a publication waiting on it.
+/// What a pass answers a publication waiting on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PublicationVerdict {
     /// The project is still this run's: publish.
@@ -696,10 +700,11 @@ pub(crate) fn merged_during_rework(tx: &Sender<Message>, node: &str, change: &st
 
 /// Ask the loop whether a lifecycle node may publish now, and wait for its answer.
 ///
-/// The publication is one of the things a pass reads its project's claim for: the pass
-/// that receives this reads the claim once for every dispatch and publication it makes, and
-/// answers each. A loop that has gone without answering answers nothing that could refuse,
-/// so the publication goes ahead as it did before a claim existed.
+/// A publication starts only on the driver's claim lease: the pass that receives this
+/// answers it from the newest read of the claim where that read is younger than one claim
+/// interval, and holds it to the next read where it is not. A loop that has gone without
+/// answering answers nothing that could refuse, so the publication goes ahead as it did
+/// before a claim existed.
 pub(crate) fn publication_cleared(tx: &Sender<Message>, node: &str) -> bool {
     let (answer, answered) = mpsc::channel();
     // llmlint: ignore-block[changed_behavior_has_e2e] neither failure has an invocation behind
@@ -707,10 +712,14 @@ pub(crate) fn publication_cleared(tx: &Sender<Message>, node: &str) -> bool {
     // holds a node's settlement until the thread reports it — so a send it refuses and an answer
     // it drops are each a loop that has already gone, which no journey can arrange while a
     // dispatch is waiting on it. What a publication does then is what it did before a claim
-    // existed; `continuation::a_superseded_driver_publishes_nothing_after_the_check_but_finishes_a_publication_under_way`
-    // drives both answers the loop does give.
+    // existed; `continuation::a_superseded_driver_notices_within_one_interval_and_publishes_nothing`
+    // and `continuation::a_takeover_while_the_displaced_driver_publishes_starts_once_the_publication_has_finished`
+    // drive both answers the loop does give.
     if tx
-        .send(Message::PublicationDue(Box::new(PublicationDue { answer })))
+        .send(Message::PublicationDue(Box::new(PublicationDue {
+            node: node.to_owned(),
+            answer,
+        })))
         .is_err()
     {
         return true;
@@ -727,20 +736,38 @@ pub(crate) fn publication_cleared(tx: &Sender<Message>, node: &str) -> bool {
 }
 
 /// Record that another run's claim superseded this driver: the record first, then a
-/// non-blocking surface saying what it means, and the board left to that run.
+/// non-blocking surface saying what it means, and the board left to that run once what
+/// this driver settles is on it.
+///
+/// Nothing more is started. A dispatch in progress settles unpublished — or is ended by the
+/// lease's watchdog, once the last read that found the project this driver's has held it as
+/// long as a read may — and a publication already under way finishes.
+///
+/// Answers whether this driver owes the run that took over an acknowledgement: it does
+/// where it ever held a lease, so that run may be waiting on it — an adoption whose first
+/// read found the takeover started nothing, and owes none. Where its lease is still running
+/// it goes on projecting what it settles until it acknowledges; where the lease has lapsed
+/// it hands the board over at once, since that run may be writing to it already.
 fn supersede(
     paths: &RunPaths,
     journal: &mut Journal,
     writeback: Option<&crate::writeback::Writeback>,
+    claims: Option<&crate::continuation::ClaimWatch>,
     by: &crate::payload::DriverClaim,
-) -> Result<()> {
+) -> Result<bool> {
+    let owed = claims.is_some_and(|watch| watch.lease().ever_held());
     if let Some(writeback) = writeback {
-        writeback.retire(by);
+        if claims.is_some_and(|watch| !watch.lease().lapsed()) {
+            writeback.hand_over();
+        } else {
+            writeback.retire(by);
+        }
     }
     let message = format!(
         "driver-superseded: run '{}' on host '{}' claimed this project at {}, so this driver \
          dispatches and publishes nothing more; a dispatch in flight settles unpublished with \
-         its branch kept, for that run to continue",
+         its branch kept, for that run to continue, and once nothing is in progress this \
+         driver acknowledges that run's claim",
         by.run, by.host, by.claimed_at
     );
     journal.emit(
@@ -764,7 +791,15 @@ fn supersede(
             workstream: None,
             correlation: None,
         },
-    )
+    )?;
+    Ok(owed)
+}
+
+/// The claim that took a project over from this driver, and whether this driver still owes
+/// it the acknowledgement it gives once nothing of its own is in progress.
+struct Superseded {
+    by: crate::payload::DriverClaim,
+    owed: bool,
 }
 
 /// The kind of the non-blocking surface a superseded driver raises.
@@ -1456,16 +1491,22 @@ fn converge(
     // arrange; the compatibility behaviour there is intentionally the absence of a writer.
     let writeback = crate::writeback::Writeback::start(paths, launch);
     // llmlint: ignore-end[changed_behavior_has_e2e]
-    // Who the project's store says drives it, read where this driver is about to do
-    // something a takeover should stop: at launch and adoption, at the start of each pass
-    // that would dispatch or publish — once for all of that pass's — and on an idle
-    // interval. Never before each dispatch or publication on its own.
-    let mut claims = crate::continuation::ClaimWatch::of_run(paths, launch);
+    // Who the project's store says drives it, read once per claim interval whatever the
+    // driver is doing — an adoption's first pass included — and never more often. Each
+    // start of a dispatch or a publication asks the lease that read gave, not the store.
+    let mut claims = crate::continuation::ClaimWatch::of_run(
+        paths,
+        launch,
+        crate::boundary::of_run(&crate::boundary::plan_now(state)).scope,
+    );
     let claimed_at = sys::now_rfc3339();
     // The claim that took the project over from this driver, once one has: from then on it
     // dispatches and publishes nothing more, and ends once what it had in flight settles.
-    let mut superseded_by: Option<crate::payload::DriverClaim> = None;
+    let mut superseded_by: Option<Superseded> = None;
     let mut publications: Vec<PublicationDue> = Vec::new();
+    // The nodes whose publication this driver cleared and which have not settled: a
+    // publication under way is finished, so neither a takeover nor a lapsed lease ends it.
+    let mut publishing: BTreeSet<String> = BTreeSet::new();
     // Rework republications waiting on the standings read that continues their trigger.
     let mut reworks_due: Vec<ReworkDue> = Vec::new();
     let channel = ChannelState::of_run(paths, launch);
@@ -1714,35 +1755,51 @@ fn converge(
         // once per driver — a launch's and an adoption's alike — and bounded by the store's
         // command deadline, so a store that fails or stalls reports it and delays nothing more.
         // Every later projection stays on the worker's own thread.
-        // The claim at launch and adoption, before this driver claims anything itself; and on
-        // the idle interval, for a driver with nothing to dispatch or publish.
-        let mut read_this_pass = false;
+        // The claim, once an interval has passed since the last read began — an adoption's
+        // first pass included, before it claims anything itself.
         if superseded_by.is_none() {
-            if let Some(watch) = claims.as_mut() {
-                // A launch's own read of the claim — the one that let it launch — covers its
-                // first pass; an adoption reads it again before claiming anything.
-                if !claimed && watch.covered_by_the_launch() {
-                    read_this_pass = true;
-                } else if !claimed || watch.idle_check_due() || !publications.is_empty() {
-                    read_this_pass = true;
-                    if let Some(by) = watch.check() {
-                        supersede(paths, journal, writeback.as_ref(), &by)?;
-                        superseded_by = Some(by);
-                    }
-                }
+            if let Some(by) = claims
+                .as_mut()
+                .filter(|watch| watch.read_due())
+                .and_then(crate::continuation::ClaimWatch::check)
+            {
+                let owed = supersede(paths, journal, writeback.as_ref(), claims.as_ref(), &by)?;
+                superseded_by = Some(Superseded { by, owed });
             }
         }
-        // A publication waits on a pass's reading rather than reading the claim itself: the
-        // claim is read once per trigger, never per publication, to hold down what a review
-        // round spends of the store's quota. So one answered by a reading taken just before a
-        // takeover still publishes — the window the ruling accepts.
+        // A publication waits on the pass rather than reading the claim itself: it starts
+        // on the lease the newest read gave, and one asked for when that read is an interval
+        // old waits for the next — which is due by then.
+        let mut waiting = Vec::new();
+        let mut starting = Vec::new();
         for due in publications.drain(..) {
-            let _ = due.answer.send(if superseded_by.is_some() {
-                PublicationVerdict::Withhold
+            if superseded_by.is_some() {
+                let _ = due.answer.send(PublicationVerdict::Withhold);
+            } else if claims.as_ref().is_none_or(|watch| watch.may_start(None)) {
+                starting.push(due);
             } else {
-                PublicationVerdict::Publish
-            });
+                waiting.push(due);
+            }
         }
+        // The project names this driver's publications under way before any of them starts,
+        // and stops naming each once it has settled: a run taking the project over that finds
+        // none named knows none is under way. One that cannot be named yet waits, as one on
+        // a stale lease does — and the lease is asked again once the fence has landed.
+        // llmlint: ignore[changed_behavior_has_e2e] the lease asked again after the fence lands is the one admission every start asks, whose refusal on a stale lease is driven by `continuation::a_publication_asked_for_on_a_stale_lease_waits_for_the_next_read`; reaching it *between* the fence's write and that question needs a store that holds one write for a whole claim interval and then answers, which is the sibling suspended mid-command — host-level process control no CLI journey exposes.
+        let fenced = claims.as_mut().is_none_or(|watch| {
+            let mut nodes = publishing.clone();
+            nodes.extend(starting.iter().map(|due| due.node.clone()));
+            watch.fence(&nodes) && (starting.is_empty() || watch.may_start(None))
+        });
+        for due in starting {
+            if fenced {
+                publishing.insert(due.node.clone());
+                let _ = due.answer.send(PublicationVerdict::Publish);
+            } else {
+                waiting.push(due);
+            }
+        }
+        publications = waiting;
         // Every rework republication ready on this pass is answered by one read, which
         // readjusts first on what it reports.
         if !reworks_due.is_empty() {
@@ -1808,8 +1865,8 @@ fn converge(
         if !claimed {
             claimed = true;
             if let Some(writeback) = writeback.as_ref().filter(|_| superseded_by.is_none()) {
-                if let Some(watch) = &claims {
-                    writeback.hold(&watch.mine(&launch.session, &claimed_at));
+                if let Some(watch) = claims.as_mut() {
+                    writeback.hold(&watch.claim(&launch.session, &claimed_at));
                 }
                 writeback.publish(paths, launch, state, &statuses);
                 writeback.wait_for_first_attempt();
@@ -1817,20 +1874,15 @@ fn converge(
             }
         }
         workspaces.begin_pass(|node| in_flight.contains_key(node));
-        // The pass reads the claim once, at the first dispatch it is about to make, where it
-        // has not already read it: one read covering every dispatch it makes.
-        let mut found: Option<crate::payload::DriverClaim> = None;
+        // Each dispatch starts only on the lease the newest read of the claim gave, asked at
+        // the moment it would start.
         let started_here = if superseded_by.is_some() {
             false
         } else {
-            let mut admit = || {
-                if !read_this_pass {
-                    read_this_pass = true;
-                    found = claims
-                        .as_mut()
-                        .and_then(crate::continuation::ClaimWatch::check);
-                }
-                found.is_none()
+            let mut admit = |node: &str| {
+                claims
+                    .as_ref()
+                    .is_none_or(|watch| watch.may_start(Some(node)))
             };
             // A placement at dispatch, and a restack, read their stack parents' standings
             // first: once a pass, and once for each node however long it is held.
@@ -1900,9 +1952,16 @@ fn converge(
             )?;
             started || restacked || readjusted
         };
-        if let Some(by) = found {
-            supersede(paths, journal, writeback.as_ref(), &by)?;
-            superseded_by = Some(by);
+        // What the lease's watchdog ends at a lapse: every dispatch in progress that is not
+        // publishing.
+        if let Some(watch) = &claims {
+            watch.lease().hold(
+                in_flight
+                    .iter()
+                    .filter(|(node, _)| !publishing.contains(*node))
+                    .map(|(node, dispatch)| (node.clone(), dispatch.cancel.clone()))
+                    .collect(),
+            );
         }
         if started_here {
             derived = None;
@@ -1942,7 +2001,30 @@ fn converge(
         }
 
         // A superseded driver ends once what it had in flight has settled: what is left of
-        // the project is the run that took it over's to drive.
+        // the project is the run that took it over's to drive. Before it goes it says so on
+        // that run's claim, once what it settled is on the board, which is what that run
+        // starts on.
+        if let Some(Superseded { by, owed }) = superseded_by
+            .as_mut()
+            .filter(|superseded| superseded.owed && in_flight.is_empty())
+        {
+            *owed = false;
+            if let Some(writeback) = writeback
+                .as_ref()
+                .filter(|writeback| !writeback.is_retired())
+            {
+                writeback.publish(paths, launch, state, &statuses);
+                // Bounded by one interval: the adopter's own wait is longer than that by more
+                // than an interval, so a board that is slow to take this is not one that
+                // could still be taking it once the adopter writes its own.
+                // llmlint: ignore[changed_behavior_has_e2e] the bound is reached only by a store that holds this one projection for a whole claim interval and then answers, which needs the sibling suspended mid-command — host-level process control no CLI journey exposes; what follows it, the acknowledgement, is driven by every takeover journey in `tests/e2e/continuation.rs`, and an acknowledgement that cannot be written by `a_takeover_waits_out_a_board_that_refuses_a_poll_and_the_acknowledgement`.
+                writeback.wait_until_landed(crate::continuation::claim_interval());
+                writeback.retire(by);
+            }
+            if let Some(watch) = &claims {
+                watch.acknowledge(by);
+            }
+        }
         if in_flight.is_empty()
             && (superseded_by.is_some() || watching_merge_paths.is_empty() && deliveries.idle())
         {
@@ -2026,9 +2108,14 @@ fn converge(
             // The pace at which an idle driver next asks the schedule.
             maintenance.next_due(),
             // And when it next reads who claims its project.
-            claims.as_ref().filter(|_| superseded_by.is_none()).map_or(
+            claims
+                .as_ref()
+                .filter(|_| superseded_by.is_none())
+                .map_or(Duration::MAX, crate::continuation::ClaimWatch::until_read),
+            // And when it next writes the publications under way the store last refused.
+            claims.as_ref().map_or(
                 Duration::MAX,
-                crate::continuation::ClaimWatch::until_idle_check,
+                crate::continuation::ClaimWatch::until_fence_retry,
             ),
         ];
         let deadline = if moved {
@@ -2397,6 +2484,7 @@ fn converge(
                 Message::Settled(settled) => {
                     let settlement = &settled.settlement;
                     in_flight.remove(&settlement.node);
+                    publishing.remove(&settlement.node);
                     // A restack says what it did ahead of the node's ordinary
                     // settlement, which follows it as any settlement does.
                     let readjusting = state.readjust.plans.remove(&settlement.node);
@@ -2552,7 +2640,11 @@ fn close_out_and_drain(
         // refusing the next host's launch over a run that is over. A closeout the store
         // answered — landed, refused or failed — is not asked about again here.
         if !writeback.is_retired() && writeback.still_landing() {
-            crate::continuation::release_left_standing(paths, launch);
+            crate::continuation::release_left_standing(
+                paths,
+                launch,
+                &crate::boundary::of_run(&crate::boundary::plan_now(state)).scope,
+            );
         }
         // The last thing this loop does, and the reason it is here rather than
         // only at the top: a run whose *terminal* projection failed is exactly
@@ -6195,7 +6287,7 @@ fn start_ready(
     workspaces: &mut crate::pool::Workspaces,
     stacking: &mut StackingPlacement,
     notes_in_flight: &DeliveriesInFlight,
-    admit: &mut dyn FnMut() -> bool,
+    admit: &mut dyn FnMut(&str) -> bool,
 ) -> Result<bool> {
     // Nothing new starts once this run's shutdown has begun. Asked here rather
     // than left to the teardown that is coming: the driver goes on scheduling
@@ -6409,9 +6501,10 @@ fn start_ready(
                 }
             }
         }
-        // The project's claim, read once for this pass where nothing before this dispatch
-        // read it: a run that has taken the project over leaves this one dispatching nothing.
-        if !admit() {
+        // The driver's claim lease, asked at the moment the dispatch would start: a lease an
+        // interval old starts nothing, and a run that has taken the project over leaves this
+        // one dispatching nothing.
+        if !admit(&node.id) {
             workspaces.keep_resuming(&node.id, resume);
             break;
         }
@@ -6555,7 +6648,7 @@ fn start_restacks(
     releases: &crate::release::Watch,
     workspaces: &mut crate::pool::Workspaces,
     notes_in_flight: &DeliveriesInFlight,
-    admit: &mut dyn FnMut() -> bool,
+    admit: &mut dyn FnMut(&str) -> bool,
 ) -> Result<bool> {
     // llmlint: ignore-block[changed_behavior_has_e2e] the three holds a restack shares with
     // a dispatch — a shutdown begun, a decision point holding the draft, its identity with no
@@ -6619,7 +6712,8 @@ fn start_restacks(
                 continue;
             }
         } // llmlint: ignore-end[changed_behavior_has_e2e]
-        if !admit() {
+          // llmlint: ignore[changed_behavior_has_e2e] this path asks the one admission `start_ready` asks — the lease's `may_start`, through the same closure — whose refusal on a stale lease and start once a read renews it are driven end to end by `continuation::a_displaced_driver_held_past_its_lease_starts_nothing_when_it_resumes` and `continuation::a_publication_asked_for_on_a_stale_lease_waits_for_the_next_read`; making a restack ready inside a stale lease would also need a board failing at that instant, and prove nothing the shared closure's journeys do not.
+        if !admit(&node.id) {
             break;
         }
         journal.emit(
@@ -6969,7 +7063,7 @@ fn repair_red_verdicts(
     paused: &BTreeSet<String>,
     releases: &crate::release::Watch,
     notes_in_flight: &DeliveriesInFlight,
-    admit: &mut dyn FnMut() -> bool,
+    admit: &mut dyn FnMut(&str) -> bool,
 ) -> Result<bool> {
     let red: Vec<(String, crate::readjust::Red)> = state
         .readjust
@@ -7007,7 +7101,8 @@ fn repair_red_verdicts(
         ) else {
             continue;
         };
-        if !admit() {
+        // llmlint: ignore[changed_behavior_has_e2e] this path asks the one admission `start_ready` asks — the lease's `may_start`, through the same closure — whose refusal on a stale lease and start once a read renews it are driven end to end by `continuation::a_displaced_driver_held_past_its_lease_starts_nothing_when_it_resumes` and `continuation::a_publication_asked_for_on_a_stale_lease_waits_for_the_next_read`; making a red verdict's repair ready inside a stale lease would also need a board failing at that instant, and prove nothing the shared closure's journeys do not.
+        if !admit(&id) {
             break;
         }
         state.readjust.red.remove(&id);
@@ -7105,7 +7200,7 @@ fn start_readjustments(
     paused: &BTreeSet<String>,
     releases: &crate::release::Watch,
     notes_in_flight: &DeliveriesInFlight,
-    admit: &mut dyn FnMut() -> bool,
+    admit: &mut dyn FnMut(&str) -> bool,
 ) -> Result<bool> {
     if crate::shutdown::begun(paths) {
         return Ok(false);
@@ -7313,7 +7408,8 @@ fn start_readjustments(
         ) else {
             continue;
         };
-        if !admit() {
+        // llmlint: ignore[changed_behavior_has_e2e] this path asks the one admission `start_ready` asks — the lease's `may_start`, through the same closure — whose refusal on a stale lease and start once a read renews it are driven end to end by `continuation::a_displaced_driver_held_past_its_lease_starts_nothing_when_it_resumes` and `continuation::a_publication_asked_for_on_a_stale_lease_waits_for_the_next_read`; making a readjustment ready inside a stale lease would also need a board failing at that instant, and prove nothing the shared closure's journeys do not.
+        if !admit(&id) {
             break;
         }
         let onto: Vec<crate::payload::RestackOnto> = match &stack {
@@ -9108,6 +9204,11 @@ fn failed_task(
         head: head(),
         ..failed(node, word)
     }
+}
+
+/// [`cancel_grace_seconds`], as the wait a takeover adds to a lapsed lease.
+pub(crate) fn cancel_grace() -> Duration {
+    Duration::from_secs(cancel_grace_seconds())
 }
 
 /// How long a cancelled dispatch has to stop itself before it is torn down.
