@@ -15,14 +15,24 @@
         "{projectRoot}/**/*",
         "{workspaceRoot}/screencomp.toml",
         "{workspaceRoot}/scripts/build-staged-release.py",
+        "{workspaceRoot}/scripts/release.py",
+        "{workspaceRoot}/scripts/release-pr-auto-merge.sh",
+        "{workspaceRoot}/scripts/linked-engines.sh",
+        "{workspaceRoot}/scripts/release-outcome.mjs",
         "{workspaceRoot}/scripts/npm-build.mjs",
         "{workspaceRoot}/release-targets.toml",
+        "{workspaceRoot}/justfile",
         "{workspaceRoot}/Cargo.toml",
+        "{workspaceRoot}/Cargo.lock",
         "{workspaceRoot}/npm/onepipeline-cli/package.json",
         "{workspaceRoot}/tests/ci_workflows.rs",
         "sharedGlobals"
       ],
       "outputs": ["{projectRoot}/.telemetry/macos-policy.json"]
+    },
+    "release-journeys": {
+      "command": "node --test .github/tests/*.journey.mjs",
+      "cache": false
     },
     "lint": {
       "command": "node node_modules/@biomejs/biome/bin/biome lint .github"

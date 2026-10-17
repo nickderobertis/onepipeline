@@ -3,9 +3,9 @@
 //
 // Nothing here is stubbed. `scripts/npm-build.mjs` assembles the real packages
 // around the real compiled binary, `npm install` resolves them, and the launcher
-// resolves the platform package and execs the binary. The one thing this cannot
-// do locally is publish to the registry; `.github/workflows/release.yml` and
-// `published-smoke.yml` cover that against the real npm.
+// resolves the platform package and execs the binary. Publishing to a registry
+// is `.github/tests/release-linux.journey.mjs`'s, against a local one, and each
+// release's build jobs install what the real npm serves.
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, existsSync, writeFileSync, rmSync } from "node:fs";
@@ -23,7 +23,6 @@ function hostTarget() {
   const key = `${process.platform}-${process.arch}`;
   const targets = {
     "linux-x64": "x86_64-unknown-linux-gnu",
-    "linux-arm64": "aarch64-unknown-linux-gnu",
     "darwin-arm64": "aarch64-apple-darwin",
     "win32-x64": "x86_64-pc-windows-msvc",
   };
@@ -159,49 +158,6 @@ describe("the npm distribution", () => {
       join(dist, `${hostTarget()}.json`),
     ]);
     assert.match(result, /verified binary reuse/);
-  });
-
-  it("delivers real native packages through the declared flat Darwin publication transport", () => {
-    const workflow = readFileSync(join(REPO_ROOT, ".github/workflows/release.yml"), "utf8");
-    const record = JSON.parse(readFileSync(join(dist, `${hostTarget()}.json`), "utf8"));
-    for (const [artifact, field, publication] of [
-      ["wheels-darwin", "wheel", "dist"],
-      ["npm-darwin", "npm", "npm-artifacts"],
-    ]) {
-      const matches = [
-        ...workflow.matchAll(new RegExp(`name: ${artifact}\\n\\s+path: ([^\\n]+)`, "g")),
-      ];
-      assert.equal(matches.length, 1, `${artifact} has one declared upload source`);
-      const downloaded = join(work, "transport", publication);
-      const files = JSON.parse(
-        run(process.platform === "win32" ? "python" : "python3", [
-          "npm/test/artifact-transport.py",
-          matches[0][1].trim(),
-          dist,
-          downloaded,
-        ]),
-      );
-      assert.equal(files.length, 1, "this native journey builds one real host target");
-      const expected = join(downloaded, record[field].split(/[\\/]/).at(-1));
-      assert.ok(existsSync(expected), `${artifact} must reach the publisher's flat directory`);
-      assert.deepEqual(readFileSync(expected), readFileSync(record[field]));
-    }
-    assert.match(workflow, /packages-dir: dist/);
-    assert.match(workflow, /npm-artifacts\/\*\.tgz/);
-    for (const escaping of [
-      "staged-release/../outside/*.whl",
-      "staged-release//tmp/*.whl",
-      "staged-release/./publish-wheels/*.whl",
-    ]) {
-      const refused = spawnSync(
-        process.platform === "win32" ? "python" : "python3",
-        ["npm/test/artifact-transport.py", escaping, dist, join(work, "transport", "escape")],
-        { cwd: REPO_ROOT, encoding: "utf8" },
-      );
-      assert.notEqual(refused.status, 0, escaping);
-      assert.match(refused.stderr, /escapes its root/);
-      assert.equal(existsSync(join(work, "transport", "escape")), false);
-    }
   });
 
   it("refuses a staged record whose payload hash disagrees with the real packages", () => {
@@ -467,34 +423,77 @@ describe("the npm distribution", () => {
     assert.match(failed.stderr, /pip install onepipeline-cli/);
   });
 
-  it("refuses Intel macOS by name rather than looking for a package no release ships", () => {
+  /// Run the installed launcher with Node reporting `key` as its platform; the
+  /// launcher itself, and everything it does after reading that, is real.
+  function launchAs(project, key, args) {
+    const [platform, arch] = key.split("-");
+    const shim = join(project, `${key}.cjs`);
+    writeFileSync(
+      shim,
+      `Object.defineProperty(process, "platform", { value: ${JSON.stringify(platform)} });\n` +
+        `Object.defineProperty(process, "arch", { value: ${JSON.stringify(arch)} });\n`,
+    );
+    const launcher = join(project, "node_modules", "onepipeline-cli", "bin", "onepipeline.js");
+    return spawnSync(process.execPath, ["--require", shim, launcher, ...args], {
+      cwd: project,
+      encoding: "utf8",
+    });
+  }
+
+  for (const [key, name] of [
+    ["darwin-x64", /Intel macOS \(darwin-x64\) is no longer supported/],
+    ["linux-arm64", /arm64 Linux \(linux-arm64\) is no longer supported/],
+  ]) {
+    it(`refuses ${key} by name rather than looking for a package no release ships`, () => {
+      const project = mkdtempSync(join(work, "app-"));
+      installInto(project, [launcherTgz]);
+      const manifest = JSON.parse(
+        readFileSync(join(project, "node_modules", "onepipeline-cli", "package.json"), "utf8"),
+      );
+      assert.ok(
+        !Object.keys(manifest.optionalDependencies).some((pkg) => pkg.endsWith(key)),
+        `the launcher must not pin a ${key} package`,
+      );
+      const refused = launchAs(project, key, ["--version"]);
+      assert.equal(refused.status, 1, refused.stderr);
+      assert.equal(refused.stdout, "");
+      assert.match(refused.stderr, name);
+      assert.match(refused.stderr, /cargo install onepipeline --locked/);
+      assert.doesNotMatch(refused.stderr, /platform package|unsupported platform/);
+    });
+  }
+
+  it("still resolves and runs every supported platform's own package", () => {
     const project = mkdtempSync(join(work, "app-"));
     installInto(project, [launcherTgz]);
     const manifest = JSON.parse(
       readFileSync(join(project, "node_modules", "onepipeline-cli", "package.json"), "utf8"),
     );
-    assert.ok(
-      !Object.keys(manifest.optionalDependencies).some((name) => name.includes("darwin-x64")),
-      "the launcher must not pin an Intel macOS package",
+    const supported = Object.keys(manifest.optionalDependencies);
+    assert.deepEqual(supported.sort(), [
+      "onepipeline-cli-darwin-arm64",
+      "onepipeline-cli-linux-x64",
+      "onepipeline-cli-win32-x64",
+    ]);
+    const hostBinary = readFileSync(
+      join(platformDir, "bin", process.platform === "win32" ? "onepipeline.exe" : "onepipeline"),
     );
-    // This host is not an Intel Mac, so the installed launcher runs under the
-    // identity Node reports there; everything after that is the real launcher.
-    const shim = join(project, "intel-mac.cjs");
-    writeFileSync(
-      shim,
-      'Object.defineProperty(process, "platform", { value: "darwin" });\n' +
-        'Object.defineProperty(process, "arch", { value: "x64" });\n',
-    );
-    const launcher = join(project, "node_modules", "onepipeline-cli", "bin", "onepipeline.js");
-    const refused = spawnSync(process.execPath, ["--require", shim, launcher, "--version"], {
-      cwd: project,
-      encoding: "utf8",
-    });
-    assert.equal(refused.status, 1, refused.stderr);
-    assert.equal(refused.stdout, "");
-    assert.match(refused.stderr, /Intel macOS \(darwin-x64\) is no longer supported/);
-    assert.match(refused.stderr, /cargo install onepipeline --locked/);
-    assert.doesNotMatch(refused.stderr, /platform package|unsupported platform/);
+    for (const pkg of supported) {
+      const key = pkg.replace(/^onepipeline-cli-/, "");
+      // Each platform's package, carrying this host's real binary under the
+      // name that platform's launcher looks for, is the only one installed.
+      for (const other of supported) {
+        rmSync(join(project, "node_modules", other), { recursive: true, force: true });
+      }
+      const dir = join(project, "node_modules", pkg);
+      mkdirSync(join(dir, "bin"), { recursive: true });
+      writeFileSync(join(dir, "package.json"), JSON.stringify({ name: pkg, version }));
+      const bin = join(dir, "bin", key.startsWith("win32") ? "onepipeline.exe" : "onepipeline");
+      writeFileSync(bin, hostBinary, { mode: 0o755 });
+      const reported = launchAs(project, key, ["--version"]);
+      assert.equal(reported.status, 0, `${key}: ${reported.stderr}`);
+      assert.equal(reported.stdout.trim(), `onepipeline ${version}`, key);
+    }
   });
 });
 

@@ -125,9 +125,8 @@ request and is deliberately **not** required: what it asks is whether the
 registry has moved past this lock, so its answer changes without this tree
 changing and a release nobody here made would otherwise block an unrelated
 merge. Red there is closed by one `cargo update -p <spec>` on any branch, never
-by requiring it here. `published-smoke.yml` gates nothing either — it runs after
-`release.yml` completes, and reports by opening an issue. `visual-docs.yml` is
-the third and is **not** required either: it is a documentation check that needs
+by requiring it here. `visual-docs.yml` is the second and is **not** required
+either: it is a documentation check that needs
 two third-party tools `just check` does not install, and a stale picture is a
 thing to refresh rather than a reason to hold a correct change out of `main`.
 CI verifies visual drift; local capture and review are manual. No screenshot
@@ -145,14 +144,31 @@ install --git` one-liner names no ref — so it is smoked with *that* revision's
 other way, such a job is unsatisfiable for the very pull request that changes
 what it asserts.
 
-**Releases are fully automated; the only human action is merging a PR.**
-`release-plz` is the single version driver: it opens a release PR, and merging it
-tags `vX.Y.Z` and cuts the GitHub Release. That Release — created with a PAT,
-because a tag from the default `GITHUB_TOKEN` triggers nothing — fires
-`release.yml`, which builds the archives, wheels, and npm packages and publishes
-them. **Nothing else writes a version:** maturin reads it from `Cargo.toml` via
-`dynamic = ["version"]` and `scripts/npm-build.mjs` stamps it from the same
-place.
+**Releases are fully automated; the only human action is merging a change.**
+`release-plz` is the single version driver: `release-plz.yml`'s one job opens a
+release PR and asks GitHub to merge it automatically once its required checks
+pass, and that merge tags `vX.Y.Z` and cuts the GitHub Release. That Release —
+created with a PAT, because a tag from the default `GITHUB_TOKEN` triggers
+nothing — fires `release.yml`: five CD jobs in all. **Nothing else writes a
+version:** maturin reads it from `Cargo.toml` via `dynamic = ["version"]` and
+`scripts/npm-build.mjs` stamps it from the same place.
+
+**`release.yml` is one build job per platform, then `publish`.** `build-linux`
+(`x86_64-unknown-linux-gnu`), `build-macos` (`aarch64-apple-darwin`) and
+`build-windows` (`x86_64-pc-windows-msvc`) each run their platform's recipe —
+`just release-<platform> build`, `publish`, `verify` — which builds each target
+once, packages the archive, wheel and npm platform package from that one binary
+(Linux inside the manylinux2014 image, so all three carry its glibc 2.17 floor),
+test-installs those files, publishes them, and installs them back from the
+registries on that OS. `publish` needs all three: it refuses a lock that links an
+engine twice, records the linked engines in the notes, confirms every registry
+serves every platform, publishes the crate and the npm launcher, installs both,
+and records `release-outcome.json`. `just release-<platform> plan` lists what a
+job publishes without building it. Intel macOS and arm64 Linux are not built.
+**A failed build job leaves the platforms that built published and the
+platform-independent artifacts unpublished** until the failed job is re-run and
+then `publish`; every upload skips what its registry already serves, so a re-run
+publishes only what is missing.
 
 **Where each tier runs follows from that release model.** Releases are batched:
 every merge since the last tag rides one release-plz release PR, so the commit
@@ -163,10 +179,10 @@ tiers — therefore runs on the release PR (`release-sweep.yml`, selected by its
 pull request runs the affected tier against its merge base, and a push to `main`
 the affected tier against the commit before the push (`ci.yml`'s `gate`,
 `ONEPIPELINE_NX_BASE_SHA`); with no derivable base, either falls back to the
-full sweep. `release.yml`'s `test` job re-sweeps a *published Release*, which is
-not a duplicate of the release-PR sweep: a Release made by hand from any tag —
-the documented fallback — can name a commit CI never gated, and that run is the
-only one that can refuse to publish the artifact.
+full sweep. Nothing re-sweeps at release time: the release PR's sweep is the last
+gate on what ships. A Release made by hand — the documented fallback — is
+refused when its tag does not name `Cargo.toml`'s version, and is otherwise
+trusted to name a commit `main` gated.
 
 **What this repository publishes is declared once**, in `release-targets.toml`
 at the root, at the canonical release-target schema `onevcs`'s `docs/contract.md`

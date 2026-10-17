@@ -2482,11 +2482,11 @@ fn the_release_recipe_composes_over_http_and_refuses_an_answer_it_cannot_read() 
 /// The marker the note opens with is the one the release job cuts the old
 /// section at.
 ///
-/// Two files hold that string: the script writes it, and `release.yml` trims
-/// the existing body from it before appending. Spelled differently in either,
-/// nothing fails — a re-run of a release quietly grows a second copy of the
-/// table, which is the failure mode this whole change exists to avoid a version
-/// of.
+/// Two files hold that string: the script writes it, and `scripts/release.py`
+/// trims the existing body from it before appending. Spelled differently in
+/// either, nothing fails — a re-run of a release quietly grows a second copy of
+/// the table, which is the failure mode this whole change exists to avoid a
+/// version of.
 #[test]
 fn the_marker_the_note_opens_with_is_the_one_the_release_job_replaces() {
     let index = index_serving("marker", &[]);
@@ -2502,12 +2502,12 @@ fn the_marker_the_note_opens_with_is_the_one_the_release_job_replaces() {
         said(&run)
     );
 
-    let release = fs::read_to_string(repo_root().join(".github/workflows/release.yml"))
-        .expect("the workflow that appends the note");
+    let release = fs::read_to_string(repo_root().join("scripts/release.py"))
+        .expect("the script that appends the note");
     assert!(
-        release.contains(&format!("/^{marker}$/")),
-        "release.yml trims the old section at a marker that is not the one the note opens \
-         with ({marker}), so re-running a release stacks a second table"
+        release.contains(&format!("LINKED_ENGINES_MARKER = '{marker}'")),
+        "scripts/release.py trims the old section at a marker that is not the one the note \
+         opens with ({marker}), so re-running a release stacks a second table"
     );
 }
 

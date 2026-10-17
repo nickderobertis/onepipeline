@@ -649,12 +649,63 @@ linked-engines:
     @bash scripts/linked-engines.sh --format notes
 
 # Outside `check` and `gate` because it pulls the manylinux image and a toolchain
-# over the network and needs Docker. release.yml's Linux `build-wheels` legs and
-# ci.yml's `wheel` legs both call this, so there is one Linux wheel build.
+# over the network and needs Docker. release.yml's `build-linux` job (through
+# `release-linux`) and ci.yml's `wheel` job both build with this script, so there
+# is one Linux wheel build.
 # Build the Linux wheel for TARGET inside the release's manylinux image, into OUT.
 wheel-linux target out="dist":
     @bash scripts/build-linux-wheel.sh --target {{quote(target)}} --out {{quote(out)}}
 # llmlint: ignore-end[comments_earn_their_place]
+
+# One recipe per release.yml build job, run there one phase per step: `build`
+# builds each target once, packages archive, wheel and npm package from that one
+# binary and test-installs them; `publish` uploads them; `verify` installs them
+# back from the registries and runs them. `plan` lists every file, package and
+# wheel tag without building; `dry-run` builds and publishes nothing. Outside
+# `check` and `gate`: building needs Docker (Linux) or that platform's own
+# toolchain, and publishing needs the release's credentials.
+# Release the Linux artifacts, one PHASE at a time (plan, build, publish, verify, dry-run).
+release-linux phase="dry-run": (_release "linux" phase)
+
+# Release the macOS (Apple silicon) artifacts, one PHASE at a time.
+release-macos phase="dry-run": (_release "macos" phase)
+
+# Release the Windows artifacts, one PHASE at a time.
+release-windows phase="dry-run": (_release "windows" phase)
+
+# release.yml's `publish` job: refuse a split engine graph, confirm every
+# platform is out, then publish and install the crate and the npm launcher.
+# Publish the platform-independent artifacts (PHASE: plan, publish or dry-run).
+release-publish phase="dry-run":
+    @case "$1" in \
+      plan) just _release-python plan common ;; \
+      publish) just _release-python publish-common ;; \
+      dry-run) just _release-python publish-common --dry-run ;; \
+      *) echo "unknown phase '$1': choose plan, publish or dry-run" >&2; exit 2 ;; \
+    esac
+
+# Compose release-outcome.json from what every release job did and attach it to the Release.
+release-outcome:
+    @just _release-python outcome
+
+# Outside `check` and `gate`: the Linux journey builds in the manylinux image
+# (Docker, and a toolchain over the network) and compiles the release binary,
+# and the release-plz journey needs the `release-plz` binary. Each refuses,
+# naming what is missing, rather than skipping.
+# The release journeys: the Linux recipe and publish against local registries, and release-plz.yml's job over a scratch repository.
+release-journeys:
+    @ONEPIPELINE_NX_SHOW_OUTPUT=1 bash scripts/nx.sh run github-workflows:release-journeys --outputStyle=stream-without-prefixes
+
+_release platform phase:
+    @case "$2" in \
+      plan | build | publish | verify | dry-run) just _release-python "$2" "$1" ;; \
+      *) echo "unknown phase '$2': choose plan, build, publish, verify or dry-run" >&2; exit 2 ;; \
+    esac
+
+# Windows runners carry `python`, not `python3`.
+_release-python *args:
+    @case "$(uname -s)" in MINGW* | MSYS* | CYGWIN*) py=python ;; *) py=python3 ;; esac; \
+      "$py" scripts/release.py "$@"
 
 # Reads the floor from Cargo.toml's `rust-version`; that toolchain must be
 # installed (`rustup toolchain install <version>`). Warnings are errors here too.

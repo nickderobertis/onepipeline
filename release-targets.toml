@@ -24,17 +24,17 @@ probe = "scripts/release-probe.sh"
 id = "crate:onepipeline"
 name = "crate"
 what = "The onepipeline library and the `onepipeline` binary, as a Rust dependent takes them with `cargo add onepipeline`."
-published_by = ".github/workflows/release.yml — the `publish-crate` job's `cargo publish`, under Cargo.toml's [package] name."
+published_by = ".github/workflows/release.yml — the `publish` job's `just release-publish publish` step (scripts/release.py's `cargo publish`), under Cargo.toml's [package] name."
 manifest = "Cargo.toml"
 
 [[target]]
 id = "pypi:onepipeline-cli"
 name = "pypi"
 what = "The standalone `onepipeline` binary as maturin `bin`-bindings wheels, installed with `pip install onepipeline-cli`."
-published_by = ".github/workflows/release.yml — the `publish-pypi` job's pypa/gh-action-pypi-publish step, from pyproject.toml's [project] name."
+published_by = ".github/workflows/release.yml — each platform's wheel by its own build job, `build-linux`, `build-macos` and `build-windows`, through its `just release-<platform> publish` step (scripts/release.py's `uv publish`), from pyproject.toml's [project] name."
 manifest = "pyproject.toml"
 
-# The four per-platform packages `scripts/npm-build.mjs` builds are `covers`
+# The three per-platform packages `scripts/npm-build.mjs` builds are `covers`
 # entries rather than targets of their own: nobody depends on
 # `onepipeline-cli-linux-x64`, because the launcher resolves exactly one of them
 # at its own exact version through `optionalDependencies`.
@@ -42,11 +42,10 @@ manifest = "pyproject.toml"
 id = "npm:onepipeline-cli"
 name = "npm"
 what = "The `onepipeline` binary as an npm launcher, installed with `npm install -g onepipeline-cli`."
-published_by = ".github/workflows/release.yml — the `publish-npm` job's scripts/publish-npm.sh step, from npm/onepipeline-cli/package.json's name."
+published_by = ".github/workflows/release.yml — each platform package by its own build job, `build-linux`, `build-macos` and `build-windows`, through its `just release-<platform> publish` step, then the launcher by the `publish` job's `just release-publish publish` step, both through scripts/publish-npm.sh, from npm/onepipeline-cli/package.json's name."
 manifest = "npm/onepipeline-cli/package.json"
 covers = [
   "npm:onepipeline-cli-linux-x64",
-  "npm:onepipeline-cli-linux-arm64",
   "npm:onepipeline-cli-darwin-arm64",
   "npm:onepipeline-cli-win32-x64",
 ]
@@ -58,3 +57,7 @@ covers = [
 [[retired]]
 id = "npm:onepipeline-cli-darwin-x64"
 why = "Intel macOS builds are discontinued: releases ship macOS binaries for Apple silicon only, and the launcher refuses Intel macOS with that message. Build from source on an Intel Mac with `cargo install onepipeline --locked`."
+
+[[retired]]
+id = "npm:onepipeline-cli-linux-arm64"
+why = "arm64 Linux builds are discontinued: releases ship Linux binaries for x86-64 only, and the launcher refuses arm64 Linux with that message. Build from source there with `cargo install onepipeline --locked`."

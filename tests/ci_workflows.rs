@@ -362,7 +362,7 @@ fn every_required_context_is_reported_on_every_pull_request() {
 }
 
 /// The jobs that report a context nobody requires, and that no required job may
-/// wait on: the release sweep, the suppressions comment, and the three workflows
+/// wait on: the release sweep, the suppressions comment, and the two workflows
 /// AGENTS.md records as advisory.
 #[test]
 fn no_required_job_waits_on_an_advisory_one() {
@@ -405,7 +405,7 @@ fn no_required_job_waits_on_an_advisory_one() {
         "release-sweep.yml",
         "notignored.yml",
         "engine-currency.yml",
-        "published-smoke.yml",
+        "visual-docs.yml",
     ] {
         assert!(
             all.contains_key(advisory),

@@ -218,15 +218,30 @@ fn release_linux_targets() -> Vec<String> {
         .collect()
 }
 
+/// The Linux targets release.yml's `build-linux` job builds — its recipe's own
+/// plan — each on that job's runner.
 fn release_linux_legs() -> Vec<(String, String)> {
-    let legs = matrix_legs(&job_block("release.yml", "build-wheels"));
-    assert!(
-        !legs.is_empty(),
-        "release.yml's build-wheels matrix has legs"
-    );
-    legs.into_iter()
-        .filter(|(_, os)| os.starts_with("ubuntu"))
-        .collect()
+    let block = job_block("release.yml", "build-linux");
+    let runner = block
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("runs-on: "))
+        .expect("build-linux names its runner")
+        .to_string();
+    let plan = Command::new("python3")
+        .args(["scripts/release.py", "plan", "linux"])
+        .current_dir(repo_root())
+        .output()
+        .expect("python3 runs scripts/release.py");
+    assert!(plan.status.success(), "the Linux plan is readable");
+    let plan: serde_json::Value = serde_json::from_slice(&plan.stdout).unwrap();
+    let legs: Vec<(String, String)> = plan["targets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|target| (target.as_str().unwrap().to_string(), runner.clone()))
+        .collect();
+    assert!(!legs.is_empty(), "release.yml's build-linux builds a target");
+    legs
 }
 
 fn release_maturin_version() -> String {
@@ -234,7 +249,7 @@ fn release_maturin_version() -> String {
         .expect("release.yml is readable");
     let pins: Vec<&str> = text
         .lines()
-        .filter_map(|line| line.trim().strip_prefix("maturin-version: v"))
+        .filter_map(|line| line.trim().strip_prefix("uv tool install maturin=="))
         .collect();
     assert!(!pins.is_empty(), "release.yml pins a maturin version");
     assert!(
@@ -258,8 +273,8 @@ fn every_linux_target_the_release_builds_is_handed_to_its_own_manylinux_image() 
     let targets = release_linux_targets();
     assert_eq!(
         targets,
-        ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"],
-        "release.yml's Linux wheel targets"
+        ["x86_64-unknown-linux-gnu"],
+        "release.yml's Linux wheel targets: arm64 Linux is not released"
     );
     let maturin = release_maturin_version();
     for target in &targets {
@@ -424,11 +439,15 @@ fn the_pull_request_check_builds_the_release_linux_legs_through_the_recipe() {
                 .contains("LEG_VERDICT: ${{ needs.wheel.outputs['x86_64-unknown-linux-gnu'] }}"),
         "the bare `wheel` name branch protection requires reports the x86_64 leg"
     );
-    let release = job_block("release.yml", "build-wheels");
+    let release = job_block("release.yml", "build-linux");
     assert!(
-        release.contains("run: just wheel-linux \"$TARGET\"")
-            && release.contains("if: runner.os == 'Linux'"),
-        "release.yml's Linux legs build through the recipe"
+        release.contains("run: just release-linux build"),
+        "release.yml's Linux job builds through its recipe"
+    );
+    let driver = fs::read_to_string(repo_root().join("scripts/release.py")).unwrap();
+    assert!(
+        driver.contains("'build-linux-wheel.sh'"),
+        "the release's Linux recipe builds its wheel with the script `just wheel-linux` runs"
     );
 }
 

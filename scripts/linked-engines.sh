@@ -6,7 +6,9 @@
 # — disagrees with them; that has shipped three times. So this reads the lock,
 # asks the crates.io sparse index what each requirement permits today, and
 # reports the difference: `--format check` as a gate, `--format notes` as the
-# markdown a release's notes carry.
+# markdown a release's notes carry. `--format split` asks only the offline
+# question below — one copy of each engine — and is what release.yml's `publish`
+# job refuses a release on before it uploads anything.
 #
 # It answers a second question first, and offline: **how many** copies of each
 # engine the lock resolves. Currency is about which release is linked; that one
@@ -30,7 +32,7 @@
 # takes a directory in the sparse index's own layout.
 #
 # Usage:
-#   linked-engines.sh [--format check|notes] [--manifest PATH] [--lock PATH]
+#   linked-engines.sh [--format check|notes|split] [--manifest PATH] [--lock PATH]
 #                     [--index URL_OR_DIR]
 set -euo pipefail
 
@@ -52,7 +54,7 @@ lock=Cargo.lock
 # default is the registry cargo itself resolves from.
 index="${ONEPIPELINE_CRATES_INDEX:-https://index.crates.io}"
 
-usage="run 'linked-engines.sh [--format check|notes] [--manifest PATH] [--lock PATH] [--index URL_OR_DIR]'"
+usage="run 'linked-engines.sh [--format check|notes|split] [--manifest PATH] [--lock PATH] [--index URL_OR_DIR]'"
 
 # Every option takes a value, so a missing one is an argument error rather than
 # a silently empty setting.
@@ -85,7 +87,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 case "$format" in
-  check|notes) ;;
+  check|notes|split) ;;
   *)
     echo "unknown format '$format'" >&2
     echo "ACTION: $usage" >&2
@@ -602,7 +604,7 @@ done
 # The check refuses; `--format notes` reports, for the reason it reports an
 # engine that is behind rather than refusing to compose notes at all — a release
 # whose graph split is the one whose notes should least be silent about it.
-if [ "$format" = check ] && [ "${#split[@]}" -gt 0 ]; then
+if [ "$format" != notes ] && [ "${#split[@]}" -gt 0 ]; then
   {
     echo "'$lock' resolves an engine at more than one version:"
     echo
@@ -618,6 +620,11 @@ if [ "$format" = check ] && [ "${#split[@]}" -gt 0 ]; then
     echo "currency check can see it: each copy is separately current."
   } >&2
   exit 1
+fi
+
+if [ "$format" = split ]; then
+  echo "linked engines resolve once each: ${SIBLINGS[*]}"
+  exit 0
 fi
 
 for name in "${SIBLINGS[@]}"; do
@@ -783,7 +790,7 @@ for name in "${SIBLINGS[@]}"; do
 done
 
 # llmlint: ignore-block[tool_output_is_signal] the document below *is* this mode's
-# product — `--format notes` asks for it, `release.yml` captures the stdout whole and
+# product — `--format notes` asks for it, scripts/release.py captures the stdout whole and
 # appends it to a Release body, and there is no shorter form of "which version of each
 # engine did this release link". The check mode, which is the one a gate reads, keeps
 # to a line.

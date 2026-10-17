@@ -319,7 +319,7 @@ test("actual workflow graph routes all events, preserves contexts and records li
               } else if (eventName === "release") {
                 assert.deepEqual(
                   mac.map((j) => j.job),
-                  ["darwin"],
+                  ["build-macos"],
                 );
                 // Intel macOS is discontinued: the one Mac job builds Apple silicon only.
                 assert.deepEqual(mac[0].targets, ["aarch64-apple-darwin"]);
@@ -727,49 +727,31 @@ test("same-named registry dependency version changes require Mac coverage", () =
   assert.equal(classify(event(), heads.version).isReleaseOnly, true);
 });
 
-test("release artifact downloads use this run's exact tagged builders and successful Darwin proof", () => {
+test("release publication waits for every platform's own build, test-install and publication", () => {
   const release = workflows()["release.yml"];
-  const produced = [];
   const ancestors = (key) => {
     const need = release.jobs[key].needs;
     const direct = need ? (Array.isArray(need) ? need : [need]) : [];
     return [...direct, ...direct.flatMap(ancestors)];
   };
   for (const [key, job] of Object.entries(release.jobs)) {
-    for (const leg of matrix(job.strategy?.matrix, {})) {
-      for (const step of job.steps ?? []) {
-        if (step.uses === "actions/checkout@v4") {
-          assert.ok(
-            !step.with?.ref || step.with.ref === `\${{ github.sha }}`,
-            `${key} must build the event's tagged tree`,
-          );
-        }
-        if (step.uses === "actions/upload-artifact@v4") {
-          const expression = step.with.name;
-          const name = expression.replace(/\$\{\{(.*?)\}\}/g, (_, e) =>
-            String(evaluate(e, { matrix: leg })),
-          );
-          produced.push({ key, name });
-        }
+    for (const step of job.steps ?? []) {
+      if (step.uses === "actions/checkout@v4") {
+        assert.ok(
+          !step.with?.ref || step.with.ref === `\${{ github.sha }}`,
+          `${key} must build the event's tagged tree`,
+        );
       }
+      // Each build job publishes the files it built and installed itself, so
+      // no artifact crosses between jobs, nor between runs.
+      assert.doesNotMatch(step.uses ?? "", /(upload|download)-artifact/, `${key} moves artifacts`);
     }
   }
-  for (const [key, job] of Object.entries(release.jobs)) {
-    for (const step of job.steps ?? [])
-      if (step.uses === "actions/download-artifact@v4") {
-        assert.equal(step.with["run-id"], undefined, `${key} must consume its own workflow run`);
-        const name = step.with.name ?? step.with.pattern;
-        const pattern = new RegExp(`^${name.replaceAll("*", ".*")}$`);
-        const inputs = produced.filter((p) => pattern.test(p.name));
-        assert.ok(inputs.length, `${key} has unresolved artifact ${name}`);
-        for (const input of inputs)
-          assert.ok(ancestors(key).includes(input.key), `${key} must wait for ${input.key}`);
-      }
-  }
-  for (const key of ["publish-crate", "publish-pypi", "publish-npm", "upload", "upload-darwin"]) {
+  for (const key of ["build-linux", "build-macos", "build-windows"]) {
+    assert.deepEqual(ancestors(key), [], `${key} waits for no other platform`);
     assert.ok(
-      ancestors(key).includes("darwin"),
-      `${key} cannot publish before Darwin installs pass`,
+      ancestors("publish").includes(key),
+      `publish cannot publish the platform-independent artifacts before ${key} has`,
     );
   }
 });
@@ -974,12 +956,15 @@ test("actual producer commands govern credential guards and architecture overrid
     npm: "false",
     crate: "false",
   });
-  assert.equal(runGraph(release, s).find((j) => j.job === "publish-crate").selected, false);
-  assert.equal(
-    runGraph(release, { ...s, cratePublish: "true" }).find((j) => j.job === "publish-crate")
-      .selected,
-    true,
-  );
+  // The crate's credential is read by the publish recipe rather than a job
+  // guard (release-checks.test.mjs drives it), so the graph is the same either way.
+  for (const cratePublish of ["false", "true"])
+    assert.deepEqual(
+      runGraph(release, { ...s, cratePublish })
+        .filter((j) => j.selected)
+        .map((j) => j.job),
+      ["build-linux", "build-macos", "build-windows", "publish"],
+    );
   const snapshot = JSON.parse(
     readFileSync(".github/fixtures/visual-docs-reusable.origin.json", "utf8"),
   );
