@@ -210,9 +210,10 @@ fn rewritten(path: &Path, into: &Path, edit: impl FnOnce(&mut serde_json::Map<St
         .split_once("---\n")
         .expect("a store document closes its front matter");
     let mut parsed: serde_json::Map<String, Value> =
-        serde_norway::from_str(front).expect("the front matter is YAML");
+        onepipeline_testfakes::yaml::from_str(front).expect("the front matter is YAML");
     edit(&mut parsed);
-    let rendered = serde_norway::to_string(&parsed).expect("the front matter renders");
+    let rendered =
+        onepipeline_testfakes::yaml::to_string(&parsed).expect("the front matter renders");
     std::fs::write(into, format!("---\n{rendered}---\n{body}")).expect("the document is written");
 }
 
@@ -1810,7 +1811,7 @@ fn an_adoption_of_a_run_an_older_build_started_reads_the_furthest_along_item_by_
                 &stale_shadow,
                 format!(
                     "---\n{}---\n## What\nAgain.\n",
-                    serde_norway::to_string(&json!({
+                    onepipeline_testfakes::yaml::to_string(&json!({
                         "title": "flaky-2",
                         "status": "in progress",
                         "metadata": {"onepipeline.id": "flaky-2", "onetaskgraph.origin": attempt_id},
@@ -1971,7 +1972,7 @@ fn shadow_document(path: &Path) -> Result<Value, String> {
         .ok_or_else(|| format!("{} opens no front matter: {text:?}", path.display()))?
         .split_once("---\n")
         .ok_or_else(|| format!("{} closes no front matter: {text:?}", path.display()))?;
-    let parsed: Value = serde_norway::from_str(front)
+    let parsed: Value = onepipeline_testfakes::yaml::from_str(front)
         .map_err(|error| format!("{} is not YAML ({error}): {text:?}", path.display()))?;
     let body = body.strip_prefix('\n').unwrap_or(body);
     let body = body.strip_suffix('\n').unwrap_or(body);

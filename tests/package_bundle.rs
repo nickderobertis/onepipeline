@@ -70,13 +70,13 @@ fn the_packaged_crate_carries_the_committed_events_bundle() {
 fn release_packaging_retains_every_target_and_installs_apple_silicon_before_publication() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let text = std::fs::read_to_string(root.join(".github/workflows/release.yml")).unwrap();
-    let release: serde_norway::Value = serde_norway::from_str(&text).unwrap();
+    let release: serde_json::Value = onepipeline_testfakes::yaml::from_str(&text).unwrap();
     let jobs = &release["jobs"];
     let darwin = &jobs["darwin"];
     assert_eq!(darwin["runs-on"].as_str(), Some("macos-latest"));
     assert!(darwin.get("strategy").is_none());
     let runs: Vec<&str> = darwin["steps"]
-        .as_sequence()
+        .as_array()
         .unwrap()
         .iter()
         .filter_map(|s| s["run"].as_str())
@@ -130,7 +130,7 @@ fn release_packaging_retains_every_target_and_installs_apple_silicon_before_publ
     declared.sort_unstable();
     for job in ["upload", "build-wheels", "build-npm"] {
         let mut targets: Vec<&str> = jobs[job]["strategy"]["matrix"]["include"]
-            .as_sequence()
+            .as_array()
             .unwrap()
             .iter()
             .map(|leg| leg["target"].as_str().unwrap())
@@ -144,7 +144,7 @@ fn release_packaging_retains_every_target_and_installs_apple_silicon_before_publ
         ("publish-npm", "build-npm"),
     ] {
         let needs: Vec<&str> = jobs[publisher]["needs"]
-            .as_sequence()
+            .as_array()
             .unwrap()
             .iter()
             .map(|v| v.as_str().unwrap())
@@ -164,7 +164,7 @@ fn release_packaging_retains_every_target_and_installs_apple_silicon_before_publ
         "payload-hashes-darwin",
     ] {
         assert!(darwin["steps"]
-            .as_sequence()
+            .as_array()
             .unwrap()
             .iter()
             .any(|step| step["with"]["name"].as_str() == Some(artifact)));

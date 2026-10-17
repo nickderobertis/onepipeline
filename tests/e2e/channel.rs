@@ -1491,7 +1491,7 @@ fn an_observer_graph_whose_judge_names_no_command_is_refused_and_the_run_goes_on
     // written out here: what this journey is about is that *one* field being
     // unusable, and a hand-written stand-in would drift into proving something
     // else about a document nobody ships.
-    let mut config: oneagentgraph::config::GraphConfig = serde_norway::from_str(
+    let mut config: oneagentgraph::config::GraphConfig = onepipeline_testfakes::yaml::from_str(
         &std::fs::read_to_string(world.shipped_dag_graph()).expect("the shipped dag-scope graph"),
     )
     .expect("the shipped dag-scope graph parses");
@@ -1513,7 +1513,7 @@ fn an_observer_graph_whose_judge_names_no_command_is_refused_and_the_run_goes_on
     let broken = graphs.join("dag-scope-nocommand.yaml");
     std::fs::write(
         &broken,
-        serde_norway::to_string(&config).expect("the emptied graph serializes"),
+        onepipeline_testfakes::yaml::to_string(&config).expect("the emptied graph serializes"),
     )
     .expect("the graph is written");
 

@@ -37,7 +37,7 @@ onetaskgraph-root := justfile_directory() / "target" / "tools" / ("onetaskgraph-
 
 # The budget checker `budgets.yaml` is measured with (`just budgets`), installed at this
 # release into this clone's own build directory, never onto `PATH`, as `onetaskgraph` is above.
-onebudgetspec-version := "0.1.1"
+onebudgetspec-version := "0.1.5"
 onebudgetspec-root := justfile_directory() / "target" / "tools" / ("onebudgetspec-" + onebudgetspec-version)
 
 # The pruner `just pool-maintenance` runs, installed onto `PATH` by `bootstrap` (the

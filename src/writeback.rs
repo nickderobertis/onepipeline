@@ -3217,9 +3217,7 @@ fn shadow_origin(path: &Path) -> Option<GlobalId> {
         .strip_prefix("---\n")
         .and_then(|rest| rest.split_once("\n---\n"))
         .ok_or_else(|| "it opens and closes no front matter".to_owned())
-        .and_then(|(front, _)| {
-            serde_norway::from_str::<Value>(front).map_err(|error| error.to_string())
-        })
+        .and_then(|(front, _)| crate::yaml::from_str::<Value>(front))
         .and_then(|front| match &front["metadata"][GlobalId::ORIGIN_KEY] {
             Value::Null => Ok(None),
             Value::String(origin) => origin
@@ -4052,7 +4050,7 @@ fn task_document(
 /// place is truncated first, so a listing arriving in that window parses an empty file and
 /// reports the run's own board as malformed.
 fn document(path: &Path, front: &Value, body: &str) -> Result<(), String> {
-    let yaml = serde_norway::to_string(front).map_err(|e| e.to_string())?;
+    let yaml = crate::yaml::to_string(front)?;
     crate::ledger::write_atomic(
         path,
         format!("---\n{yaml}---\n{body}").as_bytes(),
@@ -6512,7 +6510,7 @@ mod tests {
             .split_once("---\n")
             .expect("a projected document closes its front matter");
         (
-            serde_norway::from_str(front).expect("the front matter is YAML"),
+            crate::yaml::from_str(front).expect("the front matter is YAML"),
             body.to_owned(),
         )
     }
@@ -6631,6 +6629,156 @@ mod tests {
                     .join(format!("{}.md", super::task_file(node))),
             )
         }
+    }
+
+    /// What the base's write-back wrote for [`yaml_sensitive`], read back by the store, captured
+    /// there and committed.
+    const SHADOW_READ_BACK: &str =
+        include_str!("../tests/fixtures/real-documents/writeback-read-back.json");
+
+    /// The fixture with values a YAML writer could change the meaning of: words a YAML 1.1
+    /// reader takes for booleans, number-, date- and null-like strings, a title past the width
+    /// a folding writer folds at, flow indicators, comment marks and quotes, and multi-line
+    /// content holding blank and whitespace-only lines.
+    fn yaml_sensitive() -> Fixture {
+        let mut fixture = Fixture::new("yaml-sensitive");
+        let design = fixture
+            .snapshot
+            .nodes
+            .get_mut("design")
+            .expect("design exists");
+        design.title = Some(
+            "on: the 1.0 release — design it [carefully], {first}, # not a comment, and keep this \
+             one title well past eighty characters"
+                .to_owned(),
+        );
+        design.task = Some(
+            "## What\nyes\n\n  indented: 0012\n\t\n- no\n\n## Acceptance criteria\n- \
+                       \"quoted\" and 'single' — 2026-10-14\n"
+                .to_owned(),
+        );
+        let build = fixture
+            .snapshot
+            .nodes
+            .get_mut("build")
+            .expect("build exists");
+        build.title = Some("yes".to_owned());
+        build.task = Some("null".to_owned());
+        fixture.destination = destination(
+            "A person's own board: \"quoted\" # and on: yes",
+            &["planning", "on", "0012"],
+        );
+        fixture.destination.metadata.extend([
+            ("authored.on".to_owned(), json!("on")),
+            ("authored.number".to_owned(), json!("1e3")),
+            ("authored.date".to_owned(), json!("2026-10-14T00:00:00Z")),
+            ("authored.float".to_owned(), json!(1.5)),
+            ("authored.flag".to_owned(), json!(true)),
+            ("authored.none".to_owned(), Value::Null),
+            (
+                "authored.nested".to_owned(),
+                json!({"list": ["~", "0x1F", ""], "y": "n"}),
+            ),
+        ]);
+        fixture
+    }
+
+    /// A store answer as the values it read: less where on disk the document sits and the
+    /// digest of its bytes, which a writer may quote or fold differently for the same values.
+    fn read_value(item: impl serde::Serialize) -> Value {
+        let mut value = serde_json::to_value(item).expect("a store value serialises");
+        let fields = value.as_object_mut().expect("a store item is an object");
+        fields.remove("location");
+        fields.remove("version");
+        value
+    }
+
+    /// The shadow store's project and task documents, written by the real write-back from
+    /// [`yaml_sensitive`], read back by the linked `local-md` source to the values the base's
+    /// write-back produced, and edited in place by it — a task's status and metadata, the
+    /// project's metadata — leaving every other value as it read.
+    #[test]
+    fn the_shadow_documents_read_back_and_edit_in_place_as_the_base_wrote_them() {
+        let fixture = yaml_sensitive();
+        fixture.project();
+        let store = crate::taskgraph::Store::at(fixture.dir.to_path_buf());
+        let attempt = super::Attempt::open(&store, &fixture.snapshot)
+            .unwrap_or_else(|failed| panic!("{}", failed.reason));
+        let project = super::shadow_id(&super::project_file(&fixture.snapshot.project));
+        let read_project = || {
+            let answer = attempt
+                .runtime
+                .block_on(attempt.engine.project(&project))
+                .expect("the shadow source answers");
+            read_value(
+                super::shown(super::PROJECT_SHOW, &project, answer)
+                    .unwrap_or_else(|failed| panic!("{}", failed.reason))
+                    .item,
+            )
+        };
+        let read_task = |node: &str| {
+            let id = super::member_id(&fixture.snapshot, node);
+            let answer = attempt
+                .runtime
+                .block_on(attempt.engine.task(&id))
+                .expect("the shadow source answers");
+            read_value(
+                super::shown(super::TASK_SHOW, &id, answer)
+                    .unwrap_or_else(|failed| panic!("{}", failed.reason))
+                    .item,
+            )
+        };
+        let read = json!({
+            "project": read_project(),
+            "tasks": {"build": read_task("build"), "design": read_task("design")},
+        });
+        let expected: Value =
+            serde_json::from_str(SHADOW_READ_BACK).expect("the captured values are JSON");
+        assert_eq!(read, expected, "the shadow documents read back differently");
+
+        let design = super::member_id(&fixture.snapshot, "design");
+        let key = MetadataKey::new("authored.reviewed".to_owned()).expect("a metadata key");
+        let status = onetaskgraph_plugin_api::Status {
+            category: StatusCategory::Cancelled,
+            name: "cancelled".to_owned(),
+        };
+        attempt
+            .runtime
+            .block_on(attempt.engine.update_task(
+                &design,
+                &TaskUpdate {
+                    status: Some(status.clone()),
+                    metadata_set: BTreeMap::from([(key.clone(), json!("on"))]),
+                    ..TaskUpdate::default()
+                },
+            ))
+            .expect("the store edits the task document in place");
+        let mut edited = read["tasks"]["design"].clone();
+        edited["status"] = json!(status);
+        edited["metadata"]["authored.reviewed"] = json!("on");
+        assert_eq!(
+            read_task("design"),
+            edited,
+            "the edit changed more of the task than its status and one metadata key"
+        );
+
+        attempt
+            .runtime
+            .block_on(
+                attempt
+                    .engine
+                    .set_project_metadata(&project, &key, &json!("yes")),
+            )
+            .expect("the store edits the project document in place");
+        let mut edited = read["project"].clone();
+        edited["metadata"]["authored.reviewed"] = json!("yes");
+        let after = read_project();
+        assert_eq!(after["metadata"], edited["metadata"]);
+        assert_eq!(
+            (&after["title"], &after["content"], &after["labels"]),
+            (&edited["title"], &edited["content"], &edited["labels"]),
+            "the edit changed more of the project than one metadata key"
+        );
     }
 
     /// The same engine reads the stable local shadow again after each command ends.

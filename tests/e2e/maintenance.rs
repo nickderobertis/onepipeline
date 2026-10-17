@@ -820,6 +820,19 @@ fn the_flag_beats_the_key_a_blank_names_none_and_a_bad_schedule_is_refused_befor
             bad("spanless", "version: 1\ndefault:\n  every: 7x\n"),
             "`every`",
         ),
+        // `<<` is an ordinary key, so a schedule merging another mapping in names it.
+        (
+            bad(
+                "merged",
+                "version: 1\ndefault:\n  every: 7d\n<<: {rules: []}\n",
+            ),
+            "unknown field `<<`",
+        ),
+        // Refused before any key exists, so it says where in the file instead.
+        (
+            bad("unclosed", "[\n"),
+            "unclosed bracket '[' at line 1, column 1",
+        ),
     ] {
         world
             .run_from(
