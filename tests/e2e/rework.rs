@@ -88,7 +88,7 @@ fn opened_from(world: &World, branch: &str) -> usize {
 
 /// Whether `ancestor` is an ancestor of `of` on the origin.
 fn is_ancestor(world: &World, ancestor: &str, of: &str) -> bool {
-    std::process::Command::new("git")
+    onepipeline_testfakes::profile::process::Command::new("git")
         .args(["merge-base", "--is-ancestor", ancestor, of])
         .current_dir(service(world).origin)
         .status()

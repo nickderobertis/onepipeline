@@ -478,7 +478,7 @@ fn concurrency_bounds_how_many_nodes_are_in_flight_at_once() {
         world.events_of("bounded", "node-dispatched").len() == 2
     });
     // Give a third a chance to appear if the bound were not honoured.
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_millis(300));
     assert_eq!(
         world.events_of("bounded", "node-dispatched").len(),
         2,
@@ -986,7 +986,7 @@ fn a_worker_that_goes_quiet_is_surfaced_without_holding_anything_back() {
     assert_eq!(reported["payload"]["persona"], "engineer");
 
     // A node is reported once per quiet stretch, not once per pass.
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_millis(500));
     assert_eq!(
         world
             .events_of("quiet", "quiet-worker")

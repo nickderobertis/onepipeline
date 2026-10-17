@@ -410,17 +410,18 @@ fn a_run_nothing_watches_blocks_once_per_condition_and_the_memory_says_which() {
     );
 
     // Watched, both of them: nothing to report, silence, and the memory removed.
-    let mut watches: Vec<std::process::Child> = [run.as_str(), second.as_str()]
-        .iter()
-        .map(|run| {
-            owner
-                .cmd(&["watch", run, "--timeout", "none"])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-                .expect("the watch starts")
-        })
-        .collect();
+    let mut watches: Vec<onepipeline_testfakes::profile::process::Child> =
+        [run.as_str(), second.as_str()]
+            .iter()
+            .map(|run| {
+                owner
+                    .cmd(&["watch", run, "--timeout", "none"])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .expect("the watch starts")
+            })
+            .collect();
     // Waited on by the records the watches write rather than by asking a
     // process: a watch records itself under the run's `watchers/` directory
     // before it waits, and that file is what makes the run watched.
@@ -1039,7 +1040,7 @@ fn declared_sources_combine_with_the_verbs_own_verdict_and_continue_per_source()
         assert_eq!(source.environments(), vec![session.clone()]);
     }
     // And by hand, those same bytes drive the same answer out of the source.
-    let by_hand = std::process::Command::new(&refusing.command)
+    let by_hand = onepipeline_testfakes::profile::process::Command::new(&refusing.command)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()
@@ -1385,7 +1386,7 @@ fn a_source_that_cannot_be_consulted_refuses_the_stop_naming_itself_and_never_pa
         if command.ends_with("/left-behind") {
             let pid = std::fs::read_to_string(&left_behind).expect("the pid it left behind");
             owner.until("what the source left behind to be ended", |_| {
-                !std::process::Command::new("kill")
+                !onepipeline_testfakes::profile::process::Command::new("kill")
                     .args(["-0", pid.trim()])
                     .status()
                     .expect("kill runs")

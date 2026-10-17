@@ -659,7 +659,7 @@ fn a_public_consumer_starts_from_one_neutral_export_commit_and_the_edge_adds_no_
     );
     assert_eq!(exported, "a generic example");
     let private_head = producer["head"].as_str().expect("a kept head");
-    let reachable = std::process::Command::new("git")
+    let reachable = onepipeline_testfakes::profile::process::Command::new("git")
         .args(["cat-file", "-e", &format!("{private_head}^{{commit}}")])
         .current_dir(&library.origin)
         .status()
@@ -1770,31 +1770,32 @@ fn a_plan_naming_no_private_repository_derives_no_term_even_where_the_registry_c
     .expect("a broken declaration");
     crate::harness::git(&world, &c.checkout, &["add", "-A"]);
     crate::harness::git(&world, &c.checkout, &["commit", "-qm", "chore: break it"]);
-    let registry_scoped = std::process::Command::new(crate::harness::onevcs_binary())
-        .args([
-            "boundary",
-            "check",
-            "--destination",
-            "public",
-            "--input",
-            "-",
-        ])
-        .env("ONEVCS_HOME", world.onevcs_home())
-        .env("GIT_CONFIG_GLOBAL", world.gitconfig())
-        .env("ONEVCS_GH", crate::harness::double("fake-gh"))
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .and_then(|mut child| {
-            use std::io::Write;
-            child
-                .stdin
-                .take()
-                .expect("a stdin")
-                .write_all(br#"{"destination":"public","text":["nothing at all"]}"#)?;
-            child.wait_with_output()
-        })
-        .expect("onevcs runs");
+    let registry_scoped =
+        onepipeline_testfakes::profile::process::Command::new(crate::harness::onevcs_binary())
+            .args([
+                "boundary",
+                "check",
+                "--destination",
+                "public",
+                "--input",
+                "-",
+            ])
+            .env("ONEVCS_HOME", world.onevcs_home())
+            .env("GIT_CONFIG_GLOBAL", world.gitconfig())
+            .env("ONEVCS_GH", crate::harness::double("fake-gh"))
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write;
+                child
+                    .stdin
+                    .take()
+                    .expect("a stdin")
+                    .write_all(br#"{"destination":"public","text":["nothing at all"]}"#)?;
+                child.wait_with_output()
+            })
+            .expect("onevcs runs");
     assert!(
         !matches!(registry_scoped.status.code(), Some(0 | 1)),
         "a registry-scoped check decided: {}",
@@ -1948,7 +1949,9 @@ fn store_cli_create(
     extra: &[&str],
 ) -> crate::harness::Run {
     let template = world.cmd(&[]);
-    let mut command = std::process::Command::new(crate::harness::onetaskgraph_binary());
+    let mut command = onepipeline_testfakes::profile::process::Command::new(
+        crate::harness::onetaskgraph_binary(),
+    );
     for (key, value) in template.get_envs() {
         match value {
             Some(value) => command.env(key, value),

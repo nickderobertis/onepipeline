@@ -87,7 +87,7 @@ fn wait_record(world: &World, name: &str, kind: &str) {
             began.elapsed().as_secs() < 120,
             "{name}: no {kind} record arrived"
         );
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_millis(100));
     }
 }
 
@@ -237,7 +237,7 @@ fn analysis_reports_the_slower_ending_and_the_discard_invocation_duration() {
         })).unwrap()).unwrap();
         for selector in ["ending", "discard"] {
             let report = world.root.join(format!("{selector}-report.json"));
-            let output = std::process::Command::new("node")
+            let output = onepipeline_testfakes::profile::process::Command::new("node")
                 .arg(
                     Path::new(env!("CARGO_MANIFEST_DIR"))
                         .join("tests/scratch_workload/scratch-budget.mjs"),

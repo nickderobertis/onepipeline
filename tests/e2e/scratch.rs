@@ -1342,7 +1342,7 @@ fn retained_disk_usage_matches_du_for_sparse_files_and_hard_links() {
         .unwrap();
     std::fs::write(dir.join("original"), vec![0; 16384]).unwrap();
     std::fs::hard_link(dir.join("original"), dir.join("alias")).unwrap();
-    let du = std::process::Command::new("du")
+    let du = onepipeline_testfakes::profile::process::Command::new("du")
         .args(["-s", "-B1"])
         .arg(&dir)
         .output()

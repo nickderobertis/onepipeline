@@ -365,7 +365,7 @@ fn an_idle_driver_maintains_a_due_slot_once_and_a_fresh_driver_inside_every_runs
 
     // And one launched after `every` has elapsed maintains the slot again.
     let second = schedule(&world, "second", "1s", "");
-    std::thread::sleep(std::time::Duration::from_millis(1_100));
+    onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_millis(1_100));
     held_run(&world, "third", 2, &["--maintenance-config", &second]).exited(0);
     world.until("the third driver's record", |world| {
         !records(world, "third").is_empty()
@@ -505,7 +505,7 @@ fn maintenance_is_withheld_at_the_ceiling_without_a_free_slot_and_under_no_sched
     world.until("the dispatch", |world| {
         !world.events_of("ceiling", "node-dispatched").is_empty()
     });
-    std::thread::sleep(paces);
+    onepipeline_testfakes::profile::thread::sleep(paces);
     assert_eq!(
         sweeps(&world, "ceiling"),
         0,
@@ -530,7 +530,7 @@ fn maintenance_is_withheld_at_the_ceiling_without_a_free_slot_and_under_no_sched
     full.until("the dispatch", |world| {
         !world.events_of("full", "node-dispatched").is_empty()
     });
-    std::thread::sleep(paces);
+    onepipeline_testfakes::profile::thread::sleep(paces);
     assert_eq!(
         sweeps(&full, "full"),
         0,
@@ -548,7 +548,7 @@ fn maintenance_is_withheld_at_the_ceiling_without_a_free_slot_and_under_no_sched
     world.until("the dispatch", |world| {
         !world.events_of("unscheduled", "node-dispatched").is_empty()
     });
-    std::thread::sleep(paces);
+    onepipeline_testfakes::profile::thread::sleep(paces);
     assert_eq!(
         sweeps(&world, "unscheduled"),
         0,
@@ -666,7 +666,7 @@ fn a_rules_every_beats_the_default_for_the_identity_it_matches() {
         "rules:\n  - match: {host: github.com, owner: owner, name: other}\n    every: 1s\n  - \
          match: {host: github.com, owner: owner, name: service}\n    every: 1s\n",
     );
-    std::thread::sleep(std::time::Duration::from_millis(1_100));
+    onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_millis(1_100));
     held_run(&world, "ruled", 2, &["--maintenance-config", &ruled]).exited(0);
     let launch = world.run_json("ruled", "launch.json");
     assert_eq!(
@@ -980,7 +980,7 @@ fn a_failed_or_timed_out_command_an_unmaintainable_identity_and_an_unlistable_ho
     // releases, bounded at a second.
     let hold = world.root.join("never.go");
     pooled_with_maintenance_bounded(&world, Some(&hold), "1s");
-    std::thread::sleep(std::time::Duration::from_millis(1_100));
+    onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_millis(1_100));
     held_run(&world, "timing", 2, &["--maintenance-config", &second]).exited(0);
     world.until("the record of the timeout", |world| {
         !records(world, "timing").is_empty()
@@ -1009,7 +1009,7 @@ fn a_failed_or_timed_out_command_an_unmaintainable_identity_and_an_unlistable_ho
     // spawn — is that identity's error, and the sweep's one record carries it,
     // naming the key an operator edits.
     pooled_with_command(&world, "[]", "120s");
-    std::thread::sleep(std::time::Duration::from_millis(1_100));
+    onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_millis(1_100));
     held_run(
         &world,
         "unmaintainable",

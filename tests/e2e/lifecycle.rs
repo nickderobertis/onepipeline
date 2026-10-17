@@ -135,7 +135,7 @@ fn preserved_head(world: &World, run: &str, branch: &str) -> String {
 /// Whether a repository's object store holds a commit — the work a branch
 /// carried, which outlives the branch `onevcs` retires once that work landed.
 fn holds_commit(repo: &std::path::Path, sha: &str) -> bool {
-    std::process::Command::new("git")
+    onepipeline_testfakes::profile::process::Command::new("git")
         .args(["cat-file", "-e", &format!("{sha}^{{commit}}")])
         .current_dir(repo)
         .status()
@@ -1939,12 +1939,13 @@ fn a_red_matrix_check_hands_over_the_log_its_name_used_to_cost_it() {
 /// One stored artifact's bytes, through `onevcs artifact cat` — the same verb a
 /// re-dispatched worker is told to run.
 fn artifact_cat(world: &World, id: &str) -> String {
-    let output = std::process::Command::new(crate::harness::onevcs_binary())
-        .args(["artifact", "cat", id])
-        .env("ONEVCS_HOME", world.onevcs_home())
-        .stdin(std::process::Stdio::null())
-        .output()
-        .expect("the onevcs binary runs");
+    let output =
+        onepipeline_testfakes::profile::process::Command::new(crate::harness::onevcs_binary())
+            .args(["artifact", "cat", id])
+            .env("ONEVCS_HOME", world.onevcs_home())
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("the onevcs binary runs");
     assert!(
         output.status.success(),
         "`onevcs artifact cat {id}` failed: {}",
@@ -2892,7 +2893,7 @@ fn a_retry_interrupts_a_publication_waiting_on_its_merge_and_its_replacement_con
     let landed = preserved_head(&world, &run, branch);
     assert_ne!(landed, left, "the replacement published nothing of its own");
     assert!(
-        std::process::Command::new("git")
+        onepipeline_testfakes::profile::process::Command::new("git")
             .args(["merge-base", "--is-ancestor", left, &landed])
             .current_dir(&repo.origin)
             .status()
@@ -3697,7 +3698,7 @@ fn assert_handed_the_conflict(task: &str, base: &str, tip: &str) {
 
 /// Assert the origin's base carries `commit`, naming what it carries instead.
 fn landed_on_origin(world: &World, repo: &Repository, commit: &str) {
-    let ancestor = std::process::Command::new("git")
+    let ancestor = onepipeline_testfakes::profile::process::Command::new("git")
         .args(["merge-base", "--is-ancestor", commit, "main"])
         .current_dir(&repo.origin)
         .env("GIT_CONFIG_GLOBAL", world.gitconfig())
@@ -3722,7 +3723,7 @@ fn commits_carrying_markers(world: &World, repo: &std::path::Path) -> Vec<String
         .filter(|commit| {
             // `git grep` exits 1 for no match, which is the answer wanted here,
             // so it is asked directly rather than through the refusing helper.
-            let found = std::process::Command::new("git")
+            let found = onepipeline_testfakes::profile::process::Command::new("git")
                 .args(["grep", "-q", "-E", "^(<<<<<<<|>>>>>>>)( |$)", commit])
                 .current_dir(repo)
                 .env("GIT_CONFIG_GLOBAL", world.gitconfig())
@@ -8145,7 +8146,7 @@ fn every_dispatch_in_a_session_names_its_session_and_every_dispatch_names_the_ru
 
     // And the verb those two variables serve: from somewhere else, with nothing
     // else in its environment, it renders the node's turns.
-    let rendered = std::process::Command::new(crate::harness::binary())
+    let rendered = onepipeline_testfakes::profile::process::Command::new(crate::harness::binary())
         .args(["transcript", run, "service"])
         .env_clear()
         .env("ONEPIPELINE_RUN_ID", run)
@@ -9767,7 +9768,7 @@ fn a_workspace_wait_is_queued_again_only_once_read_and_an_elapsed_watch_names_th
     });
 
     // Unread, the unchanged wait is not queued again.
-    std::thread::sleep(std::time::Duration::from_secs(4));
+    onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_secs(4));
     let waits = waits_of(&world, &run, "second");
     assert!(
         waits.iter().all(|wait| !wait.previous_read),

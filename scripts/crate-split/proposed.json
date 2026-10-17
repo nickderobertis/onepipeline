@@ -1,0 +1,429 @@
+{
+  "//": "The proposed split. Crates: onepipeline-sys is the five src modules outside the one dependency cycle the other 68 form; onepipeline-core is that cycle; onepipeline is the binary; onepipeline-testfakes is the doubles. Every e2e suite drives the compiled binary, so it exercises the binary crate and through it every crate. The e2e binary splits into the suites below, each with its own module files and the runtime files its tests read; the harness and what it reads are every suite's.",
+  "shared": [
+    "Cargo.toml",
+    "Cargo.lock",
+    "rust-toolchain.toml",
+    ".cargo/config.toml",
+    ".config/nextest.toml",
+    "nx.json",
+    "package.json",
+    "package-lock.json",
+    "justfile"
+  ],
+  "sources": [
+    "src/**",
+    "crates/**",
+    "schemas/**"
+  ],
+  "fallback": "onepipeline-core",
+  "crates": {
+    "onepipeline-sys": {
+      "paths": [
+        "src/sys.rs",
+        "src/error.rs",
+        "src/refusal.rs",
+        "src/rendercost.rs",
+        "src/hostphases.rs"
+      ],
+      "deps": []
+    },
+    "onepipeline-core": {
+      "paths": [
+        "src/**",
+        "schemas/**"
+      ],
+      "deps": [
+        "onepipeline-sys"
+      ]
+    },
+    "onepipeline": {
+      "paths": [
+        "src/main.rs"
+      ],
+      "deps": [
+        "onepipeline-core",
+        "onepipeline-testfakes"
+      ]
+    },
+    "onepipeline-testfakes": {
+      "paths": [
+        "crates/testfakes/**"
+      ],
+      "deps": []
+    }
+  },
+  "suites": {
+    "e2e-landing": {
+      "paths": [
+        "tests/e2e/main.rs",
+        "tests/e2e/harness.rs",
+        "tests/e2e/hook.sh",
+        "tests/e2e/hook.bat",
+        "tests/e2e/probe.sh",
+        "tests/e2e/probe.bat",
+        "graphs/**",
+        "personas/**",
+        "oneharness.toml",
+        "clippy.toml",
+        "rustfmt.toml",
+        "tests/e2e/lifecycle.rs",
+        "tests/e2e/draft_lifecycle.rs",
+        "tests/e2e/landing.rs",
+        "tests/e2e/manager_landings.rs",
+        "tests/e2e/readjust.rs",
+        "tests/e2e/rework.rs",
+        "tests/e2e/stacked_drafts.rs",
+        "tests/e2e/publish_preserve.rs",
+        "tests/e2e/publication_boundary.rs",
+        "tests/e2e/real_vcs.rs",
+        "tests/e2e/amend.rs",
+        "tests/e2e/retirement.rs",
+        "tests/e2e/adoption.rs",
+        "tests/e2e/session.rs",
+        "tests/e2e/session_reuse.rs",
+        "tests/e2e/branch_template.rs",
+        "tests/e2e/destination.rs",
+        "tests/e2e/review.rs",
+        "docs/contract.md",
+        "scripts/stacked-spikes-budget.mjs",
+        "tests/golden/review-results-v1.json"
+      ],
+      "crates": [
+        "onepipeline"
+      ],
+      "modules": [
+        "lifecycle",
+        "draft_lifecycle",
+        "landing",
+        "manager_landings",
+        "readjust",
+        "rework",
+        "stacked_drafts",
+        "publish_preserve",
+        "publication_boundary",
+        "real_vcs",
+        "amend",
+        "retirement",
+        "adoption",
+        "session",
+        "session_reuse",
+        "branch_template",
+        "destination",
+        "review"
+      ]
+    },
+    "e2e-store": {
+      "paths": [
+        "tests/e2e/main.rs",
+        "tests/e2e/harness.rs",
+        "tests/e2e/hook.sh",
+        "tests/e2e/hook.bat",
+        "tests/e2e/probe.sh",
+        "tests/e2e/probe.bat",
+        "graphs/**",
+        "personas/**",
+        "oneharness.toml",
+        "clippy.toml",
+        "rustfmt.toml",
+        "tests/e2e/store.rs",
+        "tests/e2e/writeback_budget.rs",
+        "tests/e2e/writeback_cost.rs",
+        "tests/e2e/writeback_projections.rs",
+        "tests/e2e/delivers.rs",
+        "tests/e2e/multi_source.rs",
+        "tests/e2e/linear_writeback.rs",
+        "tests/e2e/holds.rs",
+        "tests/e2e/continuation.rs",
+        "tests/e2e/crossdag.rs",
+        "tests/e2e/plan.rs",
+        "tests/e2e/plan_check.rs",
+        "tests/e2e/live_edit.rs",
+        "tests/e2e/templates.rs",
+        "tests/e2e/shipped.rs",
+        "tests/e2e/criteria.rs",
+        "tests/e2e/criteria_rule.rs",
+        "tests/e2e/filter.rs",
+        "docs/contract.md",
+        "docs/contract-divergences.md",
+        "examples/**",
+        "tests/e2e/github_loopback.py",
+        "tests/e2e/linear_loopback.rs",
+        "tests/e2e/budget_result.rs",
+        "tests/golden/writeback-comparable-plan.json"
+      ],
+      "crates": [
+        "onepipeline"
+      ],
+      "modules": [
+        "store",
+        "writeback_budget",
+        "writeback_cost",
+        "writeback_projections",
+        "delivers",
+        "multi_source",
+        "linear_writeback",
+        "holds",
+        "continuation",
+        "crossdag",
+        "plan",
+        "plan_check",
+        "live_edit",
+        "templates",
+        "shipped",
+        "criteria",
+        "criteria_rule",
+        "filter",
+        "linear_loopback"
+      ]
+    },
+    "e2e-views": {
+      "paths": [
+        "tests/e2e/main.rs",
+        "tests/e2e/harness.rs",
+        "tests/e2e/hook.sh",
+        "tests/e2e/hook.bat",
+        "tests/e2e/probe.sh",
+        "tests/e2e/probe.bat",
+        "graphs/**",
+        "personas/**",
+        "oneharness.toml",
+        "clippy.toml",
+        "rustfmt.toml",
+        "tests/e2e/views.rs",
+        "tests/e2e/listing.rs",
+        "tests/e2e/host_view.rs",
+        "tests/e2e/summary.rs",
+        "tests/e2e/surface.rs",
+        "tests/e2e/journal.rs",
+        "tests/e2e/checkpoint.rs",
+        "tests/e2e/change_telemetry.rs",
+        "tests/e2e/compatibility.rs",
+        "tests/e2e/layout_document.rs",
+        "docs/contract-divergences.md",
+        "scripts/host-view-measure.mjs",
+        "tests/e2e/host_view_fixture.mjs",
+        "tests/golden/**"
+      ],
+      "crates": [
+        "onepipeline"
+      ],
+      "modules": [
+        "views",
+        "listing",
+        "host_view",
+        "summary",
+        "surface",
+        "journal",
+        "checkpoint",
+        "change_telemetry",
+        "compatibility",
+        "layout_document"
+      ]
+    },
+    "e2e-dispatch": {
+      "paths": [
+        "tests/e2e/main.rs",
+        "tests/e2e/harness.rs",
+        "tests/e2e/hook.sh",
+        "tests/e2e/hook.bat",
+        "tests/e2e/probe.sh",
+        "tests/e2e/probe.bat",
+        "graphs/**",
+        "personas/**",
+        "oneharness.toml",
+        "clippy.toml",
+        "rustfmt.toml",
+        "tests/e2e/dispatch.rs",
+        "tests/e2e/agents.rs",
+        "tests/e2e/dispatch_env_hook.rs",
+        "tests/e2e/envelope_reviewer.rs",
+        "tests/e2e/node_validator.rs",
+        "tests/e2e/turns.rs",
+        "tests/e2e/malformed_envelopes.rs",
+        "tests/e2e/bus_config.rs",
+        "docs/contract.md",
+        "docs/contract-divergences.md",
+        "tests/e2e/dispatch_env_hook.sh",
+        "tests/e2e/dispatch_env_hook.bat"
+      ],
+      "crates": [
+        "onepipeline"
+      ],
+      "modules": [
+        "dispatch",
+        "agents",
+        "dispatch_env_hook",
+        "envelope_reviewer",
+        "node_validator",
+        "turns",
+        "malformed_envelopes",
+        "bus_config"
+      ]
+    },
+    "e2e-channel": {
+      "paths": [
+        "tests/e2e/main.rs",
+        "tests/e2e/harness.rs",
+        "tests/e2e/hook.sh",
+        "tests/e2e/hook.bat",
+        "tests/e2e/probe.sh",
+        "tests/e2e/probe.bat",
+        "graphs/**",
+        "personas/**",
+        "oneharness.toml",
+        "clippy.toml",
+        "rustfmt.toml",
+        "tests/e2e/channel.rs",
+        "tests/e2e/ask.rs",
+        "tests/e2e/boundary.rs",
+        "tests/e2e/recorded_channel.rs",
+        "docs/contract.md",
+        "docs/contract-divergences.md",
+        "scripts/record-channel-answers.sh",
+        "tests/recorded/**",
+        "tests/e2e/recorded_support.rs"
+      ],
+      "crates": [
+        "onepipeline"
+      ],
+      "modules": [
+        "channel",
+        "ask",
+        "boundary",
+        "recorded_channel"
+      ]
+    },
+    "e2e-runs": {
+      "paths": [
+        "tests/e2e/main.rs",
+        "tests/e2e/harness.rs",
+        "tests/e2e/hook.sh",
+        "tests/e2e/hook.bat",
+        "tests/e2e/probe.sh",
+        "tests/e2e/probe.bat",
+        "graphs/**",
+        "personas/**",
+        "oneharness.toml",
+        "clippy.toml",
+        "rustfmt.toml",
+        "tests/e2e/driver.rs",
+        "tests/e2e/driver_exit.rs",
+        "tests/e2e/shutdown.rs",
+        "tests/e2e/cancellation.rs",
+        "tests/e2e/run_ending.rs",
+        "tests/e2e/run_end_hooks.rs",
+        "tests/e2e/concurrency.rs",
+        "tests/e2e/out_of_band.rs",
+        "tests/e2e/unreadable_sessions.rs",
+        "tests/e2e/older_launch_record.rs",
+        "tests/e2e/flow.rs",
+        "docs/contract.md",
+        "docs/contract-divergences.md",
+        "tests/e2e/run_end_hook.sh",
+        "tests/e2e/run_end_hook.bat"
+      ],
+      "crates": [
+        "onepipeline"
+      ],
+      "modules": [
+        "driver",
+        "driver_exit",
+        "shutdown",
+        "cancellation",
+        "run_ending",
+        "run_end_hooks",
+        "concurrency",
+        "out_of_band",
+        "unreadable_sessions",
+        "older_launch_record",
+        "flow"
+      ]
+    },
+    "e2e-watch": {
+      "paths": [
+        "tests/e2e/main.rs",
+        "tests/e2e/harness.rs",
+        "tests/e2e/hook.sh",
+        "tests/e2e/hook.bat",
+        "tests/e2e/probe.sh",
+        "tests/e2e/probe.bat",
+        "graphs/**",
+        "personas/**",
+        "oneharness.toml",
+        "clippy.toml",
+        "rustfmt.toml",
+        "tests/e2e/watch.rs",
+        "tests/e2e/unwatched.rs",
+        "tests/e2e/stop_guard.rs",
+        "tests/e2e/wake_budget.rs",
+        "tests/e2e/loopcost.rs",
+        "tests/e2e/unpublished.rs",
+        "docs/stop-guard.md",
+        "docs/contract-divergences.md"
+      ],
+      "crates": [
+        "onepipeline"
+      ],
+      "modules": [
+        "watch",
+        "unwatched",
+        "stop_guard",
+        "wake_budget",
+        "loopcost",
+        "unpublished"
+      ]
+    },
+    "e2e-maintenance": {
+      "paths": [
+        "tests/e2e/main.rs",
+        "tests/e2e/harness.rs",
+        "tests/e2e/hook.sh",
+        "tests/e2e/hook.bat",
+        "tests/e2e/probe.sh",
+        "tests/e2e/probe.bat",
+        "graphs/**",
+        "personas/**",
+        "oneharness.toml",
+        "clippy.toml",
+        "rustfmt.toml",
+        "tests/e2e/maintenance.rs",
+        "tests/e2e/scratch.rs",
+        "tests/e2e/*.rs",
+        "tests/e2e/*.sh",
+        "tests/e2e/*.bat"
+      ],
+      "crates": [
+        "onepipeline"
+      ],
+      "modules": [
+        "maintenance",
+        "scratch"
+      ]
+    },
+    "e2e-harness": {
+      "paths": [
+        "tests/e2e/main.rs",
+        "tests/e2e/harness.rs",
+        "tests/e2e/hook.sh",
+        "tests/e2e/hook.bat",
+        "tests/e2e/probe.sh",
+        "tests/e2e/probe.bat",
+        "graphs/**",
+        "personas/**",
+        "oneharness.toml",
+        "clippy.toml",
+        "rustfmt.toml",
+        "tests/e2e/profiling.rs",
+        "tests/golden/test-profile-record-v2.json"
+      ],
+      "crates": [
+        "onepipeline"
+      ],
+      "modules": [
+        "harness",
+        "profiling"
+      ]
+    }
+  }
+}

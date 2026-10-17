@@ -449,7 +449,9 @@ fn surfaces_queued_while_the_channel_is_being_read_are_each_read_exactly_once() 
                     if !writing.load(std::sync::atomic::Ordering::SeqCst) {
                         return;
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    onepipeline_testfakes::profile::thread::sleep(
+                        std::time::Duration::from_millis(20),
+                    );
                 })
             })
             .collect();
@@ -770,7 +772,7 @@ fn under_strace(
     argv: &[&str],
 ) -> std::process::Output {
     let inner = world.cmd(argv);
-    let mut traced = std::process::Command::new("strace");
+    let mut traced = onepipeline_testfakes::profile::process::Command::new("strace");
     traced
         .arg("-f")
         .arg("-qq")

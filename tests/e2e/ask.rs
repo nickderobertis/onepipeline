@@ -19,7 +19,7 @@
 // `harness.rs` carries the same suppression and the full rationale. The manager's side is
 // not a double either: the listener below is this crate's own `next` and `reply` verbs.
 
-use std::process::{Child, Stdio};
+use onepipeline_testfakes::profile::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -148,7 +148,7 @@ fn question_on(world: &World, run: &str) -> Value {
             Instant::now() < deadline,
             "no `{QUESTION_KIND}` reached the channel of {run}"
         );
-        std::thread::sleep(Duration::from_millis(50));
+        onepipeline_testfakes::profile::thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -359,7 +359,7 @@ fn the_reply_window_is_the_flags_then_the_launch_records_then_the_buss_own() {
     let flagged = run_under(&world, "askflag", &window_of(&[1]));
     let mut asked = asking(&world, &flagged, &["--timeout", "120", "which bound?"], &[]);
     let surface = question_on(&world, &flagged);
-    std::thread::sleep(Duration::from_secs(3));
+    onepipeline_testfakes::profile::thread::sleep(Duration::from_secs(3));
     assert!(
         asked
             .try_wait()
@@ -384,7 +384,7 @@ fn the_reply_window_is_the_flags_then_the_launch_records_then_the_buss_own() {
     let recorded = run_under(&world, "askrecorded", &window_of(&[1, 120]));
     let asked = asking(&world, &recorded, &["which bound?"], &[]);
     let surface = question_on(&world, &recorded);
-    std::thread::sleep(Duration::from_secs(3));
+    onepipeline_testfakes::profile::thread::sleep(Duration::from_secs(3));
     answer(&world, &recorded, &surface, "the wider one");
     let answered = waited(asked);
     assert_eq!(
@@ -401,7 +401,7 @@ fn the_reply_window_is_the_flags_then_the_launch_records_then_the_buss_own() {
     let bare = run_of(&world, "askbare");
     let asked = asking(&world, &bare, &["which bound?"], &[]);
     let surface = question_on(&world, &bare);
-    std::thread::sleep(Duration::from_secs(2));
+    onepipeline_testfakes::profile::thread::sleep(Duration::from_secs(2));
     answer(&world, &bare, &surface, "the bus's own");
     let answered = waited(asked);
     assert_eq!(answered.code, 0, "{}", answered.stderr);
