@@ -294,6 +294,11 @@ def verify(record, quiet=False):
             with zipfile.ZipFile(record['archive']) as archive:
                 if sorted(archive.namelist()) != expected_names:
                     raise ValueError('archive layout mismatch')
+                for info in archive.infolist():
+                    # Unix mode bits, where the archiver recorded any: a link or
+                    # a directory under an expected name is not the file it names.
+                    if info.is_dir() or (info.external_attr >> 16) & 0o170000 not in (0, 0o100000):
+                        raise ValueError(f'archive member is not a regular file: {info.filename}')
                 for name in scripts:
                     if archive.read(Path(name).name) != wheel.read(name):
                         raise ValueError('archive executable differs from wheel payload')

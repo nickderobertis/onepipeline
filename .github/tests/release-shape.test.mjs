@@ -151,7 +151,6 @@ describe("who uploads what", () => {
     }
     const files = all.map((a) => a.file);
     assert.equal(new Set(files).size, files.length, "no two jobs produce the same file");
-    // Each platform's wheel, archive (with its checksum) and npm package.
     for (const platform of PLATFORMS) {
       for (const target of plans[platform].targets) {
         const kinds = plans[platform].artifacts

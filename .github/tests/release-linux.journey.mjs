@@ -782,7 +782,6 @@ describe("publish: the platform-independent artifacts", () => {
       cwd: ROOT,
     });
     checkout = join(checkout, "tree");
-    // The Linux job has published.
     const published = await run("just", ["release-linux", "publish"], {
       env: { ...s.env, ONEPIPELINE_RELEASE_OUT: OUT },
     });
@@ -890,13 +889,11 @@ describe("publish: the crate, and a registry that loses an artifact", () => {
         execFileSync("just", [`release-${platform}`, "plan"], { encoding: "utf8" }),
       );
       for (const artifact of plan.artifacts.filter((a) => a.destination === "github-release")) {
-        s.github
-          .release(TAG)
-          .assets.push({
-            id: s.github.nextId++,
-            name: artifact.file,
-            content: Buffer.from(artifact.file),
-          });
+        s.github.release(TAG).assets.push({
+          id: s.github.nextId++,
+          name: artifact.file,
+          content: Buffer.from(artifact.file),
+        });
       }
     }
     const env = {
