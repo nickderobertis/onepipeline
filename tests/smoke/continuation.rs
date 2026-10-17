@@ -20,9 +20,9 @@
 // stand-in is the paid model turn, at oneharness's own documented per-harness override, as
 // `main.rs` states for this whole tier.
 
+use onepipeline_testfakes::profile::process::{Command, Output};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -76,7 +76,7 @@ fn claim(world: &World, project: &str) -> Value {
             }
             Err(why) => said = why,
         }
-        std::thread::sleep(Duration::from_millis(500));
+        onepipeline_testfakes::profile::thread::sleep(Duration::from_millis(500));
     }
     panic!("the store answered for its project only in part: {said}");
 }
@@ -490,7 +490,7 @@ fn until_or(what: &str, mut ready: impl FnMut() -> bool, why: impl Fn() -> Strin
         if ready() {
             return;
         }
-        std::thread::sleep(Duration::from_secs(3));
+        onepipeline_testfakes::profile::thread::sleep(Duration::from_secs(3));
     }
     panic!("timed out waiting for {what}\n{}", why());
 }
@@ -797,7 +797,7 @@ fn a_stored_project_is_carried_on_by_a_cold_host_that_takes_it_over() {
         .into_iter()
         .map(|name| host(first.on_host(name), &slug))
         .collect();
-    let children: Vec<std::process::Child> = racing
+    let children: Vec<onepipeline_testfakes::profile::process::Child> = racing
         .iter()
         .map(|host| {
             onepipeline(host, &["start", &project, "--detach"])
@@ -823,7 +823,7 @@ fn a_stored_project_is_carried_on_by_a_cold_host_that_takes_it_over() {
             );
             reading = now;
         }
-        std::thread::sleep(Duration::from_millis(500));
+        onepipeline_testfakes::profile::thread::sleep(Duration::from_millis(500));
     }
     let mut left = 0;
     let claim_then = claim(&first, &project);

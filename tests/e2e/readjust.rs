@@ -29,7 +29,7 @@ const SLUG: &str = "owner/service";
 
 /// Make a person's move on the host: `__person <args…>` of the `fake-gh` double.
 fn person(world: &World, args: &[&str]) {
-    let output = std::process::Command::new(double("fake-gh"))
+    let output = onepipeline_testfakes::profile::process::Command::new(double("fake-gh"))
         .arg("__person")
         .args(args)
         .env(onepipeline_testfakes::SCRIPT_DIR_ENV, &world.fakes)
@@ -124,7 +124,7 @@ fn tip(world: &World, branch: &str) -> String {
 
 /// Whether `ancestor` is an ancestor of `of` on the origin.
 fn is_ancestor(world: &World, ancestor: &str, of: &str) -> bool {
-    std::process::Command::new("git")
+    onepipeline_testfakes::profile::process::Command::new("git")
         .args(["merge-base", "--is-ancestor", ancestor, of])
         .current_dir(service(world).origin)
         .status()
@@ -345,7 +345,7 @@ fn a_single_parent_lands(name: &str, head: Head) {
     } else {
         assert!(reopened.is_none(), "{reopened:?}");
     }
-    let a_kept = std::process::Command::new("git")
+    let a_kept = onepipeline_testfakes::profile::process::Command::new("git")
         .args([
             "rev-parse",
             "--verify",
@@ -2167,9 +2167,9 @@ fn an_idle_driver_asks_the_host_nothing() {
     });
     // Past the instant the worker reached its hold, so the window below is the driver's
     // own idle and nothing of x's dispatch.
-    std::thread::sleep(std::time::Duration::from_millis(1500));
+    onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_millis(1500));
     let from = world.invocations().len();
-    std::thread::sleep(std::time::Duration::from_millis(3500));
+    onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_millis(3500));
     let asked = host_calls(&world, from);
     assert!(
         asked.is_empty(),

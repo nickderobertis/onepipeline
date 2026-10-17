@@ -167,7 +167,7 @@ impl LockReader {
                         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
                         .any(|event| event["kind"] == "driver-exited"));
                 }
-                std::thread::sleep(Duration::from_millis(1));
+                onepipeline_testfakes::profile::thread::sleep(Duration::from_millis(1));
             }
             Err("the run's ownership lock was never released".to_string())
         });
@@ -468,7 +468,7 @@ fn a_driver_that_panics_after_adoption_leaves_no_record() {
             break status;
         }
         assert!(Instant::now() < deadline, "the adopter never ended");
-        std::thread::sleep(Duration::from_millis(50));
+        onepipeline_testfakes::profile::thread::sleep(Duration::from_millis(50));
     };
     // 101 is the status a Rust process exits with when a panic ends it.
     assert_eq!(ended.code(), Some(101), "the adopter ended with {ended:?}");
@@ -509,7 +509,11 @@ fn validator_holding_its_second_offer(world: &World) -> (String, PathBuf, PathBu
 /// A `reply` left waiting on its answer as a process of its own, patient enough
 /// that it never takes the run over while a journey reads it.
 #[cfg(unix)]
-fn waiting_reply(world: &World, run: &str, commands: Value) -> std::process::Child {
+fn waiting_reply(
+    world: &World,
+    run: &str,
+    commands: Value,
+) -> onepipeline_testfakes::profile::process::Child {
     use std::io::Write;
     let mut reply = world.cmd(&["reply", run]);
     reply
@@ -628,7 +632,11 @@ fn status_names_an_envelope_the_driver_claimed_and_never_answered() {
 /// A `reply` left waiting on its answer, as [`waiting_reply`], through the
 /// linked `oneagentgraph` a two-party conversation runs under.
 #[cfg(unix)]
-fn waiting_reply_on_agentgraph(world: &World, run: &str, commands: Value) -> std::process::Child {
+fn waiting_reply_on_agentgraph(
+    world: &World,
+    run: &str,
+    commands: Value,
+) -> onepipeline_testfakes::profile::process::Child {
     use std::io::Write;
     let mut reply = world.agentgraph_cmd(&["reply", run]);
     reply
@@ -652,7 +660,7 @@ fn waiting_reply_on_agentgraph(world: &World, run: &str, commands: Value) -> std
 
 /// What a waiting `reply` was told, once it has been told something.
 #[cfg(unix)]
-fn receipt(reply: std::process::Child) -> (Option<i32>, String) {
+fn receipt(reply: onepipeline_testfakes::profile::process::Child) -> (Option<i32>, String) {
     let output = reply.wait_with_output().expect("the reply is waited on");
     (
         output.status.code(),
@@ -862,7 +870,7 @@ fn an_adopter_answers_the_envelopes_its_dead_driver_claimed_and_never_answered()
             Instant::now() < deadline,
             "the adopter never let the run go"
         );
-        std::thread::sleep(Duration::from_millis(100));
+        onepipeline_testfakes::profile::thread::sleep(Duration::from_millis(100));
     }
     assert_eq!(deliveries_of(&world, run, RECOVERED_NOTE), 1);
 }

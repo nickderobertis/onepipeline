@@ -111,9 +111,9 @@ fn a_watch_reads_the_run_only_when_it_moves_and_reports_a_raised_surface_at_once
     let mut held_still = false;
     for _ in 0..10 {
         let before = marks();
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_millis(500));
         let read_before = reads();
-        std::thread::sleep(QUIET);
+        onepipeline_testfakes::profile::thread::sleep(QUIET);
         if marks() == before {
             assert_eq!(
                 reads(),
@@ -165,7 +165,7 @@ fn a_watch_reads_the_run_only_when_it_moves_and_reports_a_raised_surface_at_once
             "the watch never returned:\n{}",
             world.dump()
         );
-        std::thread::sleep(std::time::Duration::from_millis(2));
+        onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_millis(2));
     };
     let exited_at = Instant::now();
     reader.join().expect("the reader finishes");
@@ -3198,7 +3198,11 @@ fn drained(world: &World, run: &str) -> Vec<String> {
 }
 
 /// A watch spawned to wait, and the moment it armed on the run.
-fn armed_watch(world: &World, run: &str, args: &[&str]) -> std::process::Child {
+fn armed_watch(
+    world: &World,
+    run: &str,
+    args: &[&str],
+) -> onepipeline_testfakes::profile::process::Child {
     armed_watch_with(world, run, args, &[])
 }
 
@@ -3208,7 +3212,7 @@ fn armed_watch_with(
     run: &str,
     args: &[&str],
     env: &[(&str, &str)],
-) -> std::process::Child {
+) -> onepipeline_testfakes::profile::process::Child {
     let before = armed(world, run);
     let mut argv = vec!["watch", run];
     argv.extend_from_slice(args);
@@ -3226,7 +3230,7 @@ fn armed_watch_with(
 }
 
 /// What a spawned watch returned: its status and its last machine record.
-fn finished(child: std::process::Child) -> (i32, Value, String) {
+fn finished(child: onepipeline_testfakes::profile::process::Child) -> (i32, Value, String) {
     let output = child.wait_with_output().expect("the watch exits");
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();

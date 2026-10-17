@@ -315,7 +315,7 @@ fn a_summary_the_store_has_moved_past_is_refolded_rather_than_served() {
     // boundary by an append that met a dead writer's fragment is left by a *crash*, not by
     // an interface; what is written back here is the store's own bytes, unchanged.
     let store = std::fs::read(paths.journal()).expect("the store");
-    std::thread::sleep(std::time::Duration::from_millis(1_100));
+    onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_millis(1_100));
     std::fs::write(paths.journal(), &store).expect("a store rewritten to its own length");
     // llmlint: ignore-end[tests_mirror_real_usage]
     let after = RunSummary::of(&paths).expect("the run reads");
@@ -650,7 +650,7 @@ fn a_record_appended_after_a_half_written_line_is_finished_leaves_the_summary_cu
         .cmd(&["stop", &run, "--force"])
         .spawn()
         .expect("the binary starts");
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_millis(500));
     assert!(
         stopping.try_wait().expect("the stop is waitable").is_none(),
         "the stop appended to a store another writer was holding"

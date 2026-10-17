@@ -30,8 +30,8 @@
 // each journey starts from. `oneagentgraph` is the double, because what is under test is
 // which session a dispatch runs in rather than what the dispatch writes.
 
+use onepipeline_testfakes::profile::process::{Command, Stdio};
 use std::path::Path;
-use std::process::{Command, Stdio};
 
 use serde_json::{json, Value};
 
@@ -518,7 +518,7 @@ fn group_holds_anything(group: i32) -> bool {
 ///
 /// A publication is a tree, not a process — the owner starts a worker, the worker
 /// calls `onevcs`, `onevcs` runs `git push`, and git runs the `pre-push` hook
-/// this journey is holding — so [`std::process::Child::kill`], which signals the
+/// this journey is holding — so [`onepipeline_testfakes::profile::process::Child::kill`], which signals the
 /// one pid it was given, leaves the push alive to land once the rendezvous is
 /// released. Three things make this stop mean what the journey says instead.
 ///
@@ -535,7 +535,11 @@ fn group_holds_anything(group: i32) -> bool {
 /// Unix-only, and there is no arm beside it — the journey below says why, and
 /// carries the same gate.
 #[cfg(unix)]
-fn stop_the_publication(world: &World, owner: &mut std::process::Child, rendezvous: &Path) {
+fn stop_the_publication(
+    world: &World,
+    owner: &mut onepipeline_testfakes::profile::process::Child,
+    rendezvous: &Path,
+) {
     let held = rendezvous.to_string_lossy().into_owned();
     world.until("the pre-push hook to take hold of the publication", |_| {
         !holders_of(&held).is_empty()
@@ -554,7 +558,7 @@ fn stop_the_publication(world: &World, owner: &mut std::process::Child, rendezvo
         if !groups.iter().copied().any(group_holds_anything) && holders_of(&held).is_empty() {
             return;
         }
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_millis(50));
     }
     panic!(
         "the stopped run's publication is still running {PUBLICATION_STOPS_WITHIN:?} after \

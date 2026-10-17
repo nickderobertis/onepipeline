@@ -534,11 +534,11 @@ fn an_attached_launch_folds_nothing_while_its_run_records_nothing() {
     });
     reporting(&world, "idle");
     // The launch's own records are behind the window before it opens.
-    std::thread::sleep(Duration::from_secs(2));
+    onepipeline_testfakes::profile::thread::sleep(Duration::from_secs(2));
 
     let wrote = world.journal("idle").len();
     let before = counts(&world, "idle");
-    std::thread::sleep(Duration::from_secs(3));
+    onepipeline_testfakes::profile::thread::sleep(Duration::from_secs(3));
     let did = counts(&world, "idle").since(before);
     assert_eq!(
         world.journal("idle").len(),

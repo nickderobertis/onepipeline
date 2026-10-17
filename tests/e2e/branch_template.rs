@@ -778,7 +778,7 @@ fn a_name_a_ref_may_not_hold_is_still_cut_as_a_valid_branch() {
     let branch = &branches[0];
     assert_ne!(branch, "Ship it: v2?..now/service");
     assert!(branch.ends_with("/service"), "{branch}");
-    let checked = std::process::Command::new("git")
+    let checked = onepipeline_testfakes::profile::process::Command::new("git")
         .args(["check-ref-format", "--branch", branch])
         .output()
         .expect("git runs");

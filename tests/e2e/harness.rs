@@ -34,12 +34,37 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
 
+use onepipeline_testfakes::profile;
+use onepipeline_testfakes::profile::process::{Command, Output, Stdio};
 use onepipeline_testfakes::{
     rendezvous_script, segment, CLI_BIN_ENV, EVALUATOR_OPENING, MEMBER_ENV, SCRIPT_DIR_ENV,
 };
 use serde_json::{json, Value};
+
+/// Start this test process's profile before `main`, so its wall clock is the
+/// process's and a test that never reaches the harness still leaves a record.
+///
+/// A constructor rather than a call in [`World::new`], because the records are
+/// one per test and not every test makes a world. Each platform's loader runs
+/// the functions its own section lists before `main`: `.init_array` on Linux,
+/// `__mod_init_func` on macOS, and the C runtime's `.CRT$XCU` on Windows.
+/// Records land under `target/test-profile/<binary>/`; `onepipeline_testfakes::
+/// profile` says what one holds.
+#[used]
+#[cfg_attr(target_os = "linux", link_section = ".init_array")]
+#[cfg_attr(target_vendor = "apple", link_section = "__DATA,__mod_init_func")]
+#[cfg_attr(windows, link_section = ".CRT$XCU")]
+static PROFILED: extern "C" fn() = profiled;
+
+extern "C" fn profiled() {
+    profile::start(
+        env!("CARGO_CRATE_NAME"),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-profile"),
+    );
+}
 
 /// The harness double draws its stdout as the released `oneharness` CLI does: the
 /// readable **text** view unless JSON is asked for by name.
@@ -58,11 +83,11 @@ use serde_json::{json, Value};
 #[test]
 fn the_harness_double_draws_its_stream_as_the_released_cli_does() {
     let fakes = std::env::temp_dir().join(format!("onepipeline-format-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&fakes);
+    let _ = profile::fs::remove_dir_all(&fakes);
     let worktree = fakes.join("worktree");
-    std::fs::create_dir_all(&worktree).expect("a scratch directory for the double");
+    profile::fs::create_dir_all(&worktree).expect("a scratch directory for the double");
     let config = fakes.join("role.toml");
-    std::fs::write(&config, "harnesses = [\"claude-code\"]\n").expect("the config is written");
+    profile::fs::write(&config, "harnesses = [\"claude-code\"]\n").expect("the config is written");
     let run = |side: &[&str], extra: &[&str]| -> Output {
         Command::new(double("fake-oneharness"))
             .arg("run")
@@ -183,7 +208,7 @@ fn the_harness_double_draws_its_stream_as_the_released_cli_does() {
         serde_json::from_str::<Value>(&compact).expect("one JSON report"),
         parsed
     );
-    let _ = std::fs::remove_dir_all(&fakes);
+    let _ = profile::fs::remove_dir_all(&fakes);
 }
 
 /// The harness double takes `--config` **repeated**, and layers the files in the
@@ -199,11 +224,11 @@ fn the_harness_double_draws_its_stream_as_the_released_cli_does() {
 #[test]
 fn the_harness_double_layers_a_repeated_config_in_order() {
     let fakes = std::env::temp_dir().join(format!("onepipeline-layers-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&fakes);
-    std::fs::create_dir_all(&fakes).expect("a scratch directory for the double");
+    let _ = profile::fs::remove_dir_all(&fakes);
+    profile::fs::create_dir_all(&fakes).expect("a scratch directory for the double");
     let write = |name: &str, text: &str| -> String {
         let path = fakes.join(name);
-        std::fs::write(&path, text).expect("the config is written");
+        profile::fs::write(&path, text).expect("the config is written");
         path.to_string_lossy().into_owned()
     };
     let codex = write("codex.toml", "harnesses = [\"codex\"]\n");
@@ -241,11 +266,11 @@ fn the_harness_double_layers_a_repeated_config_in_order() {
     // and its nested evaluator turn is recorded with both files' texts and
     // answers under the chain the later one names.
     let worktree = fakes.join("worktree");
-    std::fs::create_dir_all(&worktree).expect("the agent side's worktree");
-    std::fs::write(fakes.join("harness.nested"), "--no-history").expect("the nested script");
+    profile::fs::create_dir_all(&worktree).expect("the agent side's worktree");
+    profile::fs::write(fakes.join("harness.nested"), "--no-history").expect("the nested script");
     // The direct turns above recorded these same files, so what is read back
     // below has to be the outer turn's alone.
-    std::fs::remove_file(fakes.join("invocations.jsonl")).expect("the direct turns recorded");
+    profile::fs::remove_file(fakes.join("invocations.jsonl")).expect("the direct turns recorded");
     let outer = Command::new(double("fake-oneharness"))
         .args([
             "run",
@@ -268,13 +293,13 @@ fn the_harness_double_layers_a_repeated_config_in_order() {
         "{}",
         String::from_utf8_lossy(&outer.stderr)
     );
-    std::fs::remove_file(fakes.join("harness.nested")).expect("the nested script is removed");
-    let recorded: Vec<Value> = std::fs::read_to_string(fakes.join("invocations.jsonl"))
+    profile::fs::remove_file(fakes.join("harness.nested")).expect("the nested script is removed");
+    let recorded: Vec<Value> = profile::fs::read_to_string(fakes.join("invocations.jsonl"))
         .expect("the double records its invocations")
         .lines()
         .map(|line| serde_json::from_str(line).expect("one JSON record per line"))
         .collect();
-    let texts = |path: &str| std::fs::read_to_string(path).expect("the config is readable");
+    let texts = |path: &str| profile::fs::read_to_string(path).expect("the config is readable");
     let nested_configs: Vec<&Value> = recorded
         .iter()
         .filter(|call| call["tool"] == "oneharness-config")
@@ -305,7 +330,7 @@ fn the_harness_double_layers_a_repeated_config_in_order() {
         stderr.contains("gone.toml") && stderr.contains("not a file"),
         "{stderr}"
     );
-    let _ = std::fs::remove_dir_all(&fakes);
+    let _ = profile::fs::remove_dir_all(&fakes);
 }
 
 /// The harness double selects what the **real** CLI selects out of a config that
@@ -329,11 +354,11 @@ fn the_harness_double_layers_a_repeated_config_in_order() {
 #[test]
 fn the_harness_double_selects_the_chain_an_extends_parent_declares() {
     let fakes = std::env::temp_dir().join(format!("onepipeline-extends-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&fakes);
-    std::fs::create_dir_all(&fakes).expect("a scratch directory for the double");
+    let _ = profile::fs::remove_dir_all(&fakes);
+    profile::fs::create_dir_all(&fakes).expect("a scratch directory for the double");
     let write = |name: &str, text: &str| -> PathBuf {
         let path = fakes.join(name);
-        std::fs::write(&path, text).expect("the config is written");
+        profile::fs::write(&path, text).expect("the config is written");
         path
     };
     let judge = |config: &Path| -> Output {
@@ -430,7 +455,7 @@ fn the_harness_double_selects_the_chain_an_extends_parent_declares() {
     const REQUESTED: &str = "gpt-5.5";
     const SERVED: &str = "gpt-5.5-mini";
     let worktree = fakes.join("worktree");
-    std::fs::create_dir_all(&worktree).expect("the agent side's worktree");
+    profile::fs::create_dir_all(&worktree).expect("the agent side's worktree");
     let model_parent = write(
         "model-parent.toml",
         &format!("[harness.codex]\nmodel = {REQUESTED:?}\n"),
@@ -492,7 +517,7 @@ fn the_harness_double_selects_the_chain_an_extends_parent_declares() {
          model stated in an `extends` parent is not the model the candidate is asked for: \
          {report}"
     );
-    let _ = std::fs::remove_dir_all(&fakes);
+    let _ = profile::fs::remove_dir_all(&fakes);
 }
 
 // The exit codes are the crate's own, not a second copy of them. A suite that
@@ -654,14 +679,14 @@ pub const MEMBER_TASK: &str = "{task}\n\nReport on this run and change nothing a
 /// is reached without a symlink — true on Linux, false on macOS, and nothing to
 /// do with the crate under test.
 pub fn resolved(path: &Path) -> PathBuf {
-    let canonical = std::fs::canonicalize(path)
+    let canonical = profile::fs::canonicalize(path)
         .unwrap_or_else(|error| panic!("{} cannot be resolved: {error}", path.display()));
     plain(&canonical)
 }
 
 /// A canonical path spelled the way every other API on the platform spells it.
 ///
-/// [`std::fs::canonicalize`] answers on Windows with the *verbatim* form — the
+/// [`profile::fs::canonicalize`] answers on Windows with the *verbatim* form — the
 /// `\\?\` prefix that turns path parsing off — and nothing else there spells a
 /// directory that way: `GetCurrentDirectory` does not, so neither does the
 /// launch record, and `SetCurrentDirectory` does not even accept it. Removing
@@ -743,6 +768,7 @@ impl World {
     /// names itself; its scratch directory does not have to.
     pub fn new(name: &str) -> Self {
         static NTH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let _fixture = profile::span(profile::Category::Fixture);
         // Before anything is started, so that everything this test starts is
         // something its teardown can reach. See [`Drop for World`](World).
         onepipeline_testfakes::containment::enrol();
@@ -752,11 +778,11 @@ impl World {
             std::process::id(),
             NTH.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
         ));
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = profile::fs::remove_dir_all(&root);
         // Created before it is resolved, because resolving a path asks the
         // filesystem about it, and in the one spelling the binary will report —
         // see [`resolved`].
-        std::fs::create_dir_all(&root).expect("a scratch root");
+        profile::fs::create_dir_all(&root).expect("a scratch root");
         let root = resolved(&root);
         let world = Self {
             runs: root.join("runs"),
@@ -769,7 +795,7 @@ impl World {
             home: None,
         };
         for dir in [&world.runs, &world.fakes, &world.project] {
-            std::fs::create_dir_all(dir).expect("a scratch directory");
+            profile::fs::create_dir_all(dir).expect("a scratch directory");
         }
         world
     }
@@ -800,12 +826,13 @@ impl World {
     /// through. It shares this world's scratch root and removes only its own directory under
     /// it when it is dropped, so the world it was made from is whole until that one goes.
     pub fn on_host(&self, host: &str) -> Self {
+        let _fixture = profile::span(profile::Category::Fixture);
         LIVE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let at = self.root.join("hosts").join(host);
         let home = at.join("onevcs-home");
         let runs = at.join("runs");
         for dir in [&home, &runs] {
-            std::fs::create_dir_all(dir).expect("a scratch directory");
+            profile::fs::create_dir_all(dir).expect("a scratch directory");
         }
         let mut environment = self.environment.clone();
         environment.push(("HOSTNAME".to_owned(), host.to_owned()));
@@ -821,7 +848,7 @@ impl World {
         };
         let rules = self.onevcs_home().join("rules.yml");
         if rules.is_file() {
-            std::fs::copy(&rules, home.join("rules.yml")).expect("the host's rules are copied");
+            profile::fs::copy(&rules, home.join("rules.yml")).expect("the host's rules are copied");
         }
         let origin = self.root.join("origin.git");
         if origin.is_dir() {
@@ -1496,11 +1523,12 @@ impl World {
     /// clone a session cuts — `git clone` copies no repository-local config — so
     /// the hook git runs at the publishing push is this one.
     pub fn repository(&self, publication: &str, pre_push: &[&str]) -> Repository {
+        let _fixture = profile::span(profile::Category::Fixture);
         let origin = self.root.join("origin.git");
         let checkout = self.root.join("service");
         let home = self.onevcs_home();
         for dir in [&origin, &home] {
-            std::fs::create_dir_all(dir).expect("a scratch directory");
+            profile::fs::create_dir_all(dir).expect("a scratch directory");
         }
         git(self, &origin, &["init", "--bare", "--initial-branch=main"]);
         git(
@@ -1508,7 +1536,7 @@ impl World {
             &self.root,
             &["clone", &origin.to_string_lossy(), "service"],
         );
-        std::fs::write(checkout.join("README.md"), "the repository under test\n")
+        profile::fs::write(checkout.join("README.md"), "the repository under test\n")
             .expect("the seed file is written");
         git(self, &checkout, &["add", "-A"]);
         git(
@@ -1525,7 +1553,7 @@ impl World {
         // own answer is a GitHub read the `gh` stand-in cannot give, and an unanswered
         // one leaves a repository `unknown`: screened for private terms at every
         // publication, the repository's own name among them.
-        std::fs::write(
+        profile::fs::write(
             home.join("rules.yml"),
             format!(
                 "version: 4\nrules:\n  - match: {{owner: owner}}\n    visibility: private\n\
@@ -1536,7 +1564,7 @@ impl World {
 
         if !pre_push.is_empty() {
             let hooks = hooks_dir(self);
-            std::fs::create_dir_all(&hooks).expect("a hooks directory");
+            profile::fs::create_dir_all(&hooks).expect("a hooks directory");
             install_hook(&hooks.join("pre-push"), pre_push);
             git(
                 self,
@@ -1565,16 +1593,17 @@ impl World {
     /// The alias is what `onevcs` registers the checkout under and therefore what
     /// a plan node names as its `repo`.
     pub fn extra_repository(&self, alias: &str) -> Repository {
+        let _fixture = profile::span(profile::Category::Fixture);
         let origin = self.root.join(format!("{alias}.git"));
         let checkout = self.root.join(alias);
-        std::fs::create_dir_all(&origin).expect("a scratch directory");
+        profile::fs::create_dir_all(&origin).expect("a scratch directory");
         git(self, &origin, &["init", "--bare", "--initial-branch=main"]);
         git(
             self,
             &self.root,
             &["clone", &origin.to_string_lossy(), alias],
         );
-        std::fs::write(
+        profile::fs::write(
             checkout.join("README.md"),
             format!("the {alias} repository\n"),
         )
@@ -1609,8 +1638,9 @@ impl World {
     /// and set here as well as there, because a repository that installed no
     /// `pre-push` hook has never had that setting written.
     pub fn commit_msg_hook(&self, repository: &Repository) {
+        let _fixture = profile::span(profile::Category::Fixture);
         let hooks = hooks_dir(self);
-        std::fs::create_dir_all(&hooks).expect("a hooks directory");
+        profile::fs::create_dir_all(&hooks).expect("a hooks directory");
         let path = hooks.join("commit-msg");
         onepipeline_testfakes::executable(&path, COMMIT_MSG_POLICY);
         git(
@@ -1639,6 +1669,7 @@ impl World {
     /// the release-targets document names it by — and the file its answer is
     /// written to.
     pub fn probe_in(&self, repository: &Repository, name: &str) -> (String, PathBuf) {
+        let _fixture = profile::span(profile::Category::Fixture);
         let answer = self.root.join(format!("{name}.version"));
         let (script, body) = probe_script();
         let path = repository.checkout.join(script);
@@ -1671,7 +1702,7 @@ impl World {
     /// not a run to count either — this is polled while a probe appends to it.
     pub fn probe_runs(&self, name: &str) -> usize {
         let path = self.probe_runs_file(name);
-        match std::fs::read_to_string(&path) {
+        match profile::fs::read_to_string(&path) {
             Ok(tally) => tally.lines().filter(|line| line.trim() == "run").count(),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
             Err(error) => panic!(
@@ -1695,9 +1726,10 @@ impl World {
     /// targets and adopts fast — the behaviour every journey written before
     /// adoption existed runs under.
     pub fn releases(&self, document: &str) {
+        let _fixture = profile::span(profile::Category::Fixture);
         let home = self.onevcs_home();
-        std::fs::create_dir_all(&home).expect("the state root is there");
-        std::fs::write(home.join("releases.yml"), document)
+        profile::fs::create_dir_all(&home).expect("the state root is there");
+        profile::fs::write(home.join("releases.yml"), document)
             .expect("the release-targets file is written");
     }
 
@@ -1708,6 +1740,7 @@ impl World {
     /// state root is process-global, so two worlds asking at once would otherwise
     /// read one another's.
     pub fn on_onevcs<T>(&self, ask: impl FnOnce() -> T) -> T {
+        let _git = profile::span(profile::Category::Git);
         let _held = self.pointed_at_this_world();
         ask()
     }
@@ -1737,6 +1770,7 @@ impl World {
     /// would otherwise write into each other's registry.
     pub fn register(&self, checkout: &Path, origin: Option<&str>) {
         use clap::Parser;
+        let _git = profile::span(profile::Category::Git);
         let _held = self.pointed_at_this_world();
         let mut argv: Vec<String> = vec![
             "onevcs".to_owned(),
@@ -1782,8 +1816,8 @@ impl World {
             return;
         }
         let dir = self.fakes.join("gh").join("origin");
-        std::fs::create_dir_all(&dir).expect("a scratch directory");
-        std::fs::write(dir.join(segment(slug)), &remote)
+        profile::fs::create_dir_all(&dir).expect("a scratch directory");
+        profile::fs::write(dir.join(segment(slug)), &remote)
             .expect("the origin behind the identity is written");
     }
 
@@ -1791,6 +1825,7 @@ impl World {
     ///
     /// Under the same lock and for the same reason as [`register`](World::register).
     pub fn identity(&self, repo: &Path) -> onevcs::Identity {
+        let _git = profile::span(profile::Category::Git);
         let _held = self.pointed_at_this_world();
         onevcs::Providers::real()
             .vcs
@@ -1850,7 +1885,7 @@ impl World {
     pub fn gitconfig(&self) -> PathBuf {
         let path = self.root.join("gitconfig");
         if !path.is_file() {
-            std::fs::write(
+            profile::fs::write(
                 &path,
                 "[core]\n\tlongpaths = true\n[maintenance]\n\tauto = false\n",
             )
@@ -1895,13 +1930,14 @@ impl World {
     /// declaring `45` was silently collapsed to for the whole life of the defect
     /// `dispatch.rs`'s turn-budget journey proves fixed.
     pub fn write_supervised_node_graph(&self) {
-        std::fs::write(
+        let _fixture = profile::span(profile::Category::Fixture);
+        profile::fs::write(
             self.graphs().join("onejudge.base.yaml"),
             "system_prompt: Do the work.\nuser:\n  persona: Review it.\n  \
              done_when: the original task is complete\n  max_turns: 12\n",
         )
         .expect("the onejudge base config is written");
-        std::fs::write(
+        profile::fs::write(
             self.graphs().join("node-scope.yaml"),
             "version: 1\nname: node-scope\nmembers:\n  worker:\n    kind: onejudge\n    \
              base_config: ./onejudge.base.yaml\n    agent:\n      \
@@ -1945,10 +1981,11 @@ impl World {
     /// `ONEHARNESS_BIN_CLAUDE_CODE` on every command, so a journey writing a
     /// config of its own gets the double without having to know about it.
     pub fn harness_config(&self, member: &str) -> String {
+        let _fixture = profile::span(profile::Category::Fixture);
         let file = format!("oneharness-{member}.toml");
         let dir = self.graphs();
-        std::fs::create_dir_all(&dir).expect("a directory for the graph configs");
-        std::fs::write(
+        profile::fs::create_dir_all(&dir).expect("a directory for the graph configs");
+        profile::fs::write(
             dir.join(&file),
             format!(
                 "run_mode = \"fallback\"\nharnesses = [\"claude-code\"]\n\n[env]\n\
@@ -1967,7 +2004,7 @@ impl World {
     /// out of that install and the journey would pass for the wrong reason.
     pub fn empty_path(&self) -> PathBuf {
         let dir = self.root.join("empty-path");
-        std::fs::create_dir_all(&dir).expect("a directory with nothing in it");
+        profile::fs::create_dir_all(&dir).expect("a directory with nothing in it");
         dir
     }
 
@@ -2125,7 +2162,7 @@ impl World {
     #[cfg(unix)]
     fn path_with_ps(&self, name: &str, script: &str) -> PathBuf {
         let dir = self.root.join(name);
-        std::fs::create_dir_all(&dir).expect("a directory for the ps stand-in");
+        profile::fs::create_dir_all(&dir).expect("a directory for the ps stand-in");
         onepipeline_testfakes::executable(&dir.join("ps"), format!("#!/bin/sh\n{script}\n"));
         dir
     }
@@ -2146,11 +2183,12 @@ impl World {
     /// comes over with the rest, and it is long enough that nothing fires
     /// inside a test — what a journey observes is the *reset*.
     pub fn write_graphs_with_pacemaker(&self) {
+        let _fixture = profile::span(profile::Category::Fixture);
         use oneagentgraph::config::Member;
 
         let shipped = repo_file("graphs/dag-scope.yaml");
         let config: oneagentgraph::config::GraphConfig = onepipeline_testfakes::yaml::from_str(
-            &std::fs::read_to_string(&shipped).expect("the shipped dag-scope graph"),
+            &profile::fs::read_to_string(&shipped).expect("the shipped dag-scope graph"),
         )
         .expect("the shipped dag-scope graph is a valid oneagentgraph config");
         let (member, schedule) = config
@@ -2184,8 +2222,9 @@ impl World {
     /// `--dag-graph` takes. The schema is the consumer's, so a schedule naming
     /// no `start_after` waits its whole interval first.
     pub fn write_observer_graph_with_clocks(&self, scheduled: &[(&str, bool)]) -> String {
+        let _fixture = profile::span(profile::Category::Fixture);
         let dir = self.graphs();
-        std::fs::create_dir_all(&dir).expect("a directory for the graph configs");
+        profile::fs::create_dir_all(&dir).expect("a directory for the graph configs");
         let mut members = format!(
             "  watcher:\n    kind: oneharness\n    oneharness_config: {}\n    task: {}\n",
             self.harness_config("watcher"),
@@ -2199,7 +2238,7 @@ impl World {
             ));
         }
         let graph = dir.join("observer-with-clocks.yaml");
-        std::fs::write(
+        profile::fs::write(
             &graph,
             format!(
                 "version: {CONSUMER_GRAPH_SCHEMA}\nname: observer-with-clocks\nmembers:\n{members}\
@@ -2227,8 +2266,8 @@ impl World {
     /// will read.
     pub fn pr_author_graph(&self) -> String {
         let dir = self.graphs();
-        std::fs::create_dir_all(&dir).expect("a directory for the graph configs");
-        std::fs::write(
+        profile::fs::create_dir_all(&dir).expect("a directory for the graph configs");
+        profile::fs::write(
             dir.join("body.schema.json"),
             r#"{"type":"object","properties":{
                  "body":{"type":"string"},
@@ -2239,14 +2278,14 @@ impl World {
                "required":["body"],"additionalProperties":false}"#,
         )
         .expect("the drafted body's schema is written");
-        std::fs::write(
+        profile::fs::write(
             dir.join("oneharness.pr-author.toml"),
             "run_mode = \"fallback\"\nharnesses = [\"claude-code\"]\n\
              schema_file = \"./body.schema.json\"\n",
         )
         .expect("the drafting harness config is written");
         let graph = dir.join("pr-author.yaml");
-        std::fs::write(
+        profile::fs::write(
             &graph,
             format!(
                 "version: {CONSUMER_GRAPH_SCHEMA}\nname: pr-author\nmembers:\n  author:\n    \
@@ -2258,14 +2297,15 @@ impl World {
     }
 
     fn write_graphs_with(&self, dag_extra: Option<&str>, version: u32) {
+        let _fixture = profile::span(profile::Category::Fixture);
         let dir = self.graphs();
-        std::fs::create_dir_all(&dir).expect("a directory for the graph configs");
+        profile::fs::create_dir_all(&dir).expect("a directory for the graph configs");
         // The identity chain is the operator's own file, which the graph names
         // and this suite never selects out of: one harness family, so the model
         // pairing rule holds. This unattributed copy is what a two-party
         // member's two sides name and what a journey copying a graph elsewhere
         // takes with it; each single-sided member below gets one of its own.
-        std::fs::write(
+        profile::fs::write(
             dir.join("oneharness.toml"),
             "run_mode = \"fallback\"\nharnesses = [\"claude-code\"]\n",
         )
@@ -2295,7 +2335,7 @@ impl World {
             } else {
                 ""
             };
-            std::fs::write(
+            profile::fs::write(
                 dir.join(file),
                 format!(
                     "version: {version}\nname: {}\nmembers:\n  {member}:\n    \
@@ -2385,7 +2425,7 @@ impl World {
     /// asker sets it on the command itself.
     pub fn host_channel(&self, run: &str) -> Command {
         let bundle = self.root.join("planner-channel.json");
-        std::fs::write(&bundle, onepipeline::channel::layout::bundle_json())
+        profile::fs::write(&bundle, onepipeline::channel::layout::bundle_json())
             .expect("the layout document is written");
         let mut command = Command::new(double("host-channel-server"));
         command
@@ -2419,10 +2459,10 @@ impl World {
     // deadline is what turns a state that never arrives into a failure.
     pub fn queued_surfaces(&self, run: &str) -> Vec<Value> {
         let log = self.run_file(run, "channel/surfaces.jsonl");
-        let projection = std::fs::read_to_string(self.run_file(run, "channel/queue.json"))
+        let projection = profile::fs::read_to_string(self.run_file(run, "channel/queue.json"))
             .ok()
             .and_then(|text| serde_json::from_str::<Value>(&text).ok());
-        let length = std::fs::metadata(&log).map_or(0, |meta| meta.len());
+        let length = profile::fs::metadata(&log).map_or(0, |meta| meta.len());
         if projection
             .as_ref()
             .and_then(|state| state["accounted"].as_u64())
@@ -2431,7 +2471,7 @@ impl World {
         {
             return Vec::new();
         }
-        std::fs::read_to_string(log)
+        profile::fs::read_to_string(log)
             .unwrap_or_default()
             .lines()
             .filter_map(|line| serde_json::from_str::<Value>(line).ok())
@@ -2528,6 +2568,7 @@ impl World {
     }
 
     pub fn plan_in(&self, store: &Path, name: &str, plan: &Value) -> String {
+        let _fixture = profile::span(profile::Category::Fixture);
         let plan = plan.as_object().expect("a plan is a mapping");
         let mut metadata = serde_json::Map::new();
         for (key, value) in plan {
@@ -2594,6 +2635,7 @@ impl World {
     /// dependency names a node already there by its id, through `named` — that node's own
     /// file name.
     pub fn add_task(&self, name: &str, file: &str, node: &Value, named: &[(&str, &str)]) {
+        let _fixture = profile::span(profile::Category::Fixture);
         let named: BTreeMap<&str, &str> = named.iter().copied().collect();
         self.task(&self.store(), &project_id(name), node, file, &named);
     }
@@ -2741,9 +2783,11 @@ impl World {
     /// produce — a task with no metadata at all, say — where stating the bytes
     /// is what the journey means.
     pub fn write_store_item(&self, relative: &str, document: &str) {
+        let _fixture = profile::span(profile::Category::Fixture);
         let path = self.store().join(relative);
-        std::fs::create_dir_all(path.parent().expect("a directory")).expect("a store directory");
-        std::fs::write(path, document).expect("the store document is written");
+        profile::fs::create_dir_all(path.parent().expect("a directory"))
+            .expect("a store directory");
+        profile::fs::write(path, document).expect("the store document is written");
     }
 
     /// A task of this store that belongs to no plan a journey launches.
@@ -2753,6 +2797,7 @@ impl World {
     /// that name — which is the dangling-reference refusal, reached the way a
     /// store reaches it.
     pub fn stray_task(&self, project: &str, file: &str, node_id: &str) {
+        let _fixture = profile::span(profile::Category::Fixture);
         self.write_item(
             &self
                 .store()
@@ -2777,7 +2822,9 @@ impl World {
     /// place and refuses a one-line flow mapping it cannot edit so, finds the
     /// shape a real board has.
     pub fn write_item(&self, path: &Path, front: &[(&str, Value)], body: &str) {
-        std::fs::create_dir_all(path.parent().expect("a directory")).expect("a store directory");
+        let _fixture = profile::span(profile::Category::Fixture);
+        profile::fs::create_dir_all(path.parent().expect("a directory"))
+            .expect("a store directory");
         let mut document = String::from("---\n");
         for (key, value) in front {
             document.push_str(
@@ -2788,16 +2835,17 @@ impl World {
         document.push_str("---\n\n");
         document.push_str(body);
         document.push('\n');
-        std::fs::write(path, document).expect("the store document is written");
+        profile::fs::write(path, document).expect("the store document is written");
     }
 
     /// Script one of the doubles: `world.script("build.fail", "1")`.
     pub fn script(&self, name: &str, body: &str) {
-        std::fs::write(self.fakes.join(name), body).expect("the script is written");
+        let _fixture = profile::span(profile::Category::Fixture);
+        profile::fs::write(self.fakes.join(name), body).expect("the script is written");
     }
 
     pub fn unscript(&self, name: &str) {
-        std::fs::remove_file(self.fakes.join(name)).expect("the script is removed");
+        profile::fs::remove_file(self.fakes.join(name)).expect("the script is removed");
     }
 
     /// Have the scripted store answer every call of `method` — the plugin protocol's own
@@ -2851,7 +2899,7 @@ impl World {
 
     /// Stop holding `method`: calls from now on are answered at once.
     pub fn store_stops_holding(&self, method: &str) {
-        std::fs::remove_file(rendezvous_script(
+        profile::fs::remove_file(rendezvous_script(
             &self.fakes,
             &format!("{SCRIPTED_KEY}.{method}.first"),
         ))
@@ -2878,7 +2926,7 @@ impl World {
 
     /// Release a rendezvous the doubles are holding.
     pub fn release(&self, name: &str) {
-        std::fs::write(self.fakes.join(name), "go").expect("the rendezvous is released");
+        profile::fs::write(self.fakes.join(name), "go").expect("the rendezvous is released");
     }
 
     /// Stand where the dispatches scripted at `key` will meet this test.
@@ -2891,7 +2939,7 @@ impl World {
     pub fn rendezvous(&self, key: &str) -> Rendezvous {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback listener");
         let address = listener.local_addr().expect("the listener has an address");
-        std::fs::write(rendezvous_script(&self.fakes, key), address.to_string())
+        profile::fs::write(rendezvous_script(&self.fakes, key), address.to_string())
             .expect("the rendezvous is scripted");
         Rendezvous { listener }
     }
@@ -2972,7 +3020,7 @@ impl World {
         // failure, and if it never appears the reason is the evidence a timeout
         // has to print.
         let held =
-            || std::fs::read_to_string(&path).unwrap_or_else(|e| format!("(unreadable: {e})"));
+            || profile::fs::read_to_string(&path).unwrap_or_else(|e| format!("(unreadable: {e})"));
         if waited(|| held().contains(needle)) {
             return;
         }
@@ -2995,7 +3043,7 @@ impl World {
     /// arrive without this function being edited.
     pub fn dump(&self) -> String {
         let mut out = String::new();
-        match std::fs::read_dir(&self.runs) {
+        match profile::fs::read_dir(&self.runs) {
             Err(_) => out.push_str("  (no runs root)\n"),
             Ok(entries) => {
                 // Sorted, because a directory listing is in whatever order the
@@ -3248,7 +3296,7 @@ impl World {
     /// so a journey about that decision reaches for these rather than for the
     /// run's ownership lock, which names the driver and not the work.
     pub fn dispatch_records(&self, run: &str) -> Vec<PathBuf> {
-        let mut found: Vec<PathBuf> = std::fs::read_dir(self.run_file(run, "dispatches"))
+        let mut found: Vec<PathBuf> = profile::fs::read_dir(self.run_file(run, "dispatches"))
             .into_iter()
             .flatten()
             .flatten()
@@ -3274,7 +3322,7 @@ impl World {
     /// to name a pid rather than as a wait that never ends.
     pub fn registered(&self, run: &str, pid: u32) -> bool {
         self.dispatch_records(run).iter().any(|record| {
-            let text = std::fs::read_to_string(record)
+            let text = profile::fs::read_to_string(record)
                 .unwrap_or_else(|error| panic!("cannot read {}: {error}", record.display()));
             let entry: Value = serde_json::from_str(&text)
                 .unwrap_or_else(|error| panic!("{} is not JSON: {error}", record.display()));
@@ -3289,7 +3337,7 @@ impl World {
     pub fn run_json(&self, run: &str, relative: &str) -> Value {
         let path = self.run_file(run, relative);
         serde_json::from_str(
-            &std::fs::read_to_string(&path)
+            &profile::fs::read_to_string(&path)
                 .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display())),
         )
         .unwrap_or_else(|e| panic!("{} is not JSON: {e}", path.display()))
@@ -3409,7 +3457,7 @@ fn a_dispatch_that_met_the_test_holds_until_it_is_released() {
 ///
 /// What it wrote is discarded: every caller here has already read what it needed
 /// off a stream it took, or is ending a server whose output it never claimed.
-pub fn ended(child: std::process::Child) {
+pub fn ended(child: profile::process::Child) {
     child.wait_with_output().expect("the child ends");
 }
 
@@ -3433,7 +3481,7 @@ pub fn ended(child: std::process::Child) {
 /// through `std`, and its filesystem journals the entry with the file.
 pub fn synced_fixture<'a>(root: &Path, runs: impl IntoIterator<Item = &'a Path>) {
     for dir in runs {
-        for entry in std::fs::read_dir(dir)
+        for entry in profile::fs::read_dir(dir)
             .unwrap_or_else(|error| panic!("{} cannot be listed: {error}", dir.display()))
         {
             let path = entry.expect("an entry of the fixture's run").path();
@@ -3459,8 +3507,8 @@ pub fn synced_fixture<'a>(root: &Path, runs: impl IntoIterator<Item = &'a Path>)
 /// `checkpoint.json` — for as long as anything holds the file being replaced.
 /// What the name holds a moment later is the file to sync; a refusal that
 /// outlasts the wait is reported as the host gave it.
-fn opened_past_replacement(path: &Path) -> std::io::Result<std::fs::File> {
-    let open = || std::fs::OpenOptions::new().write(true).open(path);
+fn opened_past_replacement(path: &Path) -> std::io::Result<profile::fs::File> {
+    let open = || profile::fs::OpenOptions::new().write(true).open(path);
     let mut opened = open();
     waited_for(
         std::time::Duration::from_secs(5),
@@ -3476,7 +3524,7 @@ fn opened_past_replacement(path: &Path) -> std::io::Result<std::fs::File> {
     opened
 }
 
-fn synced(path: &Path, opened: std::io::Result<std::fs::File>) {
+fn synced(path: &Path, opened: std::io::Result<profile::fs::File>) {
     opened
         .and_then(|file| file.sync_all())
         .unwrap_or_else(|error| panic!("{} is not on the device: {error}", path.display()));
@@ -3484,7 +3532,7 @@ fn synced(path: &Path, opened: std::io::Result<std::fs::File>) {
 
 #[cfg(unix)]
 fn synced_dir(dir: &Path) {
-    synced(dir, std::fs::File::open(dir));
+    synced(dir, profile::fs::File::open(dir));
 }
 
 #[cfg(not(unix))]
@@ -3514,14 +3562,16 @@ fn waited_for(
     interval: std::time::Duration,
     mut ready: impl FnMut() -> bool,
 ) -> bool {
-    let deadline = std::time::Instant::now() + duration;
-    while std::time::Instant::now() < deadline {
-        if ready() {
-            return true;
+    profile::polled(|| {
+        let deadline = std::time::Instant::now() + duration;
+        while std::time::Instant::now() < deadline {
+            if ready() {
+                return true;
+            }
+            profile::thread::sleep(interval);
         }
-        std::thread::sleep(interval);
-    }
-    false
+        false
+    })
 }
 
 /// Move `from` onto `to`, waiting out a holder that has not let go of it yet.
@@ -3541,17 +3591,18 @@ pub fn renamed(from: &Path, to: &Path, what: &str) {
 /// out.
 fn renamed_within(from: &Path, to: &Path, what: &str, within: std::time::Duration) {
     let mut refused = None;
-    let moved = waited_for(
-        within,
-        std::time::Duration::from_millis(20),
-        || match std::fs::rename(from, to) {
-            Ok(()) => true,
-            Err(why) => {
-                refused = Some(why);
-                false
-            }
-        },
-    );
+    let moved =
+        waited_for(
+            within,
+            std::time::Duration::from_millis(20),
+            || match profile::fs::rename(from, to) {
+                Ok(()) => true,
+                Err(why) => {
+                    refused = Some(why);
+                    false
+                }
+            },
+        );
     assert!(
         moved,
         "{what}: {} never moved to {}: {}",
@@ -3585,7 +3636,7 @@ pub fn unreachable(store: &Path, aside: &Path, what: &str) {
     renamed(store, aside, what);
     let mut put_back = 0;
     let mut refused = None;
-    let hold = |refused: &mut Option<std::io::Error>| match std::fs::OpenOptions::new()
+    let hold = |refused: &mut Option<std::io::Error>| match profile::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(store)
@@ -3608,7 +3659,7 @@ pub fn unreachable(store: &Path, aside: &Path, what: &str) {
             }
             let mut beside = aside.as_os_str().to_owned();
             beside.push(format!("-put-back-{put_back}"));
-            if std::fs::rename(store, PathBuf::from(beside)).is_err() {
+            if profile::fs::rename(store, PathBuf::from(beside)).is_err() {
                 return false;
             }
             put_back += 1;
@@ -3631,7 +3682,7 @@ pub fn restored(aside: &Path, store: &Path, what: &str) {
     let cleared = waited_for(
         std::time::Duration::from_secs(30),
         std::time::Duration::from_millis(20),
-        || match std::fs::remove_file(store) {
+        || match profile::fs::remove_file(store) {
             Ok(()) => true,
             Err(why) if why.kind() == std::io::ErrorKind::NotFound => true,
             Err(why) => {
@@ -3672,20 +3723,20 @@ fn a_store_taken_away_stays_away_from_a_writer_already_writing_to_it() {
         let writing = std::sync::Arc::clone(&writing);
         std::thread::spawn(move || {
             while writing.load(std::sync::atomic::Ordering::SeqCst) {
-                let _ = std::fs::create_dir_all(store.join("projects")).and_then(|()| {
-                    std::fs::write(
+                let _ = profile::fs::create_dir_all(store.join("projects")).and_then(|()| {
+                    profile::fs::write(
                         store.join("projects").join("written-late.md"),
                         "---\ntitle: late\n---\n",
                     )
                 });
-                std::thread::sleep(std::time::Duration::from_millis(1));
+                profile::thread::sleep(std::time::Duration::from_millis(1));
             }
         })
     };
 
     unreachable(&store, &aside, "the store becomes unreachable");
     // Long enough for a writer that got in after the move to have put the store back.
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    profile::thread::sleep(std::time::Duration::from_millis(200));
     writing.store(false, std::sync::atomic::Ordering::SeqCst);
     writer.join().expect("the writer ends");
 
@@ -3722,15 +3773,15 @@ fn a_store_taken_away_stays_away_from_a_writer_already_writing_to_it() {
 fn a_move_something_still_holds_happens_once_the_holder_lets_go() {
     let world = World::new("harness-rename-held");
     let store = world.root.join("held-store");
-    std::fs::create_dir_all(store.join("projects")).expect("a store to move");
+    profile::fs::create_dir_all(store.join("projects")).expect("a store to move");
     let onto = world.root.join("held-store-moved");
-    std::fs::create_dir_all(&onto).expect("an occupied name to move onto");
+    profile::fs::create_dir_all(&onto).expect("an occupied name to move onto");
     let holder = onto.join("still-here");
-    std::fs::write(&holder, "what holds the name").expect("the holder is written");
+    profile::fs::write(&holder, "what holds the name").expect("the holder is written");
 
     let letting_go = std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        std::fs::remove_file(&holder).expect("the holder lets go");
+        profile::thread::sleep(std::time::Duration::from_millis(200));
+        profile::fs::remove_file(&holder).expect("the holder lets go");
     });
     renamed(&store, &onto, "the held store moves");
     letting_go.join().expect("the holder ends");
@@ -3755,10 +3806,11 @@ fn a_move_something_still_holds_happens_once_the_holder_lets_go() {
 fn a_move_nothing_ever_lets_go_of_fails_under_the_caller_s_own_words() {
     let world = World::new("harness-rename-refused");
     let store = world.root.join("stuck-store");
-    std::fs::create_dir_all(store.join("projects")).expect("a store to move");
+    profile::fs::create_dir_all(store.join("projects")).expect("a store to move");
     let onto = world.root.join("stuck-store-moved");
-    std::fs::create_dir_all(&onto).expect("an occupied name to move onto");
-    std::fs::write(onto.join("still-here"), "what never lets go").expect("the holder is written");
+    profile::fs::create_dir_all(&onto).expect("an occupied name to move onto");
+    profile::fs::write(onto.join("still-here"), "what never lets go")
+        .expect("the holder is written");
 
     let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         renamed_within(
@@ -3781,7 +3833,7 @@ fn a_move_nothing_ever_lets_go_of_fails_under_the_caller_s_own_words() {
         said.contains(&store.display().to_string()) && said.contains(&onto.display().to_string()),
         "the refusal does not name both paths: {said}"
     );
-    let host = std::fs::rename(&store, &onto).expect_err("the name is still occupied");
+    let host = profile::fs::rename(&store, &onto).expect_err("the name is still occupied");
     assert!(
         said.contains(&host.to_string()),
         "the refusal does not carry what the host said, which is the whole difference \
@@ -3822,7 +3874,7 @@ impl World {
     /// `driver::a_dispatch_this_run_cannot_record_is_refused_and_does_not_run`
     /// takes that registry away on purpose.
     fn stop_the_runs_it_can(&self) {
-        let Ok(entries) = std::fs::read_dir(&self.runs) else {
+        let Ok(entries) = profile::fs::read_dir(&self.runs) else {
             return;
         };
         for entry in entries.flatten() {
@@ -3861,14 +3913,14 @@ impl Drop for World {
             Some(home) => home.parent().unwrap_or(&self.root),
             None => &self.root,
         };
-        let _ = std::fs::remove_dir_all(removed);
+        let _ = profile::fs::remove_dir_all(removed);
         // The links this process made, released with the last world that could
         // still have spawned through them, so a suite leaves nothing in the
         // target directory. Best-effort: Windows refuses to unlink a running
         // image, and a directory left behind there costs a directory entry
         // rather than a binary, because these are links and not copies.
         if last {
-            let _ = std::fs::remove_dir_all(held_dir());
+            let _ = profile::fs::remove_dir_all(held_dir());
         }
         // Said last, so a teardown that fails still removes what it made; and not
         // while the test is already failing: a second panic during the first
@@ -3947,7 +3999,7 @@ fn a_dump_carries_a_file_it_has_never_heard_of_from_the_run_directory() {
     // open.
     let artifact = "publication-writeback.stderr";
     let text = "onevcs: the write-back refused: no such identity 'origin'";
-    std::fs::write(world.runs.join(run).join(artifact), format!("{text}\n"))
+    profile::fs::write(world.runs.join(run).join(artifact), format!("{text}\n"))
         .expect("the run directory takes a file beside its own records");
 
     let dumped = world.dump();
@@ -4011,7 +4063,7 @@ fn a_world_that_is_dropped_while_its_run_is_working_leaves_no_driver_behind() {
 /// the same existence check [`end_process`] waits on.
 #[cfg(unix)]
 fn still_running(pid: u64) -> bool {
-    std::process::Command::new("kill")
+    Command::new("kill")
         .args(["-0", &pid.to_string()])
         .stderr(Stdio::null())
         .status()
@@ -4088,10 +4140,6 @@ fn a_worlds_teardown_waits_for_a_descendant_still_exiting_after_its_double_is_go
         let record = world.root.join("descendant.pids");
         // Collected by nothing here: the teardown kills it, and its zombie is
         // this process's until it ends, which the assertions below allow for.
-        #[expect(
-            clippy::zombie_processes,
-            reason = "the teardown under test is what ends it; see the comment above"
-        )]
         let _double = world
             .cmd_on(
                 &double("fake-oneharness"),
@@ -4140,10 +4188,7 @@ use onepipeline_testfakes::containment::PATIENCE_VARIABLE;
 fn a_worlds_teardown_names_a_killed_descendant_it_could_not_wait_out() {
     let world = World::new("teardown-outwaited");
     let record = world.root.join("descendant.pids");
-    #[expect(
-        clippy::zombie_processes,
-        reason = "the teardown under test is what ends it"
-    )]
+    // Never waited on here: the teardown under test is what ends it.
     let _double = world
         .cmd_on(
             &double("fake-oneharness"),
@@ -4174,7 +4219,7 @@ fn a_worlds_teardown_names_a_killed_descendant_it_could_not_wait_out() {
             std::time::Instant::now() < deadline,
             "pid {descendant} never finished its exit"
         );
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        profile::thread::sleep(std::time::Duration::from_millis(50));
     }
 }
 
@@ -4267,7 +4312,7 @@ fn a_worlds_teardown_that_cannot_list_processes_fails_saying_why() {
     let world = World::new("teardown-unlisted");
     let (double_pid, descendant) = holding_a_descendant(&world);
     let empty = world.root.join("no-programs");
-    std::fs::create_dir_all(&empty).expect("an empty directory to search");
+    profile::fs::create_dir_all(&empty).expect("an empty directory to search");
 
     let refused = with_variable("PATH", &empty, move || drop(world))
         .expect_err("a teardown that could not look let its test pass");
@@ -4304,10 +4349,10 @@ fn a_worlds_teardown_refuses_a_process_list_it_cannot_read() {
         ),
     ] {
         let bin = world.root.join(format!("ps-that-{case}"));
-        std::fs::create_dir_all(&bin).expect("a directory for the stand-in ps");
+        profile::fs::create_dir_all(&bin).expect("a directory for the stand-in ps");
         let ps = bin.join("ps");
-        std::fs::write(&ps, format!("#!/bin/sh\n{script}\n")).expect("the stand-in ps");
-        std::fs::set_permissions(&ps, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+        profile::fs::write(&ps, format!("#!/bin/sh\n{script}\n")).expect("the stand-in ps");
+        profile::fs::set_permissions(&ps, std::os::unix::fs::PermissionsExt::from_mode(0o755))
             .expect("the stand-in ps is runnable");
 
         let answered = with_variable("PATH", &bin, || {
@@ -4341,12 +4386,12 @@ fn a_worlds_teardown_ends_a_process_ps_lists_in_a_state_it_could_not_classify() 
     let (double_pid, descendant) = holding_a_descendant(&world);
     let host_path = std::env::var_os("PATH").expect("the host has a PATH");
     let bin = world.root.join("ps-unclassified");
-    std::fs::create_dir_all(&bin).expect("a directory for the stand-in ps");
+    profile::fs::create_dir_all(&bin).expect("a directory for the stand-in ps");
     let ps = bin.join("ps");
     // The host's own `ps`, found on the host's own PATH. Only a row not yet a
     // zombie is rewritten: a zombie written `?` would be a process that never
     // ends, which is not what macOS reports.
-    std::fs::write(
+    profile::fs::write(
         &ps,
         format!(
             "#!/bin/sh\nPATH='{}'\nexport PATH\n\
@@ -4356,7 +4401,7 @@ fn a_worlds_teardown_ends_a_process_ps_lists_in_a_state_it_could_not_classify() 
         ),
     )
     .expect("the stand-in ps");
-    std::fs::set_permissions(&ps, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+    profile::fs::set_permissions(&ps, std::os::unix::fs::PermissionsExt::from_mode(0o755))
         .expect("the stand-in ps is runnable");
 
     let answered = with_variable("PATH", &bin, || {
@@ -4381,10 +4426,7 @@ fn a_worlds_teardown_ends_more_descendants_than_its_first_look_has_room_for() {
     let pids = {
         let world = World::new("teardown-many");
         let record = world.root.join("descendants.pids");
-        #[expect(
-            clippy::zombie_processes,
-            reason = "the teardown under test is what ends it"
-        )]
+        // Never waited on here: the teardown under test is what ends it.
         let _double = world
             .cmd_on(
                 &double("fake-oneharness"),
@@ -4467,7 +4509,7 @@ fn left_descendant(record: &Path) -> (u32, u32) {
 fn recorded_pids(record: &Path) -> Vec<u32> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     let text = loop {
-        if let Ok(text) = std::fs::read_to_string(record) {
+        if let Ok(text) = profile::fs::read_to_string(record) {
             break text;
         }
         assert!(
@@ -4475,7 +4517,7 @@ fn recorded_pids(record: &Path) -> Vec<u32> {
             "the double never recorded what it started at {}",
             record.display()
         );
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        profile::thread::sleep(std::time::Duration::from_millis(20));
     };
     text.split_whitespace()
         .map(|pid| {
@@ -4491,10 +4533,7 @@ fn recorded_pids(record: &Path) -> Vec<u32> {
 /// own, and return both pids once both are.
 fn holding_a_descendant(world: &World) -> (u32, u32) {
     let record = world.root.join("descendant.pids");
-    #[expect(
-        clippy::zombie_processes,
-        reason = "the teardown under test is what ends it"
-    )]
+    // Never waited on here: the teardown under test is what ends it.
     let _double = world
         .cmd_on(
             &double("fake-oneharness"),
@@ -4838,7 +4877,7 @@ pub fn double(name: &str) -> PathBuf {
 /// Unix-only, because that is how it reads one, and Windows exposes no supported
 /// way to ask which process holds a directory.
 #[cfg(unix)]
-pub fn occupy(world: &World, run_root: &Path) -> std::process::Child {
+pub fn occupy(world: &World, run_root: &Path) -> profile::process::Child {
     let recorded = world.root.join(format!(
         "occupant-{}.pid",
         run_root
@@ -4945,7 +4984,7 @@ fn undiscriminating_among(store: &Path, only: Option<&[&str]>) -> Option<String>
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| store.display().to_string());
-    let entries = match std::fs::read_dir(store.join("projects")) {
+    let entries = match profile::fs::read_dir(store.join("projects")) {
         Ok(entries) => entries,
         Err(error) => {
             return Some(format!(
@@ -5061,7 +5100,7 @@ fn settled_title(path: &Path) -> Result<String, String> {
 /// through mid-replacement, which is why [`settled_title`] cannot tell them apart by
 /// shape and asks again instead.
 fn title_of(path: &Path) -> Result<String, String> {
-    let document = std::fs::read_to_string(path)
+    let document = profile::fs::read_to_string(path)
         .map_err(|error| format!("its project document could not be read ({error})"))?;
     let front = document
         .strip_prefix("---\n")
@@ -5151,7 +5190,7 @@ pub fn onevcs_binary() -> PathBuf {
 /// Refused, never skipped, when it is not there or answers as another release: a
 /// journey about the seam between two products proves nothing against a third.
 pub fn onetaskgraph_binary() -> PathBuf {
-    let justfile = std::fs::read_to_string(repo_file("justfile")).expect("the justfile");
+    let justfile = profile::fs::read_to_string(repo_file("justfile")).expect("the justfile");
     let version = justfile
         .lines()
         .find_map(|line| line.strip_prefix("onetaskgraph-version := "))
@@ -5189,7 +5228,7 @@ pub fn onetaskgraph_binary() -> PathBuf {
 /// something else — and every journey about a record that names a driver which
 /// is no longer there turns on the difference.
 pub fn reaped_pid() -> u32 {
-    let mut child = std::process::Command::new(binary())
+    let mut child = Command::new(binary())
         .arg("--version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -5224,7 +5263,7 @@ pub fn process_ended(pid: u32) -> bool {
 /// up with it yet.
 #[cfg(unix)]
 pub fn end_process(pid: u32) {
-    std::process::Command::new("kill")
+    Command::new("kill")
         .args(["-KILL", &pid.to_string()])
         .status()
         .expect("this host ends a process it owns");
@@ -5232,7 +5271,7 @@ pub fn end_process(pid: u32) {
     while std::time::Instant::now() < deadline {
         // `kill -0` is the existence check: it delivers nothing and fails once
         // there is no such process.
-        let still_there = std::process::Command::new("kill")
+        let still_there = Command::new("kill")
             .args(["-0", &pid.to_string()])
             .stderr(Stdio::null())
             .status()
@@ -5241,7 +5280,7 @@ pub fn end_process(pid: u32) {
         if !still_there {
             return;
         }
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        profile::thread::sleep(std::time::Duration::from_millis(20));
     }
     panic!("pid {pid} outlived the one ask no process can ignore");
 }
@@ -5298,7 +5337,7 @@ pub fn end_driver(world: &World, run: &str) -> u32 {
 /// may itself hold one.
 #[cfg(target_os = "linux")]
 fn start_stamp(pid: u32) -> Option<String> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let stat = profile::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let ticks = stat.rsplit_once(')')?.1.split_whitespace().nth(19)?;
     Some(format!("linux-proc-stat:{}", ticks.parse::<u64>().ok()?))
 }
@@ -5369,7 +5408,7 @@ fn end_driver_process(pid: u32) {
 /// already proved by its start.
 #[cfg(windows)]
 fn end_driver_process(pid: u32) {
-    let ended = std::process::Command::new("taskkill")
+    let ended = Command::new("taskkill")
         .args(["/PID", &pid.to_string(), "/F"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -5381,7 +5420,7 @@ fn end_driver_process(pid: u32) {
         if listed_image(pid).is_none() {
             return;
         }
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        profile::thread::sleep(std::time::Duration::from_millis(20));
     }
     panic!("pid {pid} outlived a forced taskkill");
 }
@@ -5395,7 +5434,7 @@ fn end_driver_process(pid: u32) {
 /// takes nothing at that pid as proof the driver has gone.
 #[cfg(windows)]
 fn listed_image(pid: u32) -> Option<String> {
-    let listing = std::process::Command::new("tasklist")
+    let listing = Command::new("tasklist")
         .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
         .output()
         .expect("this host lists its processes");
@@ -5551,7 +5590,7 @@ fn build(selection: &[&str]) -> PathBuf {
         String::from_utf8_lossy(&built.stderr)
     );
     let held = held_dir();
-    std::fs::create_dir_all(&held).expect("a directory for this process's doubles");
+    profile::fs::create_dir_all(&held).expect("a directory for this process's doubles");
     held
 }
 
@@ -5583,13 +5622,13 @@ fn held_alias(held: &Path, name: &str) -> PathBuf {
         // that opens a second world afterwards would otherwise link into a
         // directory that is no longer there — an ENOENT the retry below cannot
         // outlast, because nothing is going to recreate it.
-        std::fs::create_dir_all(held).expect("a directory for this process's doubles");
+        profile::fs::create_dir_all(held).expect("a directory for this process's doubles");
         // Bounded, and retried rather than asserted on the first look: the
         // window this closes is another process's uplift, which is short but
         // real, and a bare `is_file` here would only move the flake one line up.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         loop {
-            let _ = std::fs::remove_file(&mine);
+            let _ = profile::fs::remove_file(&mine);
             match place(&published, &mine) {
                 Ok(()) => break,
                 Err(error) => assert!(
@@ -5598,7 +5637,7 @@ fn held_alias(held: &Path, name: &str) -> PathBuf {
                     debug.display()
                 ),
             }
-            std::thread::sleep(std::time::Duration::from_millis(20));
+            profile::thread::sleep(std::time::Duration::from_millis(20));
         }
     }
     mine
@@ -5629,7 +5668,7 @@ static STAGED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(
 /// and staging beside the destination is what keeps it one: a reader watching
 /// `mine` sees nothing, the old file, or a complete new one.
 fn place(published: &Path, mine: &Path) -> std::io::Result<()> {
-    if std::fs::hard_link(published, mine).is_ok() {
+    if profile::fs::hard_link(published, mine).is_ok() {
         return Ok(());
     }
     let staging = mine.with_file_name(format!(
@@ -5638,14 +5677,14 @@ fn place(published: &Path, mine: &Path) -> std::io::Result<()> {
         std::process::id(),
         STAGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
     ));
-    // Through the shared helper rather than `std::fs::copy`, which would hold the
+    // Through the shared helper rather than `profile::fs::copy`, which would hold the
     // copy open for writing in this process — the `ETXTBSY` its doc explains.
-    onepipeline_testfakes::executable(&staging, std::fs::read(published)?);
-    std::fs::rename(&staging, mine).inspect_err(|_| {
+    onepipeline_testfakes::executable(&staging, profile::fs::read(published)?);
+    profile::fs::rename(&staging, mine).inspect_err(|_| {
         // A rename that did not happen leaves the staging file next to the
         // destination, where the next `build` would sweep nothing: the directory
         // is this process's own and lives as long as it does.
-        let _ = std::fs::remove_file(&staging);
+        let _ = profile::fs::remove_file(&staging);
     })
 }
 
@@ -5674,8 +5713,8 @@ fn a_double_is_placed_whole_or_not_at_all() {
     use std::sync::Arc;
 
     let dir = std::env::temp_dir().join(format!("onepipeline-place-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("a scratch directory for the placement");
+    let _ = profile::fs::remove_dir_all(&dir);
+    profile::fs::create_dir_all(&dir).expect("a scratch directory for the placement");
 
     // Big enough that copying it is many writes rather than one. A small file
     // would be placed inside a single write and would prove nothing about a
@@ -5684,8 +5723,8 @@ fn a_double_is_placed_whole_or_not_at_all() {
     let replaced = b"the double this one replaces".to_vec();
     let published = dir.join("double.published");
     let mine = dir.join("double");
-    std::fs::write(&published, &replacement).expect("the built double is written");
-    std::fs::write(&mine, &replaced).expect("the double this one replaces is written");
+    profile::fs::write(&published, &replacement).expect("the built double is written");
+    profile::fs::write(&mine, &replaced).expect("the double this one replaces is written");
 
     let watching = Arc::new(AtomicBool::new(true));
     let stop = Arc::clone(&watching);
@@ -5699,7 +5738,7 @@ fn a_double_is_placed_whole_or_not_at_all() {
             looks.fetch_add(1, Ordering::Relaxed);
             // A name that does not resolve is one of the three: a reader that
             // finds nothing there looks again, and never execs a fragment.
-            if let Ok(seen) = std::fs::metadata(&destination) {
+            if let Ok(seen) = profile::fs::metadata(&destination) {
                 if !whole.contains(&seen.len()) {
                     partial = partial.or(Some(seen.len()));
                 }
@@ -5731,12 +5770,14 @@ fn a_double_is_placed_whole_or_not_at_all() {
         whole[1]
     );
     assert_eq!(
-        std::fs::metadata(&mine).expect("the placed double").len(),
+        profile::fs::metadata(&mine)
+            .expect("the placed double")
+            .len(),
         replacement.len() as u64,
         "the placement did not leave the new double behind"
     );
 
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = profile::fs::remove_dir_all(&dir);
 } // llmlint: ignore-end[tests_mirror_real_usage]
 
 /// A verb the repository's own `pre-push` hook answers **and returns from on its
@@ -5839,7 +5880,7 @@ impl HeldPublication {
     /// Let the held push through, now, because this journey has seen what it
     /// needed to while the publication was still running.
     pub fn release(&self) {
-        std::fs::write(&self.rendezvous, "go").expect("the held publication is released");
+        profile::fs::write(&self.rendezvous, "go").expect("the held publication is released");
     }
 }
 
@@ -5849,7 +5890,7 @@ impl Drop for HeldPublication {
         // the same bytes twice, and one that panicked before releasing is exactly
         // the case this exists for. Failure here means the world's tree is already
         // gone, which means so is the hook.
-        let _ = std::fs::write(&self.rendezvous, "go");
+        let _ = profile::fs::write(&self.rendezvous, "go");
     }
 }
 
@@ -6323,7 +6364,7 @@ fn the_hook_refuses_a_command_line_it_does_not_speak() {
     // or drop it, and this refuses here instead of hanging the Windows leg on a
     // push nothing releases — which is the failure this whole gate exists to end.
     let go = world.root.join("push.go");
-    std::fs::write(&go, "go").expect("the rendezvous is written");
+    profile::fs::write(&go, "go").expect("the rendezvous is written");
     assert!(
         go.is_file(),
         "the rendezvous at {} is not in place before the hook that waits for it is \
@@ -6397,29 +6438,29 @@ fn a_removal_the_host_refuses_declines_the_push_rather_than_reporting_it_done() 
     );
     let streams = home.join("streams");
     for held in ["locks", "sessions", "workspaces"] {
-        std::fs::create_dir_all(home.join(held)).expect("the state root is laid out");
+        profile::fs::create_dir_all(home.join(held)).expect("the state root is laid out");
     }
-    std::fs::create_dir_all(&streams).expect("the state root is laid out");
+    profile::fs::create_dir_all(&streams).expect("the state root is laid out");
     let named = repo
         .checkout
         .file_name()
         .expect("the checkout is a named directory");
-    std::fs::write(
+    profile::fs::write(
         streams.join(format!("{}.ndjson", named.to_string_lossy())),
         "",
     )
     .expect("this tree's stream is in place");
 
     // Sealed after the registration above, which needed to write here.
-    let opened = std::fs::metadata(&home)
+    let opened = profile::fs::metadata(&home)
         .expect("the state root is there to seal")
         .permissions();
-    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o555))
+    profile::fs::set_permissions(&home, profile::fs::Permissions::from_mode(0o555))
         .expect("the state root is sealed");
     let refused = publishing_push(&world, &repo.checkout, "a removal the host refuses");
     // Restored before anything is asserted, so a failing assertion still leaves
     // the world's scratch removable rather than failing its teardown as well.
-    std::fs::set_permissions(&home, opened).expect("the state root is unsealed");
+    profile::fs::set_permissions(&home, opened).expect("the state root is unsealed");
 
     let said = String::from_utf8_lossy(&refused.stderr).into_owned();
     assert!(
@@ -6528,7 +6569,7 @@ fn a_held_push_nothing_releases_expires_rather_than_waiting_out_the_job() {
 /// hook is git's child and inherits it from there.
 fn publishing_push(world: &World, checkout: &Path, what: &str) -> std::process::Output {
     let file = checkout.join(format!("{}.md", slug_of(what)));
-    std::fs::write(&file, format!("{what}\n")).expect("the change is written");
+    profile::fs::write(&file, format!("{what}\n")).expect("the change is written");
     git(world, checkout, &["add", "-A"]);
     git(world, checkout, &["commit", "-m", &format!("feat: {what}")]);
     Command::new("git")
@@ -6594,7 +6635,7 @@ fn interpreted(script: &Path) -> Vec<String> {
 #[cfg(windows)]
 fn write_hook_script(world: &World) -> PathBuf {
     let path = world.root.join("hook.bat");
-    std::fs::write(&path, include_str!("hook.bat").replace('\n', "\r\n"))
+    profile::fs::write(&path, include_str!("hook.bat").replace('\n', "\r\n"))
         .expect("the hook script is written");
     path
 }
@@ -6603,7 +6644,7 @@ fn write_hook_script(world: &World) -> PathBuf {
 #[cfg(not(windows))]
 fn write_hook_script(world: &World) -> PathBuf {
     let path = world.root.join("hook.sh");
-    std::fs::write(&path, include_str!("hook.sh")).expect("the hook script is written");
+    profile::fs::write(&path, include_str!("hook.sh")).expect("the hook script is written");
     path
 }
 
@@ -6615,7 +6656,7 @@ fn write_hook_script(world: &World) -> PathBuf {
 #[cfg(unix)]
 fn runnable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path)
+    profile::fs::metadata(path)
         .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
         .unwrap_or(false)
 }
@@ -6665,7 +6706,7 @@ const DUMP_LINE_CEILING: usize = 200;
 /// with this one's, on every command it runs — so an unreadable entry is
 /// reported as unreadable and the walk carries on.
 fn dump_into(out: &mut String, dir: &Path, indent: &str) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
+    let Ok(entries) = profile::fs::read_dir(dir) else {
         out.push_str(&format!("{indent}(unreadable directory)\n"));
         return;
     };
@@ -6683,7 +6724,7 @@ fn dump_into(out: &mut String, dir: &Path, indent: &str) {
         }
         out.push_str(&format!("{indent}{name}:\n"));
         let held = format!("{indent}  ");
-        match std::fs::read(&path) {
+        match profile::fs::read(&path) {
             Err(error) => out.push_str(&format!("{held}(unreadable: {error})\n")),
             Ok(bytes) if bytes.is_empty() => out.push_str(&format!("{held}(empty)\n")),
             Ok(bytes) => match String::from_utf8(bytes) {
@@ -6718,7 +6759,7 @@ fn dump_into(out: &mut String, dir: &Path, indent: &str) {
 /// line after it cannot be, so it is a record the writer lost, and reading past
 /// it would let a test assert against a gap and call it a pass.
 fn read_jsonl(path: &Path) -> Vec<Value> {
-    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let text = profile::fs::read_to_string(path).unwrap_or_default();
     let lines: Vec<&str> = text
         .lines()
         .filter(|line| !line.trim().is_empty())
@@ -6818,8 +6859,9 @@ impl Counts {
 /// The counts a run's driver has reported so far.
 pub fn counts(world: &World, run: &str) -> Counts {
     let path = world.run_file(run, "loop-stats.json");
-    let read =
-        || -> Option<Value> { serde_json::from_str(&std::fs::read_to_string(&path).ok()?).ok() };
+    let read = || -> Option<Value> {
+        serde_json::from_str(&profile::fs::read_to_string(&path).ok()?).ok()
+    };
     // Written atomically, so a partial read is not a thing that happens — an
     // absent one is, on the first look before the driver's first wait.
     let value = read().unwrap_or_else(|| {
@@ -6922,9 +6964,9 @@ pub fn plan_of(name: &str, nodes: Vec<Value>) -> Value {
 fn a_directory_reached_through_a_symlink_resolves_to_the_directory_itself() {
     let scratch =
         resolved(&std::env::temp_dir()).join(format!("op-resolved-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&scratch);
+    let _ = profile::fs::remove_dir_all(&scratch);
     let directory = scratch.join("real");
-    std::fs::create_dir_all(&directory).expect("a directory to resolve to");
+    profile::fs::create_dir_all(&directory).expect("a directory to resolve to");
     let route = scratch.join("route");
     std::os::unix::fs::symlink(&directory, &route).expect("a symlinked route to it");
 
@@ -6937,12 +6979,12 @@ fn a_directory_reached_through_a_symlink_resolves_to_the_directory_itself() {
         directory,
         "a route to a directory was kept instead of the directory"
     );
-    std::fs::remove_dir_all(&scratch).ok();
+    profile::fs::remove_dir_all(&scratch).ok();
 }
 
 /// A verbatim Windows path is spelled the way the rest of Windows spells it.
 ///
-/// [`std::fs::canonicalize`] is the only thing on that platform that produces
+/// [`profile::fs::canonicalize`] is the only thing on that platform that produces
 /// the `\\?\` prefix, so holding its answer against a launch record — which
 /// carries `GetCurrentDirectory`'s — would compare two spellings of one
 /// directory. The rule is pure text, so it is held on every platform rather
@@ -7137,7 +7179,7 @@ pub fn a_parked_run_is_read_as_driven(world: &World, run: &str) {
 pub fn a_watch_armed_active_outlasts_the_run_turning_parked(world: &World, run: &str) {
     const AFTER: &str = "4";
     let watchers = || {
-        std::fs::read_dir(world.run_file(run, "watchers")).map_or(0, |entries| {
+        profile::fs::read_dir(world.run_file(run, "watchers")).map_or(0, |entries| {
             entries
                 .filter_map(Result::ok)
                 .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))

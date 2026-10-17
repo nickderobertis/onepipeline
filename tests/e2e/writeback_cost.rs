@@ -111,7 +111,7 @@ fn at_rest(world: &World, what: &str) {
             .count();
         let between_commands = asked.last().is_some_and(|call| call[0] == END);
         if landed && between_commands && called_by_attempts == ended {
-            std::thread::sleep(Duration::from_millis(1_500));
+            onepipeline_testfakes::profile::thread::sleep(Duration::from_millis(1_500));
             if world.store_calls().len() == asked.len() && records(world).len() == recorded.len() {
                 return;
             }
@@ -122,7 +122,7 @@ fn at_rest(world: &World, what: &str) {
             "the write-back did not come to rest after {what}; the runs root held:\n{}",
             world.dump()
         );
-        std::thread::sleep(Duration::from_millis(50));
+        onepipeline_testfakes::profile::thread::sleep(Duration::from_millis(50));
     }
 }
 

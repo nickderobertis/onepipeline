@@ -214,7 +214,7 @@ fn every_task_and_every_delivered_ticket_reads_queued_at_the_first_dispatch() {
     let claim = updates.arrived();
     // The claim's first update is still held at the scripted source, so the board is as
     // authored.
-    std::thread::sleep(Duration::from_secs(1));
+    onepipeline_testfakes::profile::thread::sleep(Duration::from_secs(1));
     assert_eq!(
         dispatches(&world, name),
         0,
@@ -387,7 +387,7 @@ fn a_stopped_run_releases_its_unstarted_tickets_and_an_adoption_claims_them_agai
     world.run(&["adopt", name, "--detach"]).exited(0);
     let claim = updates.arrived();
     world.store_stops_holding(UPDATE);
-    std::thread::sleep(Duration::from_secs(1));
+    onepipeline_testfakes::profile::thread::sleep(Duration::from_secs(1));
     assert_eq!(
         dispatches(&world, name),
         dispatched_before,
@@ -528,7 +528,7 @@ fn a_first_projection_held_past_its_deadline_does_not_hold_back_the_first_dispat
 
     let held = updates.arrived();
     let started = std::time::Instant::now();
-    std::thread::sleep(Duration::from_secs(2));
+    onepipeline_testfakes::profile::thread::sleep(Duration::from_secs(2));
     assert_eq!(
         dispatches(&world, name),
         0,
@@ -1097,7 +1097,7 @@ fn a_ticket_rate_limited_with_a_wait_holds_every_call_and_the_retry_carries_its_
             failed_at.elapsed(),
             &store_calls(&world)[asked..]
         );
-        std::thread::sleep(Duration::from_millis(50));
+        onepipeline_testfakes::profile::thread::sleep(Duration::from_millis(50));
     }
     world.until("the deliverer to be carried again", |world| {
         records(world).len() >= 2

@@ -12,7 +12,7 @@
 // driven instead. `harness.rs` carries the same suppression and the full rationale.
 
 use crate::harness::{World, REFUSED, USAGE_ERROR};
-use std::process::Command;
+use onepipeline_testfakes::profile::process::Command;
 
 /// Every command the contract documents, with a minimal legal invocation.
 const COMMANDS: &[(&str, &[&str])] = &[

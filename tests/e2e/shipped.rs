@@ -271,7 +271,7 @@ fn both_example_projects_start_a_real_run() {
         for (index, identity) in example_repositories().into_iter().enumerate() {
             let checkout = world.root.join(format!("example-{index}"));
             std::fs::create_dir_all(&checkout).expect("an example checkout");
-            let initialized = std::process::Command::new("git")
+            let initialized = onepipeline_testfakes::profile::process::Command::new("git")
                 .args(["init", "--initial-branch=main"])
                 .arg(&checkout)
                 .output()

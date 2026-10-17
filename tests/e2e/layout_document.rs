@@ -7,8 +7,8 @@
 //! over a channel directory the compiled binary wrote, and hold what it reads
 //! and writes to what the engine reads and writes there.
 
+use onepipeline_testfakes::profile::process::Command;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde_json::{json, Value};
 

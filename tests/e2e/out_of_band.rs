@@ -341,7 +341,7 @@ fn only_reads(args: &Value) -> bool {
 
 /// Where the origin holds `branch`, or `None` where it holds no such branch.
 fn origin_ref(repository: &Repository, branch: &str) -> Option<String> {
-    let answer = std::process::Command::new("git")
+    let answer = onepipeline_testfakes::profile::process::Command::new("git")
         .arg("--git-dir")
         .arg(&repository.origin)
         .args(["rev-parse", "--verify", "--quiet"])
@@ -1092,7 +1092,7 @@ fn a_drafting_worktree_that_cannot_be_removed_is_named_for_the_operator() {
 
     // Given back to the world before anything can fail, so its own removal is not
     // what this journey leaves behind.
-    let restored = std::process::Command::new("chmod")
+    let restored = onepipeline_testfakes::profile::process::Command::new("chmod")
         .args(["-R", "u+w"])
         .arg(&tmp)
         .status()
@@ -1134,7 +1134,11 @@ fn world_with_its_own_tmp(name: &str) -> World {
 /// group of its own so a signal to that group reaches nothing else, behind
 /// `launcher` where one is given.
 #[cfg(unix)]
-fn start_landing(world: &World, graph: &str, launcher: Option<&str>) -> std::process::Child {
+fn start_landing(
+    world: &World,
+    graph: &str,
+    launcher: Option<&str>,
+) -> onepipeline_testfakes::profile::process::Child {
     use std::os::unix::process::CommandExt;
     use std::process::Stdio;
 
@@ -1183,7 +1187,11 @@ fn drafting_worktree(world: &World) -> std::path::PathBuf {
 
 /// Send `signal` to the landing, or to its whole group.
 #[cfg(unix)]
-fn signal_landing(landing: &std::process::Child, signal: i32, whole_group: bool) {
+fn signal_landing(
+    landing: &onepipeline_testfakes::profile::process::Child,
+    signal: i32,
+    whole_group: bool,
+) {
     let pid = i32::try_from(landing.id()).expect("a pid fits");
     // SAFETY: `kill` and `killpg` take an id and a signal and touch no memory;
     // the id is the landing's own, started in a group of its own, so the signal
@@ -1361,7 +1369,7 @@ fn a_landing_signalled_while_its_worktree_is_being_added_still_removes_it() {
     signal_landing(&landing, libc::SIGTERM, false);
     // Long enough for the landing to have acted on the signal before git finishes,
     // which is the ordering this journey is about.
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_millis(500));
     world.release("adding.go");
     let ended = landing.wait_with_output().expect("the landing ends");
     // Nothing to wait out after this: the landing waits on git's add before it
@@ -1395,7 +1403,7 @@ fn a_landing_under_nohup_drafts_and_lands_through_a_hangup() {
     let mut landing = start_landing(&world, &graph, Some("nohup"));
     let worktree = drafting_worktree(&world);
     signal_landing(&landing, libc::SIGHUP, false);
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_millis(500));
     assert!(
         landing
             .try_wait()

@@ -637,9 +637,9 @@ fn the_verb_reads_past_a_torn_tail_and_a_foreign_line_and_refuses_a_file_it_cann
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the module and both journeys in it, about 40 seconds together, and what they guard is which `oneharness-core` the crate links — a `Cargo.lock` move, which only this crate's own project sees — so an edge narrower than this target would drop them out of `nx affected` for exactly the change they exist to catch. Same grounds as the `mod agents` declaration in `main.rs`.
 #[cfg(target_os = "linux")]
 mod unscanned {
+    use onepipeline_testfakes::profile::process::Command;
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::{Path, PathBuf};
-    use std::process::Command;
     use std::time::SystemTime;
 
     use super::{every_line_names, pointers};

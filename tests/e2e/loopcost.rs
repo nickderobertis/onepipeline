@@ -156,7 +156,7 @@ fn quiet_counts(world: &World, runs: &[&str]) -> Vec<Counts> {
     let mut last = read();
     let mut since = Instant::now();
     while since.elapsed() < QUIET && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(250));
+        onepipeline_testfakes::profile::thread::sleep(Duration::from_millis(250));
         let now = read();
         if now != last {
             last = now;
@@ -216,11 +216,11 @@ fn a_converged_run_does_no_scheduling_work_while_it_records_nothing() {
     });
     reporting(&world, "idle");
     // The launch's own records are behind us before the window opens.
-    std::thread::sleep(Duration::from_secs(2));
+    onepipeline_testfakes::profile::thread::sleep(Duration::from_secs(2));
 
     let wrote = world.journal("idle").len();
     let before = counts(&world, "idle");
-    std::thread::sleep(WINDOW);
+    onepipeline_testfakes::profile::thread::sleep(WINDOW);
     let did = counts(&world, "idle").since(before);
 
     assert_eq!(
@@ -327,7 +327,7 @@ fn an_idle_pass_does_not_grow_with_the_run_it_is_idling_on() {
         "the two runs are not orders of magnitude apart: {sizes:?}"
     );
 
-    std::thread::sleep(WINDOW);
+    onepipeline_testfakes::profile::thread::sleep(WINDOW);
     let did: Vec<Counts> = ["small", "large"]
         .iter()
         .enumerate()
@@ -394,7 +394,7 @@ fn the_board_and_the_frontier_are_recomputed_once_per_recorded_state_change() {
         recorded(world, "changes", "node-dispatched", "a")
     });
     reporting(&world, "changes");
-    std::thread::sleep(Duration::from_secs(1));
+    onepipeline_testfakes::profile::thread::sleep(Duration::from_secs(1));
 
     let before = counts(&world, "changes");
     let changed_before = state_changes(&world, "changes");
@@ -404,7 +404,7 @@ fn the_board_and_the_frontier_are_recomputed_once_per_recorded_state_change() {
             recorded(world, "changes", "node-settled", node)
         });
     }
-    std::thread::sleep(Duration::from_secs(1));
+    onepipeline_testfakes::profile::thread::sleep(Duration::from_secs(1));
     let did = counts(&world, "changes").since(before);
     let changes = (state_changes(&world, "changes") - changed_before) as u64;
 
@@ -484,13 +484,13 @@ fn another_runs_ledger_is_read_on_its_own_interval_and_not_on_the_loops() {
         world.run(&["start", &plan, "--detach"]).exited(0);
         reporting(&world, run);
     }
-    std::thread::sleep(Duration::from_secs(1));
+    onepipeline_testfakes::profile::thread::sleep(Duration::from_secs(1));
 
     let before: Vec<Counts> = ["chatty", "quiet"]
         .iter()
         .map(|run| counts(&world, run))
         .collect();
-    std::thread::sleep(WINDOW);
+    onepipeline_testfakes::profile::thread::sleep(WINDOW);
     let did: Vec<Counts> = ["chatty", "quiet"]
         .iter()
         .enumerate()

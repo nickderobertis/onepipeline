@@ -111,6 +111,17 @@ jobs:
         env:
           ONEPIPELINE_NX_BASE_SHA: ${{ github.event_name == 'push' && github.event.before || '' }}
         run: ONEPIPELINE_TEST_ARCHIVE="$RUNNER_TEMP/tests.tar.zst" just check-affected 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
+      # Every test writes a record of where its wall clock went
+      # (`crates/testfakes/src/profile.rs`), green or not, and this leg's are kept
+      # for `scripts/test-profile-report.mjs`.
+      - name: Keep the per-test profile records
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-profile-gate
+          path: target/test-profile/
+          if-no-files-found: ignore
+          retention-days: 30
       # Whether each test the gate failed fails again on the same instrumented
       # build, re-run from its archive so nothing can be compiled: a new flake or
       # a regression. It cannot change the verdict. The gate step has already
@@ -262,6 +273,17 @@ jobs:
           else
             ps -ef
           fi
+      # Every test writes a record of where its wall clock went
+      # (`crates/testfakes/src/profile.rs`), green or not, and this leg's are kept
+      # for `scripts/test-profile-report.mjs`.
+      - name: Keep the per-test profile records
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-profile-${{ matrix.os }}
+          path: target/test-profile/
+          if-no-files-found: ignore
+          retention-days: 30
       # After the process table, so the snapshot above is of the leg as it
       # stopped rather than of these re-runs. This step says why any tests went
       # unrun, then whether each failed test fails again on the build the step
@@ -762,6 +784,17 @@ jobs:
         if: failure() || cancelled()
         continue-on-error: true
         run: ps -ef
+      # Every test writes a record of where its wall clock went
+      # (`crates/testfakes/src/profile.rs`), green or not, and this leg's are kept
+      # for `scripts/test-profile-report.mjs`.
+      - name: Keep the per-test profile records
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-profile-macos-latest
+          path: target/test-profile/
+          if-no-files-found: ignore
+          retention-days: 30
       # Capture the stopped processes before diagnostic re-runs change them.
       - name: Does each failed test fail again on this build
         if: failure() && steps.gate.outcome == 'failure'

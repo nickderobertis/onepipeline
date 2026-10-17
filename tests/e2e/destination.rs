@@ -1009,7 +1009,7 @@ fn a_hooks_directory_whose_name_is_not_unicode_is_found_and_its_hook_answers() {
     // routing this name through one would mangle it before git ever saw it, and
     // the journey would be about a path that was already text.
     let git = |args: &[&OsStr]| {
-        std::process::Command::new("git")
+        onepipeline_testfakes::profile::process::Command::new("git")
             .args(args)
             .current_dir(&service.checkout)
             .env("GIT_CONFIG_GLOBAL", world.gitconfig())

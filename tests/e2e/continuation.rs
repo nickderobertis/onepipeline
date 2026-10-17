@@ -1372,7 +1372,7 @@ fn two_cold_hosts_launching_one_project_at_once_leave_one_driver_and_every_draft
                 .with_env("ONEPIPELINE_IDLE_CLAIM_CHECK_SECONDS", "2")
         })
         .collect();
-    let launches: Vec<std::process::Child> = hosts
+    let launches: Vec<onepipeline_testfakes::profile::process::Child> = hosts
         .iter()
         .map(|host| {
             let mut command = host.cmd(&["start", &project, "--detach"]);
@@ -1408,7 +1408,7 @@ fn two_cold_hosts_launching_one_project_at_once_leave_one_driver_and_every_draft
     );
     // Two idle checks and some: every driver has read the claim at least once since both
     // claims could have reached the store.
-    std::thread::sleep(std::time::Duration::from_secs(6));
+    onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_secs(6));
     let left: Vec<&World> = hosts
         .iter()
         .zip(&launched)

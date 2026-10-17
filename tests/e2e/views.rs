@@ -2910,7 +2910,7 @@ const WEST: &str = "YYY9";
 /// answer of the thing under test. This asks `ps` the way a person would.
 #[cfg(unix)]
 fn start_of_as_rendered_in(zone: &str, pid: u32) -> String {
-    let listed = std::process::Command::new("ps")
+    let listed = onepipeline_testfakes::profile::process::Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "lstart="])
         .env("TZ", zone)
         .output()
