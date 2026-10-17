@@ -62,6 +62,7 @@ before(() => {
     "README.md": "seed\n",
     "crates/alpha/src/lib.rs": "seed\n",
     "crates/beta/src/lib.rs": "seed\n",
+    "crates/beta/src/moved.rs": "a module that later moves crates\n",
     "tests/one.rs": "seed\n",
     "tests/two.rs": "seed\n",
     // Today's shape, for --today: one crate, every test in one suite.
@@ -85,6 +86,11 @@ before(() => {
   });
   // After the window.
   commit("feat: alpha again", "2026-10-20T00:00:00Z", { "crates/alpha/src/lib.rs": "a2\n" });
+  // A file moved from one crate to the other, which git would report as a rename.
+  rmSync(join(repo, "crates/beta/src/moved.rs"));
+  commit("refactor: move a module between crates", "2026-10-25T00:00:00Z", {
+    "crates/alpha/src/moved.rs": "a module that later moves crates\n",
+  });
 
   const records = join(scratch, "records", "e2e");
   mkdirSync(records, { recursive: true });
@@ -567,4 +573,66 @@ test("a crate or suite named like an object's own property is refused", () => {
     writeFileSync(file, JSON.stringify(proposal).replace('"one2":', '"__proto__":'));
     refused(["--mapping", file, "--out", join(scratch, "x"), "--repo", repo], message);
   }
+});
+
+test("the window holds a change committed at its start and not one committed at its end", () => {
+  const file = mappingFile("edges", mapping(false));
+  const result = written([
+    "--mapping",
+    file,
+    "--repo",
+    repo,
+    "--ref",
+    "main",
+    "--since",
+    "2026-09-16T00:00:00Z",
+    "--until",
+    "2026-09-18T00:00:00Z",
+  ]);
+  assert.deepEqual(
+    result.perChange.map((change) => change.subject),
+    ["feat: alpha", "feat: beta"],
+  );
+});
+
+test("a file moved from one crate to another touches both", () => {
+  const file = mappingFile("moved", mapping(false));
+  const result = written([
+    "--mapping",
+    file,
+    "--repo",
+    repo,
+    "--ref",
+    "main",
+    "--since",
+    "2026-10-24T00:00:00Z",
+    "--until",
+    "2026-10-26T00:00:00Z",
+  ]);
+  assert.deepEqual(affectedBySubject(result), {
+    "refactor: move a module between crates": ["one", "two"],
+  });
+});
+
+test("a module named like an object's own property is weighed by its records and nothing else", () => {
+  const records = join(scratch, "inherited-modules");
+  mkdirSync(join(records, "e2e"), { recursive: true });
+  writeFileSync(
+    join(records, "e2e", "constructor.first.json"),
+    JSON.stringify({
+      ...golden,
+      test: "constructor::first",
+      run_id: "r",
+      wall_s: 3,
+      unattributed_s: 3,
+      categories,
+    }),
+  );
+  const proposal = mapping(false);
+  proposal.suites.one.modules = ["constructor"];
+  proposal.suites.two.modules = ["toString"];
+  const result = replayed("inherited-modules", proposal, ["--records", records]);
+  assert.equal(result.suites.one.testSeconds, 3);
+  assert.equal(result.suites.two.testSeconds, 0);
+  assert.deepEqual(result.summary.modulesInNoSuite, []);
 });

@@ -217,16 +217,17 @@ function git(repo, args) {
 
 /** The merged pull requests in the window, oldest first, each with the files it changed. */
 export function mergedChanges(repo, { ref, since, until, exclude }) {
+  // The window is applied to each commit's own date here rather than by git's
+  // `--since`/`--until`, so it is exactly [since, until).
   const log = git(repo, [
     "log",
     "--first-parent",
     "--reverse",
-    `--since=${since}`,
-    `--until=${until}`,
     "--format=%H%x09%cI%x09%s",
     "--end-of-options",
     ref,
   ]);
+  const [from, to] = [Date.parse(since), Date.parse(until)];
   const skip = new RegExp(exclude);
   return log
     .split("\n")
@@ -235,23 +236,26 @@ export function mergedChanges(repo, { ref, since, until, exclude }) {
       const [commit, committed, ...subject] = line.split("\t");
       return { commit, committed, subject: subject.join("\t") };
     })
+    .filter(({ committed }) => Date.parse(committed) >= from && Date.parse(committed) < to)
     .filter((change) => !skip.test(change.subject))
     .map((change) => ({
       ...change,
-      files: git(repo, ["diff", "--name-only", `${change.commit}^1`, change.commit])
+      // Without rename detection, so a file moved from one owner to another
+      // touches both: the one it left and the one it joined.
+      files: git(repo, ["diff", "--name-only", "--no-renames", `${change.commit}^1`, change.commit])
         .split("\n")
         .filter(Boolean),
     }));
 }
 
-/** Test-seconds per test module in one run's records. */
+/** Test-seconds per test module in one run's records, keyed by module name. */
 export function moduleSeconds(records, binary = "e2e") {
-  const out = {};
+  const out = new Map();
   // A suite here is a set of e2e modules, so another binary's module of the same
   // name is not one of them.
   for (const record of records.filter((held) => held.binary === binary)) {
     const name = moduleOf(record.test);
-    out[name] = (out[name] ?? 0) + (record.wall_s ?? 0);
+    out.set(name, (out.get(name) ?? 0) + (record.wall_s ?? 0));
   }
   return out;
 }
@@ -263,7 +267,7 @@ export function replay(mapping, changes, seconds) {
   const weight = {};
   for (const name of names) {
     weight[name] = seconds
-      ? compiled.suites[name].modules.reduce((sum, module) => sum + (seconds[module] ?? 0), 0)
+      ? compiled.suites[name].modules.reduce((sum, module) => sum + (seconds.get(module) ?? 0), 0)
       : null;
   }
   const perChange = changes.map((change) => {
@@ -299,9 +303,8 @@ export function replay(mapping, changes, seconds) {
           .reduce((inner, name) => inner + weight[name], 0),
       0,
     );
-    const unmapped = Object.entries(seconds)
-      .filter(([module]) => !names.some((name) => compiled.suites[name].modules.includes(module)))
-      .map(([module]) => module)
+    const unmapped = [...seconds.keys()]
+      .filter((module) => !names.some((name) => compiled.suites[name].modules.includes(module)))
       .sort();
     Object.assign(summary, {
       testSecondsPerRun: perRun,
