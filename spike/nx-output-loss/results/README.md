@@ -13,3 +13,10 @@
   stderr is Nx's frame with neither stand-in line).
 - `truncated-replay-ai-orchestrator.*` — the first 400 and last 300 bytes of one
   replay through ai-orchestrator's `scripts/nx.sh` that arrived cut at ~63KB.
+
+Rows whose configuration has no `direct=` field were taken before `--direct`
+existed, and ran with its default (`true`). Rows differ in `source=` only by
+commits that touched `spike/`, which nothing Nx runs reads.
+
+`nx-repro.sh` at Nx 23.3 or later writes its cache under `~/.nx/<hash>/` (Nx
+moved it there); remove that directory after a re-run.
