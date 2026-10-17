@@ -9,8 +9,6 @@
 // `cargo` against them, because the public services may not be written to by a
 // test and cannot be told to fail on cue. Each records every request, so a
 // journey can say what was — and what was not — written.
-//
-// Not a `*.test.mjs`, so the suite glob does not run it.
 
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";

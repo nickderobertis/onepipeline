@@ -572,6 +572,17 @@ describe("publication refuses a build that is not the plan, untouched", () => {
     assert.match(result.stderr, /are not the plan's/);
   });
 
+  it("refuses a file whose name on disk is not the one the plan gives it", async () => {
+    const result = await publishTampered((build, dir) => {
+      const archive = of(build, "archive");
+      const renamed = join(dir, "archives", "onepipeline-latest.tar.gz");
+      execFileSync("cp", [archive.path, renamed]);
+      archive.path = renamed;
+    });
+    assert.equal(result.code, 1, said(result));
+    assert.match(result.stderr, /onepipeline-latest\.tar\.gz is not the planned onepipeline-v/);
+  });
+
   it("refuses a Linux binary above the planned glibc floor", async () => {
     const result = await publishTampered((build, dir) => {
       // This host's own `true` links the host's glibc, far above 2.17.

@@ -166,8 +166,9 @@ def guard(phase, dry_run=False):
     """Whether this release may publish at all, and through which registries.
 
     A tag that is not `v<semver>`, or names another version than Cargo.toml, is
-    refused before any build or upload; so is a registry switched on with no
-    credential to publish with. A missing crates.io token turns the crate off.
+    refused before any build or upload; so is a publish phase with a registry
+    switched on and no credential to publish with. Only the publish phases are
+    handed credentials. A missing crates.io token turns the crate off.
     """
     tag = release_tag(dry_run)
     tag_version(tag)
@@ -176,10 +177,11 @@ def guard(phase, dry_run=False):
            'cut the Release from the commit whose Cargo.toml carries that version')
     channels = {'assets': True, 'pypi': switch('PYPI_PUBLISH'), 'npm': switch('NPM_PUBLISH'),
                 'crate': bool(os.environ.get('CARGO_REGISTRY_TOKEN'))}
-    expect(not channels['pypi'] or os.environ.get('PYPI_TOKEN'), 'PYPI_PUBLISH is on but PYPI_TOKEN is empty',
-           'add the PYPI_TOKEN secret (see gh-secrets.json) or unset PYPI_PUBLISH')
-    expect(not channels['npm'] or os.environ.get('NODE_AUTH_TOKEN'), 'NPM_PUBLISH is on but NODE_AUTH_TOKEN is empty',
-           'add the NPM_TOKEN secret (see gh-secrets.json) or unset NPM_PUBLISH')
+    if phase in ('publish', 'publish-common') and not dry_run:
+        expect(not channels['pypi'] or os.environ.get('PYPI_TOKEN'), 'PYPI_PUBLISH is on but PYPI_TOKEN is empty',
+               'add the PYPI_TOKEN secret (see gh-secrets.json) or unset PYPI_PUBLISH')
+        expect(not channels['npm'] or os.environ.get('NODE_AUTH_TOKEN'), 'NPM_PUBLISH is on but NODE_AUTH_TOKEN is empty',
+               'add the NPM_TOKEN secret (see gh-secrets.json) or unset NPM_PUBLISH')
     if phase != 'build' and not dry_run:
         require_github()
     return tag, version, channels
@@ -358,6 +360,8 @@ def built(platform, out, tag, version):
     conform(platform, version, manifest['artifacts'])
     for artifact in manifest['artifacts']:
         path = Path(artifact.get('path', ''))
+        expect(path.name == artifact['file'], f"{path} is not the planned {artifact['file']}",
+               'rebuild; a file is published under the name the plan gives it')
         expect(path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() == artifact.get('sha256'),
                f'{path} changed after it was built and test-installed',
                'rebuild; only the files the test-install ran may be published')

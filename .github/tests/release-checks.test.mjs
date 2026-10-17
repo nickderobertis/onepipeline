@@ -29,6 +29,7 @@ import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { parse } from "yaml";
+import { evaluate } from "../workflow-graph.mjs";
 import { GitHubDouble } from "./support/release-doubles.mjs";
 
 const ROOT = process.cwd();
@@ -79,6 +80,37 @@ function releaseEnv(github, out, overrides = {}) {
 }
 
 describe("an ineligible release", () => {
+  const workflow = parse(readFileSync(join(ROOT, ".github/workflows/release.yml"), "utf8"));
+  /// Every step of release.yml that runs a release recipe: [job, step].
+  const steps = Object.entries(workflow.jobs).flatMap(([job, spec]) =>
+    spec.steps.filter((step) => /^just release-/.test(step.run ?? "")).map((step) => [job, step]),
+  );
+  const CREDENTIALS = ["PYPI_TOKEN", "NODE_AUTH_TOKEN", "CARGO_REGISTRY_TOKEN"];
+
+  /// The environment Actions hands one step: the workflow's and the step's own
+  /// `env:`, evaluated for this release, and what every runner sets.
+  function stepEnv(github, out, step, { tag, vars, secrets }) {
+    const context = {
+      github: { event: { release: { tag_name: tag } } },
+      vars,
+      secrets: { GITHUB_TOKEN: "not-a-real-token", ...secrets },
+      needs: Object.fromEntries(
+        ["build-linux", "build-macos", "build-windows"].map((job) => [
+          job,
+          { result: "success", outputs: { published: "success", verified: "success" } },
+        ]),
+      ),
+    };
+    const env = {};
+    for (const [key, value] of Object.entries({ ...workflow.env, ...step.env })) {
+      env[key] = String(value).replace(/\$\{\{(.*?)\}\}/g, (_, e) =>
+        String(evaluate(e, context) ?? ""),
+      );
+    }
+    const { GITHUB_TOKEN: _, ...runner } = github.env();
+    return { ...runner, ...env, ONEPIPELINE_RELEASE_OUT: out };
+  }
+
   let github;
   before(async () => {
     github = await new GitHubDouble().start();
@@ -86,67 +118,87 @@ describe("an ineligible release", () => {
   });
   after(() => github.stop());
 
-  // The cases release.yml's `guard` job and the tag check every verify job
-  // carried, and the credential checks every publish job opened with.
+  it("hands the publishing credentials to the publish steps alone", () => {
+    for (const [job, step] of steps) {
+      const carried = CREDENTIALS.filter((name) => Object.hasOwn(step.env ?? {}, name));
+      if (/ publish$/.test(step.run)) {
+        assert.ok(
+          carried.length > 0,
+          `${job}'s ${step.run} carries the credentials it publishes with`,
+        );
+      } else {
+        assert.deepEqual(carried, [], `${job}'s ${step.run} carries no publishing credential`);
+      }
+    }
+  });
+
+  const allOn = { PYPI_PUBLISH: "true", NPM_PUBLISH: "true" };
+  const allSecrets = { PYPI_TOKEN: "pypi", NPM_TOKEN: "npm", CARGO_REGISTRY_TOKEN: "crates" };
+  // A tag that names no version, or another version, refuses every recipe step
+  // but the outcome record, which records a refused release too; a registry
+  // switched on with no credential refuses the steps that publish.
+  const recipes = (step) => step.run !== "just release-outcome";
   const cases = [
     [
       "a tag that is not a version",
-      { RELEASE_TAG: "nightly" },
+      { tag: "nightly", vars: allOn, secrets: allSecrets },
       /'nightly' is not a vX\.Y\.Z version tag/,
+      recipes,
     ],
     [
       "a tag naming another version",
-      { RELEASE_TAG: "v0.0.1" },
+      { tag: "v0.0.1", vars: allOn, secrets: allSecrets },
       /does not name Cargo\.toml's version/,
+      recipes,
     ],
     [
       "PyPI switched on with no token",
-      { PYPI_TOKEN: "" },
+      { tag: TAG, vars: allOn, secrets: { ...allSecrets, PYPI_TOKEN: "" } },
       /PYPI_PUBLISH is on but PYPI_TOKEN is empty/,
+      (step) => Object.hasOwn(step.env ?? {}, "PYPI_TOKEN"),
     ],
     [
       "npm switched on with no token",
-      { NODE_AUTH_TOKEN: "" },
+      { tag: TAG, vars: allOn, secrets: { ...allSecrets, NPM_TOKEN: "" } },
       /NPM_PUBLISH is on but NODE_AUTH_TOKEN is empty/,
+      (step) => Object.hasOwn(step.env ?? {}, "NODE_AUTH_TOKEN"),
     ],
   ];
-  const invocations = [
-    ["release-linux", "build"],
-    ["release-macos", "build"],
-    ["release-windows", "build"],
-    ["release-linux", "publish"],
-    ["release-macos", "publish"],
-    ["release-windows", "publish"],
-    ["release-publish", "publish"],
-  ];
-  for (const [name, overrides, reason] of cases) {
-    for (const [recipe, phase] of invocations) {
-      it(`${name}: just ${recipe} ${phase} exits before building or uploading`, async () => {
+  for (const [name, release, reason, applies] of cases) {
+    it(`${name}: every step it applies to exits before building or uploading`, async () => {
+      const ran = [];
+      for (const [job, step] of steps.filter(([, step]) => applies(step))) {
         const out = scratch("release-out");
         try {
           const before = github.requests.length;
-          const result = await run("just", [recipe, phase], {
-            env: releaseEnv(github, out, overrides),
+          const result = await run("bash", ["-eo", "pipefail", "-c", step.run], {
+            env: stepEnv(github, out, step, release),
           });
-          assert.equal(result.code, 1, said(result));
-          assert.match(result.stderr, reason, said(result));
+          assert.equal(result.code, 1, `${job}: ${said(result)}`);
+          assert.match(result.stderr, reason, `${job}: ${said(result)}`);
           assert.match(result.stderr, /^ACTION: /m, "a refusal names what to do next");
           assert.deepEqual(
             github.requests.slice(before),
             [],
-            "the refusal came before anything asked GitHub, let alone wrote to it",
+            `${job}: refused before asking GitHub anything`,
           );
           for (const platform of ["linux", "macos", "windows", "common"]) {
-            assert.ok(
-              !existsSync(join(out, platform, "build.json")),
-              "nothing was built for a release that was refused",
-            );
+            assert.ok(!existsSync(join(out, platform, "build.json")), `${job}: nothing was built`);
           }
+          ran.push(`${job}: ${step.run}`);
         } finally {
           rmSync(out, { recursive: true, force: true });
         }
-      });
-    }
+      }
+      assert.ok(
+        ran.some((r) => r.startsWith("build-linux") && r.endsWith(" publish")),
+        ran.join("\n"),
+      );
+      assert.ok(
+        ran.some((r) => r.startsWith("publish: just release-publish")),
+        ran.join("\n"),
+      );
+    });
   }
 });
 
@@ -157,7 +209,7 @@ describe("a lock that links an engine twice", () => {
     github = await new GitHubDouble().start();
     github.addRelease(TAG);
     // The repository's own files with one change: Cargo.lock carries a second,
-    // older copy of an engine release.yml's `linked-engines` job reported.
+    // older copy of a linked engine.
     copy = scratch("release-split");
     for (const path of [
       "scripts",
@@ -517,6 +569,7 @@ describe("release-plz.yml's auto-merge step", () => {
         '{"message":"an object"}',
         "not json",
         '[{"number":"12","node_id":7,"head":{"ref":"release-plz-a"}}]',
+        '[{"number":12,"node_id":"PR_node_12","head":{"ref":"release-plz-a","repo":{"full_name":5}}}]',
       ]) {
         github.pullsBody = body;
         const result = await runStep(github);
