@@ -125,11 +125,13 @@ after(() => rmSync(scratch, { recursive: true, force: true }));
 
 // The proposed split, held to the e2e binary it proposes to divide: every module
 // `tests/e2e/main.rs` declares is in exactly one suite (or is a support file one
-// suite lists), and every repository file a module's tests read by a literal path,
-// or by a `const` holding one, is an input of that module's suite. A path built at
-// run time (`format!`) is not read here. A module added, renamed or given a new
-// runtime file without the proposal following fails here.
-test("the proposed split names every e2e module once and every file its tests name by a literal or const path", () => {
+// suite lists). A suite's binary compiles its own modules and every module they
+// reach through `crate::<module>::`, so each of those modules' files, and every
+// repository file one of them reads by a literal path or by a `const` holding one,
+// is an input of the suite. A path built at run time (`format!`) is not read here.
+// A module added, renamed, borrowed or given a new runtime file without the
+// proposal following fails here.
+test("the proposed split names every e2e module once and every file the modules each suite compiles name by a literal or const path", () => {
   const proposal = JSON.parse(
     readFileSync(join(root, "scripts", "crate-split", "proposed.json"), "utf8"),
   );
@@ -143,41 +145,71 @@ test("the proposed split names every e2e module once and every file its tests na
       owner.set(module, name);
     }
   }
+  const sourceOf = (module) => readFileSync(join(root, `tests/e2e/${module}.rs`), "utf8");
+  /** The repository files `module`'s source reads by a literal path or a `const` holding one. */
+  const readsOf = (module) => {
+    const source = sourceOf(module);
+    const constants = new Map(
+      [...source.matchAll(/const (\w+): &str =\s*"([^"]+)";/g)].map((m) => [m[1], m[2]]),
+    );
+    return (
+      [
+        ...[...source.matchAll(/repo_file\(\s*"([^"]+)"/g)].map((m) => m[1]),
+        ...[...source.matchAll(/(?:repo_file\(|CARGO_MANIFEST_DIR"\)\)\s*\.join\()\s*(\w+)\s*\)/g)]
+          .map((m) => constants.get(m[1]))
+          .filter((path) => path !== undefined),
+        ...[...source.matchAll(/CARGO_MANIFEST_DIR"\)\)\s*\.join\("([^"]+)"/g)].map((m) => m[1]),
+        ...[...source.matchAll(/include_str!\("([^"]+)"/g)].map((m) =>
+          join("tests/e2e", m[1]).replaceAll("\\", "/"),
+        ),
+      ]
+        // What a test writes rather than reads.
+        .filter((path) => path !== "." && path !== "target" && !path.startsWith("target/"))
+        .map((path) => path.replace(/\/$/, ""))
+    );
+  };
+  /** The modules `module` names through `crate::<module>::`. */
+  const reached = (module) =>
+    [...sourceOf(module).matchAll(/crate::(\w+)::/g)]
+      .map((m) => m[1])
+      .filter((name) => name !== module && declared.includes(name));
+  const suiteOf = new Map();
   for (const module of declared) {
     const file = `tests/e2e/${module}.rs`;
-    const source = readFileSync(join(root, file), "utf8");
     // A module with tests of its own is one a suite runs; one without is support a
     // suite compiles, so a suite listing its file is enough.
-    if (/#\[test\]/.test(source))
+    if (/#\[test\]/.test(sourceOf(module)))
       assert.ok(owner.has(module), `${module} is in no suite's modules`);
     const suite =
       owner.get(module) ??
       Object.keys(proposal.suites).find((name) => compiled.suites[name].own(file));
     assert.ok(suite, `${module} is in no suite of the proposal`);
-    assert.ok(compiled.suites[suite].own(file), `${suite} does not list ${file}`);
-    const constants = new Map(
-      [...source.matchAll(/const (\w+): &str =\s*"([^"]+)";/g)].map((m) => [m[1], m[2]]),
-    );
-    const reads = [
-      ...[...source.matchAll(/repo_file\(\s*"([^"]+)"/g)].map((m) => m[1]),
-      ...[...source.matchAll(/(?:repo_file\(|CARGO_MANIFEST_DIR"\)\)\s*\.join\()\s*(\w+)\s*\)/g)]
-        .map((m) => constants.get(m[1]))
-        .filter((path) => path !== undefined),
-      ...[...source.matchAll(/CARGO_MANIFEST_DIR"\)\)\s*\.join\("([^"]+)"/g)].map((m) => m[1]),
-      ...[...source.matchAll(/include_str!\("([^"]+)"/g)].map((m) =>
-        join("tests/e2e", m[1]).replaceAll("\\", "/"),
+    suiteOf.set(module, suite);
+  }
+  for (const suite of Object.keys(proposal.suites)) {
+    const compiles = new Set(
+      ["harness", ...declared.filter((module) => suiteOf.get(module) === suite)].filter((m) =>
+        declared.includes(m),
       ),
-    ]
-      // What a test writes rather than reads.
-      .filter((path) => path !== "." && path !== "target" && !path.startsWith("target/"));
-    for (const path of reads) {
-      const read = path.replace(/\/$/, "");
-      const covered =
-        compiled.shared(read) ||
-        compiled.suites[suite].own(read) ||
-        compiled.suites[suite].own(`${read}/x`) ||
-        Object.values(compiled.crates).some((claims) => claims(read));
-      assert.ok(covered, `${module} reads ${read}, which is no input of ${suite}`);
+    );
+    for (const module of compiles) for (const next of reached(module)) compiles.add(next);
+    for (const module of compiles) {
+      const file = `tests/e2e/${module}.rs`;
+      assert.ok(
+        compiled.suites[suite].own(file),
+        `${suite} compiles ${module} but does not list ${file}`,
+      );
+      for (const read of readsOf(module)) {
+        const covered =
+          compiled.shared(read) ||
+          compiled.suites[suite].own(read) ||
+          compiled.suites[suite].own(`${read}/x`) ||
+          Object.values(compiled.crates).some((claims) => claims(read));
+        assert.ok(
+          covered,
+          `${module} reads ${read}, which is no input of ${suite}, which compiles it`,
+        );
+      }
     }
   }
 });
