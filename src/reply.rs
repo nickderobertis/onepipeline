@@ -1198,7 +1198,7 @@ mod tests {
     }
 
     /// Entry 129's block, out of the divergence record this build ships.
-    fn entry_127() -> Value {
+    fn entry_129() -> Value {
         include_str!("../docs/contract-divergences.md")
             .split("\n## ")
             .find(|entry| entry.starts_with("129."))
@@ -1211,8 +1211,8 @@ mod tests {
     /// What entry 129 states of the drafter, the reply and the records behind them is
     /// what the private types read and write.
     #[test]
-    fn the_drafter_the_reply_and_the_records_are_entry_127s() {
-        let block = entry_127();
+    fn the_drafter_the_reply_and_the_records_are_entry_129s() {
+        let block = entry_129();
         assert_eq!(block["persona"], PERSONA);
         assert_eq!(block["body_limit"], json!(BODY_LIMIT));
         assert_eq!(block["declined_label"], DECLINED);
