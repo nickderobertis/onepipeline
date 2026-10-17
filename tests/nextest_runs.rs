@@ -1548,3 +1548,157 @@ fn the_instrumented_suite_archives_the_build_it_runs_before_running_it() {
         }
     }
 } // llmlint: ignore-end[changed_behavior_has_e2e]
+
+/// Two binaries of tests, each recording every run of itself in a ledger of its
+/// own, so a shard's share is read off what ran rather than off what nextest said.
+const PARTITION_TESTS: &str = r#"
+pub fn ledger(name: &str) {
+    use std::io::Write;
+    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ledger");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join(name))
+        .unwrap()
+        .write_all(b".")
+        .unwrap();
+}
+
+#[cfg(test)]
+mod tests {
+    #[test] fn one() { super::ledger("lib-one"); }
+    #[test] fn two() { super::ledger("lib-two"); }
+    #[test] fn three() { super::ledger("lib-three"); }
+    #[test] fn four() { super::ledger("lib-four"); }
+    #[test] fn five() { super::ledger("lib-five"); }
+}
+"#;
+
+const PARTITION_SUITE: &str = r#"
+#[test] fn one() { partition_fixture::ledger("suite-one"); }
+#[test] fn two() { partition_fixture::ledger("suite-two"); }
+#[test] fn three() { partition_fixture::ledger("suite-three"); }
+#[test] fn four() { partition_fixture::ledger("suite-four"); }
+"#;
+
+const PARTITION_LEDGERS: [&str; 9] = [
+    "lib-one",
+    "lib-two",
+    "lib-three",
+    "lib-four",
+    "lib-five",
+    "suite-one",
+    "suite-two",
+    "suite-three",
+    "suite-four",
+];
+
+/// The Windows leg split across jobs, as each job runs a tier: the recipe line
+/// `_tier-test-quick` runs, given the partition `ci.yml` hands that job. The jobs'
+/// shares between them run every test exactly once, a run with no partition runs
+/// them all, and a partition no other job makes up the rest of is refused before
+/// anything runs.
+#[test]
+fn a_split_leg_runs_every_test_in_exactly_one_shard_and_refuses_a_share_nothing_completes() {
+    let fixture = Fixture::new(
+        "partitioned",
+        "[package]\nname = \"partition-fixture\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[workspace]\n",
+        &[
+            ("src/lib.rs", PARTITION_TESTS),
+            ("tests/suite.rs", PARTITION_SUITE),
+        ],
+    );
+    let locked = fixture
+        .command(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+        .args(["generate-lockfile", "--offline"])
+        .output()
+        .expect("cargo writes the fixture's lock");
+    assert!(locked.status.success(), "the fixture's lock is written");
+    // The recipe's own line, with the tier's filter as its argument and the
+    // repository's scripts reached from the fixture's root.
+    let line = format!(
+        "set -- 'all()'; {}",
+        recipe_line("_tier-test-quick filter", "nextest run")
+            .replace("bash scripts/", "bash \"$ONEPIPELINE_REPO\"/scripts/")
+    );
+    let repo = repo_root();
+    let repo = repo.to_str().expect("a UTF-8 path");
+    let ran = |fixture: &Fixture| -> Vec<usize> {
+        PARTITION_LEDGERS
+            .iter()
+            .map(|test| {
+                fs::metadata(fixture.path("ledger").join(test)).map_or(0, |ledger| {
+                    usize::try_from(ledger.len()).expect("a run count fits")
+                })
+            })
+            .collect()
+    };
+
+    let mut shares = Vec::new();
+    for shard in 1..=3 {
+        let before = ran(&fixture);
+        let partition = format!("count:{shard}/3");
+        let (output, said) = fixture.script_line(
+            &line,
+            &[
+                ("ONEPIPELINE_REPO", repo),
+                ("ONEPIPELINE_TEST_PARTITION", &partition),
+            ],
+        );
+        assert!(output.status.success(), "shard {partition} runs:\n{said}");
+        let share: usize = ran(&fixture)
+            .iter()
+            .zip(&before)
+            .map(|(after, before)| after - before)
+            .sum();
+        shares.push(share);
+    }
+    assert_eq!(
+        ran(&fixture),
+        vec![1; PARTITION_LEDGERS.len()],
+        "the three shards did not run each test exactly once between them (shares {shares:?})"
+    );
+    assert!(
+        shares.iter().all(|share| *share > 0),
+        "a shard ran nothing: {shares:?}"
+    );
+
+    let (output, said) = fixture.script_line(&line, &[("ONEPIPELINE_REPO", repo)]);
+    assert!(output.status.success(), "the unsplit run runs:\n{said}");
+    assert_eq!(
+        ran(&fixture),
+        vec![2; PARTITION_LEDGERS.len()],
+        "with no partition every test runs:\n{said}"
+    );
+
+    for refused in [
+        "count:4/3",
+        "count:0/3",
+        "hash:1/2",
+        "count:1/2 ",
+        "slice:1/2",
+    ] {
+        let (output, said) = fixture.script_line(
+            &line,
+            &[
+                ("ONEPIPELINE_REPO", repo),
+                ("ONEPIPELINE_TEST_PARTITION", refused),
+            ],
+        );
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{refused:?} was run:\n{said}"
+        );
+        assert!(
+            said.contains(&format!("ONEPIPELINE_TEST_PARTITION holds '{refused}'")),
+            "{refused:?} was refused without naming it:\n{said}"
+        );
+        assert_eq!(
+            ran(&fixture),
+            vec![2; PARTITION_LEDGERS.len()],
+            "{refused:?} ran tests before it was refused:\n{said}"
+        );
+    }
+}

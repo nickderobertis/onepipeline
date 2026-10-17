@@ -202,26 +202,38 @@ jobs:
   # quick tier still running. 220 is 180 plus the same 15-minute gap and the
   # re-run step's 25, so a step that took all 180 still leaves that step its own.
   #
-  # Splitting the suite across more jobs is the only thing that would make the leg
-  # itself shorter, and it is not available: branch protection requires `cross
-  # (macos-latest)` and `cross (windows-latest)` by rendered name, so a shard axis
-  # renames both and every open pull request waits on a context that never reports.
+  # The leg is split across two jobs since 180 stopped holding it whole: runs
+  # 38983520867, 38998427985 and 39013380285 each reached the step's limit with no
+  # test failing, at e2e test 1236 of 1375, 1083 of 1375 and 1087 of 1393. Costed
+  # from those three logs — each test at the longest any of them measured, a test
+  # none reached at the slowest measured test of its module or, for the 86 in
+  # modules none reached, of the five nearest it in cost on base 7da1f6b8's own
+  # green leg (run 39012326838), and the crate tier at that leg's times x1.4 — and
+  # run at the 3.67 tests at a time those legs managed, base's whole suite needs a
+  # 224-minute step and a 238-minute job. Each half needs 117 and 130: inside 180
+  # and 220 by over half again. The shards are nextest's `count:K/2` of every
+  # tier, so between them they run each test once; `just cross-shards` proves that
+  # of this host's listing. No leg name is required — `cross (windows-latest)` is
+  # the carrier below, which needs both shards' verdicts.
   # llmlint: ignore-end[comments_earn_their_place]
   cross:
-    name: cross proof (${{ matrix.os }})
+    name: cross proof (${{ matrix.os }}, shard ${{ matrix.shard }}/2)
     needs: changes
     if: needs.changes.outputs.crate == 'true'
     strategy:
       fail-fast: false
       matrix:
         os: [windows-latest]
+        shard: [1, 2]
     runs-on: ${{ matrix.os }}
-    # One verdict per leg, each under its own name, for the carrier below.
+    # One verdict per shard, each under its own name, for the carrier below.
     outputs:
-      windows-latest: ${{ steps.proved.outputs.windows-latest }}
+      windows-latest-1: ${{ steps.proved.outputs.windows-latest-1 }}
+      windows-latest-2: ${{ steps.proved.outputs.windows-latest-2 }}
     timeout-minutes: 220
     env:
       NEXTEST_PROFILE: ci
+      ONEPIPELINE_TEST_PARTITION: count:${{ matrix.shard }}/2
     defaults:
       run:
         shell: bash
@@ -277,7 +289,7 @@ jobs:
       - name: Record this leg's verdict
         id: proved
         env:
-          LEG: ${{ matrix.os }}
+          LEG: ${{ matrix.os }}-${{ matrix.shard }}
         run: echo "$LEG=success" >> "$GITHUB_OUTPUT"
 
   # The declared MSRV is a promise to consumers, so prove it rather than document
@@ -602,7 +614,8 @@ jobs:
           CRATE_AFFECTED: ${{ needs.changes.outputs.crate }}
           PROOF_RESULT: ${{ needs.cross.result }}
           LEG: windows-latest
-          LEG_VERDICT: ${{ needs.cross.outputs['windows-latest'] }}
+          # Both shards' verdicts, since the leg is the two of them.
+          LEG_VERDICT: ${{ needs.cross.outputs['windows-latest-1'] == 'success' && needs.cross.outputs['windows-latest-2'] == 'success' && 'success' || '' }}
         run: node .github/macos-policy.mjs path-carrier
 
   install-ubuntu:
