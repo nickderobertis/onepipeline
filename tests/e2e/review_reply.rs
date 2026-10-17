@@ -1666,8 +1666,14 @@ fn the_launch_config_names_the_reply_drafter_the_flag_overrides_it_and_a_blank_n
     let (world, host, left, output, recorded, declared, _) =
         declined("reply-graph-config", configured, &[]);
     assert_eq!(output.code, 0, "{}\n{}", output.stdout, output.stderr);
+    // Absolute by the platform's own rule — `C:\…` on Windows, `/…` elsewhere — and
+    // spelled as the launch directory joined with the reference, `..` kept: `resolve_graph`
+    // records every graph that way, and folding `..` lexically would name a different
+    // file wherever the directory before it is a symlink.
     assert!(
-        recorded.as_str().is_some_and(|path| path.starts_with('/')),
+        recorded
+            .as_str()
+            .is_some_and(|path| std::path::Path::new(path).is_absolute()),
         "{recorded}"
     );
     let declared = std::fs::canonicalize(declared).unwrap();
