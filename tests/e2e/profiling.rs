@@ -10,7 +10,7 @@ use onepipeline_testfakes::profile::process::Command;
 use onepipeline_testfakes::profile::{self, Category};
 use serde_json::Value;
 
-use crate::harness::{double, git, World};
+use crate::harness::{double, git, repo_file, World};
 
 /// The test whose record [`a_journeys_record_carries_what_it_spent_time_on_and_its_neighbours_does_not`]
 /// reads for the four categories it spends time in.
@@ -19,6 +19,39 @@ const BUSY: &str =
 
 /// Its neighbour, which does nothing at all.
 const IDLE: &str = "profiling::a_profiled_journey_that_does_nothing";
+
+/// The record's shape, which `scripts/test-profile-report.mjs` reads: a record
+/// written here is held to it, and that script's tests are held to it too, so a
+/// field renamed on one side fails on that side.
+const GOLDEN: &str = "tests/golden/test-profile-record-v1.json";
+
+/// What a record says, without the values: each object's keys and each leaf's
+/// JSON type, with `programs` — one entry per program a test happened to run —
+/// reduced to the shape of an entry.
+fn shape(value: &Value) -> Value {
+    match value {
+        Value::Object(fields) => Value::Object(
+            fields
+                .iter()
+                .map(|(key, field)| {
+                    let reduced = match (key.as_str(), field) {
+                        ("programs", Value::Object(programs)) => programs.values().next().map_or(
+                            Value::Null,
+                            |entry| serde_json::json!({ "*": shape(entry) }),
+                        ),
+                        _ => shape(field),
+                    };
+                    (key.clone(), reduced)
+                })
+                .collect(),
+        ),
+        Value::Number(_) => Value::from("number"),
+        Value::String(_) => Value::from("string"),
+        Value::Bool(_) => Value::from("bool"),
+        Value::Null => Value::from("null"),
+        Value::Array(_) => Value::from("array"),
+    }
+}
 
 #[test]
 fn a_journeys_processes_git_commands_and_sleeps_are_each_counted_once() {
@@ -125,8 +158,23 @@ fn a_journeys_record_carries_what_it_spent_time_on_and_its_neighbours_does_not()
     };
 
     let busy = record(BUSY);
+    let golden: Value = serde_json::from_str(
+        &profile::fs::read_to_string(repo_file(GOLDEN)).expect("the golden record"),
+    )
+    .expect("the golden record is JSON");
+    assert_eq!(
+        shape(&busy),
+        shape(&golden),
+        "a record no longer has {GOLDEN}'s shape: bump `profile::SCHEMA` and the golden \
+         together, and the reader with them"
+    );
     assert_eq!(busy["test"], BUSY, "{busy:#}");
     assert_eq!(busy["schema"], profile::SCHEMA, "{busy:#}");
+    assert_eq!(
+        golden["schema"],
+        profile::SCHEMA,
+        "{GOLDEN} is another schema's"
+    );
     assert_eq!(busy["ended"], "test-thread", "{busy:#}");
     for category in ["fixture", "build", "wait", "fs"] {
         let spent = busy["categories"][category]["s"]

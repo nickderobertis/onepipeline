@@ -1,0 +1,64 @@
+{
+  "schema": 1,
+  "binary": "e2e",
+  "test": "profiling::a_profiled_journey_builds_a_fixture_and_a_binary_then_polls_and_writes",
+  "run_id": "00000000-0000-0000-0000-000000000000",
+  "attempt": 1,
+  "os": "linux",
+  "arch": "x86_64",
+  "started_at": 1792216796.5,
+  "wall_s": 0.999,
+  "ended": "test-thread",
+  "categories": {
+    "spawn": {
+      "count": 1,
+      "s": 0.062,
+      "inclusive_s": 0.062,
+      "background_count": 0,
+      "background_s": 0.0
+    },
+    "git": {
+      "count": 0,
+      "s": 0.0,
+      "inclusive_s": 0.0,
+      "background_count": 0,
+      "background_s": 0.0
+    },
+    "build": {
+      "count": 1,
+      "s": 0.877,
+      "inclusive_s": 0.877,
+      "background_count": 0,
+      "background_s": 0.0
+    },
+    "fixture": {
+      "count": 2,
+      "s": 0.0,
+      "inclusive_s": 0.004,
+      "background_count": 0,
+      "background_s": 0.0
+    },
+    "wait": {
+      "count": 2,
+      "s": 0.042,
+      "inclusive_s": 0.042,
+      "background_count": 0,
+      "background_s": 0.0,
+      "polls": 1
+    },
+    "fs": {
+      "count": 15,
+      "s": 0.006,
+      "inclusive_s": 0.006,
+      "background_count": 0,
+      "background_s": 0.0
+    }
+  },
+  "unattributed_s": 0.011,
+  "programs": {
+    "cargo": {
+      "count": 1,
+      "s": 0.877
+    }
+  }
+}

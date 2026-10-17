@@ -172,7 +172,8 @@
         "shipped",
         "criteria",
         "criteria_rule",
-        "filter"
+        "filter",
+        "linear_loopback"
       ]
     },
     "e2e-views": {

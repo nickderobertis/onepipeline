@@ -2,15 +2,20 @@
 // in the shape `onepipeline_testfakes::profile` writes them.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { CATEGORIES, SCHEMA, loadRecords, totals } from "../../scripts/test-profile-report.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const script = join(root, "scripts", "test-profile-report.mjs");
-const CATEGORIES = ["spawn", "git", "build", "fixture", "wait", "fs"];
+// The record a real test wrote, at the shape `tests/e2e/profiling.rs` holds every
+// record the harness writes to: the one source both sides of the format answer to.
+const golden = JSON.parse(
+  readFileSync(join(root, "tests", "golden", "test-profile-record-v1.json"), "utf8"),
+);
 
 let scratch;
 
@@ -72,6 +77,24 @@ function report(...args) {
   assert.equal(ran.status, 0, ran.stderr);
   return ran.stdout;
 }
+
+test("the reader reads the record the harness writes, field for field", () => {
+  assert.equal(SCHEMA, golden.schema);
+  assert.deepEqual(CATEGORIES, Object.keys(golden.categories));
+  const dir = join(scratch, "golden");
+  mkdirSync(dir);
+  writeFileSync(join(dir, "record.json"), JSON.stringify(golden));
+  const [read] = loadRecords(dir);
+  assert.deepEqual(read, golden);
+  const total = totals([read]);
+  assert.equal(total.wall, golden.wall_s);
+  assert.equal(total.unattributed, golden.unattributed_s);
+  assert.equal(total.counts.polls, golden.categories.wait.polls);
+  for (const category of CATEGORIES) {
+    assert.equal(total.categories[category], golden.categories[category].s);
+    assert.equal(total.counts[category], golden.categories[category].count);
+  }
+});
 
 test("a platform's breakdown ranks its tests and modules and attributes each one's time", () => {
   const out = JSON.parse(

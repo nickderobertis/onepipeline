@@ -81,6 +81,7 @@
         "landing",
         "layout_document",
         "lifecycle",
+        "linear_loopback",
         "linear_writeback",
         "listing",
         "live_edit",
