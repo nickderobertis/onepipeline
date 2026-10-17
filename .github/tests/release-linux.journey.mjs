@@ -741,7 +741,7 @@ describe("publish: the platform-independent artifacts", () => {
       env: env({ CARGO_REGISTRY_TOKEN: "" }),
     });
     assert.equal(result.code, 0, said(result));
-    assert.match(result.stdout, /CARGO_REGISTRY_TOKEN not set; skipping crates\.io publish\./);
+    assert.match(result.stdout, /skipped crates\.io \(CARGO_REGISTRY_TOKEN not set\)/);
     assert.deepEqual(writesOf(s), before);
   });
 });

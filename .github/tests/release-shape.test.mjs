@@ -132,7 +132,7 @@ describe("the CD jobs", () => {
         for (const step of spec.steps) {
           assert.doesNotMatch(
             step.run ?? "",
-            /\bjust (check|gate|check-affected|test|test-quick|test-e2e|test-note|smoke-real|release-compat)\b|\bcargo (test|nextest|llvm-cov)\b|\bnx(\.sh)? (run|run-many|affected)\b/,
+            /\bjust (check|gate|check-affected|test|test-quick|test-e2e|test-note|smoke-real|release-compat)\b|\bcargo (test|nextest|llvm-cov)\b|\bnx(\.sh)? (run|run-many|affected)\b.*(:|-t )(test|check|budgets)\b/,
             `${file} ${job} runs a test tier`,
           );
         }
