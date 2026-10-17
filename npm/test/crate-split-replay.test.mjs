@@ -658,3 +658,42 @@ test("a changed file whose name git would quote is matched by the name it has", 
   assert.deepEqual(affectedBySubject(result), { "feat: a file git quotes the name of": ["two"] });
   assert.deepEqual(result.summary.unclaimedFiles, []);
 });
+
+test("a crate graph Cargo could not build, or a module weighed twice, is refused", () => {
+  const broken = (change) => {
+    const proposal = mapping(true);
+    change(proposal);
+    return [
+      "--mapping",
+      mappingFile("graph", proposal),
+      "--out",
+      join(scratch, "x"),
+      "--repo",
+      repo,
+    ];
+  };
+  refused(
+    broken((p) => {
+      p.crates.alpha.deps = ["alpha"];
+    }),
+    /crates alpha -> alpha depend on each other in a cycle/,
+  );
+  refused(
+    broken((p) => {
+      p.crates.alpha.deps = ["beta"];
+    }),
+    /crates alpha -> beta -> alpha depend on each other in a cycle/,
+  );
+  refused(
+    broken((p) => {
+      p.suites.one.modules = ["one", "one"];
+    }),
+    /module one is named twice, in one and one/,
+  );
+  refused(
+    broken((p) => {
+      p.suites.two.modules = ["one"];
+    }),
+    /module one is named twice, in one and two/,
+  );
+});

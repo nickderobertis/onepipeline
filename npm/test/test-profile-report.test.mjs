@@ -312,3 +312,37 @@ test("a label an object already has is a label like any other", () => {
   );
   assert.equal(out.ratios[0].label, "constructor");
 });
+
+test("each field a record must carry is checked, and the record that lacks it refused by name", () => {
+  const cases = [
+    [{ binary: "" }, /binary is not a name/],
+    [{ test: 7 }, /test is not a name/],
+    [{ started_at: "today" }, /started_at is not a nonnegative number/],
+    [{ unattributed_s: -0.5 }, /unattributed_s is not a nonnegative number/],
+    [{ run_id: 12 }, /run_id is not a string/],
+    [{ attempt: 1.5 }, /attempt is not a count/],
+    [
+      { categories: { ...golden.categories, git: { ...golden.categories.git, count: -1 } } },
+      /categories\.git\.count is not a count/,
+    ],
+    [
+      { categories: { ...golden.categories, fs: { ...golden.categories.fs, s: "fast" } } },
+      /categories\.fs\.s is not a nonnegative number/,
+    ],
+    [
+      { categories: { ...golden.categories, wait: { ...golden.categories.wait, polls: null } } },
+      /categories\.wait\.polls is not a count/,
+    ],
+    [{ categories: undefined }, /categories\.spawn\.count is not a count/],
+  ];
+  cases.forEach(([change, message], i) => {
+    const dir = join(scratch, `field-${i}`);
+    mkdirSync(dir);
+    writeFileSync(join(dir, "record.json"), JSON.stringify({ ...golden, ...change }));
+    refused(["--out", join(scratch, "x"), `field=${dir}`], message, /next: remove /);
+  });
+  const array = join(scratch, "field-array");
+  mkdirSync(array);
+  writeFileSync(join(array, "a.json"), "[]");
+  refused(["--out", join(scratch, "x"), `field=${array}`], /it is schema undefined/, /next:/);
+});

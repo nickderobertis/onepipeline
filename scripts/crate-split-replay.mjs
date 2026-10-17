@@ -131,6 +131,18 @@ export function compileMapping(mapping) {
         throw new Refusal(`crate ${name} depends on unknown crate ${dep}`, MAPPING_HELP);
     }
   }
+  // Cargo refuses a cycle among a workspace's crates, so a mapping with one is not a
+  // split that could be built.
+  const visit = (name, path) => {
+    if (path.includes(name)) {
+      throw new Refusal(
+        `crates ${[...path.slice(path.indexOf(name)), name].join(" -> ")} depend on each other in a cycle`,
+        MAPPING_HELP,
+      );
+    }
+    for (const dep of crates[name].deps ?? []) visit(dep, [...path, name]);
+  };
+  for (const name of Object.keys(crates)) visit(name, []);
   if (
     mapping.fallback !== undefined &&
     (typeof mapping.fallback !== "string" || !Object.hasOwn(crates, mapping.fallback))
@@ -146,6 +158,19 @@ export function compileMapping(mapping) {
     strings(suite, "paths", `suites.${name}`, true);
     strings(suite, "crates", `suites.${name}`, true);
     strings(suite, "modules", `suites.${name}`, false);
+  }
+  // Each module's test-seconds are weighed once, in the one suite that runs it.
+  const ownerOf = new Map();
+  for (const [name, suite] of Object.entries(declared)) {
+    for (const module of suite.modules ?? []) {
+      if (ownerOf.has(module)) {
+        throw new Refusal(
+          `module ${module} is named twice, in ${ownerOf.get(module)} and ${name}`,
+          MAPPING_HELP,
+        );
+      }
+      ownerOf.set(module, name);
+    }
   }
   const closure = (name, seen = new Set()) => {
     if (seen.has(name)) return seen;
