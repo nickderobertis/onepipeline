@@ -23,6 +23,11 @@ use onepipeline::views::{Listing, Party, RunPaths, RunSummary, SUMMARY_SCHEMA_VE
 /// not need.
 const NODES: u64 = 6;
 
+/// How many reads the live-writer journey makes beside each dispatch before it
+/// lets the next one go: with [`NODES`] of them, more reads than that journey
+/// asks for before the run can settle at all.
+const READS_PER_RELEASE: u32 = 4;
+
 /// Launch a run and wait for it to settle, as every journey in `views.rs` does.
 fn settled(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
     let path = world.plan(name, &plan_of(name, nodes));
@@ -996,6 +1001,15 @@ fn journal_mtime_ms(paths: &RunPaths) -> u64 {
 /// state after it: never a partial document, never a parse failure, never an
 /// error. What makes that true is the write being a rename over the target
 /// rather than a write through it, and this is what holds it true.
+///
+/// **The overlap is held, not hoped for.** Every node's dispatch waits on the
+/// reader, which lets them go one at a time and only once it has read
+/// [`READS_PER_RELEASE`] times since the last and seen the node before settle: so
+/// the reads are spread across the whole run rather than wherever the scheduler
+/// happened to put them. Left to the clock, a Windows runner returned from
+/// `start --detach` with six trivial dispatches all but done, and the reader made
+/// one read before the run settled — a journey that never exercised the race it
+/// guards.
 // llmlint: ignore[expensive_tests_stay_behind_their_own_edge] this journey costs 7.5s and
 // is the *third* fastest of the six in this file — the same tier, the same binary, and the
 // same real `onepipeline` subprocess every other journey under `tests/e2e/` drives. The
@@ -1012,16 +1026,27 @@ fn a_listing_beside_a_live_writer_never_reads_a_half_written_summary() {
     // long as this reader runs against it, and no more: what the journey needs
     // is the two processes overlapping, which a handful of dispatches already
     // gives it.
-    let nodes: Vec<serde_json::Value> = (0..NODES)
-        .map(|nth| agent(&format!("step{nth:02}"), &[]))
-        .collect();
+    let ids: Vec<String> = (0..NODES).map(|nth| format!("step{nth:02}")).collect();
+    for id in &ids {
+        world.script(&format!("{id}.wait"), "hold");
+    }
+    let nodes: Vec<serde_json::Value> = ids.iter().map(|id| agent(id, &[])).collect();
     let path = world.plan("live", &plan_of("live", nodes));
-    world.run(&["start", &path, "--detach"]).exited(0);
+    let started = world.run(&["start", &path, "--detach"]);
+    started.exited(0);
+    let announced: serde_json::Value = serde_json::from_str(started.stdout.trim())
+        .unwrap_or_else(|error| panic!("a detached launch announces itself: {error}"));
+    let driver = announced["pid"]
+        .as_u64()
+        .and_then(|pid| u32::try_from(pid).ok())
+        .unwrap_or_else(|| panic!("the launch announced no driver: {announced}"));
 
     let paths = paths_of(&world, "live");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
     let mut reads = 0u32;
     let mut counted = 0u64;
+    let mut released = 0usize;
+    let mut since_release = 0u32;
     let mut settled = false;
     while std::time::Instant::now() < deadline {
         let listing = Listing::of(&world.runs);
@@ -1046,6 +1071,15 @@ fn a_listing_beside_a_live_writer_never_reads_a_half_written_summary() {
         );
         counted = row.event_count;
         reads += 1;
+        since_release += 1;
+        // The next dispatch goes once this reader has read beside the last one
+        // and seen it settle, so the run cannot settle ahead of the reads.
+        let done = row.node_counts.get("done").copied().unwrap_or(0) as usize;
+        if released < ids.len() && done >= released && since_release >= READS_PER_RELEASE {
+            world.release(&format!("{}.go", ids[released]));
+            released += 1;
+            since_release = 0;
+        }
         if world.run_file("live", "result.json").is_file() {
             settled = true;
             break;
@@ -1056,6 +1090,12 @@ fn a_listing_beside_a_live_writer_never_reads_a_half_written_summary() {
         reads > 20,
         "only {reads} reads ran against the writer, which is not a race"
     );
+    // The driver writes `result.json` ahead of its closeout's last records and
+    // the seal after them, so the run is compared with its own fold once the
+    // driver has handed back, and not while it is still writing.
+    world.until("the detached driver to hand back", |_| {
+        crate::harness::process_ended(driver)
+    });
     // And the run that was being written all along ends where its own fold says.
     let served = RunSummary::of(&paths).expect("the run reads");
     recorded_before_the_document(&paths);
