@@ -437,6 +437,22 @@ describe("a lock that links an engine twice", () => {
     assert.equal(github.release(TAG).assets.length, 0);
   });
 
+  it("keeps the last publish's results through a dry run", async () => {
+    const out = scratch("release-dry-results");
+    mkdirSync(join(out, "common"), { recursive: true });
+    const results = join(out, "common", "publish-results.json");
+    writeFileSync(results, '{"kept": true}');
+    try {
+      const dry = await run("just", ["release-publish", "dry-run"], {
+        env: releaseEnv(github, out),
+      });
+      assert.equal(dry.code, 0, said(dry));
+      assert.equal(readFileSync(results, "utf8"), '{"kept": true}');
+    } finally {
+      rmSync(out, { recursive: true, force: true });
+    }
+  });
+
   it("is not refused when the lock links each engine once, and `publish`'s dry run then writes nothing", async () => {
     const before = github.requests.length;
     const dry = await run("just", ["release-publish", "dry-run"], {
@@ -649,6 +665,26 @@ describe("the release outcome record", () => {
       "skipped",
       "skipped",
     ]);
+  });
+
+  it("replaces the record on a re-run after GitHub refused to", async () => {
+    launcherResults("success", "success");
+    const env = releaseEnv(github, out, allJobs({}, {}));
+    for (const [method, pattern] of [
+      ["DELETE", /\/releases\/assets\/\d+$/],
+      ["POST", /^\/uploads\//],
+    ]) {
+      github.refuseNext(method, pattern, 500, "Internal Server Error");
+      const refused = await run("just", ["release-outcome"], { env });
+      assert.equal(refused.code, 1, said(refused));
+      assert.match(
+        refused.stderr,
+        /GitHub answered 500 (replacing|uploading) release-outcome\.json/,
+      );
+      const rerun = await run("just", ["release-outcome"], { env });
+      assert.equal(rerun.code, 0, said(rerun));
+      assert.equal(recorded().outcome, "shipped-verified");
+    }
   });
 
   it("refuses a publish-results file it cannot read rather than reading it as nothing published", async () => {

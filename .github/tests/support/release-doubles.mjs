@@ -115,6 +115,8 @@ export class GitHubDouble extends Double {
     this.graphqlBody = null;
     /// A raw body to answer the Release asset list with instead.
     this.assetsBody = null;
+    /// Called with the Release before each asset listing is answered.
+    this.onAssetsListed = null;
   }
 
   env() {
@@ -203,6 +205,10 @@ export class GitHubDouble extends Double {
       return release ? answer(200, this.#view(release)) : answer(404, { message: "Not Found" });
     }
     found = path.match(new RegExp(`^${repo}/releases/(\\d+)/assets$`));
+    if (req.method === "GET" && found && this.onAssetsListed) {
+      const listed = this.releases.find((r) => r.id === Number(found[1]));
+      if (listed) this.onAssetsListed(listed);
+    }
     if (req.method === "GET" && found && this.assetsBody !== null) {
       return answer(200, this.assetsBody, "application/json");
     }

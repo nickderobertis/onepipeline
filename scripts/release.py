@@ -419,7 +419,7 @@ class Release:
                'create the Release first: release-plz does, or cut it by hand from the tag')
         self.data = json_of(body, f'the Release tagged {tag}', lambda v: isinstance(v, dict)
                             and isinstance(v.get('id'), int) and isinstance(v.get('upload_url'), str)
-                            and v.get('tag_name') == tag and isinstance(v.get('body') or '', str))
+                            and v.get('tag_name') == tag and (v.get('body') is None or isinstance(v['body'], str)))
 
     def call(self, method, path, body=None, headers=None):
         url = path if path.startswith('http') else self.api + path
@@ -557,6 +557,10 @@ def publish(args):
 
 
 def smoke(directory, version, label):
+    # The install's own executable, or a refusal: on PATH alone, a missing one
+    # would fall through to whatever onepipeline the machine already has.
+    expect(any((Path(directory) / name).is_file() for name in ['onepipeline', 'onepipeline.exe', 'onepipeline.cmd']),
+           f'{label} put no onepipeline executable in {directory}', 'republish a package that carries the binary')
     env = dict(os.environ, PATH=f'{directory}{os.pathsep}{os.environ["PATH"]}')
     run('bash', str(SCRIPTS / 'smoke-published.sh'), '--expect-version', version, '--label', label, env=env,
         capture=True)
@@ -655,7 +659,8 @@ def publish_common(args):
     out.mkdir(parents=True, exist_ok=True)
     results = {'crate': {'published': 'skipped', 'verified': 'skipped'},
                'npm-launcher': {'published': 'skipped', 'verified': 'skipped'}}
-    results_path(out).unlink(missing_ok=True)
+    if not args.dry_run:
+        results_path(out).unlink(missing_ok=True)
 
     def record(target=None, phase=None, result=None):
         if target:

@@ -43,9 +43,10 @@ jobs:
   release-plz:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Every write — the checkout's pushes, release-plz, auto-merge — authenticates
+    # with RELEASE_PLZ_TOKEN, so the job's own token needs nothing more.
     permissions:
-      contents: write
-      pull-requests: write
+      contents: read
     concurrency:
       group: release-plz
       cancel-in-progress: false

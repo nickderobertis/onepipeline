@@ -145,23 +145,21 @@ other way, such a job is unsatisfiable for the very pull request that changes
 what it asserts.
 
 **Releases are fully automated; the only human action is merging a change.**
-`release-plz` is the single version driver: `release-plz.yml`'s one job opens a
-release PR and asks GitHub to merge it automatically once its required checks
-pass, and that merge tags `vX.Y.Z` and cuts the GitHub Release. That Release —
-created with a PAT, because a tag from the default `GITHUB_TOKEN` triggers
-nothing — fires `release.yml`: five CD jobs in all. **Nothing else writes a
-version:** maturin reads it from `Cargo.toml` via `dynamic = ["version"]` and
-`scripts/npm-build.mjs` stamps it from the same place.
+`release-plz` is the single version driver: `release-plz.yml` opens a release PR
+and asks GitHub to merge it automatically once its required checks pass, and
+that merge tags `vX.Y.Z` and cuts the GitHub Release. That Release — created
+with a PAT, because a tag from the default `GITHUB_TOKEN` triggers nothing —
+fires `release.yml`. **Nothing else writes a version:** maturin reads it from
+`Cargo.toml` via `dynamic = ["version"]` and `scripts/npm-build.mjs` stamps it
+from the same place.
 
-**`release.yml` is one build job per platform, then `publish`, and each job's
-work is its platform's recipe** (`just release-<platform>`, whose `plan` lists
-what it publishes). A target is built once and every artifact for it is packaged
-from that one binary; nothing is published before that exact file installed and
-ran, and nothing is reported published until it installs back from its registry.
-The platform-independent artifacts wait for every platform. **A failed build job
-leaves the platforms that built published and the platform-independent artifacts
-unpublished** until the failed job and then `publish` are re-run; every upload
-skips what its registry already serves.
+**A release job's work is a recipe, never inline steps.** A target is built once
+and every artifact for it is packaged from that one binary; nothing is published
+before that exact file installed and ran, and nothing is reported published until
+it installs back from its registry. The platform-independent artifacts wait for
+every platform. **A failed build job leaves the platforms that built published
+and the platform-independent artifacts unpublished** until the failed job and
+then `publish` are re-run; every upload skips what its registry already serves.
 
 **Where each tier runs follows from that release model.** Releases are batched:
 every merge since the last tag rides one release-plz release PR, so the commit

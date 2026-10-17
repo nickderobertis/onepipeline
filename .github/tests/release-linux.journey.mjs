@@ -438,6 +438,40 @@ describe("publishing and verifying the Linux artifacts", () => {
   });
 });
 
+describe("a refused PyPI upload", () => {
+  it("fails the publish step, and the re-run uploads the wheel without repeating what landed", async () => {
+    const s = await services();
+    try {
+      const env = { ...s.env, ONEPIPELINE_RELEASE_OUT: OUT };
+      // A 4xx, because uv retries a 5xx itself.
+      s.pypi.refuseNext(
+        "POST",
+        /^\/legacy\/$/,
+        403,
+        "Invalid or non-existent authentication information.",
+      );
+      const refused = await run("just", ["release-linux", "publish"], { env });
+      assert.equal(refused.code, 1, said(refused));
+      assert.equal(s.pypi.files.size, 0);
+      const landed = writesOf(s);
+      assert.equal(landed[`onepipeline-v${VERSION}-${TARGET}.tar.gz`], 1);
+      const rerun = await run("just", ["release-linux", "publish"], { env });
+      assert.equal(rerun.code, 0, said(rerun));
+      const after = writesOf(s);
+      assert.equal(
+        after[`onepipeline-v${VERSION}-${TARGET}.tar.gz`],
+        1,
+        "the archive was not uploaded again",
+      );
+      assert.equal(after[`onepipeline-v${VERSION}-${TARGET}.sha256`], 1);
+      assert.equal(s.pypi.files.size, 1, "the wheel landed on the re-run");
+      assert.equal(after[`onepipeline-cli-linux-x64@${VERSION}`], 1);
+    } finally {
+      await s.stop();
+    }
+  });
+});
+
 describe("registry verification refuses what a user could not run", () => {
   /// A double serving the Linux artifacts, with one of them replaced.
   async function serving({ wheel = true, npmBinary = null, npmVersion = VERSION } = {}) {
@@ -491,6 +525,25 @@ describe("registry verification refuses what a user could not run", () => {
       const result = await verify(s);
       assert.equal(result.code, 1, said(result));
       assert.match(result.stderr, /npm onepipeline-cli-linux-x64.*'--version' did not run/);
+    } finally {
+      await s.stop();
+    }
+  });
+
+  it("fails when the Release's archive carries no executable, rather than running another one", async () => {
+    const s = await serving();
+    try {
+      const dir = mkdtempSync(join(SCRATCH, "empty-archive-"));
+      writeFileSync(join(dir, "README.md"), "no binary here\n");
+      const archive = s.github.release(TAG).assets.find((a) => a.name.endsWith(".tar.gz"));
+      archive.content = execFileSync("tar", ["-czf", "-", "-C", dir, "README.md"]);
+      s.github.release(TAG).assets.find((a) => a.name.endsWith(".sha256")).content = Buffer.from(
+        `${sha(archive.content)}  ${archive.name}\n`,
+      );
+      rmSync(dir, { recursive: true, force: true });
+      const result = await verify(s);
+      assert.equal(result.code, 1, said(result));
+      assert.match(result.stderr, /Release archive \S+ put no onepipeline executable in/);
     } finally {
       await s.stop();
     }
@@ -663,13 +716,11 @@ describe("publish's own verification", () => {
       // Every platform out, but npm's linux-x64 package carries another version.
       for (const artifact of linux.artifacts) {
         if (artifact.destination === "github-release") {
-          s.github
-            .release(TAG)
-            .assets.push({
-              id: s.github.nextId++,
-              name: artifact.file,
-              content: readFileSync(artifact.path),
-            });
+          s.github.release(TAG).assets.push({
+            id: s.github.nextId++,
+            name: artifact.file,
+            content: readFileSync(artifact.path),
+          });
         } else if (artifact.destination === "pypi") {
           s.pypi.serve(artifact.file, readFileSync(artifact.path));
         }
@@ -815,5 +866,129 @@ describe("publish: the platform-independent artifacts", () => {
     assert.equal(result.code, 0, said(result));
     assert.match(result.stdout, /skipped crates\.io \(CARGO_REGISTRY_TOKEN not set\)/);
     assert.deepEqual(writesOf(s), before);
+  });
+});
+
+describe("publish: the crate, and a registry that loses an artifact", () => {
+  let checkout;
+  before(() => {
+    checkout = mkdtempSync(join(SCRATCH, "crate-checkout-"));
+    execFileSync("git", ["worktree", "add", "--detach", join(checkout, "tree"), "HEAD"], {
+      cwd: ROOT,
+    });
+    checkout = join(checkout, "tree");
+  });
+  after(() => {
+    execFileSync("git", ["worktree", "remove", "--force", checkout], { cwd: ROOT });
+  });
+
+  /// Every platform's assets on the Release, with PyPI and npm switched off.
+  async function assetsOnly() {
+    const s = await services();
+    for (const platform of ["linux", "macos", "windows"]) {
+      const plan = JSON.parse(
+        execFileSync("just", [`release-${platform}`, "plan"], { encoding: "utf8" }),
+      );
+      for (const artifact of plan.artifacts.filter((a) => a.destination === "github-release")) {
+        s.github
+          .release(TAG)
+          .assets.push({
+            id: s.github.nextId++,
+            name: artifact.file,
+            content: Buffer.from(artifact.file),
+          });
+      }
+    }
+    const env = {
+      ...s.env,
+      PYPI_PUBLISH: "false",
+      NPM_PUBLISH: "false",
+      ONEPIPELINE_RELEASE_OUT: mkdtempSync(join(SCRATCH, "crate-out-")),
+      CARGO_TARGET_DIR: CARGO_TARGET,
+      CARGO_PROFILE_RELEASE_LTO: "false",
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16",
+    };
+    return {
+      s,
+      env,
+      results: () =>
+        JSON.parse(
+          readFileSync(join(env.ONEPIPELINE_RELEASE_OUT, "common", "publish-results.json"), "utf8"),
+        ),
+    };
+  }
+
+  it("a refused crate upload is recorded as failed, and the re-run publishes it", async () => {
+    const { s, env, results } = await assetsOnly();
+    try {
+      s.crates.refuseNext("PUT", /^\/api\/v1\/crates\/new$/, 403, "this token may not publish");
+      const refused = await run("just", ["release-publish", "publish"], { cwd: checkout, env });
+      assert.equal(refused.code, 1, said(refused));
+      assert.deepEqual(results().crate, { published: "failure", verified: "skipped" });
+      assert.equal(s.crates.crates.size, 0);
+      const rerun = await run("just", ["release-publish", "publish"], { cwd: checkout, env });
+      assert.equal(rerun.code, 0, said(rerun));
+      assert.deepEqual(results().crate, { published: "success", verified: "success" });
+      assert.deepEqual(
+        s.crates.crates.get("onepipeline").map((v) => v.line.vers),
+        [VERSION],
+      );
+    } finally {
+      await s.stop();
+    }
+  });
+
+  it("a crate the registry serves but cannot be installed is shipped and not verified", async () => {
+    const { s, env, results } = await assetsOnly();
+    try {
+      // The index serves the version, so publish skips the upload; the file
+      // behind it is not a crate.
+      const content = Buffer.from("not a crate");
+      s.crates.crates.set("onepipeline", [
+        {
+          line: {
+            name: "onepipeline",
+            vers: VERSION,
+            deps: [],
+            cksum: sha(content),
+            features: {},
+            yanked: false,
+          },
+          content,
+        },
+      ]);
+      const result = await run("just", ["release-publish", "publish"], { cwd: checkout, env });
+      assert.equal(result.code, 1, said(result));
+      assert.match(result.stderr, /crates\.io onepipeline/);
+      assert.deepEqual(results().crate, { published: "success", verified: "failure" });
+    } finally {
+      await s.stop();
+    }
+  });
+
+  it("refuses when an artifact disappears from a registry before publish finishes", async () => {
+    const { s, env } = await assetsOnly();
+    try {
+      let listings = 0;
+      const lost = `onepipeline-v${VERSION}-x86_64-pc-windows-msvc.zip`;
+      s.github.onAssetsListed = (release) => {
+        listings += 1;
+        // Present when publish first asks, gone by the time it checks again.
+        if (listings === 2) release.assets = release.assets.filter((a) => a.name !== lost);
+      };
+      const result = await run("just", ["release-publish", "publish"], {
+        cwd: checkout,
+        env: { ...env, CARGO_REGISTRY_TOKEN: "" },
+      });
+      assert.equal(result.code, 1, said(result));
+      assert.match(
+        result.stderr,
+        new RegExp(
+          `a registry does not serve every artifact of this release: missing ${lost.replaceAll(".", "\\.")} on the Release`,
+        ),
+      );
+    } finally {
+      await s.stop();
+    }
   });
 });
