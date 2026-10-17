@@ -124,10 +124,37 @@ fn phase(
             unledgered(&args)
         })
         .collect();
-    let reads: Vec<Value> = since
+    let store_calls: Vec<&str> = since
         .iter()
         .filter(|call| call["tool"] == crate::harness::SCRIPTED_KEY)
         .filter_map(|call| call["args"][0].as_str())
+        .collect();
+    // Every call the store received is charged below or is its session's handshake or close,
+    // which reach no board: a call of a kind this list does not know fails the round rather
+    // than going uncharged.
+    let unknown: Vec<&&str> = store_calls
+        .iter()
+        .filter(|method| {
+            ![
+                "initialize",
+                "end_command",
+                "get_project",
+                "query_tasks",
+                "get_task",
+                "task_dependencies",
+                "update_task",
+                "set_project_metadata",
+            ]
+            .contains(method)
+        })
+        .collect();
+    assert!(
+        unknown.is_empty(),
+        "{name}: uncharged store calls {unknown:?}"
+    );
+    let reads: Vec<Value> = store_calls
+        .iter()
+        .copied()
         .filter(|method| {
             [
                 "get_project",
@@ -139,7 +166,7 @@ fn phase(
         })
         .map(|method| json!(method))
         .collect();
-    let writes: Vec<Value> = projection_lines(world, run)[from.projections..]
+    let mut writes: Vec<Value> = projection_lines(world, run)[from.projections..]
         .iter()
         .flat_map(|record| {
             let calls = record["calls"].clone();
@@ -159,6 +186,25 @@ fn phase(
             written
         })
         .collect();
+    // The driver writes its claim's and its publications' keys on the project itself, outside
+    // the write-back, so no projection record names those: each such write the store received
+    // is charged as the task written it is, under the driver's own kind.
+    for (method, projected, unprojected) in [
+        ("update_task", "task-update", "driver-task-update"),
+        (
+            "set_project_metadata",
+            "project-metadata-set",
+            "driver-metadata-set",
+        ),
+    ] {
+        let received = store_calls.iter().filter(|call| **call == method).count();
+        let named = writes.iter().filter(|kind| **kind == projected).count();
+        assert!(
+            named <= received,
+            "{name}: {named} {projected} projected over {received} {method} calls"
+        );
+        writes.extend(std::iter::repeat_n(json!(unprojected), received - named));
+    }
     let dispatches = since
         .iter()
         .filter(|call| call["tool"] == "oneagentgraph")

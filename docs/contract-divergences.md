@@ -11656,8 +11656,11 @@ against the public types, the registered documents and both bundles.
 `tests/e2e/review_round.rs`'s
 `the_busy_review_round_ends_answered_and_true_and_records_what_it_spent` runs the busy
 round `review-round-github-quota` states and records its telemetry, which
-`scripts/review-round-quota-budget.sh` charges for that budget in the root `budgets.yaml`;
-it also holds that the round makes no board write the store answers as changing nothing,
+`scripts/review-round-quota-budget.sh` charges for that budget in the root `budgets.yaml`.
+Every call the scripted store received is charged or is its session's handshake or close:
+the driver's own writes of its claim and of entry 128's `onepipeline.publishing` fence,
+which no projection record names, are charged as `driver-metadata-set`, and a store call of
+any other kind fails the round. It also holds that the round makes no board write the store answers as changing nothing,
 that each reworked node's item is written its Queued claim, start, dispatch and settlement
 once each, and that no restack's or readjustment's open reads the base's branch rules.
 The live tier's `tests/smoke/review.rs`,

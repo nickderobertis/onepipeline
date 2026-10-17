@@ -4,8 +4,9 @@
 // `scripts/review-round-quota-budget.sh` runs this. The record is the e2e journey's: per
 // phase of the round, the remote double's ledger entries (each with the charge the double
 // gives it), the `gh` calls the double did not answer (each charged by GitHub's published
-// rule), the store reads the scripted `local-md` source recorded and the store tasks the
-// write-back's projection records name. The figure is GraphQL points plus REST requests
+// rule), the store reads the scripted `local-md` source recorded and every store write it
+// received — the tasks and keys the write-back's projection records name, and the claim and
+// publication keys the driver writes on the project itself. The figure is GraphQL points plus REST requests
 // across both tokens: the host's `gh` token, and the plan store's board token, on which each
 // task written costs 2 points and each read 1.
 import { readFileSync } from "node:fs";
