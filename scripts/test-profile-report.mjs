@@ -8,10 +8,10 @@
 //
 // Each LABEL=DIR is one platform's records: a directory searched recursively for the
 // records `onepipeline_testfakes::profile` writes, such as a CI leg's downloaded
-// artifact. A directory can hold several runs' records, because a test that was not
-// run again keeps its old one; only one run per platform is read — the one `--run`
-// names, or else the run whose latest record is newest — and the rest are reported as
-// set aside. A test retried within that run is read at its last attempt.
+// artifact. A directory can hold several runs' records — a test that was not run again
+// keeps its old one, and a CI leg runs a tier and then a few of its tests again — so
+// only one run per platform is read: the one `--run` names, or else the run with the
+// most records, the newest of those on a tie. The rest are reported as set aside. A test retried within that run is read at its last attempt.
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -43,7 +43,7 @@ export function loadRecords(dir) {
 
 /**
  * One run's records, each test at its last attempt. `runId` picks the run; without one
- * it is the run whose newest record is newest. Returns the run, its records, and how
+ * it is the run with the most records, the newest of those on a tie. Returns the run, its records, and how
  * many records of other runs were set aside.
  */
 export function selectRun(records, runId) {
@@ -60,7 +60,9 @@ export function selectRun(records, runId) {
     chosen = runs.get(runId);
     if (!chosen) throw new Error(`no record belongs to run ${runId}`);
   } else {
-    chosen = [...runs.values()].sort((a, b) => b.latest - a.latest)[0];
+    chosen = [...runs.values()].sort(
+      (a, b) => b.records.length - a.records.length || b.latest - a.latest,
+    )[0];
   }
   if (!chosen) return { run: undefined, records: [], setAside: 0 };
   const last = new Map();

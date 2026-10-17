@@ -57,8 +57,10 @@ before(() => {
     record("readjust::slow", { wall: 10, spent: { git: 4, spawn: 4 } }),
     record("readjust::quick", { wall: 2, spent: { spawn: 1, fs: 1 } }),
     record("views::middling", { wall: 5, spent: { wait: 5 } }),
-    // An older run's record of a test the newest run did not reach: set aside.
+    // An older run's record of a test the full run did not reach, and a later run
+    // of one test again: both set aside for the run with the most records.
     record("views::gone", { run: "before", startedAt: 1, wall: 99 }),
+    record("readjust::slow", { run: "again", startedAt: 500, wall: 7 }),
     // The first attempt of a retried test: the last attempt is read.
     record("views::middling", { attempt: 0, wall: 50 }),
   ]);
@@ -102,7 +104,7 @@ test("a platform's breakdown ranks its tests and modules and attributes each one
   );
   const [linux] = out.platforms;
   assert.equal(linux.run, "now");
-  assert.equal(linux.setAside, 1);
+  assert.equal(linux.setAside, 2);
   assert.equal(linux.breakdown.total.tests, 3);
   assert.equal(linux.breakdown.total.wall, 17);
   assert.deepEqual(
