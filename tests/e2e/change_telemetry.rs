@@ -660,6 +660,10 @@ fn an_open_change_awaiting_its_merge_names_review_wait_as_not_measured() {
         .out_has("review_wait not measured");
 }
 
+/// How many telemetry reads the in-flight journey brackets before a journal that never
+/// stops moving is called a failure rather than the clock.
+const BRACKETS: usize = 20;
+
 /// A change still in its dispatch is read the same way: it has settled nothing,
 /// so its outcome is its status, it has not landed, and everything from its
 /// dispatch to the run's last record is its agent's.
@@ -681,13 +685,28 @@ fn a_change_still_in_flight_reads_its_status_and_its_agent_time() {
             .contains("service: running")
     });
 
-    let change = &changes(&world, run)["changes"][0];
+    // The held node is still recording its turn, so the journal is read on both sides of
+    // the telemetry read and a reading is kept only once nothing landed between them: a
+    // record that arrived after `telemetry` read the journal would move the expected
+    // agent time without moving the reported one.
+    let mut held_still = None;
+    for _ in 0..BRACKETS {
+        let before = world.journal(run).len();
+        let read = changes(&world, run)["changes"][0].clone();
+        let journal = world.journal(run);
+        if journal.len() == before {
+            held_still = Some((read, journal));
+            break;
+        }
+    }
+    let (change, journal) =
+        held_still.expect("the journal never held still across a telemetry read");
+    let change = &change;
     assert_eq!(change["outcome"], "running", "{change}");
     assert_eq!(change["landed_at"], Value::Null, "{change}");
     assert_eq!(change["cycle_seconds"], Value::Null, "{change}");
     assert_eq!(change["dispatches"], 1, "{change}");
     assert_eq!(change["publication_attempts"], 0, "{change}");
-    let journal = world.journal(run);
     let open = last_record(&journal) - ms(change["dispatched_at"].as_str().expect("a stamp"));
     assert_eq!(segment(change, "agent"), open, "{change}");
     assert_eq!(total(change), open, "{:?}", segments(change));

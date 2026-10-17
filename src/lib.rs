@@ -121,6 +121,7 @@ mod vcs;
 mod watch;
 mod watchers;
 mod writeback;
+mod yaml;
 
 pub use error::{Error, Result};
 

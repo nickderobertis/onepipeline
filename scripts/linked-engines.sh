@@ -36,12 +36,14 @@ set -euo pipefail
 
 # The engines whose currency this repository claims: the two it composes, the
 # verdict vocabulary it relays, the two test-support pins whose drift would
-# leave a double proving a fixture, and the store every plan is read out of and
-# every settlement projected into, which the engine links. Every one is pinned in
-# `[workspace.dependencies]`, which is what makes the claim checkable at all. The
-# store's family is lock-step, so it is pinned exactly and its core stands for the
-# whole release: the notes name the store release the engine links.
-SIBLINGS=(oneagentgraph onevcs onevcs-testing onejudge oneharness-core onetaskgraph-core)
+# leave a double proving a fixture, the store every plan is read out of and
+# every settlement projected into, the bus whose vocabulary every stream speaks,
+# and the budget checker's library `tests/budgets.rs` parses through. Every one is
+# pinned in `[workspace.dependencies]`, which is what makes the claim checkable at
+# all. The store's family is lock-step and pinned exactly, and each of its crates
+# is named on its own: the core resolving once says nothing about how many copies
+# of the plugin API or the local-md source the graph carries.
+SIBLINGS=(oneagentgraph onevcs onevcs-testing onejudge oneharness-core onetaskgraph-core onetaskgraph-plugin-api onetaskgraph-local-md onemessagebus onebudgetspec-core)
 
 format=check
 manifest=Cargo.toml

@@ -549,7 +549,7 @@ fn graph_with_overrides(
     origin: &str,
     sets: &[String],
 ) -> std::result::Result<GraphConfig, String> {
-    let mut parsed: serde_json::Value = serde_norway::from_str(content)
+    let mut parsed: serde_json::Value = crate::yaml::from_str(content)
         .map_err(|error| format!("the graph '{origin}' could not be read: {error}"))?;
     let overrides = sets
         .iter()
@@ -557,8 +557,7 @@ fn graph_with_overrides(
         .collect::<std::result::Result<Vec<_>, _>>()?;
     oneagentgraph::run::apply_overrides(&mut parsed, &overrides)
         .map_err(|error| error.to_string())?;
-    serde_norway::to_value(&parsed)
-        .and_then(serde_norway::from_value)
+    crate::taskgraph::read(parsed)
         .map_err(|error| format!("the graph '{origin}' could not be read: {error}"))
 }
 

@@ -432,8 +432,7 @@ impl Registry {
             }
         };
         let refused = |why: String| Error::Invalid(format!("{}: {why}", file.display()));
-        let parsed: RegistrationFile =
-            serde_norway::from_str(&text).map_err(|error| refused(error.to_string()))?;
+        let parsed: RegistrationFile = crate::yaml::from_str(&text).map_err(refused)?;
         if parsed.onepipeline_templates != REGISTRATION_VERSION {
             return Err(refused(format!(
                 "`{REGISTRATION_KEY}: {}` is not a registration version this build reads; it \
