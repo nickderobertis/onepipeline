@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.75.0](https://github.com/nickderobertis/onepipeline/compare/v0.74.1...v0.75.0) - 2026-10-17
+
+### Added
+
+- *(deps)* [**breaking**] read YAML with serde-saphyr and link the onetaskgraph and sibling releases that do ([#923](https://github.com/nickderobertis/onepipeline/pull/923))
+
+### Fixed
+
+- *(scratch)* name an added node's scratch directory the same way on Windows ([#977](https://github.com/nickderobertis/onepipeline/pull/977))
+- *(e2e)* close the multi-source stop race and the readjust placement flake ([#951](https://github.com/nickderobertis/onepipeline/pull/951))
+
+### Performance
+
+- *(driver)* read the driver claim on an interval and make an adopting driver wait for the one it displaces ([#965](https://github.com/nickderobertis/onepipeline/pull/965))
+
 ## [0.74.1](https://github.com/nickderobertis/onepipeline/compare/v0.74.0...v0.74.1) - 2026-10-16
 
 ### Added
