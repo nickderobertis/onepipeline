@@ -61,6 +61,16 @@ function run(command, args, { env = {}, cwd = ROOT } = {}) {
   });
 }
 
+/// The npm settings `npmEnv` points npm at a double with, without the rest of
+/// `process.env` it also returns: spread over a release environment, that copy
+/// would put a runner's own `GITHUB_API_URL` and `GITHUB_TOKEN` back over the
+/// GitHub double's, and the recipe would ask the real API.
+function npmConfig(npm, home) {
+  return Object.fromEntries(
+    Object.entries(npm.npmEnv(home)).filter(([name]) => /^npm_config_/i.test(name)),
+  );
+}
+
 function said(result) {
   return `exit ${result.code}\n--- stdout\n${result.stdout}\n--- stderr\n${result.stderr}`;
 }
@@ -320,25 +330,26 @@ describe("a release phase refuses what it cannot trust", () => {
 
 describe("a Release that names another host", () => {
   it("is refused before the token or a download goes there", async () => {
-    // Local registries, so the outcome's own registry questions stay on this machine.
+    // A local crate registry, and npm off in every run's own overrides (where
+    // `releaseEnv` cannot turn it back on), so the outcome's registry questions
+    // stay on this machine.
     const crates = await new CratesDouble().start();
-    ambient = { ONEPIPELINE_CRATE_REGISTRY: `${crates.url}/index/`, NPM_PUBLISH: "false" };
+    ambient = { ONEPIPELINE_CRATE_REGISTRY: `${crates.url}/index/` };
     const github = await new GitHubDouble().start();
     const release = github.addRelease(TAG);
     const out = scratch("release-hosts");
+    const outcomeEnv = (overrides) =>
+      releaseEnv(github, out, { NPM_PUBLISH: "false", ...overrides });
     try {
       const plain = await run("just", ["release-outcome"], {
-        env: releaseEnv(github, out, {
-          LINUX_RESULT: "success",
-          GITHUB_API_URL: "http://192.0.2.1",
-        }),
+        env: outcomeEnv({ LINUX_RESULT: "success", GITHUB_API_URL: "http://192.0.2.1" }),
       });
       assert.equal(plain.code, 1, said(plain));
       assert.match(plain.stderr, /http:\/\/192\.0\.2\.1 is not an HTTPS URL/);
       // A token is never carried through a redirect, wherever it points.
       github.redirectNext("GET", /\/releases\/tags\//, `${github.url}/elsewhere`);
       const redirected = await run("just", ["release-outcome"], {
-        env: releaseEnv(github, out, { LINUX_RESULT: "success" }),
+        env: outcomeEnv({ LINUX_RESULT: "success" }),
       });
       assert.equal(redirected.code, 1, said(redirected));
       assert.match(redirected.stderr, /redirected a request carrying a token to/);
@@ -348,7 +359,7 @@ describe("a Release that names another host", () => {
       );
       github.uploadOrigin = "https://uploads.example.com";
       let result = await run("just", ["release-outcome"], {
-        env: releaseEnv(github, out, { LINUX_RESULT: "success" }),
+        env: outcomeEnv({ LINUX_RESULT: "success" }),
       });
       assert.equal(result.code, 1, said(result));
       assert.match(
@@ -638,7 +649,7 @@ describe("publish asks every registry before it writes anything", () => {
     const home = scratch("npm-home");
     try {
       npm.refuseWith(401);
-      const result = await publishWith(github, { ...npm.npmEnv(home), NPM_PUBLISH: "true" });
+      const result = await publishWith(github, { ...npmConfig(npm, home), NPM_PUBLISH: "true" });
       assert.match(result.stderr, /npm could not be asked about onepipeline-cli-/);
     } finally {
       await Promise.all([github.stop(), npm.stop()]);
@@ -760,7 +771,7 @@ describe("the release outcome record", () => {
     npm = new Registry();
     await npm.start();
     home = scratch("npm-home");
-    ambient = { ...npm.npmEnv(home), ONEPIPELINE_CRATE_REGISTRY: `${crates.url}/index/` };
+    ambient = { ...npmConfig(npm, home), ONEPIPELINE_CRATE_REGISTRY: `${crates.url}/index/` };
   });
   after(async () => {
     ambient = {};
