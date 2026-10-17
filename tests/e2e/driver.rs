@@ -1417,71 +1417,73 @@ fn a_detached_adoption_reports_an_observer_that_refuses_to_relaunch() {
     assert_eq!(world.events_of(&run, "driver-adopted").len(), 1);
 } // llmlint: ignore-end[tests_mirror_real_usage]
 
-/// A driver that has let go of its run writes nothing more to it — not even the
-/// observer it was in the middle of restarting.
+/// A run whose observer restart is stopped inside its launch, and the driver
+/// that started it.
 ///
-/// The watch that restarts a run's observer runs beside the driver's loop, so a
-/// restart can still be inside the observer's launch when the loop lets go.
-/// Before the watch stopped at the let-go, that restart went on to write the
-/// launch record as the departing driver held it, over whatever was written
-/// since: the record an operator had just corrected — the Windows leg's
-/// `adopt --detach exited 0 not 2` in
-/// [`a_detached_adoption_reports_an_observer_that_refuses_to_relaunch`], whose
-/// premise this shares — or the claim of the driver that had adopted the run,
-/// which every reader then called undriven.
-///
-/// Held, so the order is the journey's rather than the host's: the restart is
-/// stopped inside its launch, the run lets go and its record is corrected, and
-/// only then does the launch announce itself.
-#[test]
-fn a_restart_finishing_after_its_driver_let_go_writes_nothing_to_the_run() {
-    // llmlint: ignore-block[tests_mirror_real_usage] no CLI command edits a run's
-    // durable launch record after its driver has let go. The corrected record is
-    // the premise the observer-refused journey above arranges the same way, at the
-    // persisted boundary; the launch, the held restart, the adoption, and every
-    // observation still go through the compiled binary and its doubles.
-    let world = World::new("driver-let-go-restart");
-    // The node's dispatch meets this journey inside its hold, so it is past the
+/// The watch restarting an observer runs beside the driver's loop, so this is
+/// the state a driver lets go of the run in when a restart is under way. Held
+/// rather than raced, so what happens next is the journey's order and not the
+/// host's.
+struct HeldRestart {
+    run: String,
+    driver: u32,
+    restart: crate::harness::Arrival,
+}
+
+/// [`HeldRestart`], with the run's `build` dispatch held inside its own hold
+/// beside it: releasing that is what moves the driver on to letting go.
+fn a_restart_held_inside_its_launch(
+    world: &World,
+    name: &str,
+    nodes: Vec<Value>,
+) -> (HeldRestart, crate::harness::Arrival) {
+    // The node's dispatch meets the journey inside its hold, so it is past the
     // point the launch hold below would catch it.
     let build = world.rendezvous("build");
     world.script("observer.wait", "hold");
-    let run = start_detached_observed(
-        &world,
-        "let-go-restart",
-        vec![agent("build", &[]), human("approve", &[])],
-    );
-    let held = build.arrived();
+    let run = start_detached_observed(world, name, nodes);
+    let dispatch = build.arrived();
     world.until("the observer to watch", |world| {
         !world.observer_saw().is_empty()
     });
-    let displaced = world.run_json(&run, "launch.json")["pid"]
+    let driver = world.run_json(&run, "launch.json")["pid"]
         .as_u64()
         .and_then(|pid| u32::try_from(pid).ok())
         .unwrap_or_else(|| panic!("the record names no driver:\n{}", world.dump()));
-
-    // The watching observer goes, and the driver's restart is stopped inside the
-    // launch of the next one, before it has announced anything.
     let launches = world.rendezvous("run");
     world.release("observer.go.1");
     let restart = launches.arrived();
     world.unscript("run.rendezvous");
+    (
+        HeldRestart {
+            run,
+            driver,
+            restart,
+        },
+        dispatch,
+    )
+}
 
-    // The run pauses on its human node, and its driver lets go of it.
-    held.release();
-    world.until("the driver to let go of the run", |world| {
-        world.run(&["status", &run]).stdout.contains("PAUSED")
-    });
+/// Correct the run's launch record once its driver has let go, let the held
+/// restart finish, and prove the departed driver wrote nothing over the
+/// correction and left no observer behind. The corrected record names a
+/// directory that is not there; it is returned for the caller to read.
+fn the_departed_driver_writes_nothing(world: &World, held: HeldRestart) -> PathBuf {
+    let HeldRestart {
+        run,
+        driver,
+        restart,
+    } = held;
     let missing = world.run_file(&run, "missing-observer-directory");
     let mut record = world.run_json(&run, "launch.json");
     record["dir"] = json!(missing);
     std::fs::write(world.run_file(&run, "launch.json"), record.to_string())
         .expect("the launch record names an unavailable observer directory");
 
-    // Now the restart's launch announces itself, and the driver that let go has
-    // nothing left to do.
+    let observer = restart.pid;
     restart.release();
     world.until("the driver that let go to exit", |_| {
-        crate::harness::process_ended(displaced)
+        crate::harness::process_ended(driver)
     });
     assert_eq!(
         world.run_json(&run, "launch.json")["dir"],
@@ -1495,12 +1497,67 @@ fn a_restart_finishing_after_its_driver_let_go_writes_nothing_to_the_run() {
             .contains("started another observer graph"),
         "a driver that had let go of the run claimed another observer for it"
     );
+    world.until("the observer the restart launched to be ended", |_| {
+        crate::harness::process_ended(observer)
+    });
+    missing
+}
 
-    // So the adoption meets the record as it was left, and says what refused.
+/// A driver that lets go of its run writes nothing more to it — not even the
+/// observer it was in the middle of restarting — so a record corrected after
+/// the run reads as let go is the record the next adoption meets.
+#[test]
+fn a_restart_finishing_after_its_driver_let_go_writes_nothing_to_the_run() {
+    // llmlint: ignore-block[tests_mirror_real_usage] no CLI command edits a run's
+    // durable launch record after its driver has let go. The corrected record is
+    // the premise the observer-refused journey above arranges the same way, at the
+    // persisted boundary; the launch, the held restart, the adoption, and every
+    // observation still go through the compiled binary and its doubles.
+    let world = World::new("driver-let-go-restart");
+    let (held, dispatch) = a_restart_held_inside_its_launch(
+        &world,
+        "let-go-restart",
+        vec![agent("build", &[]), human("approve", &[])],
+    );
+    let run = held.run.clone();
+    // The run pauses on its human node, and its driver lets go of it.
+    dispatch.release();
+    world.until("the driver to let go of the run", |world| {
+        world.run(&["status", &run]).stdout.contains("PAUSED")
+    });
+    the_departed_driver_writes_nothing(&world, held);
+
     let adopted = world.run(&["adopt", &run, "--detach"]);
     adopted.exited(REFUSED);
     adopted.err_has("did not claim it");
     adopted.err_has("not a directory");
+} // llmlint: ignore-end[tests_mirror_real_usage]
+
+/// The same of a driver that lets go of its run over an error it reports: the
+/// run is free the moment its `driver-exited` is written, so the restart under
+/// way then writes nothing either.
+#[test]
+fn a_restart_finishing_after_its_driver_let_go_over_an_error_writes_nothing_to_the_run() {
+    // llmlint: ignore-block[tests_mirror_real_usage] a queue log that stops being a file
+    // under a live driver is a storage fault no verb writes, and is how
+    // `driver_exit::a_driver_that_reports_an_error_records_it_while_it_still_holds_the_run`
+    // makes the compiled driver's own pass fail; the corrected record is the premise
+    // the journey above arranges. The driver, its held restart, and every observation
+    // are the real ones.
+    let world = World::new("driver-let-go-restart-error");
+    let (held, dispatch) =
+        a_restart_held_inside_its_launch(&world, "let-go-error", vec![agent("build", &[])]);
+    let run = held.run.clone();
+    std::fs::create_dir_all(world.run_file(&run, "channel/commands.jsonl"))
+        .expect("the queue log is replaced by a directory");
+    dispatch.release();
+    world.until("the driver to record its error", |world| {
+        world
+            .events_of(&run, "driver-exited")
+            .iter()
+            .any(|exited| exited["payload"]["settlement"] == "error")
+    });
+    the_departed_driver_writes_nothing(&world, held);
 } // llmlint: ignore-end[tests_mirror_real_usage]
 
 #[test]

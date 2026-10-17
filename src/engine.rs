@@ -1049,7 +1049,8 @@ pub fn claim(paths: &RunPaths) -> Result<OwnershipLock> {
 ///
 /// `letting_go` is called once, the moment this driver starts letting go of the
 /// run and while it still holds it: before the record that says it let go, and
-/// before the release. Whatever else this process writes to the run on the
+/// before the release. A driver that leaves its claim standing instead — the
+/// handover it could not take — is not letting go, and is never told it is. Whatever else this process writes to the run on the
 /// driver's behalf stops there, so nothing it writes lands after a reader was
 /// told the run is free — over the next holder's claim, or over a record an
 /// operator corrected for the adoption they are about to make.
@@ -1245,7 +1246,6 @@ fn driving(
                      its queue is applied then",
                     paths.run, paths.run
                 );
-                letting_go();
                 record_exit(paths, settlement.into(), None, answered_from);
                 claim.abandon();
                 break (settlement, Departure::LeftClaimed);
