@@ -1474,11 +1474,17 @@ fn the_departed_driver_writes_nothing(world: &World, held: HeldRestart) -> PathB
         driver,
         restart,
     } = held;
+    // llmlint: ignore-block[tests_mirror_real_usage] no CLI command edits a run's
+    // durable launch record after its driver has let go. The corrected record is
+    // the premise `a_detached_adoption_reports_an_observer_that_refuses_to_relaunch`
+    // arranges the same way, at the persisted boundary; the departed driver, its held
+    // restart, and every observation still go through the compiled binary.
     let missing = world.run_file(&run, "missing-observer-directory");
     let mut record = world.run_json(&run, "launch.json");
     record["dir"] = json!(missing);
     std::fs::write(world.run_file(&run, "launch.json"), record.to_string())
         .expect("the launch record names an unavailable observer directory");
+    // llmlint: ignore-end[tests_mirror_real_usage]
 
     let observer = restart.pid;
     restart.release();
@@ -1508,11 +1514,6 @@ fn the_departed_driver_writes_nothing(world: &World, held: HeldRestart) -> PathB
 /// the run reads as let go is the record the next adoption meets.
 #[test]
 fn a_restart_finishing_after_its_driver_let_go_writes_nothing_to_the_run() {
-    // llmlint: ignore-block[tests_mirror_real_usage] no CLI command edits a run's
-    // durable launch record after its driver has let go. The corrected record is
-    // the premise the observer-refused journey above arranges the same way, at the
-    // persisted boundary; the launch, the held restart, the adoption, and every
-    // observation still go through the compiled binary and its doubles.
     let world = World::new("driver-let-go-restart");
     let (held, dispatch) = a_restart_held_inside_its_launch(
         &world,
@@ -1531,25 +1532,25 @@ fn a_restart_finishing_after_its_driver_let_go_writes_nothing_to_the_run() {
     adopted.exited(REFUSED);
     adopted.err_has("did not claim it");
     adopted.err_has("not a directory");
-} // llmlint: ignore-end[tests_mirror_real_usage]
+}
 
 /// The same of a driver that lets go of its run over an error it reports: the
 /// run is free the moment its `driver-exited` is written, so the restart under
 /// way then writes nothing either.
 #[test]
 fn a_restart_finishing_after_its_driver_let_go_over_an_error_writes_nothing_to_the_run() {
-    // llmlint: ignore-block[tests_mirror_real_usage] a queue log that stops being a file
-    // under a live driver is a storage fault no verb writes, and is how
-    // `driver_exit::a_driver_that_reports_an_error_records_it_while_it_still_holds_the_run`
-    // makes the compiled driver's own pass fail; the corrected record is the premise
-    // the journey above arranges. The driver, its held restart, and every observation
-    // are the real ones.
     let world = World::new("driver-let-go-restart-error");
     let (held, dispatch) =
         a_restart_held_inside_its_launch(&world, "let-go-error", vec![agent("build", &[])]);
     let run = held.run.clone();
+    // llmlint: ignore-block[tests_mirror_real_usage] a queue log that stops being a file
+    // under a live driver is a storage fault no verb writes, and is how
+    // `driver_exit::a_driver_that_reports_an_error_records_it_while_it_still_holds_the_run`
+    // makes the compiled driver's own pass fail; the driver, its held restart, and every
+    // observation are the real ones.
     std::fs::create_dir_all(world.run_file(&run, "channel/commands.jsonl"))
         .expect("the queue log is replaced by a directory");
+    // llmlint: ignore-end[tests_mirror_real_usage]
     dispatch.release();
     world.until("the driver to record its error", |world| {
         world
@@ -1558,7 +1559,7 @@ fn a_restart_finishing_after_its_driver_let_go_over_an_error_writes_nothing_to_t
             .any(|exited| exited["payload"]["settlement"] == "error")
     });
     the_departed_driver_writes_nothing(&world, held);
-} // llmlint: ignore-end[tests_mirror_real_usage]
+}
 
 #[test]
 fn a_detached_adoption_refuses_when_the_prior_launch_record_cannot_be_preserved() {
