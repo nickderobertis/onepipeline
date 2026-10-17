@@ -380,44 +380,6 @@ function render(result) {
   return lines.join("\n");
 }
 
-const isString = (value) => typeof value === "string" && value !== "";
-const NX_OBJECT_INPUTS = {
-  fileset: { required: { fileset: isString }, optional: {} },
-  env: { required: { env: isString }, optional: {} },
-  runtime: { required: { runtime: isString }, optional: {} },
-  externalDependencies: { required: { externalDependencies: isStrings }, optional: {} },
-  dependentTasksOutputFiles: {
-    required: { dependentTasksOutputFiles: isString },
-    optional: { transitive: (value) => typeof value === "boolean" },
-  },
-  input: {
-    required: { input: isString },
-    optional: {
-      projects: (value) => isString(value) || isStrings(value),
-      dependencies: (value) => typeof value === "boolean",
-    },
-  },
-};
-
-/** Which of Nx's object inputs `input` is, or `undefined` for none of them. */
-function nxObjectInput(input) {
-  if (input === null || typeof input !== "object" || Array.isArray(input)) return undefined;
-  return Object.keys(NX_OBJECT_INPUTS).find((kind) => {
-    const { required, optional } = NX_OBJECT_INPUTS[kind];
-    const keys = Object.keys(input);
-    return (
-      Object.entries(required).every(
-        ([key, valid]) => Object.hasOwn(input, key) && valid(input[key]),
-      ) &&
-      keys.every(
-        (key) =>
-          (Object.hasOwn(required, key) || Object.hasOwn(optional, key)) &&
-          (!Object.hasOwn(optional, key) || optional[key](input[key])),
-      )
-    );
-  });
-}
-
 /** Today's shape, read from `nx.json` and `tests/e2e/main.rs` in `repo`. */
 export function todaysMapping(repo) {
   const refuse = (why) =>
@@ -444,12 +406,9 @@ export function todaysMapping(repo) {
           ? expand(input, [...seen, name])
           : [input.replace("{workspaceRoot}/", "")];
       }
-      // Nx's object inputs, each in its own exact shape: a `fileset` names files,
-      // and the others name none.
-      const shape = nxObjectInput(input);
-      if (shape === "fileset") return [input.fileset.replace("{workspaceRoot}/", "")];
-      if (shape) return [];
-      throw refuse(`${name} holds ${JSON.stringify(input)}, which is no Nx input`);
+      // Only a glob names files outright; an object input (`fileset`, `env`, ...)
+      // is refused rather than interpreted, so this keeps no copy of Nx's schema.
+      throw refuse(`${name} holds ${JSON.stringify(input)}, and --today reads only file globs`);
     });
   };
   const build = expand("rustBuild");
