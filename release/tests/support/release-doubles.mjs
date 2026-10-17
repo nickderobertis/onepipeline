@@ -175,7 +175,20 @@ export class GitHubDouble extends Double {
     const repo = `/repos/${this.repository}`;
     const uploads = `/uploads${repo}/releases/`;
     if (req.method === "POST" && path === "/graphql") {
-      const request = JSON.parse(body.toString("utf8"));
+      let request;
+      try {
+        request = JSON.parse(body.toString("utf8"));
+      } catch {
+        return answer(400, { message: "Problems parsing JSON" });
+      }
+      if (
+        typeof request?.query !== "string" ||
+        typeof request.variables !== "object" ||
+        request.variables === null ||
+        typeof request.variables.id !== "string"
+      ) {
+        return answer(400, { message: "a query string and an id variable are required" });
+      }
       this.graphql.push(request);
       if (this.graphqlBody !== null) return answer(200, this.graphqlBody, "application/json");
       if (this.autoMergeRefusal) {
@@ -391,6 +404,21 @@ export class CratesDouble extends Double {
       ) {
         return malformed("metadata lacks name, vers or deps");
       }
+      // Cargo's publish metadata names every field of a dependency.
+      const dependency = (d) =>
+        typeof d?.name === "string" &&
+        typeof d.version_req === "string" &&
+        Array.isArray(d.features) &&
+        typeof d.optional === "boolean" &&
+        typeof d.default_features === "boolean" &&
+        (d.target === null || typeof d.target === "string") &&
+        typeof d.kind === "string" &&
+        (d.registry === null || d.registry === undefined || typeof d.registry === "string") &&
+        (d.explicit_name_in_toml === null ||
+          d.explicit_name_in_toml === undefined ||
+          typeof d.explicit_name_in_toml === "string");
+      if (!meta.deps.every(dependency))
+        return malformed("a dependency entry lacks a field cargo sends");
       const content = body.subarray(8 + length);
       const versions = this.crates.get(meta.name) ?? [];
       if (versions.some((v) => v.line.vers === meta.vers)) {

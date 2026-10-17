@@ -54,7 +54,6 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path.cwd()
-# The repository scripts each phase composes.
 SCRIPTS = Path(__file__).resolve().parent.parent / 'scripts'
 
 _spec = importlib.util.spec_from_file_location('staged', SCRIPTS / 'build-staged-release.py')
