@@ -939,3 +939,27 @@ fn every_test_leg_keeps_the_profile_records_from_where_the_harness_writes_them()
         );
     }
 }
+
+/// The e2e project's test targets declare the records their run writes as Nx
+/// outputs, at the directory the harness writes them to, so a cached run
+/// restores them: an output naming any other path would restore nothing.
+#[test]
+fn the_e2e_test_targets_declare_the_profile_records_as_outputs() {
+    use onepipeline_testfakes::profile::RECORD_DIR;
+    let path = repo_root().join("tests/e2e/project.json");
+    let text = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("could not read {}: {e}", path.display()));
+    let project: Value = serde_json::from_str(&text).expect("tests/e2e/project.json parses");
+    let records = format!("{{workspaceRoot}}/{RECORD_DIR}/e2e");
+    for target in ["test", "test-quick"] {
+        let outputs = project["targets"][target]["outputs"]
+            .as_array()
+            .unwrap_or_else(|| panic!("the e2e {target} target declares no outputs"));
+        assert!(
+            outputs
+                .iter()
+                .any(|output| output.as_str() == Some(&records)),
+            "the e2e {target} target does not declare {records} among {outputs:?}"
+        );
+    }
+}
