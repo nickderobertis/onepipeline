@@ -189,7 +189,8 @@ fn the_harness_double_draws_its_stream_as_the_released_cli_does() {
 /// The harness double refuses a held turn whose `turn.gates` script holds a line
 /// that is not `<marker> <name>` with a name of letters, digits, `-` and `_`,
 /// naming the line, rather than skipping it and running the turn unheld — which
-/// would let a journey that meant to hold a turn race it instead. A well-formed
+/// would let a journey that meant to hold a turn race it instead — and does so
+/// wherever the line stands, after a line the prompt matches too. A well-formed
 /// script naming no marker the prompt carries runs the turn unheld, so the
 /// refusal is the malformed line's and not the script's. Driven as the process
 /// onejudge spawns, against the compiled double.
@@ -219,14 +220,25 @@ fn the_harness_double_refuses_a_malformed_turn_gates_line() {
             .expect("the compiled double runs")
     };
 
-    // A line with no marker, and one whose name is not one file name.
-    for line in ["lonely", "do the work held/apart"] {
-        let refused = run(line);
+    // The gates a matching line names are already open, so a double that took
+    // the match and never read on would run the turn through them and exit
+    // cleanly rather than wait.
+    for gate in ["work.go", "work.settle"] {
+        std::fs::write(fakes.join(gate), "").expect("the gate is open");
+    }
+    // A line with no marker, one whose name is not one file name, and a
+    // malformed line after one this prompt matches.
+    for (script, line) in [
+        ("lonely", "lonely"),
+        ("do the work held/apart", "do the work held/apart"),
+        ("do the work work\nlonely", "lonely"),
+    ] {
+        let refused = run(script);
         let stderr = String::from_utf8_lossy(&refused.stderr);
         assert_eq!(
             refused.status.code(),
             Some(i32::from(onepipeline_testfakes::USAGE)),
-            "turn.gates holding {line:?} was not refused:\n{stderr}"
+            "turn.gates holding {script:?} was not refused:\n{stderr}"
         );
         assert!(
             stderr.contains(&format!("turn.gates holds {line:?}"))

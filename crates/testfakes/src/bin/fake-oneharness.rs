@@ -1505,12 +1505,14 @@ fn asks_again_times(dir: &std::path::Path) -> Result<usize, String> {
 ///
 /// A line with no marker, or a name that is not one file name of letters,
 /// digits, `-` and `_`, is a scenario nobody wrote, and is refused rather than
-/// read as something it might have meant.
+/// read as something it might have meant — wherever it stands, so every line is
+/// read before any is matched.
 fn turn_gates(dir: &std::path::Path, prompt: &str) -> Result<Option<[String; 2]>, String> {
     let pair = |name: &str| Some([format!("{name}.go"), format!("{name}.settle")]);
     let Some(gates) = fake::node_script(dir, "turn", "gates") else {
         return Ok(pair("turn"));
     };
+    let mut named_gates = Vec::new();
     for line in gates.lines().map(str::trim).filter(|line| !line.is_empty()) {
         let named = line
             .rsplit_once(' ')
@@ -1528,11 +1530,12 @@ fn turn_gates(dir: &std::path::Path, prompt: &str) -> Result<Option<[String; 2]>
                  letters, digits, `-` and `_`"
             ));
         };
-        if prompt.contains(marker) {
-            return Ok(pair(name));
-        }
+        named_gates.push((marker, name));
     }
-    Ok(None)
+    Ok(named_gates
+        .into_iter()
+        .find(|(marker, _)| prompt.contains(marker))
+        .and_then(|(_, name)| pair(name)))
 }
 
 /// Hold this supervisor turn open, when a journey asked for one that is.

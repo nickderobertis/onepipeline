@@ -2751,31 +2751,74 @@ fn status_reads_a_held_delivery_as_delivering_and_what_waits_behind_it_as_held()
     assert!(!reading.to_string().to_lowercase().contains("abandon"));
 
     // A sidecar this build cannot read says nothing of where any envelope
-    // stands, and nothing it says is read as abandoned either.
+    // stands, and nothing it says is read as abandoned either: one that is not
+    // JSON, one of another version, and one of this version whose every field is
+    // the right kind and whose values are not what they say — each naming this
+    // run's own envelopes, so a reader that let it through would show it.
     let sidecar = world.run_file(run, "channel/deliveries.json");
     let written = std::fs::read_to_string(&sidecar).expect("the live driver wrote its sidecar");
-    std::fs::write(&sidecar, "not a delivery document").expect("the sidecar is overwritten");
-    let status = world.run(&["status", run]);
-    status.exited(0);
-    for id in [note_id, behind_id, chained_id] {
+    let (note_at, behind_at) = (note_id.to_string(), behind_id.to_string());
+    let since = "2026-10-18T09:00:00.000Z";
+    let of_version = |version: u64, entry: Value| {
+        json!({"schema_version": version, "deliveries": [entry]}).to_string()
+    };
+    let unreadable = [
+        "not a delivery document".to_string(),
+        of_version(
+            2,
+            json!({"envelope": note_at, "state": "delivering", "node": "build", "since": since}),
+        ),
+        of_version(
+            1,
+            json!({"envelope": "one", "state": "delivering", "node": "build", "since": since}),
+        ),
+        of_version(
+            1,
+            json!({"envelope": note_at, "state": "delivering", "node": "build",
+                   "since": "yesterday"}),
+        ),
+        of_version(
+            1,
+            json!({"envelope": note_at, "state": "delivering", "node": " ", "since": since}),
+        ),
+        of_version(
+            1,
+            json!({"envelope": behind_at, "state": "held", "node": "build\u{7}",
+                   "since": since, "behind_envelope": note_at}),
+        ),
+        of_version(
+            1,
+            json!({"envelope": behind_at, "state": "held", "node": "build", "since": since,
+                   "behind_envelope": "-1"}),
+        ),
+    ];
+    for document in unreadable {
+        std::fs::write(&sidecar, &document).expect("the sidecar is overwritten");
+        let status = world.run(&["status", run]);
+        status.exited(0);
+        for id in [note_id, behind_id, chained_id] {
+            assert!(
+                status.stdout.contains(&format!(
+                    "envelope {id}: claimed by the live driver, which has not said where it \
+                     stands"
+                )),
+                "status read the sidecar {document} as saying something of envelope {id}:\n{}",
+                status.stdout
+            );
+        }
+        assert!(!status.stdout.to_lowercase().contains("abandon"));
+        let reading = world.run(&["status", run, "--json"]);
+        reading.exited(0);
+        let reading = reading.json();
         assert!(
-            status.stdout.contains(&format!(
-                "envelope {id}: claimed by the live driver, which has not said where it stands"
-            )),
-            "status read an unreadable sidecar as saying something of envelope {id}:\n{}",
-            status.stdout
+            reading["unanswered"]
+                .as_array()
+                .is_some_and(|unanswered| unanswered
+                    .iter()
+                    .all(|envelope| envelope.get("delivery").is_none())),
+            "the sidecar {document} was read as a delivery: {reading}"
         );
     }
-    assert!(!status.stdout.to_lowercase().contains("abandon"));
-    let reading = world.run(&["status", run, "--json"]).json();
-    assert!(
-        reading["unanswered"]
-            .as_array()
-            .is_some_and(|unanswered| unanswered
-                .iter()
-                .all(|envelope| envelope.get("delivery").is_none())),
-        "an unreadable sidecar was read as a delivery: {reading}"
-    );
     std::fs::write(&sidecar, written).expect("the sidecar is put back");
 
     // The driver goes, with all three still claimed and unanswered.
