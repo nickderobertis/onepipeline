@@ -892,3 +892,50 @@ fn the_pr_and_opted_in_diagnostic_lanes_preserve_the_three_former_mac_proofs() {
             .contains("macos-latest"));
     }
 }
+
+/// Every pull-request leg that runs the e2e tier keeps the per-test profile
+/// records it wrote, whatever the leg's verdict, from the directory the harness
+/// writes them to: an upload naming any other path would publish nothing, and
+/// `scripts/test-profile-report.mjs` would read a platform as having no records.
+/// No leg moves the records elsewhere through the recorder's environment
+/// variable, and a leg that wrote none says so in its run.
+#[test]
+fn every_test_leg_keeps_the_profile_records_from_where_the_harness_writes_them() {
+    use onepipeline_testfakes::profile::{DIR_ENV, RECORD_DIR};
+    let ci = workflow("ci.yml");
+    assert!(
+        !onepipeline_testfakes::yaml::to_string(&ci)
+            .unwrap()
+            .contains(DIR_ENV),
+        "ci.yml sets {DIR_ENV}, so its records are not where its uploads look"
+    );
+    for key in ["gate", "cross", "macos"] {
+        let steps = ci["jobs"][key]["steps"]
+            .as_array()
+            .unwrap_or_else(|| panic!("job {key} has no steps"));
+        let kept: Vec<&Value> = steps
+            .iter()
+            .filter(|step| {
+                scalar(&step["uses"]).starts_with("actions/upload-artifact@")
+                    && scalar(&step["with"]["path"]).trim_end_matches('/') == RECORD_DIR
+            })
+            .collect();
+        assert_eq!(
+            kept.len(),
+            1,
+            "job {key} keeps {RECORD_DIR} {} times, not once",
+            kept.len()
+        );
+        let step = kept[0];
+        assert_eq!(scalar(&step["if"]), "always()", "job {key}: {step}");
+        assert_eq!(
+            scalar(&step["with"]["if-no-files-found"]),
+            "warn",
+            "job {key}: {step}"
+        );
+        assert!(
+            scalar(&step["with"]["name"]).starts_with("test-profile-"),
+            "job {key}: {step}"
+        );
+    }
+}

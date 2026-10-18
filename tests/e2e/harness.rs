@@ -60,9 +60,7 @@ static PROFILED: extern "C" fn() = profiled;
 extern "C" fn profiled() {
     profile::start(
         env!("CARGO_CRATE_NAME"),
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("test-profile"),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(profile::RECORD_DIR),
     );
 }
 

@@ -48,6 +48,11 @@ use std::time::{Duration, Instant, SystemTime};
 /// [`start`].
 pub const DIR_ENV: &str = "ONEPIPELINE_TEST_PROFILE_DIR";
 
+/// Where, under the workspace root, the e2e harness has records written: one
+/// directory per test binary beneath it. CI keeps this directory from every leg
+/// that runs the tests, which `tests/ci_workflows.rs` holds it to.
+pub const RECORD_DIR: &str = "target/test-profile";
+
 /// The version of the record's shape, written into every record as `schema`.
 pub const SCHEMA: u32 = 2;
 
