@@ -309,14 +309,29 @@ fn a_profiled_journey_nests_work_and_works_on_a_thread_it_started() {
             )
         })
         .collect();
+    let programs: serde_json::Map<String, Value> = totals
+        .programs
+        .iter()
+        .map(|(program, (count, time))| {
+            (
+                program.clone(),
+                serde_json::json!({ "count": count, "s": time.as_secs_f64() }),
+            )
+        })
+        .collect();
     // Through `std::fs` rather than `profile::fs`, so writing the totals down is
     // not itself a filesystem operation the record then holds and they do not.
-    std::fs::write(to, Value::Object(categories).to_string()).expect("the totals are written");
+    std::fs::write(
+        to,
+        serde_json::json!({ "categories": categories, "programs": programs }).to_string(),
+    )
+    .expect("the totals are written");
 }
 
 /// What a record says of each category is what the test held in memory when it
 /// ended — its own and inclusive time, and the count and time of the work on a
-/// thread it started — and none of it is zero where the test did that work.
+/// thread it started — and so is each program's count and time; none of it is
+/// zero where the test did that work.
 #[test]
 fn a_records_inclusive_and_background_figures_are_the_ones_the_test_measured() {
     let world = World::new("profile-layered-record");
@@ -342,11 +357,21 @@ fn a_records_inclusive_and_background_figures_are_the_ones_the_test_measured() {
             "background_s",
         ] {
             assert_eq!(
-                record["categories"][name][field], measured[name][field],
+                record["categories"][name][field], measured["categories"][name][field],
                 "{LAYERED}'s record says other than it measured of {name}.{field}: {record:#}"
             );
         }
     }
+    assert_eq!(
+        record["programs"], measured["programs"],
+        "{LAYERED}'s record says other than it measured of the programs it ran: {record:#}"
+    );
+    let git = &record["programs"]["git"];
+    assert!(
+        git["count"].as_u64().unwrap_or_default() >= 1
+            && git["s"].as_f64().unwrap_or_default() > 0.0,
+        "the git the test ran was not recorded against it: {record:#}"
+    );
     let figure = |category: &str, field: &str| {
         record["categories"][category][field]
             .as_f64()
