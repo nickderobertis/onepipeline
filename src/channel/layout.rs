@@ -457,6 +457,16 @@ pub struct CommandResult {
 /// boolean could never say is *which* command decided it, which is what left a
 /// manager believing a node's bar had changed when the command that would have
 /// changed it was never compiled.
+//
+// One envelope is not all-or-nothing: one whose live notes a run's driver hands
+// to their receivers commits everything else as it is handed, and a receiver's
+// conversation can refuse its note afterwards. Its outcome is then `applied:
+// false` with a `reason` opening `applied in part:` that names the commands
+// that committed and those that refused, and each result says the same —
+// `applied` for a command that committed, `refused` for one that refused. Plain
+// comments rather than these types' docs, which are the published layout
+// document's text: `engine::partly_applied` writes it, and
+// `docs/contract-divergences.md` entry 108 states it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 // llmlint: ignore-block[invalid_states_unrepresentable] the record `command-outcomes.jsonl`
 // holds, in the shape 0.28.2 wrote and the recorded directories carry: `applied` and

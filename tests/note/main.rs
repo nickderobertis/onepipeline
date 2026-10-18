@@ -2752,6 +2752,96 @@ fn a_note_refused_while_the_run_is_driven_is_recorded_and_surfaced() {
     });
 }
 
+/// A ruling on the node a refused note's envelope also amends.
+const AFTER_RULING: &str = "after: read the fixture from fixtures/v2";
+
+/// An envelope whose commands committed as it was handed, and whose live note
+/// its conversation then refused, is answered **applied in part** — and the
+/// outcome says, command by command, which committed and which refused.
+///
+/// `build` has settled `done` while `after` is held mid-turn, so a live note to
+/// `build` is offered on a delivery thread and refused by the conversation, as in
+/// [`a_note_refused_while_the_run_is_driven_is_recorded_and_surfaced`]. The amend
+/// of `after` beside it committed before that note was offered, and stays
+/// committed: the outcome is not applied as sent, but nor does it read as though
+/// nothing of it was.
+#[test]
+fn a_note_refused_after_the_commands_beside_it_committed_is_answered_applied_in_part() {
+    let world = World::new("note-partly-applied");
+    let run = "partlyapplied";
+    world.script("turn.hold-each", "");
+    held_heartbeating_conversation(
+        &world,
+        run,
+        vec![agent("build", &[]), agent("after", &["build"])],
+    );
+    release(&world.fakes, "turn.go");
+    release(&world.fakes, "turn.settle");
+    world.until(
+        "the dependent's turn to open while build is settled",
+        |world| {
+            world
+                .events_of(run, "turn-started")
+                .iter()
+                .any(|event| event["labels"]["node"] == "after")
+        },
+    );
+
+    let refused = world.run_with_stdin_on(
+        world.agentgraph_cmd(&["reply", run]),
+        &json!({"version": 2, "commands": [
+            {"op": "amend", "id": "after", "text": AFTER_RULING},
+            note_op("build", "worker", NOTE, None),
+        ]})
+        .to_string(),
+    );
+    refused.exited(2).err_has("applied in part");
+    let id = queued_id_of(&world, run, AFTER_RULING);
+    let outcome = outcome_of(&world, run, id).expect("the envelope was answered");
+    assert_eq!(outcome["applied"], json!(false), "{outcome}");
+    assert!(
+        outcome["reason"].as_str().is_some_and(|reason| {
+            reason.starts_with("applied in part: command(s) 0 ('amend') committed")
+                && reason.contains("command(s) 1 ('note') refused")
+        }),
+        "the outcome does not say which command committed and which refused: {outcome}"
+    );
+    assert_eq!(
+        [0, 1].map(|index| outcome["results"][index]["outcome"].clone()),
+        [json!("applied"), json!("refused")],
+        "{outcome}"
+    );
+    assert!(
+        outcome["results"][1]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("was not delivered")),
+        "the refused note's own reason was not kept: {outcome}"
+    );
+    assert_eq!(
+        records_of(&world, run, AFTER_RULING)
+            .into_iter()
+            .map(|(_, kind)| kind)
+            .collect::<Vec<_>>(),
+        ["edit-committed"],
+        "the amend that committed is not in the record once"
+    );
+    assert_eq!(
+        records_of(&world, run, NOTE)
+            .into_iter()
+            .map(|(_, kind)| kind)
+            .collect::<Vec<_>>(),
+        ["edit-rejected"],
+        "the refused note is not in the record once, refused"
+    );
+
+    std::fs::remove_file(world.fakes.join("turn.hold")).expect("the hold is lifted");
+    release(&world.fakes, "turn.go");
+    release(&world.fakes, "turn.settle");
+    world.until("the run to settle", |world| {
+        world.events_of(run, "node-settled").len() >= 2
+    });
+}
+
 /// A note submitted while **nothing** drives the run waits on no turn.
 ///
 /// With no driver, `reply` is the run's writer itself and delivers inline, holding
