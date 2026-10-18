@@ -905,6 +905,11 @@ just check       # the deterministic gate
 just gate        # check + the diff-scoped llmlint tier
 ```
 
+The llmlint tier, `just lint-llm-diff <base>`, runs the llmlint CLI as a cached Nx
+target keyed on the tracked tree, the resolved base commit and `llmlint
+fingerprint`: an unchanged pass is replayed, a failure is judged again, and
+`--skip-nx-cache` forces a fresh judgement.
+
 `just --list` is the full command surface.
 [`docs/contract-divergences.md`](docs/contract-divergences.md) records every place
 the code could not compile the contract exactly as written, and what the planner

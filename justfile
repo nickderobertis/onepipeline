@@ -183,6 +183,13 @@ check-affected:
 check-cross: fmt-check lint test-quick
     @echo "check-cross: ok"
 
+# CI's Windows leg runs `check-cross` split across jobs (`ci.yml`'s `cross`), and
+# this is what says the split drops and repeats nothing. Outside `check`, because
+# it lists the uninstrumented build the cross legs run, which `check` never builds.
+# Prove the Windows leg's shards run every `test-quick` test exactly once.
+cross-shards:
+    @node .github/cross-shards.mjs
+
 # The complete pre-push bar: the deterministic gate plus the LLM-judge tier
 # scoped to what this branch changed. `check` stays offline and credential-free;
 # this is where the non-deterministic tier joins it.
@@ -410,8 +417,12 @@ test-quick:
 # fresh and the archive is the build the step tested; neither sets RUSTFLAGS, as
 # the single `test-quick` recipe they were split out of did not. Warnings are
 # denied by `just lint`, which `check-cross` runs before `test-quick`.
+#
+# `ONEPIPELINE_TEST_PARTITION` (`count:K/N`, which `scripts/test-partition.sh`
+# checks) runs the K-th of N shards of every tier, so N jobs share one leg and
+# each test runs in exactly one of them; unset, every test runs.
 _tier-test-quick filter:
-    @bash scripts/nextest-run.sh cargo nextest run --locked -E "$1"
+    @partition=$(bash scripts/test-partition.sh) && bash scripts/nextest-run.sh cargo nextest run --locked ${partition:+--partition "$partition"} -E "$1"
 
 _crate-test-quick: (_tier-test-quick rest-tier)
 
@@ -741,11 +752,25 @@ lint-llm-validate *args:
     @command -v llmlint >/dev/null 2>&1 || { echo "llmlint not installed — run 'just setup-llmlint'" >&2; exit 1; }
     llmlint validate {{args}}
 
-# One verdict per tree, base commit, and judge configuration, rather than a fresh
-# roll of a non-deterministic judge every time. `scripts/llmlint-diff.sh` holds
-# that contract, including the one supported way to force a re-judge.
+# The cached `onepipeline:lint-llm-diff` target runs llmlint itself, keyed on the
+# tree, the resolved base commit and `llmlint fingerprint`, so an unchanged pass
+# replays and a failure is judged again; `--skip-nx-cache` forces a fresh judgement.
+# NX_RUN_COMMANDS_DIRECTLY=false: Nx 23.1 resolves a run-commands task on the
+# child's `exit` before reading its pipes, losing a fast-failing task's output
+# when its stdout is not a terminal (spike-nx-output-loss-report); remove it once
+# Nx collects run-commands output on `close`.
 # The blocking `llmlint` PR check; `just gate` runs it before you push.
 # llmlint scoped to the files this branch changed since it forked from main.
-lint-llm-diff base="origin/main" *options:
-    @bash scripts/llmlint-diff.sh "$@"
+lint-llm-diff base="origin/main" *nx_args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    base="$1"
+    shift
+    sha="$(git rev-parse --verify --quiet "${base}^{commit}")" || {
+      echo "lint-llm-diff: '$base' does not resolve to a commit" >&2
+      exit 2
+    }
+    echo "lint-llm-diff: judging the diff against $base ($sha)"
+    LLMLINT_DIFF_BASE_SHA="$sha" ONEPIPELINE_NX_SHOW_OUTPUT=1 NX_RUN_COMMANDS_DIRECTLY=false \
+      exec bash scripts/nx.sh run onepipeline:lint-llm-diff "$@"
 
