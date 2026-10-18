@@ -4,11 +4,16 @@ Every answer is built from current endpoint state. Unknown operations fail loudl
 no request reaches GitHub or reads a production credential. The board carries a
 `Host` text field a source's `metadata_fields` can project onto, and an optional
 second argument names a JSON file of caller metadata to seed onto issues by name.
+
+The URL is published to `<root>/endpoint` whole or not at all. For the regression journey that
+proves it, `GITHUB_LOOPBACK_PUBLISH_HOLD` names a directory: publication stops half-written,
+creates `held` there, and finishes only once `go` appears.
 """
 import json
 import os
 import pathlib
 import sys
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 root = pathlib.Path(sys.argv[1])
@@ -188,10 +193,26 @@ class Handler(BaseHTTPRequestHandler):
         return {"errors": [{"message": "unsupported loopback operation: " + query}]}
 
 
+def publish(path, text):
+    """Write `text` under another name and rename it onto `path`, so a reader that finds `path`
+    reads all of `text`."""
+    staged = path.with_name(path.name + ".partial")
+    hold = os.environ.get("GITHUB_LOOPBACK_PUBLISH_HOLD")
+    with open(staged, "w") as out:
+        if hold:
+            out.write(text[:len(text) // 2])
+            out.flush()
+            (pathlib.Path(hold) / "held").touch()
+            while not (pathlib.Path(hold) / "go").exists():
+                time.sleep(0.01)
+            text = text[len(text) // 2:]
+        out.write(text)
+    os.replace(staged, path)
+
+
 server = HTTPServer(("127.0.0.1", 0), Handler)
 # Published by a rename, so a reader that sees `endpoint` sees the whole address: a
 # file written in place exists, empty, before its contents land, and a journey that
 # read it then sent its first request to a bare path.
-(root / "endpoint.partial").write_text(f"http://127.0.0.1:{server.server_port}")
-os.replace(root / "endpoint.partial", root / "endpoint")
+publish(root / "endpoint", f"http://127.0.0.1:{server.server_port}")
 server.serve_forever()
