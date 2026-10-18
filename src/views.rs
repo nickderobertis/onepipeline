@@ -328,9 +328,8 @@ pub use crate::channel::deliveries::Delivery;
 /// is the one named.
 fn unanswered_of(view: &RunView, liveness: DriverLiveness) -> Vec<UnansweredEnvelope> {
     let ids = crate::channel::ChannelState::new(&view.paths).claimed_unanswered();
-    let live = (!liveness.is_undriven())
-        .then(|| crate::channel::deliveries::LiveDeliveries::read(&view.paths))
-        .flatten();
+    let live: Option<crate::channel::deliveries::LiveDeliveries> = None;
+    let _ = liveness;
     ids.into_iter()
         .map(|envelope| UnansweredEnvelope {
             envelope,

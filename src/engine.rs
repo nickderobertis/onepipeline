@@ -4671,7 +4671,7 @@ fn partly_applied(id: u64, commands: &[Command], answered: &[Answered]) -> Comma
         id,
         applied: false,
         reason: Some(format!(
-            "applied in part: command(s) {committed} committed and are in the run's record; \
+            "command(s) {committed} committed and are in the run's record; \
              command(s) {refused} refused — {}. What committed is not undone: resend only what \
              refused",
             first.unwrap_or("no reason was recorded")
@@ -5445,7 +5445,7 @@ impl NoteDeliveries {
 
     /// Whether an envelope naming `names` waits behind an outstanding receiver.
     fn holds(&self, names: &BTreeSet<String>) -> bool {
-        self.holder(names).is_some()
+        self.holder(names).is_some() || (!names.is_empty() && !self.outstanding.is_empty())
     }
 
     /// Keep `held` as the envelopes waiting behind outstanding receivers, in
@@ -5647,11 +5647,7 @@ impl NoteDeliveries {
 
     /// Write envelope `id`'s one outcome once its last receiver has answered.
     fn finish(&mut self, id: u64, channel: &ChannelState) -> Result<()> {
-        if !self
-            .outstanding
-            .get(&id)
-            .is_some_and(|outstanding| outstanding.lanes.is_empty())
-        {
+        if !self.outstanding.contains_key(&id) {
             return Ok(());
         }
         let Some(done) = self.outstanding.remove(&id) else {
