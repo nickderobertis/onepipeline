@@ -43,10 +43,8 @@
         "{workspaceRoot}/scripts/setup-llmlint.sh",
         "{workspaceRoot}/scripts/release-probe.sh",
         "{workspaceRoot}/release-targets.toml",
-        "{workspaceRoot}/scripts/report-workflow-failure.sh",
         "{workspaceRoot}/**/project.json",
         "{workspaceRoot}/.github/workflows/release.yml",
-        "{workspaceRoot}/.github/workflows/published-smoke.yml",
         "{workspaceRoot}/src/**/*",
         "{workspaceRoot}/Cargo.toml",
         "{workspaceRoot}/Cargo.lock",
@@ -57,7 +55,8 @@
         "{workspaceRoot}/.config/nextest.toml",
         "{workspaceRoot}/pyproject.toml",
         "sharedGlobals",
-        "{workspaceRoot}/scripts/build-staged-release.py"
+        "{workspaceRoot}/scripts/build-staged-release.py",
+        "{workspaceRoot}/release/release.py"
       ]
     },
     "check": {

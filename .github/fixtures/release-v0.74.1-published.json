@@ -1,0 +1,86 @@
+{
+  "source": "What v0.74.1 published, read on 2026-10-17 with `gh release view v0.74.1 --json assets`, PyPI's JSON API (`/pypi/onepipeline-cli/0.74.1/json`), `npm view <package>@0.74.1 --json name version os cpu`, and the crates.io sparse index (`/on/ep/onepipeline`). `.github/tests/release-shape.test.mjs` holds every build job's plan to it.",
+  "version": "0.74.1",
+  "release_assets": [
+    "onepipeline-v0.74.1-aarch64-apple-darwin.sha256",
+    "onepipeline-v0.74.1-aarch64-apple-darwin.tar.gz",
+    "onepipeline-v0.74.1-aarch64-unknown-linux-gnu.sha256",
+    "onepipeline-v0.74.1-aarch64-unknown-linux-gnu.tar.gz",
+    "onepipeline-v0.74.1-x86_64-apple-darwin.sha256",
+    "onepipeline-v0.74.1-x86_64-apple-darwin.tar.gz",
+    "onepipeline-v0.74.1-x86_64-pc-windows-msvc.sha256",
+    "onepipeline-v0.74.1-x86_64-pc-windows-msvc.zip",
+    "onepipeline-v0.74.1-x86_64-unknown-linux-gnu.sha256",
+    "onepipeline-v0.74.1-x86_64-unknown-linux-gnu.tar.gz",
+    "release-outcome.json"
+  ],
+  "pypi": [
+    "onepipeline_cli-0.74.1-py3-none-macosx_10_12_x86_64.whl",
+    "onepipeline_cli-0.74.1-py3-none-macosx_11_0_arm64.whl",
+    "onepipeline_cli-0.74.1-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.whl",
+    "onepipeline_cli-0.74.1-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+    "onepipeline_cli-0.74.1-py3-none-win_amd64.whl"
+  ],
+  "npm": [
+    {
+      "name": "onepipeline-cli",
+      "version": "0.74.1"
+    },
+    {
+      "name": "onepipeline-cli-linux-x64",
+      "version": "0.74.1",
+      "os": [
+        "linux"
+      ],
+      "cpu": [
+        "x64"
+      ]
+    },
+    {
+      "name": "onepipeline-cli-linux-arm64",
+      "version": "0.74.1",
+      "os": [
+        "linux"
+      ],
+      "cpu": [
+        "arm64"
+      ]
+    },
+    {
+      "name": "onepipeline-cli-darwin-arm64",
+      "version": "0.74.1",
+      "os": [
+        "darwin"
+      ],
+      "cpu": [
+        "arm64"
+      ]
+    },
+    {
+      "name": "onepipeline-cli-darwin-x64",
+      "version": "0.74.1",
+      "os": [
+        "darwin"
+      ],
+      "cpu": [
+        "x64"
+      ]
+    },
+    {
+      "name": "onepipeline-cli-win32-x64",
+      "version": "0.74.1",
+      "os": [
+        "win32"
+      ],
+      "cpu": [
+        "x64"
+      ]
+    }
+  ],
+  "crates": [
+    {
+      "name": "onepipeline",
+      "version": "0.74.1"
+    }
+  ]
+}

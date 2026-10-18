@@ -314,12 +314,14 @@ fn grouped(
 ///
 /// The `review` trigger reads through `review_standings`, whose review reads the pass
 /// then discovers from; every other trigger reads `change_standings`. A repository whose
-/// read failed is journalled `readjust-read-failed` and contributes nothing.
+/// read failed is journalled `readjust-read-failed` and contributes nothing. A verdict
+/// on a head in `deferred` is not read: see [`Readjuster::deferred`].
 pub(crate) fn detect(
     paths: &RunPaths,
     journal: &mut Journal,
     state: &RunState,
     trigger: ReadjustTrigger,
+    deferred: &BTreeSet<String>,
 ) -> Result<Detection> {
     let review = trigger == ReadjustTrigger::Review;
     let mut detection = Detection::default();
@@ -413,7 +415,15 @@ pub(crate) fn detect(
         )?;
     }
     detection.failures = failures;
-    take_up(paths, journal, state, trigger, &read, &mut detection)?;
+    take_up(
+        paths,
+        journal,
+        state,
+        trigger,
+        &read,
+        deferred,
+        &mut detection,
+    )?;
     detection.standings = read
         .into_iter()
         .map(|(draft, standing)| (draft.node, standing))
@@ -429,6 +439,7 @@ fn take_up(
     state: &RunState,
     trigger: ReadjustTrigger,
     read: &[(Draft, onevcs::ChangeStanding)],
+    deferred: &BTreeSet<String>,
     detection: &mut Detection,
 ) -> Result<()> {
     let mut found = Found::default();
@@ -522,6 +533,9 @@ fn take_up(
                     None => closed(paths, journal, draft)?,
                 }
             }
+            // A head a restack owed now is brought onto was just pushed, and its verdict
+            // is the next trigger's.
+            _ if deferred.contains(&standing.head.0) => {}
             _ => {
                 verdict(paths, journal, state, draft, standing, detection)?;
             }
@@ -1064,6 +1078,15 @@ pub(crate) struct Readjuster {
     /// Each node a placement read was made for, so a node held across passes is not
     /// read for again.
     pub(crate) placed: BTreeSet<String>,
+    /// The heads every restack owed when this pass's placement read was claimed brings
+    /// its draft onto, which that read leaves the verdict of to the next trigger.
+    ///
+    /// Each is a stack parent's push, and a republication's push defers its verdict:
+    /// the restack it makes owed is part of the trigger that republished it, not the
+    /// next one. Without this, whether that restack's read records the parent's verdict
+    /// would depend only on whether the driver's first pass after the relayed push ran
+    /// before or after the parent's settlement was folded.
+    pub(crate) deferred: BTreeSet<String>,
     /// Each draft the latest read found merged into a branch this run does not know.
     pub(crate) merged_elsewhere: BTreeSet<String>,
 }
@@ -1113,7 +1136,8 @@ pub(crate) fn run(
     state: &mut crate::checkpoint::Projected,
     trigger: ReadjustTrigger,
 ) -> Result<Detection> {
-    let detection = detect(paths, journal, state, trigger)?;
+    let deferred = std::mem::take(&mut state.readjust.deferred);
+    let detection = detect(paths, journal, state, trigger, &deferred)?;
     state.readjust.absorb(&detection);
     state.refresh(paths);
     Ok(detection)
@@ -1269,5 +1293,75 @@ mod tests {
             owed,
             ["c", "x", "y"].iter().map(|id| (*id).to_owned()).collect()
         );
+    }
+
+    /// A read reads every owed verdict but one on a head it was told to defer: that
+    /// head was just pushed by a republication whose own trigger is still running, so
+    /// its verdict stays outstanding for the next trigger, whichever side of the
+    /// republication's settlement the read falls on.
+    #[test]
+    fn a_verdict_on_a_deferred_head_is_left_for_the_next_trigger() {
+        let root = std::env::temp_dir().join(format!(
+            "onepipeline-readjust-deferred-{}",
+            crate::sys::pid()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = RunPaths::under(&root, "deferred");
+        paths.create().expect("the run directory");
+        let mut journal = Journal::open(&paths);
+        let mut state = state(vec![
+            node("a", &[], "github.com/o/r"),
+            node("b", &["a"], "github.com/o/r"),
+        ]);
+        let mut read = Vec::new();
+        for (id, head) in [("a", "1".repeat(40)), ("b", "2".repeat(40))] {
+            state.outcomes.insert(
+                id.to_owned(),
+                crate::vcs::REVIEW_DRAFTED_UNCHECKED.to_owned(),
+            );
+            state.heads.insert(id.to_owned(), head.clone());
+            state.recorded.insert(
+                id.to_owned(),
+                crate::projection::Recorded::At(crate::graph::NodeStatus::Done),
+            );
+            let url = state.change_urls[id].clone();
+            read.push((
+                Draft {
+                    node: id.to_owned(),
+                    url: url.clone(),
+                    repo: "github.com/o/r".to_owned(),
+                    root: Some("main".to_owned()),
+                },
+                onevcs::ChangeStanding {
+                    url: url.parse().expect("a change URL"),
+                    body: String::new(),
+                    base: "main".to_owned(),
+                    head_branch: format!("me/{id}"),
+                    head: onevcs::Sha(head),
+                    draft: true,
+                    state: onevcs::ChangeState::Open,
+                    checks: onevcs::ChecksVerdict::Passed,
+                },
+            ));
+        }
+        let deferred: BTreeSet<String> = std::iter::once("1".repeat(40)).collect();
+        let mut detection = Detection::default();
+        take_up(
+            &paths,
+            &mut journal,
+            &state,
+            ReadjustTrigger::Placement,
+            &read,
+            &deferred,
+            &mut detection,
+        )
+        .expect("the read is taken up");
+        let verdicts: Vec<String> = journal::read(&paths.journal())
+            .into_iter()
+            .filter(|event| event.kind.as_str() == "node-checks-read")
+            .filter_map(|event| event.labels.node)
+            .collect();
+        assert_eq!(verdicts, ["b"]);
+        std::fs::remove_dir_all(&root).ok();
     }
 }

@@ -72,53 +72,78 @@ fn release_packaging_retains_every_target_and_installs_apple_silicon_before_publ
     let text = std::fs::read_to_string(root.join(".github/workflows/release.yml")).unwrap();
     let release: serde_json::Value = onepipeline_testfakes::yaml::from_str(&text).unwrap();
     let jobs = &release["jobs"];
-    let darwin = &jobs["darwin"];
-    assert_eq!(darwin["runs-on"].as_str(), Some("macos-latest"));
-    assert!(darwin.get("strategy").is_none());
-    let runs: Vec<&str> = darwin["steps"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|s| s["run"].as_str())
-        .collect();
-    let builds: Vec<&str> = runs
-        .iter()
-        .flat_map(|s| s.lines())
-        .filter(|s| s.contains("scripts/build-staged-release.py --target"))
-        .collect();
-    let darwin_targets: Vec<&str> = builds
-        .iter()
-        .map(|s| {
-            assert!(
-                s.contains("--install"),
-                "Darwin must be installed before publication"
-            );
-            s.split("--target ")
-                .nth(1)
-                .unwrap()
-                .split_whitespace()
-                .next()
-                .unwrap()
-        })
-        .collect();
+    let plan = |platform: &str| -> Vec<String> {
+        let out = std::process::Command::new("python3")
+            .args(["release/release.py", "plan", platform])
+            .current_dir(&root)
+            .output()
+            .expect("python3 runs release/release.py");
+        assert!(
+            out.status.success(),
+            "plan {platform} failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let plan: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        plan["targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t.as_str().unwrap().to_owned())
+            .collect()
+    };
+    let mut built = Vec::new();
+    for (platform, runner) in [
+        ("linux", "ubuntu-latest"),
+        ("macos", "macos-latest"),
+        ("windows", "windows-latest"),
+    ] {
+        let job = &jobs[format!("build-{platform}").as_str()];
+        assert_eq!(job["runs-on"].as_str(), Some(runner));
+        assert!(job.get("strategy").is_none(), "build-{platform} is one job");
+        let runs: Vec<&str> = job["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|s| s["run"].as_str())
+            .collect();
+        // The build phase test-installs every artifact before the publish phase
+        // can run: release/release.py's `build` refuses to finish otherwise.
+        let at = |phase: &str| {
+            runs.iter()
+                .position(|run| *run == format!("just release-{platform} {phase}"))
+                .unwrap_or_else(|| panic!("build-{platform} has no {phase} step"))
+        };
+        assert!(at("build") < at("publish"));
+        built.extend(plan(platform));
+    }
     // Intel macOS builds are discontinued: the one Mac job builds, packs and
     // installs the Apple silicon target natively, with no Rosetta and no x86_64
     // cross-compilation. Dispatch-local proof runs on Linux, so these structural
     // assertions hold the Mac job's commands without simulating Darwin execution.
-    assert_eq!(darwin_targets, ["aarch64-apple-darwin"]);
-    for forbidden in [
-        "x86_64-apple-darwin",
-        "rosetta",
-        "arch -x86_64",
-        "darwin-x64",
+    assert_eq!(plan("macos"), ["aarch64-apple-darwin"]);
+    for (path, forbidden) in [
+        (".github/workflows/release.yml", &text),
+        (
+            "scripts/build-staged-release.py",
+            &std::fs::read_to_string(root.join("scripts/build-staged-release.py")).unwrap(),
+        ),
+        (
+            "release/release.py",
+            &std::fs::read_to_string(root.join("release/release.py")).unwrap(),
+        ),
     ] {
-        assert!(
-            !text.to_lowercase().contains(forbidden),
-            "release.yml still carries Intel macOS: {forbidden}"
-        );
+        for word in [
+            "x86_64-apple-darwin",
+            "rosetta",
+            "arch -x86_64",
+            "darwin-x64",
+        ] {
+            assert!(
+                !forbidden.to_lowercase().contains(word),
+                "{path} still carries Intel macOS: {word}"
+            );
+        }
     }
-    let installer = std::fs::read_to_string(root.join("scripts/build-staged-release.py")).unwrap();
-    assert!(!installer.contains("x86_64-apple-darwin") && !installer.contains("-x86_64"));
     let script = std::fs::read_to_string(root.join("scripts/npm-build.mjs")).unwrap();
     let mut declared: Vec<&str> = script
         .lines()
@@ -128,45 +153,16 @@ fn release_packaging_retains_every_target_and_installs_apple_silicon_before_publ
         })
         .collect();
     declared.sort_unstable();
-    for job in ["upload", "build-wheels", "build-npm"] {
-        let mut targets: Vec<&str> = jobs[job]["strategy"]["matrix"]["include"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|leg| leg["target"].as_str().unwrap())
-            .collect();
-        targets.extend(darwin_targets.iter().copied());
-        targets.sort_unstable();
-        assert_eq!(targets, declared, "{job} omitted a released platform");
-    }
-    for (publisher, builder) in [
-        ("publish-pypi", "build-wheels"),
-        ("publish-npm", "build-npm"),
-    ] {
-        let needs: Vec<&str> = jobs[publisher]["needs"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|v| v.as_str().unwrap())
-            .collect();
-        assert_eq!(needs, [builder, "darwin"]);
-        assert_eq!(jobs[publisher]["runs-on"].as_str(), Some("ubuntu-latest"));
-    }
-    assert_eq!(jobs["upload-darwin"]["needs"].as_str(), Some("darwin"));
+    built.sort_unstable();
     assert_eq!(
-        jobs["upload-darwin"]["runs-on"].as_str(),
-        Some("ubuntu-latest")
+        built, declared,
+        "every released platform is built by exactly one build job"
     );
-    for artifact in [
-        "wheels-darwin",
-        "npm-darwin",
-        "archives-darwin",
-        "payload-hashes-darwin",
-    ] {
-        assert!(darwin["steps"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|step| step["with"]["name"].as_str() == Some(artifact)));
-    }
+    let needs: Vec<&str> = jobs["publish"]["needs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(needs, ["build-linux", "build-macos", "build-windows"]);
 }

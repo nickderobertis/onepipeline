@@ -1222,6 +1222,58 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// The directory a dispatch's environment names, read back the way the run's
+    /// `scratch-retained` record will spell it. Raw strings, not `Path`s: `Path`
+    /// equality compares components, so it calls two spellings of one directory
+    /// equal, while a reader of the record compares the text.
+    fn handed_and_recorded(what: &str) -> (std::ffi::OsString, Vec<std::ffi::OsString>) {
+        let root = scratch_root(what);
+        std::env::set_var(crate::ledger::RUNS_DIR_ENV, &root);
+        let labels = Labels {
+            run_id: Some("demo".into()),
+            node: Some("build".into()),
+            ..Labels::default()
+        };
+        let env =
+            prepare_dispatch_env(&labels, None).expect("the dispatch's environment is composed");
+        let (_, handed) = env
+            .into_iter()
+            .find(|(key, _)| key == NODE_SCRATCH_DIR_ENV)
+            .expect("every dispatch carries a scratch directory");
+        let recorded =
+            crate::scratch::recorded_dirs(&crate::ledger::RunPaths::under(&root, "demo"))
+                .expect("the run's scratch is listed");
+        std::env::remove_var(crate::ledger::RUNS_DIR_ENV);
+        let _ = std::fs::remove_dir_all(&root);
+        (
+            PathBuf::from(handed).into_os_string(),
+            recorded.into_iter().map(PathBuf::into_os_string).collect(),
+        )
+    }
+
+    /// The run's `scratch-retained` record names the directory a dispatch was
+    /// handed in the very spelling it was handed in, so a reader of the record
+    /// can find the dispatch's directory by comparing the two.
+    #[test]
+    fn a_retained_record_spells_a_dispatchs_scratch_as_the_dispatch_was_given_it() {
+        let _runs_dir = runs_dir_lock();
+        let (handed, recorded) = handed_and_recorded("scratch-spelling");
+        assert_eq!(recorded, vec![handed]);
+    }
+
+    /// `std::fs::canonicalize` answers Windows' verbatim `\\?\C:\…` spelling,
+    /// which the record never uses, so a dispatch handed it was named by no
+    /// record entry.
+    #[test]
+    #[cfg(windows)]
+    fn a_dispatch_on_windows_is_handed_its_scratch_without_the_verbatim_prefix() {
+        let _runs_dir = runs_dir_lock();
+        let (handed, recorded) = handed_and_recorded("scratch-plain");
+        let spelled = handed.to_str().expect("the scratch path is UTF-8");
+        assert!(!spelled.starts_with(r"\\?\"), "{spelled}");
+        assert_eq!(recorded, vec![handed]);
+    }
+
     /// A runs root that cannot be made absolute refuses the dispatch.
     ///
     /// `ONEPIPELINE_RUNS_DIR` is promised absolute, and a dispatch reads it from

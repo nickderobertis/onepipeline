@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.76.0](https://github.com/nickderobertis/onepipeline/compare/v0.75.0...v0.76.0) - 2026-10-18
+
+### Fixed
+
+- *(smoke)* start the node above a settled stack within the continuation journey's bound ([#1000](https://github.com/nickderobertis/onepipeline/pull/1000))
+- *(e2e)* hold the observer-restart journey's node until its dispatch is past its script ([#994](https://github.com/nickderobertis/onepipeline/pull/994))
+- *(ci)* make flaky e2e journeys deterministic and fit the Windows leg ([#982](https://github.com/nickderobertis/onepipeline/pull/982))
+- *(driver)* stop a released driver rewriting the run's launch record ([#1003](https://github.com/nickderobertis/onepipeline/pull/1003))
+
 ## [0.75.0](https://github.com/nickderobertis/onepipeline/compare/v0.74.1...v0.75.0) - 2026-10-17
 
 ### Added

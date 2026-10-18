@@ -754,10 +754,14 @@ fn supersede(
     writeback: Option<&crate::writeback::Writeback>,
     claims: Option<&crate::continuation::ClaimWatch>,
     by: &crate::payload::DriverClaim,
+    fenced: bool,
 ) -> Result<bool> {
     let owed = claims.is_some_and(|watch| watch.lease().ever_held());
     if let Some(writeback) = writeback {
-        if claims.is_some_and(|watch| !watch.lease().lapsed()) {
+        // A publication this driver fenced holds the run that took over until its settlement
+        // is on the store, so that run is writing nothing yet: the settlement is projected
+        // even on a lapsed lease.
+        if fenced || claims.is_some_and(|watch| !watch.lease().lapsed()) {
             writeback.hand_over();
         } else {
             writeback.retire(by);
@@ -800,6 +804,8 @@ fn supersede(
 struct Superseded {
     by: crate::payload::DriverClaim,
     owed: bool,
+    /// Whether this driver has spent its one bounded wait for what it settled to land.
+    waited: bool,
 }
 
 /// The kind of the non-blocking surface a superseded driver raises.
@@ -1527,6 +1533,11 @@ fn converge(
     // The nodes whose publication this driver cleared and which have not settled: a
     // publication under way is finished, so neither a takeover nor a lapsed lease ends it.
     let mut publishing: BTreeSet<String> = BTreeSet::new();
+    // The nodes whose publication has settled and whose settlement the store does not hold
+    // yet: each stays named on the fence until a projection carrying it has landed, so a run
+    // taking the project over that finds it gone from the fence finds its settlement, and
+    // continues it rather than dispatching it again.
+    let mut unlanded: BTreeSet<String> = BTreeSet::new();
     // Rework republications waiting on the standings read that continues their trigger.
     let mut reworks_due: Vec<ReworkDue> = Vec::new();
     let channel = ChannelState::of_run(paths, launch);
@@ -1783,8 +1794,20 @@ fn converge(
                 .filter(|watch| watch.read_due())
                 .and_then(crate::continuation::ClaimWatch::check)
             {
-                let owed = supersede(paths, journal, writeback.as_ref(), claims.as_ref(), &by)?;
-                superseded_by = Some(Superseded { by, owed });
+                let fenced = !publishing.is_empty() || !unlanded.is_empty();
+                let owed = supersede(
+                    paths,
+                    journal,
+                    writeback.as_ref(),
+                    claims.as_ref(),
+                    &by,
+                    fenced,
+                )?;
+                superseded_by = Some(Superseded {
+                    by,
+                    owed,
+                    waited: false,
+                });
             }
         }
         // A publication waits on the pass rather than reading the claim itself: it starts
@@ -1806,8 +1829,10 @@ fn converge(
         // none named knows none is under way. One that cannot be named yet waits, as one on
         // a stale lease does — and the lease is asked again once the fence has landed.
         // llmlint: ignore[changed_behavior_has_e2e] the lease asked again after the fence lands is the one admission every start asks, whose refusal on a stale lease is driven by `continuation::a_publication_asked_for_on_a_stale_lease_waits_for_the_next_read`; reaching it *between* the fence's write and that question needs a store that holds one write for a whole claim interval and then answers, which is the sibling suspended mid-command — host-level process control no CLI journey exposes.
+        unlanded.retain(|node| settlement_unlanded(writeback.as_ref(), node));
         let fenced = claims.as_mut().is_none_or(|watch| {
             let mut nodes = publishing.clone();
+            nodes.extend(unlanded.iter().cloned());
             nodes.extend(starting.iter().map(|due| due.node.clone()));
             watch.fence(&nodes) && (starting.is_empty() || watch.may_start(None))
         });
@@ -2024,29 +2049,53 @@ fn converge(
         // the project is the run that took it over's to drive. Before it goes it says so on
         // that run's claim, once what it settled is on the board, which is what that run
         // starts on.
-        if let Some(Superseded { by, owed }) = superseded_by
+        if let Some(Superseded { by, owed, waited }) = superseded_by
             .as_mut()
             .filter(|superseded| superseded.owed && in_flight.is_empty())
         {
-            *owed = false;
             if let Some(writeback) = writeback
                 .as_ref()
                 .filter(|writeback| !writeback.is_retired())
             {
                 writeback.publish(paths, launch, state, &statuses);
-                // Bounded by one interval: the adopter's own wait is longer than that by more
-                // than an interval, so a board that is slow to take this is not one that
-                // could still be taking it once the adopter writes its own.
-                // llmlint: ignore[changed_behavior_has_e2e] the bound is reached only by a store that holds this one projection for a whole claim interval and then answers, which needs the sibling suspended mid-command — host-level process control no CLI journey exposes; what follows it, the acknowledgement, is driven by every takeover journey in `tests/e2e/continuation.rs`, and an acknowledgement that cannot be written by `a_takeover_waits_out_a_board_that_refuses_a_poll_and_the_acknowledgement`.
-                writeback.wait_until_landed(crate::continuation::claim_interval());
-                writeback.retire(by);
+                // The loop waits once, bounded by one interval, for the board to take it; past
+                // that it goes on passing, and the settlement's arrival wakes it.
+                if !*waited {
+                    writeback.wait_until_landed(crate::continuation::claim_interval());
+                }
             }
-            if let Some(watch) = &claims {
-                watch.acknowledge(by);
+            unlanded.retain(|node| settlement_unlanded(writeback.as_ref(), node));
+            if unlanded.is_empty() {
+                // What it settled is on the board: the run that took over continues it, so it
+                // writes nothing more there, names no publication of its, and lets that run go.
+                *owed = false;
+                if let Some(writeback) = &writeback {
+                    writeback.retire(by);
+                }
+                if let Some(watch) = claims.as_mut() {
+                    watch.fence(&publishing);
+                    watch.acknowledge(by);
+                }
+            } else if !*waited {
+                // A settlement the board has not taken would be dispatched again by a run that
+                // started without it, so the fence stands and nothing is acknowledged until it
+                // has.
+                eprintln!(
+                    "onepipeline: run '{}': the settlement of {} has not reached the store; it \
+                     acknowledges run '{}' on host '{}' once it has",
+                    paths.run,
+                    quoted(&unlanded),
+                    by.run,
+                    by.host
+                );
             }
+            *waited = true;
         }
+        // A superseded driver still owing its acknowledgement waits for what it settled to
+        // land rather than closing out.
+        let leaving = superseded_by.as_ref().map(|superseded| !superseded.owed);
         if in_flight.is_empty()
-            && (superseded_by.is_some() || watching_merge_paths.is_empty() && deliveries.idle())
+            && leaving.unwrap_or_else(|| watching_merge_paths.is_empty() && deliveries.idle())
         {
             // Nothing is running and nothing became ready, so no further
             // message can arrive: the graph is as converged as it will get.
@@ -2159,6 +2208,13 @@ fn converge(
                 if writeback
                     .as_ref()
                     .is_some_and(crate::writeback::Writeback::has_unprojected)
+                {
+                    return true;
+                }
+                // A settlement the fence still names has landed, so the fence can let it go.
+                if unlanded
+                    .iter()
+                    .any(|node| !settlement_unlanded(writeback.as_ref(), node))
                 {
                     return true;
                 }
@@ -2504,7 +2560,9 @@ fn converge(
                 Message::Settled(settled) => {
                     let settlement = &settled.settlement;
                     in_flight.remove(&settlement.node);
-                    publishing.remove(&settlement.node);
+                    if publishing.remove(&settlement.node) {
+                        unlanded.insert(settlement.node.clone());
+                    }
                     // A restack says what it did ahead of the node's ordinary
                     // settlement, which follows it as any settlement does.
                     let readjusting = state.readjust.plans.remove(&settlement.node);
@@ -2594,6 +2652,17 @@ fn converge(
         watch_for_quiet(paths, journal, stall_after, &mut in_flight)?;
     }
 
+    // The close-out projected every settlement this run made, or spent its window trying:
+    // the fence lets go of each that has landed since the last pass, and goes on naming one
+    // that has not — a run that took the project over without it would dispatch it again.
+    if !unlanded.is_empty() {
+        unlanded.retain(|node| settlement_unlanded(writeback.as_ref(), node));
+        if let Some(watch) = claims.as_mut() {
+            let mut nodes = publishing.clone();
+            nodes.extend(unlanded.iter().cloned());
+            watch.fence(&nodes);
+        }
+    }
     // A landing the last pass settled is told to `onevcs` before the driver
     // lets go, since no pass follows it.
     supersessions.pass(paths, journal, state)?;
@@ -2605,6 +2674,21 @@ fn converge(
     maintenance.close(paths, journal, &rx)?;
 
     Ok(graph::state_of(&statuses_of(&mut derived, state)))
+}
+
+/// `nodes`, each quoted, as a line names them.
+fn quoted(nodes: &BTreeSet<String>) -> String {
+    nodes
+        .iter()
+        .map(|node| format!("'{node}'"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Whether `node`'s settlement has yet to reach the store: until a projection carrying it has
+/// landed. A run with no write-back projects nothing, so has nothing to wait on.
+fn settlement_unlanded(writeback: Option<&crate::writeback::Writeback>, node: &str) -> bool {
+    writeback.is_some_and(|writeback| !writeback.has_landed_settlement(node))
 }
 
 /// What a close-out's last claim on the command queue found, and so what the
@@ -2781,8 +2865,11 @@ fn wait_for_work(
                 // message is about to cause. Narration and settlement share this
                 // channel, so taking one message a pass made a settlement wait a
                 // whole pass for every envelope queued ahead of it.
+                let mut drain_started = Instant::now();
+                if held_at_push(&message)? {
+                    drain_started = Instant::now();
+                }
                 let mut batch = vec![message];
-                let drain_started = Instant::now();
                 while drain_started.elapsed() < DRAIN_WINDOW {
                     // One arm for both refusals: nothing is queued, or nothing
                     // ever will be again. The second is answered one pass later,
@@ -2790,6 +2877,9 @@ fn wait_for_work(
                     let Ok(message) = rx.try_recv() else {
                         break;
                     };
+                    if held_at_push(&message)? {
+                        drain_started = Instant::now();
+                    }
                     batch.push(message);
                 }
                 return Ok(Some(batch));
@@ -2813,6 +2903,23 @@ fn wait_for_work(
             return Ok(Some(Vec::new()));
         }
     }
+}
+
+/// Whether `message` is a relayed push the private ordering gate held the loop on —
+/// see [`crate::ordering::push_received`] — so the drain after it starts again from the
+/// release rather than from before the hold.
+fn held_at_push(message: &Message) -> Result<bool> {
+    let Message::Event(envelope) = message else {
+        return Ok(false);
+    };
+    if envelope.source != crate::event::Source::Vcs || !crate::vcs::is_push(&envelope.kind) {
+        return Ok(false);
+    }
+    envelope
+        .labels
+        .node
+        .as_deref()
+        .map_or(Ok(false), crate::ordering::push_received)
 }
 
 /// One reason the loop is not running a node it has not settled.
@@ -6909,7 +7016,8 @@ fn review_change_for(state: &Projected, node: &str) -> Option<String> {
 
 /// Claim the standings read owed by this pass's placements on unlanded drafts and its
 /// restacks, for each node not read for yet, once per node however many passes it is
-/// held across: marks those nodes read for, and answers whether any were.
+/// held across: marks those nodes read for, records the heads those restacks bring
+/// their drafts onto as the verdicts the read defers, and answers whether any were.
 fn claim_placement_reads(
     state: &mut Projected,
     statuses: &BTreeMap<String, NodeStatus>,
@@ -6930,6 +7038,7 @@ fn claim_placement_reads(
         })
         .map(|node| node.id.clone())
         .collect();
+    let mut onto = BTreeSet::new();
     wanted.extend(
         crate::stack::restacks_owed(state, statuses, &|node| {
             in_flight.contains_key(node)
@@ -6944,6 +7053,7 @@ fn claim_placement_reads(
                 .iter()
                 .map(|onto| onto.head.clone())
                 .collect();
+            onto.extend(heads.iter().cloned());
             format!("{}@{}", owed.node, heads.join(","))
         }),
     );
@@ -6955,6 +7065,7 @@ fn claim_placement_reads(
         return false;
     }
     state.readjust.placed.extend(fresh);
+    state.readjust.deferred = onto;
     true
 }
 
@@ -13940,6 +14051,77 @@ mod tests {
             "the held envelopes were not each answered, in claim order, once both notes were"
         );
         assert!(deliveries.idle(), "an envelope is still held");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The placement read a restack is claimed for defers the verdict on the head that
+    /// restack is brought onto — the stack parent's fresh push — and that read is the
+    /// only one it defers: the next read, a later trigger's, defers nothing.
+    #[test]
+    fn a_restack_s_claimed_read_defers_the_pushed_head_once() {
+        let root = std::env::temp_dir().join(format!("onepipeline-deferred-{}", sys::pid()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = RunPaths::under(&root, "deferred");
+        paths.create().expect("the run directory");
+        let mut journal = Journal::open(&paths);
+        let mut state = Projected::open(&paths);
+        let mut statuses = BTreeMap::new();
+        for (id, deps) in [("a", vec![]), ("b", vec!["a".to_owned()])] {
+            state.graph.insert(crate::plan::Node {
+                id: id.into(),
+                repo: Some("service".into()),
+                deps,
+                ..crate::plan::Node::default()
+            });
+            statuses.insert(id.to_owned(), NodeStatus::Done);
+            state.landings.insert(id.to_owned(), Landing::Unlanded);
+            state.branches.insert(id.to_owned(), format!("me/{id}"));
+            state
+                .branch_heads
+                .insert(format!("me/{id}"), format!("old-{id}"));
+        }
+        state.stacks.insert(
+            "b".into(),
+            crate::payload::SettledStack {
+                parents: vec![crate::payload::StackParent {
+                    node: "a".into(),
+                    branch: "me/a".into(),
+                    head: "old-a".into(),
+                }],
+                stack_base: None,
+            },
+        );
+        let (in_flight, paused) = (BTreeMap::new(), BTreeSet::new());
+        assert!(!claim_placement_reads(
+            &mut state, &statuses, &in_flight, &paused
+        ));
+        assert!(state.readjust.deferred.is_empty());
+
+        // `a`'s republication pushed: `b` is owed its restack onto that push.
+        state.branch_heads.insert("me/a".into(), "new-a".into());
+        assert!(claim_placement_reads(
+            &mut state, &statuses, &in_flight, &paused
+        ));
+        assert_eq!(
+            state.readjust.deferred,
+            std::iter::once("new-a".to_owned()).collect::<BTreeSet<_>>()
+        );
+        crate::readjust::run(
+            &paths,
+            &mut journal,
+            &mut state,
+            crate::payload::ReadjustTrigger::Placement,
+        )
+        .expect("the placement read runs");
+        assert!(
+            state.readjust.deferred.is_empty(),
+            "a later trigger's read would defer the pushed head too"
+        );
+        // Held across passes, the restack is not read for again, so nothing is deferred.
+        assert!(!claim_placement_reads(
+            &mut state, &statuses, &in_flight, &paused
+        ));
+        assert!(state.readjust.deferred.is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
 }

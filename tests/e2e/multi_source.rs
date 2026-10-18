@@ -16,7 +16,10 @@ use std::path::PathBuf;
 
 use serde_json::{json, Value};
 
-use crate::harness::{global, plan_of, project_id, World, STORE_SOURCE};
+use crate::harness::{
+    global, plan_of, project_id, settling_patience, waited, Clock, ManualClock, RealClock, World,
+    ONE_STEP, STORE_SOURCE,
+};
 
 /// The second source: where the plan source routes the engine repository's tasks.
 const MEMBERS: &str = "members";
@@ -242,6 +245,25 @@ fn sources(world: &World, home: &str) -> BTreeMap<String, String> {
         .collect()
 }
 
+/// Wait for the run `name` of `plan` to settle.
+///
+/// A node dispatches only once its dependencies settle, so a run whose edges make a chain is
+/// that many dispatches long rather than one step: the wait allows each node on the plan's
+/// longest chain one step.
+fn until_settled(world: &World, name: &str, plan: &Value) {
+    until_settled_on(world, &RealClock::started(), name, plan);
+}
+
+/// [`until_settled`], with its deadline read from `clock`.
+fn until_settled_on(world: &World, clock: &dyn Clock, name: &str, plan: &Value) {
+    world.until_within_on(
+        clock,
+        settling_patience(plan),
+        "the run to settle",
+        |world| world.run_file(name, "result.json").is_file(),
+    );
+}
+
 fn position(journal: &[Value], kind: &str, node: &str) -> usize {
     journal
         .iter()
@@ -280,18 +302,15 @@ fn a_plan_spanning_two_sources_runs_as_one_graph_and_settles_each_task_where_it_
     }
     let name = "spanning";
     // `adopt` depends on a home task, and `ship` on the member task: an edge each way.
-    let home = filed(
-        &world,
+    let plan = plan_of(
         name,
-        &plan_of(
-            name,
-            vec![
-                on(HOME, "core", &[]),
-                on(ROUTED, "adopt", &["core"]),
-                on(HOME, "ship", &["adopt"]),
-            ],
-        ),
+        vec![
+            on(HOME, "core", &[]),
+            on(ROUTED, "adopt", &["core"]),
+            on(HOME, "ship", &["adopt"]),
+        ],
     );
+    let home = filed(&world, name, &plan);
     assert_eq!(
         sources(&world, &home),
         BTreeMap::from([
@@ -315,9 +334,7 @@ fn a_plan_spanning_two_sources_runs_as_one_graph_and_settles_each_task_where_it_
         );
     }
     dispatched.release();
-    world.until("the run to settle", |world| {
-        world.run_file(name, "result.json").is_file()
-    });
+    until_settled(&world, name, &plan);
 
     assert_eq!(
         result_of(&world, name),
@@ -350,6 +367,123 @@ fn a_plan_spanning_two_sources_runs_as_one_graph_and_settles_each_task_where_it_
     let held = |source: &str| -> Vec<String> { source_nodes(&world, source).into_keys().collect() };
     assert_eq!(held(STORE_SOURCE), ["core", "ship"]);
     assert_eq!(held(MEMBERS), ["adopt"]);
+}
+
+/// A chain that crosses sources runs one dispatch at a time, so the run's settlement is waited
+/// out across every dispatch on it: a settlement wait started while the first dispatch is held
+/// in flight outlasts a single step's budget as the chain's dispatches spend most of a step
+/// each, and sees the run settle once the last of them has.
+///
+/// Each dispatch is held in flight at the double while the wait's clock is moved on by most of
+/// a step, so by the second dispatch the wait has spent more than one step; the wait is the
+/// journey's own [`until_settled_on`], read against a [`ManualClock`], and the engine runs
+/// for real throughout.
+#[test]
+fn a_settlement_wait_outlasts_one_step_while_each_dispatch_on_a_cross_source_chain_is_held() {
+    // Most of a step: the chain's three dispatches spend more than one step together, and
+    // less than one step each.
+    const IN_FLIGHT: std::time::Duration =
+        std::time::Duration::from_secs(ONE_STEP.as_secs() * 9 / 10);
+    let world = a_routed_world("multi-source-chain");
+    let _service = world.repository("local-direct", &[]);
+    let _engine = world.extra_repository("engine");
+    let chain = ["core", "adopt", "ship"];
+    for node in chain {
+        world.script(&format!("{node}.work"), &format!("{node} wrote this\n"));
+    }
+    let name = "chain";
+    let plan = plan_of(
+        name,
+        vec![
+            on(HOME, "core", &[]),
+            on(ROUTED, "adopt", &["core"]),
+            on(HOME, "ship", &["adopt"]),
+        ],
+    );
+    let home = filed(&world, name, &plan);
+    let holds = chain.map(|node| world.rendezvous(node));
+    let clock = ManualClock::default();
+
+    world.run(&["start", &home, "--detach"]).exited(0);
+    let mut first = Some(holds[0].arrived());
+    std::thread::scope(|scope| {
+        let waiter = scope.spawn(|| until_settled_on(&world, &clock, name, &plan));
+        // Dropped before the scope joins the wait, on a failure here as on success: the wait
+        // ends at its next look rather than holding the scope on a clock nothing moves.
+        let _expiry = clock.expiring();
+        // The wait sets its deadline at its first read, and has looked again by the second:
+        // every move below is spent from that deadline, not before it was set.
+        assert!(
+            waited(|| clock.read_again() || waiter.is_finished()),
+            "the settlement wait never started reading its clock"
+        );
+        assert!(
+            !waiter.is_finished(),
+            "the settlement wait ended before any time was spent"
+        );
+        let mut spent = std::time::Duration::ZERO;
+        for (at, hold) in holds.iter().enumerate() {
+            let held = first.take().unwrap_or_else(|| hold.arrived());
+            let journal = world.journal(name);
+            let dispatched: Vec<&str> = chain
+                .iter()
+                .copied()
+                .filter(|node| {
+                    journal.iter().any(|event| {
+                        event["kind"] == "node-dispatched" && event["labels"]["node"] == *node
+                    })
+                })
+                .collect();
+            assert_eq!(
+                dispatched,
+                chain[..=at],
+                "{} was held in flight, and the dispatches were not the chain up to it",
+                chain[at]
+            );
+            if let Some(before) = at.checked_sub(1) {
+                assert!(
+                    position(&journal, "node-settled", chain[before])
+                        < position(&journal, "node-dispatched", chain[at]),
+                    "{} was dispatched before {} settled",
+                    chain[at],
+                    chain[before]
+                );
+            }
+            assert!(
+                !world.run_file(name, "result.json").exists(),
+                "the run settled while {} was in flight",
+                chain[at]
+            );
+            clock.advance(IN_FLIGHT);
+            spent += IN_FLIGHT;
+            assert!(
+                waited(|| clock.read_again() || waiter.is_finished()),
+                "the settlement wait never looked at the clock again"
+            );
+            assert!(
+                !waiter.is_finished(),
+                "the settlement wait ended {spent:?} into a run whose dispatch of {} was still \
+                 in flight",
+                chain[at]
+            );
+            held.release();
+        }
+        // The wait's own clock no longer moves, so the backstop on a run that never settles is
+        // the wall clock's.
+        world.until("the run to settle", |world| {
+            world.run_file(name, "result.json").is_file()
+        });
+        waiter
+            .join()
+            .expect("the settlement wait saw the run settle once its last dispatch was let go");
+    });
+    assert_eq!(
+        result_of(&world, name),
+        chain
+            .iter()
+            .map(|node| ((*node).to_owned(), "done".to_owned()))
+            .collect()
+    );
 }
 
 /// A live `add` whose node names a repository the home's source routes elsewhere lands in that
