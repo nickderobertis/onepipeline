@@ -6,6 +6,7 @@ no request reaches GitHub or reads a production credential. The board carries a
 second argument names a JSON file of caller metadata to seed onto issues by name.
 """
 import json
+import os
 import pathlib
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -188,5 +189,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
 server = HTTPServer(("127.0.0.1", 0), Handler)
-(root / "endpoint").write_text(f"http://127.0.0.1:{server.server_port}")
+# Published by a rename, so a reader that sees `endpoint` sees the whole address: a
+# file written in place exists, empty, before its contents land, and a journey that
+# read it then sent its first request to a bare path.
+(root / "endpoint.partial").write_text(f"http://127.0.0.1:{server.server_port}")
+os.replace(root / "endpoint.partial", root / "endpoint")
 server.serve_forever()

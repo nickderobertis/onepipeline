@@ -183,6 +183,13 @@ check-affected:
 check-cross: fmt-check lint test-quick
     @echo "check-cross: ok"
 
+# CI's Windows leg runs `check-cross` split across jobs (`ci.yml`'s `cross`), and
+# this is what says the split drops and repeats nothing. Outside `check`, because
+# it lists the uninstrumented build the cross legs run, which `check` never builds.
+# Prove the Windows leg's shards run every `test-quick` test exactly once.
+cross-shards:
+    @node .github/cross-shards.mjs
+
 # The complete pre-push bar: the deterministic gate plus the LLM-judge tier
 # scoped to what this branch changed. `check` stays offline and credential-free;
 # this is where the non-deterministic tier joins it.
@@ -410,8 +417,12 @@ test-quick:
 # fresh and the archive is the build the step tested; neither sets RUSTFLAGS, as
 # the single `test-quick` recipe they were split out of did not. Warnings are
 # denied by `just lint`, which `check-cross` runs before `test-quick`.
+#
+# `ONEPIPELINE_TEST_PARTITION` (`count:K/N`, which `scripts/test-partition.sh`
+# checks) runs the K-th of N shards of every tier, so N jobs share one leg and
+# each test runs in exactly one of them; unset, every test runs.
 _tier-test-quick filter:
-    @bash scripts/nextest-run.sh cargo nextest run --locked -E "$1"
+    @partition=$(bash scripts/test-partition.sh) && bash scripts/nextest-run.sh cargo nextest run --locked ${partition:+--partition "$partition"} -E "$1"
 
 _crate-test-quick: (_tier-test-quick rest-tier)
 
