@@ -9021,6 +9021,8 @@ each worker's turn held on its own gates (`turn.gates` in the doubled harness):
   `each_of_three_receivers_of_one_envelope_is_recorded_as_it_answers` cover fan-out.
 - `a_note_held_on_one_receiver_holds_nothing_that_names_only_others` covers the
   per-receiver hold.
+- `a_later_edit_to_a_node_a_held_envelope_names_waits_behind_that_envelope` covers a
+  later edit held behind a held envelope, then applied after it.
 - `only_an_envelope_naming_what_a_waiting_note_names_is_held_behind_it` covers commits at
   hand and both findings and edits to the envelope's other nodes being unheld.
 - `a_finding_about_a_node_surfaces_while_its_note_waits` covers a finding, non-blocking and
@@ -9028,7 +9030,8 @@ each worker's turn held on its own gates (`turn.gates` in the doubled harness):
 - `a_note_refused_after_the_commands_beside_it_committed_is_answered_applied_in_part`
   covers the partial outcome, read back.
 - `status_reads_a_held_delivery_as_delivering_and_what_waits_behind_it_as_held` covers
-  status, both forms, before and after the driver is killed.
+  status, both forms, before and after the driver is killed, beside a docs-only `amend`
+  applied while the note waits.
 
 `src/engine.rs` covers the rest with unit tests:
 
