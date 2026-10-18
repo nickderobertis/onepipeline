@@ -28,6 +28,8 @@ Commits after dd2e5d6:
 - **953fda8** names the record directory once, as `profile::RECORD_DIR`. The harness writes to the same `target/test-profile` it did before, and each CI leg's upload of it now warns if it found no records. It changes no test's work, so the local figures below, taken on 7574f2f, stand for it.
 - **997aaa8** merges main at 54cfa4a (#982), which splits the Windows leg into two `cross` shards. Each shard now keeps its records as `test-profile-windows-latest-<shard>`, because `upload-artifact` refuses a second artifact of one name. To read a run's Windows records, download both (`gh run download <run> -p 'test-profile-windows-latest-*' -D windows`) and pass each shard as its own label, e.g. `windows-shard-1=windows/test-profile-windows-latest-1 windows-shard-2=windows/test-profile-windows-latest-2`. The script reads one nextest run per label and sets the rest aside, and each shard is its own run. One label over both directories would therefore read only the larger shard: on run 39138389849 it read 708 tests and set 165 records aside. #982 also changes the timing of four e2e journeys, so records from after the merge are not directly comparable with these for those tests.
 - **8b5655c** merges main at 4d975bc: #994 holds one driver journey's node, and #1000 moves `tests/smoke/continuation.rs` onto a `Clock`. Its wall clock's sleep is recorded through `profile::thread::sleep`.
+- **a07bbdd** merges main at 1e18274: #1016 drives `waited_on` from a `Clock` (with `RealClock` and `ManualClock`) and sizes a two-source run's wait to its longest chain; #986 publishes the GitHub loopback endpoint's URL atomically. The wait still runs inside `profile::polled`, and both clocks pause through `profile::thread::sleep`, so polling waits stay attributed. `linear_writeback`'s new `StartedEndpoint` holds the profiled `Child` that `GitHubEndpoint::start` spawns. These change the timing of the `multi_source` and `linear_writeback` journeys they touch; the figures below predate them.
+- **9809e12** links oneharness-core 0.28.3 (from 0.28.2), the newest its requirement permits, which `just engines-current` asked for after the merge. Only that entry's version and checksum move.
 - **6c4a488** runs one maintenance journey at a three-second pace (see **maintenance on Windows, run 39129002719**). Its test-s move by a few seconds, which the figures below do not include.
 
 The hosted dd2e5d6 records therefore predate the lock refresh and the fence fix. The local runs show neither moved the harness. The c551671 counts match the a94701b run: spawn 13,686 vs 13,575, git 9,048 vs 9,048, build 3,261 vs 3,259, fixture 7,766 vs 7,765. The 7574f2f counts are spawn 13,822, git 9,055, build 3,263 and fixture 7,773. The difference from c551671 is mostly the one added test and run-to-run variation in retries and polls.
@@ -1269,7 +1271,7 @@ What the test process gains is the profiling wrappers around `world.until`'s pol
 **The hosted result on 6c4a488's successor (4b94e43, run 39138389849).** The test **passed on Windows** in 13.614 s: `cross proof (windows-latest, shard 1/2)`, job 117711816829, test 8 of 709. It passed again in `Mac PR proofs`, and that job and `gate` both passed.
 
 **That shard failed on another test.** `continuation::the_claim_is_held_while_a_run_drives_and_released_at_closeout_and_at_stop` panicked at `tests/e2e/harness.rs:1253`. Its in-process read of the world's plan store through `onetaskgraph-core` was refused: `...\plan-store\projects\stopped-board.md escapes configured root ...\plan-store`. The job's `rerun-failed` step passed it 3 of 3 on the same build. It is not traced to this change:
-- the store code is the sibling engine's, and `Cargo.lock` links the same onetaskgraph releases as main (it differs only in oneagentgraph, onevcs and onevcs-testing);
+- the store code is the sibling engine's, and `Cargo.lock` links the same onetaskgraph releases as main (on 4b94e43 it differed only in oneagentgraph, onevcs and onevcs-testing; 9809e12 adds oneharness-core);
 - this branch changes no store path or call;
 - main's latest Windows shards (run 39135168556, at 4d975bc) did not show it, and neither did the 7 earlier main job logs read above.
 
@@ -1278,6 +1280,13 @@ The `cross (windows-latest)` carrier failed because shard 1 did. That flake is d
 Five other journeys in `tests/e2e/maintenance.rs` assert an empty journal after a `release` under the same pace. None of them is named here, so they are left as a follow-up.
 
 ## Checks
+
+**On 9809e12** (the merge of main at 1e18274, whose conflict was `tests/e2e/harness.rs`, and the oneharness-core refresh):
+- On a07bbdd, the merge: `cargo nextest run --test e2e -E 'test(/harness::|multi_source::|profiling::|linear_writeback::/)'`, 76 of 76 passed. That includes #1016's `harness::a_runs_settling_patience_is_one_step_per_node_on_its_longest_chain` and `multi_source::a_settlement_wait_outlasts_one_step_while_each_dispatch_on_a_cross_source_chain_is_held`, and #986's `linear_writeback::the_github_endpoint_url_is_readable_only_once_completely_written`.
+- On a07bbdd: `cargo clippy --test e2e -- -D warnings` and `cargo fmt --check`: clean.
+- On a07bbdd: `just lint-llm-diff origin/main`, against 1e18274: 39 rules, 21 passed, 0 failed. The dispatch's `LLMLINT_ONEHARNESS_BIN` named a wrapper that no longer exists, so the run unset it and used `oneharness` from PATH.
+- On 9809e12: `just engines-current` passed; `cargo build --workspace --tests --locked` built; `cargo nextest run --test linked_engines` (33 of 33) and the lib's `agentgraph` tests (34 of 34) passed. Both test runs were on the 9809e12 lock.
+- Not re-run since the merge: the full e2e tier, and the hosted CI on these commits.
 
 **On 4b94e43** (head before this evidence):
 - **The full e2e tier**, instrumented as `gate` runs it (`cargo llvm-cov --no-report nextest --locked -E 'binary(e2e)' --final-status-level fail --no-fail-fast`, `ONETASKGRAPH_*` unset), ran as `9b7d3bb7` at load 12-59. **1,661 of 1,664 passed in 5,938.0 s.**
