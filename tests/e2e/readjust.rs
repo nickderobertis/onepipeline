@@ -98,12 +98,12 @@ fn query_of(call: &Value) -> &str {
 /// a session open and a write: the repository's visibility, and whether its rules
 /// require a branch up to date with its base.
 fn is_sibling_read(call: &Value) -> bool {
-    call["args"][0] == "api"
-        && call["args"].as_array().is_some_and(|args| args.len() == 2)
-        && call["args"][1].as_str().is_some_and(|path| {
-            path == format!("repos/{SLUG}")
-                || path.starts_with(&format!("repos/{SLUG}/rules/branches/"))
-        })
+    crate::harness::is_visibility_probe(call)
+        || call["args"][0] == "api"
+            && call["args"].as_array().is_some_and(|args| args.len() == 2)
+            && call["args"][1]
+                .as_str()
+                .is_some_and(|path| path.starts_with(&format!("repos/{SLUG}/rules/branches/")))
 }
 
 /// Whether `call` writes a change request's base, description or state.

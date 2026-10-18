@@ -4760,10 +4760,11 @@ impl World {
 }
 
 /// Whether one recorded `gh` invocation is `onevcs`'s probe of a repository's
-/// visibility — `gh api repos/<owner>/<name>` and nothing more.
+/// visibility — `gh api repos/<owner>/<name> --include` and nothing more.
 ///
 /// `onevcs` 0.44.0 on asks it before every write that could reach a public
-/// destination, to decide what the public boundary screens. It reads the
+/// destination, to decide what the public boundary screens, and 0.56.0 on asks it
+/// with `--include`, so a host that did not answer is told from one that refused. It reads the
 /// repository's metadata and nothing of a change request, a merge path or a ref,
 /// so a journey counting what a run asked the host about its *work* leaves it out.
 pub fn is_visibility_probe(call: &Value) -> bool {
@@ -4771,7 +4772,7 @@ pub fn is_visibility_probe(call: &Value) -> bool {
         .as_array()
         .map(|args| args.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
-    matches!(args.as_slice(), ["api", path]
+    matches!(args.as_slice(), ["api", path, "--include"]
         if path.split('/').count() == 3 && path.starts_with("repos/"))
 }
 
