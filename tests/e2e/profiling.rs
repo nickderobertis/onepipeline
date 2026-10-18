@@ -331,7 +331,8 @@ fn a_profiled_journey_nests_work_and_works_on_a_thread_it_started() {
 /// What a record says of each category is what the test held in memory when it
 /// ended — its own and inclusive time, and the count and time of the work on a
 /// thread it started — and so is each program's count and time; none of it is
-/// zero where the test did that work.
+/// zero where the test did that work. What it leaves unattributed is its wall
+/// clock less every category's own time, the rest of the test's time.
 #[test]
 fn a_records_inclusive_and_background_figures_are_the_ones_the_test_measured() {
     let world = World::new("profile-layered-record");
@@ -391,6 +392,23 @@ fn a_records_inclusive_and_background_figures_are_the_ones_the_test_measured() {
             "the started thread's {category} took no time: {record:#}"
         );
     }
+    let wall = record["wall_s"]
+        .as_f64()
+        .expect("a record's wall_s is a number");
+    let attributed: f64 = Category::ALL
+        .iter()
+        .map(|category| figure(category.name(), "s"))
+        .sum();
+    let unattributed = record["unattributed_s"]
+        .as_f64()
+        .expect("a record's unattributed_s is a number");
+    // A microsecond is far above the f64 rounding of a sum of seconds and far
+    // below any error the writer could make in what it subtracts.
+    assert!(
+        (unattributed - (wall - attributed)).abs() < 1e-6,
+        "{LAYERED}'s unattributed_s {unattributed} is not its wall_s {wall} less its \
+         categories' {attributed}: {record:#}"
+    );
 }
 
 /// A fixture's own time is what it spent outside the work nested in it, and the
