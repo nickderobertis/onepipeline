@@ -2781,8 +2781,11 @@ fn wait_for_work(
                 // message is about to cause. Narration and settlement share this
                 // channel, so taking one message a pass made a settlement wait a
                 // whole pass for every envelope queued ahead of it.
+                let mut drain_started = Instant::now();
+                if held_at_push(&message)? {
+                    drain_started = Instant::now();
+                }
                 let mut batch = vec![message];
-                let drain_started = Instant::now();
                 while drain_started.elapsed() < DRAIN_WINDOW {
                     // One arm for both refusals: nothing is queued, or nothing
                     // ever will be again. The second is answered one pass later,
@@ -2790,6 +2793,9 @@ fn wait_for_work(
                     let Ok(message) = rx.try_recv() else {
                         break;
                     };
+                    if held_at_push(&message)? {
+                        drain_started = Instant::now();
+                    }
                     batch.push(message);
                 }
                 return Ok(Some(batch));
@@ -2813,6 +2819,23 @@ fn wait_for_work(
             return Ok(Some(Vec::new()));
         }
     }
+}
+
+/// Whether `message` is a relayed push the private ordering gate held the loop on —
+/// see [`crate::ordering::push_received`] — so the drain after it starts again from the
+/// release rather than from before the hold.
+fn held_at_push(message: &Message) -> Result<bool> {
+    let Message::Event(envelope) = message else {
+        return Ok(false);
+    };
+    if envelope.source != crate::event::Source::Vcs || !crate::vcs::is_push(&envelope.kind) {
+        return Ok(false);
+    }
+    envelope
+        .labels
+        .node
+        .as_deref()
+        .map_or(Ok(false), crate::ordering::push_received)
 }
 
 /// One reason the loop is not running a node it has not settled.
@@ -6909,7 +6932,8 @@ fn review_change_for(state: &Projected, node: &str) -> Option<String> {
 
 /// Claim the standings read owed by this pass's placements on unlanded drafts and its
 /// restacks, for each node not read for yet, once per node however many passes it is
-/// held across: marks those nodes read for, and answers whether any were.
+/// held across: marks those nodes read for, records the heads those restacks bring
+/// their drafts onto as the verdicts the read defers, and answers whether any were.
 fn claim_placement_reads(
     state: &mut Projected,
     statuses: &BTreeMap<String, NodeStatus>,
@@ -6930,6 +6954,7 @@ fn claim_placement_reads(
         })
         .map(|node| node.id.clone())
         .collect();
+    let mut onto = BTreeSet::new();
     wanted.extend(
         crate::stack::restacks_owed(state, statuses, &|node| {
             in_flight.contains_key(node)
@@ -6944,6 +6969,7 @@ fn claim_placement_reads(
                 .iter()
                 .map(|onto| onto.head.clone())
                 .collect();
+            onto.extend(heads.iter().cloned());
             format!("{}@{}", owed.node, heads.join(","))
         }),
     );
@@ -6955,6 +6981,7 @@ fn claim_placement_reads(
         return false;
     }
     state.readjust.placed.extend(fresh);
+    state.readjust.deferred = onto;
     true
 }
 
@@ -13940,6 +13967,77 @@ mod tests {
             "the held envelopes were not each answered, in claim order, once both notes were"
         );
         assert!(deliveries.idle(), "an envelope is still held");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The placement read a restack is claimed for defers the verdict on the head that
+    /// restack is brought onto — the stack parent's fresh push — and that read is the
+    /// only one it defers: the next read, a later trigger's, defers nothing.
+    #[test]
+    fn a_restack_s_claimed_read_defers_the_pushed_head_once() {
+        let root = std::env::temp_dir().join(format!("onepipeline-deferred-{}", sys::pid()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = RunPaths::under(&root, "deferred");
+        paths.create().expect("the run directory");
+        let mut journal = Journal::open(&paths);
+        let mut state = Projected::open(&paths);
+        let mut statuses = BTreeMap::new();
+        for (id, deps) in [("a", vec![]), ("b", vec!["a".to_owned()])] {
+            state.graph.insert(crate::plan::Node {
+                id: id.into(),
+                repo: Some("service".into()),
+                deps,
+                ..crate::plan::Node::default()
+            });
+            statuses.insert(id.to_owned(), NodeStatus::Done);
+            state.landings.insert(id.to_owned(), Landing::Unlanded);
+            state.branches.insert(id.to_owned(), format!("me/{id}"));
+            state
+                .branch_heads
+                .insert(format!("me/{id}"), format!("old-{id}"));
+        }
+        state.stacks.insert(
+            "b".into(),
+            crate::payload::SettledStack {
+                parents: vec![crate::payload::StackParent {
+                    node: "a".into(),
+                    branch: "me/a".into(),
+                    head: "old-a".into(),
+                }],
+                stack_base: None,
+            },
+        );
+        let (in_flight, paused) = (BTreeMap::new(), BTreeSet::new());
+        assert!(!claim_placement_reads(
+            &mut state, &statuses, &in_flight, &paused
+        ));
+        assert!(state.readjust.deferred.is_empty());
+
+        // `a`'s republication pushed: `b` is owed its restack onto that push.
+        state.branch_heads.insert("me/a".into(), "new-a".into());
+        assert!(claim_placement_reads(
+            &mut state, &statuses, &in_flight, &paused
+        ));
+        assert_eq!(
+            state.readjust.deferred,
+            std::iter::once("new-a".to_owned()).collect::<BTreeSet<_>>()
+        );
+        crate::readjust::run(
+            &paths,
+            &mut journal,
+            &mut state,
+            crate::payload::ReadjustTrigger::Placement,
+        )
+        .expect("the placement read runs");
+        assert!(
+            state.readjust.deferred.is_empty(),
+            "a later trigger's read would defer the pushed head too"
+        );
+        // Held across passes, the restack is not read for again, so nothing is deferred.
+        assert!(!claim_placement_reads(
+            &mut state, &statuses, &in_flight, &paused
+        ));
+        assert!(state.readjust.deferred.is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
 }
