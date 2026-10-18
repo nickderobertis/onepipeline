@@ -717,22 +717,12 @@ resolver = "2"
 # `src/maintenance.rs` matches `IdentityOutcome::MaintenanceUnreadable` and reads
 # `SlotOutcome::Ran`'s `disk`, neither of which an earlier release defines.
 #
-# `onevcs` 0.56.1 is the floor because it is the one `onevcs-testing` 0.19.11 requires
-# exactly, and that pair is the release carrying all eight fixes this host's dispatches
-# publish, resume, cancel and land through: per-invocation holder records, a green
-# resume, a resumed branch's identity, host-attested landings, a cancellable push and
-# a clean-base-merge continuation change behaviour only. Two change shapes this crate
-# reads. `boundary::Unavailability::HostVisibility` is a write held because the host did
-# not answer whether its destination is public — rate limited, failing or out of reach —
-# and its publication settles as that unavailable check, never as a disclosure:
-# `tests/e2e/publication_boundary.rs`'s
-# `a_publication_whose_host_rate_limits_the_visibility_read_settles_on_an_unavailable_check`
-# drives it. The same release asks for that visibility with `gh api --include`, which
-# `crates/testfakes`'s `fake-gh` answers status line first. And `WorkspaceCapacity`
-# carries `ineligible`, every idle slot a request cannot take and why, which
-# `src/pool.rs` names in a held node's `workspace-wait` — `tests/e2e/lifecycle.rs`'s
-# `a_node_held_beside_an_idle_slot_it_cannot_take_is_told_which_slot_and_why`. A
-# **requirement**, because `^0.52` admits no 0.56.x.
+# `onevcs` 0.56.1 is the floor because `onevcs-testing` 0.19.11 requires exactly it,
+# and it is the release whose two new shapes this crate reads: a publication held on
+# `boundary::Unavailability::HostVisibility` settles as that unavailable check, and
+# `WorkspaceCapacity::ineligible` is named in a held node's `workspace-wait`
+# (`src/pool.rs`). It asks visibility with `gh api --include`, which `fake-gh` answers
+# status line first. A **requirement**, because `^0.52` admits no 0.56.x.
 #
 # `onevcs` 0.52.0 was the floor because it is the release the declared-maintenance
 # producer supplied for this crate's idle pool maintenance, the `onevcs.toml`

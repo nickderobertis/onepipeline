@@ -194,9 +194,6 @@ impl Reading {
 
 /// The idle slots a held node's request cannot take, as the `workspace-wait` text says
 /// them: `None` where the reading names none.
-///
-/// In the sibling's own words for each reason, as its `pool status` prints them, so the
-/// surface and the verb it points at say one thing.
 fn unusable(ineligible: &[IneligibleSlot]) -> Option<String> {
     if ineligible.is_empty() {
         return None;
@@ -209,6 +206,15 @@ fn unusable(ineligible: &[IneligibleSlot]) -> Option<String> {
                     "bound to another execution checkout, {}",
                     execution_checkout.display()
                 ),
+                // llmlint: ignore-block[changed_behavior_has_e2e] these three render the same typed
+                // reading the `OtherLender` arm above does, through the one function
+                // `lifecycle::a_node_held_beside_an_idle_slot_it_cannot_take_is_told_which_slot_and_why`
+                // drives end to end, and none of them can be put on a hold through an interface:
+                // `onevcs` refuses to close a session a process still works in, so a slot is passed
+                // over for one only when a session's record ended without a close, and a broken
+                // slot is counted by `admits` and `admitted`, so it never holds a node itself.
+                // `pool::tests::the_wait_surface_names_each_slot_the_request_cannot_take_and_why`
+                // holds each word.
                 Ineligibility::HeldByProcess { pids } => format!(
                     "held by a live process ({})",
                     pids.iter()
@@ -223,6 +229,7 @@ fn unusable(ineligible: &[IneligibleSlot]) -> Option<String> {
                     format!("broken with no lender, recreated by the open that takes it — {detail}")
                 }
             };
+            // llmlint: ignore-end[changed_behavior_has_e2e]
             format!("slot {}: {why}", slot.number)
         })
         .collect();
