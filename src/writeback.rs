@@ -1073,6 +1073,18 @@ impl Writeback {
         lock.lock().is_ok_and(|pending| pending.unlanded())
     }
 
+    /// Whether a projection carrying `node`'s settlement has landed on the store: every later
+    /// one carries it too, so the newest that landed answers.
+    pub(crate) fn has_landed_settlement(&self, node: &str) -> bool {
+        let (lock, _) = &*self.pending;
+        lock.lock().is_ok_and(|pending| {
+            pending
+                .last_success
+                .as_ref()
+                .is_some_and(|landed| landed.settlements.contains_key(node))
+        })
+    }
+
     /// Whether another run took the project over, so this driver writes nothing more to it.
     pub(crate) fn is_retired(&self) -> bool {
         self.board
@@ -1773,6 +1785,10 @@ fn worker(
                 || member_sources(&store, &snapshot.project),
             )
         });
+        // A failpoint, so a journey can hold one settlement off the store.
+        if let Err(error) = crate::ordering::settlement_projecting(snapshot.settlements.keys()) {
+            eprintln!("{error}");
+        }
         let landing = landing_lock(&run_dir).and_then(|file| file.lock().map(|()| file));
         // llmlint: ignore-block[changed_behavior_has_e2e] a run directory the driver cannot open a
         // file in is one it cannot write this attempt's record into either, a line below; the
@@ -3916,7 +3932,7 @@ struct ReworkProjected {
     // llmlint: ignore-end[invalid_states_unrepresentable]
     comments: Vec<crate::channel::ReworkComment>,
     /// The superseded node's settled head, so a host continuing the lineage can tell
-    /// the commits the rework added from the ones before it (entry 129). Omitted where
+    /// the commits the rework added from the ones before it (entry 130). Omitted where
     /// the run's record holds none.
     // llmlint: ignore[invalid_states_unrepresentable] copied from the run's own record, whose `heads` hold every node's settled head as the `String` the settlement carries — the crate has no commit-id type to hold it as — and the one reader of it, `continuation::rework_provenance`, refuses anything but a full commit id at the store's boundary.
     #[serde(skip_serializing_if = "Option::is_none")]

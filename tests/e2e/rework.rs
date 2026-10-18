@@ -325,7 +325,7 @@ fn a_draft_in_review_is_reworked_on_its_own_branch_and_change_request() {
             "instruction": "say what the review asked in a.md",
             "comments": [{"id": "101", "url": COMMENT_URL}],
             // Where the rework's own commits begin, so a host continuing the lineage can
-            // tell them from the original worker's (entry 129).
+            // tell them from the original worker's (entry 130).
             "replaces_head": a_head,
         }),
         "{projected}"

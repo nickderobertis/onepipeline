@@ -6,7 +6,7 @@
 //! `sha256(<lineage root>:<comment id>:<revision>)` — so whether a comment is
 //! answered is read off the host, and recovery is that read: a reply the host
 //! accepted is seen by the next read and never posted again, and one it never
-//! accepted leaves the comment owed. See `docs/contract-divergences.md` entry 129.
+//! accepted leaves the comment owed. See `docs/contract-divergences.md` entry 130.
 
 use crate::{
     error::{Error, Result},
@@ -238,7 +238,7 @@ pub(crate) fn links(body: &str, url: &str) -> bool {
     false
 }
 
-/// The drafter's structured result in the shape entry 129 states it: `replies` and
+/// The drafter's structured result in the shape entry 130 states it: `replies` and
 /// nothing else, whatever the graph's own schema admits beside it.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1238,22 +1238,22 @@ mod tests {
         assert!(validated(&drafting(true), &exact).is_ok());
     }
 
-    /// Entry 129's block, out of the divergence record this build ships.
-    fn entry_129() -> Value {
+    /// Entry 130's block, out of the divergence record this build ships.
+    fn entry_130() -> Value {
         include_str!("../docs/contract-divergences.md")
             .split("\n## ")
-            .find(|entry| entry.starts_with("129."))
+            .find(|entry| entry.starts_with("130."))
             .and_then(|entry| entry.split("```json").nth(1))
             .and_then(|rest| rest.split("```").next())
-            .map(|block| serde_json::from_str(block).expect("entry 129's block is JSON"))
-            .expect("the record carries entry 129's block")
+            .map(|block| serde_json::from_str(block).expect("entry 130's block is JSON"))
+            .expect("the record carries entry 130's block")
     }
 
-    /// What entry 129 states of the drafter, the reply and the records behind them is
+    /// What entry 130 states of the drafter, the reply and the records behind them is
     /// what the private types read and write.
     #[test]
-    fn the_drafter_the_reply_and_the_records_are_entry_129s() {
-        let block = entry_129();
+    fn the_drafter_the_reply_and_the_records_are_entry_130s() {
+        let block = entry_130();
         assert_eq!(block["persona"], PERSONA);
         assert_eq!(block["body_limit"], json!(BODY_LIMIT));
         assert_eq!(block["declined_label"], DECLINED);
@@ -1348,7 +1348,7 @@ mod tests {
                     serde_json::from_value::<crate::payload::ReviewReplyNotDrafted>(record.clone())
                         .map(|_| ())
                 }
-                other => panic!("entry 129 records {other}, which no payload here is"),
+                other => panic!("entry 130 records {other}, which no payload here is"),
             };
             read.unwrap_or_else(|why| panic!("{kind}: {why}"));
         }

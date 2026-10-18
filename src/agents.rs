@@ -97,7 +97,7 @@ pub enum Scope {
     Observer,
     /// The drafting graph a lifecycle node's change request body comes from.
     PrAuthor,
-    /// The drafting graph a review comment's reply comes from (entry 129).
+    /// The drafting graph a review comment's reply comes from (entry 130).
     ReviewReply,
 }
 

@@ -1,4 +1,4 @@
-//! The live half of `docs/contract-divergences.md` entry 129: review comments on a real draft,
+//! The live half of `docs/contract-divergences.md` entry 130: review comments on a real draft,
 //! found by one host, answered on a cold one continuing from the plan store.
 //!
 //! The store is one local Markdown root every host of the journey shares, as the continuation

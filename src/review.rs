@@ -601,7 +601,7 @@ fn record_surface(paths: &RunPaths, journal: &mut Journal, surface: &Surface) ->
 
 // llmlint: ignore-block[invalid_states_unrepresentable] Entry 122 fixes this output-only JSON document’s run and node ids as strings. They borrow the recorded RunPaths and validated graph identities; these DTOs never accept or execute external input. Changing their serialized shape would change that agreed view contract.
 /// The JSON results view's schema version: **2** since an answered comment names the
-/// rework that answered it and the commits its reply links (entry 129), both omitted
+/// rework that answered it and the commits its reply links (entry 130), both omitted
 /// where empty, so a version-1 reader reads every version-2 document's other fields.
 pub(crate) const RESULTS_SCHEMA_VERSION: u32 = 2;
 

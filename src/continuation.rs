@@ -48,7 +48,7 @@ pub(crate) struct StoredRework {
     pub(crate) instruction: String,
     pub(crate) comments: Vec<crate::channel::ReworkComment>,
     /// The superseded node's settled head, absent from a record written before it
-    /// was carried (entry 129).
+    /// was carried (entry 130).
     #[serde(default)]
     pub(crate) replaces_head: Option<String>,
 }
@@ -135,6 +135,10 @@ const BEGIN_GATE_NODE_ENV: &str = "ONEPIPELINE_TEST_CLAIM_BEGIN_NODE";
 /// The test failpoint met before each read of the claim, so a journey can tell when a
 /// driver's lease began and hold it there.
 const READ_GATE_ENV: &str = "ONEPIPELINE_TEST_CLAIM_READ_GATE";
+
+/// The test failpoint met before each read a takeover makes once its wait has passed, so a
+/// journey can hold that read until the displaced driver has got where it needs it.
+const TAKEOVER_PAST_WAIT_GATE_ENV: &str = "ONEPIPELINE_TEST_TAKEOVER_PAST_WAIT_GATE";
 
 /// The key a displaced driver's acknowledgement is written under, inside the claim it
 /// acknowledges.
@@ -1312,6 +1316,9 @@ pub(crate) fn hand_over(
         } else {
             every.min(left)
         });
+        if wait.is_some_and(|wait| written.elapsed() >= wait) {
+            let _ = crate::ordering::meet(TAKEOVER_PAST_WAIT_GATE_ENV);
+        }
         let read = store
             .project_metadata_within(project, CLAIM_READ_DEADLINE)
             .and_then(|metadata| {

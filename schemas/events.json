@@ -1640,7 +1640,7 @@
                 "description": "The decline's replies could not all be drafted or posted. Any posted before\nthe failure stay on the host, and sending the decline again posts only the\nrest."
               }
             ],
-            "description": "Why the reconciler refused a [`Command::Decline`], by kind.\n\nIts [`Display`](std::fmt::Display) is the refusal's `reason` on the command's\noutcome. The kinds are the ones a planner acts on differently: a comment no\nread of the node found is named again once `onepipeline review` has read it, a\nblank reason is restated, a comment a reply already answers needs nothing, and\na decline whose replies did not all reach the host is sent again, posting only\nthe ones still missing. See `docs/contract-divergences.md` entry 129."
+            "description": "Why the reconciler refused a [`Command::Decline`], by kind.\n\nIts [`Display`](std::fmt::Display) is the refusal's `reason` on the command's\noutcome. The kinds are the ones a planner acts on differently: a comment no\nread of the node found is named again once `onepipeline review` has read it, a\nblank reason is restated, a comment a reply already answers needs nothing, and\na decline whose replies did not all reach the host is sent again, posting only\nthe ones still missing. See `docs/contract-divergences.md` entry 130."
           }
         }
       }

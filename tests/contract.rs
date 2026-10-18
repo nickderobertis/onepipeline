@@ -1020,7 +1020,7 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), EVENTS_BUNDLE_VERSION);
     assert_eq!(
-        divergence_block("129.")["bundle_versions"]["events"],
+        divergence_block("130.")["bundle_versions"]["events"],
         EVENTS_BUNDLE_VERSION,
         "the events bundle version must be the one the newest entry raising it records"
     );
@@ -1230,7 +1230,7 @@ fn the_contract_states_the_planner_channel_documents_path_version_and_source() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), DOCUMENT_VERSION);
     assert_eq!(
-        divergence_block("129.")["bundle_versions"]["planner_channel"],
+        divergence_block("130.")["bundle_versions"]["planner_channel"],
         DOCUMENT_VERSION,
         "the planner-channel version must be the one the newest entry raising it records"
     );
@@ -4439,10 +4439,10 @@ fn the_run_history_surface_is_what_the_contract_names() {
     );
     let scopes: std::collections::BTreeMap<String, String> =
         serde_json::from_value(history["scopes"].clone()).expect("the scopes are words");
-    // The contract's three, and the reply drafter's that entry 129 proposes.
-    let proposed = divergence_block("129.")["history_scope"]
+    // The contract's three, and the reply drafter's that entry 130 proposes.
+    let proposed = divergence_block("130.")["history_scope"]
         .as_str()
-        .expect("entry 129 names the reply drafter's scope")
+        .expect("entry 130 names the reply drafter's scope")
         .to_owned();
     assert_eq!(
         scopes
@@ -6674,7 +6674,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // record proposes, and no others: a kind neither document names fails here.
     let proposed: BTreeSet<String> = [
         "40.", "47.", "55.", "65.", "70.", "92.", "119.", "121.", "122.", "123.", "126.", "127.",
-        "129.",
+        "130.",
     ]
     .into_iter()
     .flat_map(|entry| {
@@ -10676,8 +10676,8 @@ fn dispatch_scratch_lifetime_is_the_divergence_surface() {
     use onepipeline::event::{EventKind, PipelineKind};
     let contract = divergence_block("127.");
     // The events bundle that first carried the scratch kinds; entry 128's claim
-    // lease and entry 129's reply surface raised the compiled-in one since, which
-    // entry 129's own test pins.
+    // lease and entry 130's reply surface raised the compiled-in one since, which
+    // entry 130's own test pins.
     assert_eq!(contract["bundle_versions"]["events"], "1.5.0");
     assert!(
         matches!(Cli::try_parse_from(["onepipeline", "scratch", "discard", "example"]).unwrap().command, Command::Scratch(ScratchCommand::Discard { run }) if run == "example")
@@ -10984,7 +10984,7 @@ fn the_readjustment_is_what_the_divergence_record_names() {
     );
 
     // The versions the readjustment raised both bundles to; entries 127 and 128 raised
-    // the events bundle since, and entry 129 both.
+    // the events bundle since, and entry 130 both.
     assert_eq!(
         block["bundle_versions"],
         json!({"events": "1.4.0", "planner_channel": "1.4.0"})
@@ -11084,7 +11084,7 @@ fn the_manager_landing_contract_is_what_the_divergence_record_names() {
         serde_json::from_value::<onepipeline::vocabulary::Significance>(word.clone())
             .unwrap_or_else(|why| panic!("{kind}'s word {word} is not onevcs's: {why}"));
     }
-    // The bundle that first carried the landings; entries 127, 128 and 129 raised
+    // The bundle that first carried the landings; entries 127, 128 and 130 raised
     // it since, so the compiled-in bundle is that one or a later minor.
     let release = |text: &str| -> (u64, u64, u64) {
         let parts: Vec<u64> = text
@@ -11106,7 +11106,7 @@ fn the_manager_landing_contract_is_what_the_divergence_record_names() {
     );
 }
 
-/// Entry 129's reply surface is this build's own: the flag is `start`'s and the key
+/// Entry 130's reply surface is this build's own: the flag is `start`'s and the key
 /// the launch config's, at the schema version the entry names; the history scope is
 /// the agents module's; `decline` deserializes into its own variant, round-trips, is
 /// the planner's to issue and no other author's by default; both kinds are spelled by
@@ -11121,7 +11121,7 @@ fn the_review_reply_surface_is_what_the_divergence_record_names() {
     use onepipeline::channel::layout::{CommandOutcome, Op, DOCUMENT_VERSION};
     use onepipeline::channel::{Author, Command, CommandResult, CommandVerdict, Refusal};
     use onepipeline::payload::{registry, schema_of};
-    let block = divergence_block("129.");
+    let block = divergence_block("130.");
 
     let start = Cli::command();
     let start = start

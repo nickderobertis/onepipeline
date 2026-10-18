@@ -121,7 +121,7 @@ use crate::projection::{self, RunState};
 /// approval for attestation ahead of the prerequisites it was reparented onto.
 /// Version 12 restores a continued lineage's rework provenance; an older fold
 /// would forget which comments that lineage is already reworking. Version 13
-/// carries that provenance's reason, instruction and superseded head (entry 129):
+/// carries that provenance's reason, instruction and superseded head (entry 130):
 /// a version-12 fold holds none of them, and resumed from it a host would draft a
 /// lineage's replies with no reason and none of the commits its rework added.
 // llmlint: ignore[changed_behavior_has_e2e] a version-1 document is one the build before

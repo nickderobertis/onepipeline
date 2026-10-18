@@ -11408,7 +11408,53 @@ the acknowledged claim's shape and its refusals, a claim's `lease` and a driver'
 publications and their refusals, and the block above against the constants, the claim boundary and the
 README.
 
-## 129. A reviewer was never answered where they left a comment — OPEN
+## 129. Entry 128's bounds let a takeover start before what the displaced driver settled was on the store — OPEN
+
+**Proposal, for the planner who owns the contract, whose ruling kept the deferred
+acknowledgement below: entry 128 promises that a takeover "reads the project again, and
+continues and pins from that read — so what the displaced driver settled while it was being
+taken over is continued rather than dispatched again". Two of its other rules let the
+adopter start before that settlement was on the store, so that read missed it and the
+adopter dispatched a published node again. This build keeps the continuation promise and
+departs from those two rules as follows. Entry 128's wording is unchanged until this is
+ruled on.**
+
+- **The fence lets go of a settled publication only once its settlement has landed.**
+  Entry 128 has the driver rewrite `onepipeline.publishing` without a node "once a
+  publication has settled". This build drops the node only once a projection carrying the
+  node's settlement has landed on the store. Before that, an adopter past its wait that
+  found no fence started without the settlement. That was the Windows failure of
+  `a_publication_held_past_the_whole_takeover_wait_holds_the_takeover_until_it_has_finished`,
+  and `a_takeover_reading_before_a_settled_publication_has_landed_waits_until_it_has`
+  drives it.
+- **A superseded driver acknowledges only once what it settled has landed.** Entry 128
+  says it acknowledges once nothing of its own is in progress "and that projection has
+  landed (waited for at most one interval)". Read literally, a projection held longer than
+  that one interval is acknowledged anyway: the adopter starts on the acknowledgement, reads
+  the project without the settlement, and dispatches the node twice.
+  `a_settlement_held_past_the_displaced_drivers_wait_holds_the_takeover_until_it_lands`
+  is the evidence: it fails on the literal bound with the fence cleared and the takeover
+  acknowledged. This build keeps the one bounded wait. Past it, the driver goes on passing,
+  saying on standard error that the settlement "has not reached the store" and that it
+  acknowledges once it has. It does not clear its fence, acknowledge, retire its write-back
+  or close out until a projection carrying the settlement has landed.
+- **A driver whose lease had lapsed when it read the takeover still projects a settlement
+  its fence holds the adopter for.** Entry 128 has such a driver project nothing more,
+  because the adopter "may be writing to the board already". An adopter held by that
+  driver's fence has started nothing, so it writes nothing that projection could overwrite.
+- **A run closing out with a settlement that has not landed leaves its fence naming it.**
+  A later takeover then waits for an acknowledgement, as it does for a driver that died
+  mid-publication.
+
+Refused projections are untouched: entry 72 still attempts a refused snapshot again only
+when the run's graph next changes, and republishing the same snapshot attempts nothing. A
+settlement the store refuses is therefore not on the store, and the fence and the
+acknowledgement wait for it like any other. If the graph never changes, the takeover waits
+until somebody clears the fence, or until the displaced host's own records prove its run
+gone. It never starts without the settlement. That remaining case is a follow-up, not part
+of this record.
+
+## 130. A reviewer was never answered where they left a comment — OPEN
 
 **Proposal, for the planner who owns the contract: one launch flag and launch-config
 key, `--review-reply-graph` / `review_reply_graph`; one reserved persona and history
@@ -11605,7 +11651,8 @@ launch setting.
 Merging `main`, whose scratch reclamation (entry 127) and claim lease (entry 128) took
 that number and the events bundles `1.5.0` and `1.6.0` first, moved this record from 127
 to 129 and its events bundle from `1.5.0` to `1.7.0`: the next free entry and the
-bundle's next minor. The planner-channel bundle, which neither raised, stays `1.5.0`.
+bundle's next minor. A later merge of `main`, whose takeover settlement record took 129
+first, moved it to 130. The planner-channel bundle, which neither raised, stays `1.5.0`.
 
 **What this build does.** `tests/e2e/review_reply.rs` drives every rule through the
 compiled binary and the real linked `onevcs` over real git, with GitHub at `onevcs`'s
