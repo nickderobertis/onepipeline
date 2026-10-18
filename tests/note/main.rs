@@ -2230,10 +2230,41 @@ fn held_apart(world: &World, run: &str, nodes: Vec<Value>) {
     });
 }
 
-/// Release the held turn of `node`'s worker, and no other, under [`held_apart`].
+/// Release the held turn of `node`'s worker, and no other, under [`held_apart`],
+/// once no note offered to any member is still waiting for its courier.
+///
+/// A note is in its conversation's hands only once the courier has taken it, and
+/// onejudge looks for notes only as the held decision returns; a turn released
+/// while its note is still an offer ends with the judge deciding on nothing, the
+/// node settled, and the note recorded after the dispatch it was meant for — the
+/// window [`release_once_the_note_is_taken`] documents, given the same margin.
 fn release_turn_of(world: &World, node: &str) {
+    world.until("every offered note to be taken by its courier", |world| {
+        notes_offered(&world.graph_state()).is_empty()
+    });
+    std::thread::sleep(IN_PROCESS_MARGIN);
     release(&world.fakes, &format!("turn-{node}.go"));
     release(&world.fakes, &format!("turn-{node}.settle"));
+}
+
+/// The id of each note a member's spool under `dir` holds offered and not yet
+/// taken by its courier: [`notes_taken`]'s earlier half.
+fn notes_offered(dir: &Path) -> BTreeSet<String> {
+    let mut offered = BTreeSet::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return offered;
+    };
+    let spool = dir.file_name().is_some_and(|name| name == NOTES_DIR);
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if let Some(id) = name.strip_suffix(".offer.json").filter(|_| spool) {
+            offered.insert(id.to_string());
+        } else if name != ".git" && entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            offered.extend(notes_offered(&entry.path()));
+        }
+    }
+    offered
 }
 
 /// Where the journal records the note to `node` reading `text` as committed.
