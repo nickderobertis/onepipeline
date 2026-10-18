@@ -5244,7 +5244,7 @@ pub fn process_ended(pid: u32) -> bool {
 /// The wait is what makes this usable as a precondition. `kill` returns when the
 /// signal is queued, not when the process has exited, so a journey that went
 /// straight on from here would be asserting against a host that had not caught
-/// up with it yet.
+/// up with it yet. Gone means ended, not reaped — see [`process_ended`].
 #[cfg(unix)]
 pub fn end_process(pid: u32) {
     std::process::Command::new("kill")
@@ -5253,15 +5253,10 @@ pub fn end_process(pid: u32) {
         .expect("this host ends a process it owns");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     while std::time::Instant::now() < deadline {
-        // `kill -0` is the existence check: it delivers nothing and fails once
-        // there is no such process.
-        let still_there = std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .stderr(Stdio::null())
-            .status()
-            .expect("this host answers about a process it owns")
-            .success();
-        if !still_there {
+        // Ended rather than reaped: a process this suite did not start is reaped
+        // by its own parent, which a journey may be holding at a failpoint, and
+        // a zombie writes and holds nothing.
+        if process_ended(pid) {
             return;
         }
         std::thread::sleep(std::time::Duration::from_millis(20));

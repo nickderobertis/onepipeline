@@ -1936,8 +1936,8 @@ fn confirm_driving(paths: &RunPaths, driver: &mut std::process::Child) -> Result
                     .is_none_or(|stamp| stamp.matches(&record.started))
         })
     };
-    // Test failpoints only, met where no variable is set to nothing at all: a
-    // journey holds this process before its first reading, or between that
+    // Test failpoints only, and nothing at all where their variables are unset:
+    // a journey holds this process before its first reading, or between that
     // reading and its first look at whether the driver has exited, so what the
     // driver does is placed on a chosen side of each.
     let _ = crate::ordering::meet(HANDOVER_UNREAD_GATE_ENV);

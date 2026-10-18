@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 
 use crate::dispatch::OBSERVER_RESTARTS_ENV;
 use crate::harness::{
-    agent, end_driver, end_lock_holder, human, plan_of, rows, still_running_as, World,
-    NOTHING_DRIVING, REFUSED,
+    agent, end_driver, end_lock_holder, human, plan_of, process_ended, rows, still_running_as,
+    World, NOTHING_DRIVING, REFUSED,
 };
 // The journeys that end a process, and those that assert against a process table,
 // are `#[cfg(unix)]`, so what only they reach for is imported on the same terms.
@@ -1597,9 +1597,10 @@ fn adopt_held(
                 identity_in(&world.run_json(run, "launch.json")) == driver
             });
         }
-        world.until("the retained driver to exit", |_| {
-            !still_running_as(pid, &driver.1)
-        });
+        // Ended, not gone: the held launcher is its parent and has not reaped
+        // it, so its pid cannot have been handed on and a zombie is all that is
+        // left of it.
+        world.until("the retained driver to exit", |_| process_ended(pid));
         held.release();
         (adopting.join().expect("the adoption returns"), driver)
     })
