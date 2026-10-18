@@ -1073,6 +1073,38 @@ impl Writeback {
         lock.lock().is_ok_and(|pending| pending.unlanded())
     }
 
+    /// Whether a projection carrying `node`'s settlement has landed on the store: every later
+    /// one carries it too, so the newest that landed answers.
+    pub(crate) fn has_landed_settlement(&self, node: &str) -> bool {
+        let (lock, _) = &*self.pending;
+        lock.lock().is_ok_and(|pending| {
+            pending
+                .last_success
+                .as_ref()
+                .is_some_and(|landed| landed.settlements.contains_key(node))
+        })
+    }
+
+    /// Attempt the projection the store last refused again, where nothing newer is queued or
+    /// being attempted: what a settlement the store has yet to hold is owed, whether or not the
+    /// graph changes. Answers whether one was queued.
+    pub(crate) fn retry_refused(&self) -> bool {
+        let (lock, ready) = &*self.pending;
+        let Ok(mut pending) = lock.lock() else {
+            return false;
+        };
+        if pending.latest.is_some() || pending.worker == WorkerState::Working {
+            return false;
+        }
+        let Some(refused) = pending.refused.take() else {
+            return false;
+        };
+        pending.queued_items = refused.lineages().len();
+        pending.latest = Some(refused);
+        ready.notify_all();
+        true
+    }
+
     /// Whether another run took the project over, so this driver writes nothing more to it.
     pub(crate) fn is_retired(&self) -> bool {
         self.board
