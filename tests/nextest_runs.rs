@@ -114,6 +114,9 @@ impl Fixture {
         // CI's test step sets it for the whole suite, naming the suite's own
         // archive: a fixture inheriting it would archive itself over that one.
         command.env_remove("ONEPIPELINE_TEST_ARCHIVE");
+        // And on a split leg it sets the suite's own share: a fixture inheriting
+        // it would run only that share of its own tests.
+        command.env_remove("ONEPIPELINE_TEST_PARTITION");
         // `ci.yml` sets the first for every job and Nx the second for every
         // task, and nextest then colours the counts these tests read;
         // `failed_step` asks for colour where it means to.
@@ -479,19 +482,27 @@ fn lingerers_outliving(fixture: &Fixture, patience: std::time::Duration) -> (usi
 /// and `rerun-failed` reads that as the failure it is. Under the default profile
 /// the same test is still a leaky pass. Every process those runs leak has ended,
 /// by its pid, before this test returns, so this test leaks nothing itself.
+///
+/// The fixture's runs take one test at a time. Run together, a test nextest is
+/// still spawning holds every capture pipe open in nextest when it forks, its
+/// siblings' among them, until it execs; on a loaded host that can outlast a
+/// sibling's exit by more than the 100ms leak timeout, and the sibling is then
+/// leaky too. The gate of run 39076493816 read "6 passed (3 leaky)" that way.
+/// One at a time, only a process a test started can hold its output.
 #[test]
 fn a_test_leaving_a_process_holding_its_output_fails_the_ci_profile_by_name() {
     let fixture = leaking_fixture("leak-fails");
     archive(&fixture);
     let leaker = "nextest-scheduling-fixture::e2e leaves_a_process_holding_its_output";
+    let one_at_a_time = ["--no-fail-fast", "--test-threads", "1"];
 
-    let (output, log) = fixture.nextest_run(&["--no-fail-fast"]);
+    let (output, log) = fixture.nextest_run(&one_at_a_time);
     assert!(
         output.status.success() && log.contains("passed (1 leaky)"),
         "under the default profile a leak is still counted as a leaky pass:\n{log}"
     );
 
-    let (output, log) = fixture.nextest_run(&["--no-fail-fast", "--profile", "ci"]);
+    let (output, log) = fixture.nextest_run(&[&one_at_a_time[..], &["--profile", "ci"]].concat());
     assert!(
         !output.status.success(),
         "under the ci profile a test that left a process holding its output passed:\n{log}"
@@ -1397,7 +1408,8 @@ fn the_scripts_refuse_what_they_cannot_run() {
 // proven on GitHub by the demonstration run recorded on this change request.
 #[test]
 fn the_rerun_steps_run_only_after_a_failure_and_are_bounded_by_what_they_run() {
-    // `ci.yml` holds the gate and the cross legs; `release-sweep.yml` the full
+    // `ci.yml` holds gate, Windows cross, PR Mac and manual Mac diagnostics;
+    // `release-sweep.yml` holds the full
     // sweep on the release pull request, which re-runs its failures the same way.
     let workflow = [
         ".github/workflows/ci.yml",
@@ -1422,15 +1434,18 @@ fn the_rerun_steps_run_only_after_a_failure_and_are_bounded_by_what_they_run() {
     let archive = "\"$RUNNER_TEMP/tests.tar.zst\"";
     let archived_runs = workflow
         .lines()
+        // The Windows shards name their recipe in `GATE`: `check-cross` for the
+        // first, `test-quick` for the rest.
         .filter(|line| {
-            line.trim().starts_with(&format!(
-                "run: ONEPIPELINE_TEST_ARCHIVE={archive} just check"
-            ))
+            ["just check", "just \"$GATE\""].iter().any(|recipe| {
+                line.trim()
+                    .starts_with(&format!("run: ONEPIPELINE_TEST_ARCHIVE={archive} {recipe}"))
+            })
         })
         .count();
     assert_eq!(
-        archived_runs, 3,
-        "the gate step, the cross step and the release sweep archive their build"
+        archived_runs, 5,
+        "gate, Windows cross, PR Mac, manual Mac and release sweep archive their build"
     );
 
     let steps: Vec<&str> = workflow
@@ -1439,8 +1454,8 @@ fn the_rerun_steps_run_only_after_a_failure_and_are_bounded_by_what_they_run() {
         .collect();
     assert_eq!(
         steps.len(),
-        3,
-        "one rerun step each in gate, cross and the release sweep"
+        5,
+        "one rerun step each in gate, Windows cross, PR Mac, manual Mac and release sweep"
     );
     for step in steps {
         let field = |key: &str| {
@@ -1547,3 +1562,760 @@ fn the_instrumented_suite_archives_the_build_it_runs_before_running_it() {
         }
     }
 } // llmlint: ignore-end[changed_behavior_has_e2e]
+
+/// Two binaries of tests, each recording every run of itself in a ledger of its
+/// own, so a shard's share is read off what ran rather than off what nextest said.
+const PARTITION_TESTS: &str = r#"
+pub fn ledger(name: &str) {
+    use std::io::Write;
+    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ledger");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join(name))
+        .unwrap()
+        .write_all(b".")
+        .unwrap();
+}
+
+#[cfg(test)]
+mod tests {
+    #[test] fn one() { super::ledger("lib-one"); }
+    #[test] fn two() { super::ledger("lib-two"); }
+    #[test] fn three() { super::ledger("lib-three"); }
+    #[test] fn four() { super::ledger("lib-four"); }
+    #[test] fn five() { super::ledger("lib-five"); }
+}
+"#;
+
+const PARTITION_SUITE: &str = r#"
+#[test] fn one() { partition_fixture::ledger("suite-one"); }
+#[test] fn two() { partition_fixture::ledger("suite-two"); }
+#[test] fn three() { partition_fixture::ledger("suite-three"); }
+#[test] fn four() { partition_fixture::ledger("suite-four"); }
+"#;
+
+const PARTITION_LEDGERS: [&str; 9] = [
+    "lib-one",
+    "lib-two",
+    "lib-three",
+    "lib-four",
+    "lib-five",
+    "suite-one",
+    "suite-two",
+    "suite-three",
+    "suite-four",
+];
+
+/// The Windows leg split across jobs, as each job runs a tier: the recipe line
+/// `_tier-test-quick` runs, given the partition `ci.yml` hands that job. The jobs'
+/// shares between them run every test exactly once, a run with no partition runs
+/// them all, and a partition no other job makes up the rest of is refused before
+/// anything runs.
+#[test]
+fn a_split_leg_runs_every_test_in_exactly_one_shard_and_refuses_a_share_nothing_completes() {
+    let fixture = Fixture::new(
+        "partitioned",
+        "[package]\nname = \"partition-fixture\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[workspace]\n",
+        &[
+            ("src/lib.rs", PARTITION_TESTS),
+            ("tests/suite.rs", PARTITION_SUITE),
+        ],
+    );
+    let locked = fixture
+        .command(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+        .args(["generate-lockfile", "--offline"])
+        .output()
+        .expect("cargo writes the fixture's lock");
+    assert!(locked.status.success(), "the fixture's lock is written");
+    // The recipe's own line, with the tier's filter as its argument and the
+    // repository's scripts reached from the fixture's root.
+    let line = format!(
+        "set -- 'all()'; {}",
+        recipe_line("_tier-test-quick filter", "nextest run")
+            .replace("bash scripts/", "bash \"$ONEPIPELINE_REPO\"/scripts/")
+    );
+    let repo = repo_root();
+    let repo = repo.to_str().expect("a UTF-8 path");
+    let ran = |fixture: &Fixture| -> Vec<usize> {
+        PARTITION_LEDGERS
+            .iter()
+            .map(|test| {
+                fs::metadata(fixture.path("ledger").join(test)).map_or(0, |ledger| {
+                    usize::try_from(ledger.len()).expect("a run count fits")
+                })
+            })
+            .collect()
+    };
+
+    let mut shares = Vec::new();
+    for shard in 1..=3 {
+        let before = ran(&fixture);
+        let partition = format!("count:{shard}/3");
+        let (output, said) = fixture.script_line(
+            &line,
+            &[
+                ("ONEPIPELINE_REPO", repo),
+                ("ONEPIPELINE_TEST_PARTITION", &partition),
+            ],
+        );
+        assert!(output.status.success(), "shard {partition} runs:\n{said}");
+        let share: usize = ran(&fixture)
+            .iter()
+            .zip(&before)
+            .map(|(after, before)| after - before)
+            .sum();
+        shares.push(share);
+    }
+    assert_eq!(
+        ran(&fixture),
+        vec![1; PARTITION_LEDGERS.len()],
+        "the three shards did not run each test exactly once between them (shares {shares:?})"
+    );
+    assert!(
+        shares.iter().all(|share| *share > 0),
+        "a shard ran nothing: {shares:?}"
+    );
+
+    let (output, said) = fixture.script_line(&line, &[("ONEPIPELINE_REPO", repo)]);
+    assert!(output.status.success(), "the unsplit run runs:\n{said}");
+    assert_eq!(
+        ran(&fixture),
+        vec![2; PARTITION_LEDGERS.len()],
+        "with no partition every test runs:\n{said}"
+    );
+
+    for refused in [
+        "count:4/3",
+        "count:0/3",
+        "hash:1/2",
+        "count:1/2 ",
+        "slice:1/2",
+        "count:1/1000",
+    ] {
+        let (output, said) = fixture.script_line(
+            &line,
+            &[
+                ("ONEPIPELINE_REPO", repo),
+                ("ONEPIPELINE_TEST_PARTITION", refused),
+            ],
+        );
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{refused:?} was run:\n{said}"
+        );
+        assert!(
+            said.contains(&format!("ONEPIPELINE_TEST_PARTITION holds '{refused}'")),
+            "{refused:?} was refused without naming it:\n{said}"
+        );
+        assert_eq!(
+            ran(&fixture),
+            vec![2; PARTITION_LEDGERS.len()],
+            "{refused:?} ran tests before it was refused:\n{said}"
+        );
+    }
+}
+
+/// A `ci.yml` splitting its Windows leg three ways, as the repository's own does
+/// two: a `cross` job with a `shard` axis and the partition it hands each shard.
+const SHARDS_CI: &str = "jobs:\n  cross:\n    strategy:\n      matrix:\n        os: [windows-latest]\n        shard: [1, 2, 3]\n    env:\n      ONEPIPELINE_TEST_PARTITION: count:${{ matrix.shard }}/3\n";
+
+/// A justfile laid out as the repository's is: each `_<project>-test-quick`
+/// recipe runs one tier through `_tier-test-quick`, beside the archive recipe.
+const SHARDS_JUSTFILE: &str = "lib-tier := \"kind(lib)\"\nsuite2-tier := \"binary(suite) or binary(more)\"\n\n_tier-test-quick filter:\n    @true\n\n_crate-test-quick: (_tier-test-quick lib-tier)\n\n_suite-test-quick: (_tier-test-quick suite2-tier)\n\n_crate-test-quick-archive:\n    @true\n";
+
+/// A second binary in one tier, so a deal that went on counting across binaries
+/// rather than starting again for each would put its tests in other shards.
+const SHARDS_MORE: &str = "#[test] fn alpha() {}\n#[test] fn beta() {}\n";
+
+/// The Windows inventory of the fixture's leg: every test its two binaries hold,
+/// and one more that Windows builds and this host does not, which no listing here
+/// can account for and the deal over the inventory has to.
+const SHARDS_INVENTORY: &str = "# Every test the Windows leg of run 1 (job 2) ran, at 3.\n\
+lib-tier\tpartition-fixture\ttests::five\n\
+lib-tier\tpartition-fixture\ttests::four\n\
+lib-tier\tpartition-fixture\ttests::one\n\
+lib-tier\tpartition-fixture\ttests::three\n\
+lib-tier\tpartition-fixture\ttests::two\n\
+lib-tier\tpartition-fixture\ttests::windows_only\n\
+suite2-tier\tpartition-fixture::more\talpha\n\
+suite2-tier\tpartition-fixture::more\tbeta\n\
+suite2-tier\tpartition-fixture::suite\tfour\n\
+suite2-tier\tpartition-fixture::suite\tone\n\
+suite2-tier\tpartition-fixture::suite\tthree\n\
+suite2-tier\tpartition-fixture::suite\ttwo\n";
+
+/// `just cross-shards`, run from a fixture repository holding `ci`, `justfile` and
+/// the Windows `inventory` beside the partition fixture's two binaries.
+fn cross_shards(case: &str, ci: &str, justfile: &str, inventory: &str) -> (Output, String) {
+    let fixture = Fixture::new(
+        case,
+        "[package]\nname = \"partition-fixture\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[workspace]\n",
+        &[
+            ("src/lib.rs", PARTITION_TESTS),
+            ("tests/suite.rs", PARTITION_SUITE),
+            ("tests/more.rs", SHARDS_MORE),
+            (".github/workflows/ci.yml", ci),
+            ("justfile", justfile),
+            (".github/windows-test-inventory.tsv", inventory),
+        ],
+    );
+    let locked = fixture
+        .command(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+        .args(["generate-lockfile", "--offline"])
+        .output()
+        .expect("cargo writes the fixture's lock");
+    assert!(locked.status.success(), "the fixture's lock is written");
+    let output = fixture
+        .command("node")
+        .arg(repo_root().join(".github/cross-shards.mjs"))
+        .stdin(Stdio::null())
+        .output()
+        .expect("node runs the check");
+    let said = format!("{}{}", stdout(&output), stderr(&output));
+    (output, said)
+}
+
+/// What says the Windows leg's split drops and repeats nothing: it lists every
+/// tier the justfile runs, whole and once per shard `ci.yml` hands out, and passes
+/// only when each test is in exactly one shard. A split it cannot account for —
+/// shards out of order, a partition that is not the axis's own, a tier it cannot
+/// place, no split at all — is refused by name rather than proved over less. And
+/// the same deal, once it has reproduced nextest's own shards, places every test of
+/// the Windows inventory in exactly one shard, a test this host does not build
+/// among them; an inventory it cannot read whole is refused.
+#[test]
+fn the_shard_check_accounts_for_every_tier_and_refuses_a_split_it_cannot_prove() {
+    let (output, said) = cross_shards(
+        "shards-proved",
+        SHARDS_CI,
+        SHARDS_JUSTFILE,
+        SHARDS_INVENTORY,
+    );
+    assert!(output.status.success(), "the split is proved:\n{said}");
+    for line in [
+        "cross-shards: lib-tier: 5 tests, 2 + 2 + 1 across 3 shards",
+        "cross-shards: suite2-tier: 6 tests, 3 + 2 + 1 across 3 shards",
+        "cross-shards: ok, 11 tests across 2 tiers, each in exactly one of 3 shards",
+        "cross-shards: Every test the Windows leg of run 1 (job 2) ran, at 3.",
+        "cross-shards: windows ok, 12 tests, 5 + 4 + 3 across 3 shards, each in exactly one; 1 of them this host does not list",
+    ] {
+        assert!(said.contains(line), "no `{line}`:\n{said}");
+    }
+
+    for (case, ci, justfile, says) in [
+        (
+            "shards-misnumbered",
+            SHARDS_CI.replace("[1, 2, 3]", "[1, 3, 2]"),
+            SHARDS_JUSTFILE.to_owned(),
+            "the `shard` axis is [1,3,2], not 1 to 3 in order",
+        ),
+        (
+            "shards-mishanded",
+            SHARDS_CI.replace("}}/3", "}}/2"),
+            SHARDS_JUSTFILE.to_owned(),
+            "the `cross` job hands its shards \"count:${{ matrix.shard }}/2\"",
+        ),
+        (
+            "shards-unsplit",
+            SHARDS_CI.replace("        shard: [1, 2, 3]\n", ""),
+            SHARDS_JUSTFILE.to_owned(),
+            "the `cross` job has no `shard` axis",
+        ),
+        (
+            "shards-no-leg",
+            "jobs:\n  gate:\n    runs-on: ubuntu-latest\n".to_owned(),
+            SHARDS_JUSTFILE.to_owned(),
+            "ci.yml has no `cross` job",
+        ),
+        (
+            "shards-no-tiers",
+            SHARDS_CI.to_owned(),
+            "_tier-test-quick filter:\n    @true\n".to_owned(),
+            "the justfile runs no tier through `_tier-test-quick`",
+        ),
+        (
+            "shards-unplaced",
+            SHARDS_CI.to_owned(),
+            SHARDS_JUSTFILE.replace(
+                "_suite-test-quick: (_tier-test-quick suite2-tier)",
+                "_suite-test-quick: (_tier-test-quick suite2-tier) (_tier-test-quick lib-tier)",
+            ),
+            "_suite-test-quick runs 2 tiers through `_tier-test-quick`, not one",
+        ),
+    ] {
+        let (output, said) = cross_shards(case, &ci, &justfile, SHARDS_INVENTORY);
+        assert_eq!(output.status.code(), Some(1), "{case} was proved:\n{said}");
+        assert!(
+            said.contains(says),
+            "{case} was refused without `{says}`:\n{said}"
+        );
+        assert!(!said.contains("cross-shards: ok"), "{case}:\n{said}");
+    }
+
+    for (case, inventory, says) in [
+        (
+            "inventory-untiered",
+            SHARDS_INVENTORY.replace(
+                "suite2-tier\tpartition-fixture::suite\ttwo",
+                "e2e-tier\tpartition-fixture::suite\ttwo",
+            ),
+            "names e2e-tier, which no `test-quick` recipe runs",
+        ),
+        (
+            "inventory-twice",
+            format!("{SHARDS_INVENTORY}lib-tier\tpartition-fixture\ttests::one\n"),
+            "lists partition-fixture tests::one a second time",
+        ),
+        (
+            "inventory-unreadable",
+            format!("{SHARDS_INVENTORY}lib-tier\tpartition-fixture\n"),
+            "is not a tier, a binary and a test",
+        ),
+        (
+            "inventory-partial",
+            SHARDS_INVENTORY
+                .lines()
+                .filter(|line| !line.starts_with("suite2-tier"))
+                .map(|line| format!("{line}\n"))
+                .collect(),
+            "holds no test of suite2-tier, so it is not a whole leg",
+        ),
+    ] {
+        let (output, said) = cross_shards(case, SHARDS_CI, SHARDS_JUSTFILE, &inventory);
+        assert_eq!(output.status.code(), Some(1), "{case} was proved:\n{said}");
+        assert!(
+            said.contains(says),
+            "{case} was refused without `{says}`:\n{said}"
+        );
+        assert!(!said.contains("windows ok"), "{case}:\n{said}");
+    }
+}
+
+/// One `test-quick` target's nextest run as a green Windows leg's log records it:
+/// under the Nx line that started it, with its `Starting` line, a status line per
+/// test it named, and its `Summary`.
+struct LoggedRun<'a> {
+    project: &'a str,
+    binary: &'a str,
+    tests: Vec<&'a str>,
+    starting: Option<usize>,
+    summary: String,
+}
+
+impl<'a> LoggedRun<'a> {
+    fn green(project: &'a str, binary: &'a str, tests: &[&'a str]) -> Self {
+        Self {
+            project,
+            binary,
+            tests: tests.to_vec(),
+            starting: Some(tests.len()),
+            summary: format!("{0} tests run: {0} passed, 0 skipped", tests.len()),
+        }
+    }
+}
+
+/// The four runs of a green leg, one per tier.
+fn green_leg() -> Vec<LoggedRun<'static>> {
+    vec![
+        LoggedRun::green("onepipeline-contract", "onepipeline::contract", &["a"]),
+        LoggedRun::green("onepipeline-note-journeys", "onepipeline::note", &["n"]),
+        LoggedRun::green("onepipeline-e2e", "onepipeline::e2e", &["x::b", "x::a"]),
+        LoggedRun::green("onepipeline", "onepipeline", &["unit"]),
+    ]
+}
+
+/// A job's log as GitHub serves it: a timestamp before each line, a byte-order
+/// mark before the first, and colour in the status lines.
+fn leg_log(runs: &[LoggedRun<'_>]) -> String {
+    let mut log = String::from("\u{feff}2026-10-17T07:22:19.0Z Current runner version\n");
+    for run in runs {
+        log.push_str(&format!(
+            "2026-10-17T07:22:20.0Z > nx run {}:test-quick\n",
+            run.project
+        ));
+        if let Some(starting) = run.starting {
+            log.push_str(&format!(
+                "2026-10-17T07:22:20.1Z \u{1b}[32;1m    Starting\u{1b}[0m {starting} tests across 1 binary\n"
+            ));
+        }
+        for (at, test) in run.tests.iter().enumerate() {
+            log.push_str(&format!(
+                "2026-10-17T07:22:20.2Z \u{1b}[32;1m        PASS\u{1b}[0m [   0.10{at}s] ({}/{}) \u{1b}[35;1m{}\u{1b}[0m {test}\n",
+                at + 1,
+                run.tests.len(),
+                run.binary
+            ));
+        }
+        log.push_str(&format!(
+            "2026-10-17T07:22:20.3Z      Summary [   0.5s] {}\n",
+            run.summary
+        ));
+    }
+    log
+}
+
+/// The four projects' `test-quick` targets, as this repository declares them, and
+/// the justfile recipes they run.
+const INVENTORY_PROJECTS: [(&str, &str, &str); 4] = [
+    ("project.json", "onepipeline", "just _crate-test-quick"),
+    (
+        "tests/e2e/project.json",
+        "onepipeline-e2e",
+        "just _e2e-test-quick",
+    ),
+    (
+        "tests/contract/project.json",
+        "onepipeline-contract",
+        "just _contract-test-quick",
+    ),
+    (
+        "tests/note/project.json",
+        "onepipeline-note-journeys",
+        "just _note-test-quick",
+    ),
+];
+
+const INVENTORY_JUSTFILE: &str = "_tier-test-quick filter:\n    @true\n\n_crate-test-quick: (_tier-test-quick rest-tier)\n\n_e2e-test-quick: _preflight (_tier-test-quick e2e-tier)\n\n_contract-test-quick: (_tier-test-quick contract-tier)\n\n_note-test-quick: (_tier-test-quick note-tier)\n";
+
+/// `node .github/windows-inventory.mjs`, from a fixture repository declaring
+/// `projects` — path, name and `test-quick` command — over `log`, with `args` after the log's path — or the usual
+/// three when `args` is `None`. Exit code, the inventory written, and stderr.
+fn windows_inventory(
+    case: &str,
+    projects: &[(&str, &str, &str)],
+    justfile: &str,
+    log: &str,
+    args: Option<&[&str]>,
+) -> (Option<i32>, String, String) {
+    let projects: Vec<(String, String)> = projects
+        .iter()
+        .map(|(path, name, command)| {
+            (
+                (*path).to_owned(),
+                format!(
+                    "{{\"name\": \"{name}\", \"targets\": {{\"test-quick\": {{\"command\": \"{command}\"}}}}}}"
+                ),
+            )
+        })
+        .collect();
+    let mut files: Vec<(&str, &str)> = projects
+        .iter()
+        .map(|(path, text)| (path.as_str(), text.as_str()))
+        .collect();
+    files.push(("justfile", justfile));
+    files.push(("leg.log", log));
+    let fixture = Fixture::new(case, RERUN_MANIFEST, &files);
+    let output = fixture
+        .command("node")
+        .arg(repo_root().join(".github/windows-inventory.mjs"))
+        .arg(fixture.path("leg.log"))
+        .args(args.unwrap_or(&["11", "22", "abc"]))
+        .stdin(Stdio::null())
+        .output()
+        .expect("node runs the extractor");
+    (output.status.code(), stdout(&output), stderr(&output))
+}
+
+/// A log the extractor has to refuse: its case, the projects and justfile beside it, the log,
+/// the arguments after the log's path, and what the refusal says.
+struct Refused<'a>(
+    &'a str,
+    Vec<(&'a str, &'a str, &'a str)>,
+    String,
+    String,
+    Option<&'a [&'a str]>,
+    &'a str,
+);
+
+/// The inventory is written off a green leg's own log, every test it ran under the
+/// tier its project's `test-quick` target runs, read off where those are declared.
+/// A log whose counts do not add up, or that does not hold one finished run of each
+/// tier, and a project that does not run one tier, are refused rather than written
+/// down short.
+#[test]
+fn the_windows_inventory_is_every_test_a_finished_leg_ran_and_nothing_less() {
+    let (code, written, said) = windows_inventory(
+        "inventory-green",
+        &INVENTORY_PROJECTS,
+        INVENTORY_JUSTFILE,
+        &leg_log(&green_leg()),
+        None,
+    );
+    assert_eq!(code, Some(0), "{said}");
+    assert_eq!(
+        written,
+        "# Every test the Windows leg of run 11 (job 22) ran, at abc.\n\
+         # Written by .github/windows-inventory.mjs from that job's log; checked by\n\
+         # .github/cross-shards.mjs. Columns: tier, binary, test.\n\
+         contract-tier\tonepipeline::contract\ta\n\
+         e2e-tier\tonepipeline::e2e\tx::a\n\
+         e2e-tier\tonepipeline::e2e\tx::b\n\
+         note-tier\tonepipeline::note\tn\n\
+         rest-tier\tonepipeline\tunit\n"
+    );
+
+    let changed = |change: &dyn Fn(&mut Vec<LoggedRun<'static>>)| {
+        let mut runs = green_leg();
+        change(&mut runs);
+        leg_log(&runs)
+    };
+    let green = leg_log(&green_leg());
+    let cases: Vec<Refused<'_>> = vec![
+        Refused(
+            "inventory-usage",
+            INVENTORY_PROJECTS.to_vec(),
+            INVENTORY_JUSTFILE.to_owned(),
+            green.clone(),
+            Some(&["11", "22"]),
+            "usage: windows-inventory.mjs <job log> <run> <job> <commit>",
+        ),
+        Refused(
+            "inventory-surplus",
+            INVENTORY_PROJECTS.to_vec(),
+            INVENTORY_JUSTFILE.to_owned(),
+            green.clone(),
+            Some(&["11", "22", "abc", "extra"]),
+            "usage: windows-inventory.mjs <job log> <run> <job> <commit>",
+        ),
+        Refused(
+            "inventory-unknown-project",
+            INVENTORY_PROJECTS.to_vec(),
+            INVENTORY_JUSTFILE.to_owned(),
+            changed(&|runs| runs[0].project = "onepipeline-mystery"),
+            None,
+            "onepipeline-mystery:test-quick runs no tier this inventory knows",
+        ),
+        Refused(
+            "inventory-reported-twice",
+            INVENTORY_PROJECTS.to_vec(),
+            INVENTORY_JUSTFILE.to_owned(),
+            changed(&|runs| runs[2].tests.push("x::a")),
+            None,
+            "e2e-tier: onepipeline::e2e x::a reported twice",
+        ),
+        Refused(
+            "inventory-tier-twice",
+            INVENTORY_PROJECTS.to_vec(),
+            INVENTORY_JUSTFILE.to_owned(),
+            changed(&|runs| {
+                runs.pop();
+                runs.push(LoggedRun::green(
+                    "onepipeline-contract",
+                    "onepipeline::contract",
+                    &["a"],
+                ));
+            }),
+            None,
+            "the log holds 4 test-quick runs over contract-tier, note-tier, e2e-tier, not one of each tier",
+        ),
+        Refused(
+            "inventory-unstarted",
+            INVENTORY_PROJECTS.to_vec(),
+            INVENTORY_JUSTFILE.to_owned(),
+            changed(&|runs| runs[1].starting = None),
+            None,
+            "note-tier: the run has no Starting or no Summary line, so it did not finish",
+        ),
+        Refused(
+            "inventory-unreported",
+            INVENTORY_PROJECTS.to_vec(),
+            INVENTORY_JUSTFILE.to_owned(),
+            changed(&|runs| {
+                runs[2].tests.pop();
+            }),
+            None,
+            "e2e-tier: 1 tests named, 2 starting, 2 run and 2 passed",
+        ),
+        Refused(
+            "inventory-overcounted",
+            INVENTORY_PROJECTS.to_vec(),
+            INVENTORY_JUSTFILE.to_owned(),
+            changed(&|runs| runs[2].summary = "3 tests run: 3 passed, 0 skipped".to_owned()),
+            None,
+            "e2e-tier: 2 tests named, 2 starting, 3 run and 3 passed",
+        ),
+        Refused(
+            "inventory-failed",
+            INVENTORY_PROJECTS.to_vec(),
+            INVENTORY_JUSTFILE.to_owned(),
+            changed(&|runs| runs[2].summary = "2 tests run: 1 passed, 1 failed".to_owned()),
+            None,
+            "e2e-tier: 2 tests named, 2 starting, 2 run and 1 passed",
+        ),
+        Refused(
+            "inventory-two-tier-recipe",
+            INVENTORY_PROJECTS.to_vec(),
+            INVENTORY_JUSTFILE.replace(
+                "_note-test-quick: (_tier-test-quick note-tier)",
+                "_note-test-quick: (_tier-test-quick note-tier) (_tier-test-quick e2e-tier)",
+            ),
+            green.clone(),
+            None,
+            "onepipeline-note-journeys:test-quick runs _note-test-quick, which runs 2 tiers, not one",
+        ),
+        Refused(
+            "inventory-not-a-recipe",
+            INVENTORY_PROJECTS
+                .iter()
+                .map(|&(path, name, command)| {
+                    (path, name, if name == "onepipeline-e2e" { "cargo nextest run" } else { command })
+                })
+                .collect(),
+            INVENTORY_JUSTFILE.to_owned(),
+            green.clone(),
+            None,
+            "onepipeline-e2e:test-quick runs \"cargo nextest run\", not one justfile recipe",
+        ),
+        Refused(
+            "inventory-no-projects",
+            Vec::new(),
+            INVENTORY_JUSTFILE.to_owned(),
+            green.clone(),
+            None,
+            "no project here has a `test-quick` target",
+        ),
+    ];
+    for Refused(case, projects, justfile, log, args, says) in cases {
+        let (code, written, said) = windows_inventory(case, &projects, &justfile, &log, args);
+        assert_eq!(code, Some(1), "{case} was written:\n{written}");
+        assert!(
+            said.contains(says),
+            "{case} was refused without `{says}`:\n{said}"
+        );
+        assert!(written.is_empty(), "{case} wrote an inventory:\n{written}");
+    }
+}
+
+/// Nx's answer to `show <args> --json`, asked through the workspace's one entry
+/// point to it.
+fn nx_shows(args: &[&str]) -> serde_json::Value {
+    let output = Command::new(bash())
+        .arg(repo_root().join("scripts/nx.sh"))
+        .arg("show")
+        .args(args)
+        .arg("--json")
+        .current_dir(repo_root())
+        .env("ONEPIPELINE_NX_SHOW_OUTPUT", "1")
+        .stdin(Stdio::null())
+        .output()
+        .expect("bash runs Nx");
+    assert!(
+        output.status.success(),
+        "nx show {args:?} failed:\n{}",
+        stderr(&output)
+    );
+    serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|error| panic!("nx show {args:?} is not JSON: {error}"))
+}
+
+/// Nx caches every `test-quick` target, and two shards of one tree differ in
+/// nothing but `ONEPIPELINE_TEST_PARTITION` — so unless that is one of a target's
+/// inputs, a warm cache replays one shard's pass for the next, which then runs
+/// nothing. Read off Nx's own resolution of each project's target, defaults merged:
+/// every cached `test-quick` is keyed on the partition.
+#[test]
+fn a_shards_cached_pass_never_stands_in_for_another_shards_run() {
+    let projects = nx_shows(&["projects", "--with-target", "test-quick"]);
+    let projects = projects
+        .as_array()
+        .expect("Nx lists the projects with a `test-quick` target");
+    assert!(!projects.is_empty(), "no project has a `test-quick` target");
+    let partition = serde_json::json!({ "env": "ONEPIPELINE_TEST_PARTITION" });
+    for project in projects {
+        let project = project.as_str().expect("a project is named");
+        let target = nx_shows(&["target", &format!("{project}:test-quick")]);
+        if target["cache"] != true {
+            continue;
+        }
+        let inputs = target["inputs"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{project}:test-quick resolves no inputs: {target}"));
+        assert!(
+            inputs.contains(&partition),
+            "{project}:test-quick is cached without the partition among its inputs, so one \
+             shard's pass replays for another: {inputs:?}"
+        );
+    }
+}
+
+/// The log grammar the inventory is read with is nextest's, so it is held against
+/// nextest's own: the partition fixture run under this repository's `ci` profile —
+/// the one the Windows leg reports with — in colour, written into a leg's log once
+/// per tier under the Nx line that starts it and with the timestamp GitHub puts
+/// before every line, has to come back as every test it ran.
+#[test]
+fn the_windows_inventory_reads_what_nextest_itself_reports() {
+    // The binaries the profile's own filters name, as the scheduling fixture has.
+    let fixture = Fixture::new(
+        "inventory-real-nextest",
+        SCHEDULING_MANIFEST,
+        &[
+            (
+                "src/lib.rs",
+                "#[cfg(test)]\nmod tests {\n    #[test]\n    fn unit() {}\n}\n",
+            ),
+            (".config/nextest.toml", &repository_config()),
+            (
+                "tests/e2e.rs",
+                "#[test]\nfn one() {}\n#[test]\nfn two() {}\n",
+            ),
+            ("tests/note.rs", "#[test]\nfn one() {}\n"),
+            ("tests/release_channel.rs", "#[test]\nfn one() {}\n"),
+            ("tests/oneagentgraph_liveness.rs", "#[test]\nfn one() {}\n"),
+        ],
+    );
+    let nextest = |args: &[&str]| {
+        fixture
+            .command(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+            .arg("nextest")
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .expect("nextest runs in the fixture")
+    };
+    let ran = nextest(&["run", "--profile", "ci", "--color", "always"]);
+    let reported = format!("{}{}", stdout(&ran), stderr(&ran));
+    assert!(
+        ran.status.success(),
+        "the fixture's run passed:\n{reported}"
+    );
+    let listed = nextest(&["list", "--message-format", "oneline"]);
+    assert!(listed.status.success(), "{}", stderr(&listed));
+    let tests: Vec<String> = stdout(&listed)
+        .lines()
+        .filter_map(|line| line.split_once(' '))
+        .map(|(binary, test)| format!("{binary}\t{test}"))
+        .collect();
+    assert_eq!(tests.len(), 6, "{}", stdout(&listed));
+
+    let mut log = String::new();
+    for (_, project, _) in INVENTORY_PROJECTS {
+        log.push_str(&format!(
+            "2026-10-17T07:22:20.0Z > nx run {project}:test-quick\n"
+        ));
+        for line in reported.lines() {
+            log.push_str(&format!("2026-10-17T07:22:20.1Z {line}\n"));
+        }
+    }
+    let (code, written, said) = windows_inventory(
+        "inventory-real-nextest-log",
+        &INVENTORY_PROJECTS,
+        INVENTORY_JUSTFILE,
+        &log,
+        None,
+    );
+    assert_eq!(code, Some(0), "{said}\n{log}");
+    let mut expected: Vec<String> = ["rest-tier", "e2e-tier", "contract-tier", "note-tier"]
+        .iter()
+        .flat_map(|tier| tests.iter().map(move |test| format!("{tier}\t{test}")))
+        .collect();
+    expected.sort();
+    let inventoried: Vec<&str> = written
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .collect();
+    assert_eq!(inventoried, expected, "{said}");
+}

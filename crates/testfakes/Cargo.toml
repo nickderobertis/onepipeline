@@ -53,13 +53,13 @@ oneharness-core = { workspace = true }
 # dev-dependency): a two-party member's onejudge spawns `oneharness run` for each
 # turn, and `tests/e2e/dispatch.rs`'s
 # `a_judged_codex_turn_starts_with_plugins_off_unless_its_config_opts_in` drives
-# that real process — over the one `oneharness-core` above, since 0.25.1 requires
-# `^0.28.1` — with only `codex` doubled. Nothing here calls into it.
-oneharness = "0.25.1"
+# that real process — over the one `oneharness-core` above, since 0.25.2 requires
+# `^0.28.2` — with only `codex` doubled. Nothing here calls into it.
+oneharness = "0.25.2"
 # The graph document's own reader, so the observer double runs the judge-side
 # provider the graph *declares* rather than one it remembered: a graph that named
 # a different provider would otherwise still be supervised by this copy.
-serde_norway = "0.9"
+serde-saphyr = { workspace = true }
 # The store's reference plugin host, the plugin it hosts, and the plugin API whose
 # types `scripted-source` reads its scenario through; see `src/hosted.rs`.
 onetaskgraph-core = { workspace = true }

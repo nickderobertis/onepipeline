@@ -2149,7 +2149,7 @@ impl World {
         use oneagentgraph::config::Member;
 
         let shipped = repo_file("graphs/dag-scope.yaml");
-        let config: oneagentgraph::config::GraphConfig = serde_norway::from_str(
+        let config: oneagentgraph::config::GraphConfig = onepipeline_testfakes::yaml::from_str(
             &std::fs::read_to_string(&shipped).expect("the shipped dag-scope graph"),
         )
         .expect("the shipped dag-scope graph is a valid oneagentgraph config");
@@ -2781,7 +2781,7 @@ impl World {
         let mut document = String::from("---\n");
         for (key, value) in front {
             document.push_str(
-                &serde_norway::to_string(&json!({ *key: value }))
+                &onepipeline_testfakes::yaml::to_string(&json!({ *key: value }))
                     .expect("a front-matter field serialises"),
             );
         }
@@ -3318,6 +3318,23 @@ pub struct Arrival {
 }
 
 impl Rendezvous {
+    /// A rendezvous the binary under test meets itself rather than a double: one of its
+    /// private ordering failpoints, which a journey points at [`Rendezvous::address`]
+    /// through that failpoint's variable.
+    pub fn failpoint() -> Self {
+        Self {
+            listener: std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback listener"),
+        }
+    }
+
+    /// Where the failpoint meets this test.
+    pub fn address(&self) -> String {
+        self.listener
+            .local_addr()
+            .expect("the listener has an address")
+            .to_string()
+    }
+
     /// Block until the next dispatch arrives, and say which one.
     ///
     /// Once this returns, what the caller does next lands on a worker that is
@@ -3326,8 +3343,14 @@ impl Rendezvous {
     /// promise. Called again after a takeover, it answers with the fresh
     /// driver's dispatch, since the stopped one is already held.
     pub fn arrived(&self) -> Arrival {
-        use std::io::BufRead;
         let (stream, _) = self.listener.accept().expect("a dispatch connects");
+        Arrival::of(stream)
+    }
+}
+
+impl Arrival {
+    fn of(stream: std::net::TcpStream) -> Self {
+        use std::io::BufRead;
         let mut announced = String::new();
         std::io::BufReader::new(stream.try_clone().expect("the connection is shared"))
             .read_line(&mut announced)
@@ -5081,7 +5104,7 @@ fn title_of(path: &Path) -> Result<String, String> {
         .and_then(|rest| rest.split_once("---\n"))
         .map(|(front, _)| front)
         .ok_or_else(|| "its project document has no front matter".to_owned())?;
-    let front = serde_norway::from_str::<serde_json::Map<String, Value>>(front)
+    let front = onepipeline_testfakes::yaml::from_str::<serde_json::Map<String, Value>>(front)
         .map_err(|error| format!("its front matter is not a mapping ({error})"))?;
     front
         .get("title")
@@ -5854,6 +5877,38 @@ impl HeldPublication {
     pub fn release(&self) {
         std::fs::write(&self.rendezvous, "go").expect("the held publication is released");
     }
+
+    /// Hold the next push again, once every push this hold let through is over:
+    /// the rendezvous and the marker the last push left are both taken away, so
+    /// [`holding`](Self::holding) answers for the next one alone.
+    pub fn rearm(&self) {
+        let mut marker = self.rendezvous.clone().into_os_string();
+        marker.push(".holding");
+        for path in [PathBuf::from(marker), self.rendezvous.clone()] {
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => panic!("{} could not be taken away: {error}", path.display()),
+            }
+        }
+    }
+}
+
+/// Hold every push from here on at `held`'s rendezvous rather than at the one the
+/// repository's hook was installed with.
+///
+/// git reads the hook again at every push, so a push already inside the old hook
+/// waits on the old rendezvous and every later push on `held`'s — which is how a
+/// journey holds the second of two pushes it cannot tell apart by anything else,
+/// switching once it has seen the first held. Only for a world whose
+/// [`World::repository`] installed a hook, since that is what points git here.
+pub fn hold_later_pushes_at(world: &World, held: &HeldPublication) {
+    let hook = hooks_dir(world).join("pre-push");
+    assert!(
+        hook.is_file(),
+        "this world's repository has no hook of its own to hold a push with"
+    );
+    install_hook(&hook, &held.argv());
 }
 
 impl Drop for HeldPublication {
@@ -6810,6 +6865,8 @@ pub struct Counts {
     /// written, and one resuming from a checkpoint counts what the store has
     /// grown by since.
     pub records_folded: u64,
+    /// Reads of the project's driver claim the driver asked its plan store for.
+    pub claim_reads: u64,
 }
 
 impl Counts {
@@ -6824,6 +6881,7 @@ impl Counts {
             maintenance_sweeps: self.maintenance_sweeps - before.maintenance_sweeps,
             store_bytes: self.store_bytes - before.store_bytes,
             records_folded: self.records_folded - before.records_folded,
+            claim_reads: self.claim_reads - before.claim_reads,
         }
     }
 }
@@ -6855,6 +6913,7 @@ pub fn counts(world: &World, run: &str) -> Counts {
         release_asks: count("release_asks"),
         maintenance_sweeps: count("maintenance_sweeps"),
         store_bytes: count("store_bytes"),
+        claim_reads: count("claim_reads"),
         records_folded: count("records_folded"),
     }
 }

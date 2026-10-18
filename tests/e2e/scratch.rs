@@ -1013,8 +1013,15 @@ fn discard_refuses_unknown_and_path_like_names_and_live_or_dead_drivers() {
         &plan_of("live", vec![agent("build", &[]), agent("later", &[])]),
     );
     world.run(&["start", &path, "--detach"]).exited(0);
-    world.until("the dispatch's scratch", |world| {
+    // Both dispatches run at once, and each writes its scratch first: `build`
+    // before the turn it holds open, `later` before it settles. Until both
+    // have, the tree the refusals must leave alone is still being written.
+    world.until("both dispatches' scratch", |world| {
         !world.events_of("live", "turn-started").is_empty()
+            && world
+                .events_of("live", "node-settled")
+                .iter()
+                .any(|settled| settled["labels"]["node"] == "later")
     });
     let before = snapshot(&world.run_file("live", "scratch"));
     for run in ["unknown", "../live", "/live", "live/", "live\\outside"] {

@@ -432,8 +432,7 @@ impl Registry {
             }
         };
         let refused = |why: String| Error::Invalid(format!("{}: {why}", file.display()));
-        let parsed: RegistrationFile =
-            serde_norway::from_str(&text).map_err(|error| refused(error.to_string()))?;
+        let parsed: RegistrationFile = crate::yaml::from_str(&text).map_err(refused)?;
         if parsed.onepipeline_templates != REGISTRATION_VERSION {
             return Err(refused(format!(
                 "`{REGISTRATION_KEY}: {}` is not a registration version this build reads; it \
@@ -647,7 +646,13 @@ fn repository_dir(repo: &Path) -> PathBuf {
 /// `\\?\UNC\server\…`), which is how `onevcs` can answer a checkout while the caller
 /// registered it plainly; any other path, and every path elsewhere, is returned as it is.
 pub(crate) fn plain(path: PathBuf) -> PathBuf {
-    if cfg!(windows) {
+    plain_on(path, cfg!(windows))
+}
+
+/// [`plain`] as it reads on Windows when `windows`, and as it reads elsewhere otherwise,
+/// so a caller can prove the Windows spelling on any host.
+pub(crate) fn plain_on(path: PathBuf, windows: bool) -> PathBuf {
+    if windows {
         if let Some(stripped) = path.to_str().and_then(without_verbatim_prefix) {
             return PathBuf::from(stripped);
         }

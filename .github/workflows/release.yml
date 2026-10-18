@@ -1,93 +1,51 @@
 name: Release
 
-# Build, archive, checksum, and publish everything a published GitHub Release
-# ships: the cross-platform binaries, the crates.io crate, the PyPI wheels, and
-# the npm packages.
+# Build, test-install, publish and verify everything a published GitHub Release
+# ships, one platform per job, then the platform-independent rest:
+#
+#   * build-linux   — x86_64-unknown-linux-gnu
+#   * build-macos   — aarch64-apple-darwin (Intel macOS is not built)
+#   * build-windows — x86_64-pc-windows-msvc
+#   * publish       — the crate and the npm launcher, once every platform is out
+#
+# Each build job builds its targets once, packages the archive, the wheel and
+# the npm platform package from that one binary, test-installs those exact
+# files, publishes them (the Release assets, PyPI, npm), and then installs what
+# the registries serve on its own OS and runs it. Every step is a phase of its
+# platform's recipe — `just release-<platform> build|publish|verify` — so a
+# release and a developer run the same release/release.py, and `just
+# release-<platform> plan` lists everything a job publishes without building it.
+#
+# `publish` needs all three. It refuses a lock that links an engine twice,
+# records the linked engines in the notes, confirms every registry serves every
+# platform, publishes the crate and the launcher, installs both, and records the
+# outcome. A failed build job leaves the platforms that built published and the
+# platform-independent artifacts unpublished until it is re-run: re-running the
+# failed job and then `publish` finishes the release, and each upload skips what
+# a registry already serves.
 #
 # The Release is what fires this: release-plz (see release-plz.yml) computes the
 # version, writes the changelog and manifests, tags `vX.Y.Z`, and cuts the
-# Release. Versioning and building stay separate workflows, joined only by that
-# Release. Creating a Release by hand in the GitHub UI is the supported manual
-# fallback — it triggers this same validated path.
-#
-# release-plz authenticates with a PAT precisely so that Release fires this
-# workflow — a tag or release created by the default GITHUB_TOKEN triggers
-# nothing, and the release would silently ship no artifacts.
-#
-#   * test          — the complete deterministic gate, so untested artifacts
-#                     never publish.
-#   * linked-engines — record the sibling-engine versions this release links in
-#                     its own notes, ungated so a red gate still says what it
-#                     would have shipped.
-#   * upload        — build each target on a native runner and attach the archive
-#                     + sha256 checksum to the Release.
-#   * publish-crate — idempotent crates.io publish; self-activates the day
-#                     CARGO_REGISTRY_TOKEN is set.
-#   * verify-crate  — an artifact a release published and nothing installed is one
-#                     nobody is watching; this is that promise for the crate.
-#   * build-wheels  — wrap the prebuilt binary in per-platform PyPI wheels with
-#                     maturin (the ruff/uv pattern). Runs unconditionally, so a
-#                     packaging break reddens the release even while publishing
-#                     is switched off.
-#   * publish-pypi  — upload those wheels to onepipeline-cli with the
-#                     PYPI_TOKEN secret, gated on the PYPI_PUBLISH repo variable.
-#   * verify-pypi   — pip-install the exact version just published on every OS a
-#                     user installs it on, then run scripts/smoke-published.sh.
-#   * build-npm     — wrap the same prebuilt binary in per-platform npm packages
-#                     via scripts/npm-build.mjs. Unconditional, same rationale as
-#                     the wheels.
-#   * publish-npm   — publish the platform packages, then the launcher that
-#                     depends on them, with the NPM_TOKEN secret, gated on the
-#                     NPM_PUBLISH repo variable.
-#   * verify-npm    — the same promise for npm, one leg per platform package the
-#                     launcher pins: a platform nothing installs is one nothing
-#                     watches, which is how one of them stayed broken.
-#   * outcome       — the one artifact a consumer outside this repository can ask
-#                     what a release did, rather than reconstructing it from
-#                     thirty job squares.
-#
-# **Verification stays in this workflow rather than a separate one**, so this
-# workflow's conclusion is a claim about what a user can install rather than
-# about whether the publish steps exited 0. A release has already shipped
-# artifacts that could not be installed; the second claim would have been green
-# for all of them. `outcome` below makes the distinction readable without
-# opening a job log.
-#
-# Every verify job runs the version at publish time only, and by exact version.
-# `published-smoke.yml` runs the identical script against whatever the registries
-# serve as `latest`, triggered by this workflow completing — which is when the
-# two can newly disagree, a dist-tag left on a build that never shipped being the
-# way that happens — and it opens an issue rather than a red square nobody reads.
+# Release, with a PAT, because a Release created by the default GITHUB_TOKEN
+# triggers nothing. Creating a Release by hand is the supported fallback; the
+# tree it names was gated by the pull requests that reached it, and this
+# workflow refuses a tag that does not name Cargo.toml's version.
 #
 # The version is never written here: every artifact takes it from Cargo.toml
 # (maturin via `dynamic = ["version"]`, npm via scripts/npm-build.mjs), so
 # release-plz stays the single version driver.
 #
-# llmlint: ignore-file[changed_behavior_has_e2e] the publish and verify jobs are steps
-# in a GitHub Actions job on a published Release: installing an exact version until the
-# registry serves it, and smoke-testing what it installed. Driving them from a test would
-# mean standing up a runner and a public release, or replacing both with a simulation —
-# and the simulation is what would then be under test. They are proven the only way they
-# can be, by running on every real release, and everything they call that *can* be driven
-# locally is: the npm packaging in npm/test/launcher.test.mjs, and the wheel and the
-# smoke script in ci.yml's `wheel` and `install` jobs on every pull request.
-#
-# llmlint: ignore-file[live_tier_compiles_and_requires_credential] the publish and verify
-# jobs are deliberately switched by the PYPI_PUBLISH / NPM_PUBLISH repository variables,
-# which is the operator's control over whether a Release reaches a public registry at all
-# — a fork, or a repo whose tokens are not provisioned, must not publish. The two
-# properties the rule protects are still held: the tier *builds* on every release, because
-# build-wheels and build-npm are ungated on purpose, so a packaging break reddens a release
-# even while publishing is off; and it *requires* its credential, because each publish job
-# fails fast with the secret to set when its variable is on and the token is empty.
+# PyPI and npm publish only while the PYPI_PUBLISH / NPM_PUBLISH repository
+# variables are 'true' — the operator's switch, so a fork does not publish — and
+# a registry switched on with an empty token is refused before anything uploads.
+# Only the publish steps are handed the tokens.
+# The crate publishes while CARGO_REGISTRY_TOKEN is set.
 
 on:
   release:
     types: [published]
 
-# Nothing by default: the jobs that read the repository ask for `contents: read`
-# themselves, and the ones that only move artifacts between jobs or install from
-# a public registry get a token with no scopes at all.
+# Nothing by default: each job asks for what it writes.
 permissions: {}
 
 concurrency:
@@ -96,604 +54,181 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  RELEASE_TAG: ${{ github.event.release.tag_name }}
+  PYPI_PUBLISH: ${{ vars.PYPI_PUBLISH }}
+  NPM_PUBLISH: ${{ vars.NPM_PUBLISH }}
 
 jobs:
-  # crates.io publishing self-activates once the CARGO_REGISTRY_TOKEN secret
-  # exists. `secrets` cannot be read in a job `if:`, so read it into an env var
-  # here and expose its presence as an output the publish job gates on. The PyPI
-  # and npm jobs need no such guard: they gate on repository *variables*, which
-  # `if:` can read directly.
-  guard:
+  build-linux:
     runs-on: ubuntu-latest
-    permissions: {}
+    timeout-minutes: 30
+    permissions:
+      contents: write
     outputs:
-      publish: ${{ steps.check.outputs.publish }}
-    steps:
-      - id: check
-        env:
-          TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: |
-          if [ -n "$TOKEN" ]; then
-            echo "publish=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "CARGO_REGISTRY_TOKEN not set; skipping crates.io publish." >&2
-            echo "publish=false" >> "$GITHUB_OUTPUT"
-          fi
-
-  # Re-gate the release on the same checks CI enforces, so a release can never
-  # publish an artifact that would not pass the gate.
-  #
-  # llmlint: ignore-block[no_second_broader_sweep_over_an_already_gated_commit] the
-  # tree this gates is not one this repository has necessarily gated. This workflow
-  # fires on a *published Release*, and creating a Release by hand from any tag is the
-  # documented manual fallback (see the header above) — that tag can name a commit CI
-  # never ran on, or one whose gate ran against different pinned engines. The rule's
-  # premise, that an identical tree was already gated on the way in, is what does not
-  # hold here; this is the only run that can refuse to publish an artifact.
-  test:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
+      published: ${{ steps.publish.outcome }}
+      verified: ${{ steps.verify.outcome }}
     steps:
       - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: just,nextest,cargo-llvm-cov
-      - run: just bootstrap
-      - run: just check
-  # llmlint: ignore-end[no_second_broader_sweep_over_an_already_gated_commit]
-
-  # Which version of each sibling engine this release links, in the notes rather
-  # than only in the CycloneDX SBOM inside a published wheel — where nobody who
-  # asks the question is looking.
-  #
-  # Deliberately not gated on `test`: this reads the tagged tree and is true
-  # whether or not the artifacts publish, and a release whose gate went red is
-  # the one whose notes should least be silent about what it links.
-  # `contents: write` because it edits the Release body, which nothing else here
-  # needs.
-  linked-engines:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: just
-      # Through the recipe, so the note a release carries and the check a
-      # developer runs are one reading rather than two that can disagree.
-      - name: Compose the note from this release's own lockfile
-        run: just linked-engines > "$RUNNER_TEMP/linked-engines.md"
-      - name: Record it in the release notes
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.event.release.tag_name }}
-        run: |
-          gh release view "$TAG" --json body --jq .body > "$RUNNER_TEMP/body.md"
-          # Re-running a release replaces the section rather than stacking a
-          # second copy: everything from the marker onward is dropped first.
-          awk '/^<!-- linked-engines -->$/ { exit } { print }' \
-            "$RUNNER_TEMP/body.md" > "$RUNNER_TEMP/notes.md"
-          printf '\n' >> "$RUNNER_TEMP/notes.md"
-          cat "$RUNNER_TEMP/linked-engines.md" >> "$RUNNER_TEMP/notes.md"
-          gh release edit "$TAG" --notes-file "$RUNNER_TEMP/notes.md"
-
-  upload:
-    name: upload (${{ matrix.target }})
-    needs: test
-    permissions:
-      contents: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # Native runners per target so nothing needs cross-compilation.
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-24.04-arm
-          - target: x86_64-apple-darwin
-            os: macos-latest
-          - target: aarch64-apple-darwin
-            os: macos-latest
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build, archive, checksum, and upload
-        # Four of these targets are compiled nowhere else, so a warning specific
-        # to one has no other job to surface it.
-        env:
-          RUSTFLAGS: "-D warnings"
-        uses: taiki-e/upload-rust-binary-action@v1
-        with:
-          bin: onepipeline
-          target: ${{ matrix.target }}
-          archive: $bin-$tag-$target
-          checksum: sha256
-          include: README.md,LICENSE,CHANGELOG.md
-          # Uploading an asset to a release that already exists triggers no
-          # workflow, so the job-scoped GITHUB_TOKEN is the least privilege that
-          # does the job. The PAT this pipeline does need is RELEASE_PLZ_TOKEN,
-          # which cuts the Release that starts this workflow.
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-  # crates.io publishing: runs whenever CARGO_REGISTRY_TOKEN is set. Gated on the
-  # same `test` job as the binary upload, but NOT on `upload` — a flaky
-  # per-platform upload must not block the immutable crate publish, and vice
-  # versa. Kept out of release-plz (publish = false there) so versioning/tagging
-  # stays decoupled from the registry push.
-  publish-crate:
-    needs: [guard, test]
-    if: ${{ needs.guard.outputs.publish == 'true' }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
-      # Idempotent: a version already live on crates.io is skipped rather than
-      # failing the release, so re-running after a partial failure is safe.
-      - name: Publish (skip a version already live)
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-          # `cargo publish` verifies the packaged crate by building it, which is
-          # one more compile the gate never sees the output of.
-          RUSTFLAGS: "-D warnings"
-        run: |
-          ver="$(cargo metadata --no-deps --format-version 1 \
-                 | sed -n 's/.*"name":"onepipeline","version":"\([^"]*\)".*/\1/p')"
-          if curl -fsSL "https://index.crates.io/on/ea/onepipeline" 2>/dev/null \
-             | grep -q "\"vers\":\"$ver\""; then
-            echo "onepipeline $ver is already on crates.io; nothing to publish."
-            exit 0
-          fi
-          cargo publish --locked
-
-  # Post-publish gate for the crate, the same promise verify-pypi and verify-npm
-  # make for the wheel and the launcher. crates.io had none, which is the hole
-  # aarch64 Linux sat in on npm: an artifact every release publishes and no
-  # release installs. One leg, because crates.io serves one artifact — the
-  # source — rather than one per platform, and building it is what a Rust user's
-  # `cargo install` does on every platform anyway.
-  verify-crate:
-    needs: [guard, publish-crate]
-    if: ${{ needs.guard.outputs.publish == 'true' }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
-      - name: Check the release tag is a version
-        run: |
-          if ! [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::release tag '$GITHUB_REF_NAME' is not a vX.Y.Z version tag"
-            exit 1
-          fi
-      # The install is the propagation probe, same as the other two verify jobs:
-      # the sparse index a user resolves from converges after the publish call
-      # returns, and only the install asks the thing a user asks.
-      - name: Install the published crate
-        run: |
-          ver="${GITHUB_REF_NAME#v}"
-          bash scripts/retry-install.sh \
-            --label "crates.io onepipeline $ver on $RUNNER_OS/$RUNNER_ARCH" \
-            --action "check https://crates.io/crates/onepipeline — publish-crate may not have published this version" \
-            -- cargo install onepipeline --version "$ver" --locked --force
-      - name: Smoke-test what crates.io served
-        run: |
-          ver="${GITHUB_REF_NAME#v}"
-          bash scripts/smoke-published.sh \
-            --expect-version "$ver" \
-            --label "crates.io onepipeline $ver on $RUNNER_OS/$RUNNER_ARCH"
-
-  # PyPI wheels: maturin's `bin` bindings wrap the prebuilt binary in
-  # per-platform wheels (the ruff/uv pattern), so `pip install onepipeline-cli`
-  # is a seconds-fast binary install anywhere PyPI is reachable. Linux wheels
-  # compile inside manylinux containers for broad glibc compatibility, which is
-  # why this is a separate matrix from `upload` rather than a step in it.
-  #
-  # The Linux legs run `just wheel-linux`, the build ci.yml's `wheel` legs run on
-  # every pull request, so a release builds no Linux wheel a pull request did not.
-  build-wheels:
-    name: build-wheels (${{ matrix.target }})
-    needs: test
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-24.04-arm
-          - target: x86_64-apple-darwin
-            os: macos-latest
-          - target: aarch64-apple-darwin
-            os: macos-latest
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: taiki-e/install-action@v2
-        if: runner.os == 'Linux'
-        with:
-          tool: just
-      - name: Build wheel (Linux)
-        if: runner.os == 'Linux'
-        env:
-          TARGET: ${{ matrix.target }}
-        run: just wheel-linux "$TARGET"
-      - name: Build wheel
-        if: runner.os != 'Linux'
-        env:
-          RUSTFLAGS: "-D warnings"
-        uses: PyO3/maturin-action@v1
-        with:
-          target: ${{ matrix.target }}
-          args: --release --locked --out dist
-          maturin-version: v1.14.1
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wheels-${{ matrix.target }}
-          path: dist
-
-  # PyPI publishing activates when the PYPI_PUBLISH repository variable is
-  # 'true'. Authentication is the PYPI_TOKEN secret (a project-scoped API token),
-  # not Trusted Publishing: this project publishes with repo secrets, so no OIDC
-  # identity is registered on PyPI and `id-token: write` would buy nothing.
-  publish-pypi:
-    needs: build-wheels
-    if: ${{ vars.PYPI_PUBLISH == 'true' }}
-    runs-on: ubuntu-latest
-    steps:
-      # Switching PYPI_PUBLISH on is a claim that the credential exists. Say so
-      # here rather than letting the upload fail later as an opaque 403 — the
-      # live tier must require its credential, not discover it missing.
-      - name: Require the publishing credential
-        env:
-          PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
-        run: |
-          if [ -z "${PYPI_TOKEN:-}" ]; then
-            echo "::error::PYPI_PUBLISH is on but the PYPI_TOKEN secret is empty; add it (see gh-secrets.json) or unset PYPI_PUBLISH" >&2
-            exit 1
-          fi
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: wheels-*
-          path: dist
-          merge-multiple: true
-      - uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          packages-dir: dist
-          password: ${{ secrets.PYPI_TOKEN }}
-          # Idempotent: a re-run (e.g. to finish a sibling publish) must not
-          # red-fail because these wheels are already on PyPI.
-          skip-existing: true
-
-  # Post-publish gate: prove the just-published version is pip-installable on
-  # every OS a user installs it on. PyPI propagation is not instant, so the
-  # install itself retries through scripts/retry-install.sh until the index a
-  # user resolves from serves the version, then the real wheel it put on PATH
-  # goes to scripts/smoke-published.sh — the same script ci.yml runs against the
-  # build under test, so what a release asserts cannot drift from what ships.
-  #
-  # Four legs for five targets: `pip install` resolves a *different wheel* per
-  # platform AND architecture. `macos-latest` is arm64; `macos-15-intel` is the
-  # leg that installs the x86_64 Darwin wheel. The one target with no leg is
-  # aarch64 Linux, which the matrices above still build.
-  verify-pypi:
-    name: verify-pypi (${{ matrix.os }})
-    needs: publish-pypi
-    if: ${{ vars.PYPI_PUBLISH == 'true' }}
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, macos-15-intel, windows-latest]
-    runs-on: ${{ matrix.os }}
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      # A Release can be cut by hand with any tag, and the version below is
-      # sliced straight out of it — so check the shape before it becomes a
-      # package specifier. A glob cannot say "digits and nothing else", so match
-      # the whole tag against a pattern.
-      - name: Check the release tag is a version
-        run: |
-          if ! [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::release tag '$GITHUB_REF_NAME' is not a vX.Y.Z version tag"
-            exit 1
-          fi
-      # The install is the propagation probe, and the only one: `pip install`
-      # resolves through the simple index behind a CDN, which converges later
-      # and per edge than the JSON API a separate wait step would poll.
-      # `--no-cache-dir` because pip caches the index response it reads: a retry
-      # that re-read its own cached "no such version" page would spend the whole
-      # budget polling its own memory.
-      - name: Install the published wheel
-        run: |
-          ver="${GITHUB_REF_NAME#v}"
-          bash scripts/retry-install.sh \
-            --label "PyPI onepipeline-cli $ver on $RUNNER_OS/$RUNNER_ARCH" \
-            --action "check https://pypi.org/project/onepipeline-cli/ — publish-pypi may have uploaded no wheel for this platform" \
-            -- pip install --no-cache-dir "onepipeline-cli==${ver}"
-      # Single-shot on purpose: the install is what races the registry, and a
-      # wrong version or a broken binary must fail now rather than be retried.
-      - name: Smoke-test what PyPI served
-        run: |
-          ver="${GITHUB_REF_NAME#v}"
-          bash scripts/smoke-published.sh \
-            --expect-version "$ver" \
-            --label "PyPI onepipeline-cli $ver on $RUNNER_OS/$RUNNER_ARCH"
-
-  # npm packages: scripts/npm-build.mjs wraps the prebuilt binary in a
-  # per-platform package (onepipeline-cli-<platform>-<arch>), the direct
-  # analogue of the maturin wheels, on the same native-runner matrix as `upload`,
-  # then `npm pack`s each to a tarball artifact.
-  build-npm:
-    name: build-npm (${{ matrix.target }})
-    needs: test
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-24.04-arm
-          - target: x86_64-apple-darwin
-            os: macos-latest
-          - target: aarch64-apple-darwin
-            os: macos-latest
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-    runs-on: ${{ matrix.os }}
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-      - name: Build the platform binary
-        env:
-          TARGET: ${{ matrix.target }}
-          RUSTFLAGS: "-D warnings"
-        run: |
-          rustup target add "$TARGET"
-          cargo build --release --locked --target "$TARGET"
-      - name: Assemble and pack the platform npm package
-        env:
-          TARGET: ${{ matrix.target }}
-        run: |
-          bin="target/$TARGET/release/onepipeline"
-          [ -f "$bin" ] || bin="${bin}.exe"
-          pkgdir="$(node scripts/npm-build.mjs platform --target "$TARGET" --binary "$bin" --out npm/dist)"
-          mkdir -p npm-artifacts
-          (cd "$pkgdir" && npm pack --pack-destination "$GITHUB_WORKSPACE/npm-artifacts")
-      - uses: actions/upload-artifact@v4
-        with:
-          name: npm-${{ matrix.target }}
-          path: npm-artifacts/*.tgz
-
-  # npm publishing activates when the NPM_PUBLISH repository variable is 'true'.
-  # `registry-url` makes setup-node write an .npmrc that authenticates with
-  # NODE_AUTH_TOKEN, so `npm publish` is token-authenticated.
-  publish-npm:
-    needs: build-npm
-    permissions:
-      contents: read
-    if: ${{ vars.NPM_PUBLISH == 'true' }}
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@v4
-      # Same rule as publish-pypi: the live tier requires its credential rather
-      # than discovering it missing at the registry, after some packages may
-      # already be public.
-      - name: Require the publishing credential
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          if [ -z "${NPM_TOKEN:-}" ]; then
-            echo "::error::NPM_PUBLISH is on but the NPM_TOKEN secret is empty; add it (see gh-secrets.json) or unset NPM_PUBLISH" >&2
-            exit 1
-          fi
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
-      - uses: actions/download-artifact@v4
+      - uses: actions/setup-python@v5
         with:
-          pattern: npm-*
-          path: npm-artifacts
-          merge-multiple: true
-      - name: Publish the platform packages, then the launcher
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - name: Build, package and test-install the Linux artifacts
+        run: just release-linux build
+      - name: Publish the Linux artifacts
+        id: publish
         env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          # Platform packages first: the launcher's optionalDependencies pin their
-          # exact versions, so they must exist for a later install to resolve.
-          # Glob against an ABSOLUTE base so each argument is an absolute path —
-          # npm reads a bare `dir/file.tgz` as a `user/repo` GitHub spec and tries
-          # to git-clone it.
-          for tgz in "$GITHUB_WORKSPACE"/npm-artifacts/*.tgz; do
-            bash scripts/publish-npm.sh "$tgz"
-          done
-          # The launcher carries no binary, so it needs no prebuilt target — just
-          # the version-stamped manifest.
-          launcher="$(node scripts/npm-build.mjs launcher --out npm/dist)"
-          bash scripts/publish-npm.sh "$launcher"
+        run: just release-linux publish
+      - name: Install the Linux artifacts from the registries and run them
+        id: verify
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: just release-linux verify
 
-  # Post-publish gate: prove the just-published version is npm-installable on
-  # every OS a user installs it on — the same promise verify-pypi makes for the
-  # wheel, for the same reasons. The smoke test then drives the real binary the
-  # optional dependency pulled in, which is the resolution this job exists to
-  # prove: npm picks a different platform package on each runner.
-  verify-npm:
-    name: verify-npm (${{ matrix.os }})
-    needs: publish-npm
-    if: ${{ vars.NPM_PUBLISH == 'true' }}
+  build-macos:
+    runs-on: macos-latest
+    timeout-minutes: 30
     permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        # One leg per platform package the launcher's manifest declares.
-        # `npm/test/platform-matrix.test.mjs` reconciles these `package:` names
-        # against that manifest, so a declared platform with no leg fails without
-        # needing a runner for it.
-        include:
-          - os: ubuntu-latest
-            package: onepipeline-cli-linux-x64
-          - os: ubuntu-24.04-arm
-            package: onepipeline-cli-linux-arm64
-          - os: macos-latest
-            package: onepipeline-cli-darwin-arm64
-          - os: macos-15-intel
-            package: onepipeline-cli-darwin-x64
-          - os: windows-latest
-            package: onepipeline-cli-win32-x64
-    runs-on: ${{ matrix.os }}
+      contents: write
+    outputs:
+      published: ${{ steps.publish.outcome }}
+      verified: ${{ steps.verify.outcome }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - name: Install the packager and the Rust target
+        run: |
+          just nx run onepipeline-npm:bootstrap
+          uv tool dir --bin >> "$GITHUB_PATH"
+          rustup target add aarch64-apple-darwin
+      - name: Build, package and test-install the macOS artifacts
+        run: just release-macos build
+      - name: Publish the macOS artifacts
+        id: publish
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: just release-macos publish
+      - name: Install the macOS artifacts from the registries and run them
+        id: verify
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: just release-macos verify
+
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    outputs:
+      published: ${{ steps.publish.outcome }}
+      verified: ${{ steps.verify.outcome }}
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - name: Check the release tag is a version
+          registry-url: "https://registry.npmjs.org"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - name: Install the packager and the Rust target
         run: |
-          if ! [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::release tag '$GITHUB_REF_NAME' is not a vX.Y.Z version tag"
-            exit 1
-          fi
-      # Same probe as verify-pypi: the install is what resolves the packument and
-      # its platform dependency, so it is what waits for them. `--prefer-online`
-      # for the reason pip gets `--no-cache-dir`.
-      - name: Install the published package
-        run: |
-          ver="${GITHUB_REF_NAME#v}"
-          bash scripts/retry-install.sh \
-            --label "npm onepipeline-cli $ver on $RUNNER_OS/$RUNNER_ARCH" \
-            --action "check https://www.npmjs.com/package/onepipeline-cli — the platform package for this runner may not have published" \
-            -- npm install -g --prefer-online "onepipeline-cli@${ver}"
-      # A leg that installed the launcher and never resolved its own platform
-      # package would still pass the smoke below on a machine that happened to
-      # have an older copy on PATH. This is the leg saying which package it
-      # proved, so `package:` above is an assertion rather than a label.
-      - name: Check npm resolved this leg's own platform package
+          just nx run onepipeline-npm:bootstrap
+          uv tool dir --bin >> "$GITHUB_PATH"
+          rustup target add x86_64-pc-windows-msvc
+      - name: Build, package and test-install the Windows artifacts
+        run: just release-windows build
+      - name: Publish the Windows artifacts
+        id: publish
         env:
-          PACKAGE: ${{ matrix.package }}
-        run: |
-          root="$(npm root -g)"
-          node -e '
-            const { existsSync } = require("node:fs");
-            const { join } = require("node:path");
-            const root = process.argv[1];
-            const want = process.env.PACKAGE;
-            const where = [
-              join(root, want),
-              join(root, "onepipeline-cli", "node_modules", want),
-            ];
-            if (!where.some((dir) => existsSync(join(dir, "package.json")))) {
-              console.error(
-                `::error::npm installed onepipeline-cli without ${want}. An install ` +
-                  "silently skips an optional dependency it cannot resolve, so this is " +
-                  "the registry not yet serving that package at this version.",
-              );
-              process.exit(1);
-            }
-            console.log(`${want} resolved under ${root}`);
-          ' "$root"
-      - name: Smoke-test what npm served
-        run: |
-          ver="${GITHUB_REF_NAME#v}"
-          bash scripts/smoke-published.sh \
-            --expect-version "$ver" \
-            --label "npm onepipeline-cli $ver on $RUNNER_OS/$RUNNER_ARCH"
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: just release-windows publish
+      - name: Install the Windows artifacts from the registries and run them
+        id: verify
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: just release-windows verify
 
-  # What this release did, as an artifact rather than as a conclusion somebody
-  # reconstructs from thirty job squares. README.md's "Release outcome" is where
-  # it is documented and where a consumer is told how to fetch it.
-  #
-  # `if: always()`, and `needs` every publish and verify job: a record that only
-  # exists when everything worked answers the one question nobody needs to ask.
-  outcome:
-    name: record the release outcome
-    needs: [publish-crate, verify-crate, publish-pypi, verify-pypi, publish-npm, verify-npm]
-    if: always()
+  # Runs when a build job failed too, so the outcome is recorded either way; its
+  # publish step runs only when every build job succeeded.
+  publish:
+    needs: [build-linux, build-macos, build-windows]
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - name: Check the release tag is a version
-        run: |
-          if ! [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::release tag '$GITHUB_REF_NAME' is not a vX.Y.Z version tag"
-            exit 1
-          fi
-      # The identifiers are release-targets.toml's own, so the record names
-      # artifacts by the same names the release-target contract and
-      # `scripts/release-probe.sh` use. `npm/test/release-outcome.test.mjs` reads
-      # the `--target` names back out of this job and fails when they are not
-      # exactly what that file declares — and the goldens with them, so a target
-      # added to the declaration cannot be left out of the record. Every one of
-      # them names a verification job, which is the property `verify-crate` above
-      # was added to hold.
-      #
-      # Job results reach the script through `env:` rather than being
-      # interpolated into the command line, the same rule every other input in
-      # this repository follows; the script refuses any value that is not one of the
-      # results GitHub reports, rather than reading an unknown one as "not success".
-      - name: Compose the outcome record
+          registry-url: "https://registry.npmjs.org"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - name: Publish the platform-independent artifacts
+        if: >-
+          ${{ needs.build-linux.result == 'success' && needs.build-macos.result == 'success'
+          && needs.build-windows.result == 'success' }}
         env:
-          CRATE_PUBLISHED: ${{ needs.publish-crate.result }}
-          CRATE_VERIFIED: ${{ needs.verify-crate.result }}
-          PYPI_PUBLISHED: ${{ needs.publish-pypi.result }}
-          PYPI_VERIFIED: ${{ needs.verify-pypi.result }}
-          NPM_PUBLISHED: ${{ needs.publish-npm.result }}
-          NPM_VERIFIED: ${{ needs.verify-npm.result }}
-        run: |
-          node scripts/release-outcome.mjs \
-            --out "$RUNNER_TEMP/release-outcome.json" \
-            --version "${GITHUB_REF_NAME#v}" \
-            --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
-            --target crate:onepipeline --published "$CRATE_PUBLISHED" --verified "$CRATE_VERIFIED" \
-            --target pypi:onepipeline-cli --published "$PYPI_PUBLISHED" --verified "$PYPI_VERIFIED" \
-            --target npm:onepipeline-cli --published "$NPM_PUBLISHED" --verified "$NPM_VERIFIED"
-      # `--clobber` so a re-run replaces the record rather than failing on the
-      # asset it wrote last time: a re-run is how a release moves out of
-      # `shipped-unverified`, and the record has to move with it.
-      - name: Attach it to the Release
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
+        run: just release-publish publish
+      # What this release did, as an artifact rather than as a conclusion
+      # somebody reconstructs from job squares. README.md's "Release outcome"
+      # documents it. `always()`: a record that only exists when everything
+      # worked answers the one question nobody needs to ask.
+      - name: Record the release outcome
+        if: ${{ always() }}
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release upload "$GITHUB_REF_NAME" "$RUNNER_TEMP/release-outcome.json" --clobber
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LINUX_RESULT: ${{ needs.build-linux.result }}
+          LINUX_PUBLISHED: ${{ needs.build-linux.outputs.published }}
+          LINUX_VERIFIED: ${{ needs.build-linux.outputs.verified }}
+          MACOS_RESULT: ${{ needs.build-macos.result }}
+          MACOS_PUBLISHED: ${{ needs.build-macos.outputs.published }}
+          MACOS_VERIFIED: ${{ needs.build-macos.outputs.verified }}
+          WINDOWS_RESULT: ${{ needs.build-windows.result }}
+          WINDOWS_PUBLISHED: ${{ needs.build-windows.outputs.published }}
+          WINDOWS_VERIFIED: ${{ needs.build-windows.outputs.verified }}
+        run: just release-outcome

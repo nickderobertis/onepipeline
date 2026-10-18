@@ -1028,6 +1028,85 @@ fn deferred_republications_are_read_by_the_next_trigger_green_or_repaired_red() 
     assert_eq!(outcome_of(&world, run, "b"), "change-review-draft");
 }
 
+/// A restack whose read is claimed only after its parent's republication settled still
+/// leaves that republication's verdict to the next trigger. The adopting driver is held as
+/// it receives `a-rework-1`'s relayed push, and let go only once `a-rework-1`'s settlement
+/// is queued behind it — the order a loaded host gave CI — so the restack that push owes
+/// `b` is claimed with `a-rework-1` already `change-review-draft-unchecked` on the record.
+/// That read records no verdict for it: `status` still names it outstanding, and the next
+/// trigger reads it green.
+// llmlint: ignore-block[tests_mirror_real_usage] the ordering under test is two threads' —
+// the dispatch's relayed push and its settlement against the loop's next pass — which no CLI
+// input chooses, so the journey holds the compiled driver on its private ordering gates and
+// releases it in the one order it asserts about. Nothing is substituted: the driver, the
+// publication over the real origin and the host double are the ones every journey runs.
+#[test]
+fn a_restack_read_claimed_after_its_parent_settled_leaves_the_parents_verdict_outstanding() {
+    let pushed = crate::harness::Rendezvous::failpoint();
+    let queued = crate::harness::Rendezvous::failpoint();
+    let world = team_world("readjust-late-claim")
+        .with_env("ONEPIPELINE_TEST_SETTLEMENT_NODE", "a-rework-1")
+        .with_env("ONEPIPELINE_TEST_PUSH_RECEIVED_GATE", &pushed.address())
+        .with_env("ONEPIPELINE_TEST_SETTLEMENT_QUEUED_GATE", &queued.address());
+    world.script("a.work", "a's change\n");
+    world.script("b.work", "b's change\n");
+    world.script("a-rework-1.work", "a's change, as the review asked\n");
+    world.script("a-rework-1.work-file", "a");
+    let run = "late";
+    launched(
+        &world,
+        run,
+        vec![lifecycle("a", &[]), lifecycle("b", &["a"])],
+    );
+    reply(&world, run, json!([rework("a")])).exited(0);
+    let driver = world
+        .cmd(&["adopt", run])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the adopting driver starts");
+    let push = pushed.arrived();
+    queued.arrived().release();
+    push.release();
+    let ended = driver.wait_with_output().expect("the adopting driver ends");
+    assert!(ended.status.success(), "{ended:?}");
+
+    // The late ordering, as the record shows it: the restack began after the settlement,
+    // onto the head that settlement pushed.
+    assert_eq!(
+        settled(&world, run, "a-rework-1")["outcome"],
+        "change-review-draft-unchecked"
+    );
+    let restacked = record(&world, run, "node-restack-started", "b").expect("b was restacked");
+    assert_eq!(
+        restacked["onto"][0]["head"],
+        settled(&world, run, "a-rework-1")["head"],
+        "{restacked}"
+    );
+    assert!(
+        first(&world, run, "node-settled", "a-rework-1")
+            < first(&world, run, "node-restack-started", "b"),
+        "b's restack started before a-rework-1 settled"
+    );
+    let (status, _) = views(&world, run);
+    for node in ["a-rework-1", "b"] {
+        assert!(
+            status.contains(&format!("{node}: check verdict outstanding")),
+            "{node}:\n{status}"
+        );
+    }
+    assert!(
+        record(&world, run, "node-checks-read", "a-rework-1").is_none(),
+        "b's restack read a-rework-1's deferred verdict"
+    );
+
+    readjusted(&world, run);
+    let read = record(&world, run, "node-checks-read", "a-rework-1").expect("read");
+    assert_eq!(read["verdict"], "passed", "{read}");
+    assert_eq!(outcome_of(&world, run, "a-rework-1"), "change-review-draft");
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
 /// Every node id the write-back's landed projections carried since the first `from`
 /// records.
 fn projected_since(world: &World, run: &str, from: usize) -> Vec<String> {
@@ -2130,12 +2209,13 @@ fn an_adoption_readjusts_before_its_first_dispatch() {
     assert_eq!(settled(&world, run, "b")["base"], "main");
 }
 
-/// Nothing polls: a live driver with drafts outstanding and nothing to do, left over
-/// three of its idle intervals — shortened through the test seam entry 119 names —
-/// asks the host nothing at all; and `start` takes no readjustment-interval flag.
+/// Nothing polls: a live driver with drafts outstanding and nothing to do, left over more
+/// than one of its claim intervals — shortened through the setting entry 128 names, so it
+/// reads its claim inside the window — asks the host nothing at all; and `start` takes no
+/// readjustment-interval flag.
 #[test]
 fn an_idle_driver_asks_the_host_nothing() {
-    let world = team_world("readjust-idle").with_env("ONEPIPELINE_IDLE_CLAIM_CHECK_SECONDS", "1");
+    let world = team_world("readjust-idle").with_env("ONEPIPELINE_CLAIM_INTERVAL_SECONDS", "2");
     for node in ["a", "b", "x"] {
         world.script(&format!("{node}.work"), &format!("{node}'s change\n"));
     }

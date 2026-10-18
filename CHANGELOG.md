@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.76.0](https://github.com/nickderobertis/onepipeline/compare/v0.75.0...v0.76.0) - 2026-10-18
+
+### Fixed
+
+- *(smoke)* start the node above a settled stack within the continuation journey's bound ([#1000](https://github.com/nickderobertis/onepipeline/pull/1000))
+- *(e2e)* hold the observer-restart journey's node until its dispatch is past its script ([#994](https://github.com/nickderobertis/onepipeline/pull/994))
+- *(ci)* make flaky e2e journeys deterministic and fit the Windows leg ([#982](https://github.com/nickderobertis/onepipeline/pull/982))
+- *(driver)* stop a released driver rewriting the run's launch record ([#1003](https://github.com/nickderobertis/onepipeline/pull/1003))
+
+## [0.75.0](https://github.com/nickderobertis/onepipeline/compare/v0.74.1...v0.75.0) - 2026-10-17
+
+### Added
+
+- *(deps)* [**breaking**] read YAML with serde-saphyr and link the onetaskgraph and sibling releases that do ([#923](https://github.com/nickderobertis/onepipeline/pull/923))
+
+### Fixed
+
+- *(scratch)* name an added node's scratch directory the same way on Windows ([#977](https://github.com/nickderobertis/onepipeline/pull/977))
+- *(e2e)* close the multi-source stop race and the readjust placement flake ([#951](https://github.com/nickderobertis/onepipeline/pull/951))
+
+### Performance
+
+- *(driver)* read the driver claim on an interval and make an adopting driver wait for the one it displaces ([#965](https://github.com/nickderobertis/onepipeline/pull/965))
+
 ## [0.74.1](https://github.com/nickderobertis/onepipeline/compare/v0.74.0...v0.74.1) - 2026-10-16
 
 ### Added

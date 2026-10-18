@@ -485,6 +485,12 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     if dir.join("run.hang").exists() {
         fake::wait_for(&dir.join("run.go"));
     }
+    // The same hold, met: `run.rendezvous` stops a launch before it announces
+    // itself and tells the journey it has — which the invocation recorded above,
+    // written before this point, cannot. `fake::meet` says how.
+    if let Some(address) = fake::node_script(dir, "run", "rendezvous") {
+        fake::meet(&address);
+    }
 
     // A graph that finishes before it announces anything: it did what it was
     // given, so the launch succeeded even though nothing is driving anything
@@ -3114,8 +3120,9 @@ fn drafting_schema(args: &[String]) -> oneharness_core::domain::structured::Sche
         std::fs::read_to_string(path)
             .unwrap_or_else(|error| fake::fail(&format!("cannot read {}: {error}", path.display())))
     };
-    let configured: oneagentgraph::config::GraphConfig = serde_norway::from_str(&read(graph))
-        .unwrap_or_else(|error| fake::fail(&format!("the drafting graph is invalid: {error}")));
+    let configured: oneagentgraph::config::GraphConfig =
+        onepipeline_testfakes::yaml::from_str(&read(graph))
+            .unwrap_or_else(|error| fake::fail(&format!("the drafting graph is invalid: {error}")));
     let harness = configured
         .members
         .values()

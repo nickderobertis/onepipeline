@@ -2,16 +2,16 @@
 # Smoke-test an `onepipeline` that is already on PATH, and name the install
 # that broke when it does not behave.
 #
-# One script, one set of assertions. `release.yml`'s verify jobs and
-# `published-smoke.yml` run this over a binary they installed from PyPI or npm;
-# CI's `install` job runs the identical file over the binary this repo just
-# compiled. That is what stops a workflow's idea of "it works" from drifting from
+# One script, one set of assertions. `release.yml`'s build jobs run this over
+# each file they built and test-installed, and again over what they installed back
+# from the Release, PyPI and npm; CI's `install` job runs the identical file over
+# the binary this repo just compiled. That is what stops a workflow's idea of "it works" from drifting from
 # what actually ships — assertions inlined in a workflow keep passing after the
 # surface around them changes.
 #
-# Deliberately toolchain-free: bash and the installed binary. `published-smoke.yml`
-# runs this after every release, on every OS, for both registries, and anything it
-# had to install first would be a second thing that can rot.
+# Deliberately toolchain-free: bash and the installed binary. Every release runs
+# this on every OS, for every registry, and anything it had to install first would
+# be a second thing that can rot.
 #
 # The promise a published artifact makes: it reports its version, prints the
 # documented command list, and answers a real command against a real ledger with
@@ -115,7 +115,7 @@ fi
 # would be reporting a surface it never read, and one that exited 3 would be
 # sending a planner to intervene in a run that does not exist.
 # llmlint: ignore-block[changed_behavior_has_e2e] this script *is* the release's own
-# end-to-end test — CI's `install` job and both post-publish verify jobs run this exact
+# end-to-end test — CI's `install` job and every release build job's verify step run this exact
 # file against a real installed binary on every platform, which exercises the passing
 # branch below continuously. Its failure branches are diagnostics for that run, and a
 # harness that installed a deliberately broken binary to drive each one would be a second

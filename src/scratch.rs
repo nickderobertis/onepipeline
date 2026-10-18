@@ -346,9 +346,20 @@ impl ScratchTree {
     }
 }
 
+/// A run's scratch root, in the one spelling both the directory a dispatch is handed
+/// and the record naming it are joined onto, so the two are equal on every platform.
+pub(crate) fn root(paths: &RunPaths) -> io::Result<std::path::PathBuf> {
+    Ok(root_spelled(fs::canonicalize(&paths.dir)?, cfg!(windows)))
+}
+
+/// The scratch root under a run directory's canonical path: the plain spelling, never
+/// Windows' verbatim `\\?\` one, which nothing else on that platform spells a directory in.
+fn root_spelled(canonical_run_dir: std::path::PathBuf, windows: bool) -> std::path::PathBuf {
+    crate::templates::plain_on(canonical_run_dir, windows).join("scratch")
+}
+
 fn directories(paths: &RunPaths) -> io::Result<ScratchTree> {
-    // Recorded and printed in the plain spelling, never Windows' verbatim `\\?\` one.
-    let root = crate::templates::plain(fs::canonicalize(&paths.dir)?).join("scratch");
+    let root = root(paths)?;
     match fs::symlink_metadata(&root) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             return Ok(ScratchTree {
@@ -380,6 +391,13 @@ fn directories(paths: &RunPaths) -> io::Result<ScratchTree> {
         })
         .collect::<io::Result<_>>()?;
     Ok(ScratchTree { root, access, dirs })
+}
+
+/// The directories a `scratch-retained` record for `paths` would name, spelled as it
+/// would spell them.
+#[cfg(test)]
+pub(crate) fn recorded_dirs(paths: &RunPaths) -> io::Result<Vec<std::path::PathBuf>> {
+    Ok(directories(paths)?.dirs)
 }
 
 fn absolute(path: &Path) -> crate::Result<AbsolutePath> {
@@ -970,5 +988,27 @@ mod traversal_boundary {
         assert!(at::open_dir(std::os::fd::AsFd::as_fd(&parent), c"dispatch").is_err());
         assert_eq!(fs::read(outside.join("target")).unwrap(), b"external bytes");
         fs::remove_dir_all(temp).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Windows' `canonicalize` answers a run directory in the verbatim form, and the
+    /// scratch root a dispatch is handed and the record names is the plain one.
+    #[test]
+    fn a_verbatim_run_directory_spells_the_scratch_root_the_record_names() {
+        for (verbatim, spelled) in [
+            (r"\\?\C:\op\runs\r", r"C:\op\runs\r"),
+            (r"\\?\UNC\server\share\runs\r", r"\\server\share\runs\r"),
+        ] {
+            let root = root_spelled(verbatim.into(), true);
+            assert_eq!(root, std::path::Path::new(spelled).join("scratch"));
+            assert_eq!(root, root_spelled(spelled.into(), true));
+            assert!(!root.to_str().unwrap().starts_with(r"\\?\"), "{root:?}");
+        }
+        let unix = std::path::PathBuf::from("/home/me/runs/r");
+        assert_eq!(root_spelled(unix.clone(), false), unix.join("scratch"));
     }
 }

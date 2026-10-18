@@ -4111,6 +4111,20 @@ fn the_codex_double_answers_each_exec_line_oneharness_builds_and_refuses_each_it
             "--json",
             "Do build.",
         ][..],
+        &["exec", "-c", "features.plugins=true", "--json", "Do build."][..],
+        &[
+            "exec",
+            "-c",
+            "features.plugins=false",
+            "-c",
+            "features.apps=false",
+            "-c",
+            "analytics.enabled=false",
+            "-c",
+            "model_catalog_json=\"/catalog.json\"",
+            "--json",
+            "Do build.",
+        ][..],
     ] {
         let answered = sent(argv);
         let said = String::from_utf8_lossy(&answered.stdout).to_string();
@@ -4174,20 +4188,12 @@ fn the_codex_double_answers_each_exec_line_oneharness_builds_and_refuses_each_it
         ),
         (&["exec", "--json"][..], "no prompt"),
         (
+            &["exec", "-c", "model=o3", "--json", "Do build."][..],
+            "no setting \"model=o3\"",
+        ),
+        (
             &["exec", "--json", "Do build.", "-c"][..],
-            "-c takes a key=value",
-        ),
-        (
-            &["exec", "-c", "--json", "Do build."][..],
-            "\"--json\" is not one",
-        ),
-        (
-            &["exec", "-c", "features.plugins", "--json", "Do build."][..],
-            "\"features.plugins\" is not one",
-        ),
-        (
-            &["exec", "-c", "=false", "--json", "Do build."][..],
-            "\"=false\" is not one",
+            "-c takes a setting",
         ),
     ] {
         let refused = sent(argv);
@@ -4230,7 +4236,7 @@ fn turns_dispatched(world: &World, run: &str, node: &str, step: Option<&str>) ->
         .as_str()
         .expect("the sibling publishes the config it launched the member with");
     let text = std::fs::read_to_string(config).expect("that configuration is on disk");
-    let effective: Value = serde_norway::from_str(&text).expect("it parses");
+    let effective: Value = onepipeline_testfakes::yaml::from_str(&text).expect("it parses");
     effective["user"]["max_turns"]
         .as_u64()
         .unwrap_or_else(|| panic!("{config} states no turn ceiling: {text}"))
@@ -4392,7 +4398,7 @@ fn settled_report(world: &World, run: &str) -> Value {
 
 /// The provider block onejudge read the dispatch of the worker in `run` from.
 fn provider_block(world: &World, run: &str) -> Value {
-    let effective: Value = serde_norway::from_str(&config_of(world, run, "worker"))
+    let effective: Value = onepipeline_testfakes::yaml::from_str(&config_of(world, run, "worker"))
         .expect("the member's effective onejudge config parses");
     effective["provider"].clone()
 }

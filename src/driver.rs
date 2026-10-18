@@ -17,6 +17,7 @@ use std::io::Write;
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde_json::json;
@@ -939,6 +940,55 @@ pub(crate) fn resolve_node_graphs(node: &mut Node, base: &Path) -> Result<()> {
     Ok(())
 }
 
+/// What a launch found where a project's claim goes.
+enum Found {
+    /// No claim: nobody drives the project.
+    Nothing,
+    /// A claim, naming the run that drives it.
+    Claim(crate::payload::DriverClaim),
+    /// Something that is not a claim, which only a takeover passes.
+    NotAClaim,
+}
+
+impl Found {
+    /// The claim found, where one was.
+    fn claim(&self) -> Option<crate::payload::DriverClaim> {
+        match self {
+            Self::Claim(claim) => Some(claim.clone()),
+            Self::Nothing | Self::NotAClaim => None,
+        }
+    }
+
+    /// Whether a driver may still stand behind what was found: a claim that is not one may
+    /// be standing over a driver too, and a takeover waits on it as on any other.
+    fn may_stand_over_a_driver(&self) -> bool {
+        !matches!(self, Self::Nothing)
+    }
+}
+
+/// Whether the driver `claim` names provably can no longer act, by this host's own records:
+/// a run of this host, under this runs root, that nothing drives — its ownership lock taken
+/// and let go again here. Anything else is a driver only its acknowledgement, or its lease
+/// running out, can say has let go.
+fn gone_from_this_host(root: &Path, claim: Option<&crate::payload::DriverClaim>) -> Result<bool> {
+    let Some(claim) =
+        claim.filter(|claim| claim.host == sys::hostname() && ledger::is_valid_run_id(&claim.run))
+    else {
+        return Ok(false);
+    };
+    let paths = RunPaths::under(root, &claim.run);
+    if !paths.dir.is_dir() {
+        return Ok(false);
+    }
+    Ok(match engine::take_if_undriven(&paths)? {
+        Some(lock) => {
+            lock.release();
+            true
+        }
+        None => false,
+    })
+}
+
 /// Mint a run id from the plan's name or the project's, made unique.
 ///
 /// The plan's own name first, which a project states as `onepipeline.name` or
@@ -1161,23 +1211,25 @@ fn start(args: &StartArgs) -> Result<i32> {
     // Read whole, keeping each task as the store answered it beside the plan: the rendered-only
     // check below reads each task's own record, and the write-back's landed baseline is seeded
     // from this one read, so its first projection reads nothing the launch has just read.
-    let read = store.read_plan(&project).map_err(Error::from)?;
+    let mut read = store.read_plan(&project).map_err(Error::from)?;
     graph::validate(&read.plan)?;
     // Who drives the project, off that same read: a read that failed has already refused
     // the launch above, so a claim is never defaulted to none.
     // A claim that is not one refuses the launch, unless the launch takes the project over:
     // otherwise a project whose claim a stranger mangled could never be launched again.
-    let claim = match crate::continuation::claim_of(project.as_str(), &read.project_metadata) {
-        Ok(claim) => claim,
+    let found = match crate::continuation::claim_of(project.as_str(), &read.project_metadata) {
+        Ok(Some(claim)) => Found::Claim(claim),
+        Ok(None) => Found::Nothing,
         Err(refused) if args.take_over => {
             eprintln!("onepipeline: --take-over passes a claim that is not one: {refused}");
-            None
+            Found::NotAClaim
         }
         Err(refused) => return Err(refused),
     };
+    let claim = found.claim();
     // What the project's last driver left on it, which a launch continues rather than runs
     // again — unless it is told `--fresh`.
-    let continuation = if args.fresh {
+    let mut continuation = if args.fresh {
         crate::continuation::Continuation::default()
     } else {
         crate::continuation::continuation_of(&read, claim.as_ref())?
@@ -1361,15 +1413,6 @@ fn start(args: &StartArgs) -> Result<i32> {
         )?,
     };
     crate::templates::check_plan(&templates, &read, &launch_dir)?;
-    let mut plan = read.plan.clone();
-    // A node that left a branch is pinned to it, as an adoption pins an abandoned dispatch:
-    // its next dispatch continues that branch, and its publication adopts the change request
-    // already open from it rather than opening a second.
-    for (id, branch) in &continuation.pinned {
-        if let Some(node) = plan.tasks.iter_mut().find(|node| &node.id == id) {
-            node.branch = Some(branch.as_str().to_owned());
-        }
-    }
 
     // The write-back's per-item budget, by the same three rungs. Every rung is *read*
     // rather than merely present: zero is no budget at all, and each rung refuses it by
@@ -1417,10 +1460,25 @@ fn start(args: &StartArgs) -> Result<i32> {
         .or(declared.dispatch_env_hook_timeout)
         .unwrap_or(crate::cli::DEFAULT_DISPATCH_ENV_HOOK_TIMEOUT_SECONDS);
     let node_graph_ref = resolve_graph(&engine::configured_node_graph(), &launch_dir)?;
-    resolve_plan_graphs(&mut plan, &launch_dir)?;
-    for node in &plan.tasks {
-        graph::validate_dispatch_sets(node, &node_graph_ref, &node_sets)?;
-    }
+    let launched = |read: &crate::taskgraph::Read,
+                    continuation: &crate::continuation::Continuation|
+     -> Result<Plan> {
+        let mut plan = read.plan.clone();
+        // A node that left a branch is pinned to it, as an adoption pins an abandoned
+        // dispatch: its next dispatch continues that branch, and its publication adopts the
+        // change request already open from it rather than opening a second.
+        for (id, branch) in &continuation.pinned {
+            if let Some(node) = plan.tasks.iter_mut().find(|node| &node.id == id) {
+                node.branch = Some(branch.as_str().to_owned());
+            }
+        }
+        resolve_plan_graphs(&mut plan, &launch_dir)?;
+        for node in &plan.tasks {
+            graph::validate_dispatch_sets(node, &node_graph_ref, &node_sets)?;
+        }
+        Ok(plan)
+    };
+    let mut plan = launched(&read, &continuation)?;
     // Before the run directory exists. A spec that could not be honoured is the
     // exit 2 it is, rather than a launch that has already minted a run and cut
     // sessions for it before a source refuses the filter it was handed.
@@ -1431,11 +1489,43 @@ fn start(args: &StartArgs) -> Result<i32> {
     // take the project over, and `--fresh` is refused while running afresh would open a
     // second change request beside one nothing has landed.
     crate::continuation::admit(claim.as_ref(), args.take_over)?;
+    let root = ledger::runs_root();
+    let run = mint_run_id(&plan, project.native(), &root);
+    // A takeover of a driver that may still be acting starts nothing until that driver has
+    // let go: its claim is written now, and the project is read again — what this launch
+    // continues, and what its write-back starts from — once the displaced driver has
+    // acknowledged it or can no longer act. A driver of this host whose run nothing drives
+    // has let go already, which this host's own records prove.
+    if args.take_over
+        && found.may_stand_over_a_driver()
+        && !gone_from_this_host(&root, claim.as_ref())?
+    {
+        let mine = crate::payload::DriverClaim {
+            run: run.clone(),
+            host: sys::hostname(),
+            session: crate::vcs::usable(&sys::launching_session()),
+            pid: sys::pid(),
+            claimed_at: sys::now_rfc3339(),
+            lease: Some(crate::continuation::lease_terms()),
+        };
+        crate::continuation::hand_over(
+            &store,
+            &project,
+            &mine,
+            claim.as_ref(),
+            &crate::boundary::of_run(&plan).scope,
+        )?;
+        read = store.read_plan(&project).map_err(Error::from)?;
+        graph::validate(&read.plan)?;
+        crate::templates::check_plan(&templates, &read, &launch_dir)?;
+        if !args.fresh {
+            continuation = crate::continuation::continuation_of(&read, claim.as_ref())?;
+        }
+        plan = launched(&read, &continuation)?;
+    }
     if args.fresh {
         crate::continuation::refuse_fresh_over_unlanded(project.as_str(), &read)?;
     }
-    let root = ledger::runs_root();
-    let run = mint_run_id(&plan, project.native(), &root);
     let holdings = concurrency::holders(&plan)?;
     let holders = &holdings.holders;
     // Every stale holder the sibling still has anybody to answer for. Since
@@ -2011,8 +2101,14 @@ pub(crate) fn drive_run(paths: &RunPaths, retained: Retained) -> Result<i32> {
         // graph it started beside the driver that started it.
         let mut watch = ObserverWatch::of(&paths, record, goal, output);
         std::thread::scope(|scope| {
+            let letting_go = watch.letting_go();
             scope.spawn(|| keep_the_run_watched(watched, &mut watch, &driving));
-            let settled = engine::drive_holding(&paths, lock);
+            let settled = engine::drive_holding(&paths, lock, &letting_go);
+            // The departing driver's window, held open where a journey asks: the
+            // run is let go of and this watch is still polling beside it.
+            if let Err(error) = crate::ordering::meet("ONEPIPELINE_TEST_LET_GO_GATE") {
+                eprintln!("onepipeline: {error}");
+            }
             driving.store(false, Ordering::Release);
             settled
         })?
@@ -2074,11 +2170,8 @@ fn keep_the_run_watched(
                 );
             }
         }
-        if observer.has_exited() {
-            observer_stopped_watching(&watch.paths.run);
-            if watch.restart(observer).is_none() {
-                return;
-            }
+        if observer.has_exited() && matches!(watch.stopped(observer), Stopped::Over) {
+            return;
         }
         std::thread::sleep(ATTACH_POLL);
     }
@@ -2153,10 +2246,20 @@ fn observer_restart_limit() -> u32 {
 /// writer: a restart moves the graph run a later `next` addresses the check-in
 /// clocks by, and a reader that went on addressing the graph that died would
 /// restart a clock nothing is running.
+///
+/// Single writer only **while this driver holds the run**. The watch runs beside
+/// the loop rather than inside it, so a restart can still be under way when the
+/// loop lets go — and the record it would then write is this driver's, put back
+/// over whatever the run's next holder, or an operator readying the run for one,
+/// wrote since. See [`ObserverWatch::letting_go`].
 struct ObserverWatch<'a> {
     paths: &'a RunPaths,
     /// The run's launch record, as this driver holds it.
     record: LaunchRecord,
+    /// Whether this driver still holds the run, behind the one lock both a write
+    /// of the record and the loop letting go take — so a write is either over
+    /// before the loop lets go, or never made.
+    holding: Arc<Mutex<bool>>,
     /// The plan's goal, which is the only thing besides the run id that reaches
     /// the observer's task.
     goal: Option<String>,
@@ -2166,6 +2269,20 @@ struct ObserverWatch<'a> {
     /// The bound, and how much of it has been spent.
     limit: u32,
     restarted: u32,
+    /// Whether this driver has said that an observer stopped as it let go, so a
+    /// watch polling through the release says it once.
+    said_let_go: bool,
+}
+
+/// What a watch did about an observer that stopped watching the run.
+enum Stopped {
+    /// Another is watching it now.
+    Restarted,
+    /// None, because the loop is letting go of the run and the record is no
+    /// longer this driver's to move.
+    LettingGo,
+    /// None, and nothing this driver runs will start another.
+    Over,
 }
 
 impl<'a> ObserverWatch<'a> {
@@ -2179,11 +2296,55 @@ impl<'a> ObserverWatch<'a> {
         Self {
             paths,
             record,
+            holding: Arc::new(Mutex::new(true)),
             goal,
             output,
             limit: observer_restart_limit(),
             restarted: 0,
+            said_let_go: false,
         }
+    }
+
+    /// Answer an observer that has stopped watching the run.
+    ///
+    /// A restart writes the record, so one is asked for only while this driver
+    /// holds the run; [`Self::restart`] says what becomes of one the loop lets go
+    /// of while it is under way.
+    fn stopped(&mut self, observer: &mut agentgraph::GraphRun) -> Stopped {
+        if !self.holds() {
+            // Still said as a stop, because it is one: a run that settles before
+            // its watch next looks — an observer refused at once does — has its
+            // observer stop inside this window, and its reader is owed the stop.
+            if !self.said_let_go {
+                self.said_let_go = true;
+                eprintln!(
+                    "onepipeline: the observer graph for '{}' has stopped watching as this \
+                     driver let go of the run; its next driver starts its own",
+                    self.paths.run
+                );
+            }
+            return Stopped::LettingGo;
+        }
+        observer_stopped_watching(&self.paths.run);
+        match self.restart(observer) {
+            Some(()) => Stopped::Restarted,
+            None => Stopped::Over,
+        }
+    }
+
+    /// What the loop calls the moment it starts letting go of the run — see
+    /// [`engine::drive_holding`] — after which this watch writes nothing more.
+    ///
+    /// It waits out a write already under way, so that write lands while the run
+    /// is still this driver's, before anything says the run is let go of.
+    fn letting_go(&self) -> impl Fn() + Send + Sync + 'static {
+        let holding = Arc::clone(&self.holding);
+        move || *holding.lock().unwrap_or_else(PoisonError::into_inner) = false
+    }
+
+    /// Whether the run is still this driver's to write.
+    fn holds(&self) -> bool {
+        *self.holding.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Start another observer in place of the one that has stopped.
@@ -2201,6 +2362,11 @@ impl<'a> ObserverWatch<'a> {
         // has already put on its log — leaving the verdict to the liveness probe
         // every build before this answered with.
         if self.limit == 0 {
+            return None;
+        }
+        // A driver that has let go of the run has nothing to keep watched, and no
+        // claim to record one under.
+        if !self.holds() {
             return None;
         }
         if self.restarted >= self.limit {
@@ -2226,7 +2392,12 @@ impl<'a> ObserverWatch<'a> {
                 .map(ToString::to_string)
                 .unwrap_or_default(),
         );
-        self.write_down();
+        // Let go of while the graph was starting: it watches a run this driver
+        // no longer drives, and nothing names it, so it is ended here.
+        if !self.write_down() {
+            started.cancel();
+            return None;
+        }
         eprintln!(
             "onepipeline: started another observer graph for '{}' ({} of {} restart(s))",
             self.paths.run, self.restarted, self.limit
@@ -2245,7 +2416,7 @@ impl<'a> ObserverWatch<'a> {
             self.paths.run
         );
         self.record.observer_ending = reason;
-        self.write_down();
+        let _ = self.write_down();
         None
     }
 
@@ -2256,13 +2427,24 @@ impl<'a> ObserverWatch<'a> {
     /// is gone, or a view reading a watch that is over as one still going. Both
     /// are worth saying out loud on the driver's own log, and neither is worth
     /// ending a working observer over.
-    fn write_down(&self) {
+    ///
+    /// Nothing at all once the driver has let go of the run: the record is no
+    /// longer this process's to write, and `false` says so. The lock is held
+    /// across the write, which is what holds the loop's letting go until it is
+    /// on disk.
+    #[must_use]
+    fn write_down(&self) -> bool {
+        let holding = self.holding.lock().unwrap_or_else(PoisonError::into_inner);
+        if !*holding {
+            return false;
+        }
         if let Err(error) = ledger::write_json(&self.paths.launch(), &self.record) {
             eprintln!(
                 "onepipeline: could not record what is watching '{}': {error}",
                 self.paths.run
             );
         }
+        true
     }
 }
 
@@ -2498,9 +2680,18 @@ fn attach(
     let mut chains = engine::ChainRecords::default();
 
     let driving = paths.clone();
+    let letting_go = watch.letting_go();
     let engine = std::thread::Builder::new()
         .name(format!("engine-{}", paths.run))
-        .spawn(move || engine::drive_holding(&driving, lock))
+        .spawn(move || {
+            let driven = engine::drive_holding(&driving, lock, &letting_go);
+            // The same window as a detached driver's, held where a journey asks:
+            // the run is let go of and the loop below is still watching it.
+            if let Err(error) = crate::ordering::meet("ONEPIPELINE_TEST_LET_GO_GATE") {
+                eprintln!("onepipeline: {error}");
+            }
+            driven
+        })
         .map_err(|e| Error::Invalid(format!("cannot start the engine loop: {e}")))?;
 
     loop {
@@ -2524,18 +2715,18 @@ fn attach(
         // unwatched run is the same failure either way.
         if let Some(run) = watched.as_deref_mut() {
             if run.has_exited() && !observer_gone {
-                observer_stopped_watching(&paths.run);
-                match watch.restart(run) {
+                match watch.stopped(run) {
                     // Whatever the replacement says is still the run's, so it is
                     // relayed like its predecessor's. The sender is here to be
                     // cloned: it is released only once the loop has finished, and
                     // a finished loop starts no observer to relay.
-                    Some(()) => {
+                    Stopped::Restarted => {
                         if let Some(tx) = relay.as_ref() {
                             relay_observer(paths, run, tx.clone())?;
                         }
                     }
-                    None => observer_gone = true,
+                    Stopped::LettingGo => {}
+                    Stopped::Over => observer_gone = true,
                 }
             }
         }

@@ -820,6 +820,19 @@ fn the_flag_beats_the_key_a_blank_names_none_and_a_bad_schedule_is_refused_befor
             bad("spanless", "version: 1\ndefault:\n  every: 7x\n"),
             "`every`",
         ),
+        // `<<` is an ordinary key, so a schedule merging another mapping in names it.
+        (
+            bad(
+                "merged",
+                "version: 1\ndefault:\n  every: 7d\n<<: {rules: []}\n",
+            ),
+            "unknown field `<<`",
+        ),
+        // Refused before any key exists, so it says where in the file instead.
+        (
+            bad("unclosed", "[\n"),
+            "unclosed bracket '[' at line 1, column 1",
+        ),
     ] {
         world
             .run_from(
@@ -2157,6 +2170,12 @@ fn a_slot_that_grew_or_could_not_be_measured_frees_nothing_in_the_summary() {
 
 /// A sweep over idle slots whose identities declare nothing, under a host naming
 /// no `maintain`, journals nothing: nothing ran and nothing went wrong.
+///
+/// The release can land inside a sweep the pace began after the second one ended.
+/// That sweep is cut short, and the contract has a pass cut short write its record
+/// "even where it would otherwise write nothing" — so where one is written, it is
+/// that cut and names no identity. The cut itself is
+/// `a_closing_driver_journals_the_cut_of_a_sweep_over_identities_that_declare_nothing`'s.
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] This
 // src/maintenance.rs journey has no narrower Nx edge: noteJourneySource includes src/**/*.
 #[test]
@@ -2175,15 +2194,107 @@ fn a_sweep_over_identities_that_declare_nothing_journals_nothing() {
         !sweeping(world, "undeclared")
     });
     release(&world, "undeclared");
-    assert!(records(&world, "undeclared").is_empty(), "{}", world.dump());
+    let recorded = records(&world, "undeclared");
+    assert!(recorded.len() <= 1, "{}", world.dump());
+    for record in &recorded {
+        assert_eq!(record["payload"]["identities"], json!([]), "{record}");
+        assert_eq!(
+            record["payload"]["cut_short"]["reason"], "driver-closing",
+            "a sweep that was not cut short was recorded: {record}"
+        );
+    }
     for repo in ["service", "other"] {
         assert_eq!(the_slot_of(&world, repo)["last_maintained"], Value::Null);
     }
     let results = world.run(&["results", "undeclared"]);
-    assert!(
-        !results.exited(0).stdout.contains("pool maintenance"),
-        "{}",
-        results.stdout
+    let stdout = &results.exited(0).stdout;
+    if recorded.is_empty() {
+        assert!(!stdout.contains("pool maintenance"), "{stdout}");
+    } else {
+        assert!(!stdout.contains("(every "), "{stdout}");
+        assert!(
+            stdout.contains("the sweep was cut short as the driver closed"),
+            "{stdout}"
+        );
+    }
+}
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
+/// The failpoint a driver's first sweep meets inside its first identity.
+const IDENTITY_GATE: &str = "ONEPIPELINE_TEST_MAINTENANCE_IDENTITY_GATE";
+
+/// The failpoint a driver meets the first time it raises a sweep's stop.
+const STOP_GATE: &str = "ONEPIPELINE_TEST_MAINTENANCE_STOP_GATE";
+
+/// A sweep over identities that declare nothing, caught in progress by its driver
+/// closing, journals the cut and nothing else: no identity, and every identity it
+/// never began named in `cut_short` — the contract's "a pass cut short writes its
+/// record even where it would otherwise write nothing".
+///
+/// The sweep is held inside its first identity, `other`, until the driver has
+/// raised its stop, so the cut lands at that boundary on every host however fast
+/// it runs. `other` then answers that it declares nothing, `service` is never
+/// begun, and the retirement pass is never begun either; `results` renders the cut.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] This
+// src/maintenance.rs journey has no narrower Nx edge: noteJourneySource includes src/**/*.
+#[test]
+fn a_closing_driver_journals_the_cut_of_a_sweep_over_identities_that_declare_nothing() {
+    // llmlint: ignore-block[tests_mirror_real_usage] the interleaving is the property: no
+    // user-facing input can place a driver's close inside a sweep over identities that
+    // declare nothing, which answer at once. The failpoints only order the real binary over
+    // the real linked sibling, and every outcome is asserted on the binary's own records.
+    let inside = crate::harness::Rendezvous::failpoint();
+    let stopping = crate::harness::Rendezvous::failpoint();
+    let world = pooled_world("maintenance-undeclared-cut", Some(FAST_PACE))
+        .with_env(IDENTITY_GATE, &inside.address())
+        .with_env(STOP_GATE, &stopping.address());
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let service = world.repository("local-direct", &[]);
+    let other = world.extra_repository("other");
+    sized_pools(&world, &[("service", 1, None), ("other", 1, None)]);
+    cut_a_slot(&world, &service.checkout);
+    cut_a_slot(&world, &other.checkout);
+
+    let every = schedule(&world, "cut", "1s", "");
+    held_run(&world, "cut", 2, &["--maintenance-config", &every]).exited(0);
+    let held = inside.arrived();
+    assert!(sweeping(&world, "cut"), "{}", world.dump());
+    world.release("cut-build.go");
+    stopping.arrived().release();
+    held.release();
+    world.until("the cut run's result", |world| {
+        world.run_file("cut", "result.json").is_file()
+    });
+
+    let recorded = records(&world, "cut");
+    assert_eq!(recorded.len(), 1, "{}", world.dump());
+    let payload = &recorded[0]["payload"];
+    assert_eq!(payload["identities"], json!([]), "{payload}");
+    assert_eq!(
+        payload["cut_short"],
+        json!({"reason": "driver-closing", "unreached": [SERVICE_IDENTITY]}),
+        "{payload}"
+    );
+    let retirement = world.events_of("cut", "branches-retired");
+    assert_eq!(retirement.len(), 1, "{}", world.dump());
+    assert_eq!(
+        retirement[0]["payload"],
+        json!({
+            "retired": [],
+            "failed": [],
+            "cut_short": {
+                "reason": "driver-closing",
+                "unreached": ["github.com/owner/other", SERVICE_IDENTITY],
+            },
+        })
+    );
+    for repo in ["service", "other"] {
+        assert_eq!(the_slot_of(&world, repo)["last_maintained"], Value::Null);
+    }
+    assert!(!sweeping(&world, "cut"), "the marker outlived the driver");
+    world.run(&["results", "cut"]).exited(0).out_has(
+        "the sweep was cut short as the driver closed, and did not reach: \
+         github.com/owner/service",
     );
 }
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]

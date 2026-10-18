@@ -18,13 +18,11 @@ const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 
 // process.platform-process.arch -> the platform package that carries the binary.
-// The keys mirror the Rust target matrix in .github/workflows/release.yml, the
-// TARGETS table in scripts/npm-build.mjs, and the optionalDependencies in
-// package.json; keep the four in lockstep.
+// The keys mirror the targets release/release.py builds, the TARGETS table in
+// scripts/npm-build.mjs, and the optionalDependencies in package.json; keep the
+// four in lockstep.
 const PACKAGES = {
   "linux-x64": "onepipeline-cli-linux-x64",
-  "linux-arm64": "onepipeline-cli-linux-arm64",
-  "darwin-x64": "onepipeline-cli-darwin-x64",
   "darwin-arm64": "onepipeline-cli-darwin-arm64",
   "win32-x64": "onepipeline-cli-win32-x64",
 };
@@ -42,6 +40,22 @@ function fail(message) {
 
 function binaryPath() {
   const key = `${process.platform}-${process.arch}`;
+  // Intel macOS and arm64 Linux packages are no longer published, so say that
+  // rather than listing the platforms that are, or failing on a package that is
+  // missing.
+  if (key === "darwin-x64") {
+    fail(
+      "Intel macOS (darwin-x64) is no longer supported: prebuilt binaries ship " +
+        "for Apple silicon macOS only. On Apple silicon, run an arm64 Node.js; on an " +
+        "Intel Mac, build from source with 'cargo install onepipeline --locked'.",
+    );
+  }
+  if (key === "linux-arm64") {
+    fail(
+      "arm64 Linux (linux-arm64) is no longer supported: prebuilt Linux binaries " +
+        "ship for x86-64 only. Build from source with 'cargo install onepipeline --locked'.",
+    );
+  }
   const pkg = PACKAGES[key];
   // llmlint: ignore-block[changed_behavior_has_e2e] reaching this branch means running
   // where no prebuilt package exists, and a test could only get there by lying to node

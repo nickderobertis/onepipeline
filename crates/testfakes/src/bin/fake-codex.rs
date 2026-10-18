@@ -11,11 +11,12 @@
 //! cleanly, so only the structured error can classify the attempt as failed.
 //!
 //! It speaks the `codex exec` line oneharness builds — `codex exec [resume ID]
-//! [-c KEY=VALUE]... [--dangerously-bypass-approvals-and-sandbox | --sandbox
-//! read-only|workspace-write] [--model M] [--json] (PROMPT | -)` — and refuses
-//! any other,
-//! so a line oneharness starts sending that this double does not speak is a
-//! refusal a journey reads rather than an argument it silently swallows.
+//! [-c features.plugins=false|true] [-c features.apps=false|true]
+//! [-c analytics.enabled=false|true] [-c model_catalog_json=PATH] [--dangerously-bypass-approvals-and-sandbox |
+//! --sandbox read-only|workspace-write] [--model M] [--json] (PROMPT | -)` — and
+//! refuses any other, so a line oneharness starts sending that this double does
+//! not speak is a refusal a journey reads rather than an argument it silently
+//! swallows.
 
 use onepipeline_testfakes as fake;
 use std::process::ExitCode;
@@ -77,6 +78,16 @@ fn script_dir() -> std::path::PathBuf {
 // that is not below is a refusal there rather than a double that reads differently.
 const SANDBOXES: [&str; 2] = ["read-only", "workspace-write"];
 
+/// The `-c` settings oneharness starts every Codex launch with, in either state.
+const SETTINGS: [&str; 6] = [
+    "features.plugins=false",
+    "features.plugins=true",
+    "features.apps=false",
+    "features.apps=true",
+    "analytics.enabled=false",
+    "analytics.enabled=true",
+];
+
 /// Whether `args` is a `codex exec` line oneharness builds, or why it is not.
 ///
 /// The verb first, then its options in any order, then exactly one prompt —
@@ -110,20 +121,14 @@ fn declared(args: &[String]) -> Result<(), String> {
                     return Err(format!("codex takes no sandbox {sandbox:?}"));
                 }
             }
-            // A config override, as oneharness 0.26.0 sends `-c
-            // features.plugins=false` on every launch a config did not opt into
-            // plugins. Recorded rather than read: what it set is the journey's
-            // to assert from the argv.
+            // The config overrides oneharness sends: Codex's plugins, apps and
+            // analytics, each off unless the run opted in, and the shared model catalog.
             "-c" => {
-                let set = rest
+                let setting = rest
                     .next()
-                    .ok_or("codex's -c takes a key=value, and nothing followed it")?;
-                if set.starts_with('-')
-                    || !set.split_once('=').is_some_and(|(key, _)| !key.is_empty())
-                {
-                    return Err(format!(
-                        "codex's -c takes a key=value, and {set:?} is not one"
-                    ));
+                    .ok_or("codex's -c takes a setting, and nothing followed it")?;
+                if !SETTINGS.contains(&setting) && !setting.starts_with("model_catalog_json=") {
+                    return Err(format!("codex takes no setting {setting:?} here"));
                 }
             }
             "--model" => {

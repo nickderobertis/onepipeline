@@ -8,10 +8,12 @@
 //      platform-to-package resolution),
 //   3. `npm/onepipeline-cli/package.json`'s optionalDependencies (what npm
 //      installs), and
-//   4. the `upload`, `build-wheels`, and `build-npm` matrices in
-//      `.github/workflows/release.yml` (what actually gets built), and
-//   5. that file's `verify-npm` matrix (what a release actually *installs and
-//      starts* on each platform).
+//   4. the targets `.github/workflows/release.yml`'s build jobs build — each
+//      job's recipe plan, `just release-<platform> plan` (what actually gets
+//      built), and
+//   5. the npm packages those jobs' `verify` steps install from the registry
+//      and start (what a release actually *installs and starts* on each
+//      platform).
 //
 // The fifth is not the same question as the fourth, and the gap between them is
 // how a platform stayed broken: aarch64 Linux was built and published by every
@@ -19,13 +21,13 @@
 // whose registry lag was visible from 0.16.4 onward. Building a platform nobody
 // verifies is a platform nobody is watching.
 //
-// None can be generated from another — a workflow matrix is YAML a workflow
-// engine reads, npm resolves optionalDependencies before any code runs, and the
+// None can be generated from another — a release plan is Python a build job runs, npm resolves optionalDependencies before any code runs, and the
 // launcher must resolve with no build step. So the sets are reconciled here
 // instead: add a platform in one place and this fails until it is added in all
 // five. Drift here does not break a build; it 404s an install, on the one
 // platform nobody tested.
 
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { describe, it } from "node:test";
@@ -50,28 +52,27 @@ function literalKeys(source, name) {
   return [...objectLiteral(source, name).matchAll(/^\s{2}"([^"]+)":/gm)].map((m) => m[1]);
 }
 
-function workflowTargets(workflow, job) {
-  const start = workflow.indexOf(`\n  ${job}:\n`);
-  assert.notEqual(start, -1, `no \`${job}\` job in release.yml`);
-  // Jobs are indented two spaces, so the next line at that indent ends this one.
-  const rest = workflow.slice(start + 1);
-  const nextJob = rest.slice(1).search(/\n {2}[a-z][a-z0-9-]*:\n/);
-  const body = nextJob === -1 ? rest : rest.slice(0, nextJob + 1);
-  const targets = [...body.matchAll(/^\s*- target: (\S+)$/gm)].map((m) => m[1]);
-  assert.ok(targets.length > 0, `the \`${job}\` job builds no targets`);
-  return targets;
+const PLATFORMS = ["linux", "macos", "windows"];
+
+/// One build job's plan: every file, package and target it builds and publishes.
+function plan(platform) {
+  return JSON.parse(
+    execFileSync("python3", ["release/release.py", "plan", platform], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+    }),
+  );
 }
 
-/// The platform package each `verify-npm` leg names in `package:`. That key is
-/// also asserted at run time by the leg itself, so a name here is a claim the
-/// release checks rather than a label.
-function workflowVerifyPackages(workflow) {
-  const start = workflow.indexOf("\n  verify-npm:\n");
-  assert.notEqual(start, -1, "no `verify-npm` job in release.yml");
+/// Whether `build-<platform>` runs its recipe's `phase` as a step of its own.
+function runsPhase(workflow, platform, phase) {
+  const start = workflow.indexOf(`\n  build-${platform}:\n`);
+  assert.notEqual(start, -1, `release.yml has a build-${platform} job`);
+  // Jobs are indented two spaces, so the next line at that indent ends this one.
   const rest = workflow.slice(start + 1);
-  const nextJob = rest.slice(1).search(/\n {2}[a-z][a-z0-9-]*:\n/);
-  const body = nextJob === -1 ? rest : rest.slice(0, nextJob + 1);
-  return [...body.matchAll(/^\s*- os: \S+\n\s*package: (\S+)$/gm)].map((m) => m[1]);
+  const next = rest.slice(1).search(/\n {2}[a-z][a-z0-9-]*:\n/);
+  const body = next === -1 ? rest : rest.slice(0, next + 1);
+  return body.includes(`\n        run: just release-${platform} ${phase}\n`);
 }
 
 describe("the platform matrix", () => {
@@ -79,6 +80,7 @@ describe("the platform matrix", () => {
   const launcher = read("npm", "onepipeline-cli", "bin", "onepipeline.js");
   const manifest = JSON.parse(read("npm", "onepipeline-cli", "package.json"));
   const workflow = read(".github", "workflows", "release.yml");
+  const plans = PLATFORMS.map(plan);
 
   const triples = literalKeys(buildScript, "TARGETS");
   // `{ platform: "linux", arch: "x64", ... }` for each triple, in the same order.
@@ -86,15 +88,16 @@ describe("the platform matrix", () => {
     ...objectLiteral(buildScript, "TARGETS").matchAll(/platform: "([^"]+)", arch: "([^"]+)"/g),
   ].map(([, platform, arch]) => ({ platform, arch }));
 
-  it("names the same triples in every release matrix", () => {
+  it("builds every triple in exactly one build job", () => {
     assert.ok(triples.length >= 1, "npm-build.mjs declares no targets");
-    for (const job of ["upload", "build-wheels", "build-npm"]) {
-      assert.deepEqual(
-        workflowTargets(workflow, job).sort(),
-        [...triples].sort(),
-        `release.yml's \`${job}\` matrix and npm-build.mjs's TARGETS disagree`,
-      );
-    }
+    for (const platform of PLATFORMS) assert.ok(runsPhase(workflow, platform, "build"), platform);
+    const built = plans.flatMap((p) => p.targets);
+    assert.deepEqual(
+      [...built].sort(),
+      [...triples].sort(),
+      "the release.yml build jobs and npm-build.mjs's TARGETS disagree",
+    );
+    assert.equal(new Set(built).size, built.length, "two build jobs build the same target");
   });
 
   it("resolves every built target from the launcher", () => {
@@ -125,18 +128,26 @@ describe("the platform matrix", () => {
 
   it("verifies an install on every platform the launcher declares a package for", () => {
     const declared = Object.keys(manifest.optionalDependencies).sort();
-    const verified = workflowVerifyPackages(workflow);
+    const verified = PLATFORMS.flatMap((platform, index) => {
+      assert.ok(
+        runsPhase(workflow, platform, "verify"),
+        `build-${platform} installs what it published and starts it`,
+      );
+      return plans[index].artifacts
+        .filter((a) => a.destination === "npm")
+        .map((a) => a.package.replace(/^npm:/, ""));
+    });
     assert.deepEqual(
       [...verified].sort(),
       declared,
-      "release.yml's `verify-npm` matrix and the launcher's optionalDependencies disagree — a " +
-        "platform with a package and no leg is one no release installs, and a leg for a package " +
-        "nothing publishes can only ever be red",
+      "the packages the build jobs publish and verify and the launcher's optionalDependencies " +
+        "disagree — a platform with a package and no verification is one no release installs, and " +
+        "a verification of a package nothing publishes can only ever be red",
     );
     assert.equal(
       new Set(verified).size,
       verified.length,
-      "two `verify-npm` legs name the same platform package, so one platform is unwatched",
+      "two build jobs publish the same platform package",
     );
   });
 });

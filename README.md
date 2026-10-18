@@ -53,8 +53,10 @@ The package name is not optional: `cargo install --git` searches the whole
 repository, and this one also carries the `onepipeline-testfakes` test harness,
 so an unqualified command fails with `multiple packages with binaries found`.
 
-Prebuilt archives for Linux (x86-64, arm64), macOS (Intel, Apple silicon), and
-Windows (x86-64) are attached to every release, with `sha256` checksums.
+Prebuilt archives for Linux (x86-64), macOS (Apple silicon), and Windows
+(x86-64) are attached to every release, with `sha256` checksums. Intel macOS and
+arm64 Linux builds are discontinued: there, build from source with the command
+above.
 
 ## How the npm launcher is published
 
@@ -74,9 +76,9 @@ window after each release.
 `scripts/publish-npm.sh` therefore asks the registry rather than the exit code:
 it does not return until the version it just published is served, and it refuses
 to publish any package before the exact versions that package's own manifest
-pins are served. `verify-npm` then installs and starts the launcher on every
-platform the manifest declares a package for, so a release that would ship that
-window is red rather than green.
+pins are served. Each platform's build job then installs its own platform
+package from npm and starts it on that OS, and `publish` installs and starts the
+launcher, so a release that would ship that window is red rather than green.
 
 ## Release outcome
 
@@ -84,7 +86,7 @@ Every release attaches **`release-outcome.json`** to its GitHub Release. It
 answers one question in three states, so a consumer can tell a publication that
 was verified from one that was not without opening a job log:
 
-- `nothing-shipped` — no publish job ran, so no artifact can have reached a
+- `nothing-shipped` — no publish step ran, so no artifact can have reached a
   registry. A publish that *failed* does not say this: it may have published
   part of what it was given, so it reads as `shipped-unverified`.
 - `shipped-unverified` — artifacts are public, and installing one of them was
@@ -221,6 +223,23 @@ are projected back onto the onetaskgraph project in the background. A failed
 write is reported and retried — unless the store refused it, which is reported
 once and attempted again when the run's graph next changes; it never changes
 execution or an edit ruling.
+
+A run claims its project on the store (`onepipeline.driver`), and a launch finding
+another run's claim is refused unless told `--take-over`. A running driver reads that
+claim once per **claim interval** — `ONEPIPELINE_CLAIM_INTERVAL_SECONDS`, 300 by
+default — and never more often, however busy it is. It starts a dispatch or a
+publication only on a read younger than one interval, and ends any dispatch it still has
+in progress once its newest read is two intervals and twenty seconds — the time a read
+may take — old. Before a publication starts, the driver names it on the project
+(`onepipeline.publishing`), and it clears that once the publication has finished. So a
+takeover waits rather than every driver: `start --take-over` writes its claim, and starts
+nothing until the driver it displaced has stopped and acknowledged that on the claim —
+which that driver does at its next read — or, where it never does, until two of *that
+driver's* intervals, twenty seconds, *its* cancel grace (`ONEPIPELINE_CANCEL_GRACE_SECONDS`,
+which its claim states beside its interval) and ten seconds have passed and the project
+names none of its publications under way. A publication held for any length of time holds
+the takeover with it. A claim stating no lease — one an older build wrote — is taken over
+only on an acknowledgement. A run of this host that nothing drives is taken over at once.
 
 A task's shape is a template its host owns. A host registers names in
 `<root>/templates.yaml` under `--template-root DIR`; `plan-task` is always
@@ -885,6 +904,11 @@ just bootstrap   # from a clean clone
 just check       # the deterministic gate
 just gate        # check + the diff-scoped llmlint tier
 ```
+
+The llmlint tier, `just lint-llm-diff <base>`, runs the llmlint CLI as a cached Nx
+target keyed on the tracked tree, the resolved base commit and `llmlint
+fingerprint`: an unchanged pass is replayed, a failure is judged again, and
+`--skip-nx-cache` forces a fresh judgement.
 
 `just --list` is the full command surface.
 [`docs/contract-divergences.md`](docs/contract-divergences.md) records every place

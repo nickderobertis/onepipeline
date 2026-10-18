@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
-use serde_norway::Value;
+use serde_json::Value;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -30,7 +30,8 @@ fn workflow(file: &str) -> Value {
     let path = repo_root().join(".github/workflows").join(file);
     let text = fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("could not read {}: {e}", path.display()));
-    serde_norway::from_str(&text).unwrap_or_else(|e| panic!("{file} does not parse: {e}"))
+    onepipeline_testfakes::yaml::from_str(&text)
+        .unwrap_or_else(|e| panic!("{file} does not parse: {e}"))
 }
 
 fn workflows() -> BTreeMap<String, Value> {
@@ -97,17 +98,21 @@ const VISUAL_DOCS_LEG_INPUTS: &[&str] = &["arches", "projects", "gallery-title"]
 /// pull request or skips the job — and a skipped job reports its context as
 /// passed — so none of them can leave a context unreported. A new condition is
 /// a new way to be unreported, and has to be argued for here.
+///
+/// A skipped *matrix* job is the exception to "reports as passed": it reports
+/// under its bare key, never a leg's rendered name — the shape of run
+/// 38398392919, where a failed gate left `install (<os>)` unreported. So no
+/// required context is reported by a conditional matrix job; carriers report
+/// those names instead (see `carrier_runs`).
 const ALLOWED_CONDITIONS: &[&str] = &[
     "needs.changes.outputs.crate == 'true'",
     "needs.changes.outputs.crate == 'true' && github.event_name == 'pull_request'",
     "github.event_name == 'pull_request'",
 ];
 
-/// `on:` parses as the boolean `true` under YAML 1.1, which serde_norway follows.
 fn triggers(parsed: &Value) -> &Value {
     parsed
         .get("on")
-        .or_else(|| parsed.get(Value::Bool(true)))
         .expect("the workflow declares its triggers")
 }
 
@@ -123,7 +128,7 @@ fn runs_on_every_pull_request(file: &str, parsed: &Value) -> bool {
     }
     pull_request
         .get("types")
-        .and_then(Value::as_sequence)
+        .and_then(Value::as_array)
         .is_none_or(|types| {
             ["opened", "synchronize", "reopened"]
                 .iter()
@@ -138,30 +143,30 @@ fn rendered(key: &str, job: &Value) -> Vec<String> {
         match job.get("strategy").and_then(|s| s.get("matrix")) {
             None => vec![BTreeMap::new()],
             Some(matrix) => {
-                if let Some(include) = matrix.get("include").and_then(Value::as_sequence) {
+                if let Some(include) = matrix.get("include").and_then(Value::as_array) {
                     include
                         .iter()
                         .map(|leg| {
-                            leg.as_mapping()
+                            leg.as_object()
                                 .expect("an include leg is a mapping")
                                 .iter()
-                                .map(|(k, v)| (k.as_str().expect("a key").to_owned(), scalar(v)))
+                                .map(|(k, v)| (k.clone(), scalar(v)))
                                 .collect()
                         })
                         .collect()
                 } else {
                     let axes: Vec<(String, Vec<String>)> = matrix
-                        .as_mapping()
+                        .as_object()
                         .expect("the matrix is a mapping")
                         .iter()
                         .map(|(k, v)| {
                             let values = v
-                                .as_sequence()
+                                .as_array()
                                 .expect("a matrix axis is a list")
                                 .iter()
                                 .map(scalar)
                                 .collect();
-                            (k.as_str().expect("an axis name").to_owned(), values)
+                            (k.clone(), values)
                         })
                         .collect();
                     axes.iter()
@@ -196,7 +201,7 @@ fn rendered(key: &str, job: &Value) -> Vec<String> {
 fn scalar(value: &Value) -> String {
     match value {
         Value::String(s) => s.clone(),
-        other => serde_norway::to_string(other)
+        other => onepipeline_testfakes::yaml::to_string(other)
             .expect("a scalar renders")
             .trim()
             .to_owned(),
@@ -207,12 +212,26 @@ fn needs(job: &Value) -> Vec<String> {
     match job.get("needs") {
         None => Vec::new(),
         Some(Value::String(one)) => vec![one.clone()],
-        Some(Value::Sequence(many)) => many
+        Some(Value::Array(many)) => many
             .iter()
             .map(|need| need.as_str().expect("a needed job is named").to_owned())
             .collect(),
         Some(other) => panic!("`needs` is neither a name nor a list: {other:?}"),
     }
+}
+
+/// The result command a carrier job runs, if this job is one: a Linux job that
+/// reports a required name for a proof that may legitimately not run.
+fn carrier_run(job: &Value) -> Option<&str> {
+    job["steps"].as_array()?.iter().find_map(|step| {
+        step["run"].as_str().filter(|run| {
+            [
+                "node .github/macos-policy.mjs carrier",
+                "node .github/macos-policy.mjs path-carrier",
+            ]
+            .contains(run)
+        })
+    })
 }
 
 fn condition(job: &Value) -> Option<String> {
@@ -235,8 +254,7 @@ fn every_required_context_is_reported_on_every_pull_request() {
         if !runs_on_every_pull_request(file, parsed) {
             continue;
         }
-        for (key, job) in parsed["jobs"].as_mapping().expect("the workflow has jobs") {
-            let key = key.as_str().expect("a job key");
+        for (key, job) in parsed["jobs"].as_object().expect("the workflow has jobs") {
             for name in rendered(key, job) {
                 reporters.insert(name, (file.clone(), key.to_owned()));
             }
@@ -249,7 +267,28 @@ fn every_required_context_is_reported_on_every_pull_request() {
             .unwrap_or_else(|| panic!("no job reports `{context}` on a pull request"));
         let jobs = &all[file]["jobs"];
         let job = &jobs[key.as_str()];
+        if let Some(run) = carrier_run(job) {
+            assert_eq!(condition(job).as_deref(), Some("always()"));
+            assert_eq!(job["runs-on"].as_str(), Some("ubuntu-latest"));
+            let upstream = needs(job);
+            assert_eq!(upstream.len(), 2, "`{context}` carries one proof");
+            assert_eq!(upstream[0], "changes");
+            if run.ends_with(" carrier") {
+                assert_eq!(upstream[1], "macos");
+            }
+            assert!(
+                rendered(&upstream[1], &jobs[upstream[1].as_str()])
+                    .iter()
+                    .all(|name| !REQUIRED.contains(&name.as_str())),
+                "`{context}`'s proof reports a required name itself, so it would report twice"
+            );
+            continue;
+        }
         if let Some(condition) = condition(job) {
+            assert!(
+                job.get("strategy").is_none(),
+                "`{context}` ({file} job `{key}`) is a conditional matrix job, whose skip reports no leg's name"
+            );
             assert!(
                 ALLOWED_CONDITIONS.contains(&condition.as_str()),
                 "`{context}` ({file} job `{key}`) runs only if `{condition}`, a condition that can leave it unreported"
@@ -323,7 +362,7 @@ fn every_required_context_is_reported_on_every_pull_request() {
 }
 
 /// The jobs that report a context nobody requires, and that no required job may
-/// wait on: the release sweep, the suppressions comment, and the three workflows
+/// wait on: the release sweep, the suppressions comment, and the two workflows
 /// AGENTS.md records as advisory.
 #[test]
 fn no_required_job_waits_on_an_advisory_one() {
@@ -344,9 +383,8 @@ fn no_required_job_waits_on_an_advisory_one() {
     // `needs` only reaches jobs of the same workflow, so a required job waits on
     // an advisory one only if the two share a file — which none of these do.
     for (file, parsed) in &all {
-        let jobs = parsed["jobs"].as_mapping().expect("the workflow has jobs");
+        let jobs = parsed["jobs"].as_object().expect("the workflow has jobs");
         for (key, job) in jobs {
-            let key = key.as_str().expect("a job key");
             if rendered(key, job)
                 .iter()
                 .any(|name| REQUIRED.contains(&name.as_str()))
@@ -355,6 +393,7 @@ fn no_required_job_waits_on_an_advisory_one() {
                     let upstream_names = rendered(&upstream, &parsed["jobs"][upstream.as_str()]);
                     assert!(
                         upstream == "changes"
+                            || (carrier_run(job).is_some() && needs(job)[1] == upstream)
                             || upstream_names.iter().any(|name| REQUIRED.contains(&name.as_str())),
                         "{file}'s required `{key}` waits on `{upstream}`, which is not itself required"
                     );
@@ -366,7 +405,7 @@ fn no_required_job_waits_on_an_advisory_one() {
         "release-sweep.yml",
         "notignored.yml",
         "engine-currency.yml",
-        "published-smoke.yml",
+        "visual-docs.yml",
     ] {
         assert!(
             all.contains_key(advisory),
@@ -541,7 +580,7 @@ fn the_release_pull_request_runs_the_full_sweep_and_every_other_pull_request_the
     let gate = &workflow("ci.yml")["jobs"]["gate"];
     let runs = |job: &Value, step_run: &str| {
         job["steps"]
-            .as_sequence()
+            .as_array()
             .expect("the job has steps")
             .iter()
             .filter_map(|step| step.get("run").and_then(Value::as_str))
@@ -558,13 +597,13 @@ fn the_release_pull_request_runs_the_full_sweep_and_every_other_pull_request_the
     // The workload journeys no `check` reaches run here, after the quality gate.
     let position = |job: &Value, step_run: &str| {
         job["steps"]
-            .as_sequence()
+            .as_array()
             .expect("the job has steps")
             .iter()
             .position(|step| step.get("run").and_then(Value::as_str) == Some(step_run))
     };
     let checked = sweep["steps"]
-        .as_sequence()
+        .as_array()
         .expect("the job has steps")
         .iter()
         .position(|step| step["id"].as_str() == Some("every"))
@@ -625,7 +664,7 @@ fn the_release_pull_request_runs_the_full_sweep_and_every_other_pull_request_the
 fn the_release_sweep_runs_the_workloads_after_its_quality_gate_and_the_gate_never_does() {
     let steps = |file: &str, job: &str| -> Vec<Value> {
         workflow(file)["jobs"][job]["steps"]
-            .as_sequence()
+            .as_array()
             .unwrap_or_else(|| panic!("{file}'s {job} job has steps"))
             .clone()
     };
@@ -701,12 +740,11 @@ const SMOKE_REPO_KEY: &str = "ONEPIPELINE_SMOKE_REPO";
 fn strings(value: &Value, into: &mut Vec<String>) {
     match value {
         Value::String(s) => into.push(s.clone()),
-        Value::Sequence(items) => items.iter().for_each(|item| strings(item, into)),
-        Value::Mapping(map) => map.iter().for_each(|(key, item)| {
-            strings(key, into);
+        Value::Array(items) => items.iter().for_each(|item| strings(item, into)),
+        Value::Object(map) => map.iter().for_each(|(key, item)| {
+            into.push(key.clone());
             strings(item, into);
         }),
-        Value::Tagged(tagged) => strings(&tagged.value, into),
         _ => {}
     }
 }
@@ -736,7 +774,7 @@ fn the_smoke_step_reads_its_scratch_repository_from_the_secret_of_the_same_name(
     let secret = format!("${{{{ secrets.{SMOKE_REPO_KEY} }}}}");
     let ci = workflow("ci.yml");
     let steps = ci["jobs"]["smoke"]["steps"]
-        .as_sequence()
+        .as_array()
         .expect("ci.yml's smoke job has steps");
     let runs: Vec<&Value> = steps
         .iter()
@@ -774,11 +812,11 @@ fn the_smoke_step_reads_its_scratch_repository_from_the_secret_of_the_same_name(
 
     for (file, parsed) in workflows() {
         let mut env_blocks = vec![parsed.get("env")];
-        for (_, job) in parsed["jobs"].as_mapping().into_iter().flatten() {
+        for (_, job) in parsed["jobs"].as_object().into_iter().flatten() {
             env_blocks.push(job.get("env"));
             for step in job
                 .get("steps")
-                .and_then(Value::as_sequence)
+                .and_then(Value::as_array)
                 .into_iter()
                 .flatten()
             {
@@ -813,4 +851,143 @@ fn a_hard_coded_scratch_repository_is_recognised() {
     );
     assert!(scratch_slugs("owner/name with a name ending in -smoke").is_empty());
     assert!(scratch_slugs("tests/smoke/main.rs and actions/checkout@v4").is_empty());
+}
+
+#[test]
+fn the_pr_and_opted_in_diagnostic_lanes_preserve_the_three_former_mac_proofs() {
+    let ci = workflow("ci.yml");
+    let lane = &ci["jobs"]["macos"];
+    assert_eq!(lane["runs-on"].as_str(), Some("macos-latest"));
+    assert_eq!(
+        condition(lane).as_deref(),
+        Some("needs.changes.outputs.macos == 'true'")
+    );
+    // Dispatch-local checks cannot initiate a paid manual Mac probe. These
+    // structural assertions preserve the diagnostic's same real install/smoke
+    // commands; native runner execution remains GitHub's third-party boundary.
+    for key in ["macos", "macos-diagnostic"] {
+        let lane = &ci["jobs"][key];
+        assert_eq!(lane["runs-on"].as_str(), Some("macos-latest"));
+        let commands = lane["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|step| step["run"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        for proof in [
+            "just check-cross",
+            "cargo install --path . --locked",
+            "documented=$(grep",
+            "git show FETCH_HEAD:scripts/smoke-published.sh",
+            "bash scripts/smoke-published.sh",
+            "bash \"$RUNNER_TEMP/smoke-published.sh\"",
+        ] {
+            assert!(commands.contains(proof), "{key} omitted {proof}");
+        }
+    }
+    for key in ["cross", "install", "install-documented"] {
+        assert!(!onepipeline_testfakes::yaml::to_string(&ci["jobs"][key])
+            .unwrap()
+            .contains("macos-latest"));
+    }
+}
+
+/// The Windows leg is one leg split across the jobs of `cross`'s `shard` axis.
+/// Each job is handed `count:K/N` of one partition — N the axis's length, K its own
+/// place on it — under a name of its own, and records a verdict of its own; and
+/// `cross (windows-latest)`, the context branch protection requires, passes only on
+/// every one of those verdicts, so a shard that failed, was cancelled or never ran
+/// is not outvoted by one that passed. That each test runs in exactly one shard is
+/// nextest's partition, which `nextest_runs` drives through `_tier-test-quick` and
+/// `just cross-shards` lists over this host's build.
+#[test]
+fn the_windows_leg_is_split_into_shards_that_each_report_and_pass_only_together() {
+    let ci = workflow("ci.yml");
+    let cross = &ci["jobs"]["cross"];
+    let shards: Vec<String> = cross["strategy"]["matrix"]["shard"]
+        .as_array()
+        .expect("`cross` splits its leg along a `shard` axis")
+        .iter()
+        .map(scalar)
+        .collect();
+    let count = shards.len();
+    assert_eq!(
+        shards,
+        (1..=count).map(|k| k.to_string()).collect::<Vec<_>>(),
+        "the shards are not 1 to {count} in order"
+    );
+    assert_eq!(
+        cross["env"]["ONEPIPELINE_TEST_PARTITION"].as_str(),
+        Some(format!("count:${{{{ matrix.shard }}}}/{count}").as_str()),
+        "each shard is not handed its own share of one {count}-way partition"
+    );
+    let names = rendered("cross", cross);
+    assert_eq!(names.len(), count, "{names:?}");
+    assert!(
+        names.windows(2).all(|pair| pair[0] != pair[1]),
+        "two shards report under one name: {names:?}"
+    );
+    assert!(
+        names.iter().all(|name| !REQUIRED.contains(&name.as_str())),
+        "a shard reports a required context itself: {names:?}"
+    );
+    let steps = cross["steps"].as_array().expect("`cross` has steps");
+    let gate = steps
+        .iter()
+        .find(|step| step["id"] == "gate")
+        .expect("`cross` has its quality gate");
+    // The first shard runs `check-cross` whole and every other its `test-quick`
+    // alone, so the format and lint checks run once and every shard tests its share.
+    assert_eq!(
+        gate["env"]["GATE"].as_str(),
+        Some("${{ matrix.shard == 1 && 'check-cross' || 'test-quick' }}"),
+        "the shards do not split `check-cross` between them: {gate}"
+    );
+    assert!(
+        gate["run"]
+            .as_str()
+            .is_some_and(|run| run.contains("just \"$GATE\"")),
+        "the quality gate does not run the recipe its shard is given: {gate}"
+    );
+    let proved = steps
+        .iter()
+        .find(|step| step["id"] == "proved")
+        .expect("`cross` records its verdict");
+    assert_eq!(
+        proved["env"]["LEG"].as_str(),
+        Some("${{ matrix.os }}-${{ matrix.shard }}"),
+        "a shard's verdict is not recorded under its own name"
+    );
+    let outputs = cross["outputs"]
+        .as_object()
+        .expect("`cross` exports its verdicts");
+    let verdict = ci["jobs"]["cross-windows"]["steps"]
+        .as_array()
+        .expect("the carrier has steps")
+        .iter()
+        .find_map(|step| step["env"]["LEG_VERDICT"].as_str())
+        .expect("the carrier reads the leg's verdict");
+    assert_eq!(outputs.len(), count, "{outputs:?}");
+    assert_eq!(
+        verdict.matches("needs.cross.outputs[").count(),
+        count,
+        "the carrier reads other than each shard's verdict once: {verdict}"
+    );
+    for k in 1..=count {
+        let key = format!("windows-latest-{k}");
+        assert_eq!(
+            outputs.get(&key).and_then(Value::as_str),
+            Some(format!("${{{{ steps.proved.outputs.{key} }}}}").as_str()),
+            "shard {k}'s verdict is not exported as {key}"
+        );
+        assert!(
+            verdict.contains(&format!("needs.cross.outputs['{key}'] == 'success' &&")),
+            "the carrier passes without shard {k}'s verdict: {verdict}"
+        );
+    }
+    assert!(
+        verdict.trim_end().ends_with("&& 'success' || '' }}"),
+        "the carrier's verdict is not success only when every shard's is: {verdict}"
+    );
 }

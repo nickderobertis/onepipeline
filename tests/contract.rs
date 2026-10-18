@@ -159,7 +159,8 @@ fn assert_contract_names(what: &str, names: &[&str]) {
 #[test]
 fn the_contracts_rules_example_parses_and_round_trips() {
     let yaml = fenced_block_naming("yaml", "executors:");
-    let rules: ExecutorRules = serde_norway::from_str(&yaml).expect("the rules example parses");
+    let rules: ExecutorRules =
+        onepipeline_testfakes::yaml::from_str(&yaml).expect("the rules example parses");
 
     assert_eq!(
         rules.executors.len(),
@@ -196,9 +197,10 @@ fn the_contracts_rules_example_parses_and_round_trips() {
     );
     assert_eq!(rules.rules[1].use_executor, "local");
 
-    let round_tripped: ExecutorRules =
-        serde_norway::from_str(&serde_norway::to_string(&rules).expect("serializes"))
-            .expect("re-parses");
+    let round_tripped: ExecutorRules = onepipeline_testfakes::yaml::from_str(
+        &onepipeline_testfakes::yaml::to_string(&rules).expect("serializes"),
+    )
+    .expect("re-parses");
     assert_eq!(round_tripped, rules);
 }
 
@@ -228,7 +230,7 @@ fn the_contract_states_both_predicate_families_and_what_each_matches_on() {
             "the contract does not name the selectable label `{key}`"
         );
     }
-    let rules: ExecutorRules = serde_norway::from_str(
+    let rules: ExecutorRules = onepipeline_testfakes::yaml::from_str(
         "executors: [{name: local, type: local}]\n\
          rules: [{when: {node_label: {step: implement}}, use: local}]\n",
     )
@@ -242,7 +244,7 @@ fn the_contract_states_both_predicate_families_and_what_each_matches_on() {
 #[test]
 fn an_unknown_rules_key_is_refused_at_the_boundary() {
     let bad = "executors:\n  - {name: local, type: local, mx_load1: 8.0}\nrules:\n  - use: local\n";
-    let err = serde_norway::from_str::<ExecutorRules>(bad)
+    let err = onepipeline_testfakes::yaml::from_str::<ExecutorRules>(bad)
         .expect_err("a mistyped key is rejected, not silently dropped");
     assert!(
         err.to_string().contains("mx_load1"),
@@ -254,9 +256,10 @@ fn an_unknown_rules_key_is_refused_at_the_boundary() {
 fn the_shipped_rules_example_is_the_contracts_own() {
     let shipped = std::fs::read_to_string(repo_root().join("examples/executors.yaml"))
         .expect("examples/executors.yaml ships");
-    let shipped: ExecutorRules = serde_norway::from_str(&shipped).expect("it parses");
+    let shipped: ExecutorRules =
+        onepipeline_testfakes::yaml::from_str(&shipped).expect("it parses");
     let documented: ExecutorRules =
-        serde_norway::from_str(&fenced_block_naming("yaml", "executors:"))
+        onepipeline_testfakes::yaml::from_str(&fenced_block_naming("yaml", "executors:"))
             .expect("the contract's example parses");
     assert_eq!(
         shipped, documented,
@@ -485,7 +488,8 @@ fn the_contracts_graph_override_shapes_match_the_public_types() {
 #[test]
 fn the_contracts_launch_config_example_parses_and_round_trips() {
     let yaml = fenced_block_naming("yaml", "schema_version: 2");
-    let config: LaunchConfig = serde_norway::from_str(&yaml).expect("the launch config parses");
+    let config: LaunchConfig =
+        onepipeline_testfakes::yaml::from_str(&yaml).expect("the launch config parses");
     // A version this build **reads**, which is what the contract's committed
     // example is: the document is approved verbatim and is never edited to
     // follow the schema, so a later version having been written since does not
@@ -593,8 +597,9 @@ fn the_contracts_launch_config_example_parses_and_round_trips() {
 #[test]
 fn the_contracts_launch_config_omits_an_empty_block_and_still_reads() {
     for version in LAUNCH_CONFIG_SCHEMA_VERSIONS_READ {
-        let bare: LaunchConfig = serde_norway::from_str(&format!("schema_version: {version}\n"))
-            .expect("a config may declare only a version");
+        let bare: LaunchConfig =
+            onepipeline_testfakes::yaml::from_str(&format!("schema_version: {version}\n"))
+                .expect("a config may declare only a version");
         assert!(bare.filters.is_empty());
         assert_eq!(bare.pr_author_graph, None);
         assert_eq!(bare.node_validator, None);
@@ -709,11 +714,9 @@ fn a_filter_spec_is_refused_by_the_shared_grammars_own_rules() {
         .expect_err("a matcher field the grammar does not have is refused");
     let said = unknown_field.to_string();
     assert!(said.contains("role"), "the refusal names the field: {said}");
-    // Since `onemessagebus` 0.9.1 the core parses a spec with `serde-saphyr`,
-    // which places a refusal by line and column of the spec rather than by the
-    // list's path, so that position is what the refusal is held to.
+    // The bus reads a spec through its YAML reader, so where is the position in the spec.
     assert!(
-        said.contains("line 1, column 14"),
+        said.contains("at line 1, column 14"),
         "the refusal says where in the spec: {said}"
     );
 
@@ -1017,9 +1020,9 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), EVENTS_BUNDLE_VERSION);
     assert_eq!(
-        divergence_block("127.")["bundle_versions"]["events"],
+        divergence_block("128.")["bundle_versions"]["events"],
         EVENTS_BUNDLE_VERSION,
-        "the scratch bundle version must be the manager's recorded ruling"
+        "the events bundle version must be the one the claim lease entry records"
     );
     let carried: Vec<String> = bundle
         .schemas()
@@ -2021,10 +2024,11 @@ fn a_declared_turn_budget_reaches_the_effective_configuration_of_the_worker() {
             .iter()
             .map(|set| oneagentgraph::run::parse_set(set).expect("the sibling parses the override"))
             .collect();
-        let mut document: Value = serde_norway::from_str(&text).expect("the graph parses");
+        let mut document: Value =
+            onepipeline_testfakes::yaml::from_str(&text).expect("the graph parses");
         oneagentgraph::run::apply_overrides(&mut document, &overrides)
             .expect("the sibling applies the override");
-        serde_norway::from_value(serde_norway::to_value(&document).expect("a value"))
+        serde_json::from_value(document)
             .expect("the overridden graph is still a valid graph config")
     };
 
@@ -2797,8 +2801,8 @@ fn the_pool_maintenance_schedule_is_what_the_divergence_record_names() {
         Some("./maintenance.yml")
     );
     let example = fenced_block_naming("yaml", "maintenance_config:");
-    let example: LaunchConfig =
-        serde_norway::from_str(&example).expect("the contract's launch example parses");
+    let example: LaunchConfig = onepipeline_testfakes::yaml::from_str(&example)
+        .expect("the contract's launch example parses");
     assert_eq!(example.schema_version, at);
     assert_eq!(
         example.maintenance_config.as_deref(),
@@ -2848,7 +2852,7 @@ fn the_pool_maintenance_schedule_is_what_the_divergence_record_names() {
     );
     // The contract's own schedule block is the same document.
     let contract_schedule: MaintenanceConfig =
-        serde_norway::from_str(&fenced_block_naming("yaml", "every: 7d"))
+        onepipeline_testfakes::yaml::from_str(&fenced_block_naming("yaml", "every: 7d"))
             .expect("the contract's schedule example parses");
     assert_eq!(contract_schedule, schedule);
     // Loaded off disk, each refusal the block lists names its key.
@@ -3132,7 +3136,7 @@ fn the_branch_name_template_is_what_the_contract_names() {
     assert_eq!(at, CONFIG_SCHEMA_VERSION);
     assert!(at <= LAUNCH_CONFIG_SCHEMA_VERSION);
     let example: LaunchConfig =
-        serde_norway::from_str(&fenced_block_naming("yaml", "branch_template:"))
+        onepipeline_testfakes::yaml::from_str(&fenced_block_naming("yaml", "branch_template:"))
             .expect("the contract's launch example parses");
     assert_eq!(example.schema_version, at);
     assert_eq!(
@@ -6480,13 +6484,15 @@ fn a_siblings_reserved_labels_source_word_phases_and_matcher_fields_are_this_cra
 
     // 4. Every matcher field, through the wire, in both directions.
     let vcs = onevcs::MatchFields {
-        significance: None,
         phase: Some(onevcs::Phase::Development),
         run_id: Some("R".into()),
         node: Some("build".into()),
         step: Some("implement".into()),
         member: Some("worker".into()),
         persona: Some("engineer".into()),
+        // onevcs's own significance stamp, which neither this crate's matcher nor the
+        // graph's carries; unset, it is not written, so the two shapes still cross.
+        significance: None,
     };
     let graph = oneagentgraph::event::MatchFields {
         // The graph links no `onevcs`, so its phase is an open word. A filter it
@@ -7328,7 +7334,8 @@ fn the_dag_scope_graph_is_a_monitor_plus_a_resettable_check_in() {
     let text = std::fs::read_to_string(repo_root().join("graphs/dag-scope.yaml"))
         .expect("the dag-scope graph ships");
     // It parses as oneagentgraph's own schema — the library that launches it.
-    let graph: GraphConfig = serde_norway::from_str(&text).expect("it is a valid graph config");
+    let graph: GraphConfig =
+        onepipeline_testfakes::yaml::from_str(&text).expect("it is a valid graph config");
     assert_eq!(graph.name, "dag-scope");
 
     let monitor = graph.members.get("monitor").expect("a monitor member");
@@ -7499,7 +7506,8 @@ fn the_default_node_scope_graph_is_a_worker_and_a_judge() {
     assert!(CONTRACT.contains("a default node-scope config (worker+judge)"));
     let text = std::fs::read_to_string(repo_root().join("graphs/node-scope.yaml"))
         .expect("the node-scope graph ships");
-    let graph: GraphConfig = serde_norway::from_str(&text).expect("it is a valid graph config");
+    let graph: GraphConfig =
+        onepipeline_testfakes::yaml::from_str(&text).expect("it is a valid graph config");
     assert_eq!(graph.name, "node-scope");
 
     let worker = graph.members.get("worker").expect("a worker member");
@@ -10652,10 +10660,9 @@ fn dispatch_scratch_lifetime_is_the_divergence_surface() {
     use onepipeline::cli::{Cli, Command, ScratchCommand};
     use onepipeline::event::{EventKind, PipelineKind};
     let contract = divergence_block("127.");
-    assert_eq!(
-        contract["bundle_versions"]["events"],
-        onepipeline::vocabulary::EVENTS_BUNDLE_VERSION
-    );
+    // The events bundle that first carried the scratch kinds; entry 128's claim
+    // lease raised the compiled-in one since, which that entry's own test pins.
+    assert_eq!(contract["bundle_versions"]["events"], "1.5.0");
     assert!(
         matches!(Cli::try_parse_from(["onepipeline", "scratch", "discard", "example"]).unwrap().command, Command::Scratch(ScratchCommand::Discard { run }) if run == "example")
     );
@@ -10962,7 +10969,8 @@ fn the_readjustment_is_what_the_divergence_record_names() {
     );
 
     // The events bundle that first carried the readjustment; entry 127's scratch
-    // kinds raised the compiled-in one since, which that entry's own test pins.
+    // kinds and entry 128's claim lease raised the compiled-in one since, which
+    // entry 128's own test pins.
     assert_eq!(
         block["bundle_versions"],
         json!({"events": "1.4.0", "planner_channel": DOCUMENT_VERSION})
@@ -11062,8 +11070,8 @@ fn the_manager_landing_contract_is_what_the_divergence_record_names() {
         serde_json::from_value::<onepipeline::vocabulary::Significance>(word.clone())
             .unwrap_or_else(|why| panic!("{kind}'s word {word} is not onevcs's: {why}"));
     }
-    // The bundle that first carried the landings; entry 127's scratch kinds
-    // raised it since, so the compiled-in bundle is that one or a later minor.
+    // The bundle that first carried the landings; entries 127 and 128 raised
+    // it since, so the compiled-in bundle is that one or a later minor.
     let release = |text: &str| -> (u64, u64, u64) {
         let parts: Vec<u64> = text
             .split('.')

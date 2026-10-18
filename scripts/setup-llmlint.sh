@@ -19,7 +19,8 @@
 #      (`just lint-llm-diff` needs the changed-file-scoped `--diff` and three-dot
 #      `--diff-base` default; `just lint-llm-validate` needs the `validate` gate).
 #   2. In a Claude Code session, persists PATH (so the freshly installed binary
-#      resolves) into CLAUDE_ENV_FILE so later Bash calls inherit it.
+#      resolves) into CLAUDE_ENV_FILE so later Bash calls inherit it; on a GitHub
+#      Actions runner, appends the same directory to GITHUB_PATH for later steps.
 #
 # Harness selection: the committed `oneharness.toml` is in fallback mode (codex +
 # gpt-6.1-sol primary, claude-code + opus-4.8 secondary), so llmlint runs the primary
@@ -33,9 +34,10 @@ set -uo pipefail
 # Version floor, as a PyPI constraint (the `llmlint-cli` package version tracks the
 # wrapped binary version). `uv tool install --upgrade` installs the newest release
 # satisfying it; oneharness comes along transitively at a compatible version.
-# 0.3.23 bundles config_lint v1.2, so `line_localizable_rules_require_attribution`
-# is enforced; everything the header above relies on shipped before it.
-readonly LLMLINT_MIN="0.3.23"
+# 0.4.11 ships `llmlint fingerprint`, the judge digest `onepipeline:lint-llm-diff`
+# keys its Nx cache on, and refuses a judge reply that leaves a selected rule
+# unanswered; everything the header above relies on shipped before it.
+readonly LLMLINT_MIN="0.4.11"
 readonly BIN_DIR="$HOME/.local/bin"
 
 log() { printf 'setup-llmlint: %s\n' "$*" >&2; }
@@ -70,9 +72,17 @@ persist_session_env() {
   log "exported PATH"
 }
 
+# The cached Nx target runs `llmlint` from PATH, so a CI lane's later steps need
+# the install directory there too. No-op off a GitHub Actions runner.
+persist_runner_path() {
+  [ -n "${GITHUB_PATH:-}" ] || return 0
+  printf '%s\n' "$BIN_DIR" >> "$GITHUB_PATH" || log "could not append to GITHUB_PATH (continuing)"
+}
+
 export PATH="${BIN_DIR}:${PATH}"
 ensure_toolchain
 persist_session_env
+persist_runner_path
 # `llmlint doctor` confirms the sibling `oneharness` is reachable (it is not on
 # PATH — llmlint resolves it beside its own binary), so report via doctor.
 if command -v llmlint >/dev/null 2>&1; then

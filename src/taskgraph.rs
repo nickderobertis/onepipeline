@@ -118,6 +118,13 @@ pub(crate) const DISPATCH_KEY: &str = "onepipeline.dispatch";
 /// reads `null` exactly as it reads the key absent.
 pub(crate) const DRIVER_KEY: &str = "onepipeline.driver";
 
+/// Projection-only **project** metadata naming the publications a driver has under way: its
+/// run and host, the nodes publishing and when it wrote them. Written — and landed — before
+/// any publication starts, and cleared once those publications have settled, so a run
+/// taking the project over can tell whether one may still be under way. Entry 128 of
+/// `docs/contract-divergences.md` names it; `null` reads as absent, as for the claim.
+pub(crate) const PUBLISHING_KEY: &str = "onepipeline.publishing";
+
 /// The reserved keys the write-back owns and no node field answers to.
 ///
 /// A project a run projected onto — its own, where the plan's store is the destination —
@@ -139,7 +146,7 @@ const PROJECTION_ONLY: &[&str] = &[
 ];
 
 /// The reserved **project** keys the engine owns and no plan setting answers to.
-const PROJECT_PROJECTION_ONLY: &[&str] = &[DRIVER_KEY];
+const PROJECT_PROJECTION_ONLY: &[&str] = &[DRIVER_KEY, PUBLISHING_KEY];
 
 /// A reserved key this mapping fills from the task itself, and where it comes
 /// from — so a project stating it is told which end to edit rather than having
@@ -348,8 +355,12 @@ impl Store {
         Ok(found.item.metadata.into_iter().collect())
     }
 
-    /// Set one key of one project's metadata, within `within`: what a driver releases its
-    /// claim by when the closeout's own projection did not land it in time.
+    /// Set one key of one project's metadata, within `within`: what a driver claims,
+    /// acknowledges, fences and releases by outside its write-back.
+    ///
+    /// A store whose configuration opted into the public boundary has the write checked as
+    /// the write-back's are — by the linked `onevcs`, in process, over `term_scope`, the
+    /// run's own — rather than by the commands that configuration names.
     ///
     /// # Errors
     ///
@@ -360,8 +371,9 @@ impl Store {
         key: &str,
         value: &Value,
         within: std::time::Duration,
+        term_scope: &[String],
     ) -> Result<()> {
-        let built = self
+        let mut built = self
             .engine(&Layer::default())
             .map_err(|error| Error::Sibling {
                 tool: STORE,
@@ -370,6 +382,13 @@ impl Store {
                     self.dir.display()
                 ),
             })?;
+        // llmlint: ignore[changed_behavior_has_e2e] driven end to end by every `tests/e2e/publication_boundary.rs` journey that publishes — a store whose configuration opts into the boundary, where a driver's fence must land before its publication starts; without this policy each of them waited on a fence the store refused, which is how the gap was found.
+        if built.engine.boundary_active() {
+            built.engine = built
+                .engine
+                .with_write_policy(std::sync::Arc::new(crate::boundary::WritePolicy))
+                .with_term_scope(Some(term_scope.to_vec()));
+        }
         let reader = Reader::over(built)?;
         let named = MetadataKey::new(key.to_owned()).map_err(|why| Error::Sibling {
             tool: STORE,
@@ -1153,8 +1172,12 @@ fn node_id(metadata: &BTreeMap<String, Value>) -> std::result::Result<String, St
 /// `serde_json`'s own error says the type it wanted and not where it wanted it,
 /// and a project's fields are metadata keys a person wrote by hand — so the path
 /// is the whole of what makes the refusal actionable, and a nested one (a step's
-/// own budget, say) is unreachable without it.
-fn read<T: serde::de::DeserializeOwned>(document: Value) -> std::result::Result<T, String> {
+/// own budget, say) is unreachable without it. A graph document read once its
+/// overrides are applied is read through it for the same reason: it no longer
+/// carries the line a key was written on.
+pub(crate) fn read<T: serde::de::DeserializeOwned>(
+    document: Value,
+) -> std::result::Result<T, String> {
     serde_path_to_error::deserialize(document).map_err(|error| match error.path().to_string() {
         path if path == "." => error.into_inner().to_string(),
         path => format!("{path}: {}", error.into_inner()),
@@ -1960,7 +1983,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let write = |path: PathBuf, front: Value| {
             std::fs::create_dir_all(path.parent().expect("a folder")).expect("a store folder");
-            let yaml = serde_norway::to_string(&front).expect("front matter");
+            let yaml = crate::yaml::to_string(&front).expect("front matter");
             std::fs::write(
                 path,
                 format!(
