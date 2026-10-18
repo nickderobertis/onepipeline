@@ -25,6 +25,7 @@ Commits after dd2e5d6:
 - **7574f2f** and 644b02e change only this document.
 - **953fda8** names the record directory once, as `profile::RECORD_DIR`. The harness writes to the same `target/test-profile` it did before, and each CI leg's upload of it now warns if it found no records. It changes no test's work, so the local figures below, taken on 7574f2f, stand for it.
 - **997aaa8** merges main at 54cfa4a (#982), which splits the Windows leg into two `cross` shards. Each shard now keeps its records as `test-profile-windows-latest-<shard>`, because `upload-artifact` refuses a second artifact of one name. To read a run's Windows records, unpack both into one directory: `gh run download <run> -p 'test-profile-windows-latest-*' -D windows`, then pass `windows=windows`. The script reads a directory recursively, and the shards run disjoint tests. #982 also changes the timing of four e2e journeys, so records from after the merge are not directly comparable with these for those tests.
+- **8b5655c** merges main at 4d975bc: #994 holds one driver journey's node, and #1000 moves `tests/smoke/continuation.rs` onto a `Clock`. Its wall clock's sleep is recorded through `profile::thread::sleep`.
 - **6c4a488** runs one maintenance journey at a three-second pace (see **maintenance on Windows, run 39129002719**). Its test-s move by a few seconds, which the figures below do not include.
 
 The hosted dd2e5d6 records therefore predate the lock refresh and the fence fix. The local runs show neither moved the harness. The c551671 counts match the a94701b run: spawn 13,686 vs 13,575, git 9,048 vs 9,048, build 3,261 vs 3,259, fixture 7,766 vs 7,765. The 7574f2f counts are spawn 13,822, git 9,055, build 3,263 and fixture 7,773. The difference from c551671 is mostly the one added test and run-to-run variation in retries and polls.
@@ -992,6 +993,13 @@ What the test process gains is the profiling wrappers around `world.until`'s pol
 Five other journeys in `tests/e2e/maintenance.rs` assert an empty journal after a `release` under the same pace. None of them is named here, so they are left as a follow-up.
 
 ## Checks
+
+**On 8b5655c** (the merge of main at 4d975bc; its conflict was `tests/smoke/continuation.rs`):
+- `continuation::waiting::` in the smoke binary: 4 of 4 passed.
+- The 7 e2e `driver::` observer journeys, including #994's `a_restart_the_observers_graph_refuses_is_reported_and_not_asked_again`: 7 of 7 passed.
+- `cargo fmt --check` and `cargo clippy --test smoke --test e2e --locked -D warnings`: clean.
+- `just engines-current`: passed. `Cargo.lock` still differs from main only in the three engines.
+- `just lint-llm-diff origin/main`, against 4d975bc: 39 rules, 21 passed, 0 failed.
 
 **On d085c0d.** The judged lint on 9c102f4 reported one `changed_behavior_has_e2e` finding: nothing held a record's persisted `unattributed_s` to what the writer subtracts. `profiling::a_records_inclusive_and_background_figures_are_the_ones_the_test_measured` now holds it to the record's `wall_s` less every category's own `s`, within a microsecond. It failed as intended at `tests/e2e/profiling.rs:405` when the writer persisted the whole wall clock as unattributed; that was reverted. Re-run on d085c0d:
 - the 22 e2e `profiling::` journeys: 22 of 22 passed;
