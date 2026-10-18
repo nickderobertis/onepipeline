@@ -462,6 +462,14 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         }
     }
 
+    // Held before it either refuses or starts, until the journey writes
+    // `run.go`: what the launching process does next — the driver that started
+    // this graph claiming its run, or giving up on it — happens only once the
+    // journey has put whatever is waiting on that driver where it wants it.
+    if dir.join("run.hold").exists() {
+        fake::wait_for_any(&[dir.join("run.go")]);
+    }
+
     // A refusal a launcher cannot catch by glancing: the real CLI validates
     // before it announces itself, and how long that takes is the host's
     // business — a config fetched over the network, a loaded machine. Scripted

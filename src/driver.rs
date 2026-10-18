@@ -1902,6 +1902,14 @@ fn observe(
     Ok(Some(launched))
 }
 
+/// The test failpoint a detached launch meets before its first reading of the
+/// launch record.
+const HANDOVER_UNREAD_GATE_ENV: &str = "ONEPIPELINE_TEST_HANDOVER_UNREAD_GATE";
+
+/// The test failpoint a detached launch meets once its first reading found no
+/// claim, before it asks whether the driver has exited.
+const HANDOVER_READ_GATE_ENV: &str = "ONEPIPELINE_TEST_HANDOVER_READ_GATE";
+
 /// Wait for a retained driver to claim the run, or report that it never did.
 ///
 /// A detached launch is the one caller that never waits for what it started, so
@@ -1928,10 +1936,19 @@ fn confirm_driving(paths: &RunPaths, driver: &mut std::process::Child) -> Result
                     .is_none_or(|stamp| stamp.matches(&record.started))
         })
     };
+    // Test failpoints only, met where no variable is set to nothing at all: a
+    // journey holds this process before its first reading, or between that
+    // reading and its first look at whether the driver has exited, so what the
+    // driver does is placed on a chosen side of each.
+    let _ = crate::ordering::meet(HANDOVER_UNREAD_GATE_ENV);
+    let mut first = true;
     let deadline = Instant::now() + DRIVER_HANDOVER;
     while Instant::now() < deadline {
         if claimed() {
             return Ok(());
+        }
+        if std::mem::take(&mut first) {
+            let _ = crate::ordering::meet(HANDOVER_READ_GATE_ENV);
         }
         // `try_wait` rather than a pid probe, and reaping is the point: a child
         // nobody waits on stays a zombie, and a zombie answers a liveness probe
