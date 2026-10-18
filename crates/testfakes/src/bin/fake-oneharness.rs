@@ -1069,9 +1069,11 @@ fn work(
     // arrives; a second, released while the node is still in flight, proves the
     // readout *advances*. The driver's own turn is left alone — it is the
     // member running the engine verbs, not the one being watched.
-    let gates = (!observing && dir.join("turn.hold").exists())
-        .then(|| turn_gates(dir, &prompt))
-        .flatten();
+    let gates = if !observing && dir.join("turn.hold").exists() {
+        turn_gates(dir, prompt)?
+    } else {
+        None
+    };
     if let Some([go, settle]) = gates {
         fake::wait_for(&dir.join(&go));
         let held = [call(3, "cargo llvm-cov --workspace"), observation(4)];
@@ -1500,15 +1502,37 @@ fn asks_again_times(dir: &std::path::Path) -> Result<usize, String> {
 /// first line that matches wins. Where `turn.gates` is written, a turn whose
 /// prompt carries none of its markers is not held: a journey naming its gates
 /// holds exactly the turns it names.
-fn turn_gates(dir: &std::path::Path, prompt: &str) -> Option<[String; 2]> {
-    let name = match fake::node_script(dir, "turn", "gates") {
-        None => "turn".to_string(),
-        Some(gates) => gates.lines().find_map(|line| {
-            let (marker, name) = line.trim().rsplit_once(' ')?;
-            prompt.contains(marker).then(|| name.trim().to_string())
-        })?,
+///
+/// A line with no marker, or a name that is not one file name of letters,
+/// digits, `-` and `_`, is a scenario nobody wrote, and is refused rather than
+/// read as something it might have meant.
+fn turn_gates(dir: &std::path::Path, prompt: &str) -> Result<Option<[String; 2]>, String> {
+    let pair = |name: &str| Some([format!("{name}.go"), format!("{name}.settle")]);
+    let Some(gates) = fake::node_script(dir, "turn", "gates") else {
+        return Ok(pair("turn"));
     };
-    Some([format!("{name}.go"), format!("{name}.settle")])
+    for line in gates.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let named = line
+            .rsplit_once(' ')
+            .map(|(marker, name)| (marker.trim(), name))
+            .filter(|(marker, name)| {
+                !marker.is_empty()
+                    && !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            });
+        let Some((marker, name)) = named else {
+            return Err(format!(
+                "turn.gates holds {line:?}, which is not `<marker> <name>` with a name of \
+                 letters, digits, `-` and `_`"
+            ));
+        };
+        if prompt.contains(marker) {
+            return Ok(pair(name));
+        }
+    }
+    Ok(None)
 }
 
 /// Hold this supervisor turn open, when a journey asked for one that is.
