@@ -1284,6 +1284,9 @@ const BUILD_RULING: &str = "build: keep the public API unchanged";
 /// A ruling on `lint` carried in the envelope a cancel of `build` overtakes.
 const LINT_RULING: &str = "lint: check only the files this change touched";
 
+/// A second ruling on `lint`, held behind an envelope that carries the first.
+const LINT_SECOND_RULING: &str = "lint: and report each finding once";
+
 const LINT_NOTE: &str = "lint: the fixture moved to fixtures/v2";
 
 const NOWHERE_RULING: &str = "a ruling on a node nobody added";
@@ -2569,9 +2572,11 @@ fn a_finding_about_a_node_surfaces_while_its_note_waits() {
 /// `status`, in both forms, says what a live driver is doing with each claimed
 /// envelope: delivering a live note to a node since when, or holding it behind
 /// another envelope's note — directly, or behind an envelope held there itself —
-/// and once that driver is gone, that every one is left for the next driver. A
-/// sidecar it cannot read says nothing of where any stands. Nothing it says calls
-/// a delivery in progress abandoned.
+/// and once that driver is gone, that every one is left for the next driver. An
+/// envelope naming only a node the note's own envelope amended, which committed
+/// as the note was handed, and which no held envelope names, is applied at once
+/// and named nowhere. A sidecar it cannot read says nothing of where any stands.
+/// Nothing it says calls a delivery in progress abandoned.
 #[cfg(unix)]
 #[test]
 fn status_reads_a_held_delivery_as_delivering_and_what_waits_behind_it_as_held() {
@@ -2580,12 +2585,20 @@ fn status_reads_a_held_delivery_as_delivering_and_what_waits_behind_it_as_held()
     held_heartbeating_conversation(
         &world,
         run,
-        vec![agent("build", &[]), agent("docs", &["build"])],
+        vec![
+            agent("build", &[]),
+            agent("docs", &["build"]),
+            agent("lint", &["build"]),
+        ],
     );
     let mut note = submitted(
         &world,
         run,
-        &envelope(note_op("build", "worker", NOTE, None)),
+        &json!({"version": 2, "commands": [
+            note_op("build", "worker", NOTE, None),
+            {"op": "amend", "id": "docs", "text": FIRST_RULING},
+        ]})
+        .to_string(),
     );
     world.until("the note to wait in the conversation's inbox", |world| {
         awaiting_an_answer(world) == 1
@@ -2601,25 +2614,52 @@ fn status_reads_a_held_delivery_as_delivering_and_what_waits_behind_it_as_held()
         run,
         &json!({"version": 2, "commands": [
             {"op": "amend", "id": "build", "text": BUILD_RULING},
-            {"op": "amend", "id": "docs", "text": FIRST_RULING},
+            {"op": "amend", "id": "lint", "text": LINT_RULING},
         ]})
         .to_string(),
     );
     world.until("the amend of build to be queued", queued(BUILD_RULING));
-    // Naming only `docs`, which no note waits on: held behind the envelope above,
+    // Naming only `lint`, which no note waits on: held behind the envelope above,
     // which names it, and so behind what that one waits on.
     let mut chained = submitted(
         &world,
         run,
-        &envelope(json!({"op": "amend", "id": "docs", "text": SECOND_RULING})),
+        &envelope(json!({"op": "amend", "id": "lint", "text": LINT_SECOND_RULING})),
     );
     world.until(
-        "the second amend of docs to be queued",
-        queued(SECOND_RULING),
+        "the second amend of lint to be queued",
+        queued(LINT_SECOND_RULING),
+    );
+    // Naming only `docs`, which the note's own envelope amended as the note was
+    // handed and no held envelope names: applied while the note is outstanding.
+    let docs_only = submitted(
+        &world,
+        run,
+        &envelope(json!({"op": "amend", "id": "docs", "text": SECOND_RULING})),
+    );
+    assert!(
+        answered(docs_only).contains("\"state\":\"applied\""),
+        "an amend naming only a node no note or held envelope names waited on build's note"
+    );
+    assert_eq!(
+        awaiting_an_answer(&world),
+        1,
+        "the conversation answered the note, so nothing showed the docs-only amend applied \
+         while it was outstanding"
+    );
+    let journal = world.journal(run);
+    let ruled = |text: &str| {
+        committed_at(&journal, "amend", "text", text)
+            .unwrap_or_else(|| panic!("no amend reading {text} was committed"))
+    };
+    assert!(
+        ruled(FIRST_RULING) < ruled(SECOND_RULING),
+        "the docs-only amend was committed ahead of the one the note's envelope carried"
     );
     let note_id = queued_id_of(&world, run, NOTE);
     let behind_id = queued_id_of(&world, run, BUILD_RULING);
-    let chained_id = queued_id_of(&world, run, SECOND_RULING);
+    let chained_id = queued_id_of(&world, run, LINT_SECOND_RULING);
+    let docs_only_id = queued_id_of(&world, run, SECOND_RULING);
     let delivering = format!("envelope {note_id}: delivering a live note to build since ");
     let held =
         format!("envelope {behind_id}: held behind envelope {note_id}'s note to build since ");
@@ -2639,6 +2679,11 @@ fn status_reads_a_held_delivery_as_delivering_and_what_waits_behind_it_as_held()
     assert!(
         !status.stdout.to_lowercase().contains("abandon"),
         "status called a delivery in progress abandoned:\n{}",
+        status.stdout
+    );
+    assert!(
+        !status.stdout.contains(&format!("envelope {docs_only_id}:")),
+        "status named the applied docs-only amend as still waiting:\n{}",
         status.stdout
     );
     let reading = world.run(&["status", run, "--json"]);
@@ -2740,6 +2785,120 @@ fn status_reads_a_held_delivery_as_delivering_and_what_waits_behind_it_as_held()
     }
     release(&world.fakes, "turn.go");
     release(&world.fakes, "turn.settle");
+}
+
+/// A later edit to a node that a still-held envelope names waits behind that
+/// envelope — neither committed ahead of it nor refused — though no note waits
+/// on the node itself, and is applied after it once the note it waits behind is
+/// answered. An envelope claimed after it, naming nothing held, is applied at
+/// once, which shows the reconciler judged past the one left waiting.
+#[cfg(unix)]
+#[test]
+fn a_later_edit_to_a_node_a_held_envelope_names_waits_behind_that_envelope() {
+    let world = World::new("note-held-behind-held");
+    let run = "heldbehindheld";
+    held_heartbeating_conversation(
+        &world,
+        run,
+        vec![
+            agent("build", &[]),
+            agent("docs", &["build"]),
+            agent("lint", &["build"]),
+        ],
+    );
+    let note = submitted(
+        &world,
+        run,
+        &envelope(note_op("build", "worker", NOTE, None)),
+    );
+    world.until("the note to wait in the conversation's inbox", |world| {
+        awaiting_an_answer(world) == 1
+    });
+    let queue = world.run_file(run, "channel/commands.jsonl");
+    let queued = |text: &str| {
+        let text = text.to_string();
+        let queue = queue.clone();
+        move |_: &World| std::fs::read_to_string(&queue).is_ok_and(|held| held.contains(&text))
+    };
+    // Held behind the note, since it names `build`; it names `lint` too.
+    let mut held = submitted(
+        &world,
+        run,
+        &json!({"version": 2, "commands": [
+            {"op": "amend", "id": "build", "text": BUILD_RULING},
+            {"op": "amend", "id": "lint", "text": LINT_RULING},
+        ]})
+        .to_string(),
+    );
+    world.until(
+        "the envelope naming build and lint to be queued",
+        queued(LINT_RULING),
+    );
+    let mut later = submitted(
+        &world,
+        run,
+        &envelope(json!({"op": "amend", "id": "lint", "text": LINT_SECOND_RULING})),
+    );
+    world.until(
+        "the later amend of lint to be queued",
+        queued(LINT_SECOND_RULING),
+    );
+    let unheld = submitted(
+        &world,
+        run,
+        &envelope(json!({"op": "amend", "id": "docs", "text": FIRST_RULING})),
+    );
+    assert!(
+        answered(unheld).contains("\"state\":\"applied\""),
+        "an amend naming nothing held waited on build's note"
+    );
+    assert_eq!(
+        awaiting_an_answer(&world),
+        1,
+        "the conversation answered the note, so nothing showed the later amend waiting on it"
+    );
+    let later_id = queued_id_of(&world, run, LINT_SECOND_RULING);
+    assert!(
+        outcome_of(&world, run, later_id).is_none(),
+        "the later amend of lint was answered — refused or applied — ahead of the held \
+         envelope naming lint"
+    );
+    let journal = world.journal(run);
+    assert!(
+        committed_at(&journal, "amend", "text", LINT_SECOND_RULING).is_none()
+            && committed_at(&journal, "amend", "text", LINT_RULING).is_none(),
+        "an amend of lint was committed while the envelope naming it was held"
+    );
+    for (what, reply) in [("held", &mut held), ("later", &mut later)] {
+        assert!(
+            reply.try_wait().expect("the reply is readable").is_none(),
+            "the {what} envelope was answered while the note it waits behind was not"
+        );
+    }
+
+    release(&world.fakes, "turn.go");
+    release(&world.fakes, "turn.settle");
+    for (what, reply) in [("note's", note), ("held", held), ("later", later)] {
+        assert!(
+            answered(reply).contains("\"state\":\"applied\""),
+            "the {what} envelope was not applied once the note was answered"
+        );
+    }
+    let journal = world.journal(run);
+    let at = |op, field, value| {
+        committed_at(&journal, op, field, value)
+            .unwrap_or_else(|| panic!("no {op} reading {value} was committed"))
+    };
+    let order = [
+        at("note", "id", "build"),
+        at("amend", "text", LINT_RULING),
+        at("amend", "text", LINT_SECOND_RULING),
+    ];
+    assert!(
+        order.windows(2).all(|pair| pair[0] < pair[1]),
+        "lint's amends were not committed after the note, in the order they were claimed: \
+         {order:?}"
+    );
 }
 
 /// A driver that dies with one receiver of an envelope answered and another
