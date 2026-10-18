@@ -437,7 +437,8 @@ def is_asset(value):
 
 
 class Release:
-    """The GitHub Release this run publishes into."""
+    """The tag's GitHub Release, read and written through the REST API the job's token reaches:
+    its assets are listed, uploaded and downloaded, and its notes take the linked-engines section."""
 
     def __init__(self, tag):
         require_github()
@@ -753,7 +754,8 @@ def publish_common(args):
     missing = availability(version, channels)
     expect(not missing, 'not every platform is published, so nothing platform-independent is: missing '
            + '; '.join(missing), 're-run the build job that publishes what is missing, then this one')
-    # Every registry is asked before anything is written.
+    # crates.io is asked before anything is written, so a re-run skips a crate an
+    # earlier run published; publish-npm.sh asks npm the same of the launcher.
     crate_published = crate_serves(version) if channels['crate'] else None
     Release(tag).notes(run('just', 'linked-engines', capture=True))
     if channels['crate']:
