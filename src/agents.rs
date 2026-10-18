@@ -97,11 +97,18 @@ pub enum Scope {
     Observer,
     /// The drafting graph a lifecycle node's change request body comes from.
     PrAuthor,
+    /// The drafting graph a review comment's reply comes from (entry 130).
+    ReviewReply,
 }
 
 impl Scope {
     /// Every scope, for a reader holding the words to the contract.
-    pub const ALL: [Scope; 3] = [Scope::Node, Scope::Observer, Scope::PrAuthor];
+    pub const ALL: [Scope; 4] = [
+        Scope::Node,
+        Scope::Observer,
+        Scope::PrAuthor,
+        Scope::ReviewReply,
+    ];
 
     /// The word [`SCOPE_LABEL`] carries.
     #[must_use]
@@ -110,6 +117,7 @@ impl Scope {
             Scope::Node => "node",
             Scope::Observer => "observer",
             Scope::PrAuthor => "pr-author",
+            Scope::ReviewReply => "review-reply",
         }
     }
 }
@@ -156,6 +164,14 @@ pub enum Launched<'a> {
         /// The node's attempt, which the drafting is part of.
         attempt: NonZeroU32,
     },
+    /// The reply drafter: the node whose draft carries the comments, and the
+    /// drafting's own attempt.
+    ReviewReply {
+        /// The node.
+        node: &'a str,
+        /// The attempt the drafting was dispatched as.
+        attempt: NonZeroU32,
+    },
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
@@ -167,6 +183,7 @@ impl Launched<'_> {
             Launched::Node { .. } => Scope::Node,
             Launched::Observer => Scope::Observer,
             Launched::PrAuthor { .. } => Scope::PrAuthor,
+            Launched::ReviewReply { .. } => Scope::ReviewReply,
         }
     }
 }
@@ -194,7 +211,7 @@ impl Stamp<'_> {
                 pairs.push((ATTEMPT_LABEL, attempt.to_string()));
             }
             Launched::Observer => {}
-            Launched::PrAuthor { node, attempt } => {
+            Launched::PrAuthor { node, attempt } | Launched::ReviewReply { node, attempt } => {
                 pairs.push((NODE_LABEL, node.to_string()));
                 pairs.push((ATTEMPT_LABEL, attempt.to_string()));
             }
@@ -638,6 +655,7 @@ mod tests {
         assert_eq!(Scope::Node.as_str(), "node");
         assert_eq!(Scope::Observer.as_str(), "observer");
         assert_eq!(Scope::PrAuthor.as_str(), "pr-author");
+        assert_eq!(Scope::ReviewReply.as_str(), "review-reply");
     }
 
     /// A run with no pointer file is an empty list; a written one groups by

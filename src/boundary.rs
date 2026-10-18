@@ -104,11 +104,7 @@ impl Oracle for Onevcs {
         if let Some(known) = self.known.get(repo) {
             return known.clone();
         }
-        let visibility = onevcs::inspect_repository(&onevcs::boundary::InspectRequest {
-            repository: repo.to_owned(),
-        })
-        .map(|answer| answer.visibility)
-        .unwrap_or(onevcs::Visibility::Unknown);
+        let visibility = probed(repo).unwrap_or(onevcs::Visibility::Unknown);
         let identity = onevcs::release_targets(repo).map_or_else(
             |_| Identity::Unresolved(repo.to_owned()),
             |targets| Identity::Registered(targets.identity),
@@ -131,6 +127,55 @@ impl Oracle for Onevcs {
             reason: onevcs::boundary::Unavailability::Registry,
         })
     }
+}
+
+/// How long one process answers a repository's visibility from the probe it already made:
+/// a command's own run of the boundary, store writes and envelopes asks the host once,
+/// and a driver that outlives it asks again.
+const PROBED_FOR: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The visibilities this process probed, with when: see [`probed`].
+static PROBED: std::sync::Mutex<BTreeMap<String, (std::time::Instant, onevcs::Visibility)>> =
+    std::sync::Mutex::new(BTreeMap::new());
+
+/// `repo`'s visibility, refreshed and recorded by `onevcs` — once per [`PROBED_FOR`] in
+/// this process. Only a host's answer is kept: an unknown one, and a refusal, are asked
+/// again at the next read.
+fn probed(repo: &str) -> std::result::Result<onevcs::Visibility, String> {
+    probed_with(&PROBED, repo, std::time::Instant::now(), |repo| {
+        onevcs::inspect_repository(&onevcs::boundary::InspectRequest {
+            repository: repo.to_owned(),
+        })
+        .map(|answer| answer.visibility)
+        .map_err(|error| error.to_string())
+    })
+}
+
+/// [`probed`] over a supplied cache, clock and probe.
+fn probed_with(
+    cache: &std::sync::Mutex<BTreeMap<String, (std::time::Instant, onevcs::Visibility)>>,
+    repo: &str,
+    now: std::time::Instant,
+    probe: impl FnOnce(&str) -> std::result::Result<onevcs::Visibility, String>,
+) -> std::result::Result<onevcs::Visibility, String> {
+    // llmlint: ignore[changed_behavior_has_e2e] the window's expiry is observable end to end
+    // only by keeping one process alive past `PROBED_FOR` between two boundary resolutions,
+    // a minute of idle driver per run; reuse inside it and the re-ask after a refusal are
+    // driven by `review_reply::a_command_asks_a_repositorys_visibility_once_and_again_only_where_the_host_did_not_say`,
+    // and this module's `a_visibility_is_probed_once_a_window_and_only_an_answer_is_kept`
+    // holds the expiry itself on an injected clock.
+    if let Some((at, visibility)) = cache.lock().ok().and_then(|held| held.get(repo).copied()) {
+        if now.saturating_duration_since(at) < PROBED_FOR {
+            return Ok(visibility);
+        }
+    }
+    let visibility = probe(repo)?;
+    if !visibility.is_unknown() {
+        if let Ok(mut held) = cache.lock() {
+            held.insert(repo.to_owned(), (now, visibility));
+        }
+    }
+    Ok(visibility)
 }
 
 /// Every repository a node names: its `repo`, then whatever else its record names.
@@ -330,7 +375,8 @@ const RESOLVED_KEPT: usize = 8;
 /// What a dispatch and a write-back read, which recomputes the run's scope on exactly what
 /// the contract recomputes it on: an accepted edit. A repository whose visibility changes
 /// under an unchanged plan is read anew by the next load, live edit or envelope judged,
-/// each of which resolves afresh, and by these two at the next edit after it.
+/// each of which resolves afresh from a probe at most [`PROBED_FOR`] old, and by these two
+/// at the next edit after it.
 // llmlint: ignore[changed_behavior_has_e2e] reuse under an unchanged shape is the absence of
 // a host read, which no journey can observe here: every repository this suite registers has
 // a visibility its rules file states, and a declared visibility is never asked of the host.
@@ -412,13 +458,9 @@ impl onetaskgraph_core::boundary::WritePolicy for WritePolicy {
         onetaskgraph_core::boundary::RepositoryVisibility,
         onetaskgraph_core::boundary::PolicyError,
     > {
-        let answered = onevcs::inspect_repository(&onevcs::boundary::InspectRequest {
-            repository: repository.as_str().to_owned(),
-        })
-        .map_err(|error| onetaskgraph_core::boundary::PolicyError {
-            message: error.to_string(),
-        })?;
-        Ok(match answered.visibility {
+        let answered = probed(repository.as_str())
+            .map_err(|message| onetaskgraph_core::boundary::PolicyError { message })?;
+        Ok(match answered {
             onevcs::Visibility::Public => onetaskgraph_core::boundary::RepositoryVisibility::Public,
             onevcs::Visibility::Private => {
                 onetaskgraph_core::boundary::RepositoryVisibility::Private
@@ -1141,8 +1183,8 @@ pub(crate) fn judge(
             state.clone()
         }
     };
-    // Asked afresh every time, never from memory: a repository whose visibility changed
-    // since the last envelope is judged by what it is now.
+    // Resolved afresh every time: a repository whose visibility changed since the last
+    // envelope is judged by what the host said of it at most `PROBED_FOR` ago.
     let resolved = resolve(&plan_now(&staged), oracle);
     if !resolved.mixed() {
         return Judged::Pass;
@@ -1758,6 +1800,54 @@ pub(crate) fn check(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A process asks the host a repository's visibility once per `PROBED_FOR`, keeps
+    /// only an answer the host gave, and asks again once that answer is older.
+    #[test]
+    fn a_visibility_is_probed_once_a_window_and_only_an_answer_is_kept() {
+        let cache = std::sync::Mutex::new(BTreeMap::new());
+        let start = std::time::Instant::now();
+        let asked = std::cell::Cell::new(0);
+        let probe = |answer: std::result::Result<onevcs::Visibility, String>| {
+            let asked = &asked;
+            move |_: &str| {
+                asked.set(asked.get() + 1);
+                answer
+            }
+        };
+        let public = Ok(onevcs::Visibility::Public);
+        for at in [start, start + PROBED_FOR / 2] {
+            assert_eq!(
+                probed_with(&cache, "o/r", at, probe(public.clone())),
+                public
+            );
+        }
+        assert_eq!(
+            asked.get(),
+            1,
+            "the second read within the window asks nothing"
+        );
+        let private = Ok(onevcs::Visibility::Private);
+        assert_eq!(
+            probed_with(&cache, "o/r", start + PROBED_FOR, probe(private.clone())),
+            private
+        );
+        assert_eq!(
+            asked.get(),
+            2,
+            "an answer as old as the window is asked again"
+        );
+
+        for unanswered in [Ok(onevcs::Visibility::Unknown), Err("refused".to_owned())] {
+            for _ in 0..2 {
+                assert_eq!(
+                    probed_with(&cache, "o/other", start, probe(unanswered.clone())),
+                    unanswered
+                );
+            }
+        }
+        assert_eq!(asked.get(), 6, "an unknown or refused probe is never kept");
+    }
 
     /// A key of a mapping a command carries is screened like the value beside it, and the
     /// command's own `op` and field names — the channel's wire words — are not. No command

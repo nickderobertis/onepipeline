@@ -357,6 +357,14 @@ pub enum PipelineKind {
     /// One repository's standings read failed: `repo`, `detail`. Its drafts stay as
     /// they were.
     ReadjustReadFailed,
+    /// A reply to one review comment was posted on the host: `node`, `comment`, its
+    /// `disposition` — `answered` by a rework's commits or `declined` — the reply's
+    /// `url`, and the `commits` its body links.
+    ReviewReplyPosted,
+    /// A drafting of a rework's replies posted nothing: `node`, the `comments` it
+    /// named, its `ending` — `unconfigured`, `failed` or `invalid` — and the `detail`.
+    /// The replies stay owed and are drafted again on the next `onepipeline review`.
+    ReviewReplyNotDrafted,
     /// A launch passed another driver's claim on its project with `--take-over`.
     ///
     /// Written by `start --take-over` beside its `run-started`, only where the
@@ -452,6 +460,8 @@ impl PipelineKind {
             Self::ChangeClosed => "change-closed",
             Self::NodeChecksRead => "node-checks-read",
             Self::ReadjustReadFailed => "readjust-read-failed",
+            Self::ReviewReplyPosted => "review-reply-posted",
+            Self::ReviewReplyNotDrafted => "review-reply-not-drafted",
             Self::DriverTakenOver => "driver-taken-over",
             Self::DriverSuperseded => "driver-superseded",
             Self::LandingRegistered => "landing-registered",
@@ -543,6 +553,8 @@ pub const PIPELINE_KINDS: &[PipelineKind] = &[
     PipelineKind::ChangeClosed,
     PipelineKind::NodeChecksRead,
     PipelineKind::ReadjustReadFailed,
+    PipelineKind::ReviewReplyPosted,
+    PipelineKind::ReviewReplyNotDrafted,
     PipelineKind::DriverTakenOver,
     PipelineKind::DriverSuperseded,
     PipelineKind::LandingRegistered,

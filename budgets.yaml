@@ -116,3 +116,18 @@ budgets:
       the slowest; the median, the phase breakdown, the cold read and the 100/400/800-root
       scaling reads are its detail. Measured by `just host-view-budget` there, read from the
       record it leaves; `just budgets` leaves it out, as the gate builds no release binary.
+  - id: review-round-github-quota
+    measure: reported
+    command: [bash, scripts/review-round-quota-budget.sh]
+    unit: quota-units
+    direction: max
+    threshold: 45
+    description: >-
+      GraphQL points plus REST requests one busy review round spends across the two tokens it
+      touches: the host's `gh` token and the plan store's board token. The round is ten stacked
+      drafts, six new comments, two passes, two reworks, one decline, a person's merge and a
+      readjustment, and six replies. Read from the telemetry the e2e tier's busy-round journey
+      records over onevcs-testing's remote double, fake agents and a local Markdown store,
+      because no check may spend the shared account's quota. Each ledger call is charged what
+      the spikes measured on GitHub, each store task written 2 points, and each store read 1.
+      The threshold is spike-quota-round-report's measured round of about 42, with a little room.

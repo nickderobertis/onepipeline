@@ -1278,7 +1278,11 @@ fn snapshot_of(
 
 /// Each node whose dispatch has a session open and has not settled, with what its item's
 /// `onepipeline.dispatch` says: the branch the session works on, the base it opened against
-/// and when it opened — off the session's own `session-opened`, the last one for the node.
+/// and when it opened — off the session's own `session-opened`, the last session for the node,
+/// and the first record of that session the journal holds: one open is journalled twice, as
+/// the dispatch relays it and as `onevcs` streams it, each with its own stamp, and taking the
+/// later record would move `opened_at` — and write the item again — for a session that never
+/// changed.
 ///
 /// A session that named no base, or a record carrying no time, is left out rather than
 /// written half: a host that pins the node needs the branch and the base together.
@@ -1292,6 +1296,7 @@ fn dispatches(
     }
     /// What a node's `session-opened` said: the base it opened against, and when.
     struct Opened {
+        token: Option<onevcs::SessionToken>,
         base: crate::vcs::BranchName,
         // llmlint: ignore[invalid_states_unrepresentable] the journal record's own `ts`, which onemessagebus's `Envelope` declares as a `String` holding an RFC 3339 instant, copied onto the store verbatim as `StoredDispatch::opened_at`; this crate has no timestamp type to parse it into and back out of, and every other `ts` it reads stays a string.
         at: String,
@@ -1309,6 +1314,14 @@ fn dispatches(
         else {
             continue;
         };
+        let token = event
+            .payload
+            .get("token")
+            .and_then(Value::as_str)
+            .map(|token| onevcs::SessionToken(token.to_owned()));
+        if token.is_some() && opened.get(&node).is_some_and(|held| held.token == token) {
+            continue;
+        }
         if let Some(base) = event
             .payload
             .get("base")
@@ -1318,6 +1331,7 @@ fn dispatches(
             opened.insert(
                 node,
                 Opened {
+                    token,
                     base,
                     at: event.ts.clone(),
                 },
@@ -1326,7 +1340,7 @@ fn dispatches(
     }
     open.into_iter()
         .filter_map(|(node, session)| {
-            let Opened { base, at } = opened.remove(&node)?;
+            let Opened { base, at, .. } = opened.remove(&node)?;
             let dispatch = crate::continuation::StoredDispatch {
                 branch: session.branch().as_str().to_owned(),
                 base: base.as_str().to_owned(),
@@ -3072,8 +3086,16 @@ fn difference(
                 .collect::<Result<_, _>>()?,
         );
     }
+    // The edges as a set: a plan edit that reorders a node's `deps` leaves the board's
+    // blocking edges exactly as they stand, so it writes none.
+    // llmlint: ignore[changed_behavior_has_e2e] driven end to end: each rework in
+    // `review_round::the_busy_review_round_ends_answered_and_true_and_records_what_it_spent`
+    // reorders the two-parent draft's `deps` (its reworked parent's replacement moves to the
+    // end) with the same parents, and that journey fails naming the write the store answered
+    // as unchanged when this compares the edges in order.
+    let set = |edges: &[String]| edges.iter().cloned().collect::<BTreeSet<String>>();
     let edges_moved = match held.edges {
-        Edges::Landed => was.depends_on != is.depends_on,
+        Edges::Landed => set(&was.depends_on) != set(&is.depends_on),
         Edges::Unread => !is.depends_on.is_empty(),
     };
     if edges_moved {
@@ -3909,6 +3931,12 @@ struct ReworkProjected {
     instruction: String,
     // llmlint: ignore-end[invalid_states_unrepresentable]
     comments: Vec<crate::channel::ReworkComment>,
+    /// The superseded node's settled head, so a host continuing the lineage can tell
+    /// the commits the rework added from the ones before it (entry 130). Omitted where
+    /// the run's record holds none.
+    // llmlint: ignore[invalid_states_unrepresentable] copied from the run's own record, whose `heads` hold every node's settled head as the `String` the settlement carries — the crate has no commit-id type to hold it as — and the one reader of it, `continuation::rework_provenance`, refuses anything but a full commit id at the store's boundary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    replaces_head: Option<String>,
 }
 
 /// The `onepipeline.rework` record of each rework's replacement, keyed by the
@@ -3925,6 +3953,7 @@ fn reworks_of(state: &RunState) -> BTreeMap<String, ReworkProjected> {
                     reason: rework.reason.clone(),
                     instruction: rework.instruction.clone(),
                     comments: rework.comments.clone(),
+                    replaces_head: crate::reply::replaces_head(state, replaces),
                 },
             )
         })

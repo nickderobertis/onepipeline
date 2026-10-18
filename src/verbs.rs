@@ -326,7 +326,7 @@ pub fn render_results_json(results: &Results) -> Result<String> {
     let comments = crate::review::read(&view.state)?;
     let statuses = view.state.statuses();
     to_json(&crate::review::ResultsDocument {
-        schema_version: 1,
+        schema_version: crate::review::RESULTS_SCHEMA_VERSION,
         run: &view.paths.run,
         nodes: view
             .state
