@@ -2966,11 +2966,26 @@ impl World {
         &self,
         patience: std::time::Duration,
         what: &str,
+        ready: impl FnMut(&Self) -> bool,
+    ) {
+        self.until_within_on(&RealClock::started(), patience, what, ready);
+    }
+
+    /// [`until_within`](Self::until_within), with its deadline read from `clock`: a
+    /// journey proving a wait's budget passes a [`ManualClock`] and moves its time itself.
+    pub fn until_within_on(
+        &self,
+        clock: &dyn Clock,
+        patience: std::time::Duration,
+        what: &str,
         mut ready: impl FnMut(&Self) -> bool,
     ) {
-        if waited_for(patience, std::time::Duration::from_millis(250), || {
-            ready(self)
-        }) {
+        if waited_on(
+            clock,
+            patience,
+            std::time::Duration::from_millis(250),
+            || ready(self),
+        ) {
             return;
         }
         panic!(
@@ -2985,7 +3000,7 @@ impl World {
     /// reads for the reason `tests/AGENTS.md` gives; the deadline and assertion
     /// are [`until`](Self::until)'s.
     pub fn until_store(&self, what: &str, mut ready: impl FnMut(&Self) -> bool) {
-        self.until_store_for(std::time::Duration::from_secs(120), what, &mut ready);
+        self.until_store_for(ONE_STEP, what, &mut ready);
     }
 
     fn until_store_for(
@@ -3575,24 +3590,169 @@ pub fn waited(ready: impl FnMut() -> bool) -> bool {
 }
 
 fn waited_every(interval: std::time::Duration, ready: impl FnMut() -> bool) -> bool {
-    waited_for(std::time::Duration::from_secs(120), interval, ready)
+    waited_for(ONE_STEP, interval, ready)
+}
+
+/// The deadline [`waited`] — and so [`World::until`] — gives one step of the product's
+/// asynchrony: a dispatch carried from its start through its publication to its
+/// settlement, on the slowest hosted leg with the suite running beside it.
+pub const ONE_STEP: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// How long a run of `plan` may take to settle: one [`ONE_STEP`] for each node on its
+/// longest chain of dependencies.
+///
+/// The contract's execution model fixes that count: "a node — and each step within a
+/// lifecycle node — dispatches the moment its dependencies settle `done`", so the nodes
+/// of one chain run one after another, and a run settles no sooner than its longest
+/// chain has, each link a whole dispatch. Nodes off that chain run beside it.
+pub fn settling_patience(plan: &Value) -> std::time::Duration {
+    let tasks: BTreeMap<&str, Vec<&str>> = plan["tasks"]
+        .as_array()
+        .expect("a plan carries its tasks")
+        .iter()
+        .map(|task| {
+            let id = task["id"].as_str().expect("a task carries its id");
+            let deps = task["deps"]
+                .as_array()
+                .map(|deps| deps.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            (id, deps)
+        })
+        .collect();
+    fn depth<'a>(
+        node: &'a str,
+        tasks: &BTreeMap<&'a str, Vec<&'a str>>,
+        known: &mut BTreeMap<&'a str, u32>,
+    ) -> u32 {
+        if let Some(depth) = known.get(node) {
+            return *depth;
+        }
+        // A dependency outside the plan — a cross-DAG edge — is another run's to settle.
+        let below = tasks.get(node).map_or(0, |deps| {
+            deps.iter()
+                .filter(|dep| tasks.contains_key(*dep))
+                .map(|dep| depth(dep, tasks, known))
+                .max()
+                .unwrap_or(0)
+        });
+        known.insert(node, below + 1);
+        below + 1
+    }
+    let mut known = BTreeMap::new();
+    let longest = tasks
+        .keys()
+        .map(|node| depth(node, &tasks, &mut known))
+        .max()
+        .unwrap_or(1);
+    ONE_STEP * longest
 }
 
 fn waited_for(
     duration: std::time::Duration,
     interval: std::time::Duration,
+    ready: impl FnMut() -> bool,
+) -> bool {
+    waited_on(&RealClock::started(), duration, interval, ready)
+}
+
+fn waited_on(
+    clock: &dyn Clock,
+    duration: std::time::Duration,
+    interval: std::time::Duration,
     mut ready: impl FnMut() -> bool,
 ) -> bool {
     profile::polled(|| {
-        let deadline = std::time::Instant::now() + duration;
-        while std::time::Instant::now() < deadline {
+        let deadline = clock.elapsed().saturating_add(duration);
+        while clock.elapsed() < deadline {
             if ready() {
                 return true;
             }
-            profile::thread::sleep(interval);
+            clock.pause(interval);
         }
         false
     })
+}
+
+/// The time a wait reads its deadline against.
+pub trait Clock: Sync {
+    /// How long the wait has been running, by this clock.
+    fn elapsed(&self) -> std::time::Duration;
+    /// Let `interval` go by between looks.
+    fn pause(&self, interval: std::time::Duration);
+}
+
+/// The wall clock every wait in the suite runs on.
+pub struct RealClock(std::time::Instant);
+
+impl RealClock {
+    pub fn started() -> Self {
+        Self(std::time::Instant::now())
+    }
+}
+
+impl Clock for RealClock {
+    fn elapsed(&self) -> std::time::Duration {
+        self.0.elapsed()
+    }
+
+    fn pause(&self, interval: std::time::Duration) {
+        profile::thread::sleep(interval);
+    }
+}
+
+/// A clock whose time moves only when the journey moves it.
+///
+/// A wait on it still looks at its predicate every real interval, so the work it waits on
+/// is observed as it happens; only its deadline is the journey's to spend. Each move opens
+/// a new reading, and [`read_again`](Self::read_again) says whether the wait has read the
+/// moved time and then looked once more — that is, read it and not given up.
+#[derive(Default)]
+pub struct ManualClock {
+    time: std::sync::Mutex<(std::time::Duration, u32)>,
+}
+
+impl ManualClock {
+    /// Move the clock on by `by`.
+    pub fn advance(&self, by: std::time::Duration) {
+        let mut time = self.time.lock().expect("the clock is readable");
+        *time = (time.0.saturating_add(by), 0);
+    }
+
+    /// Whether the wait has read the time since the last move at least twice.
+    pub fn read_again(&self) -> bool {
+        self.time.lock().expect("the clock is readable").1 >= 2
+    }
+
+    /// A guard that, once dropped, moves the clock past any deadline — so a wait on it
+    /// ends, rather than holding the scope its journey runs it in when that journey
+    /// fails with the clock still.
+    pub fn expiring(&self) -> Expiry<'_> {
+        Expiry(self)
+    }
+}
+
+/// [`ManualClock::expiring`]'s guard.
+pub struct Expiry<'a>(&'a ManualClock);
+
+impl Drop for Expiry<'_> {
+    fn drop(&mut self) {
+        // Poisoned only by a panic while the lock was held, which nothing here makes.
+        if let Ok(mut time) = self.0.time.lock() {
+            *time = (std::time::Duration::MAX, 0);
+        }
+    }
+}
+
+impl Clock for ManualClock {
+    fn elapsed(&self) -> std::time::Duration {
+        let mut time = self.time.lock().expect("the clock is readable");
+        time.1 = time.1.saturating_add(1);
+        time.0
+    }
+
+    fn pause(&self, interval: std::time::Duration) {
+        profile::thread::sleep(interval);
+    }
 }
 
 /// Move `from` onto `to`, waiting out a holder that has not let go of it yet.
@@ -7001,6 +7161,41 @@ pub fn plan_of(name: &str, nodes: Vec<Value>) -> Value {
         "goal": {"text": format!("Deliver {name}")},
         "tasks": nodes,
     })
+}
+
+/// A run's patience counts the dispatches on its longest dependency chain, one step
+/// each, and nothing for nodes running beside that chain or edges to another run.
+#[test]
+fn a_runs_settling_patience_is_one_step_per_node_on_its_longest_chain() {
+    let chained = |id: &str, deps: &[&str]| json!({"id": id, "deps": deps});
+    let patience = |nodes: Vec<Value>| settling_patience(&plan_of("patience", nodes));
+    assert_eq!(patience(vec![json!({"id": "only"})]), ONE_STEP);
+    assert_eq!(
+        patience(vec![
+            chained("a", &[]),
+            chained("b", &[]),
+            chained("c", &[])
+        ]),
+        ONE_STEP
+    );
+    assert_eq!(
+        patience(vec![
+            chained("ship", &["adopt"]),
+            chained("core", &[]),
+            chained("adopt", &["core"]),
+        ]),
+        ONE_STEP * 3
+    );
+    assert_eq!(
+        patience(vec![
+            chained("a", &[]),
+            chained("b", &["a"]),
+            chained("c", &["a"]),
+            chained("d", &["b", "c", "run:other#x"]),
+            chained("e", &[]),
+        ]),
+        ONE_STEP * 3
+    );
 }
 
 /// A directory reached through a symlink resolves to the directory itself.

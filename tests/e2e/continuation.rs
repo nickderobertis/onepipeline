@@ -1679,6 +1679,155 @@ fn a_publication_held_past_the_whole_takeover_wait_holds_the_takeover_until_it_h
     drop(held);
 }
 
+/// How a journey keeps the displaced driver's settlement of `x` off the store.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OffTheStore {
+    /// Its projection is held, and let through inside the displaced driver's one bounded
+    /// wait for it.
+    Held,
+    /// Its projection is held past that wait, and let through after it.
+    HeldPastTheWait,
+}
+
+/// A publication that settles while a takeover is past its whole wait leaves its fence
+/// standing until its settlement is on the store: the displaced driver's projection of `x`'s
+/// settlement is held off the store, and the adopter's read inside that hold finds the fence
+/// and starts nothing; its read once the projection has landed finds `x` settled, so it
+/// continues `x` and dispatches `y` alone. A fence cleared ahead of the settlement would have
+/// had the read inside the hold find neither, and dispatch `x` again.
+#[test]
+fn a_takeover_reading_before_a_settled_publication_has_landed_waits_until_it_has() {
+    a_takeover_waits_for_a_settlement_off_the_store("takeover-unlanded", OffTheStore::Held);
+}
+
+/// The same with the settlement's projection held past the displaced driver's one bounded
+/// wait for it: past that wait the driver neither clears its fence nor acknowledges, and the
+/// adopter starts nothing, until the projection has landed.
+#[test]
+fn a_settlement_held_past_the_displaced_drivers_wait_holds_the_takeover_until_it_lands() {
+    a_takeover_waits_for_a_settlement_off_the_store(
+        "takeover-unlanded-late",
+        OffTheStore::HeldPastTheWait,
+    );
+}
+
+fn a_takeover_waits_for_a_settlement_off_the_store(name: &str, off: OffTheStore) {
+    // The displaced driver waits up to one interval for its projection before it goes on
+    // passing, which outlasts what a journey holding the projection inside it does.
+    let interval = 15;
+    let world = World::new(name)
+        .with_env("ONEVCS_BRANCH_PREFIX", PREFIX)
+        .with_env(CLAIM_INTERVAL_ENV, &interval.to_string())
+        .with_env(crate::harness::CANCEL_GRACE_ENV, "1");
+    let go = world.fakes.join("push.go");
+    let held = held_publication(&world, &go);
+    world.repository("change-open", &held.argv());
+    rules(&world, "change-open", "required", None);
+    world.script("gh.checks", GREEN);
+    world.script("x.work", "x's change\n");
+    world.script("y.work", "y's change\n");
+    // Each read the adopter makes once its wait has passed is held until this journey lets
+    // it go.
+    let polls = crate::harness::Rendezvous::failpoint();
+    let successor = world
+        .on_host("host-b")
+        .with_env(CLAIM_INTERVAL_ENV, "5")
+        .with_env("ONEPIPELINE_TEST_TAKEOVER_PAST_WAIT_GATE", &polls.address());
+    // The displaced driver's first projection carrying `x`'s settlement is held before it
+    // reaches the store.
+    let projecting = crate::harness::Rendezvous::failpoint();
+    let world = world
+        .with_env("ONEPIPELINE_TEST_PROJECTION_SETTLED_NODE", "x")
+        .with_env(
+            "ONEPIPELINE_TEST_PROJECTION_SETTLED_GATE",
+            &projecting.address(),
+        );
+    let run = "unlanded";
+    let project = author(
+        &world,
+        run,
+        vec![lifecycle("x", &[]), lifecycle("y", &["x"])],
+    );
+    world
+        .run_from(&world.project, &["start", &project, "--detach"])
+        .exited(0);
+    world.until("x's publication to be under way", |_| held.holding());
+    assert_eq!(stored_publishing(&world, &project)["nodes"], json!(["x"]));
+
+    let taking = take_over_in_background(&successor, &project);
+    until_claimed_on(&world, &project, "host-b");
+    // The adopter is past its whole wait, and held before its next read.
+    let past = polls.arrived();
+    held.release();
+    // `x`'s publication has settled, and its settlement is about to be projected.
+    let projection = projecting.arrived();
+    if off == OffTheStore::HeldPastTheWait {
+        // Past the driver's one wait for the settlement, the driver says it is still owed,
+        // where one that had given up on it would have cleared its fence or acknowledged
+        // instead.
+        world.until(
+            "the displaced driver's wait for x's settlement to pass",
+            |world| {
+                std::fs::read_to_string(world.run_file(run, "driver.log"))
+                    .is_ok_and(|log| log.contains("has not reached the store; it acknowledges"))
+                    || stored_publishing(world, &project).is_null()
+                    || stored_claim(world, &project).get("acknowledged").is_some()
+            },
+        );
+    }
+    assert_eq!(
+        stored_publishing(&world, &project)["nodes"],
+        json!(["x"]),
+        "the fence was cleared before x's settlement reached the store"
+    );
+    assert!(
+        stored_claim(&world, &project).get("acknowledged").is_none(),
+        "the takeover was acknowledged before x's settlement reached the store"
+    );
+    // The adopter reads before the settlement has landed, finds the fence, and reads again
+    // rather than starting.
+    past.release();
+    let again = polls.arrived();
+    assert!(
+        successor.run_file(run, "launch.json").metadata().is_err(),
+        "the adopter minted its run before x's settlement had reached the store"
+    );
+    assert!(
+        dispatched(&successor, run).is_empty(),
+        "the adopter dispatched before x's settlement had reached the store"
+    );
+    // Once the settlement has landed the fence goes, and the adopter's next read starts it.
+    projection.release();
+    world.until(
+        "the fence to be cleared once x's settlement has landed",
+        |world| stored_publishing(world, &project).is_null(),
+    );
+    again.release();
+    let said = launched_over(taking);
+    assert!(
+        said.contains("and its publication of 'x' has been under way since"),
+        "{said}"
+    );
+    let x = settled(&world, run, "x");
+    assert_eq!(x["outcome"], "change-review-draft", "{x}");
+    successor.until("the adopter to settle", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+    assert_eq!(dispatched(&world, run), vec!["x".to_owned()]);
+    assert_eq!(dispatched(&successor, run), vec!["y".to_owned()]);
+    assert_eq!(
+        settled(&successor, run, "x")["continued"]["source"],
+        "store"
+    );
+    assert_eq!(settled(&successor, run, "x")["change_url"], x["change_url"]);
+    handed_over(&world, &successor, run);
+    one_change_request_per_branch(&world);
+    assert_eq!(created_from(&world).len(), 2);
+    assert_eq!(stored_publishing(&world, &project), Value::Null);
+    drop(successor);
+    drop(held);
+}
+
 /// Write `value` as the project's `onepipeline.publishing`, as somebody other than a driver
 /// would.
 fn restate_publishing(world: &World, project: &str, value: Value) {

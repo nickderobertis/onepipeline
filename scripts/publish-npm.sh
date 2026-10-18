@@ -230,7 +230,7 @@ for package in "$@"; do
   at=$((at + 1))
 
   # Nothing reaches the registry before the exact versions its own manifest pins
-  # do. For the launcher those pins are the five platform packages, so this is
+  # do. For the launcher those pins are the platform packages, so this is
   # the rule that stops a user from installing a launcher whose binary npm
   # silently declined to fetch.
   while read -r pin; do

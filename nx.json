@@ -57,6 +57,7 @@
       "{workspaceRoot}/graphs/**/*",
       "{workspaceRoot}/personas/**/*",
       "{workspaceRoot}/scripts/**/*",
+      "{workspaceRoot}/release/release.py",
       "{workspaceRoot}/screenshots/**/*",
       "{workspaceRoot}/.github/**/*",
       "{workspaceRoot}/AGENTS.md",
@@ -233,6 +234,9 @@
       "cache": false
     },
     "release-compat": {
+      "cache": false
+    },
+    "release-journeys": {
       "cache": false
     },
     "workload": {

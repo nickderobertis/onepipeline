@@ -469,7 +469,7 @@ jobs:
 
   # Prove the end-user install path on every platform: install the binary the
   # documented way and smoke-test the real artifact through scripts/
-  # smoke-published.sh — the same assertions the post-publish verify jobs run
+  # smoke-published.sh — the same assertions the release build jobs' verify steps run
   # against PyPI and npm, so what a release checks cannot drift from what a pull
   # request checks. `cargo install --path .` is the same code path as the
   # documented `cargo install onepipeline`, minus the registry fetch.
@@ -581,9 +581,9 @@ jobs:
   # onepipeline-cli` serves. Built and installed from this revision so the
   # packaging is proven on every pull request rather than first at a release,
   # where a broken wheel is already public. Built by `just wheel-linux`, the
-  # recipe release.yml's Linux `build-wheels` legs run, for both of their targets
-  # on the same native runners. The `wheel-x86_64` carrier below reports the
-  # x86_64 leg under the bare `wheel` name branch protection requires.
+  # script release.yml's `build-linux` job builds with, for its one target on the
+  # same runner. The `wheel-x86_64` carrier below reports the x86_64 leg under
+  # the bare `wheel` name branch protection requires.
   wheel:
     name: wheel proof (${{ matrix.target }})
     needs: changes
@@ -594,8 +594,6 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-24.04-arm
     runs-on: ${{ matrix.os }}
     outputs:
       x86_64-unknown-linux-gnu: ${{ steps.proved.outputs.x86_64-unknown-linux-gnu }}

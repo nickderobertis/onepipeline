@@ -393,6 +393,13 @@ fn directories(paths: &RunPaths) -> io::Result<ScratchTree> {
     Ok(ScratchTree { root, access, dirs })
 }
 
+/// The directories a `scratch-retained` record for `paths` would name, spelled as it
+/// would spell them.
+#[cfg(test)]
+pub(crate) fn recorded_dirs(paths: &RunPaths) -> io::Result<Vec<std::path::PathBuf>> {
+    Ok(directories(paths)?.dirs)
+}
+
 fn absolute(path: &Path) -> crate::Result<AbsolutePath> {
     AbsolutePath::new(path.to_path_buf()).map_err(|error| crate::Error::Invalid(error.into()))
 }

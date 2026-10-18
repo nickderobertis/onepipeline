@@ -66,6 +66,17 @@ pub(crate) fn settlement_started(node: &str) -> Result<()> {
     Ok(())
 }
 
+/// Hold the loop on the target node's relayed push as it is received, before it drains
+/// what is queued behind it: released after that node's settlement has been queued, the
+/// push and the settlement are applied in one pass, so whatever the push makes owed is
+/// claimed only once the settlement is on the record. Answers whether it held.
+pub(crate) fn push_received(node: &str) -> Result<bool> {
+    if settlement_target(node) {
+        return meet("ONEPIPELINE_TEST_PUSH_RECEIVED_GATE");
+    }
+    Ok(false)
+}
+
 pub(crate) fn settlement_before_queue(node: &str) -> Result<()> {
     if settlement_target(node) {
         meet("ONEPIPELINE_TEST_SETTLEMENT_BEFORE_QUEUE_GATE")?;
@@ -76,6 +87,26 @@ pub(crate) fn settlement_before_queue(node: &str) -> Result<()> {
 pub(crate) fn settlement_queued(node: &str) -> Result<()> {
     if settlement_target(node) {
         meet("ONEPIPELINE_TEST_SETTLEMENT_QUEUED_GATE")?;
+    }
+    Ok(())
+}
+
+static SETTLEMENT_PROJECTING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Met once, by the write-back, before it projects the first snapshot carrying the settlement
+/// of the node `ONEPIPELINE_TEST_PROJECTION_SETTLED_NODE` names: a journey holds that
+/// settlement off the store there.
+pub(crate) fn settlement_projecting<'a>(
+    mut settled: impl Iterator<Item = &'a String>,
+) -> Result<()> {
+    let Ok(target) = std::env::var("ONEPIPELINE_TEST_PROJECTION_SETTLED_NODE") else {
+        return Ok(());
+    };
+    if settled.any(|node| *node == target)
+        && !SETTLEMENT_PROJECTING.swap(true, std::sync::atomic::Ordering::Relaxed)
+    {
+        meet("ONEPIPELINE_TEST_PROJECTION_SETTLED_GATE")?;
     }
     Ok(())
 }
