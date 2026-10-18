@@ -8,7 +8,8 @@ The records come from `onepipeline_testfakes::profile` (`crates/testfakes/src/pr
 
 | record set | where | commit | tests | e2e test-s |
 | --- | --- | --- | ---: | ---: |
-| local Linux (current) | this dev host (20 cores, WSL2, shared), the full e2e tier instrumented as `gate` runs it, `--no-fail-fast`, run `80afd02e` | c551671 (head) | 1660 | 14571.5 |
+| local Linux (current) | this dev host (20 cores, WSL2, shared, load 4-10), the full e2e tier instrumented as `gate` runs it, `--no-fail-fast`, run `a989b0b5` | 7574f2f (head) | 1661 | 13874.8 |
+| local Linux (previous) | the same host and command, run `80afd02e` | c551671 | 1660 | 14571.5 |
 | CI Linux (current) | CI `gate`, run [39098714538](https://github.com/nickderobertis/onepipeline/actions/runs/39098714538) | dd2e5d6 | 1658 | 10407.2 |
 | macOS (current) | CI `Mac PR proofs`, run 39098714538 | dd2e5d6 | 1633 | 13334.1 |
 | Windows (current) | CI `cross proof (windows-latest)`, run 39098714538: **partial**, cut off by the 180-minute step limit after 1,108 of 1,413 e2e tests, with no failing test | dd2e5d6 | 1112 | 37565.0 |
@@ -19,73 +20,77 @@ The records come from `onepipeline_testfakes::profile` (`crates/testfakes/src/pr
 
 Commits after dd2e5d6:
 - **c551671** only moves `Cargo.lock` to the engine patch releases the manifest already permits: oneagentgraph 0.5.14, onevcs 0.52.1, onevcs-testing 0.19.5.
-- **The commit adding this document** writes `docs/test-profile-report.md` and nothing else.
+- **f2b9566**, the commit adding this document, writes `docs/test-profile-report.md` and nothing else.
+- **c93fa56** changes product timing: a driver no longer writes a refused publications fence again before its 5 s retry is due (`src/continuation.rs`). It also adds one e2e test, `continuation::a_pass_inside_a_refused_fences_retry_does_not_write_it_early`.
+- **7574f2f** and the commit regenerating these figures change only this document.
 
-The hosted dd2e5d6 records therefore predate the lock refresh. The local c551671 run is what shows the refresh left the harness unchanged. Its operation counts match the a94701b run: spawn 13,686 vs 13,575, git 9,048 vs 9,048, build 3,261 vs 3,259, fixture 7,766 vs 7,765.
+The hosted dd2e5d6 records therefore predate the lock refresh and the fence fix. The local runs show neither moved the harness. The c551671 counts match the a94701b run: spawn 13,686 vs 13,575, git 9,048 vs 9,048, build 3,261 vs 3,259, fixture 7,766 vs 7,765. The 7574f2f counts are spawn 13,822, git 9,055, build 3,263 and fixture 7,773. The difference from c551671 is mostly the one added test and run-to-run variation in retries and polls.
 
-## Linux breakdown on c551671 (local)
+The local 7574f2f run is the one every local figure below uses. It ran 1,661 tests in 4,175.7 s: 1,660 passed, and the one failure is `host_view`, the same failure as the earlier runs (see **host_view on this host**).
 
-`node scripts/test-profile-report.mjs --top-tests 30 --top-modules 10 linux=target/test-profile/e2e`, over the full-tier run of c551671.
+## Linux breakdown on 7574f2f (local)
+
+`node scripts/test-profile-report.mjs --top-tests 30 --top-modules 10 linux=target/test-profile/e2e`, over the full-tier run of 7574f2f, which contains the fence fix c93fa56.
 
 ### linux
 
-Run `80afd02e-4f33-4df0-b528-b953642a4a3c`: 1660 tests, 14571.5 test-s. Counts: spawn 13686, git 9048, build 3261, fixture 7766, wait 105772, fs 381256, polls 18425.
+Run `a989b0b5-3433-4b3f-9026-72886505d752`: 1661 tests, 13874.8 test-s. Counts: spawn 13822, git 9055, build 3263, fixture 7773, wait 97348, fs 380460, polls 18432.
 
 #### Whole run
 
 | | tests | wall s | spawn | git | build | fixture | wait | fs | unattributed |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| all | 1660 | 14571.5 | 62.7% | 1.3% | 9.4% | 0.0% | 23.1% | 0.4% | 3.1% |
+| all | 1661 | 13874.8 | 62.6% | 1.2% | 10.1% | 0.0% | 22.8% | 0.3% | 3.0% |
 
 #### The 30 costliest tests
 
 | | tests | wall s | spawn | git | build | fixture | wait | fs | unattributed |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| e2e::host_view::the_budget_measurement_records_what_each_scaling_read_opened | 1 | 231.5 | 99.9% | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% | 0.1% |
-| e2e::loopcost::an_idle_pass_does_not_grow_with_the_run_it_is_idling_on | 1 | 208.2 | 3.7% | 0.0% | 0.3% | 0.0% | 95.8% | 0.1% | 0.1% |
-| e2e::listing::a_host_sized_runs_root_lists_in_seconds_and_ten_times_the_journal_bytes_barely_moves_it | 1 | 170.5 | 47.5% | 0.2% | 0.8% | 0.0% | 0.0% | 2.0% | 49.5% |
-| e2e::adoption::a_held_release_is_asked_about_on_its_own_interval_however_fast_the_loop_runs | 1 | 130.1 | 2.3% | 0.3% | 0.7% | 0.0% | 96.4% | 0.2% | 0.1% |
-| e2e::review::a_continued_rework_refuses_projection_when_its_seeded_baseline_cannot_preserve_it | 1 | 125.1 | 93.7% | 5.4% | 0.6% | 0.0% | 0.0% | 0.1% | 0.2% |
-| e2e::host_view::the_host_view_answers_a_host_sized_root_steady_cold_and_steady_again | 1 | 111.6 | 99.3% | 0.0% | 0.6% | 0.0% | 0.0% | 0.0% | 0.2% |
-| e2e::linear_writeback::a_linear_destination_lands_current_values_after_each_way_a_call_fails | 1 | 107.3 | 6.9% | 0.0% | 0.6% | 0.0% | 92.1% | 0.0% | 0.4% |
-| e2e::unwatched::a_host_sized_runs_root_is_answered_in_well_under_a_second_whatever_its_journals_hold | 1 | 104.6 | 44.0% | 0.0% | 0.7% | 0.0% | 0.1% | 3.6% | 51.6% |
-| e2e::writeback_budget::a_seven_item_copy_held_at_eleven_seconds_per_item_lands_inside_its_deadline | 1 | 83.3 | 1.9% | 0.0% | 1.0% | 0.0% | 96.9% | 0.0% | 0.1% |
-| e2e::linear_writeback::command_end_refusal_and_timeout_rebuild_the_workers_store | 1 | 81.4 | 5.0% | 0.0% | 0.7% | 0.0% | 93.9% | 0.0% | 0.4% |
-| e2e::continuation::a_publication_held_past_the_whole_takeover_wait_holds_the_takeover_until_it_has_finished | 1 | 76.5 | 4.0% | 1.3% | 1.5% | 0.0% | 93.0% | 0.1% | 0.1% |
-| e2e::writeback_budget::a_record_an_older_build_wrote_is_adopted_and_its_update_runs_under_the_shipped_default | 1 | 74.9 | 29.0% | 0.0% | 1.3% | 0.0% | 69.3% | 0.1% | 0.3% |
-| e2e::out_of_band::a_run_whose_records_cannot_be_read_leaves_no_owner_known_to_be_unique | 1 | 73.9 | 97.6% | 0.9% | 0.8% | 0.0% | 0.0% | 0.2% | 0.4% |
-| e2e::delivers::a_first_projection_held_past_its_deadline_does_not_hold_back_the_first_dispatch | 1 | 73.9 | 1.0% | 0.0% | 1.0% | 0.0% | 97.7% | 0.2% | 0.1% |
-| e2e::writeback_budget::a_targeted_update_held_past_the_floor_still_lands_inside_its_item_budget | 1 | 71.3 | 2.1% | 0.0% | 1.1% | 0.0% | 96.6% | 0.0% | 0.2% |
-| e2e::writeback_budget::a_creating_copy_held_past_a_tiny_budget_is_cancelled_and_the_next_attempt_creates_it | 1 | 70.0 | 1.8% | 0.0% | 2.0% | 0.0% | 96.0% | 0.2% | 0.1% |
-| e2e::linear_writeback::a_retained_stores_blocked_configuration_read_is_bounded_and_rebuilt | 1 | 69.2 | 4.4% | 0.0% | 0.8% | 0.0% | 94.1% | 0.0% | 0.7% |
-| e2e::continuation::a_takeover_of_an_idle_driver_starts_on_its_acknowledgement_within_the_interval | 1 | 67.8 | 6.6% | 1.0% | 1.0% | 0.0% | 2.9% | 0.0% | 88.5% |
-| e2e::loopcost::another_runs_ledger_is_read_on_its_own_interval_and_not_on_the_loops | 1 | 67.0 | 7.0% | 0.0% | 1.3% | 0.0% | 91.6% | 0.0% | 0.1% |
-| e2e::writeback_budget::an_update_held_past_a_tiny_budget_is_cancelled_and_the_refusal_names_the_arithmetic | 1 | 66.8 | 32.7% | 0.0% | 1.1% | 0.0% | 65.7% | 0.1% | 0.4% |
-| e2e::dispatch::a_legacy_plan_path_launch_record_is_still_reportable_and_adoptable | 1 | 66.5 | 99.1% | 0.0% | 0.9% | 0.0% | 0.0% | 0.0% | 0.1% |
-| e2e::dispatch_env_hook::a_hook_that_fails_times_out_cannot_start_or_prints_a_malformed_document_refuses_the_launch | 1 | 64.4 | 97.4% | 0.0% | 1.9% | 0.0% | 0.0% | 0.2% | 0.4% |
-| e2e::writeback_budget::a_destination_read_held_past_the_floor_is_cancelled_retried_and_recovers | 1 | 64.3 | 2.6% | 0.0% | 1.9% | 0.0% | 95.2% | 0.2% | 0.1% |
-| e2e::loopcost::a_converged_run_does_no_scheduling_work_while_it_records_nothing | 1 | 64.0 | 1.3% | 0.0% | 1.2% | 0.0% | 97.5% | 0.0% | 0.1% |
-| e2e::continuation::a_settlement_dispatch_or_claim_that_is_not_one_refuses_the_launch | 1 | 63.6 | 24.7% | 0.2% | 1.1% | 0.0% | 72.8% | 0.1% | 1.2% |
-| e2e::store::a_run_whose_store_is_rate_limited_throughout_settles_as_it_does_against_a_healthy_one | 1 | 63.3 | 92.9% | 0.0% | 1.6% | 0.0% | 5.4% | 0.0% | 0.1% |
-| e2e::driver::a_legacy_unqualified_project_does_not_prevent_adoption | 1 | 63.1 | 98.4% | 0.0% | 1.2% | 0.0% | 0.0% | 0.3% | 0.1% |
-| e2e::writeback_budget::a_store_that_does_not_open_within_the_floor_is_refused_retried_and_recovers | 1 | 62.7 | 1.2% | 0.0% | 1.4% | 0.0% | 96.7% | 0.2% | 0.5% |
-| e2e::adoption::a_cross_dag_dependency_is_pinned_against_git_and_named_from_the_upstreams_ledger | 1 | 59.0 | 4.4% | 0.7% | 2.9% | 0.0% | 91.0% | 0.9% | 0.1% |
-| e2e::continuation::an_in_flight_dispatch_left_on_the_store_is_continued_by_a_host_that_takes_the_project_over | 1 | 58.9 | 96.6% | 1.1% | 1.0% | 0.0% | 1.1% | 0.0% | 0.2% |
+| e2e::loopcost::an_idle_pass_does_not_grow_with_the_run_it_is_idling_on | 1 | 209.7 | 3.2% | 0.0% | 4.0% | 0.0% | 92.6% | 0.1% | 0.1% |
+| e2e::host_view::the_budget_measurement_records_what_each_scaling_read_opened | 1 | 204.7 | 99.9% | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% | 0.1% |
+| e2e::adoption::a_held_release_is_asked_about_on_its_own_interval_however_fast_the_loop_runs | 1 | 129.5 | 2.2% | 0.2% | 0.5% | 0.0% | 97.0% | 0.1% | 0.1% |
+| e2e::listing::a_host_sized_runs_root_lists_in_seconds_and_ten_times_the_journal_bytes_barely_moves_it | 1 | 127.7 | 46.7% | 0.1% | 0.7% | 0.0% | 0.0% | 2.1% | 50.4% |
+| e2e::review::a_continued_rework_refuses_projection_when_its_seeded_baseline_cannot_preserve_it | 1 | 119.4 | 93.0% | 6.0% | 0.7% | 0.0% | 0.0% | 0.1% | 0.2% |
+| e2e::linear_writeback::a_linear_destination_lands_current_values_after_each_way_a_call_fails | 1 | 104.7 | 4.7% | 0.0% | 0.7% | 0.0% | 94.3% | 0.0% | 0.3% |
+| e2e::unwatched::a_host_sized_runs_root_is_answered_in_well_under_a_second_whatever_its_journals_hold | 1 | 97.8 | 43.3% | 0.0% | 0.6% | 0.0% | 0.1% | 3.1% | 52.9% |
+| e2e::host_view::the_host_view_answers_a_host_sized_root_steady_cold_and_steady_again | 1 | 97.4 | 99.3% | 0.0% | 0.6% | 0.0% | 0.0% | 0.0% | 0.1% |
+| e2e::writeback_budget::a_seven_item_copy_held_at_eleven_seconds_per_item_lands_inside_its_deadline | 1 | 81.8 | 2.0% | 0.0% | 0.8% | 0.0% | 97.0% | 0.0% | 0.1% |
+| e2e::linear_writeback::command_end_refusal_and_timeout_rebuild_the_workers_store | 1 | 81.7 | 3.8% | 0.0% | 0.7% | 0.0% | 95.3% | 0.0% | 0.2% |
+| e2e::writeback_budget::a_record_an_older_build_wrote_is_adopted_and_its_update_runs_under_the_shipped_default | 1 | 74.9 | 29.0% | 0.0% | 1.3% | 0.0% | 69.2% | 0.1% | 0.3% |
+| e2e::out_of_band::a_run_whose_records_cannot_be_read_leaves_no_owner_known_to_be_unique | 1 | 74.8 | 97.4% | 1.1% | 0.9% | 0.0% | 0.0% | 0.2% | 0.4% |
+| e2e::continuation::a_publication_held_past_the_whole_takeover_wait_holds_the_takeover_until_it_has_finished | 1 | 73.8 | 3.2% | 0.9% | 0.8% | 0.0% | 95.0% | 0.0% | 0.1% |
+| e2e::delivers::a_first_projection_held_past_its_deadline_does_not_hold_back_the_first_dispatch | 1 | 73.7 | 1.1% | 0.0% | 0.8% | 0.0% | 97.9% | 0.2% | 0.1% |
+| e2e::writeback_budget::a_targeted_update_held_past_the_floor_still_lands_inside_its_item_budget | 1 | 70.0 | 1.7% | 0.0% | 0.8% | 0.0% | 97.3% | 0.0% | 0.2% |
+| e2e::linear_writeback::a_retained_stores_blocked_configuration_read_is_bounded_and_rebuilt | 1 | 69.2 | 2.3% | 0.0% | 0.8% | 0.0% | 96.3% | 0.0% | 0.5% |
+| e2e::writeback_budget::a_creating_copy_held_past_a_tiny_budget_is_cancelled_and_the_next_attempt_creates_it | 1 | 69.1 | 1.8% | 0.0% | 1.0% | 0.0% | 97.0% | 0.1% | 0.1% |
+| e2e::continuation::a_takeover_of_an_idle_driver_starts_on_its_acknowledgement_within_the_interval | 1 | 67.8 | 6.5% | 1.1% | 0.9% | 0.0% | 3.2% | 0.0% | 88.4% |
+| e2e::loopcost::another_runs_ledger_is_read_on_its_own_interval_and_not_on_the_loops | 1 | 66.8 | 6.9% | 0.0% | 0.9% | 0.0% | 92.1% | 0.0% | 0.1% |
+| e2e::dispatch::a_legacy_plan_path_launch_record_is_still_reportable_and_adoptable | 1 | 66.6 | 99.0% | 0.0% | 0.9% | 0.0% | 0.0% | 0.0% | 0.1% |
+| e2e::writeback_budget::an_update_held_past_a_tiny_budget_is_cancelled_and_the_refusal_names_the_arithmetic | 1 | 66.4 | 32.6% | 0.0% | 0.9% | 0.0% | 66.0% | 0.1% | 0.3% |
+| e2e::store::a_run_whose_store_is_rate_limited_throughout_settles_as_it_does_against_a_healthy_one | 1 | 66.2 | 90.9% | 0.0% | 2.7% | 0.0% | 6.0% | 0.1% | 0.3% |
+| e2e::writeback_budget::a_destination_read_held_past_the_floor_is_cancelled_retried_and_recovers | 1 | 63.7 | 1.8% | 0.0% | 1.1% | 0.0% | 96.9% | 0.1% | 0.1% |
+| e2e::loopcost::a_converged_run_does_no_scheduling_work_while_it_records_nothing | 1 | 63.7 | 1.1% | 0.0% | 1.0% | 0.0% | 97.9% | 0.0% | 0.1% |
+| e2e::driver::a_legacy_unqualified_project_does_not_prevent_adoption | 1 | 62.6 | 98.7% | 0.0% | 1.1% | 0.0% | 0.0% | 0.0% | 0.1% |
+| e2e::writeback_budget::a_store_that_does_not_open_within_the_floor_is_refused_retried_and_recovers | 1 | 62.2 | 1.2% | 0.0% | 1.1% | 0.0% | 97.2% | 0.2% | 0.3% |
+| e2e::dispatch_env_hook::a_hook_that_fails_times_out_cannot_start_or_prints_a_malformed_document_refuses_the_launch | 1 | 61.5 | 98.4% | 0.0% | 1.1% | 0.0% | 0.0% | 0.1% | 0.4% |
+| e2e::continuation::a_settlement_dispatch_or_claim_that_is_not_one_refuses_the_launch | 1 | 60.2 | 20.9% | 0.2% | 1.0% | 0.0% | 76.7% | 0.0% | 1.2% |
+| e2e::continuation::an_in_flight_dispatch_left_on_the_store_is_continued_by_a_host_that_takes_the_project_over | 1 | 58.5 | 96.4% | 1.1% | 1.0% | 0.0% | 1.2% | 0.1% | 0.2% |
+| e2e::continuation::a_takeover_finding_a_fence_it_cannot_read_waits_until_it_is_cleared | 1 | 54.8 | 7.5% | 1.3% | 1.4% | 0.0% | 86.0% | 0.0% | 3.8% |
 
 #### The 10 costliest modules
 
 | | tests | wall s | spawn | git | build | fixture | wait | fs | unattributed |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| e2e::continuation | 43 | 1262.7 | 39.3% | 1.6% | 2.5% | 0.0% | 46.4% | 0.1% | 10.1% |
-| e2e::lifecycle | 102 | 1077.2 | 80.9% | 1.6% | 8.1% | 0.0% | 8.4% | 0.3% | 0.6% |
-| e2e::adoption | 51 | 947.1 | 25.0% | 3.2% | 5.7% | 0.1% | 64.4% | 1.1% | 0.6% |
-| e2e::readjust | 44 | 723.8 | 91.7% | 1.2% | 4.0% | 0.0% | 2.3% | 0.2% | 0.6% |
-| e2e::writeback_budget | 12 | 523.4 | 14.2% | 0.0% | 2.4% | 0.0% | 83.0% | 0.1% | 0.3% |
-| e2e::driver | 88 | 449.7 | 75.1% | 0.0% | 15.8% | 0.1% | 7.5% | 0.3% | 1.2% |
-| e2e::rework | 20 | 446.5 | 90.6% | 1.0% | 3.9% | 0.0% | 3.7% | 0.2% | 0.6% |
-| e2e::store | 46 | 445.1 | 41.6% | 0.1% | 6.9% | 0.0% | 44.8% | 0.3% | 6.3% |
-| e2e::review | 21 | 422.0 | 88.6% | 3.2% | 3.2% | 0.0% | 4.3% | 0.2% | 0.6% |
-| e2e::loopcost | 10 | 375.1 | 7.3% | 0.0% | 2.1% | 0.0% | 90.0% | 0.2% | 0.4% |
+| e2e::continuation | 44 | 1216.5 | 37.5% | 1.4% | 2.2% | 0.0% | 48.6% | 0.1% | 10.2% |
+| e2e::lifecycle | 102 | 944.8 | 83.4% | 1.4% | 7.4% | 0.0% | 7.0% | 0.2% | 0.5% |
+| e2e::readjust | 44 | 942.0 | 91.2% | 1.5% | 4.5% | 0.0% | 2.1% | 0.2% | 0.6% |
+| e2e::adoption | 51 | 751.2 | 24.1% | 2.1% | 8.0% | 0.1% | 64.8% | 0.4% | 0.5% |
+| e2e::writeback_budget | 12 | 515.6 | 14.1% | 0.0% | 1.6% | 0.0% | 83.9% | 0.1% | 0.2% |
+| e2e::store | 46 | 479.8 | 44.0% | 0.1% | 7.5% | 0.0% | 41.9% | 0.3% | 6.2% |
+| e2e::rework | 20 | 421.1 | 91.2% | 1.1% | 3.3% | 0.0% | 3.6% | 0.2% | 0.6% |
+| e2e::driver | 88 | 409.1 | 75.1% | 0.0% | 15.6% | 0.0% | 7.8% | 0.2% | 1.2% |
+| e2e::review | 21 | 389.3 | 88.3% | 3.5% | 3.5% | 0.0% | 3.9% | 0.2% | 0.6% |
+| e2e::linear_writeback | 11 | 364.3 | 6.6% | 0.0% | 1.8% | 0.0% | 91.3% | 0.0% | 0.4% |
 
 This host is shared with other dispatches, so the wall figures move with load. The categories' shares and the counts are what to compare across runs.
 
@@ -282,17 +287,17 @@ Each figure is the platform's seconds in that category over ci-linux's, summed o
 | macos | 1629 | 1.31x | 1.37x | 3.86x | 0.94x | 1.48x | 1.26x | 1.57x | 0.99x |
 | windows | 1108 | 4.99x | 5.54x | 21.61x | 3.35x | 1.52x | 3.81x | 9.58x | 2.81x |
 
-### Every category's ratio against local Linux (c551671)
+### Every category's ratio against local Linux (7574f2f)
 
-Each figure is the platform's seconds in that category over local-linux's, summed over the tests both ran.
+Each figure is the platform's seconds in that category over local-linux's, summed over the tests both ran. The hosted sets are dd2e5d6's, from run 39098714538's `test-profile-*` artifacts.
 
 | platform | tests both ran | wall | spawn | git | build | fixture | wait | fs | unattributed |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| ci-linux | 1658 | 0.72x | 0.70x | 0.40x | 0.66x | 0.50x | 0.84x | 0.45x | 0.58x |
-| macos | 1631 | 0.95x | 0.96x | 1.55x | 0.62x | 0.74x | 1.05x | 0.71x | 0.58x |
-| windows | 1110 | 3.56x | 3.92x | 8.01x | 2.19x | 0.74x | 3.07x | 4.22x | 1.60x |
+| ci-linux | 1658 | 0.75x | 0.73x | 0.46x | 0.64x | 0.58x | 0.89x | 0.60x | 0.63x |
+| macos | 1631 | 0.99x | 1.01x | 1.76x | 0.62x | 0.86x | 1.12x | 0.94x | 0.63x |
+| windows | 1110 | 3.77x | 4.13x | 9.29x | 2.16x | 0.90x | 3.32x | 6.02x | 1.78x |
 
-The local host is slower than a CI runner for every category but `wait`, so the CI-Linux baseline above is the fair comparison between platforms.
+The local host is slower than a CI runner in every category, and least in `wait` (CI Linux 0.89x of local), since a wait's length is set by the test rather than the machine. The CI-Linux baseline above is therefore the fair comparison between platforms.
 
 ## Earlier evidence (a94701b, 3c728a6, a17a96a)
 
@@ -639,26 +644,24 @@ Test-seconds: 10407.2 per full run; 63440.7 skipped over the window (4.2%).
 
 Today's shape, the same records: 144 merged changes, 1 suites: 3 of 144 suite runs skipped (2.1%). Test-seconds: 10407.2 per full run; 31221.7 skipped over the window (2.1%).
 
-**By the local Linux records of c551671:**
+**By the local Linux records of 7574f2f** (run `a989b0b5`, all 1,661 tests, `host_view` included):
 
 144 merged changes, 9 suites: 58 of 1296 suite runs skipped (4.5%).
-Test-seconds: 14459.9 per full run; 88092.5 skipped over the window (4.2%).
+Test-seconds: 13874.8 per full run; 84776.3 skipped over the window (4.2%).
 
 | suite | changes it runs on | unaffected | test-s per run |
 | --- | ---: | ---: | ---: |
-| e2e-landing | 139 | 3.5% | 5317.2 |
-| e2e-store | 137 | 4.9% | 3591.5 |
-| e2e-views | 136 | 5.6% | 1080.3 |
-| e2e-dispatch | 137 | 4.9% | 900.3 |
-| e2e-channel | 137 | 4.9% | 445.6 |
-| e2e-runs | 138 | 4.2% | 1502.5 |
-| e2e-watch | 138 | 4.2% | 1171.9 |
-| e2e-maintenance | 140 | 2.8% | 337.2 |
-| e2e-harness | 136 | 5.6% | 113.4 |
+| e2e-landing | 139 | 3.5% | 5097.5 |
+| e2e-store | 137 | 4.9% | 3543.3 |
+| e2e-views | 136 | 5.6% | 1130.3 |
+| e2e-dispatch | 137 | 4.9% | 808.3 |
+| e2e-channel | 137 | 4.9% | 331.5 |
+| e2e-runs | 138 | 4.2% | 1401.5 |
+| e2e-watch | 138 | 4.2% | 1102.9 |
+| e2e-maintenance | 140 | 2.8% | 309.4 |
+| e2e-harness | 136 | 5.6% | 150.1 |
 
-Today's shape, the same records: 144 merged changes, 1 suites: 3 of 144 suite runs skipped (2.1%). Test-seconds: 14459.9 per full run; 43379.6 skipped over the window (2.1%).
-
-The c551671 weighting is short one test, `host_view::the_host_view_answers_a_host_sized_root_steady_cold_and_steady_again` (111.6 s in the full run). A later single-test `cargo test` run of it, for the base comparison below, overwrote its record with one of no run, which the replay sets aside. That leaves e2e-views at 1080.3 test-s per run where the full run had 1191.9, and moves no percentage. The Linux breakdown above was generated before that overwrite and holds all 1660 tests.
+Today's shape, the same records (`--today`): 144 merged changes, 1 suites: 3 of 144 suite runs skipped (2.1%). Test-seconds: 13874.8 per full run; 41624.3 skipped over the window (2.1%).
 
 **Earlier replay** over the same 144, weighted by the CI Linux records of a94701b, with the mapping at dd2e5d6 (identical to the mapping today), as first reported:
 
@@ -734,8 +737,8 @@ Per-unit `--timings` (cold, `-j20`) show where the extra CPU goes. The e2e test 
 
 | | effect of the proposed split | evidence |
 | --- | --- | --- |
-| e2e suite runs Nx skips | **4.5%** (58 of 1,296), against **2.1%** for today's shape; ceiling about 5.6% | replay of the 144 over the mapping at dd2e5d6, the same on CI-Linux dd2e5d6, local c551671 and CI-Linux a94701b weights |
-| e2e test-seconds skipped | **4.2%**: 63,441 of 1,498,637 by CI-Linux dd2e5d6, 88,093 of 2,082,226 by local c551671, 57,558 of 1,354,608 by CI-Linux a94701b | the same replay |
+| e2e suite runs Nx skips | **4.5%** (58 of 1,296), against **2.1%** for today's shape; ceiling about 5.6% | replay of the 144 over the mapping at dd2e5d6, the same on CI-Linux dd2e5d6, local 7574f2f and CI-Linux a94701b weights |
+| e2e test-seconds skipped | **4.2%**: 63,441 of 1,498,637 by CI-Linux dd2e5d6, 84,776 of 1,997,966 by local 7574f2f, 57,558 of 1,354,608 by CI-Linux a94701b | the same replay |
 | compile per CI job | **+38% CPU** for a whole-job build (every suite, which 95% of PRs need); -18% to -30% only for a job that builds one suite | prototype of f6a526e, local Linux, uninstrumented |
 | incremental local rebuild | **+36-38%** CPU for a source edit, **+45%** for a one-area test edit | the same prototype |
 | per-test cost | **unchanged**: every test spawns the same binary and does the same work | the records: per-test work is the binary's, not the crate layout's |
@@ -766,89 +769,89 @@ A, B and E keep coverage. B keeps it only if each timing ratio is held and each 
 
 ### Every e2e module, on the current records
 
-Seconds per module: local Linux c551671, and CI Linux, macOS and Windows from run 39098714538 at dd2e5d6 ("–" means Windows did not reach the module before the step limit). The category shares are of the local c551671 seconds. The proposal codes are the ones assigned above.
+Seconds per module: local Linux 7574f2f, and CI Linux, macOS and Windows from run 39098714538 at dd2e5d6 ("–" means Windows did not reach the module before the step limit). The category shares are of the local 7574f2f seconds. The proposal codes are the ones assigned above.
 
-| module | tests | local Linux s (c551671) | CI Linux s | macOS s | Windows s | spawn | wait | build | proposal |
+| module | tests | local Linux s (7574f2f) | CI Linux s | macOS s | Windows s | spawn | wait | build | proposal |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| continuation | 43 | 1263 | 1093 | 1197 | 2530 | 39% | 46% | 2% | A, B |
-| lifecycle | 102 | 1077 | 745 | 1187 | 3991 | 81% | 8% | 8% | A, D |
-| adoption | 51 | 947 | 626 | 974 | 4724 | 25% | 64% | 6% | A, B |
-| readjust | 44 | 724 | 628 | 1333 | 7695 | 92% | 2% | 4% | A, D |
-| writeback_budget | 12 | 523 | 496 | 501 | – | 14% | 83% | 2% | A, C |
-| driver | 88 | 450 | 252 | 276 | 273 | 75% | 7% | 16% | A |
-| rework | 20 | 447 | 359 | 526 | 3227 | 91% | 4% | 4% | A, D |
-| store | 46 | 445 | 361 | 439 | – | 42% | 45% | 7% | A, B |
-| review | 21 | 422 | 304 | 425 | 1996 | 89% | 4% | 3% | A, D |
-| loopcost | 10 | 375 | 278 | 274 | 363 | 7% | 90% | 2% | A, C |
-| linear_writeback | 11 | 370 | 318 | 412 | 252 | 9% | 88% | 2% | A, B |
-| dispatch | 71 | 353 | 252 | 262 | 531 | 74% | 3% | 21% | A |
-| retirement | 38 | 333 | 245 | 402 | 984 | 66% | 21% | 8% | A, B,D |
-| channel | 62 | 325 | 153 | 133 | 271 | 60% | 9% | 27% | A |
-| views | 66 | 282 | 188 | 190 | – | 73% | 7% | 18% | A |
-| publication_boundary | 35 | 254 | 202 | 390 | 1533 | 73% | 13% | 9% | A, D |
-| host_view | 9 | 253 | 225 | – | – | 96% | 1% | 3% | A, E |
-| unwatched | 27 | 246 | 155 | 111 | 108 | 64% | 3% | 9% | A, E |
-| run_end_hooks | 32 | 245 | 177 | 185 | 296 | 86% | 2% | 10% | A, D |
-| listing | 10 | 235 | 114 | 98 | 228 | 59% | 0% | 3% | A, E |
-| watch | 44 | 230 | 150 | 138 | – | 70% | 9% | 18% | A |
-| out_of_band | 27 | 224 | 153 | 276 | 1253 | 86% | 1% | 8% | A, D |
-| live_edit | 46 | 190 | 111 | 105 | 257 | 63% | 17% | 18% | A |
-| publish_preserve | 30 | 189 | 145 | 239 | 946 | 77% | 10% | 10% | A, D |
-| scratch | 29 | 186 | 120 | 107 | 170 | 77% | 8% | 13% | A |
-| manager_landings | 39 | 177 | 139 | 203 | – | 67% | 12% | 14% | A, D |
-| branch_template | 16 | 169 | 111 | 155 | 609 | 91% | 0% | 7% | A, D |
-| wake_budget | 22 | 164 | 106 | 92 | – | 77% | 8% | 13% | A |
-| stacked_drafts | 12 | 158 | 121 | 183 | 310 | 80% | 2% | 7% | A, D |
-| dispatch_env_hook | 10 | 155 | 117 | 208 | 157 | 92% | 2% | 5% | A |
-| maintenance | 23 | 152 | 97 | 127 | 206 | 35% | 42% | 9% | A, B |
-| flow | 22 | 151 | 80 | 84 | – | 66% | 14% | 18% | A |
-| shutdown | 30 | 146 | 83 | 105 | 201 | 63% | 16% | 19% | A, B |
-| driver_exit | 19 | 123 | 87 | 95 | 43 | 67% | 18% | 14% | A, B |
-| draft_lifecycle | 15 | 121 | 79 | 154 | 562 | 88% | 0% | 10% | A, D |
+| continuation | 44 | 1216 | 1093 | 1197 | 2530 | 38% | 49% | 2% | A, B |
+| lifecycle | 102 | 945 | 745 | 1187 | 3991 | 83% | 7% | 7% | A, D |
+| readjust | 44 | 942 | 628 | 1333 | 7695 | 91% | 2% | 4% | A, D |
+| adoption | 51 | 751 | 626 | 974 | 4724 | 24% | 65% | 8% | A, B |
+| writeback_budget | 12 | 516 | 496 | 501 | – | 14% | 84% | 2% | A, C |
+| store | 46 | 480 | 361 | 439 | – | 44% | 42% | 7% | A, B |
+| rework | 20 | 421 | 359 | 526 | 3227 | 91% | 4% | 3% | A, D |
+| driver | 88 | 409 | 252 | 276 | 273 | 75% | 8% | 16% | A |
+| review | 21 | 389 | 304 | 425 | 1996 | 88% | 4% | 4% | A, D |
+| linear_writeback | 11 | 364 | 318 | 412 | 252 | 7% | 91% | 2% | A, B |
+| loopcost | 10 | 362 | 278 | 274 | 363 | 6% | 90% | 4% | A, C |
+| dispatch | 71 | 353 | 252 | 262 | 531 | 75% | 3% | 21% | A |
+| host_view | 10 | 349 | 225 | – | – | 89% | 0% | 10% | A, E |
+| retirement | 38 | 326 | 245 | 402 | 984 | 67% | 20% | 7% | A, B,D |
+| views | 66 | 276 | 188 | 190 | – | 73% | 7% | 18% | A |
+| publication_boundary | 35 | 274 | 202 | 390 | 1533 | 71% | 12% | 12% | A, D |
+| run_end_hooks | 32 | 238 | 177 | 185 | 296 | 87% | 2% | 10% | A, D |
+| unwatched | 27 | 237 | 155 | 111 | 108 | 64% | 3% | 9% | A, E |
+| out_of_band | 27 | 223 | 153 | 276 | 1253 | 86% | 1% | 8% | A, D |
+| channel | 62 | 218 | 153 | 133 | 271 | 64% | 11% | 22% | A |
+| listing | 10 | 215 | 114 | 98 | 228 | 53% | 0% | 15% | A, E |
+| watch | 44 | 207 | 150 | 138 | – | 74% | 9% | 14% | A |
+| publish_preserve | 30 | 206 | 145 | 239 | 946 | 74% | 10% | 13% | A, D |
+| live_edit | 46 | 200 | 111 | 105 | 257 | 53% | 12% | 33% | A |
+| scratch | 29 | 176 | 120 | 107 | 170 | 79% | 7% | 12% | A |
+| manager_landings | 39 | 175 | 139 | 203 | – | 66% | 12% | 16% | A, D |
+| dispatch_env_hook | 10 | 151 | 117 | 208 | 157 | 93% | 2% | 4% | A |
+| branch_template | 16 | 146 | 111 | 155 | 609 | 91% | 0% | 7% | A, D |
+| stacked_drafts | 12 | 145 | 121 | 183 | 310 | 80% | 2% | 6% | A, D |
+| wake_budget | 22 | 143 | 106 | 92 | – | 79% | 7% | 12% | A |
+| flow | 22 | 135 | 80 | 84 | – | 56% | 11% | 31% | A |
+| maintenance | 23 | 133 | 97 | 127 | 206 | 34% | 45% | 9% | A, B |
+| shutdown | 30 | 133 | 83 | 105 | 201 | 65% | 15% | 16% | A, B |
+| harness | 30 | 129 | 24 | 16 | 32 | 39% | 1% | 56% | A |
 | delivers | 16 | 120 | 104 | 100 | 125 | 15% | 75% | 9% | A, B |
-| malformed_envelopes | 12 | 119 | 61 | 63 | 82 | 89% | 4% | 6% | A |
-| templates | 24 | 112 | 95 | 70 | – | 82% | 0% | 17% | A |
-| unpublished | 23 | 111 | 74 | 124 | – | 81% | 0% | 14% | A, D |
-| criteria | 17 | 103 | 74 | 98 | 447 | 80% | 5% | 11% | A, D |
-| landing | 5 | 101 | 80 | 165 | 923 | 94% | 0% | 4% | A, D |
-| harness | 30 | 94 | 24 | 16 | 32 | 69% | 2% | 21% | A |
-| summary | 12 | 90 | 68 | 56 | – | 72% | 2% | 10% | A |
-| filter | 14 | 85 | 49 | 53 | 75 | 81% | 0% | 18% | A |
-| change_telemetry | 9 | 77 | 55 | 73 | 312 | 84% | 3% | 11% | A, D |
-| journal | 16 | 76 | 49 | 50 | 55 | 76% | 4% | 19% | A |
-| session_reuse | 4 | 71 | 45 | 67 | 289 | 74% | 21% | 4% | A, B |
-| ask | 10 | 67 | 52 | 50 | 66 | 75% | 13% | 11% | A, B |
-| envelope_reviewer | 11 | 67 | 36 | 45 | 72 | 78% | 4% | 16% | A |
-| agents | 6 | 66 | 26 | 32 | 140 | 58% | 12% | 26% | A |
-| node_validator | 11 | 65 | 47 | 48 | 86 | 87% | 1% | 11% | A |
-| plan | 22 | 63 | 40 | 45 | 77 | 53% | 18% | 27% | A |
-| writeback_projections | 11 | 59 | 30 | 33 | – | 56% | 23% | 16% | A, B |
-| amend | 8 | 50 | 20 | 21 | 77 | 65% | 2% | 30% | A (under 20 s: little to gain) |
-| crossdag | 8 | 48 | 36 | 35 | 50 | 88% | 1% | 10% | A |
-| run_ending | 8 | 47 | 31 | 28 | 40 | 79% | 2% | 15% | A |
-| bus_config | 12 | 47 | 23 | 22 | 42 | 72% | 1% | 25% | A (under 20 s: little to gain) |
-| cancellation | 10 | 46 | 22 | 25 | 42 | 57% | 18% | 23% | A, B |
-| stop_guard | 11 | 45 | 31 | 37 | – | 67% | 3% | 27% | A |
-| writeback_cost | 1 | 45 | 37 | 37 | – | 8% | 89% | 2% | A, C |
-| unreadable_sessions | 5 | 43 | 33 | 40 | – | 72% | 18% | 8% | A, B |
-| boundary | 10 | 42 | 28 | 27 | 44 | 81% | 0% | 17% | A |
-| checkpoint | 6 | 38 | 26 | 24 | 40 | 71% | 14% | 13% | A, B |
-| multi_source | 10 | 38 | 31 | 35 | 186 | 41% | 37% | 13% | A, B |
-| shipped | 15 | 37 | 23 | 23 | 42 | 72% | 0% | 20% | A |
-| destination | 25 | 36 | 24 | 19 | 33 | 38% | 0% | 49% | A (under 20 s: little to gain) |
+| unpublished | 23 | 115 | 74 | 124 | – | 82% | 0% | 14% | A, D |
+| driver_exit | 19 | 114 | 87 | 95 | 43 | 68% | 19% | 11% | A, B |
+| draft_lifecycle | 15 | 111 | 79 | 154 | 562 | 89% | 0% | 9% | A, D |
+| templates | 24 | 110 | 95 | 70 | – | 83% | 0% | 15% | A |
+| criteria | 17 | 101 | 74 | 98 | 447 | 81% | 5% | 10% | A, D |
+| summary | 12 | 89 | 68 | 56 | – | 71% | 2% | 11% | A |
+| landing | 5 | 89 | 80 | 165 | 923 | 95% | 0% | 3% | A, D |
+| malformed_envelopes | 12 | 81 | 61 | 63 | 82 | 86% | 4% | 9% | A |
+| change_telemetry | 9 | 71 | 55 | 73 | 312 | 84% | 3% | 11% | A, D |
+| session_reuse | 4 | 69 | 45 | 67 | 289 | 75% | 20% | 4% | A, B |
+| filter | 14 | 67 | 49 | 53 | 75 | 84% | 0% | 15% | A |
+| journal | 16 | 65 | 49 | 50 | 55 | 80% | 3% | 15% | A |
+| ask | 10 | 64 | 52 | 50 | 66 | 75% | 13% | 11% | A, B |
+| node_validator | 11 | 63 | 47 | 48 | 86 | 86% | 0% | 12% | A |
+| plan | 22 | 62 | 40 | 45 | 77 | 52% | 17% | 29% | A |
+| envelope_reviewer | 11 | 54 | 36 | 45 | 72 | 81% | 5% | 12% | A |
+| writeback_projections | 11 | 53 | 30 | 33 | – | 57% | 22% | 15% | A, B |
+| crossdag | 8 | 47 | 36 | 35 | 50 | 87% | 1% | 11% | A |
+| unreadable_sessions | 5 | 46 | 33 | 40 | – | 73% | 18% | 8% | A, B |
+| writeback_cost | 1 | 44 | 37 | 37 | – | 7% | 90% | 2% | A, C |
+| run_ending | 8 | 42 | 31 | 28 | 40 | 83% | 2% | 12% | A |
+| agents | 6 | 41 | 26 | 32 | 140 | 71% | 12% | 15% | A |
+| stop_guard | 11 | 39 | 31 | 37 | – | 74% | 3% | 20% | A |
+| destination | 25 | 39 | 24 | 19 | 33 | 33% | 0% | 55% | A (under 20 s: little to gain) |
+| boundary | 10 | 39 | 28 | 27 | 44 | 84% | 0% | 15% | A |
+| multi_source | 10 | 36 | 31 | 35 | 186 | 39% | 36% | 15% | A, B |
+| checkpoint | 6 | 36 | 26 | 24 | 40 | 72% | 15% | 11% | A, B |
+| cancellation | 10 | 35 | 22 | 25 | 42 | 59% | 20% | 19% | A, B |
+| bus_config | 12 | 35 | 23 | 22 | 42 | 74% | 1% | 22% | A (under 20 s: little to gain) |
 | real_vcs | 4 | 35 | 26 | 50 | 211 | 88% | 0% | 10% | A, D |
-| holds | 6 | 35 | 22 | 23 | 32 | 66% | 17% | 15% | A, B |
+| holds | 6 | 34 | 22 | 23 | 32 | 61% | 16% | 22% | A, B |
 | criteria_rule | 7 | 32 | 22 | 20 | 42 | 81% | 0% | 17% | A (under 20 s: little to gain) |
-| turns | 6 | 28 | 20 | 19 | – | 82% | 0% | 16% | A (under 20 s: little to gain) |
-| plan_check | 14 | 24 | 15 | 15 | 40 | 46% | 0% | 50% | A (under 20 s: little to gain) |
-| concurrency | 3 | 24 | 14 | 12 | 66 | 61% | 21% | 14% | A, B |
-| profiling | 22 | 20 | 10 | 12 | 22 | 48% | 28% | 18% | A (under 20 s: little to gain) |
-| surface | 12 | 14 | 10 | 5 | – | 64% | 0% | 33% | A (under 20 s: little to gain) |
-| compatibility | 7 | 13 | 7 | 6 | 15 | 53% | 7% | 37% | A (under 20 s: little to gain) |
-| recorded_channel | 8 | 12 | 9 | 15 | 23 | 60% | 0% | 35% | A (under 20 s: little to gain) |
-| session | 2 | 6 | 4 | 4 | 7 | 67% | 7% | 24% | A (under 20 s: little to gain) |
-| older_launch_record | 1 | 5 | 4 | 3 | 7 | 84% | 0% | 14% | A (under 20 s: little to gain) |
-| layout_document | 2 | 4 | 2 | 2 | 9 | 73% | 5% | 19% | A (under 20 s: little to gain) |
+| shipped | 15 | 32 | 23 | 23 | 42 | 78% | 0% | 14% | A |
+| turns | 6 | 30 | 20 | 19 | – | 81% | 0% | 16% | A (under 20 s: little to gain) |
+| plan_check | 14 | 29 | 15 | 15 | 40 | 40% | 0% | 56% | A (under 20 s: little to gain) |
+| amend | 8 | 29 | 20 | 21 | 77 | 76% | 3% | 19% | A (under 20 s: little to gain) |
+| concurrency | 3 | 22 | 14 | 12 | 66 | 62% | 21% | 13% | A, B |
+| profiling | 22 | 21 | 10 | 12 | 22 | 45% | 26% | 22% | A (under 20 s: little to gain) |
+| surface | 12 | 15 | 10 | 5 | – | 59% | 0% | 38% | A (under 20 s: little to gain) |
+| recorded_channel | 8 | 11 | 9 | 15 | 23 | 65% | 0% | 30% | A (under 20 s: little to gain) |
+| compatibility | 7 | 11 | 7 | 6 | 15 | 53% | 9% | 36% | A (under 20 s: little to gain) |
+| session | 2 | 6 | 4 | 4 | 7 | 68% | 6% | 24% | A (under 20 s: little to gain) |
+| older_launch_record | 1 | 5 | 4 | 3 | 7 | 86% | 0% | 13% | A (under 20 s: little to gain) |
+| layout_document | 2 | 3 | 2 | 2 | 9 | 71% | 3% | 23% | A (under 20 s: little to gain) |
 | linear_loopback | 1 | 0 | 0 | 0 | 0 | 0% | 0% | 0% | A (under 20 s: little to gain) |
 
 <details><summary>Every e2e module, earlier records (CI Linux a94701b, macOS 3c728a6, Windows a17a96a partial: "–" = not reached before the timeout)</summary>
@@ -950,6 +953,7 @@ Seconds per module: local Linux c551671, and CI Linux, macOS and Windows from ru
 
 | run | commit | `Cargo.lock` | load average | result |
 | --- | --- | --- | --- | --- |
+| full e2e tier | 7574f2f | head's | 4.0 → 9.8 | `FAIL [97.408s]` at `tests/e2e/host_view.rs:799:5`, `"read_bytes":0`, the only failure of 1,661 |
 | full e2e tier | c551671 | head's | (shared host) | `FAIL [111.636s]`, the only failure of 1,660 |
 | single test, back to back | 049ba74 (base) | byte-identical copy of c551671's | 6.3 → 7.0 | failed at `tests/e2e/host_view.rs:799:5` in 168.64 s, `"read_bytes":0`, `"cold-journal-bytes":261654914` |
 | single test, back to back | c551671 | head's | 7.0 → 13.9 | failed at the same line in 170.87 s, the same `read_bytes` and journal bytes |
@@ -966,7 +970,9 @@ The earlier runs at a94701b, dd2e5d6 and 049ba74 are recorded under the Checks h
 - `cargo clippy --all-targets --locked -- -D warnings`: clean.
 - `just lint-llm-diff origin/main`: 39 rules, 23 passed, 0 failed.
 
-The fix adds one e2e test (1,661 in all) and changes no figure above, which were all measured before it.
+The fix adds one e2e test, 1,661 in all.
+
+**On 7574f2f** (the tree containing c93fa56; the commit after it changes only this document). The full e2e tier ran instrumented as `gate` runs it: `cargo llvm-cov --no-report nextest --locked -E 'binary(e2e)' --final-status-level fail --no-fail-fast`, with the `ONETASKGRAPH_*` dispatch variables unset. That was run `a989b0b5`, at load 4-10: **1,660 of 1,661 passed in 4,175.7 s**. Both fence tests passed: `a_publication_whose_fence_the_board_refuses_starts_once_a_later_write_lands` in 8.2 s and `a_pass_inside_a_refused_fences_retry_does_not_write_it_early` in 9.1 s. The only failure was `host_view`, at `tests/e2e/host_view.rs:799:5` with `"read_bytes":0`, as before. Every record in `target/test-profile/e2e` is from that run. The Linux breakdown, the ratios against local Linux, the local replay weighting and the per-module table's local column were regenerated from it.
 
 **On c551671** (head before this document):
 - The full e2e tier: 1,659 of 1,660 passed, in 4,412.6 s. The only failure was host_view, above.
