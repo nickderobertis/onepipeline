@@ -967,6 +967,12 @@ pub(crate) fn stacking_bases<'a>(
 /// refuses to fail in. So the name is refused where a plan is read.
 pub(crate) const RESERVED_PERSONA: &str = "`pr-author` is the persona this crate dispatches a      change request's drafting under, so a node's own worker cannot run as it";
 
+/// What a plan naming the reserved reply-drafting persona is told, on
+/// [`RESERVED_PERSONA`]'s terms: a node claiming it would be composed as a reply
+/// drafting and lose the overrides it declared.
+pub(crate) const RESERVED_REPLY_PERSONA: &str = "`review-reply` is the persona this crate \
+     dispatches a review comment's reply drafting under, so a node's own worker cannot run as it";
+
 /// Check one node's shape.
 pub fn validate_node(node: &Node) -> Result<()> {
     check_node(node).map_err(Error::from)
@@ -985,6 +991,9 @@ pub(crate) fn check_node(node: &Node) -> std::result::Result<(), Refusal> {
     }
     if node.persona.as_deref() == Some(crate::lifecycle::PR_AUTHOR_PERSONA) {
         return Err(named(RESERVED_PERSONA).field("persona"));
+    }
+    if node.persona.as_deref() == Some(crate::reply::PERSONA) {
+        return Err(named(RESERVED_REPLY_PERSONA).field("persona"));
     }
     // A kept branch is a lifecycle node's, so a node that cuts none has nothing
     // for `preserve` to keep — and a draft is a state of a change request, which a
@@ -1286,6 +1295,12 @@ fn check_steps(node: &Node, steps: &[Step]) -> std::result::Result<(), Refusal> 
             }
             if step.persona.as_deref() == Some(crate::lifecycle::PR_AUTHOR_PERSONA) {
                 return Err(named(format!("step '{}': {RESERVED_PERSONA}", step.id)));
+            }
+            if step.persona.as_deref() == Some(crate::reply::PERSONA) {
+                return Err(named(format!(
+                    "step '{}': {RESERVED_REPLY_PERSONA}",
+                    step.id
+                )));
             }
             // The same rule the node above is held to: a control this build
             // cannot apply stops the plan here rather than at the step's launch.

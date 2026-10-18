@@ -41,6 +41,7 @@ mod harness;
 mod continuation;
 mod release_probe;
 mod repo;
+mod review;
 
 use onepipeline_testfakes::profile::process::Command;
 use std::path::{Path, PathBuf};

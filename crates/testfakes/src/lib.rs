@@ -1072,3 +1072,52 @@ fn launch_record(run: &str) -> Option<PathBuf> {
     let root = std::env::var("ONEPIPELINE_RUNS_DIR").ok()?;
     (!root.is_empty() && !run.is_empty()).then(|| PathBuf::from(root).join(run).join("launch.json"))
 }
+
+/// The answer a `review-reply` dispatch gives: `review-reply.result`, a JSON value
+/// written verbatim, where a journey scripted one; otherwise one reply per comment the
+/// task's `## Comments` names — `answered`, linking the first commit `## Commits`
+/// lists, where it lists one, and `declined` with the reason's first line otherwise.
+/// `None` for any task that is not a reply drafting's. Shared by `fake-oneagentgraph`,
+/// which answers a drafting whole, and `fake-claude`, which answers the turn a real
+/// `oneagentgraph` runs for one, so both compose the same answer from the same task.
+pub fn replied_answer(task: &str, dir: &Path) -> Option<serde_json::Value> {
+    if !task.starts_with("Draft one terse reply to each review comment") {
+        return None;
+    }
+    if let Some(scripted) = node_script(dir, "review-reply", "result") {
+        return Some(
+            serde_json::from_str(&scripted)
+                .unwrap_or_else(|error| fail(&format!("review-reply.result is not JSON: {error}"))),
+        );
+    }
+    let section = |name: &str| -> String {
+        task.split(&format!("\n## {name}\n"))
+            .nth(1)
+            .map(|rest| rest.split("\n## ").next().unwrap_or_default().to_owned())
+            .unwrap_or_default()
+    };
+    let comments: Vec<String> = section("Comments")
+        .lines()
+        .filter_map(|line| line.strip_prefix("### ").map(str::to_owned))
+        .collect();
+    let commit = section("Commits")
+        .lines()
+        .filter_map(|line| line.strip_prefix("- "))
+        .find_map(|line| line.split_whitespace().last().map(str::to_owned));
+    let reason = section("Reason")
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("out of scope")
+        .chars()
+        .take(400)
+        .collect::<String>();
+    Some(
+        serde_json::json!({"replies": comments.iter().map(|comment| match &commit {
+        Some(url) => serde_json::json!({"comment": comment, "disposition": "answered",
+            "body": format!("Addressed in {url}.")}),
+        None => serde_json::json!({"comment": comment, "disposition": "declined",
+            "body": format!("Left as it is: {reason}")}),
+    }).collect::<Vec<_>>()}),
+    )
+}

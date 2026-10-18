@@ -1845,7 +1845,8 @@ fn restate_publishing(world: &World, project: &str, value: Value) {
 ///
 /// The claim interval is far longer than the fence's retry, so the next claim read cannot be
 /// what wakes the driver to write it again: the retry is due on its own clock, neither at
-/// once nor an interval later.
+/// once nor an interval later — and a pass something else wakes inside that window, here a
+/// surface queued on the run's channel, writes nothing.
 #[test]
 fn a_publication_whose_fence_the_board_refuses_starts_once_a_later_write_lands() {
     let world = takeover_world("fence-refused", 60).through_scripted_source();
@@ -1868,6 +1869,16 @@ fn a_publication_whose_fence_the_board_refuses_starts_once_a_later_write_lands()
     );
     let refused_at = std::time::Instant::now();
     let refused = world.store_asked("set_project_metadata");
+    world
+        .run(&[
+            "surface",
+            run,
+            "--kind",
+            "check-in",
+            "--message",
+            "a pass inside the fence's retry",
+        ])
+        .exited(0);
     world.until("the fence to be written again", |world| {
         world.store_asked("set_project_metadata") > refused
     });

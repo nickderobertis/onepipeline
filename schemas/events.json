@@ -1,5 +1,5 @@
 {
-  "version": "1.6.0",
+  "version": "1.7.0",
   "description": "The agent stack's event envelope, filter, artifact reference and labels, and the payload of every onepipeline pipeline kind, as onepipeline declares them.",
   "schemas": [
     {
@@ -1263,6 +1263,20 @@
                 "items": {
                   "$ref": "#/$defs/ReworkComment"
                 }
+              },
+              "reason": {
+                "type": "string",
+                "description": "The rework's reason and instruction, byte-for-byte as the store holds them:\nwhat a reply drafting on this host is handed as `## Reason`. Empty in a\nrecord written before they were carried."
+              },
+              "instruction": {
+                "type": "string"
+              },
+              "replaces_head": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The superseded node's settled head, where the store's provenance carries\nit: where the commits the rework added begin."
               }
             },
             "required": [
@@ -1289,7 +1303,7 @@
               "id",
               "url"
             ],
-            "description": "One review comment a [`Command::Rework`] answers: its id on the host, and\nwhere a person reads it."
+            "description": "One review comment a [`Command::Rework`] or a [`Command::Decline`] answers: its id on the host, and\nwhere a person reads it."
           },
           "ContinuedSource": {
             "oneOf": [
@@ -1493,6 +1507,17 @@
             "format": "uint64",
             "minimum": 0,
             "description": "The command envelope it came in. Absent from a record written before the\nfield existed, and from one no queued envelope produced."
+          },
+          "refusal": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Refusal"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The refusal by kind, where it was one the reconciler names as one; `reason`\nis then its text. Absent otherwise."
           }
         },
         "required": [
@@ -1507,6 +1532,115 @@
           "AuthorWord": {
             "type": "string",
             "description": "Who submitted a command or a reply."
+          },
+          "Refusal": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "node": {
+                    "type": "string",
+                    "description": "The node the decline named."
+                  },
+                  "comment": {
+                    "type": "string",
+                    "description": "The comment no read found there."
+                  },
+                  "kind": {
+                    "type": "string",
+                    "const": "comment-not-read"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "node",
+                  "comment"
+                ],
+                "description": "The comment was never read for the node: no `onepipeline review` of this\nrun found it on the node's draft."
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "node": {
+                    "type": "string",
+                    "description": "The node the decline named."
+                  },
+                  "kind": {
+                    "type": "string",
+                    "const": "blank-reason"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "node"
+                ],
+                "description": "The decline's reason was blank."
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "node": {
+                    "type": "string",
+                    "description": "The node the decline named."
+                  },
+                  "comment": {
+                    "type": "string",
+                    "description": "The comment already answered."
+                  },
+                  "url": {
+                    "type": "string",
+                    "description": "Where that reply is read."
+                  },
+                  "kind": {
+                    "type": "string",
+                    "const": "already-answered"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "node",
+                  "comment",
+                  "url"
+                ],
+                "description": "A marked reply already answers the comment's current revision, so there is\nnothing to post."
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "node": {
+                    "type": "string",
+                    "description": "The node the decline named."
+                  },
+                  "comments": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "The comments it named."
+                  },
+                  "detail": {
+                    "type": "string",
+                    "description": "What failed."
+                  },
+                  "kind": {
+                    "type": "string",
+                    "const": "decline-not-posted"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "node",
+                  "comments",
+                  "detail"
+                ],
+                "description": "The decline's replies could not all be drafted or posted. Any posted before\nthe failure stay on the host, and sending the decline again posts only the\nrest."
+              }
+            ],
+            "description": "Why the reconciler refused a [`Command::Decline`], by kind.\n\nIts [`Display`](std::fmt::Display) is the refusal's `reason` on the command's\noutcome. The kinds are the ones a planner acts on differently: a comment no\nread of the node found is named again once `onepipeline review` has read it, a\nblank reason is restated, a comment a reply already answers needs nothing, and\na decline whose replies did not all reach the host is sent again, posting only\nthe ones still missing. See `docs/contract-divergences.md` entry 130."
           }
         }
       }
@@ -4095,6 +4229,122 @@
         "description": "`readjust-read-failed`: one repository's standings read failed, and its drafts were\nleft as they were.",
         "title": "ReadjustReadFailed",
         "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "id": "agent.pipeline.review-reply-posted@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "node": {
+            "type": "string",
+            "description": "The node whose draft carries the comment."
+          },
+          "comment": {
+            "type": "string",
+            "description": "The comment answered."
+          },
+          "disposition": {
+            "$ref": "#/$defs/ReplyDisposition",
+            "description": "Whether it was answered or declined."
+          },
+          "url": {
+            "type": "string",
+            "description": "Where the reply is read."
+          },
+          "commits": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The commits its body links, by full sha; empty for a decline."
+          }
+        },
+        "required": [
+          "node",
+          "comment",
+          "disposition",
+          "url",
+          "commits"
+        ],
+        "description": "`review-reply-posted`: one reply the host accepted, in its comment's thread or as a\nconversation comment linking it.",
+        "title": "ReviewReplyPosted",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "ReplyDisposition": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "answered",
+                "description": "Answered by commits a rework added."
+              },
+              {
+                "type": "string",
+                "const": "declined",
+                "description": "Left, saying why."
+              }
+            ],
+            "description": "How a posted reply answers its comment: with the rework's commits, or declining it."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.review-reply-not-drafted@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "node": {
+            "type": "string",
+            "description": "The node whose draft carries the comments."
+          },
+          "comments": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The comments the drafting named."
+          },
+          "ending": {
+            "$ref": "#/$defs/ReplyNotDraftedEnding",
+            "description": "Why nothing was posted."
+          },
+          "detail": {
+            "type": "string",
+            "description": "What failed, in the drafter's or the engine's words."
+          }
+        },
+        "required": [
+          "node",
+          "comments",
+          "ending",
+          "detail"
+        ],
+        "description": "`review-reply-not-drafted`: a drafting of a rework's replies posted nothing; the\nreplies stay owed and are drafted again on the next pass.",
+        "title": "ReviewReplyNotDrafted",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "ReplyNotDraftedEnding": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "unconfigured",
+                "description": "No reply drafter is configured for the run."
+              },
+              {
+                "type": "string",
+                "const": "failed",
+                "description": "The drafting dispatch failed, or answered nothing the schema accepted."
+              },
+              {
+                "type": "string",
+                "const": "invalid",
+                "description": "The drafter answered a result the engine refused."
+              }
+            ],
+            "description": "Why a reply drafting posted nothing."
+          }
+        }
       }
     },
     {

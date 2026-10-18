@@ -19,6 +19,11 @@ pub enum Error {
     /// reconciler rejected it. Exits [`EXIT_REFUSED`].
     #[error("refused: {0}")]
     Refused(String),
+    /// A command the reconciler refused for a reason it names by kind — the
+    /// refusal a channel outcome carries as its typed `refusal` beside the
+    /// `reason` this prints. Exits [`EXIT_REFUSED`].
+    #[error("refused: {0}")]
+    Rejected(crate::channel::Refusal),
     /// A reply's edits are accepted and durable but were not reconciled within
     /// the timeout; they remain queued. Exits [`EXIT_QUEUED`].
     ///

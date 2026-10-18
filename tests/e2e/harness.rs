@@ -2294,6 +2294,43 @@ impl World {
         graph.display().to_string()
     }
 
+    /// A reply-drafter graph, `--review-reply-graph`'s document: one single-sided
+    /// member asked for the reply result's shape, which the double answers.
+    ///
+    /// The schema holds the shape and nothing the engine's own rules decide — no
+    /// length, no link — so a result breaking one of those rules reaches the engine.
+    pub fn review_reply_graph(&self) -> String {
+        let dir = self.graphs();
+        std::fs::create_dir_all(&dir).expect("a directory for the graph configs");
+        std::fs::write(
+            dir.join("review-reply.schema.json"),
+            r#"{"type":"object","properties":{
+                 "replies":{"type":"array","items":{"type":"object","properties":{
+                   "comment":{"type":"string"},
+                   "disposition":{"type":"string","enum":["answered","declined"]},
+                   "body":{"type":"string"}},
+                   "required":["comment","disposition","body"],"additionalProperties":false}}},
+               "required":["replies"],"additionalProperties":false}"#,
+        )
+        .expect("the reply result's schema is written");
+        std::fs::write(
+            dir.join("oneharness.review-reply.toml"),
+            "run_mode = \"fallback\"\nharnesses = [\"claude-code\"]\n\
+             schema_file = \"./review-reply.schema.json\"\n",
+        )
+        .expect("the reply drafter's harness config is written");
+        let graph = dir.join("review-reply.yaml");
+        std::fs::write(
+            &graph,
+            format!(
+                "version: {CONSUMER_GRAPH_SCHEMA}\nname: review-reply\nmembers:\n  replier:\n    \
+                 kind: oneharness\n    oneharness_config: ./oneharness.review-reply.toml\n"
+            ),
+        )
+        .expect("the review-reply graph is written");
+        graph.display().to_string()
+    }
+
     fn write_graphs_with(&self, dag_extra: Option<&str>, version: u32) {
         let _fixture = profile::span(profile::Category::Fixture);
         let dir = self.graphs();

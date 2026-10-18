@@ -576,6 +576,17 @@ pub(crate) struct ContinuedRework {
     pub(crate) replacement: String,
     pub(crate) replaces: String,
     pub(crate) comments: Vec<crate::channel::ReworkComment>,
+    /// The rework's reason and instruction, byte-for-byte as the store holds them:
+    /// what a reply drafting on this host is handed as `## Reason`. Empty in a
+    /// record written before they were carried.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) reason: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) instruction: String,
+    /// The superseded node's settled head, where the store's provenance carries
+    /// it: where the commits the rework added begin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) replaces_head: Option<String>,
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
@@ -750,6 +761,10 @@ pub(crate) struct EditRejected {
     /// field existed, and from one no queued envelope produced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) envelope: Option<u64>,
+    /// The refusal by kind, where it was one the reconciler names as one; `reason`
+    /// is then its text. Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) refusal: Option<crate::channel::Refusal>,
 }
 
 /// `planner-surface-queued`: a surface sent.
@@ -1896,6 +1911,58 @@ pub(crate) struct ReadjustReadFailed {
     /// What the host or the sibling said.
     pub(crate) detail: String,
 }
+
+/// How a posted reply answers its comment: with the rework's commits, or declining it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ReplyDisposition {
+    /// Answered by commits a rework added.
+    Answered,
+    /// Left, saying why.
+    Declined,
+}
+
+/// `review-reply-posted`: one reply the host accepted, in its comment's thread or as a
+/// conversation comment linking it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct ReviewReplyPosted {
+    /// The node whose draft carries the comment.
+    pub(crate) node: String,
+    /// The comment answered.
+    pub(crate) comment: String,
+    /// Whether it was answered or declined.
+    pub(crate) disposition: ReplyDisposition,
+    /// Where the reply is read.
+    pub(crate) url: String,
+    /// The commits its body links, by full sha; empty for a decline.
+    pub(crate) commits: Vec<String>,
+}
+
+/// Why a reply drafting posted nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ReplyNotDraftedEnding {
+    /// No reply drafter is configured for the run.
+    Unconfigured,
+    /// The drafting dispatch failed, or answered nothing the schema accepted.
+    Failed,
+    /// The drafter answered a result the engine refused.
+    Invalid,
+}
+
+/// `review-reply-not-drafted`: a drafting of a rework's replies posted nothing; the
+/// replies stay owed and are drafted again on the next pass.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct ReviewReplyNotDrafted {
+    /// The node whose draft carries the comments.
+    pub(crate) node: String,
+    /// The comments the drafting named.
+    pub(crate) comments: Vec<String>,
+    /// Why nothing was posted.
+    pub(crate) ending: ReplyNotDraftedEnding,
+    /// What failed, in the drafter's or the engine's words.
+    pub(crate) detail: String,
+}
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// The scratch removed at one ending or manager request.
@@ -2220,6 +2287,8 @@ payload_messages! {
     ChangeClosed => "change-closed";
     NodeChecksRead => "node-checks-read";
     ReadjustReadFailed => "readjust-read-failed";
+    ReviewReplyPosted => "review-reply-posted";
+    ReviewReplyNotDrafted => "review-reply-not-drafted";
     DriverTakenOver => "driver-taken-over";
     DriverSuperseded => "driver-superseded";
     LandingRegistered => "landing-registered";
