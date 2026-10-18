@@ -2939,7 +2939,7 @@ impl World {
     /// reads for the reason `tests/AGENTS.md` gives; the deadline and assertion
     /// are [`until`](Self::until)'s.
     pub fn until_store(&self, what: &str, mut ready: impl FnMut(&Self) -> bool) {
-        self.until_store_for(std::time::Duration::from_secs(120), what, &mut ready);
+        self.until_store_for(ONE_STEP, what, &mut ready);
     }
 
     fn until_store_for(
@@ -3529,7 +3529,61 @@ pub fn waited(ready: impl FnMut() -> bool) -> bool {
 }
 
 fn waited_every(interval: std::time::Duration, ready: impl FnMut() -> bool) -> bool {
-    waited_for(std::time::Duration::from_secs(120), interval, ready)
+    waited_for(ONE_STEP, interval, ready)
+}
+
+/// The deadline [`waited`] — and so [`World::until`] — gives one step of the product's
+/// asynchrony: a dispatch carried from its start through its publication to its
+/// settlement, on the slowest hosted leg with the suite running beside it.
+pub const ONE_STEP: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// How long a run of `plan` may take to settle: one [`ONE_STEP`] for each node on its
+/// longest chain of dependencies.
+///
+/// The contract's execution model fixes that count: "a node — and each step within a
+/// lifecycle node — dispatches the moment its dependencies settle `done`", so the nodes
+/// of one chain run one after another, and a run settles no sooner than its longest
+/// chain has, each link a whole dispatch. Nodes off that chain run beside it.
+pub fn settling_patience(plan: &Value) -> std::time::Duration {
+    let tasks: BTreeMap<&str, Vec<&str>> = plan["tasks"]
+        .as_array()
+        .expect("a plan carries its tasks")
+        .iter()
+        .map(|task| {
+            let id = task["id"].as_str().expect("a task carries its id");
+            let deps = task["deps"]
+                .as_array()
+                .map(|deps| deps.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            (id, deps)
+        })
+        .collect();
+    fn depth<'a>(
+        node: &'a str,
+        tasks: &BTreeMap<&'a str, Vec<&'a str>>,
+        known: &mut BTreeMap<&'a str, u32>,
+    ) -> u32 {
+        if let Some(depth) = known.get(node) {
+            return *depth;
+        }
+        // A dependency outside the plan — a cross-DAG edge — is another run's to settle.
+        let below = tasks.get(node).map_or(0, |deps| {
+            deps.iter()
+                .filter(|dep| tasks.contains_key(*dep))
+                .map(|dep| depth(dep, tasks, known))
+                .max()
+                .unwrap_or(0)
+        });
+        known.insert(node, below + 1);
+        below + 1
+    }
+    let mut known = BTreeMap::new();
+    let longest = tasks
+        .keys()
+        .map(|node| depth(node, &tasks, &mut known))
+        .max()
+        .unwrap_or(1);
+    ONE_STEP * longest
 }
 
 fn waited_for(
@@ -6961,6 +7015,41 @@ pub fn plan_of(name: &str, nodes: Vec<Value>) -> Value {
         "goal": {"text": format!("Deliver {name}")},
         "tasks": nodes,
     })
+}
+
+/// A run's patience counts the dispatches on its longest dependency chain, one step
+/// each, and nothing for nodes running beside that chain or edges to another run.
+#[test]
+fn a_runs_settling_patience_is_one_step_per_node_on_its_longest_chain() {
+    let chained = |id: &str, deps: &[&str]| json!({"id": id, "deps": deps});
+    let patience = |nodes: Vec<Value>| settling_patience(&plan_of("patience", nodes));
+    assert_eq!(patience(vec![json!({"id": "only"})]), ONE_STEP);
+    assert_eq!(
+        patience(vec![
+            chained("a", &[]),
+            chained("b", &[]),
+            chained("c", &[])
+        ]),
+        ONE_STEP
+    );
+    assert_eq!(
+        patience(vec![
+            chained("ship", &["adopt"]),
+            chained("core", &[]),
+            chained("adopt", &["core"]),
+        ]),
+        ONE_STEP * 3
+    );
+    assert_eq!(
+        patience(vec![
+            chained("a", &[]),
+            chained("b", &["a"]),
+            chained("c", &["a"]),
+            chained("d", &["b", "c", "run:other#x"]),
+            chained("e", &[]),
+        ]),
+        ONE_STEP * 3
+    );
 }
 
 /// A directory reached through a symlink resolves to the directory itself.

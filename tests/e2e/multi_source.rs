@@ -16,7 +16,9 @@ use std::path::PathBuf;
 
 use serde_json::{json, Value};
 
-use crate::harness::{global, plan_of, project_id, World, STORE_SOURCE};
+use crate::harness::{
+    global, plan_of, project_id, settling_patience, World, ONE_STEP, STORE_SOURCE,
+};
 
 /// The second source: where the plan source routes the engine repository's tasks.
 const MEMBERS: &str = "members";
@@ -280,18 +282,15 @@ fn a_plan_spanning_two_sources_runs_as_one_graph_and_settles_each_task_where_it_
     }
     let name = "spanning";
     // `adopt` depends on a home task, and `ship` on the member task: an edge each way.
-    let home = filed(
-        &world,
+    let plan = plan_of(
         name,
-        &plan_of(
-            name,
-            vec![
-                on(HOME, "core", &[]),
-                on(ROUTED, "adopt", &["core"]),
-                on(HOME, "ship", &["adopt"]),
-            ],
-        ),
+        vec![
+            on(HOME, "core", &[]),
+            on(ROUTED, "adopt", &["core"]),
+            on(HOME, "ship", &["adopt"]),
+        ],
     );
+    let home = filed(&world, name, &plan);
     assert_eq!(
         sources(&world, &home),
         BTreeMap::from([
@@ -315,7 +314,9 @@ fn a_plan_spanning_two_sources_runs_as_one_graph_and_settles_each_task_where_it_
         );
     }
     dispatched.release();
-    world.until("the run to settle", |world| {
+    // The edges make one chain of three dispatches, each started only once the one before it
+    // settles, so the run is three dispatches long rather than one step.
+    world.until_within(settling_patience(&plan), "the run to settle", |world| {
         world.run_file(name, "result.json").is_file()
     });
 
@@ -350,6 +351,81 @@ fn a_plan_spanning_two_sources_runs_as_one_graph_and_settles_each_task_where_it_
     let held = |source: &str| -> Vec<String> { source_nodes(&world, source).into_keys().collect() };
     assert_eq!(held(STORE_SOURCE), ["core", "ship"]);
     assert_eq!(held(MEMBERS), ["adopt"]);
+}
+
+/// A chain that crosses sources runs one dispatch at a time, and its run settles only once
+/// the last of them has: each task is dispatched once the task it depends on in the other
+/// source has settled, and not before, however long that task's dispatch is held in flight.
+#[test]
+fn a_chain_across_two_sources_settles_only_once_each_dispatch_on_it_has() {
+    let world = a_routed_world("multi-source-chain");
+    let _service = world.repository("local-direct", &[]);
+    let _engine = world.extra_repository("engine");
+    let chain = ["core", "adopt", "ship"];
+    for node in chain {
+        world.script(&format!("{node}.work"), &format!("{node} wrote this\n"));
+    }
+    let name = "chain";
+    let home = filed(
+        &world,
+        name,
+        &plan_of(
+            name,
+            vec![
+                on(HOME, "core", &[]),
+                on(ROUTED, "adopt", &["core"]),
+                on(HOME, "ship", &["adopt"]),
+            ],
+        ),
+    );
+    let holds = chain.map(|node| world.rendezvous(node));
+
+    world.run(&["start", &home, "--detach"]).exited(0);
+    for (at, hold) in holds.iter().enumerate() {
+        let held = hold.arrived();
+        let journal = world.journal(name);
+        let dispatched: Vec<&str> = chain
+            .iter()
+            .copied()
+            .filter(|node| {
+                journal.iter().any(|event| {
+                    event["kind"] == "node-dispatched" && event["labels"]["node"] == *node
+                })
+            })
+            .collect();
+        assert_eq!(
+            dispatched,
+            chain[..=at],
+            "{} was held in flight, and the dispatches were not the chain up to it",
+            chain[at]
+        );
+        if let Some(before) = at.checked_sub(1) {
+            assert!(
+                position(&journal, "node-settled", chain[before])
+                    < position(&journal, "node-dispatched", chain[at]),
+                "{} was dispatched before {} settled",
+                chain[at],
+                chain[before]
+            );
+        }
+        assert!(
+            !world.run_file(name, "result.json").exists(),
+            "the run settled while {} was in flight",
+            chain[at]
+        );
+        held.release();
+    }
+    // The last dispatch is let go: what remains is that one step.
+    world.until_within(ONE_STEP, "the run to settle", |world| {
+        world.run_file(name, "result.json").is_file()
+    });
+    assert_eq!(
+        result_of(&world, name),
+        chain
+            .iter()
+            .map(|node| ((*node).to_owned(), "done".to_owned()))
+            .collect()
+    );
 }
 
 /// A live `add` whose node names a repository the home's source routes elsewhere lands in that
