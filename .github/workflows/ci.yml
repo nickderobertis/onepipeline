@@ -205,13 +205,15 @@ jobs:
   # The leg is split across two jobs since 180 stopped holding it whole: runs
   # 38983520867, 38998427985 and 39013380285 each reached the step's limit with no
   # test failing, at e2e test 1236 of 1375, 1083 of 1375 and 1087 of 1393. Costed
-  # from those three logs — each test at the longest any of them measured, a test
-  # none reached at the slowest measured test of its module or, for the 86 in
-  # modules none reached, of the five nearest it in cost on base 7da1f6b8's own
-  # green leg (run 39012326838), and the crate tier at that leg's times x1.4 — and
-  # run at the 3.67 tests at a time those legs managed, base's whole suite needs a
-  # 224-minute step and a 238-minute job. Each half needs 117 and 130: inside 180
-  # and 220 by over half again. The shards are nextest's `count:K/2` of every
+  # from those three logs over the 2657 tests both shards of run 39076493816 ran —
+  # each test at the longest any of them measured; the 53 they did not reach at
+  # the slowest they measured in its module; the 1192 in modules none reached (86
+  # e2e, the whole crate tier) at the slowest of its module on any Windows leg —
+  # at each tier's fewest tests at a time (e2e 3.68; the crate tier's off base's
+  # green leg, run 39012326838), after their slowest 490s before the first tier
+  # and with 848s outside the step, the whole suite needs a 251-minute step and a
+  # 265-minute job. Each shard needs 130 and 144: inside 180 and 220 by 1.39x and
+  # 1.53x. The shards are nextest's `count:K/2` of every
   # tier, so between them they run each test once; `just cross-shards` proves that
   # of this host's listing and of the 2651 tests base's leg ran
   # (`.github/windows-test-inventory.tsv`). No leg name is required —
