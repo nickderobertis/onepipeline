@@ -22,9 +22,7 @@ use std::collections::BTreeMap;
 use serde_json::{json, Value};
 
 use crate::draft_lifecycle::{rules, team_repository, GREEN};
-use crate::harness::{
-    agent, held_publication, lifecycle, plan_of, process_ended, World, SCRIPTED_KEY,
-};
+use crate::harness::{agent, held_publication, lifecycle, plan_of, process_ended, World};
 
 /// The host's branch prefix every team journey here runs under.
 const PREFIX: &str = "me/";
@@ -1686,8 +1684,6 @@ enum OffTheStore {
     Held,
     /// Its projection is held past that wait, and let through after it.
     HeldPastTheWait,
-    /// The store refuses every attempt to write it, until it stops refusing.
-    Refused,
 }
 
 /// A publication that settles while a takeover is past its whole wait leaves its fence
@@ -1712,18 +1708,6 @@ fn a_settlement_held_past_the_displaced_drivers_wait_holds_the_takeover_until_it
     );
 }
 
-/// The same with the store refusing the settlement's projection: a refusal is not a landing,
-/// so the fence stands and nothing is acknowledged; the driver asks for the projection again
-/// while it owes it, and once the store takes it the adopter continues `x` and dispatches
-/// `y` alone.
-#[test]
-fn a_settlement_the_store_refuses_holds_the_takeover_until_a_later_attempt_lands() {
-    a_takeover_waits_for_a_settlement_off_the_store(
-        "takeover-unlanded-refused",
-        OffTheStore::Refused,
-    );
-}
-
 fn a_takeover_waits_for_a_settlement_off_the_store(name: &str, off: OffTheStore) {
     // The displaced driver waits up to one interval for its projection before it goes on
     // passing, which outlasts what a journey holding the projection inside it does.
@@ -1732,11 +1716,6 @@ fn a_takeover_waits_for_a_settlement_off_the_store(name: &str, off: OffTheStore)
         .with_env("ONEVCS_BRANCH_PREFIX", PREFIX)
         .with_env(CLAIM_INTERVAL_ENV, &interval.to_string())
         .with_env(crate::harness::CANCEL_GRACE_ENV, "1");
-    let world = if off == OffTheStore::Refused {
-        world.through_scripted_source()
-    } else {
-        world
-    };
     let go = world.fakes.join("push.go");
     let held = held_publication(&world, &go);
     world.repository("change-open", &held.argv());
@@ -1779,23 +1758,10 @@ fn a_takeover_waits_for_a_settlement_off_the_store(name: &str, off: OffTheStore)
     held.release();
     // `x`'s publication has settled, and its settlement is about to be projected.
     let projection = projecting.arrived();
-    let refusal = format!("{SCRIPTED_KEY}.update_task.refuse");
-    let projection = match off {
-        OffTheStore::Held | OffTheStore::HeldPastTheWait => Some(projection),
-        OffTheStore::Refused => {
-            world.script(
-                &refusal,
-                &json!({"kind": "refused", "message": "the board refused it"}).to_string(),
-            );
-            projection.release();
-            world.until_run_file_holds(run, "driver.log", "the board refused it");
-            None
-        }
-    };
-    if off != OffTheStore::Held {
-        // Past the driver's one wait for the settlement — over at once for one the store
-        // refused — the driver says it is still owed, where one that had given up on it would
-        // have cleared its fence or acknowledged instead.
+    if off == OffTheStore::HeldPastTheWait {
+        // Past the driver's one wait for the settlement, the driver says it is still owed,
+        // where one that had given up on it would have cleared its fence or acknowledged
+        // instead.
         world.until(
             "the displaced driver's wait for x's settlement to pass",
             |world| {
@@ -1828,10 +1794,7 @@ fn a_takeover_waits_for_a_settlement_off_the_store(name: &str, off: OffTheStore)
         "the adopter dispatched before x's settlement had reached the store"
     );
     // Once the settlement has landed the fence goes, and the adopter's next read starts it.
-    match projection {
-        Some(projection) => projection.release(),
-        None => world.unscript(&refusal),
-    }
+    projection.release();
     world.until(
         "the fence to be cleared once x's settlement has landed",
         |world| stored_publishing(world, &project).is_null(),

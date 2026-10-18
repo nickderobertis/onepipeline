@@ -1538,8 +1538,6 @@ fn converge(
     // taking the project over that finds it gone from the fence finds its settlement, and
     // continues it rather than dispatching it again.
     let mut unlanded: BTreeSet<String> = BTreeSet::new();
-    // When a projection the store refused was last asked for again on their behalf.
-    let mut retried_refused: Option<Instant> = None;
     // Rework republications waiting on the standings read that continues their trigger.
     let mut reworks_due: Vec<ReworkDue> = Vec::new();
     let channel = ChannelState::of_run(paths, launch);
@@ -1832,23 +1830,6 @@ fn converge(
         // a stale lease does — and the lease is asked again once the fence has landed.
         // llmlint: ignore[changed_behavior_has_e2e] the lease asked again after the fence lands is the one admission every start asks, whose refusal on a stale lease is driven by `continuation::a_publication_asked_for_on_a_stale_lease_waits_for_the_next_read`; reaching it *between* the fence's write and that question needs a store that holds one write for a whole claim interval and then answers, which is the sibling suspended mid-command — host-level process control no CLI journey exposes.
         unlanded.retain(|node| settlement_unlanded(writeback.as_ref(), node));
-        // A refused projection is otherwise attempted again only when the graph changes, which
-        // a driver waiting on what it settled may never see: one owing a settlement is asked
-        // for again on the fence's own retry clock.
-        if !unlanded.is_empty() && due(retried_refused, SETTLEMENT_RETRY) {
-            if writeback
-                .as_ref()
-                .is_some_and(crate::writeback::Writeback::retry_refused)
-            {
-                eprintln!(
-                    "onepipeline: run '{}' asks the store again for the settlement of {} it \
-                     refused",
-                    paths.run,
-                    quoted(&unlanded)
-                );
-            }
-            retried_refused = Some(Instant::now());
-        }
         let fenced = claims.as_mut().is_none_or(|watch| {
             let mut nodes = publishing.clone();
             nodes.extend(unlanded.iter().cloned());
@@ -2205,12 +2186,6 @@ fn converge(
                 Duration::MAX,
                 crate::continuation::ClaimWatch::until_fence_retry,
             ),
-            // And when it next asks again for a settlement the store refused.
-            if unlanded.is_empty() {
-                Duration::MAX
-            } else {
-                until_due(retried_refused, SETTLEMENT_RETRY)
-            },
         ];
         let deadline = if moved {
             Duration::ZERO
@@ -2587,7 +2562,6 @@ fn converge(
                     in_flight.remove(&settlement.node);
                     if publishing.remove(&settlement.node) {
                         unlanded.insert(settlement.node.clone());
-                        retried_refused = Some(Instant::now());
                     }
                     // A restack says what it did ahead of the node's ordinary
                     // settlement, which follows it as any settlement does.
@@ -2701,10 +2675,6 @@ fn converge(
 
     Ok(graph::state_of(&statuses_of(&mut derived, state)))
 }
-
-/// How soon a projection the store refused is asked for again while it owes a settled
-/// publication's settlement: the fence's own retry.
-const SETTLEMENT_RETRY: Duration = Duration::from_secs(5);
 
 /// `nodes`, each quoted, as a line names them.
 fn quoted(nodes: &BTreeSet<String>) -> String {
