@@ -1759,6 +1759,10 @@ fn worker(
                 || member_sources(&store, &snapshot.project),
             )
         });
+        // A failpoint, so a journey can hold one settlement off the store.
+        if let Err(error) = crate::ordering::settlement_projecting(snapshot.settlements.keys()) {
+            eprintln!("{error}");
+        }
         let landing = landing_lock(&run_dir).and_then(|file| file.lock().map(|()| file));
         // llmlint: ignore-block[changed_behavior_has_e2e] a run directory the driver cannot open a
         // file in is one it cannot write this attempt's record into either, a line below; the

@@ -1527,6 +1527,12 @@ fn converge(
     // The nodes whose publication this driver cleared and which have not settled: a
     // publication under way is finished, so neither a takeover nor a lapsed lease ends it.
     let mut publishing: BTreeSet<String> = BTreeSet::new();
+    // The nodes whose publication has settled and whose settlement the store may not hold
+    // yet, each `true` once a projection carrying it has been handed to the write-back: each
+    // stays named on the fence until that projection has landed, so a run taking the project
+    // over that finds it gone from the fence finds its settlement, and continues it rather
+    // than dispatching it again.
+    let mut unlanded: BTreeMap<String, bool> = BTreeMap::new();
     // Rework republications waiting on the standings read that continues their trigger.
     let mut reworks_due: Vec<ReworkDue> = Vec::new();
     let channel = ChannelState::of_run(paths, launch);
@@ -1806,8 +1812,10 @@ fn converge(
         // none named knows none is under way. One that cannot be named yet waits, as one on
         // a stale lease does — and the lease is asked again once the fence has landed.
         // llmlint: ignore[changed_behavior_has_e2e] the lease asked again after the fence lands is the one admission every start asks, whose refusal on a stale lease is driven by `continuation::a_publication_asked_for_on_a_stale_lease_waits_for_the_next_read`; reaching it *between* the fence's write and that question needs a store that holds one write for a whole claim interval and then answers, which is the sibling suspended mid-command — host-level process control no CLI journey exposes.
+        unlanded.retain(|_, handed| settlement_landing(writeback.as_ref(), *handed));
         let fenced = claims.as_mut().is_none_or(|watch| {
             let mut nodes = publishing.clone();
+            nodes.extend(unlanded.keys().cloned());
             nodes.extend(starting.iter().map(|due| due.node.clone()));
             watch.fence(&nodes) && (starting.is_empty() || watch.may_start(None))
         });
@@ -1996,6 +2004,7 @@ fn converge(
         if unpublished {
             if let Some(writeback) = &writeback {
                 writeback.publish(paths, launch, state, &statuses);
+                unlanded.values_mut().for_each(|handed| *handed = true);
             }
             unpublished = false;
         }
@@ -2041,7 +2050,11 @@ fn converge(
                 writeback.wait_until_landed(crate::continuation::claim_interval());
                 writeback.retire(by);
             }
-            if let Some(watch) = &claims {
+            // What it settled is on the board, or nothing more of it will be: the fence
+            // names none of it now, and the loop leaves before another pass would clear it.
+            unlanded.clear();
+            if let Some(watch) = claims.as_mut() {
+                watch.fence(&publishing);
                 watch.acknowledge(by);
             }
         }
@@ -2159,6 +2172,13 @@ fn converge(
                 if writeback
                     .as_ref()
                     .is_some_and(crate::writeback::Writeback::has_unprojected)
+                {
+                    return true;
+                }
+                // A settlement the fence still names has landed, so the fence can let it go.
+                if unlanded
+                    .values()
+                    .any(|handed| !settlement_landing(writeback.as_ref(), *handed))
                 {
                     return true;
                 }
@@ -2504,7 +2524,9 @@ fn converge(
                 Message::Settled(settled) => {
                     let settlement = &settled.settlement;
                     in_flight.remove(&settlement.node);
-                    publishing.remove(&settlement.node);
+                    if publishing.remove(&settlement.node) {
+                        unlanded.insert(settlement.node.clone(), false);
+                    }
                     // A restack says what it did ahead of the node's ordinary
                     // settlement, which follows it as any settlement does.
                     let readjusting = state.readjust.plans.remove(&settlement.node);
@@ -2594,6 +2616,14 @@ fn converge(
         watch_for_quiet(paths, journal, stall_after, &mut in_flight)?;
     }
 
+    // The close-out projected every settlement this run made, or spent its window trying: a
+    // fence still naming one whose projection had not landed by the last pass is cleared now,
+    // since no pass follows to clear it.
+    if !unlanded.is_empty() {
+        if let Some(watch) = claims.as_mut() {
+            watch.fence(&publishing);
+        }
+    }
     // A landing the last pass settled is told to `onevcs` before the driver
     // lets go, since no pass follows it.
     supersessions.pass(paths, journal, state)?;
@@ -2605,6 +2635,15 @@ fn converge(
     maintenance.close(paths, journal, &rx)?;
 
     Ok(graph::state_of(&statuses_of(&mut derived, state)))
+}
+
+/// Whether the fence goes on naming a settled publication whose settlement was `handed` to
+/// `writeback` — or, where it was not yet, is still to be: until the projection carrying it
+/// has landed. A run projecting nothing — no write-back, or one another run's takeover
+/// retired — has nothing to wait on.
+fn settlement_landing(writeback: Option<&crate::writeback::Writeback>, handed: bool) -> bool {
+    writeback
+        .is_some_and(|writeback| !writeback.is_retired() && (!handed || writeback.still_landing()))
 }
 
 /// What a close-out's last claim on the command queue found, and so what the

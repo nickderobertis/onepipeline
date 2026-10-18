@@ -11201,10 +11201,14 @@ it. The lease is what every start asks; no start asks the store:
 - a driver **fences its publications**: before any publication starts it writes the
   project's `onepipeline.publishing` — `{"run", "host", "nodes", "at"}`, the nodes whose
   publications are under way — and starts it only once that write has landed and the lease
-  still admits it; once a publication has settled it writes the key again without that
-  node, `null` for none. A write the store refuses starts nothing, and is made again five
-  seconds later. A superseded driver reads the key before it clears it, and clears only its
-  own;
+  still admits it; once a publication has settled, and the projection carrying its
+  settlement has landed, it writes the key again without that node, `null` for none — so a
+  run taking the project over that finds the node gone finds its settlement, and continues
+  it rather than dispatching it again. A superseded driver clears it once that projection
+  has landed or its one-interval wait for it has passed, before it acknowledges, and a run
+  closing out once its close-out has. A write the store refuses starts nothing, and is made
+  again five seconds later. A superseded driver reads the key before it clears it, and
+  clears only its own;
 - a driver whose newest confirming read is **two intervals and the 20-second read deadline
   old ends every dispatch it has in progress that is not publishing** — so the read due at
   two intervals is given its whole deadline, and one read the board fails is not alone a

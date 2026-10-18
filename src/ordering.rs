@@ -80,6 +80,26 @@ pub(crate) fn settlement_queued(node: &str) -> Result<()> {
     Ok(())
 }
 
+static SETTLEMENT_PROJECTING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Met once, by the write-back, before it projects the first snapshot carrying the settlement
+/// of the node `ONEPIPELINE_TEST_PROJECTION_SETTLED_NODE` names: a journey holds that
+/// settlement off the store there.
+pub(crate) fn settlement_projecting<'a>(
+    mut settled: impl Iterator<Item = &'a String>,
+) -> Result<()> {
+    let Ok(target) = std::env::var("ONEPIPELINE_TEST_PROJECTION_SETTLED_NODE") else {
+        return Ok(());
+    };
+    if settled.any(|node| *node == target)
+        && !SETTLEMENT_PROJECTING.swap(true, std::sync::atomic::Ordering::Relaxed)
+    {
+        meet("ONEPIPELINE_TEST_PROJECTION_SETTLED_GATE")?;
+    }
+    Ok(())
+}
+
 pub(crate) fn settlement_recorded(paths: &crate::ledger::RunPaths, node: &str) -> Result<()> {
     if settlement_target(node) {
         SETTLEMENT_ACTIVE.store(false, std::sync::atomic::Ordering::Relaxed);
