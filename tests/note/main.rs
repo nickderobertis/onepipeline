@@ -2921,6 +2921,10 @@ fn status_names_each_receiver_still_delivering_and_drops_each_as_it_answers() {
 fn a_later_edit_to_a_node_a_held_envelope_names_waits_behind_that_envelope() {
     let world = World::new("note-held-behind-held");
     let run = "heldbehindheld";
+    // Each of build's turns is held, so the one that takes the note is still in
+    // flight when the envelope amending build is judged behind it: released
+    // together, build could settle first, and an amend of a settled node is refused.
+    world.script("turn.hold-each", "Do build");
     held_heartbeating_conversation(
         &world,
         run,
