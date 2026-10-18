@@ -1296,7 +1296,7 @@ fn dispatches(
     }
     /// What a node's `session-opened` said: the base it opened against, and when.
     struct Opened {
-        token: Option<String>,
+        token: Option<onevcs::SessionToken>,
         base: crate::vcs::BranchName,
         // llmlint: ignore[invalid_states_unrepresentable] the journal record's own `ts`, which onemessagebus's `Envelope` declares as a `String` holding an RFC 3339 instant, copied onto the store verbatim as `StoredDispatch::opened_at`; this crate has no timestamp type to parse it into and back out of, and every other `ts` it reads stays a string.
         at: String,
@@ -1318,7 +1318,7 @@ fn dispatches(
             .payload
             .get("token")
             .and_then(Value::as_str)
-            .map(str::to_owned);
+            .map(|token| onevcs::SessionToken(token.to_owned()));
         if token.is_some() && opened.get(&node).is_some_and(|held| held.token == token) {
             continue;
         }
