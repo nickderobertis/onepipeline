@@ -1286,6 +1286,7 @@ impl World {
                 let request = onetaskgraph_core::DependencyRequest {
                     id: id.clone(),
                     direction: onetaskgraph_plugin_api::Direction::DependsOn,
+                    completeness: onetaskgraph_core::Completeness::Required,
                     paging: onetaskgraph_core::Paging {
                         limit: std::num::NonZeroU32::new(500).expect("not zero"),
                         token,

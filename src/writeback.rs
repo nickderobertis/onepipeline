@@ -628,6 +628,7 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         EngineError::UnknownSource { .. } => decided("unknown-source"),
         EngineError::Token { .. } => decided("page-token"),
         EngineError::NoSources => decided("no-sources"),
+        EngineError::IncompleteSource { .. } => decided("incomplete-source"),
         // llmlint: ignore-block[changed_behavior_has_e2e] These store refusals are
         // unreachable from settlement writes: copies use project members, carry no
         // comments, set no expected version, and read immutable local shadow tasks.
@@ -717,7 +718,8 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         | EngineError::SourceRefused { error, .. }
         | EngineError::SourceUnavailable { error, .. }
         | EngineError::SourceFailed { error, .. } => (source_kind(error).to_owned(), Some(error)),
-        EngineError::CopyNotUndone { error, .. } => cause_of(error),
+        EngineError::CopyNotUndone { error, .. }
+        | EngineError::CopyDestinationUncertain { error, .. } => cause_of(error),
     }
 }
 
@@ -5735,6 +5737,9 @@ mod tests {
             },
             EngineError::Token { message: words() },
             EngineError::NoSources,
+            EngineError::IncompleteSource {
+                name: onetaskgraph_plugin_api::SourceName::new("plans").expect("a source name"),
+            },
             EngineError::ExpectOneTask,
             EngineError::NotCached {
                 name: "plans".into(),
@@ -5983,6 +5988,15 @@ mod tests {
                 }),
                 left_behind: onetaskgraph_core::LeftBehind::new(id()),
                 refusal: source.clone(),
+            },
+            // So does a create whose answer the destination malformed.
+            EngineError::CopyDestinationUncertain {
+                error: Box::new(EngineError::SourceRefused {
+                    name: "plans".into(),
+                    error: SourceError::Refused { message: words() },
+                }),
+                destination: "plans".into(),
+                operation: "write_task".into(),
             },
         ];
         for failure in &failures {
