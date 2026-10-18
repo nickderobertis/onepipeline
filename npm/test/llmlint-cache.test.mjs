@@ -415,7 +415,12 @@ function removalDiagnosis(sandbox, error) {
   visit(sandbox, ".");
 
   lines.push("process table when it failed:");
-  const table = spawnSync("ps", ["-ww", "-eo", "pid,ppid,lstart,args"], { encoding: "utf8" });
+  // Past Node's 1 MiB default: `-ww` prints whole argv, and a busy host's table outgrows
+  // it, which failed the diagnosis with ENOBUFS instead of carrying the table.
+  const table = spawnSync("ps", ["-ww", "-eo", "pid,ppid,lstart,args"], {
+    encoding: "utf8",
+    maxBuffer: 256 * 1024 * 1024,
+  });
   if (table.error || table.status !== 0) {
     lines.push(`  ps could not report it: ${table.error?.message ?? table.stderr.trim()}`);
   } else {
