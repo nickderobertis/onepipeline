@@ -56,7 +56,10 @@
     "test-quick": {
       "command": "just _e2e-test-quick",
       "inputs": [
-        "e2eSource"
+        "e2eSource",
+        {
+          "env": "ONEPIPELINE_TEST_PARTITION"
+        }
       ],
       "dependsOn": [
         {

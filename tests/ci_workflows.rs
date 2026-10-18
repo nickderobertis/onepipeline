@@ -898,7 +898,10 @@ fn the_pr_and_opted_in_diagnostic_lanes_preserve_the_three_former_mac_proofs() {
 /// writes them to: an upload naming any other path would publish nothing, and
 /// `scripts/test-profile-report.mjs` would read a platform as having no records.
 /// No leg moves the records elsewhere through the recorder's environment
-/// variable, and a leg that wrote none says so in its run.
+/// variable, a leg that wrote none says so in its run, and every matrix leg
+/// keeps them under a name of its own: `upload-artifact` refuses a second
+/// artifact of a name a run already holds, so two shards sharing one would
+/// lose the second shard's records.
 #[test]
 fn every_test_leg_keeps_the_profile_records_from_where_the_harness_writes_them() {
     use onepipeline_testfakes::profile::{DIR_ENV, RECORD_DIR};
@@ -909,6 +912,7 @@ fn every_test_leg_keeps_the_profile_records_from_where_the_harness_writes_them()
             .contains(DIR_ENV),
         "ci.yml sets {DIR_ENV}, so its records are not where its uploads look"
     );
+    let mut names = Vec::new();
     for key in ["gate", "cross", "macos"] {
         let steps = ci["jobs"][key]["steps"]
             .as_array()
@@ -937,7 +941,22 @@ fn every_test_leg_keeps_the_profile_records_from_where_the_harness_writes_them()
             scalar(&step["with"]["name"]).starts_with("test-profile-"),
             "job {key}: {step}"
         );
+        let mut artifact = ci["jobs"][key].clone();
+        artifact["name"] = step["with"]["name"].clone();
+        names.extend(rendered(key, &artifact));
     }
+    let mut distinct = names.clone();
+    distinct.sort();
+    distinct.dedup();
+    assert_eq!(
+        distinct.len(),
+        names.len(),
+        "two legs keep their records under one artifact name: {names:?}"
+    );
+    assert!(
+        names.iter().all(|name| !name.contains("${{")),
+        "an artifact name is not rendered from its leg's matrix: {names:?}"
+    );
 }
 
 /// The e2e project's test targets declare the records their run writes as Nx
@@ -962,4 +981,103 @@ fn the_e2e_test_targets_declare_the_profile_records_as_outputs() {
             "the e2e {target} target does not declare {records} among {outputs:?}"
         );
     }
+}
+
+/// The Windows leg is one leg split across the jobs of `cross`'s `shard` axis.
+/// Each job is handed `count:K/N` of one partition — N the axis's length, K its own
+/// place on it — under a name of its own, and records a verdict of its own; and
+/// `cross (windows-latest)`, the context branch protection requires, passes only on
+/// every one of those verdicts, so a shard that failed, was cancelled or never ran
+/// is not outvoted by one that passed. That each test runs in exactly one shard is
+/// nextest's partition, which `nextest_runs` drives through `_tier-test-quick` and
+/// `just cross-shards` lists over this host's build.
+#[test]
+fn the_windows_leg_is_split_into_shards_that_each_report_and_pass_only_together() {
+    let ci = workflow("ci.yml");
+    let cross = &ci["jobs"]["cross"];
+    let shards: Vec<String> = cross["strategy"]["matrix"]["shard"]
+        .as_array()
+        .expect("`cross` splits its leg along a `shard` axis")
+        .iter()
+        .map(scalar)
+        .collect();
+    let count = shards.len();
+    assert_eq!(
+        shards,
+        (1..=count).map(|k| k.to_string()).collect::<Vec<_>>(),
+        "the shards are not 1 to {count} in order"
+    );
+    assert_eq!(
+        cross["env"]["ONEPIPELINE_TEST_PARTITION"].as_str(),
+        Some(format!("count:${{{{ matrix.shard }}}}/{count}").as_str()),
+        "each shard is not handed its own share of one {count}-way partition"
+    );
+    let names = rendered("cross", cross);
+    assert_eq!(names.len(), count, "{names:?}");
+    assert!(
+        names.windows(2).all(|pair| pair[0] != pair[1]),
+        "two shards report under one name: {names:?}"
+    );
+    assert!(
+        names.iter().all(|name| !REQUIRED.contains(&name.as_str())),
+        "a shard reports a required context itself: {names:?}"
+    );
+    let steps = cross["steps"].as_array().expect("`cross` has steps");
+    let gate = steps
+        .iter()
+        .find(|step| step["id"] == "gate")
+        .expect("`cross` has its quality gate");
+    // The first shard runs `check-cross` whole and every other its `test-quick`
+    // alone, so the format and lint checks run once and every shard tests its share.
+    assert_eq!(
+        gate["env"]["GATE"].as_str(),
+        Some("${{ matrix.shard == 1 && 'check-cross' || 'test-quick' }}"),
+        "the shards do not split `check-cross` between them: {gate}"
+    );
+    assert!(
+        gate["run"]
+            .as_str()
+            .is_some_and(|run| run.contains("just \"$GATE\"")),
+        "the quality gate does not run the recipe its shard is given: {gate}"
+    );
+    let proved = steps
+        .iter()
+        .find(|step| step["id"] == "proved")
+        .expect("`cross` records its verdict");
+    assert_eq!(
+        proved["env"]["LEG"].as_str(),
+        Some("${{ matrix.os }}-${{ matrix.shard }}"),
+        "a shard's verdict is not recorded under its own name"
+    );
+    let outputs = cross["outputs"]
+        .as_object()
+        .expect("`cross` exports its verdicts");
+    let verdict = ci["jobs"]["cross-windows"]["steps"]
+        .as_array()
+        .expect("the carrier has steps")
+        .iter()
+        .find_map(|step| step["env"]["LEG_VERDICT"].as_str())
+        .expect("the carrier reads the leg's verdict");
+    assert_eq!(outputs.len(), count, "{outputs:?}");
+    assert_eq!(
+        verdict.matches("needs.cross.outputs[").count(),
+        count,
+        "the carrier reads other than each shard's verdict once: {verdict}"
+    );
+    for k in 1..=count {
+        let key = format!("windows-latest-{k}");
+        assert_eq!(
+            outputs.get(&key).and_then(Value::as_str),
+            Some(format!("${{{{ steps.proved.outputs.{key} }}}}").as_str()),
+            "shard {k}'s verdict is not exported as {key}"
+        );
+        assert!(
+            verdict.contains(&format!("needs.cross.outputs['{key}'] == 'success' &&")),
+            "the carrier passes without shard {k}'s verdict: {verdict}"
+        );
+    }
+    assert!(
+        verdict.trim_end().ends_with("&& 'success' || '' }}"),
+        "the carrier's verdict is not success only when every shard's is: {verdict}"
+    );
 }

@@ -211,7 +211,10 @@
     "test-quick": {
       "cache": true,
       "inputs": [
-        "default"
+        "default",
+        {
+          "env": "ONEPIPELINE_TEST_PARTITION"
+        }
       ]
     },
     "doc": {
@@ -243,7 +246,7 @@
           "env": "LLMLINT_DIFF_BASE_SHA"
         },
         {
-          "runtime": "bash scripts/llmlint-fingerprint.sh"
+          "runtime": "llmlint fingerprint"
         }
       ]
     },

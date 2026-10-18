@@ -213,26 +213,41 @@ jobs:
   # quick tier still running. 220 is 180 plus the same 15-minute gap and the
   # re-run step's 25, so a step that took all 180 still leaves that step its own.
   #
-  # Splitting the suite across more jobs is the only thing that would make the leg
-  # itself shorter, and it is not available: branch protection requires `cross
-  # (macos-latest)` and `cross (windows-latest)` by rendered name, so a shard axis
-  # renames both and every open pull request waits on a context that never reports.
+  # The leg is split across two jobs since 180 stopped holding it whole: runs
+  # 38983520867, 38998427985 and 39013380285 each reached the step's limit with no
+  # test failing, at e2e test 1236 of 1375, 1083 of 1375 and 1087 of 1393. Costed
+  # from those three logs over the 2657 tests both shards of run 39076493816 ran —
+  # each test at the longest any of them measured; the 53 they did not reach at
+  # the slowest they measured in its module; the 1192 in modules none reached (86
+  # e2e, the whole crate tier) at the slowest of its module on any Windows leg —
+  # at each tier's fewest tests at a time (e2e 3.68; the crate tier's off base's
+  # green leg, run 39012326838), after their slowest 490s before the first tier
+  # and with 848s outside the step, the whole suite needs a 251-minute step and a
+  # 265-minute job. Each shard needs 130 and 144: inside 180 and 220 by 1.39x and
+  # 1.53x. The shards are nextest's `count:K/2` of every
+  # tier, so between them they run each test once; `just cross-shards` proves that
+  # of this host's listing and of the 2651 tests base's leg ran
+  # (`.github/windows-test-inventory.tsv`). No leg name is required —
+  # `cross (windows-latest)` is the carrier below, which needs both shards' verdicts.
   # llmlint: ignore-end[comments_earn_their_place]
   cross:
-    name: cross proof (${{ matrix.os }})
+    name: cross proof (${{ matrix.os }}, shard ${{ matrix.shard }}/2)
     needs: changes
     if: needs.changes.outputs.crate == 'true'
     strategy:
       fail-fast: false
       matrix:
         os: [windows-latest]
+        shard: [1, 2]
     runs-on: ${{ matrix.os }}
     # One verdict per leg, each under its own name, for the carrier below.
     outputs:
-      windows-latest: ${{ steps.proved.outputs.windows-latest }}
+      windows-latest-1: ${{ steps.proved.outputs.windows-latest-1 }}
+      windows-latest-2: ${{ steps.proved.outputs.windows-latest-2 }}
     timeout-minutes: 220
     env:
       NEXTEST_PROFILE: ci
+      ONEPIPELINE_TEST_PARTITION: count:${{ matrix.shard }}/2
     defaults:
       run:
         shell: bash
@@ -254,10 +269,14 @@ jobs:
       # Teed for the re-run step below; `shell: bash` above is pipefail, so the
       # tee cannot turn a failed leg green. The archive is the test build, kept
       # for that step to re-run without compiling.
+      # The first shard runs `check-cross` whole and the others its `test-quick`
+      # alone: the format and lint checks read the one commit every shard builds.
       - name: Quality gate (cross-platform legs)
         id: gate
         timeout-minutes: 180
-        run: ONEPIPELINE_TEST_ARCHIVE="$RUNNER_TEMP/tests.tar.zst" just check-cross 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
+        env:
+          GATE: ${{ matrix.shard == 1 && 'check-cross' || 'test-quick' }}
+        run: ONEPIPELINE_TEST_ARCHIVE="$RUNNER_TEMP/tests.tar.zst" just "$GATE" 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
       # A leg that stops without a verdict stops holding something — a test
       # process, or a child of one that outlived it — and on Windows there are no
       # process groups to make that visible afterwards, so it is read here while
@@ -280,7 +299,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-profile-${{ matrix.os }}
+          name: test-profile-${{ matrix.os }}-${{ matrix.shard }}
           path: target/test-profile/
           if-no-files-found: warn
           retention-days: 30
@@ -299,7 +318,7 @@ jobs:
       - name: Record this leg's verdict
         id: proved
         env:
-          LEG: ${{ matrix.os }}
+          LEG: ${{ matrix.os }}-${{ matrix.shard }}
         run: echo "$LEG=success" >> "$GITHUB_OUTPUT"
 
   # The declared MSRV is a promise to consumers, so prove it rather than document
@@ -624,7 +643,7 @@ jobs:
           CRATE_AFFECTED: ${{ needs.changes.outputs.crate }}
           PROOF_RESULT: ${{ needs.cross.result }}
           LEG: windows-latest
-          LEG_VERDICT: ${{ needs.cross.outputs['windows-latest'] }}
+          LEG_VERDICT: ${{ needs.cross.outputs['windows-latest-1'] == 'success' && needs.cross.outputs['windows-latest-2'] == 'success' && 'success' || '' }}
         run: node .github/macos-policy.mjs path-carrier
 
   install-ubuntu:
