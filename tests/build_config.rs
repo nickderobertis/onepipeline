@@ -17,11 +17,21 @@
 //! environment may carry (`CARGO_TARGET_DIR`, `RUSTFLAGS`) are stripped from the
 //! probe's environment on purpose: each outranks the file, and what is under
 //! test is the file.
+//!
+//! Nothing a probe runs may wait on a lock the rest of the clone's cargo work
+//! takes. The clone's `target/debug` and `target/release` are locked for the
+//! whole of every build into them — the clippy, doc and build tasks Nx runs
+//! beside this suite hold them for minutes — and the cargo home's package cache
+//! for every resolution. So each case runs under a cargo home of its own, a
+//! probe that builds does so in a checkout of its own carrying a copy of the
+//! file, and a probe that would block on a lock fails naming it rather than
+//! waiting out the runner's bound.
 
 use std::ffi::OsStr;
-use std::fs;
+use std::fs::{self, File, OpenOptions, TryLockError};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 /// The repository root: `CARGO_MANIFEST_DIR` is the root crate's directory.
 fn repo_root() -> PathBuf {
@@ -33,16 +43,24 @@ fn build_config() -> String {
     fs::read_to_string(&path).unwrap_or_else(|error| panic!("{} reads: {error}", path.display()))
 }
 
-/// A crate that is inside the clone but outside the workspace: its own
-/// `[workspace]` table stops cargo from folding it into the root's, which is the
-/// case a manifest-declared profile could never reach.
+/// The directory one case writes everything it runs under, and the cargo home
+/// its cargo runs with at `cargo-home/` inside it.
 ///
 /// Written fresh on every call, and under `target/` for the reason
 /// `linked_engines` puts its fixtures there: a failed run leaves the tree that
-/// failed where the other build artifacts are.
-fn probe_crate(case: &str) -> PathBuf {
-    let root = repo_root().join(format!("target/build-config/{case}"));
-    let _ = fs::remove_dir_all(&root);
+/// failed where the other build artifacts are. One per case, because two cases
+/// sharing a cargo home would contend for its package cache.
+fn case_dir(case: &str) -> PathBuf {
+    let dir = repo_root().join(format!("target/build-config/{case}"));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("a case directory");
+    dir
+}
+
+/// A crate at `root` that is inside the clone but outside the workspace: its own
+/// `[workspace]` table stops cargo from folding it into the root's, which is the
+/// case a manifest-declared profile could never reach.
+fn probe_crate(root: &Path) {
     fs::create_dir_all(root.join("src")).expect("a probe crate directory");
     fs::write(
         root.join("Cargo.toml"),
@@ -50,7 +68,22 @@ fn probe_crate(case: &str) -> PathBuf {
     )
     .expect("a probe manifest");
     fs::write(root.join("src/lib.rs"), "pub fn probe() {}\n").expect("a probe crate");
-    root
+}
+
+/// A checkout of its own under `case`, carrying a copy of the file at its root,
+/// with a probe crate outside any workspace inside it at `probe/`: the clone's
+/// layout, in a tree whose build directories nothing but this case builds into.
+///
+/// That the copy resolves `target-dir` against its own root, as the clone's file
+/// does against the clone's, is what
+/// `a_second_checkout_carrying_its_own_copy_of_the_file_builds_into_its_own_root`
+/// proves.
+fn probe_checkout(case: &Path) -> PathBuf {
+    fs::create_dir_all(case.join(".cargo")).expect("a checkout config directory");
+    fs::write(case.join(".cargo/config.toml"), build_config()).expect("a copied config");
+    let probe = case.join("probe");
+    probe_crate(&probe);
+    probe
 }
 
 /// The cargo that builds the probe: `CARGO`, which cargo sets on every test it
@@ -72,14 +105,27 @@ fn cargo_binary() -> PathBuf {
     cargo
 }
 
-/// Run cargo from `dir` with everything that outranks the config file removed.
-fn cargo<I, S>(dir: &Path, args: I) -> Output
+/// What cargo prints, on its own line, when a lock it needs is held elsewhere.
+const LOCK_WAIT: &str = "waiting for file lock";
+
+/// Run cargo from `dir` with everything that outranks the config file removed,
+/// under `case`'s own cargo home.
+///
+/// A cargo that reports it is waiting on a lock is ended there and fails the
+/// test naming the lock: every lock a probe takes is one only its own case
+/// takes, so a wait means one escaped into what the rest of the clone shares.
+fn cargo<I, S>(dir: &Path, case: &Path, args: I) -> Output
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
     let mut command = Command::new(cargo_binary());
-    command.args(args).current_dir(dir);
+    command
+        .args(args)
+        .current_dir(dir)
+        .env("CARGO_HOME", case.join("cargo-home"))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     for outranking in [
         "CARGO_TARGET_DIR",
         "CARGO_BUILD_TARGET_DIR",
@@ -92,7 +138,37 @@ where
     ] {
         command.env_remove(outranking);
     }
-    let output = command.output().expect("cargo runs");
+    let mut child = command.spawn().expect("cargo runs");
+    let mut stdout = child.stdout.take().expect("cargo's stdout is piped");
+    let stdout = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).map(|_| bytes)
+    });
+    let mut stderr = Vec::new();
+    let lines = BufReader::new(child.stderr.take().expect("cargo's stderr is piped"));
+    for line in lines.split(b'\n') {
+        let line = line.expect("cargo's stderr reads");
+        if String::from_utf8_lossy(&line).contains(LOCK_WAIT) {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "cargo in {} waited on a lock the rest of the clone shares: {}\n{}",
+                dir.display(),
+                String::from_utf8_lossy(&line),
+                String::from_utf8_lossy(&stderr)
+            );
+        }
+        stderr.extend_from_slice(&line);
+        stderr.push(b'\n');
+    }
+    let output = Output {
+        status: child.wait().expect("cargo exits"),
+        stdout: stdout
+            .join()
+            .expect("cargo's stdout reader")
+            .expect("cargo's stdout reads"),
+        stderr,
+    };
     assert!(
         output.status.success(),
         "cargo failed in {}: {}",
@@ -102,8 +178,12 @@ where
     output
 }
 
-fn reported_target_directory(dir: &Path) -> PathBuf {
-    let output = cargo(dir, ["metadata", "--format-version", "1", "--no-deps"]);
+fn reported_target_directory(dir: &Path, case: &Path) -> PathBuf {
+    let output = cargo(
+        dir,
+        case,
+        ["metadata", "--format-version", "1", "--no-deps"],
+    );
     let metadata: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("cargo metadata is JSON");
     PathBuf::from(
@@ -210,15 +290,17 @@ fn a_shell_quoted_out_dir_is_read_as_the_path_it_names() {
 
 #[test]
 fn every_crate_in_the_clone_builds_into_the_clones_own_target_directory() {
+    let case = case_dir("outside-workspace");
     let clone_target = repo_root().join("target");
     assert_eq!(
-        reported_target_directory(&repo_root()),
+        reported_target_directory(&repo_root(), &case),
         clone_target,
         "the workspace root builds into <clone>/target"
     );
-    let outside = probe_crate("outside-workspace");
+    let outside = case.join("probe");
+    probe_crate(&outside);
     assert_eq!(
-        reported_target_directory(&outside),
+        reported_target_directory(&outside, &case),
         clone_target,
         "a crate outside the workspace, inside the clone, builds into the same <clone>/target"
     );
@@ -229,23 +311,26 @@ fn a_second_checkout_carrying_its_own_copy_of_the_file_builds_into_its_own_root(
     // A worktree nested inside a clone is the case that matters: cargo reads
     // both files, and the deeper one's `target-dir` has to win *and* resolve
     // against the deeper root, or two checkouts silently share one target.
-    let nested_root = probe_crate("nested-checkout");
+    let nested_root = case_dir("nested-checkout");
+    probe_crate(&nested_root);
     fs::create_dir_all(nested_root.join(".cargo")).expect("a nested config directory");
     fs::write(nested_root.join(".cargo/config.toml"), build_config()).expect("a copied config");
     assert_eq!(
-        reported_target_directory(&nested_root),
+        reported_target_directory(&nested_root, &nested_root),
         nested_root.join("target"),
         "a checkout with its own copy of the file resolves target-dir against its own root"
     );
 }
 
-#[test]
-fn dev_test_and_release_builds_carry_no_debuginfo() {
-    let probe = probe_crate("debuginfo");
-    let deps = repo_root().join("target/debug/deps");
+/// Build the probe under the dev, test and release profiles, in a checkout of
+/// its own under `case`, and hold each build to the debuginfo the file promises.
+fn builds_carry_no_debuginfo(case: &str) {
+    let checkout = case_dir(case);
+    let probe = probe_checkout(&checkout);
+    let deps = checkout.join("target/debug/deps");
 
     let dev = rustc_invocation(
-        &cargo(&probe, ["build", "-v", "--offline"]),
+        &cargo(&probe, &checkout, ["build", "-v", "--offline"]),
         "--crate-type lib",
     );
     // At `debug = 0` cargo passes no `-C debuginfo` level and strips the standard
@@ -257,11 +342,11 @@ fn dev_test_and_release_builds_carry_no_debuginfo() {
     assert_eq!(
         out_dir(&dev),
         deps,
-        "a dev build of a crate outside the workspace lands in <clone>/target/debug: {dev}"
+        "a dev build of a crate outside the workspace lands in <checkout>/target/debug: {dev}"
     );
 
     let test = rustc_invocation(
-        &cargo(&probe, ["test", "-v", "--no-run", "--offline"]),
+        &cargo(&probe, &checkout, ["test", "-v", "--no-run", "--offline"]),
         "--test",
     );
     assert!(
@@ -270,7 +355,7 @@ fn dev_test_and_release_builds_carry_no_debuginfo() {
     );
 
     let release = rustc_invocation(
-        &cargo(&probe, ["build", "-v", "--offline", "--release"]),
+        &cargo(&probe, &checkout, ["build", "-v", "--offline", "--release"]),
         "--crate-type lib",
     );
     // `-C strip=debuginfo` is cargo's own release default and names no level;
@@ -279,4 +364,66 @@ fn dev_test_and_release_builds_carry_no_debuginfo() {
         !release.contains("-C debuginfo="),
         "a release build is untouched by the dev profile: {release}"
     );
+}
+
+#[test]
+fn dev_test_and_release_builds_carry_no_debuginfo() {
+    builds_carry_no_debuginfo("debuginfo");
+}
+
+/// The cargo home the environment hands every other cargo on this host.
+fn environment_cargo_home() -> PathBuf {
+    if let Some(home) = std::env::var_os("CARGO_HOME") {
+        return PathBuf::from(home);
+    }
+    std::env::home_dir()
+        .expect("a home directory holds the default cargo home")
+        .join(".cargo")
+}
+
+/// Exclusive holds on the locks the rest of the clone's cargo work takes: the
+/// clone's own dev and release build directories, and the environment cargo
+/// home's package cache, both halves, which is what a cargo mutating it holds.
+///
+/// A lock someone else already holds is left to them: it is held either way,
+/// which is the condition under test, and waiting for it would make this test
+/// wait on exactly what it proves the probe does not.
+fn hold_shared_locks() -> Vec<File> {
+    let home = environment_cargo_home();
+    let target = repo_root().join("target");
+    [
+        target.join("debug/.cargo-lock"),
+        target.join("release/.cargo-lock"),
+        home.join(".package-cache"),
+        home.join(".package-cache-mutate"),
+    ]
+    .into_iter()
+    .filter_map(|path| {
+        fs::create_dir_all(path.parent().expect("a lock has a directory"))
+            .expect("a lock directory");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .unwrap_or_else(|error| panic!("{} opens: {error}", path.display()));
+        match file.try_lock() {
+            Ok(()) => Some(file),
+            Err(TryLockError::WouldBlock) => None,
+            Err(TryLockError::Error(error)) => panic!("{} locks: {error}", path.display()),
+        }
+    })
+    .collect()
+}
+
+#[test]
+fn the_debuginfo_builds_wait_on_no_lock_the_rest_of_the_clone_holds() {
+    // What the tier's neighbours do for minutes at a time: a build into the
+    // clone's target directory, and a resolution against the shared cargo home.
+    // Held for the whole of the builds, so a probe that took any of these locks
+    // would report the wait, and `cargo` fails on that report.
+    let held = hold_shared_locks();
+    builds_carry_no_debuginfo("debuginfo-beside-held-locks");
+    drop(held);
 }
