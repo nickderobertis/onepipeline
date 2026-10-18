@@ -8889,8 +8889,9 @@ awaiting a live note's answer is held only when it names a node the awaiting env
 names, and every other envelope is judged and applied on the pass that claims it.
 **Amended per receiver** by the plan node `op-note-holds` (onepipeline#1011, #801, #803,
 #754), as [*Per receiver*](#per-receiver--ruled) below states: what holds a later envelope
-is now each node whose own live note is still outstanding, never every node an envelope
-named, and a `finding` holds nothing and is held by nothing.
+is now each node that receives a still-outstanding live note, or that an earlier envelope
+still held names, never every node an envelope named, and a `finding` holds nothing and
+is held by nothing.
 
 **What was wrong.** Since `a72e88e` a live note is offered off the run's single writer,
 so relay, settlement and heartbeats go on while a conversation decides. But the
@@ -8967,12 +8968,13 @@ managers took a slow worker for a lost message and reached for destructive lever
    any later `[amend C]` is judged. A `retitle` among them
    that the host refuses still refuses the envelope whole, with nothing offered.
 3. **The hold is per receiver.** A later envelope is held only while it names a node that
-   still has an outstanding live note from an earlier envelope. A receiver's hold is
+   receives an outstanding live note, or a node named by an earlier envelope that is
+   itself still held. A node named only by an envelope's non-note commands holds nothing
+   once rule 2 has committed them. A receiver's hold is
    released as soon as its own note is answered, whatever the envelope's other receivers
    are doing. Order is still kept for each node. A later command naming a node waits for
-   that node's outstanding note, and an envelope naming a node that an envelope already held
-   behind it names is held too, in claim order. An envelope naming no node with an
-   outstanding note is not held by notes to other nodes.
+   that node's outstanding note, or for the held envelope naming it, in claim order. An
+   envelope naming neither is not held by notes to other nodes.
 4. **Findings are never held.** A `finding` names no node for this purpose, whether it is
    blocking or not and whatever node it is about. It edits nothing that an edit to its node
    could overtake, and what a monitor finds about a node is most worth reading while that
