@@ -1,5 +1,5 @@
 {
-  "//": "The proposed split. Crates: onepipeline-sys is the five src modules outside the one dependency cycle the other 68 form; onepipeline-core is that cycle; onepipeline is the binary; onepipeline-testfakes is the doubles. Every e2e suite drives the compiled binary, so it exercises the binary crate and through it every crate. The e2e binary splits into the suites below, each with its own module files and the runtime files its tests read; the harness and what it reads are every suite's.",
+  "//": "The proposed split. Crates: onepipeline-sys is the five src modules outside the one dependency cycle the other 68 form; onepipeline-core is that cycle; onepipeline is the binary; onepipeline-testfakes is the doubles. Every e2e suite drives the compiled binary, so it exercises the binary crate and through it every crate. The e2e binary splits into the suites below, each with the module files its binary compiles \u2014 its own and those they reach through `crate::<module>::` \u2014 and the runtime files they read; the harness and what it reads are every suite's.",
   "shared": [
     "Cargo.toml",
     "Cargo.lock",
