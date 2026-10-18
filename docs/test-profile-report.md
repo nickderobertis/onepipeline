@@ -24,6 +24,8 @@ Commits after dd2e5d6:
 - **c93fa56** changes product timing: a driver no longer writes a refused publications fence again before its 5 s retry is due (`src/continuation.rs`). It also adds one e2e test, `continuation::a_pass_inside_a_refused_fences_retry_does_not_write_it_early`.
 - **7574f2f** and 644b02e change only this document.
 - **953fda8** names the record directory once, as `profile::RECORD_DIR`. The harness writes to the same `target/test-profile` it did before, and each CI leg's upload of it now warns if it found no records. It changes no test's work, so the local figures below, taken on 7574f2f, stand for it.
+- **997aaa8** merges main at 54cfa4a (#982), which splits the Windows leg into two `cross` shards. Each shard now keeps its records as `test-profile-windows-latest-<shard>`, because `upload-artifact` refuses a second artifact of one name. To read a run's Windows records, unpack both into one directory: `gh run download <run> -p 'test-profile-windows-latest-*' -D windows`, then pass `windows=windows`. The script reads a directory recursively, and the shards run disjoint tests. #982 also changes the timing of four e2e journeys, so records from after the merge are not directly comparable with these for those tests.
+- **6c4a488** runs one maintenance journey at a three-second pace (see **maintenance on Windows, run 39129002719**). Its test-s move by a few seconds, which the figures below do not include.
 
 The hosted dd2e5d6 records therefore predate the lock refresh and the fence fix. The local runs show neither moved the harness. The c551671 counts match the a94701b run: spawn 13,686 vs 13,575, git 9,048 vs 9,048, build 3,261 vs 3,259, fixture 7,766 vs 7,765. The 7574f2f counts are spawn 13,822, git 9,055, build 3,263 and fixture 7,773. The difference from c551671 is mostly the one added test and run-to-run variation in retries and polls.
 
@@ -963,7 +965,43 @@ Seconds per module: local Linux 7574f2f, and CI Linux, macOS and Windows from ru
 
 The earlier runs at a94701b, dd2e5d6 and 049ba74 are recorded under the Checks heading below. This branch's only change to that file is the `Command`/`Child`/`Stdio` import.
 
+## maintenance on Windows, run 39129002719
+
+`maintenance::a_sweep_over_identities_that_declare_nothing_journals_nothing` failed once in `cross proof (windows-latest)`, job 117680287750, on 0cbe9aa. It failed at `tests/e2e/maintenance.rs:2191`, the assertion that the run journaled no `pool-maintenance` record. The same job's `rerun-failed` step passed it 3 of 3 times on the same build.
+
+**What the journal shows.** The driver had started 3 sweeps (`maintenance_sweeps: 3`). The test waits for 2. The one record is the third sweep:
+- It started at 13:27:08.526 and recorded at .665 with `identities: []` and `cut_short: {reason: driver-closing, unreached: [github.com/owner/service]}`.
+- The released node's last event is at .529, and the checkpoint still records the node as `running`.
+
+**Why it happens.** The driver starts a sweep whenever a pass is idle and the pace has elapsed since the last sweep *started* (`Maintenance::consider`). Under the one-second pace, the test has one second less sweep 2's length to do four things: see sweep 2 end, release the node, let the node finish, and let the driver close. On this runner that took the whole second. Sweep 3 began as the node finished, and the closing driver recorded it as cut short. Recording a cut-short pass is the product's contract (`maintenance::tests::a_pass_cut_short_is_recorded_with_what_it_never_reached_and_a_whole_one_is_not_marked`). The test's empty-journal assertion, made after the close, therefore holds only while the release beats the next sweep.
+
+**Not this branch's code.** This branch changes:
+- neither `src/maintenance.rs`, the driver loop, nor the fake doubles;
+- in this test, nothing: its `profile::thread::sleep` replacements are in five other tests in the file.
+
+What the test process gains is the profiling wrappers around `world.until`'s poll and `release`'s write: a span opened and closed, which is microseconds. That cannot move a window of about a second.
+
+**Not shown on a tree without this branch.**
+- Main's Windows and macOS proofs passed this test in each of the 7 job logs read that ran it: runs 39115147571, 39080139044, 39023278916, 39012247843, 39008698390, 38998935272 and 38887444753.
+- On this host it did not fail:
+  - 48 of 48 passed at the one-second pace, 16 concurrent copies at load 10-12, on 997aaa8;
+  - with an injected 0.5-1.2 s delay before `release`, every run passed under both paces, because a sweep here ends long before the node's close. Those delays were reverted.
+
+**The fix (6c4a488).** Under the amendment, a failure not shown without the change is fixed with every assertion kept, so the journey now runs at `CLOSING_PACE`, three seconds. A close then lands inside a sweep only if the release takes about 2.7 s, against the roughly one second this runner took. Every assertion and wait is unchanged, and the test passes on this host in 6.3 s. That the Windows flake is gone rests on the timeline above, because Linux does not reproduce it.
+
+Five other journeys in `tests/e2e/maintenance.rs` assert an empty journal after a `release` under the same pace. None of them is named here, so they are left as a follow-up.
+
 ## Checks
+
+**On 6c4a488** (the merge of main at 54cfa4a, and the maintenance pace):
+- **The merge.** It kept both sides of `tests/ci_workflows.rs`: main's sharded-Windows test and this branch's two profile-record tests. `ci_workflows::every_test_leg_keeps_the_profile_records_from_where_the_harness_writes_them` now renders each leg's artifact name and requires them distinct. Against the merged `ci.yml`, before the rename, it failed as intended: `["test-profile-gate", "test-profile-windows-latest", "test-profile-windows-latest", "test-profile-macos-latest"]`.
+- `cargo test --test ci_workflows`: 11 of 11 passed, on 997aaa8.
+- `node --test .github/tests/`: 43 of 43 passed, on 997aaa8.
+- `just cross-shards`: ok. 3,002 tests across 4 tiers, and the Windows inventory's 2,651, each in exactly one of 2 shards. Taken on 6c4a488.
+- `cargo build --workspace --tests`: clean, on 997aaa8.
+- `just engines-current`: passed on 997aaa8, with oneagentgraph 0.5.14, onevcs 0.52.1 and onevcs-testing 0.19.5. onevcs-testing 0.19.9 is held back by `onevcs = "0.52.0"`, which the check names and passes.
+- The maintenance journey passed on 6c4a488.
+- `cargo fmt --check`, and `cargo clippy --test e2e --test ci_workflows --locked -D warnings`: clean on 6c4a488.
 
 **On c93fa56** (the fence fix, after this document). Hosted run 39118487503 on f2b9566 failed `cross (macos-latest)` on one test. `Mac PR proofs` failed `continuation::a_publication_whose_fence_the_board_refuses_starts_once_a_later_write_lands` with "the fence was written again 166.698583ms after the refusal". It then passed 3 of 3 reruns, and it is the same test as the Windows flake below. The cause is in the product: any driver pass inside the 5 s retry wrote a refused fence again at once. `ClaimWatch::fence` now holds a non-empty fence until its retry is due. The new `continuation::a_pass_inside_a_refused_fences_retry_does_not_write_it_early` wakes the driver inside the retry on purpose. Before the fix it failed for that reason ("written again 124.828284ms after the refusal"); with the fix it passes. Re-run on c93fa56:
 - `cargo nextest run --test e2e -E 'test(/fence/) or test(/publication/)'`: 78 of 78 passed.
