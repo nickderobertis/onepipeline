@@ -17,6 +17,7 @@ use std::io::Write;
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde_json::json;
@@ -2139,8 +2140,9 @@ pub(crate) fn drive_run(paths: &RunPaths, retained: Retained) -> Result<i32> {
         // graph it started beside the driver that started it.
         let mut watch = ObserverWatch::of(&paths, record, goal, output);
         std::thread::scope(|scope| {
+            let letting_go = watch.letting_go();
             scope.spawn(|| keep_the_run_watched(watched, &mut watch, &driving));
-            let settled = engine::drive_holding(&paths, lock);
+            let settled = engine::drive_holding(&paths, lock, &letting_go);
             driving.store(false, Ordering::Release);
             settled
         })?
@@ -2281,10 +2283,20 @@ fn observer_restart_limit() -> u32 {
 /// writer: a restart moves the graph run a later `next` addresses the check-in
 /// clocks by, and a reader that went on addressing the graph that died would
 /// restart a clock nothing is running.
+///
+/// Single writer only **while this driver holds the run**. The watch runs beside
+/// the loop rather than inside it, so a restart can still be under way when the
+/// loop lets go — and the record it would then write is this driver's, put back
+/// over whatever the run's next holder, or an operator readying the run for one,
+/// wrote since. See [`ObserverWatch::letting_go`].
 struct ObserverWatch<'a> {
     paths: &'a RunPaths,
     /// The run's launch record, as this driver holds it.
     record: LaunchRecord,
+    /// Whether this driver still holds the run, behind the one lock both a write
+    /// of the record and the loop letting go take — so a write is either over
+    /// before the loop lets go, or never made.
+    holding: Arc<Mutex<bool>>,
     /// The plan's goal, which is the only thing besides the run id that reaches
     /// the observer's task.
     goal: Option<String>,
@@ -2307,11 +2319,27 @@ impl<'a> ObserverWatch<'a> {
         Self {
             paths,
             record,
+            holding: Arc::new(Mutex::new(true)),
             goal,
             output,
             limit: observer_restart_limit(),
             restarted: 0,
         }
+    }
+
+    /// What the loop calls the moment it starts letting go of the run — see
+    /// [`engine::drive_holding`] — after which this watch writes nothing more.
+    ///
+    /// It waits out a write already under way, so that write lands while the run
+    /// is still this driver's, before anything says the run is let go of.
+    fn letting_go(&self) -> impl Fn() + Send + Sync + 'static {
+        let holding = Arc::clone(&self.holding);
+        move || *holding.lock().unwrap_or_else(PoisonError::into_inner) = false
+    }
+
+    /// Whether the run is still this driver's to write.
+    fn holds(&self) -> bool {
+        *self.holding.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Start another observer in place of the one that has stopped.
@@ -2329,6 +2357,11 @@ impl<'a> ObserverWatch<'a> {
         // has already put on its log — leaving the verdict to the liveness probe
         // every build before this answered with.
         if self.limit == 0 {
+            return None;
+        }
+        // A driver that has let go of the run has nothing to keep watched, and no
+        // claim to record one under.
+        if !self.holds() {
             return None;
         }
         if self.restarted >= self.limit {
@@ -2354,7 +2387,12 @@ impl<'a> ObserverWatch<'a> {
                 .map(ToString::to_string)
                 .unwrap_or_default(),
         );
-        self.write_down();
+        // Let go of while the graph was starting: it watches a run this driver
+        // no longer drives, and nothing names it, so it is ended here.
+        if !self.write_down() {
+            started.cancel();
+            return None;
+        }
         eprintln!(
             "onepipeline: started another observer graph for '{}' ({} of {} restart(s))",
             self.paths.run, self.restarted, self.limit
@@ -2373,7 +2411,7 @@ impl<'a> ObserverWatch<'a> {
             self.paths.run
         );
         self.record.observer_ending = reason;
-        self.write_down();
+        let _ = self.write_down();
         None
     }
 
@@ -2384,13 +2422,24 @@ impl<'a> ObserverWatch<'a> {
     /// is gone, or a view reading a watch that is over as one still going. Both
     /// are worth saying out loud on the driver's own log, and neither is worth
     /// ending a working observer over.
-    fn write_down(&self) {
+    ///
+    /// Nothing at all once the driver has let go of the run: the record is no
+    /// longer this process's to write, and `false` says so. The lock is held
+    /// across the write, which is what holds the loop's letting go until it is
+    /// on disk.
+    #[must_use]
+    fn write_down(&self) -> bool {
+        let holding = self.holding.lock().unwrap_or_else(PoisonError::into_inner);
+        if !*holding {
+            return false;
+        }
         if let Err(error) = ledger::write_json(&self.paths.launch(), &self.record) {
             eprintln!(
                 "onepipeline: could not record what is watching '{}': {error}",
                 self.paths.run
             );
         }
+        true
     }
 }
 
@@ -2626,9 +2675,10 @@ fn attach(
     let mut chains = engine::ChainRecords::default();
 
     let driving = paths.clone();
+    let letting_go = watch.letting_go();
     let engine = std::thread::Builder::new()
         .name(format!("engine-{}", paths.run))
-        .spawn(move || engine::drive_holding(&driving, lock))
+        .spawn(move || engine::drive_holding(&driving, lock, &letting_go))
         .map_err(|e| Error::Invalid(format!("cannot start the engine loop: {e}")))?;
 
     loop {
