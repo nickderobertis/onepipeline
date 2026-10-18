@@ -107,6 +107,21 @@ pub const DEFAULT_PACE_SECONDS: u64 = 600;
 /// cadence rather than on every pass, and a dispatch settling wakes it sooner.
 const RECHECK: Duration = Duration::from_secs(60);
 
+/// The test failpoint a driver's first sweep meets inside its first identity,
+/// before asking the sibling about it, so a journey can hold a sweep in progress.
+const IDENTITY_GATE_ENV: &str = "ONEPIPELINE_TEST_MAINTENANCE_IDENTITY_GATE";
+
+/// The test failpoint a driver meets the first time it raises a sweep's stop, before
+/// it waits for the sweep, so a journey knows the stop is up.
+const STOP_GATE_ENV: &str = "ONEPIPELINE_TEST_MAINTENANCE_STOP_GATE";
+
+/// Meet `variable`'s failpoint the first time `met` is asked, and never again.
+fn meet_once(met: &AtomicBool, variable: &str) {
+    if !met.swap(true, Ordering::SeqCst) {
+        let _ = crate::ordering::meet(variable);
+    }
+}
+
 /// The schedule document a launch names: how often each identity's idle slots
 /// are maintained.
 ///
@@ -668,6 +683,8 @@ fn maintain_pools(config: &MaintenanceConfig, stop: &AtomicBool) -> (PoolsMainta
     };
     let mut identities = Vec::with_capacity(keys.len());
     let unreached = visit(&keys, stop, |identity| {
+        static MET: AtomicBool = AtomicBool::new(false);
+        meet_once(&MET, IDENTITY_GATE_ENV);
         identities.push(maintain(config, identity.clone()));
     });
     (
@@ -853,6 +870,8 @@ impl Sweep {
     /// its retirement pass — the stop reaches nothing and the wait is its exit.
     fn join(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
+        static MET: AtomicBool = AtomicBool::new(false);
+        meet_once(&MET, STOP_GATE_ENV);
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
