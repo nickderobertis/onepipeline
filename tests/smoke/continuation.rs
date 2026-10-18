@@ -45,50 +45,79 @@ const PATIENCE: Duration = Duration::from_secs(120);
 /// How often a wait reads the hosts and the services again.
 const POLL: Duration = Duration::from_secs(3);
 
-// The publication settings every driver here runs under. Each is one the contract and
-// `onevcs` document, set for the drivers the way a host bounds them, so the journey's bound
-// on a lifecycle node's settlement is derived from what the drivers were told.
+// What bounds a lifecycle node's settlement here. Every driver runs on the production
+// publication settings — `onepipeline` below removes any override of them from its
+// environment — so the documented values are the defaults, restated where the crate that
+// owns them keeps them private.
 
-/// `ONEPIPELINE_PUBLICATION_ATTEMPTS`: how many times a lifecycle node whose publication
-/// keeps failing is dispatched.
-const PUBLICATION_ATTEMPTS: u32 = 2;
-/// `ONEPIPELINE_MERGE_PATH_READS`: how many times a publication whose push reached the
-/// remote is published again to read the merge path behind it.
-const MERGE_PATH_READS: u32 = 2;
-/// `ONEPIPELINE_MERGE_PATH_BACKOFF_SECONDS`: the first backoff between those reads, which
-/// doubles to a two-minute ceiling.
-const MERGE_PATH_BACKOFF_SECONDS: u64 = 5;
-/// `ONEVCS_CHECKS_TIMEOUT_SECONDS`: how long one publication watches its change request's
-/// checks.
-const CHECKS_TIMEOUT_SECONDS: u64 = 20;
-/// `ONEVCS_CHECKS_POLL_SECONDS`: how long that watch sleeps between readings, which it can
-/// sleep past its bound once.
-const CHECKS_POLL_SECONDS: u64 = 5;
-/// What one publication's own calls are allowed beyond its watch: the session, the push,
-/// the change request's opening and the reads around them. The contract bounds none of
-/// them, so this is the journey's allowance for the real services, not a bound it derives.
-const PUBLICATION_CALLS: Duration = Duration::from_secs(20);
+/// onevcs's `DEFAULT_DRAFT_GRACE_SECONDS` (`ONEVCS_DRAFT_CHECKS_GRACE_SECONDS`,
+/// `onevcs` 0.52 `src/gh.rs`): "How long a draft waits for any of its required checks to run
+/// before it is lifted". **Documented.** A host that says completely that nothing is required
+/// is green at once — `settle_draft`: "A host that says, completely, that nothing is required
+/// is green at once: no grace window and no warning" — and one that will not say waits this.
+const DRAFT_GRACE: Duration = Duration::from_secs(120);
 
-/// How long a lifecycle node may take from its first turn to its settlement under the
-/// settings above.
+/// onevcs's `DEFAULT_CHECKS_POLL_SECONDS` (`ONEVCS_CHECKS_POLL_SECONDS`, the same file): how
+/// long the watch sleeps between two readings of the host, which it can sleep once past the
+/// grace before it reads the elapsed window. **Documented.**
+const CHECKS_POLL: Duration = Duration::from_secs(30);
+
+/// What one publication's calls to git and GitHub — the session, the push, the change
+/// request's opening and the reads around them — are allowed beyond its watch.
+/// **Discretionary**: neither the contract nor `onevcs` bounds any of those calls, so this is
+/// the journey's allowance for the real services, sized from passing runs, where a stacked
+/// node's change request opens about ten seconds after its parent's.
+const PUBLICATION_CALLS: Duration = Duration::from_secs(30);
+
+/// How long the stacked node may take, from its turn, to settle on **one** publication: the
+/// documented bound of one change-open publication on a repository with no required checks
+/// ([`DRAFT_GRACE`] and one [`CHECKS_POLL`]), plus the discretionary [`PUBLICATION_CALLS`].
 ///
-/// `docs/contract.md`: "Every publication failure is named, and a preserving one is
-/// re-dispatched", up to `ONEPIPELINE_PUBLICATION_ATTEMPTS` dispatches; a push that
-/// reached the remote and whose merge path could not be read is "a bounded re-read of the
-/// merge path", `ONEPIPELINE_MERGE_PATH_READS` publications apart by the doubling backoff;
-/// and each publication watches its checks for `ONEVCS_CHECKS_TIMEOUT_SECONDS`. So every
-/// dispatch the budget allows, each publishing as often as the reads allow — its calls and
-/// one whole watch each time — with the backoff between them.
+/// It is not the engine's bound on the node's settlement. Under the production settings the
+/// contract allows a failing publication `ONEPIPELINE_PUBLICATION_ATTEMPTS` (3) dispatches,
+/// each read up to `ONEPIPELINE_MERGE_PATH_READS` (3) times with a watch of up to
+/// `ONEVCS_CHECKS_TIMEOUT_SECONDS` (3600s) — about nine hours — and no runner waits that out.
+/// So a path that needs a retry is not waited for: [`retried`] fails the wait at once,
+/// naming what the hosts recorded.
 fn settlement_bound() -> Duration {
-    let publication =
-        PUBLICATION_CALLS + Duration::from_secs(CHECKS_TIMEOUT_SECONDS + CHECKS_POLL_SECONDS);
-    let backoffs: Duration = (1..MERGE_PATH_READS)
-        .map(|nth| {
-            Duration::from_secs(MERGE_PATH_BACKOFF_SECONDS << (nth - 1))
-                .min(Duration::from_secs(120))
+    DRAFT_GRACE + CHECKS_POLL + PUBLICATION_CALLS
+}
+
+/// The settings a driver here would otherwise read from whoever runs the journey, removed
+/// so it publishes on the production defaults [`settlement_bound`] is written against.
+const PUBLICATION_SETTINGS: [&str; 6] = [
+    "ONEPIPELINE_PUBLICATION_ATTEMPTS",
+    "ONEPIPELINE_MERGE_PATH_READS",
+    "ONEPIPELINE_MERGE_PATH_BACKOFF_SECONDS",
+    "ONEVCS_CHECKS_TIMEOUT_SECONDS",
+    "ONEVCS_CHECKS_POLL_SECONDS",
+    "ONEVCS_DRAFT_CHECKS_GRACE_SECONDS",
+];
+
+/// How `node`'s publication went past one attempt on `world`, if it did: dispatched again
+/// after a failed publication, or published again to re-read its merge path — either way a
+/// path [`settlement_bound`] does not cover.
+fn retried(world: &World, run: &str, node: &str) -> Option<String> {
+    let dispatches: Vec<Value> = world
+        .events_of(run, "node-dispatched")
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == node)
+        .collect();
+    if dispatches.len() > 1 {
+        return Some(format!(
+            "{node} was dispatched again after its publication failed: {}",
+            dispatches.last().expect("more than one")["payload"]
+        ));
+    }
+    let pushes = world
+        .journal(run)
+        .into_iter()
+        .filter(|event| {
+            event["source"] == "vcs" && event["kind"] == "push" && event["labels"]["node"] == node
         })
-        .sum();
-    (publication * MERGE_PATH_READS + backoffs) * PUBLICATION_ATTEMPTS
+        .count();
+    (pushes > 1)
+        .then(|| format!("{node} was published {pushes} times: its merge path is being read again"))
 }
 
 /// Every task of `project` as the shared store holds it.
@@ -510,24 +539,10 @@ fn onepipeline(world: &World, args: &[&str]) -> Command {
         .current_dir(&world.project)
         .env("GH_TOKEN", gh_token())
         .env("GIT_CONFIG_GLOBAL", git_credentials(world))
-        .env("ONEPIPELINE_CLAIM_INTERVAL_SECONDS", CLAIM_INTERVAL_SECONDS)
-        .env(
-            "ONEPIPELINE_PUBLICATION_ATTEMPTS",
-            PUBLICATION_ATTEMPTS.to_string(),
-        )
-        .env("ONEPIPELINE_MERGE_PATH_READS", MERGE_PATH_READS.to_string())
-        .env(
-            "ONEPIPELINE_MERGE_PATH_BACKOFF_SECONDS",
-            MERGE_PATH_BACKOFF_SECONDS.to_string(),
-        )
-        .env(
-            "ONEVCS_CHECKS_TIMEOUT_SECONDS",
-            CHECKS_TIMEOUT_SECONDS.to_string(),
-        )
-        .env(
-            "ONEVCS_CHECKS_POLL_SECONDS",
-            CHECKS_POLL_SECONDS.to_string(),
-        );
+        .env("ONEPIPELINE_CLAIM_INTERVAL_SECONDS", CLAIM_INTERVAL_SECONDS);
+    for setting in PUBLICATION_SETTINGS {
+        command.env_remove(setting);
+    }
     command
 }
 
@@ -781,6 +796,13 @@ fn a_stored_project_is_carried_on_by_a_cold_host_that_takes_it_over() {
         settlement_bound(),
         || {
             early("it settled the stacked node");
+            if let Some(how) = retried(&first, &run, "b") {
+                panic!(
+                    "the stacked node needed a publication retry, which the journey's bound \
+                     on its settlement does not cover: {how}\n{}",
+                    first_held()
+                );
+            }
             settled_b().is_some()
         },
         first_held,
@@ -1141,7 +1163,7 @@ mod waiting {
 
     use serde_json::json;
 
-    use super::{hosts_held, settlement_bound, waited, Clock, POLL};
+    use super::{hosts_held, retried, settlement_bound, waited, Clock, POLL};
     use crate::harness::World;
 
     /// A clock that moves only when the wait sleeps.
@@ -1257,5 +1279,48 @@ mod waiting {
         }
         let alone = hosts_held(&[("first", Some(&first)), ("second", None)], run);
         assert!(alone.contains("the second host: not made yet"), "{alone}");
+    }
+
+    /// A run's journal holding exactly `events`.
+    fn journal(world: &World, run: &str, events: &[serde_json::Value]) {
+        let dir = world.run_file(run, "");
+        std::fs::create_dir_all(&dir).expect("a run directory");
+        let lines: String = events.iter().map(|event| format!("{event}\n")).collect();
+        std::fs::write(dir.join("events.jsonl"), lines).expect("the journal is written");
+    }
+
+    #[test]
+    fn a_publication_that_needed_a_retry_is_named_rather_than_waited_out() {
+        let world = World::new("wait-retried");
+        let dispatched = |attempt: u32| {
+            json!({"source": "onepipeline", "kind": "node-dispatched", "labels": {"node": "b"},
+                   "payload": {"attempt": attempt, "reason": "push-rejected: refused"}})
+        };
+        let pushed = json!({"source": "vcs", "kind": "push", "labels": {"node": "b"},
+                            "payload": {"accepted": true}});
+        let other = json!({"source": "vcs", "kind": "push", "labels": {"node": "a"},
+                           "payload": {"accepted": true}});
+
+        journal(
+            &world,
+            "once",
+            &[dispatched(1), pushed.clone(), other.clone(), other],
+        );
+        assert_eq!(retried(&world, "once", "b"), None);
+
+        journal(
+            &world,
+            "again",
+            &[dispatched(1), pushed.clone(), dispatched(2)],
+        );
+        let again = retried(&world, "again", "b").expect("a second dispatch");
+        assert!(
+            again.contains("dispatched again") && again.contains("push-rejected: refused"),
+            "{again}"
+        );
+
+        journal(&world, "reread", &[dispatched(1), pushed.clone(), pushed]);
+        let reread = retried(&world, "reread", "b").expect("a second publication");
+        assert!(reread.contains("published 2 times"), "{reread}");
     }
 }

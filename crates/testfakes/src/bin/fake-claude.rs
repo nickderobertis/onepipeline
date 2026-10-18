@@ -319,6 +319,12 @@ fn turn(args: &[String], dir: &std::path::Path) -> ExitCode {
                 Some(_) => format!("{body}\n{}", what_the_task_says(&prompt)),
                 None => body,
             };
+            // `harness.work-anew` numbers every turn it writes, so a node dispatched again
+            // changes the tree its last attempt left rather than writing it over unaltered.
+            let body = match fake::node_script(dir, "harness", "work-anew") {
+                Some(_) => format!("{body}\nturn {}", fake::count(dir, "harness.work-anew")),
+                None => body,
+            };
             if let Err(error) = std::fs::write(&path, format!("{body}\n")) {
                 return fake::refuse(&format!("cannot write {}: {error}", path.display()));
             }
