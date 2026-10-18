@@ -176,14 +176,12 @@ impl WorkspaceHold {
 /// where the numbers already are.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Reading {
-    /// The hold the reading stands for.
     pub hold: WorkspaceHold,
-    /// The slots nobody is in that the reading does not count as idle, by number.
+    /// Every slot nobody is in that `hold.idle` does not count, which only the text says.
     pub ineligible: Vec<IneligibleSlot>,
 }
 
 impl Reading {
-    /// The reading one capacity read stands for.
     pub(crate) fn of(capacity: &WorkspaceCapacity) -> Self {
         Self {
             hold: WorkspaceHold::of(capacity),
@@ -384,7 +382,8 @@ impl Workspaces {
         Admission::Admitted
     }
 
-    /// Hold `node` this pass on `reading`.
+    /// Hold `node` this pass on `reading`, its slots kept apart from the hold so the
+    /// `workspace` entry the engine diffs stays the reading's numbers alone.
     fn hold(&mut self, node: &str, reading: Reading) {
         self.held.insert(node.to_owned(), reading.hold);
         if reading.ineligible.is_empty() {
@@ -466,16 +465,11 @@ impl Workspaces {
     /// the identity.
     pub(crate) fn surface_waits(&mut self, paths: &RunPaths, journal: &mut Journal) -> Result<()> {
         for (node, hold) in &self.held {
-            let unusable = self.unusable.get(node).and_then(|slots| unusable(slots));
-            let content = format!(
-                "{}\u{1f}{}\u{1f}{}",
-                hold.identity,
-                hold.describe(),
-                unusable.as_deref().unwrap_or_default()
-            );
+            let content = format!("{}\u{1f}{}", hold.identity, hold.describe());
             if !self.surfaced.due(paths, node, &content) {
                 continue;
             }
+            let unusable = self.unusable.get(node).and_then(|slots| unusable(slots));
             let surface = wait_surface(node, hold, unusable.as_deref());
             let queued = crate::engine::raised(paths, journal, surface)?;
             self.surfaced.queued(node, content, &queued);

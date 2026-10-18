@@ -9244,6 +9244,130 @@ fn opens_the_last_slot_on(world: &World, record: &std::path::Path, nth: u32) -> 
     hook.to_string_lossy().into_owned()
 }
 
+/// A node whose open the identity refused keeps naming the idle slot it cannot take
+/// while it is held on the reading taken after that refusal.
+///
+/// The read admits the node — the pool has room for a second slot — and the
+/// dispatch-env hook takes that room before the driver's own open, as
+/// [`a_session_open_refused_as_exhausted_returns_the_node_to_queued_and_it_dispatches_later`]
+/// does. The one slot left idle is bound to a second checkout of the identity, so
+/// the reading after the refusal counts nothing idle for this node, and the hold it
+/// keeps until the paced re-read says which slot that is and why.
+#[cfg(unix)]
+#[test]
+fn a_refused_open_holds_the_node_on_a_reading_that_names_the_slot_it_cannot_take() {
+    let world = World::new("lifecycle-pool-refused-ineligible");
+    world.write_graphs();
+    let graph = world.graphs().join("node-scope.yaml");
+    let world = world
+        .with_env("ONEPIPELINE_NODE_GRAPH", &graph.to_string_lossy())
+        .with_env("ONEPIPELINE_WORKSPACE_POLL_SECONDS", "1");
+    let repo = world.repository("local-direct", &[]);
+    std::fs::write(
+        world.onevcs_home().join("workspaces.yml"),
+        "version: 1\nrules:\n  - match: {host: github.com, owner: owner, name: service}\n    \
+         pool: 2\n    overflow: 0\n",
+    )
+    .expect("the workspaces file is written");
+    let primary = world.root.join("primary");
+    crate::harness::git(
+        &world,
+        &world.root,
+        &["clone", &repo.origin.to_string_lossy(), "primary"],
+    );
+    world.register(&primary, Some("https://github.com/owner/service.git"));
+    // Slot 1, idle and bound to `primary` by the session placed on it from there.
+    world.on_onevcs(|| {
+        let vcs = onevcs::Providers::real().vcs;
+        let session = vcs
+            .open_session(onevcs::SessionRequest {
+                repo: SERVICE_IDENTITY.to_owned(),
+                branch: None,
+                branch_name: None,
+                branch_prefix: None,
+                base: None,
+                execution_checkout: Some("primary".to_owned()),
+                pool: None,
+                overflow: None,
+                labels: Default::default(),
+                refuse_conflicts: false,
+                caller_merges_base: false,
+            })
+            .expect("a session opens from the second checkout");
+        vcs.close_session(&session.token)
+            .expect("the session closes and its slot is idle");
+    });
+    let record = world.root.join("pool-hook");
+    std::fs::create_dir_all(&record).expect("the hook's record directory");
+    let hook = opens_the_last_slot_on(&world, &record, 1);
+    world.script("service.work", "the worker wrote this\n");
+    let path = world.plan(
+        "refusedineligible",
+        &plan_of("refusedineligible", vec![lifecycle("service", &[])]),
+    );
+    world
+        .run(&["start", &path, "--detach", "--dispatch-env-hook", &hook])
+        .exited(0);
+    let run = "refusedineligible".to_string();
+
+    world.until("the refused node's wait to be surfaced", |world| {
+        !world.events_of(&run, "node-requeued").is_empty()
+            && world
+                .events_of(&run, "planner-surface-queued")
+                .iter()
+                .any(|event| event["payload"]["kind"] == "workspace-wait")
+    });
+    assert_eq!(
+        world.events_of(&run, "node-requeued")[0]["payload"]["reason"],
+        "workspace-exhausted"
+    );
+    let said = world
+        .events_of(&run, "planner-surface-queued")
+        .into_iter()
+        .find(|event| event["payload"]["kind"] == "workspace-wait")
+        .and_then(|event| event["payload"]["message"].as_str().map(str::to_owned))
+        .expect("the wait says something");
+    let primary_named = std::fs::canonicalize(&primary).expect("the second checkout exists");
+    for names in [
+        "pool 2 (2 slot(s): 0 idle, 0 maintaining), overflow 0 with 0 in use".to_owned(),
+        format!(
+            "the idle slot(s) it cannot take are slot 1: bound to another execution checkout, {}",
+            primary_named.display()
+        ),
+    ] {
+        assert!(
+            said.contains(&names),
+            "the surface does not say {names:?}: {said}"
+        );
+    }
+
+    // The hook's session closes, its slot is idle for this node, and it goes.
+    let opened: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(record.join("opened")).expect("the hook opened a session"),
+    )
+    .expect("the sibling printed the session");
+    let token = opened["token"].as_str().expect("a token").to_owned();
+    world
+        .run_on(
+            world.cmd_on(
+                &crate::harness::onevcs_binary(),
+                &["session", "close", &token],
+            ),
+            "onevcs session close",
+        )
+        .exited(0);
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+    let result = world.run_json(&run, "result.json");
+    assert_eq!(
+        result["state"],
+        "complete",
+        "{result}\n{}",
+        why(&world, &run)
+    );
+}
+
 /// A session open the identity refuses as exhausted returns the node to queued.
 ///
 /// The read admits the node — nothing holds the slot when it looks — and the
