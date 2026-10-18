@@ -31,6 +31,7 @@ Commits after dd2e5d6:
 - **a07bbdd** merges main at 1e18274: #1016 drives `waited_on` from a `Clock` (with `RealClock` and `ManualClock`) and sizes a two-source run's wait to its longest chain; #986 publishes the GitHub loopback endpoint's URL atomically. The wait still runs inside `profile::polled`, and both clocks pause through `profile::thread::sleep`, so polling waits stay attributed. `linear_writeback`'s new `StartedEndpoint` holds the profiled `Child` that `GitHubEndpoint::start` spawns. These change the timing of the `multi_source` and `linear_writeback` journeys they touch; the figures below predate them.
 - **9809e12** links oneharness-core 0.28.3 (from 0.28.2), the newest its requirement permits, which `just engines-current` asked for after the merge. Only that entry's version and checksum move.
 - **875a01c** merges main at 589d81b (#935). `src/continuation.rs` takes main's fence retry, which holds every refused fence to its retry, an empty one included; this branch's c93fa56 had exempted clearing. Its `continuation::a_pass_inside_a_refused_fences_retry_does_not_write_it_early` still holds under main's form. `tests/e2e/project.json` keeps both main's review-round quota record and this branch's `target/test-profile/e2e`. #935's new `review_reply` and `review_round` journeys spawn and sleep through `profile::process` and `profile::thread` like the rest of the suite. Main now links oneagentgraph 0.5.14, onevcs 0.52.1 and onevcs-testing 0.19.5 itself, so `Cargo.lock` differs from main only in oneharness-core.
+- **ff19d5c** merges main at 645ca97 (#1001, #1021). `tests/e2e/harness.rs`'s `end_process` takes main's `process_ended` wait in place of `kill -0`, inside this branch's profiled spawn and sleep.
 - **6c4a488** runs one maintenance journey at a three-second pace (see **maintenance on Windows, run 39129002719**). Its test-s move by a few seconds, which the figures below do not include.
 
 The hosted dd2e5d6 records therefore predate the lock refresh and the fence fix. The local runs show neither moved the harness. The c551671 counts match the a94701b run: spawn 13,686 vs 13,575, git 9,048 vs 9,048, build 3,261 vs 3,259, fixture 7,766 vs 7,765. The 7574f2f counts are spawn 13,822, git 9,055, build 3,263 and fixture 7,773. The difference from c551671 is mostly the one added test and run-to-run variation in retries and polls.
@@ -1282,12 +1283,17 @@ Five other journeys in `tests/e2e/maintenance.rs` assert an empty journal after 
 
 ## Checks
 
+**On ff19d5c** (the merge of main at 645ca97, whose conflict was `tests/e2e/harness.rs`):
+- `cargo nextest run --locked --no-fail-fast` over `build_config`, the e2e `driver::`, `harness::` and `profiling::` modules, and the 18 e2e tests elsewhere that reach `end_process`: 174 of 175 passed, at load 31-37.
+- **The one failure is a load flake that main shows too.** `harness::a_worlds_teardown_names_a_killed_descendant_it_could_not_wait_out` failed at `tests/e2e/harness.rs:4436`: "pid … never finished its exit". In the failing runs the teardown, given 1 s of patience, never signalled the doubles: they were still in state `S` minutes later. Alone, it then failed 3 more times and passed once. Run alternately, 4 times with main's `crates/testfakes/src/containment.rs` and 4 with this branch's (which routes `ps` and its sleeps through the profiler), it failed once with each, at load 57 and 29. Each other run passed. The 1 s patience racing `ps` listings on a loaded host fails the same way without this change. The run of `harness::` on a07bbdd, at lower load, passed it.
+- `cargo clippy --locked --all-targets -- -D warnings` and `cargo fmt --check`: clean. `just engines-current`: passed.
+- Not re-run since these merges: the full e2e tier, and the hosted CI on this commit.
+
 **On 875a01c** (the merge of main at 589d81b, whose conflicts were `src/continuation.rs` and `tests/e2e/project.json`):
 - `cargo nextest run --locked --no-fail-fast` over `ci_workflows`, `budgets`, `nextest_runs`, the e2e `continuation`, `review_reply`, `review_round` and `profiling` modules, and the lib's `continuation` tests: 160 of 160 passed.
 - The smoke binary's `continuation::` tests: the 4 offline ones passed. `a_stored_project_is_carried_on_by_a_cold_host_that_takes_it_over` refused, because `ONEPIPELINE_SMOKE_REPO` is unset here; it is the credentialled tier (`just smoke-real`) and refuses by design.
 - `cargo clippy --locked --all-targets -- -D warnings` and `cargo fmt --check`: clean.
 - `just engines-current`: passed.
-- Not re-run since this merge: the full e2e tier, and the hosted CI on this commit.
 
 **On 9809e12** (the merge of main at 1e18274, whose conflict was `tests/e2e/harness.rs`, and the oneharness-core refresh):
 - On a07bbdd, the merge: `cargo nextest run --test e2e -E 'test(/harness::|multi_source::|profiling::|linear_writeback::/)'`, 76 of 76 passed. That includes #1016's `harness::a_runs_settling_patience_is_one_step_per_node_on_its_longest_chain` and `multi_source::a_settlement_wait_outlasts_one_step_while_each_dispatch_on_a_cross_source_chain_is_held`, and #986's `linear_writeback::the_github_endpoint_url_is_readable_only_once_completely_written`.
