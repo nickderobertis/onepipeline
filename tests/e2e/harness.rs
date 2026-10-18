@@ -5313,6 +5313,39 @@ pub fn end_driver(world: &World, run: &str) -> u32 {
     pid
 }
 
+/// End the process holding a run's ownership lock, and wait until it is gone.
+///
+/// For the driver a detached adoption retained, between its taking the lock and
+/// its claiming the run in the launch record: the one moment the lock names a
+/// driver the record does not yet. The same proof [`end_driver`] asks of its
+/// target, read off the lock — the pid it names, started at the very moment
+/// the lock was stamped with — so a pid the host has handed on is refused rather
+/// than signalled.
+pub fn end_lock_holder(world: &World, run: &str) -> u32 {
+    let lock = world.run_json(run, "owner.lock");
+    let pid = lock["pid"]
+        .as_u64()
+        .and_then(|pid| u32::try_from(pid).ok())
+        .unwrap_or_else(|| panic!("the ownership lock of {run} names no holder"));
+    let started = lock["started"]
+        .as_str()
+        .filter(|started| !started.is_empty())
+        .unwrap_or_else(|| panic!("the ownership lock of {run} stamps no start for pid {pid}"));
+    assert_eq!(
+        start_stamp(pid).as_deref(),
+        Some(started),
+        "pid {pid} is not the process holding {run}'s lock; refusing to end it"
+    );
+    end_driver_process(pid);
+    pid
+}
+
+/// Whether the process a record stamped `started` for is still running at `pid`
+/// — the same proof [`end_driver`] asks, without the signal.
+pub fn still_running_as(pid: u32, started: &str) -> bool {
+    !started.is_empty() && start_stamp(pid).as_deref() == Some(started)
+}
+
 /// When the process at `pid` started, spelled the way the engine stamps a launch
 /// record, or nothing for no such process.
 ///

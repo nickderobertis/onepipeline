@@ -1765,14 +1765,14 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
         }
         // The firing driver's own stream: it is the process that released the run,
         // and the only one this record can prove let go. See `RunState::let_go_by`.
-        Some(journal::PipelineKind::ScratchRetained) => {
-            state.let_go_by = DriverClaim::of_stream(&event.stream);
-        }
-        Some(journal::PipelineKind::ScratchRemoved)
-            if payload.get("trigger").and_then(Value::as_str) == Some("success") =>
-        {
-            state.let_go_by = DriverClaim::of_stream(&event.stream);
-        }
+        //
+        // A driver's scratch record is not that proof, and is deliberately not
+        // read as it: the driver writes it inside its final handover *before* it
+        // releases the run, and goes on writing after it — the release itself, and
+        // a retained driver's observer watch until it is joined. Read as a let-go,
+        // the run reads undriven over a live claim, and whatever is arranged on it
+        // then — an adoption, a repaired record — is undone by the writes that
+        // follow.
         Some(journal::PipelineKind::RunHookFired) => {
             state.let_go_by = DriverClaim::of_stream(&event.stream);
         }

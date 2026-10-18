@@ -12,7 +12,10 @@
 use std::path::{Path, PathBuf};
 
 use crate::dispatch::OBSERVER_RESTARTS_ENV;
-use crate::harness::{agent, end_driver, human, plan_of, rows, World, NOTHING_DRIVING, REFUSED};
+use crate::harness::{
+    agent, end_driver, end_lock_holder, human, plan_of, rows, still_running_as, World,
+    NOTHING_DRIVING, REFUSED,
+};
 // The journeys that end a process, and those that assert against a process table,
 // are `#[cfg(unix)]`, so what only they reach for is imported on the same terms.
 // Both names have to be: `end_process` is `#[cfg(unix)]` in `harness.rs`, so an
@@ -1408,6 +1411,164 @@ fn a_detached_adoption_reports_an_observer_that_refuses_to_relaunch() {
     assert!(world.run_file(&run, "launch.pre-adopt-1.json").exists());
     assert_eq!(world.events_of(&run, "driver-adopted").len(), 1);
 } // llmlint: ignore-end[tests_mirror_real_usage]
+
+/// An observed run paused on a person's approval, read once its first driver is
+/// gone: the run each ordering below adopts, and the pid of the driver it was
+/// taken from.
+///
+/// `PAUSED` is the word for a paused run nothing drives, so it is read only once
+/// that driver has stopped writing to the run. A driver's scratch record is
+/// written before it lets go; read as its letting go, the run read `PAUSED` while
+/// the driver still held the lock and its observer watch was still writing the
+/// launch record — and whatever a journey arranged on the run in that window was
+/// written over before the adoption ever read it.
+fn paused_and_observed(world: &World, name: &str) -> (String, Value) {
+    let run = start_detached_observed(world, name, vec![human("approve", &[])]);
+    world.until("the driver to exit", |world| {
+        world.run(&["status", &run]).stdout.contains("PAUSED")
+    });
+    let displaced = world.run_json(&run, "launch.json")["pid"].clone();
+    (run, displaced)
+}
+
+/// A run reads `PAUSED` — paused, and nothing driving it — only once the driver
+/// that paused it has stopped running, and with it stopped writing.
+///
+/// Every observer graph this run starts answers late, so its driver's watch is
+/// mid-restart when the run pauses: the driver journals its scratch record and
+/// its `driver-exited`, lets go of the lock, and then goes on running until that
+/// restart returns and it writes the launch record once more. A run read
+/// `PAUSED` in that window is a run an operator is told to adopt or repair while
+/// its driver is still writing over it — the window both detached-adoption
+/// journeys above lost their arrangement in on a slow host.
+#[test]
+fn a_run_reads_paused_only_once_the_driver_that_paused_it_has_stopped() {
+    let world = World::new("driver-paused-once-gone");
+    world.script("run.start-after", "3000");
+    let run = start_detached_observed(&world, "paused-once-gone", vec![human("approve", &[])]);
+    let launch = world.run_json(&run, "launch.json");
+    let pid = launch["pid"]
+        .as_u64()
+        .and_then(|pid| u32::try_from(pid).ok())
+        .expect("the launch record names its driver");
+    let started = launch["started"]
+        .as_str()
+        .expect("the launch record stamps its driver")
+        .to_owned();
+
+    world.until("the driver to journal its ending", |world| {
+        !world.events_of(&run, "driver-exited").is_empty()
+    });
+    let mut read_while_running = false;
+    world.until("the run to read PAUSED", |world| {
+        let paused = world.run(&["status", &run]).stdout.contains("PAUSED");
+        // Asked after the reading, so a driver running now was running while
+        // the run was read.
+        let running = still_running_as(pid, &started);
+        assert!(
+            !(paused && running),
+            "the run read PAUSED while its driver, pid {pid}, was still running:\n{}",
+            world.dump()
+        );
+        read_while_running |= running;
+        paused
+    });
+    assert!(
+        read_while_running,
+        "the driver had stopped before the run was first read, so nothing here was proved"
+    );
+}
+
+/// The run a refused or dead adoption leaves: the record still names the driver
+/// it was to be taken from, counts no adoption, and the launcher printed nothing.
+fn left_as_it_was(world: &World, run: &str, adopted: &crate::harness::Run, displaced: &Value) {
+    assert!(
+        adopted.stdout.trim().is_empty(),
+        "a refused adoption printed a launch record anyway: {}",
+        adopted.stdout
+    );
+    let record = world.run_json(run, "launch.json");
+    assert_eq!(
+        &record["pid"], displaced,
+        "the record names a driver that never ran"
+    );
+    assert_eq!(record["adoptions"], json!(0));
+}
+
+/// `adopt --detach` answers what its retained driver did, whenever it did it.
+///
+/// The launcher decides its exit on two readings — the launch record naming the
+/// retained driver, and the retained driver having exited — so each outcome is
+/// driven both before the launcher's first reading and after it: refused with
+/// the driver's own words, whether the observer graph it starts refuses at once
+/// or only after a wait no launcher would sit out unprompted.
+#[test]
+fn a_detached_adoption_reports_its_driver_refusing_before_or_after_it_first_looks() {
+    for (name, after) in [("refused-at-once", "0"), ("refused-late", "1500")] {
+        let world = World::new(&format!("driver-adopt-{name}"));
+        let (run, displaced) = paused_and_observed(&world, name);
+        world.script("run.refuse-after", after);
+
+        let adopted = world.run(&["adopt", &run, "--detach"]);
+        adopted.exited(REFUSED);
+        adopted.err_has("did not claim it");
+        adopted.err_has("a member that does not exist");
+        left_as_it_was(&world, &run, &adopted, &displaced);
+    }
+}
+
+/// A retained driver that dies after the launcher's first reading — holding the
+/// run's lock, with its observer graph not yet answered and the launch record not
+/// yet its own — is a refusal, not a pid for a process that is gone.
+///
+/// The die-at-once ordering is
+/// `a_detached_adoption_whose_driver_dies_is_refused_with_what_that_driver_said`.
+#[test]
+fn a_detached_adoption_reports_its_driver_dying_after_it_first_looks() {
+    let world = World::new("driver-adopt-dies-late");
+    let (run, displaced) = paused_and_observed(&world, "dies-late");
+    world.script("run.start-after", "5000");
+
+    let adopted = std::thread::scope(|scope| {
+        let adopting = scope.spawn(|| world.run(&["adopt", &run, "--detach"]));
+        world.until("the retained driver to take the run's lock", |world| {
+            world.run_file(&run, "owner.lock").is_file()
+        });
+        end_lock_holder(&world, &run);
+        adopting.join().expect("the adoption returns")
+    });
+    adopted.exited(REFUSED);
+    adopted.err_has("did not claim it");
+    adopted.err_has("driver.log");
+    left_as_it_was(&world, &run, &adopted, &displaced);
+}
+
+/// A retained driver that claims the run is announced, whether it claims before
+/// the launcher's first reading or only after its observer graph has kept it
+/// waiting past it — and this driver lets go of the run the moment it has claimed
+/// it, because the run is still paused on its approval, so the launcher may find
+/// it claimed and already gone. That is still a driver that took the run.
+#[test]
+fn a_detached_adoption_announces_its_driver_taking_the_run_before_or_after_it_first_looks() {
+    for (name, after) in [("taken-at-once", None), ("taken-late", Some("1500"))] {
+        let world = World::new(&format!("driver-adopt-{name}"));
+        let (run, displaced) = paused_and_observed(&world, name);
+        if let Some(after) = after {
+            world.script("run.start-after", after);
+        }
+
+        let adopted = world.run(&["adopt", &run, "--detach"]);
+        adopted.exited(0);
+        let announced: Value =
+            serde_json::from_str(adopted.stdout.trim()).unwrap_or_else(|error| {
+                panic!("{name}: no launch record: {error}: {}", adopted.stdout)
+            });
+        assert_ne!(announced["pid"], displaced, "{name}");
+        let record = world.run_json(&run, "launch.json");
+        assert_eq!(record["pid"], announced["pid"], "{name}");
+        assert_eq!(record["adoptions"], json!(1), "{name}");
+    }
+}
 
 #[test]
 fn a_detached_adoption_refuses_when_the_prior_launch_record_cannot_be_preserved() {

@@ -130,7 +130,13 @@ use crate::telemetry::{self, RunTelemetry};
 /// to do: a version-9 document carries no answer to where a node settled
 /// `preserved` kept its work rather than a run that kept none — so it is refolded
 /// once rather than served as a run whose kept branches nobody can find.
-pub const SUMMARY_SCHEMA_VERSION: u32 = 10;
+///
+/// **11** since a driver's scratch record no longer reads as its letting go of
+/// the run (`RunState::let_go_by`): the driver writes that record before it
+/// releases the run, and a version-10 document written over one names a live
+/// driver as having let go — so it is refolded once rather than served as a run
+/// nothing is driving.
+pub const SUMMARY_SCHEMA_VERSION: u32 = 11;
 
 /// Read the version, refusing a document this build cannot honestly read.
 fn this_version<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<u32, D::Error> {
@@ -1836,7 +1842,7 @@ mod tests {
     /// Read rather than restated: this is the wire a consumer parses, and the
     /// only thing that stops a field being renamed, an absence becoming a zero,
     /// or the version moving without anyone deciding to move it.
-    const GOLDEN: &str = include_str!("../tests/golden/run-summary-v10.json");
+    const GOLDEN: &str = include_str!("../tests/golden/run-summary-v11.json");
 
     /// The documents earlier builds wrote, kept exactly as those builds wrote them.
     ///
@@ -1852,9 +1858,10 @@ mod tests {
     /// carries no answer to whether its run was driven under the closure rule —
     /// and a real schema 8 document, which carries no answer to which human
     /// actions wait — and a real schema 9 document, which carries no answer to
-    /// where a kept branch is. The reader below has to refuse all nine rather
-    /// than read any as one of its own.
-    const GOLDEN_EARLIER: [(u32, &str); 9] = [
+    /// where a kept branch is — and a real schema 10 document, whose `let_go_by`
+    /// may name a driver that had not yet released its run. The reader below has
+    /// to refuse all ten rather than read any as one of its own.
+    const GOLDEN_EARLIER: [(u32, &str); 10] = [
         (1, include_str!("../tests/golden/run-summary-v1.json")),
         (2, include_str!("../tests/golden/run-summary-v2.json")),
         (3, include_str!("../tests/golden/run-summary-v3.json")),
@@ -1864,6 +1871,7 @@ mod tests {
         (7, include_str!("../tests/golden/run-summary-v7.json")),
         (8, include_str!("../tests/golden/run-summary-v8.json")),
         (9, include_str!("../tests/golden/run-summary-v9.json")),
+        (10, include_str!("../tests/golden/run-summary-v10.json")),
     ];
 
     /// The document the golden pins, built through the types.
@@ -1956,13 +1964,13 @@ mod tests {
     }
 
     #[test]
-    fn a_schema_10_document_is_the_shape_the_golden_pins() {
+    fn a_schema_11_document_is_the_shape_the_golden_pins() {
         let rendered = serde_json::to_string_pretty(&golden()).expect("it serialises");
         assert_eq!(
             rendered.trim(),
             GOLDEN.trim(),
             "the summary document changed shape. If that was deliberate, bump \
-             SUMMARY_SCHEMA_VERSION and update tests/golden/run-summary-v10.json together"
+             SUMMARY_SCHEMA_VERSION and update tests/golden/run-summary-v11.json together"
         );
     }
 
@@ -1988,7 +1996,7 @@ mod tests {
     }
 
     #[test]
-    fn a_schema_10_document_round_trips_and_a_version_this_build_does_not_read_is_refused() {
+    fn a_schema_11_document_round_trips_and_a_version_this_build_does_not_read_is_refused() {
         let read: RunSummary =
             serde_json::from_str(GOLDEN).expect("the golden reads back into the types");
         assert_eq!(read, golden());

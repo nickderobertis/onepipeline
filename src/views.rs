@@ -7754,7 +7754,7 @@ mod tests {
     fn a_row_counting_a_status_word_this_build_cannot_read_is_judged_by_its_driver_alone() {
         let root = scratch("unknown-status-word");
         let mut summary: RunSummary =
-            serde_json::from_str(include_str!("../tests/golden/run-summary-v10.json"))
+            serde_json::from_str(include_str!("../tests/golden/run-summary-v11.json"))
                 .expect("the summary golden reads");
         // Naming a driver this host proves gone: nothing drives the run, so what
         // its graph holds is what decides its word.
