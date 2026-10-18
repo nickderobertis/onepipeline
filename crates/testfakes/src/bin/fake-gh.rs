@@ -394,6 +394,14 @@ fn protection(args: &[String], dir: &Path, path: &str) -> ExitCode {
 /// `403` for a primary rate limit — no requests remaining, and the epoch it resets at,
 /// which the file holds — written as `gh api --include` writes any response, status line
 /// and headers on stdout ahead of the body, with `gh`'s one line on stderr and exit 1.
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the response is GitHub's, which
+// declares it nowhere this repository can read, and `onevcs::GitHub::visibility`'s parser of
+// it is private. Its gate is the real linked `onevcs` reading this answer: every journey that
+// publishes reads the `200` as the visibility it names, and
+// `tests/e2e/publication_boundary.rs`'s
+// `a_publication_whose_host_rate_limits_the_visibility_read_settles_on_an_unavailable_check`
+// asserts the `403`'s status, limit, resource, remaining and reset as onevcs read them, so a
+// shape that drifts from what onevcs parses fails a journey rather than a double nobody checks.
 fn repository(args: &[String], dir: &Path, path: &str) -> ExitCode {
     if args.len() != 3 || args[2] != "--include" {
         return fake::refuse(&format!(
