@@ -53,6 +53,7 @@ use serde_json::{Map, Value};
 use crate::note::{Addressee, Criterion, NoteText};
 use crate::plan::Node;
 
+pub mod deliveries;
 pub mod layout;
 
 use layout::{
