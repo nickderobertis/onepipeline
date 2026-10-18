@@ -2818,6 +2818,99 @@ fn status_reads_a_held_delivery_as_delivering_and_what_waits_behind_it_as_held()
     release(&world.fakes, "turn.settle");
 }
 
+/// Of one envelope delivering to two receivers, `status` names every receiver
+/// still delivering and drops each as it answers, while `status --json` names
+/// one: the first the live driver lists — `build`, ahead of `lint` — and then
+/// the one left once `build` has answered. Once both have, nothing is named.
+#[test]
+fn status_names_each_receiver_still_delivering_and_drops_each_as_it_answers() {
+    let world = World::new("note-status-receivers");
+    let run = "statusreceivers";
+    held_apart(&world, run, vec![agent("build", &[]), agent("lint", &[])]);
+    let both = submitted(
+        &world,
+        run,
+        &json!({"version": 2, "commands": [
+            note_op("build", "worker", BUILD_NOTE, None),
+            note_op("lint", "worker", LINT_NOTE, None),
+        ]})
+        .to_string(),
+    );
+    world.until("both notes to wait in their inboxes", |world| {
+        awaiting_an_answer(world) == 2
+    });
+    let id = queued_id_of(&world, run, BUILD_NOTE);
+    let line = |status: &str| {
+        status
+            .lines()
+            .find(|line| line.trim_start().starts_with(&format!("envelope {id}:")))
+            .map(str::to_owned)
+    };
+    let delivering_to = |node: &str| format!("delivering a live note to {node} since ");
+    world.until("status to name both receivers delivering", |world| {
+        line(&world.run(&["status", run]).stdout).is_some_and(|line| {
+            line.contains(&delivering_to("build")) && line.contains(&delivering_to("lint"))
+        })
+    });
+    let delivery_of = |world: &World| {
+        let reading = world.run(&["status", run, "--json"]);
+        reading.exited(0);
+        let reading = reading.json();
+        let unanswered = reading["unanswered"]
+            .as_array()
+            .unwrap_or_else(|| panic!("the reading names no claimed envelope: {reading}"))
+            .clone();
+        let [envelope] = &unanswered[..] else {
+            panic!("the reading does not name the one envelope: {reading}");
+        };
+        assert_eq!(envelope["envelope"], json!(id.to_string()), "{reading}");
+        envelope["delivery"].clone()
+    };
+    let delivery = delivery_of(&world);
+    assert_eq!(
+        [&delivery["state"], &delivery["node"]],
+        [&json!("delivering"), &json!("build")],
+        "{delivery}"
+    );
+
+    release_turn_of(&world, "build");
+    world.until("build's note to be recorded", |world| {
+        noted_at(&world.journal(run), "build", BUILD_NOTE).is_some()
+    });
+    world.until("status to drop build and keep lint", |world| {
+        line(&world.run(&["status", run]).stdout).is_some_and(|line| {
+            !line.contains(&delivering_to("build")) && line.contains(&delivering_to("lint"))
+        })
+    });
+    let delivery = delivery_of(&world);
+    assert_eq!(
+        [&delivery["state"], &delivery["node"]],
+        [&json!("delivering"), &json!("lint")],
+        "{delivery}"
+    );
+    let status = world.run(&["status", run]);
+    assert!(
+        !status.stdout.to_lowercase().contains("abandon"),
+        "status called a delivery in progress abandoned:\n{}",
+        status.stdout
+    );
+
+    release_turn_of(&world, "lint");
+    assert!(
+        answered(both).contains("\"state\":\"applied\""),
+        "the envelope of both notes was not applied"
+    );
+    let status = world.run(&["status", run]);
+    assert!(
+        line(&status.stdout).is_none(),
+        "status still names the answered envelope:\n{}",
+        status.stdout
+    );
+    world.until("the run to settle", |world| {
+        world.events_of(run, "node-settled").len() == 2
+    });
+}
+
 /// A later edit to a node that a still-held envelope names waits behind that
 /// envelope — neither committed ahead of it nor refused — though no note waits
 /// on the node itself, and is applied after it once the note it waits behind is
