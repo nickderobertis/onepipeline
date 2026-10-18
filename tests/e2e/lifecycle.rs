@@ -2443,16 +2443,16 @@ fn an_unusable_read_budget_falls_back_rather_than_disabling_the_recovery() {
 /// The bound is not the only thing that ends these reads. A cancelled run must
 /// not be held open polling somebody else's API — the teardown is on its way to
 /// reap this dispatch — and since `onevcs` 0.38.0 the cancellation reaches the
-/// publication itself: the push it was making runs to completion, and the host
-/// is never asked about it, so there is no unread path to re-read and the node
-/// settles `cancelled` with the work on the origin.
+/// publication itself: a push whose update origin already took is kept, and the
+/// host is never asked about it, so there is no unread path to re-read and the
+/// node settles `cancelled` with the work on the origin.
 ///
-/// The window is held open rather than raced for, the way
-/// `a_cancel_that_lands_before_the_next_attempt_settles_on_the_publication_failure`
-/// holds its own: the repository's `pre-push` hook blocks until this test releases
-/// it, so the cancel lands while the push is running and everything after the
-/// release — the push reaching the origin — happens with the cancellation
-/// already set.
+/// The window is held open rather than raced for: origin's own `post-receive` hook
+/// blocks until this test releases it, so the update is already on origin while the
+/// push is still running and the cancel lands there. Since `onevcs` 0.56 a cancel
+/// stops the push it reaches and keeps only an update origin took first, which this
+/// one is — held at the repository's `pre-push` instead, the cancel would prevent
+/// the push rather than meet one that landed.
 #[test]
 fn a_cancelled_run_reads_no_merge_path_once_its_push_has_landed() {
     let world = World::new("lifecycle-rereadcancelled")
@@ -2461,7 +2461,8 @@ fn a_cancelled_run_reads_no_merge_path_once_its_push_has_landed() {
         .with_env("ONEPIPELINE_MERGE_PATH_BACKOFF_SECONDS", "60");
     let go = world.fakes.join("push.go");
     let held = held_merge_path(&world, &go);
-    let repo = world.repository("change-auto", &held.argv());
+    let repo = world.repository("change-auto", &[]);
+    crate::harness::hold_landings_at(&repo.origin, &held);
     // The service's visibility is declared, so the publication's write boundary
     // takes the rule's word and asks the host nothing: the one read left to
     // count is the closeout's.
@@ -2489,9 +2490,9 @@ fn a_cancelled_run_reads_no_merge_path_once_its_push_has_landed() {
     world.run(&["start", &path, "--detach"]).exited(0);
     let run = "rereadcancelled".to_string();
 
-    // The publication has committed and is held at the merge path, which is
-    // before the push and therefore before any read of the host.
-    world.until("the merge path to be holding the push", |_| held.holding());
+    // The publication's push has reached origin and is held there before it
+    // returns, which is before any read of the host.
+    world.until("origin to be holding the landed push", |_| held.holding());
     world
         .run_with_stdin(
             &["reply", &run],
@@ -2575,7 +2576,11 @@ fn a_node_cancelled_during_its_publication_settles_on_it_and_is_no_longer_parked
     let world = World::new("lifecycle-cancelparked");
     let go = world.fakes.join("push.go");
     let held = held_merge_path(&world, &go);
-    world.repository("local-direct", &held.argv());
+    let repo = world.repository("local-direct", &[]);
+    // Held in origin's `post-receive`, once the squash is on the base: the one point
+    // of a push a cancel is too late for, since `onevcs` 0.56 stops one it reaches
+    // earlier and keeps only an update origin already took.
+    crate::harness::hold_landings_at(&repo.origin, &held);
     world.script("service.work", "the worker wrote this\n");
 
     let path = world.plan(
@@ -2585,9 +2590,9 @@ fn a_node_cancelled_during_its_publication_settles_on_it_and_is_no_longer_parked
     world.run(&["start", &path, "--detach"]).exited(0);
     let run = "cancelparked".to_string();
 
-    // The dispatch is over and the publication has committed its work and is
-    // held at the merge path: the moment a cancel is too late to stop anything.
-    world.until("the merge path to be holding the push", |_| held.holding());
+    // The dispatch is over and the publication's squash is on origin's base, held
+    // before the push returns: the moment a cancel is too late to stop anything.
+    world.until("origin to be holding the landed push", |_| held.holding());
     world
         .run_with_stdin(
             &["reply", &run],
@@ -3432,20 +3437,30 @@ fn work_a_worker_committed_on_a_branch_of_its_own_outlives_the_session() {
 /// A run cancelled between a preserving failure and the attempt that would
 /// answer it settles on the failure, not on the cancellation.
 ///
-/// The window is held open rather than raced for: the repository's own `pre-push`
-/// hook blocks until this test releases it, so the cancel lands while the
-/// publication is still running and everything after the release — the push, its
-/// refusal, the preserving classification — happens unconditionally. Dispatched
-/// again into a run whose teardown is on its way to reap it, the node would settle
-/// as the cancellation and lose the publication failure, which is the useful half
-/// of what happened.
+/// The window is held open rather than raced for: the node's dispatch is held at the
+/// engine's ordering gate once the push and its refusal are over and before it decides
+/// whether to dispatch again, so the cancel lands exactly between the two. Dispatched
+/// again into a run whose teardown is on its way to reap it, the node would settle as
+/// the cancellation and lose the publication failure, which is the useful half of what
+/// happened. Not held at the repository's `pre-push`, as it was: since `onevcs` 0.56 a
+/// cancel stops the push it reaches there, so there would be no refusal to settle on.
 #[test]
 fn a_cancel_that_lands_before_the_next_attempt_settles_on_the_publication_failure() {
-    let world =
-        World::new("lifecycle-cancelledretry").with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "2");
-    let go = world.fakes.join("push.go");
-    let held = held_merge_path(&world, &go);
-    let repo = world.repository("change-auto", &held.argv());
+    // llmlint: ignore-block[tests_mirror_real_usage] the window is the instant between a
+    // publication's refusal and the retry decision, which no hook, host read or input a
+    // user has can be placed in since the push became cancellable; the gate only orders
+    // the real binary over a real origin whose own `pre-receive` refuses the push, and
+    // every outcome is asserted on the binary's own records.
+    let answered = crate::harness::Rendezvous::failpoint();
+    let world = World::new("lifecycle-cancelledretry")
+        .with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "2")
+        .with_env("ONEPIPELINE_TEST_SETTLEMENT_NODE", "service")
+        .with_env(
+            "ONEPIPELINE_TEST_PUBLICATION_ANSWERED_GATE",
+            &answered.address(),
+        );
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let repo = world.repository("change-auto", &[]);
     world.script("service.work", "the worker wrote this\n");
     refuse_pushed_branches(&world, &repo);
 
@@ -3456,12 +3471,9 @@ fn a_cancel_that_lands_before_the_next_attempt_settles_on_the_publication_failur
     world.run(&["start", &path, "--detach"]).exited(0);
     let run = "cancelledretry".to_string();
 
-    // The last record before the publishing push, which is where the hook above
-    // holds: `merge-queued` is a `change-*` record the host writes *after* the
-    // push, so it never arrives while the push is the thing being held. Once the
-    // work is committed the publication cannot get past the hook until this test
-    // releases it, so there is no race left to lose.
-    world.until("the merge path to be holding the push", |_| held.holding());
+    // The refused push is behind the dispatch, which cannot decide anything about
+    // it until this test releases the gate, so there is no race left to lose.
+    let held = answered.arrived();
     world
         .run_with_stdin(
             &["reply", &run],

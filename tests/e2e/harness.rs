@@ -6008,7 +6008,10 @@ impl HeldPublication {
     }
 
     /// Whether the merge path has started holding the push — git is running the
-    /// hook, so the push is under way and nothing interrupts it from here.
+    /// hook, so the push is under way. Held at the repository's `pre-push`, a
+    /// caller's cancellation still stops it (`onevcs` 0.56 on); held at origin's
+    /// `post-receive` ([`hold_landings_at`]), the update is already on origin and
+    /// a cancel is too late to take it back.
     ///
     /// Not the same moment as the publication's last record before the push:
     /// `onevcs` asks its caller's cancellation between the two, so a journey
@@ -6056,6 +6059,21 @@ pub fn hold_later_pushes_at(world: &World, held: &HeldPublication) {
         "this world's repository has no hook of its own to hold a push with"
     );
     install_hook(&hook, &held.argv());
+}
+
+/// Hold every push origin **takes** at `held`'s rendezvous, in origin's own
+/// `post-receive` hook: git runs it once the refs are updated and the pushing
+/// side waits for it to end, so the push is still running while the update is
+/// already on origin.
+///
+/// The window a cancel is too late in. `onevcs` stops a push its caller's
+/// cancellation reaches, hook and all, and then asks origin whether the update
+/// landed first — so a cancel held here meets a landing it keeps, where one held
+/// at the repository's `pre-push` meets a push it prevents.
+pub fn hold_landings_at(origin: &Path, held: &HeldPublication) {
+    let hooks = origin.join("hooks");
+    std::fs::create_dir_all(&hooks).expect("origin's hooks directory");
+    install_hook(&hooks.join("post-receive"), &held.argv());
 }
 
 impl Drop for HeldPublication {
