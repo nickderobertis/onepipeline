@@ -233,7 +233,7 @@
       "properties": {
         "envelope": {
           "type": "string",
-          "description": "The channel envelope id."
+          "description": "The channel envelope id — a decimal string in the document."
         },
         "delivery": {
           "anyOf": [
@@ -263,7 +263,7 @@
             },
             "since": {
               "type": "string",
-              "description": "When it was offered, RFC 3339."
+              "description": "When it was offered, in epoch milliseconds — RFC 3339 on the wire."
             },
             "state": {
               "type": "string",
@@ -286,11 +286,11 @@
             },
             "since": {
               "type": "string",
-              "description": "When it was first held, RFC 3339."
+              "description": "When it was first held, in epoch milliseconds — RFC 3339 on the wire."
             },
             "behind_envelope": {
               "type": "string",
-              "description": "The channel envelope id of the envelope whose note it waits behind."
+              "description": "The channel envelope id of the envelope whose note it waits behind —\na decimal string on the wire."
             },
             "state": {
               "type": "string",
@@ -306,7 +306,7 @@
           "description": "The driver holds the envelope unjudged behind `behind_envelope`'s live\nnote to `node`, so that no later edit to that node overtakes it."
         }
       ],
-      "description": "Where one claimed, unanswered envelope's live note stands, as the run's live\ndriver last wrote it."
+      "description": "Where one claimed, unanswered envelope's live note stands, as the run's live\ndriver last wrote it.\n\nEnvelope ids and instants are carried as numbers and written as the strings\nthe document states — a channel envelope id in decimal, an instant in RFC\n3339 — so a value read back that is neither is refused where it is read\nrather than shown."
     }
   }
 }

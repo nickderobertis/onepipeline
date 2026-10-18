@@ -31,6 +31,11 @@ pub(crate) const DELIVERIES_SCHEMA_VERSION: u32 = 1;
 
 /// Where one claimed, unanswered envelope's live note stands, as the run's live
 /// driver last wrote it.
+///
+/// Envelope ids and instants are carried as numbers and written as the strings
+/// the document states — a channel envelope id in decimal, an instant in RFC
+/// 3339 — so a value read back that is neither is refused where it is read
+/// rather than shown.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "state", rename_all = "lowercase")]
 pub enum Delivery {
@@ -38,19 +43,30 @@ pub enum Delivery {
     /// live note.
     Delivering {
         /// The node whose conversation the note was offered to.
+        // llmlint: ignore[invalid_states_unrepresentable] a node id is the plan's own `String` everywhere this crate carries one — `Command`, `Node`, the journal's labels — and a newtype here alone would be a second spelling of it; what a reader is handed is checked non-blank and free of control characters by `node_id` as it is read.
+        #[serde(deserialize_with = "node_id")]
         node: String,
-        /// When it was offered, RFC 3339.
-        since: String,
+        /// When it was offered, in epoch milliseconds — RFC 3339 on the wire.
+        #[serde(with = "instant")]
+        #[schemars(with = "String")]
+        since: u64,
     },
     /// The driver holds the envelope unjudged behind `behind_envelope`'s live
     /// note to `node`, so that no later edit to that node overtakes it.
     Held {
         /// The node whose outstanding note it waits behind.
+        // llmlint: ignore[invalid_states_unrepresentable] the node id, as `Delivering`'s `node` says.
+        #[serde(deserialize_with = "node_id")]
         node: String,
-        /// When it was first held, RFC 3339.
-        since: String,
-        /// The channel envelope id of the envelope whose note it waits behind.
-        behind_envelope: String,
+        /// When it was first held, in epoch milliseconds — RFC 3339 on the wire.
+        #[serde(with = "instant")]
+        #[schemars(with = "String")]
+        since: u64,
+        /// The channel envelope id of the envelope whose note it waits behind —
+        /// a decimal string on the wire.
+        #[serde(with = "envelope_id")]
+        #[schemars(with = "String")]
+        behind_envelope: u64,
     },
 }
 
@@ -59,8 +75,10 @@ pub enum Delivery {
 /// per receiver still outstanding.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct LiveDelivery {
-    /// The channel envelope id.
-    pub(crate) envelope: String,
+    /// The channel envelope id — a decimal string on the wire.
+    #[serde(with = "envelope_id")]
+    #[schemars(with = "String")]
+    pub(crate) envelope: u64,
     /// Where it stands.
     #[serde(flatten)]
     pub(crate) delivery: Delivery,
@@ -73,6 +91,47 @@ pub(crate) struct LiveDeliveries {
     pub(crate) schema_version: u32,
     /// Every outstanding and held delivery, outstanding ones first.
     pub(crate) deliveries: Vec<LiveDelivery>,
+}
+
+/// A channel envelope id, written as the decimal string the document states.
+pub(crate) mod envelope_id {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub(crate) fn serialize<S: Serializer>(id: &u64, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&id.to_string())
+    }
+
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        text.parse()
+            .map_err(|_| serde::de::Error::custom(format!("{text:?} is not a channel envelope id")))
+    }
+}
+
+/// An instant, in epoch milliseconds, written as RFC 3339.
+mod instant {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub(crate) fn serialize<S: Serializer>(at: &u64, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&crate::sys::rfc3339_from_millis(*at))
+    }
+
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        crate::projection::millis_of(&text)
+            .ok_or_else(|| serde::de::Error::custom(format!("{text:?} is not an RFC 3339 instant")))
+    }
+}
+
+/// A node id as a reader is handed it: not blank, and with no control character.
+fn node_id<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    let node = String::deserialize(deserializer)?;
+    if node.trim().is_empty() || node.chars().any(char::is_control) {
+        return Err(serde::de::Error::custom(format!(
+            "{node:?} is not a node id"
+        )));
+    }
+    Ok(node)
 }
 
 impl LiveDeliveries {
@@ -90,8 +149,9 @@ impl LiveDeliveries {
     }
 
     /// What the run's channel directory holds, or nothing where the file is
-    /// absent, unreadable, or of a version this build does not read — each of
-    /// which is no live delivery information.
+    /// absent, unreadable, of a version this build does not read, or carrying an
+    /// entry that is not an envelope id, a node id and an RFC 3339 instant — each
+    /// of which is no live delivery information.
     pub(crate) fn read(paths: &RunPaths) -> Option<Self> {
         let text = std::fs::read_to_string(paths.channel(DELIVERIES_FILE)).ok()?;
         serde_json::from_str::<Self>(&text)
@@ -100,7 +160,7 @@ impl LiveDeliveries {
     }
 
     /// Every entry for channel envelope `id`, in the order written.
-    pub(crate) fn of_envelope<'a>(&'a self, id: &'a str) -> impl Iterator<Item = &'a Delivery> {
+    pub(crate) fn of_envelope(&self, id: u64) -> impl Iterator<Item = &Delivery> {
         self.deliveries
             .iter()
             .filter(move |entry| entry.envelope == id)
@@ -127,29 +187,30 @@ mod tests {
             ],
         });
         let read: LiveDeliveries = serde_json::from_value(wire.clone()).expect("it reads");
+        let at = |ts: &str| crate::projection::millis_of(ts).expect("an instant");
         assert_eq!(
             read,
             LiveDeliveries::of(vec![
                 LiveDelivery {
-                    envelope: "1".into(),
+                    envelope: 1,
                     delivery: Delivery::Delivering {
                         node: "build".into(),
-                        since: "2026-10-18T09:00:00.000Z".into(),
+                        since: at("2026-10-18T09:00:00.000Z"),
                     },
                 },
                 LiveDelivery {
-                    envelope: "2".into(),
+                    envelope: 2,
                     delivery: Delivery::Held {
                         node: "build".into(),
-                        since: "2026-10-18T09:00:01.000Z".into(),
-                        behind_envelope: "1".into(),
+                        since: at("2026-10-18T09:00:01.000Z"),
+                        behind_envelope: 1,
                     },
                 },
             ])
         );
         assert_eq!(serde_json::to_value(&read).expect("it writes"), wire);
-        assert_eq!(read.of_envelope("2").count(), 1);
-        assert_eq!(read.of_envelope("3").count(), 0);
+        assert_eq!(read.of_envelope(2).count(), 1);
+        assert_eq!(read.of_envelope(3).count(), 0);
     }
 
     /// The sidecar's entry is the `delivery` object the run reading states:
@@ -200,17 +261,17 @@ mod tests {
             let delivery = match state {
                 "delivering" => Delivery::Delivering {
                     node: "n".into(),
-                    since: "t".into(),
+                    since: 0,
                 },
                 "held" => Delivery::Held {
                     node: "n".into(),
-                    since: "t".into(),
-                    behind_envelope: "1".into(),
+                    since: 0,
+                    behind_envelope: 1,
                 },
                 other => panic!("the reading states a state this type has not: {other}"),
             };
             let written = serde_json::to_value(LiveDelivery {
-                envelope: "2".into(),
+                envelope: 2,
                 delivery,
             })
             .expect("an entry writes");
@@ -248,6 +309,27 @@ mod tests {
         )
         .expect("written");
         assert_eq!(LiveDeliveries::read(&paths), None);
+        // A document whose every field is the right kind, and whose values are
+        // not what they say, reads as nothing too.
+        for entry in [
+            json!({"envelope": "one", "state": "delivering", "node": "build",
+                   "since": "2026-10-18T09:00:00.000Z"}),
+            json!({"envelope": "1", "state": "delivering", "node": "build",
+                   "since": "yesterday"}),
+            json!({"envelope": "1", "state": "delivering", "node": " ",
+                   "since": "2026-10-18T09:00:00.000Z"}),
+            json!({"envelope": "1", "state": "held", "node": "build\u{7}",
+                   "since": "2026-10-18T09:00:00.000Z", "behind_envelope": "0"}),
+            json!({"envelope": "1", "state": "held", "node": "build",
+                   "since": "2026-10-18T09:00:00.000Z", "behind_envelope": "-1"}),
+        ] {
+            std::fs::write(
+                paths.channel(DELIVERIES_FILE),
+                json!({"schema_version": 1, "deliveries": [entry.clone()]}).to_string(),
+            )
+            .expect("written");
+            assert_eq!(LiveDeliveries::read(&paths), None, "{entry} was read");
+        }
         LiveDeliveries::of(Vec::new())
             .write(&paths)
             .expect("the sidecar is written");

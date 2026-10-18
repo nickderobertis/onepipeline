@@ -302,8 +302,10 @@ pub struct RunReading {
 /// `status <RUN> --json` reads it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct UnansweredEnvelope {
-    /// The channel envelope id.
-    pub envelope: String,
+    /// The channel envelope id — a decimal string in the document.
+    #[serde(with = "crate::channel::deliveries::envelope_id")]
+    #[schemars(with = "String")]
+    pub envelope: u64,
     /// Where its live note stands, as the run's live driver last wrote it —
     /// omitted where no driver is live, which leaves the envelope to be answered
     /// by the run's next driver, and where the live driver holds no live note of
@@ -330,12 +332,11 @@ fn unanswered_of(view: &RunView, liveness: DriverLiveness) -> Vec<UnansweredEnve
         .then(|| crate::channel::deliveries::LiveDeliveries::read(&view.paths))
         .flatten();
     ids.into_iter()
-        .map(|id| {
-            let envelope = id.to_string();
-            let delivery = live
+        .map(|envelope| UnansweredEnvelope {
+            envelope,
+            delivery: live
                 .as_ref()
-                .and_then(|live| live.of_envelope(&envelope).next().cloned());
-            UnansweredEnvelope { envelope, delivery }
+                .and_then(|live| live.of_envelope(envelope).next().cloned()),
         })
         .collect()
 }
@@ -4213,7 +4214,7 @@ fn driver_exit_lines(view: &RunView) -> String {
     }
     let ids = unanswered
         .iter()
-        .map(|envelope| envelope.envelope.as_str())
+        .map(|envelope| envelope.envelope.to_string())
         .collect::<Vec<_>>()
         .join(", ");
     if liveness.is_undriven() {
@@ -4232,11 +4233,11 @@ fn driver_exit_lines(view: &RunView) -> String {
     for envelope in &unanswered {
         let said: Vec<String> = live
             .iter()
-            .flat_map(|live| live.of_envelope(&envelope.envelope))
+            .flat_map(|live| live.of_envelope(envelope.envelope))
             .map(delivery_phrase)
             .collect();
         let said = if said.is_empty() {
-            "being judged by the live driver".to_string()
+            "claimed by the live driver, which has not said where it stands".to_string()
         } else {
             said.join("; ")
         };
@@ -4248,14 +4249,18 @@ fn driver_exit_lines(view: &RunView) -> String {
 /// What `status` says of one claimed envelope's live note.
 fn delivery_phrase(delivery: &Delivery) -> String {
     match delivery {
-        Delivery::Delivering { node, since } => {
-            format!("delivering a live note to {node} since {since}")
-        }
+        Delivery::Delivering { node, since } => format!(
+            "delivering a live note to {node} since {}",
+            sys::rfc3339_from_millis(*since)
+        ),
         Delivery::Held {
             node,
             since,
             behind_envelope,
-        } => format!("held behind envelope {behind_envelope}'s note to {node} since {since}"),
+        } => format!(
+            "held behind envelope {behind_envelope}'s note to {node} since {}",
+            sys::rfc3339_from_millis(*since)
+        ),
     }
 }
 

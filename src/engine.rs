@@ -5215,6 +5215,7 @@ pub(crate) struct LaneAnswer {
     /// The envelope the notes came in.
     envelope: u64,
     /// The receiver.
+    // llmlint: ignore[invalid_states_unrepresentable] the node id its notes' `ValidatedNote::node` carries — the plan's own `String` everywhere this crate holds a node id — and only ever one a validated note of this envelope named, since `hand` builds it from those alone.
     node: String,
     /// Each of its notes, by its index among the envelope's commands, with what
     /// [`deliver_envelope`] answered for it.
@@ -5790,10 +5791,10 @@ impl NoteDeliveries {
         for (id, outstanding) in &self.outstanding {
             for (node, lane) in &outstanding.lanes {
                 entries.push(LiveDelivery {
-                    envelope: id.to_string(),
+                    envelope: *id,
                     delivery: Live::Delivering {
                         node: node.clone(),
-                        since: sys::rfc3339_from_millis(lane.since),
+                        since: lane.since,
                     },
                 });
             }
@@ -5819,11 +5820,11 @@ impl NoteDeliveries {
                 .copied()
                 .unwrap_or_else(sys::now_millis);
             entries.push(LiveDelivery {
-                envelope: envelope.id.to_string(),
+                envelope: envelope.id,
                 delivery: Live::Held {
                     node: node.clone(),
-                    since: sys::rfc3339_from_millis(since),
-                    behind_envelope: behind.to_string(),
+                    since,
+                    behind_envelope: behind,
                 },
             });
             reasons.push((names, (behind, node)));
@@ -5833,23 +5834,32 @@ impl NoteDeliveries {
 }
 
 /// The sidecar is emptied as the driver lets go of the run, so what it says is
-/// only ever what a live driver holds.
+/// only ever what a live driver holds — unless what the file holds is no longer
+/// what this driver wrote, which is a driver that superseded this one writing
+/// its own, and not this one's to empty.
 impl Drop for NoteDeliveries {
     fn drop(&mut self) {
         let Some(sidecar) = &self.sidecar else {
             return;
         };
-        if sidecar
-            .written
-            .as_ref()
-            .is_some_and(|written| !written.deliveries.is_empty())
+        let Some(written) = sidecar.written.as_ref() else {
+            return;
+        };
+        // llmlint: ignore-block[changed_behavior_has_e2e] a driver lets go with a delivery
+        // outstanding only when it is superseded or fails on its own store: `stop` and a host
+        // shutdown end it by signal, and a run that completes waits for its deliveries first —
+        // so no verb reaches this with entries to empty. Nothing reads what it would leave as
+        // a delivery either way: `status` reads the sidecar only beside a live driver, which
+        // `status_reads_a_held_delivery_as_delivering_and_what_waits_behind_it_as_held` drives
+        // through a killed one.
+        if written.deliveries.is_empty()
+            || crate::channel::deliveries::LiveDeliveries::read(&sidecar.paths).as_ref()
+                != Some(written)
         {
-            // llmlint: ignore[changed_behavior_has_e2e] a run directory this writer cannot
-            // write into is a host fault no verb makes; a sidecar left behind is read with
-            // the driver's liveness, and a driver that is gone makes it say nothing.
-            let _ =
-                crate::channel::deliveries::LiveDeliveries::of(Vec::new()).write(&sidecar.paths);
+            return;
         }
+        let _ = crate::channel::deliveries::LiveDeliveries::of(Vec::new()).write(&sidecar.paths);
+        // llmlint: ignore-end[changed_behavior_has_e2e]
     }
 }
 
@@ -14777,10 +14787,39 @@ mod tests {
             [neither],
             "only the envelope naming no outstanding receiver is answered"
         );
+        // The sidecar names each receiver outstanding, then each envelope held
+        // and what it waits behind — `after`, naming only `lint`, through `both`,
+        // which it is held behind, so behind what `both` waits on.
+        let stated: Vec<(u64, String, Option<u64>)> = deliveries
+            .snapshot()
+            .deliveries
+            .into_iter()
+            .map(|entry| match entry.delivery {
+                crate::channel::deliveries::Delivery::Delivering { node, .. } => {
+                    (entry.envelope, node, None)
+                }
+                crate::channel::deliveries::Delivery::Held {
+                    node,
+                    behind_envelope,
+                    ..
+                } => (entry.envelope, node, Some(behind_envelope)),
+            })
+            .collect();
+        let entry =
+            |envelope: u64, node: &str, behind: Option<u64>| (envelope, node.to_owned(), behind);
         assert_eq!(
-            deliveries.snapshot().deliveries.len(),
-            3 + 4,
-            "the sidecar does not name each outstanding receiver and each held envelope"
+            stated,
+            [
+                entry(1, "build", None),
+                entry(2, "docs", None),
+                entry(2, "test", None),
+                entry(both, "build", Some(1)),
+                entry(after, "build", Some(1)),
+                entry(on_docs, "docs", Some(2)),
+                entry(on_test, "test", Some(2)),
+            ],
+            "the sidecar does not name each outstanding receiver and what each held \
+             envelope waits behind"
         );
         answer(&mut deliveries, 2, "docs");
         assert_eq!(

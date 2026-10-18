@@ -736,14 +736,16 @@ fn a_note_waiting_on_a_held_turn_leaves_the_run_journalling_its_dispatch() {
     world.until("the note to wait in the conversation's inbox", |world| {
         awaiting_an_answer(world) == 1
     });
+    // Naming `build` among its `deps`, and valid however `build` has ended by
+    // the time it is judged.
     let edit = submitted(
         &world,
         run,
-        &envelope(json!({"op": "amend", "id": "build", "text": BUILD_RULING})),
+        &envelope(json!({"op": "add", "node": agent(ADDED, &["build"])})),
     );
     let queue = world.run_file(run, "channel/commands.jsonl");
     world.until("the edit behind the note to be queued", |_| {
-        std::fs::read_to_string(&queue).is_ok_and(|text| text.contains(BUILD_RULING))
+        std::fs::read_to_string(&queue).is_ok_and(|text| text.contains(ADDED))
     });
     let activity = world.events_of(run, "turn-activity").len();
     let beats = world.events_of(run, "member-heartbeat").len();
@@ -776,7 +778,7 @@ fn a_note_waiting_on_a_held_turn_leaves_the_run_journalling_its_dispatch() {
         world
             .journal(run)
             .iter()
-            .all(|event| event["payload"]["command"]["text"] != BUILD_RULING),
+            .all(|event| event["payload"]["command"]["op"] != "add"),
         "the edit queued behind the note was applied ahead of it"
     );
 
@@ -806,7 +808,11 @@ fn a_note_waiting_on_a_held_turn_leaves_the_run_journalling_its_dispatch() {
         "the edit queued behind the note was not applied"
     );
     let journal = world.journal(run);
-    let behind = committed_at(&journal, "amend", "text", BUILD_RULING)
+    let behind = journal
+        .iter()
+        .position(|event| {
+            event["kind"] == "edit-committed" && event["payload"]["command"]["op"] == "add"
+        })
         .expect("the edit behind the note was recorded");
     assert!(
         delivered < behind,
@@ -2248,9 +2254,9 @@ const DOCS_NOTE: &str = "docs: describe only the flags that shipped";
 /// the last of them.
 ///
 /// `build`'s turn is held for as long as the journey says, and `lint`'s is
-/// released first: `lint`'s note is committed, and its conversation shown it,
-/// while `build`'s is still waiting — and the envelope is answered, once and
-/// applied, only once `build` answers too.
+/// released first: `lint`'s note is committed, and its worker handed it, while
+/// `build`'s is still waiting — and the envelope is answered, once and applied,
+/// only once `build` answers too.
 #[test]
 fn a_note_to_each_of_two_receivers_is_recorded_as_each_answers() {
     let world = World::new("note-fan-out");
@@ -2275,8 +2281,10 @@ fn a_note_to_each_of_two_receivers_is_recorded_as_each_answers() {
     world.until("lint's note to be recorded", |world| {
         noted_at(&world.journal(run), "lint", LINT_NOTE).is_some()
     });
-    world.until("lint's conversation to be shown its note", |world| {
-        !presentations_of(world, run, "lint").is_empty()
+    world.until("lint's worker to be handed its note", |world| {
+        worked(world)
+            .iter()
+            .any(|prompt| prompt.contains(LINT_NOTE))
     });
     assert_eq!(
         awaiting_an_answer(&world),
@@ -2560,14 +2568,20 @@ fn a_finding_about_a_node_surfaces_while_its_note_waits() {
 
 /// `status`, in both forms, says what a live driver is doing with each claimed
 /// envelope: delivering a live note to a node since when, or holding it behind
-/// another envelope's note — and once that driver is gone, that both are left
-/// for the next driver. Nothing it says calls a delivery in progress abandoned.
+/// another envelope's note — directly, or behind an envelope held there itself —
+/// and once that driver is gone, that every one is left for the next driver. A
+/// sidecar it cannot read says nothing of where any stands. Nothing it says calls
+/// a delivery in progress abandoned.
 #[cfg(unix)]
 #[test]
 fn status_reads_a_held_delivery_as_delivering_and_what_waits_behind_it_as_held() {
     let world = World::new("note-status-delivering");
     let run = "statusdelivering";
-    held_heartbeating_conversation(&world, run, vec![agent("build", &[])]);
+    held_heartbeating_conversation(
+        &world,
+        run,
+        vec![agent("build", &[]), agent("docs", &["build"])],
+    );
     let mut note = submitted(
         &world,
         run,
@@ -2576,25 +2590,48 @@ fn status_reads_a_held_delivery_as_delivering_and_what_waits_behind_it_as_held()
     world.until("the note to wait in the conversation's inbox", |world| {
         awaiting_an_answer(world) == 1
     });
+    let queue = world.run_file(run, "channel/commands.jsonl");
+    let queued = |text: &str| {
+        let text = text.to_string();
+        let queue = queue.clone();
+        move |_: &World| std::fs::read_to_string(&queue).is_ok_and(|held| held.contains(&text))
+    };
     let mut behind = submitted(
         &world,
         run,
-        &envelope(json!({"op": "amend", "id": "build", "text": BUILD_RULING})),
+        &json!({"version": 2, "commands": [
+            {"op": "amend", "id": "build", "text": BUILD_RULING},
+            {"op": "amend", "id": "docs", "text": FIRST_RULING},
+        ]})
+        .to_string(),
     );
-    let queue = world.run_file(run, "channel/commands.jsonl");
-    world.until("the amend of build to be queued", |_| {
-        std::fs::read_to_string(&queue).is_ok_and(|text| text.contains(BUILD_RULING))
-    });
+    world.until("the amend of build to be queued", queued(BUILD_RULING));
+    // Naming only `docs`, which no note waits on: held behind the envelope above,
+    // which names it, and so behind what that one waits on.
+    let mut chained = submitted(
+        &world,
+        run,
+        &envelope(json!({"op": "amend", "id": "docs", "text": SECOND_RULING})),
+    );
+    world.until(
+        "the second amend of docs to be queued",
+        queued(SECOND_RULING),
+    );
     let note_id = queued_id_of(&world, run, NOTE);
     let behind_id = queued_id_of(&world, run, BUILD_RULING);
+    let chained_id = queued_id_of(&world, run, SECOND_RULING);
     let delivering = format!("envelope {note_id}: delivering a live note to build since ");
     let held =
         format!("envelope {behind_id}: held behind envelope {note_id}'s note to build since ");
+    let held_too =
+        format!("envelope {chained_id}: held behind envelope {note_id}'s note to build since ");
     world.until(
         "status to read the delivery and what waits behind it",
         |world| {
             let status = world.run(&["status", run]);
-            status.stdout.contains(&delivering) && status.stdout.contains(&held)
+            [&delivering, &held, &held_too]
+                .iter()
+                .all(|line| status.stdout.contains(line.as_str()))
         },
     );
     let status = world.run(&["status", run]);
@@ -2610,8 +2647,8 @@ fn status_reads_a_held_delivery_as_delivering_and_what_waits_behind_it_as_held()
     let unanswered = reading["unanswered"]
         .as_array()
         .unwrap_or_else(|| panic!("the reading names no claimed envelope: {reading}"));
-    let [first, second] = &unanswered[..] else {
-        panic!("the reading does not name both envelopes: {reading}");
+    let [first, second, third] = &unanswered[..] else {
+        panic!("the reading does not name all three envelopes: {reading}");
     };
     assert_eq!(first["envelope"], json!(note_id.to_string()), "{reading}");
     assert_eq!(first["delivery"]["state"], json!("delivering"), "{reading}");
@@ -2623,31 +2660,59 @@ fn status_reads_a_held_delivery_as_delivering_and_what_waits_behind_it_as_held()
         "the reading's since-time is not the one status prints: {reading}"
     );
     assert_eq!(first["delivery"].get("behind_envelope"), None, "{reading}");
-    assert_eq!(
-        second["envelope"],
-        json!(behind_id.to_string()),
-        "{reading}"
-    );
-    assert_eq!(second["delivery"]["state"], json!("held"), "{reading}");
-    assert_eq!(second["delivery"]["node"], json!("build"), "{reading}");
-    assert_eq!(
-        second["delivery"]["behind_envelope"],
-        json!(note_id.to_string()),
-        "{reading}"
-    );
+    for (envelope, id) in [(second, behind_id), (third, chained_id)] {
+        assert_eq!(envelope["envelope"], json!(id.to_string()), "{reading}");
+        assert_eq!(
+            [
+                &envelope["delivery"]["state"],
+                &envelope["delivery"]["node"],
+                &envelope["delivery"]["behind_envelope"],
+            ],
+            [&json!("held"), &json!("build"), &json!(note_id.to_string())],
+            "{reading}"
+        );
+    }
     assert!(!reading.to_string().to_lowercase().contains("abandon"));
 
-    // The driver goes, with both still claimed and unanswered.
+    // A sidecar this build cannot read says nothing of where any envelope
+    // stands, and nothing it says is read as abandoned either.
+    let sidecar = world.run_file(run, "channel/deliveries.json");
+    let written = std::fs::read_to_string(&sidecar).expect("the live driver wrote its sidecar");
+    std::fs::write(&sidecar, "not a delivery document").expect("the sidecar is overwritten");
+    let status = world.run(&["status", run]);
+    status.exited(0);
+    for id in [note_id, behind_id, chained_id] {
+        assert!(
+            status.stdout.contains(&format!(
+                "envelope {id}: claimed by the live driver, which has not said where it stands"
+            )),
+            "status read an unreadable sidecar as saying something of envelope {id}:\n{}",
+            status.stdout
+        );
+    }
+    assert!(!status.stdout.to_lowercase().contains("abandon"));
+    let reading = world.run(&["status", run, "--json"]).json();
+    assert!(
+        reading["unanswered"]
+            .as_array()
+            .is_some_and(|unanswered| unanswered
+                .iter()
+                .all(|envelope| envelope.get("delivery").is_none())),
+        "an unreadable sidecar was read as a delivery: {reading}"
+    );
+    std::fs::write(&sidecar, written).expect("the sidecar is put back");
+
+    // The driver goes, with all three still claimed and unanswered.
     harness::end_driver(&world, run);
     let status = world.run(&["status", run]);
     status.exited(0);
-    let line = claimed_with_no_outcome(&world, run).expect("both are still claimed");
+    let line = claimed_with_no_outcome(&world, run).expect("all three are still claimed");
     assert_eq!(
         line.trim_start(),
         format!(
-            "claimed with no outcome: command envelope(s) {note_id}, {behind_id} — taken off \
-             the queue and not answered yet, so their submitters have been told nothing; the \
-             run's next driver answers each before anything it claims itself"
+            "claimed with no outcome: command envelope(s) {note_id}, {behind_id}, {chained_id} \
+             — taken off the queue and not answered yet, so their submitters have been told \
+             nothing; the run's next driver answers each before anything it claims itself"
         )
     );
     assert!(
@@ -2664,16 +2729,99 @@ fn status_reads_a_held_delivery_as_delivering_and_what_waits_behind_it_as_held()
         &vec![
             json!({"envelope": note_id.to_string()}),
             json!({"envelope": behind_id.to_string()}),
+            json!({"envelope": chained_id.to_string()}),
         ],
         "a dead driver's deliveries were read as still under way: {reading}"
     );
 
-    for reply in [&mut note, &mut behind] {
+    for reply in [&mut note, &mut behind, &mut chained] {
         let _ = reply.kill();
         let _ = reply.wait();
     }
     release(&world.fakes, "turn.go");
     release(&world.fakes, "turn.settle");
+}
+
+/// A driver that dies with one receiver of an envelope answered and another
+/// still delivering leaves the next driver to answer it: the note already
+/// recorded is applied, and the one still being delivered is refused — journalled
+/// once, saying whether it was read is not known — rather than offered again.
+#[cfg(unix)]
+#[test]
+fn a_receiver_still_delivering_when_its_driver_died_is_refused_by_the_next() {
+    let world = World::new("note-died-delivering");
+    let run = "dieddelivering";
+    held_apart(&world, run, vec![agent("build", &[]), agent("lint", &[])]);
+    let both = submitted(
+        &world,
+        run,
+        &json!({"version": 2, "commands": [
+            note_op("build", "worker", BUILD_NOTE, None),
+            note_op("lint", "worker", LINT_NOTE, None),
+        ]})
+        .to_string(),
+    );
+    world.until("both notes to wait in their inboxes", |world| {
+        awaiting_an_answer(world) == 2
+    });
+    let id = queued_id_of(&world, run, BUILD_NOTE);
+    release_turn_of(&world, "lint");
+    world.until("lint's note to be recorded", |world| {
+        noted_at(&world.journal(run), "lint", LINT_NOTE).is_some()
+    });
+
+    harness::end_driver(&world, run);
+    assert!(
+        outcome_of(&world, run, id).is_none(),
+        "the envelope was answered before its driver died"
+    );
+    world
+        .run_on(
+            world.agentgraph_cmd(&["adopt", run, "--detach"]),
+            "adopt --detach",
+        )
+        .exited(0);
+    world.until("the adopter to answer the envelope", |world| {
+        outcome_of(world, run, id).is_some()
+    });
+    let output = both.wait_with_output().expect("the binary runs");
+    assert_eq!(output.status.code(), Some(REFUSED));
+    let outcome = outcome_of(&world, run, id).expect("answered");
+    assert_eq!(outcome["applied"], json!(false), "{outcome}");
+    assert!(
+        outcome["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.starts_with("applied in part:")),
+        "{outcome}"
+    );
+    assert_eq!(
+        [0, 1].map(|index| outcome["results"][index]["outcome"].clone()),
+        [json!("refused"), json!("applied")],
+        "{outcome}"
+    );
+    assert!(
+        outcome["results"][0]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("exited before that node's conversation")),
+        "the note still being delivered does not say why it was refused: {outcome}"
+    );
+    assert_eq!(
+        records_of(&world, run, BUILD_NOTE)
+            .into_iter()
+            .map(|(_, kind)| kind)
+            .collect::<Vec<_>>(),
+        ["edit-rejected"],
+        "the note still being delivered was not journalled refused once"
+    );
+    assert_eq!(
+        records_of(&world, run, LINT_NOTE)
+            .into_iter()
+            .map(|(_, kind)| kind)
+            .collect::<Vec<_>>(),
+        ["edit-committed"],
+        "the note lint answered was committed again"
+    );
+    release_turn_of(&world, "build");
 }
 
 /// A note the conversation refuses while the run is still being driven is
@@ -2755,6 +2903,9 @@ fn a_note_refused_while_the_run_is_driven_is_recorded_and_surfaced() {
 /// A ruling on the node a refused note's envelope also amends.
 const AFTER_RULING: &str = "after: read the fixture from fixtures/v2";
 
+/// A second note to the receiver that refused the first, never offered.
+const SKIPPED_NOTE: &str = "build: and keep the old fixture for one release";
+
 /// An envelope whose commands committed as it was handed, and whose live note
 /// its conversation then refused, is answered **applied in part** — and the
 /// outcome says, command by command, which committed and which refused.
@@ -2764,7 +2915,8 @@ const AFTER_RULING: &str = "after: read the fixture from fixtures/v2";
 /// [`a_note_refused_while_the_run_is_driven_is_recorded_and_surfaced`]. The amend
 /// of `after` beside it committed before that note was offered, and stays
 /// committed: the outcome is not applied as sent, but nor does it read as though
-/// nothing of it was.
+/// nothing of it was. A second note to `build` after the refused one is never
+/// offered, and says so.
 #[test]
 fn a_note_refused_after_the_commands_beside_it_committed_is_answered_applied_in_part() {
     let world = World::new("note-partly-applied");
@@ -2792,6 +2944,7 @@ fn a_note_refused_after_the_commands_beside_it_committed_is_answered_applied_in_
         &json!({"version": 2, "commands": [
             {"op": "amend", "id": "after", "text": AFTER_RULING},
             note_op("build", "worker", NOTE, None),
+            note_op("build", "worker", SKIPPED_NOTE, None),
         ]})
         .to_string(),
     );
@@ -2807,9 +2960,19 @@ fn a_note_refused_after_the_commands_beside_it_committed_is_answered_applied_in_
         "the outcome does not say which command committed and which refused: {outcome}"
     );
     assert_eq!(
-        [0, 1].map(|index| outcome["results"][index]["outcome"].clone()),
-        [json!("applied"), json!("refused")],
+        [0, 1, 2].map(|index| outcome["results"][index]["outcome"].clone()),
+        [json!("applied"), json!("refused"), json!("validated")],
         "{outcome}"
+    );
+    assert!(
+        outcome["results"][2]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("never offered")),
+        "the note after the refused one does not say it was never offered: {outcome}"
+    );
+    assert!(
+        records_of(&world, run, SKIPPED_NOTE).is_empty(),
+        "a note never offered left a record"
     );
     assert!(
         outcome["results"][1]["reason"]
