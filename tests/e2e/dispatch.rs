@@ -88,6 +88,59 @@ fn ready_and_undriven(world: &World, run: &str, node: Value) {
 /// Both shipped relative graph paths are bound to the directory `start` was
 /// launched from before either graph can create a workspace. The direct node
 /// proves the second graph was read and its member actually ran.
+/// A hold naming one task holds that task's turn and no other: the node before it runs
+/// and settles while the hold stands, and the named one stays in flight until it is let
+/// go. What the continuation smoke holds the node above its stack with, so a stacked node
+/// the engine dispatches again is never held behind it.
+#[test]
+fn a_hold_naming_one_task_holds_that_turn_and_leaves_the_others_free() {
+    let world = World::new("hold-one-task");
+    world.write_graphs();
+    world.script("turn.hold-what", "Do held.");
+    world.script("turn.hold", "");
+    let project = world.plan(
+        "hold-one-task",
+        &plan_of(
+            "hold-one-task",
+            vec![agent("free", &[]), agent("held", &["free"])],
+        ),
+    );
+    let launch = world.agentgraph_cmd(&["start", &project, "--detach"]);
+    world.run_on(launch, "start hold-one-task").exited(0);
+    let run = std::fs::read_dir(&world.runs)
+        .expect("the runs root")
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .next()
+        .expect("the launch minted a run");
+    let settled = |world: &World, node: &str| {
+        world
+            .events_of(&run, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == node)
+    };
+    world.until("the held node's turn to start", |world| {
+        world
+            .turns()
+            .iter()
+            .any(|turn| turn.prompt.contains("Do held."))
+    });
+    assert!(
+        settled(&world, "free"),
+        "the node the hold does not name was not let settle: {:?}",
+        world.kinds(&run)
+    );
+    assert!(
+        !settled(&world, "held"),
+        "the node the hold names settled while it stood"
+    );
+    world.release("turn.go");
+    world.release("turn.settle");
+    world.until("the held node to settle once let go", |world| {
+        settled(world, "held")
+    });
+}
+
 #[test]
 fn relative_default_graphs_dispatch_from_the_launch_directory() {
     let world = World::new("real-relative-defaults");
