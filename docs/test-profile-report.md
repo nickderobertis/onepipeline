@@ -960,6 +960,14 @@ The earlier runs at a94701b, dd2e5d6 and 049ba74 are recorded under the Checks h
 
 ## Checks
 
+**On c93fa56** (the fence fix, after this document). Hosted run 39118487503 on f2b9566 failed `cross (macos-latest)` on one test. `Mac PR proofs` failed `continuation::a_publication_whose_fence_the_board_refuses_starts_once_a_later_write_lands` with "the fence was written again 166.698583ms after the refusal". It then passed 3 of 3 reruns, and it is the same test as the Windows flake below. The cause is in the product: any driver pass inside the 5 s retry wrote a refused fence again at once. `ClaimWatch::fence` now holds a non-empty fence until its retry is due. The new `continuation::a_pass_inside_a_refused_fences_retry_does_not_write_it_early` wakes the driver inside the retry on purpose. Before the fix it failed for that reason ("written again 124.828284ms after the refusal"); with the fix it passes. Re-run on c93fa56:
+- `cargo nextest run --test e2e -E 'test(/fence/) or test(/publication/)'`: 78 of 78 passed.
+- Every `continuation` test in the e2e and lib binaries: 58 of 58 passed.
+- `cargo clippy --all-targets --locked -- -D warnings`: clean.
+- `just lint-llm-diff origin/main`: 39 rules, 23 passed, 0 failed.
+
+The fix adds one e2e test (1,661 in all) and changes no figure above, which were all measured before it.
+
 **On c551671** (head before this document):
 - The full e2e tier: 1,659 of 1,660 passed, in 4,412.6 s. The only failure was host_view, above.
 - `cargo test --workspace --lib`: 955 passed, including the oneagentgraph floor test in `src/agentgraph.rs`.
