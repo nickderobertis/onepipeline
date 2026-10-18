@@ -135,7 +135,6 @@ fn node_id<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, 
 }
 
 impl LiveDeliveries {
-    /// A document holding `deliveries`.
     pub(crate) fn of(deliveries: Vec<LiveDelivery>) -> Self {
         Self {
             schema_version: DELIVERIES_SCHEMA_VERSION,
