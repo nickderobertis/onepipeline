@@ -1740,6 +1740,58 @@ fn a_publication_whose_fence_the_board_refuses_starts_once_a_later_write_lands()
     assert_eq!(stored_publishing(&world, &project), Value::Null);
 }
 
+/// A pass the driver takes inside a refused fence's retry — here the one a second node's
+/// finished turn wakes, which makes its publication due beside the first — writes the fence
+/// no sooner: both publications wait for the retry's own clock, and both start once it lands.
+#[test]
+fn a_pass_inside_a_refused_fences_retry_does_not_write_it_early() {
+    let world = takeover_world("fence-woken", 60).through_scripted_source();
+    world.script("x.work", "x's change\n");
+    world.script("y.work", "y's change\n");
+    let x = world.rendezvous("x");
+    let y = world.rendezvous("y");
+    let run = "fence-woken";
+    // Both in flight at once, so the second turn can end while the first waits on its fence.
+    let mut plan = plan_of(run, vec![lifecycle("x", &[]), lifecycle("y", &[])]);
+    plan["concurrency"] = json!(2);
+    let project = world.plan(run, &plan);
+    world
+        .run_from(&world.project, &["start", &project, "--detach"])
+        .exited(0);
+    let first = x.arrived();
+    let second = y.arrived();
+    until_claimed_by(&world, &project, run);
+    world.store_refuses_once("set_project_metadata", &board_down());
+    first.release();
+    world.until_run_file_holds(
+        run,
+        "driver.log",
+        "could not write its publications under way",
+    );
+    let refused_at = std::time::Instant::now();
+    let refused = world.store_asked("set_project_metadata");
+    // y's turn ends inside the retry: its settlement wakes the driver, and its publication
+    // is due on that same pass.
+    second.release();
+    world.until("the fence to be written again", |world| {
+        world.store_asked("set_project_metadata") > refused
+    });
+    let retried_after = refused_at.elapsed();
+    assert!(
+        retried_after >= std::time::Duration::from_secs(3),
+        "the fence was written again {retried_after:?} after the refusal, before its retry was due"
+    );
+    world.until("the driver to end", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+    for node in ["x", "y"] {
+        let settled = settled(&world, run, node);
+        assert_eq!(settled["outcome"], "change-review-draft", "{settled}");
+    }
+    assert_eq!(created_from(&world).len(), 2);
+    assert_eq!(stored_publishing(&world, &project), Value::Null);
+}
+
 /// A takeover past its wait that finds the project's `onepipeline.publishing` holding
 /// something that is not a driver's publications cannot tell whether the displaced driver
 /// — here one a shutdown ended — has one under way, so it starts nothing and says why;

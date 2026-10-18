@@ -913,6 +913,15 @@ impl ClaimWatch {
         if crate::writeback::store_asked_to_wait(&self.run_dir) {
             return false;
         }
+        // A fence the store refused is written again on its own clock, not on whatever pass
+        // comes first: a publication waits for the retry. Clearing it never waits.
+        if !nodes.is_empty()
+            && self
+                .fence_refused
+                .is_some_and(|at| at.elapsed() < FENCE_RETRY)
+        {
+            return false;
+        }
         if nodes.is_empty() && self.superseded {
             match self
                 .store
