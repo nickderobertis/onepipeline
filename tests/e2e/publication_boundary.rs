@@ -1051,6 +1051,72 @@ fn a_producer_named_with_a_private_term_is_given_a_neutral_branch_and_exports_on
     assert!(tasks_of(&world, "more-examples").is_empty());
 }
 
+/// A public node whose publication meets a host that will not say whether its destination
+/// is public — GitHub's primary rate limit on the visibility read — settles on the
+/// boundary check being **unavailable**, naming what the host sent, and never as output
+/// carrying a private term: nothing was screened, so nothing was found.
+///
+/// `library` is declared nowhere, so the write asks the host, which is the `gh` stand-in
+/// answering `repos/owner/library --include` with GitHub's own `403`, headers first.
+#[test]
+fn a_publication_whose_host_rate_limits_the_visibility_read_settles_on_an_unavailable_check() {
+    let world = World::new("boundary-visibility-unanswered");
+    let _private = world.repository("local-direct", &[]);
+    let _library = world.extra_repository("library");
+    // `service` is declared private and nothing else is declared at all: `declare_visibility`'s
+    // closing rule would declare `library` private too, and a declared repository is never
+    // asked about.
+    std::fs::write(
+        world.onevcs_home().join("rules.yml"),
+        "version: 4\nrules:\n  - match: {owner: owner, name: service}\n    visibility: private\n\
+         default:\n  publication: local-direct\n  approvals: none\n",
+    )
+    .expect("the rules file is written");
+    // 2030-01-01T00:00:00Z, the moment the stand-in says the limit resets.
+    world.script("gh.visibility.rate-limited", "1893456000");
+    world.script("examples.work", "an example\n");
+    let project = world.plan(
+        "unanswered",
+        &mixed_plan("unanswered", vec![public("examples", &[])], Vec::new()),
+    );
+    world.run(&["start", &project, "--attach"]).settled();
+
+    let examples = settled(&world, "unanswered", "examples");
+    assert_eq!(examples["outcome"], "publication-failed", "{examples}");
+    let detail = detail_of(&world, "unanswered", "examples");
+    for says in [
+        "the public boundary check is unavailable: the host did not answer whether the \
+         destination is public",
+        "is refused for its rate limit: HTTP 403, limit 5000 (core), 0 remaining, resets at",
+        "retry once the host answers",
+        "Nothing was written to the remote",
+    ] {
+        assert!(
+            detail.contains(says),
+            "the detail does not say {says:?}: {detail}"
+        );
+    }
+    assert!(
+        !detail.contains("carries a term of a private repository"),
+        "an unanswered visibility read was reported as a disclosure: {detail}"
+    );
+    // The verdict is the host's silence, so the host was asked.
+    let asked = world
+        .invocations()
+        .into_iter()
+        .filter(|call| {
+            call["tool"] == "gh"
+                && call["args"][1] == "repos/owner/library"
+                && call["args"][2] == "--include"
+        })
+        .count();
+    assert!(
+        asked >= 1,
+        "the host's visibility was never asked\n{}",
+        world.dump()
+    );
+}
+
 /// Judge `document` with the compiled validator, as a bus's `command` validator runs it.
 fn validated(world: &World, run: &str, document: &Value) -> crate::harness::Run {
     let validated = world.run_with_stdin(

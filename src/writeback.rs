@@ -717,7 +717,12 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         | EngineError::SourceRefused { error, .. }
         | EngineError::SourceUnavailable { error, .. }
         | EngineError::SourceFailed { error, .. } => (source_kind(error).to_owned(), Some(error)),
-        EngineError::CopyNotUndone { error, .. } => cause_of(error),
+        // A create the destination answered malformed may have stored an item the copy has no
+        // id for. The store classes it by the malformed answer it wraps — refused, so no timer
+        // asks again and lands a second item beside the first — and its own words, which the
+        // reason carries, name the destination, the operation and the possible residue.
+        EngineError::CopyNotUndone { error, .. }
+        | EngineError::CopyDestinationUncertain { error, .. } => cause_of(error),
     }
 }
 
@@ -5954,6 +5959,15 @@ mod tests {
                 }),
                 left_behind: onetaskgraph_core::LeftBehind::new(id()),
                 refusal: source.clone(),
+            },
+            // So does a create whose malformed answer left the destination uncertain.
+            EngineError::CopyDestinationUncertain {
+                error: Box::new(EngineError::SourceRefused {
+                    name: "plans".into(),
+                    error: SourceError::Malformed { message: words() },
+                }),
+                destination: "plans".into(),
+                operation: "write_task".into(),
             },
         ];
         for failure in &failures {

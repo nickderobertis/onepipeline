@@ -717,7 +717,24 @@ resolver = "2"
 # `src/maintenance.rs` matches `IdentityOutcome::MaintenanceUnreadable` and reads
 # `SlotOutcome::Ran`'s `disk`, neither of which an earlier release defines.
 #
-# `onevcs` 0.52.0 is the floor because it is the release the declared-maintenance
+# `onevcs` 0.56.1 is the floor because it is the one `onevcs-testing` 0.19.11 requires
+# exactly, and that pair is the release carrying all eight fixes this host's dispatches
+# publish, resume, cancel and land through: per-invocation holder records, a green
+# resume, a resumed branch's identity, host-attested landings, a cancellable push and
+# a clean-base-merge continuation change behaviour only. Two change shapes this crate
+# reads. `boundary::Unavailability::HostVisibility` is a write held because the host did
+# not answer whether its destination is public — rate limited, failing or out of reach —
+# and its publication settles as that unavailable check, never as a disclosure:
+# `tests/e2e/publication_boundary.rs`'s
+# `a_publication_whose_host_rate_limits_the_visibility_read_settles_on_an_unavailable_check`
+# drives it. The same release asks for that visibility with `gh api --include`, which
+# `crates/testfakes`'s `fake-gh` answers status line first. And `WorkspaceCapacity`
+# carries `ineligible`, every idle slot a request cannot take and why, which
+# `src/pool.rs` names in a held node's `workspace-wait` — `tests/e2e/lifecycle.rs`'s
+# `a_node_held_beside_an_idle_slot_it_cannot_take_is_told_which_slot_and_why`. A
+# **requirement**, because `^0.52` admits no 0.56.x.
+#
+# `onevcs` 0.52.0 was the floor because it is the release the declared-maintenance
 # producer supplied for this crate's idle pool maintenance, the `onevcs.toml`
 # reading 0.50.0 brought. It also adds `SessionRequest::caller_merges_base`
 # (onevcs #434), which every request this crate builds sets `false`, so a
@@ -785,7 +802,7 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 oneagentgraph = "0.5.13"
-onevcs = "0.52.0"
+onevcs = "0.56.1"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is
@@ -1006,7 +1023,7 @@ oneharness-core = "0.28.2"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.19.4"
+onevcs-testing = "0.19.11"
 # The store, linked: `src/taskgraph.rs` says how the engine calls it. `-plugin-api` is
 # named for the values the store answers with, and `-local-md` for the plugin
 # `crates/testfakes` hosts in process.
@@ -1041,9 +1058,18 @@ onevcs-testing = "0.19.4"
 # 0.7.1 is also the release onetaskgraph's move onto `serde-saphyr` published; its
 # local-md source is what reads back and edits the run's write-back shadow documents
 # (`src/writeback.rs`).
-onetaskgraph-core = "=0.7.1"
-onetaskgraph-plugin-api = "=0.7.1"
-onetaskgraph-local-md = "=0.7.1"
+#
+# **0.7.2 says when a copy may have left an item behind**: a create the destination
+# answered malformed is `EngineError::CopyDestinationUncertain`, naming the destination
+# and the plugin method, because the plugin may have stored the item under an id the
+# copy never learned. `src/writeback.rs` classes it by the malformed answer it wraps, as
+# the store does — refused, so no timer creates a second item — and carries the store's
+# words into the line and the surface; `tests/e2e/store.rs`'s
+# `a_create_the_destination_stored_and_answered_malformed_names_the_destination_and_its_residue`
+# drives it. The variant is new, so a lower pin does not compile.
+onetaskgraph-core = "=0.7.2"
+onetaskgraph-plugin-api = "=0.7.2"
+onetaskgraph-local-md = "=0.7.2"
 # Test-support only: the budget checker's own library, at exactly the release `justfile`'s
 # `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
 onebudgetspec-core = "=0.1.5"

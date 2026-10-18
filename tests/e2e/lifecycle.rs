@@ -8527,6 +8527,110 @@ fn first_seq(world: &World, run: &str, kind: &str, node: &str) -> u64 {
         .unwrap_or_else(|| panic!("no {kind} for {node}\n{}", why(world, run)))
 }
 
+/// A node whose identity has an idle slot it cannot take is held, and its
+/// `workspace-wait` names that slot and the sibling's reason beside the numbers.
+///
+/// Against the real linked `onevcs`: the identity keeps one warm slot, and a session
+/// opened from a second registered checkout of it and closed again leaves that slot
+/// idle and bound to that checkout. A node lending from the first checkout is the one
+/// request the slot never takes, so the reading counts nothing idle and admits no
+/// session — and the surface says why rather than leaving a reader to wonder why an
+/// idle slot did not take it. Raising the overflow lets it go.
+#[test]
+fn a_node_held_beside_an_idle_slot_it_cannot_take_is_told_which_slot_and_why() {
+    let world =
+        World::new("lifecycle-pool-ineligible").with_env("ONEPIPELINE_WORKSPACE_POLL_SECONDS", "1");
+    let repo = world.repository("local-direct", &[]);
+    pool_one_slot_no_overflow(&world);
+    let primary = world.root.join("primary");
+    crate::harness::git(
+        &world,
+        &world.root,
+        &["clone", &repo.origin.to_string_lossy(), "primary"],
+    );
+    world.register(&primary, Some("https://github.com/owner/service.git"));
+    // The one slot, bound to `primary` by the session placed on it from there.
+    world.on_onevcs(|| {
+        let vcs = onevcs::Providers::real().vcs;
+        let session = vcs
+            .open_session(onevcs::SessionRequest {
+                repo: SERVICE_IDENTITY.to_owned(),
+                branch: None,
+                branch_name: None,
+                branch_prefix: None,
+                base: None,
+                execution_checkout: Some("primary".to_owned()),
+                pool: None,
+                overflow: None,
+                labels: Default::default(),
+                refuse_conflicts: false,
+                caller_merges_base: false,
+            })
+            .expect("a session opens from the second checkout");
+        vcs.close_session(&session.token)
+            .expect("the session closes and its slot is idle");
+    });
+
+    world.script("service.work", "the worker wrote this\n");
+    let path = world.plan(
+        "ineligible",
+        &plan_of("ineligible", vec![lifecycle("service", &[])]),
+    );
+    world.run(&["start", &path, "--detach"]).exited(0);
+    let run = "ineligible".to_string();
+
+    let waits = |world: &World| -> Vec<String> {
+        world
+            .events_of(&run, "planner-surface-queued")
+            .into_iter()
+            .filter(|event| event["payload"]["kind"] == "workspace-wait")
+            .filter_map(|event| event["payload"]["message"].as_str().map(str::to_owned))
+            .collect()
+    };
+    world.until("the node's wait to be surfaced", |world| {
+        !waits(world).is_empty()
+    });
+    let said = waits(&world).remove(0);
+    let primary_named = std::fs::canonicalize(&primary).expect("the second checkout exists");
+    for names in [
+        "node 'service' is held".to_owned(),
+        format!("'{SERVICE_IDENTITY}' workspace admits no more sessions"),
+        "pool 1 (1 slot(s): 0 idle, 0 maintaining), overflow 0 with 0 in use".to_owned(),
+        format!(
+            "the idle slot(s) it cannot take are slot 1: bound to another execution checkout, {}",
+            primary_named.display()
+        ),
+    ] {
+        assert!(
+            said.contains(&names),
+            "the surface does not say {names:?}: {said}"
+        );
+    }
+    assert!(
+        dispatches_of(&world, &run, "service").is_empty(),
+        "the node was dispatched into a slot it cannot take\n{}",
+        why(&world, &run)
+    );
+
+    // Room past the pool lets it go, on the next paced read.
+    std::fs::write(
+        world.onevcs_home().join("workspaces.yml"),
+        "version: 1\nrules:\n  - match: {host: github.com, owner: owner, name: service}\n    \
+         pool: 1\n    overflow: 1\n",
+    )
+    .expect("the workspaces file is rewritten");
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+    let result = world.run_json(&run, "result.json");
+    assert_eq!(
+        result["state"],
+        "complete",
+        "{result}\n{}",
+        why(&world, &run)
+    );
+}
+
 /// A pooled identity that admits one session holds the second node that would
 /// open one, and lets it go when the first's session closes.
 ///
