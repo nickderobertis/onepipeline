@@ -2920,11 +2920,26 @@ impl World {
         &self,
         patience: std::time::Duration,
         what: &str,
+        ready: impl FnMut(&Self) -> bool,
+    ) {
+        self.until_within_on(&RealClock::started(), patience, what, ready);
+    }
+
+    /// [`until_within`](Self::until_within), with its deadline read from `clock`: a
+    /// journey proving a wait's budget passes a [`ManualClock`] and moves its time itself.
+    pub fn until_within_on(
+        &self,
+        clock: &dyn Clock,
+        patience: std::time::Duration,
+        what: &str,
         mut ready: impl FnMut(&Self) -> bool,
     ) {
-        if waited_for(patience, std::time::Duration::from_millis(250), || {
-            ready(self)
-        }) {
+        if waited_on(
+            clock,
+            patience,
+            std::time::Duration::from_millis(250),
+            || ready(self),
+        ) {
             return;
         }
         panic!(
@@ -3589,16 +3604,88 @@ pub fn settling_patience(plan: &Value) -> std::time::Duration {
 fn waited_for(
     duration: std::time::Duration,
     interval: std::time::Duration,
+    ready: impl FnMut() -> bool,
+) -> bool {
+    waited_on(&RealClock::started(), duration, interval, ready)
+}
+
+fn waited_on(
+    clock: &dyn Clock,
+    duration: std::time::Duration,
+    interval: std::time::Duration,
     mut ready: impl FnMut() -> bool,
 ) -> bool {
-    let deadline = std::time::Instant::now() + duration;
-    while std::time::Instant::now() < deadline {
+    let deadline = clock.elapsed() + duration;
+    while clock.elapsed() < deadline {
         if ready() {
             return true;
         }
-        std::thread::sleep(interval);
+        clock.pause(interval);
     }
     false
+}
+
+/// The time a wait reads its deadline against.
+pub trait Clock: Sync {
+    /// How long the wait has been running, by this clock.
+    fn elapsed(&self) -> std::time::Duration;
+    /// Let `interval` go by between looks.
+    fn pause(&self, interval: std::time::Duration);
+}
+
+/// The wall clock every wait in the suite runs on.
+pub struct RealClock(std::time::Instant);
+
+impl RealClock {
+    pub fn started() -> Self {
+        Self(std::time::Instant::now())
+    }
+}
+
+impl Clock for RealClock {
+    fn elapsed(&self) -> std::time::Duration {
+        self.0.elapsed()
+    }
+
+    fn pause(&self, interval: std::time::Duration) {
+        std::thread::sleep(interval);
+    }
+}
+
+/// A clock whose time moves only when the journey moves it.
+///
+/// A wait on it still looks at its predicate every real interval, so the work it waits on
+/// is observed as it happens; only its deadline is the journey's to spend. Each move opens
+/// a new reading, and [`read_again`](Self::read_again) says whether the wait has read the
+/// moved time and then looked once more — that is, read it and not given up.
+#[derive(Default)]
+pub struct ManualClock {
+    time: std::sync::Mutex<(std::time::Duration, u32)>,
+}
+
+impl ManualClock {
+    /// Move the clock on by `by`.
+    pub fn advance(&self, by: std::time::Duration) {
+        let mut time = self.time.lock().expect("the clock is readable");
+        *time = (time.0 + by, 0);
+    }
+
+    /// Whether the wait has read the time since the last move at least twice.
+    pub fn read_again(&self) -> bool {
+        self.time.lock().expect("the clock is readable").1 >= 2
+    }
+}
+
+impl Clock for ManualClock {
+    fn elapsed(&self) -> std::time::Duration {
+        let mut time = self.time.lock().expect("the clock is readable");
+        time.1 = time.1.saturating_add(1);
+        time.0
+    }
+
+    fn pause(&self, interval: std::time::Duration) {
+        std::thread::sleep(interval);
+    }
 }
 
 /// Move `from` onto `to`, waiting out a holder that has not let go of it yet.
