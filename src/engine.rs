@@ -2761,8 +2761,11 @@ fn wait_for_work(
                 // message is about to cause. Narration and settlement share this
                 // channel, so taking one message a pass made a settlement wait a
                 // whole pass for every envelope queued ahead of it.
+                let mut drain_started = Instant::now();
+                if held_at_push(&message)? {
+                    drain_started = Instant::now();
+                }
                 let mut batch = vec![message];
-                let drain_started = Instant::now();
                 while drain_started.elapsed() < DRAIN_WINDOW {
                     // One arm for both refusals: nothing is queued, or nothing
                     // ever will be again. The second is answered one pass later,
@@ -2770,6 +2773,9 @@ fn wait_for_work(
                     let Ok(message) = rx.try_recv() else {
                         break;
                     };
+                    if held_at_push(&message)? {
+                        drain_started = Instant::now();
+                    }
                     batch.push(message);
                 }
                 return Ok(Some(batch));
@@ -2793,6 +2799,23 @@ fn wait_for_work(
             return Ok(Some(Vec::new()));
         }
     }
+}
+
+/// Whether `message` is a relayed push the private ordering gate held the loop on —
+/// see [`crate::ordering::push_received`] — so the drain after it starts again from the
+/// release rather than from before the hold.
+fn held_at_push(message: &Message) -> Result<bool> {
+    let Message::Event(envelope) = message else {
+        return Ok(false);
+    };
+    if envelope.source != crate::event::Source::Vcs || !crate::vcs::is_push(&envelope.kind) {
+        return Ok(false);
+    }
+    envelope
+        .labels
+        .node
+        .as_deref()
+        .map_or(Ok(false), crate::ordering::push_received)
 }
 
 /// One reason the loop is not running a node it has not settled.
@@ -6911,17 +6934,6 @@ fn claim_placement_reads(
         })
         .map(|node| node.id.clone())
         .collect();
-    // llmlint: ignore-block[changed_behavior_has_e2e] the ordering this exists for — a
-    // restack's read claimed only after the parent republication that owed it settled — has
-    // no invocation that produces it on demand: a `rework` is refused while a draft stacked on
-    // it has a dispatch in flight, so that draft cannot be held across the republication, and
-    // which side of the settlement the claim falls on is decided only by when the relayed push
-    // reaches the driver's next pass, two threads no journey controls. Every e2e restack runs
-    // this collection and its consumption on whichever ordering the scheduler gives —
-    // `readjust::deferred_republications_are_read_by_the_next_trigger_green_or_repaired_red`
-    // failed on the late one in CI before it — and the two halves are held deterministically by
-    // `engine::tests::a_restack_s_claimed_read_defers_the_pushed_head_once` and
-    // `readjust::tests::a_verdict_on_a_deferred_head_is_left_for_the_next_trigger`.
     let mut onto = BTreeSet::new();
     wanted.extend(
         crate::stack::restacks_owed(state, statuses, &|node| {
@@ -6950,7 +6962,6 @@ fn claim_placement_reads(
     }
     state.readjust.placed.extend(fresh);
     state.readjust.deferred = onto;
-    // llmlint: ignore-end[changed_behavior_has_e2e]
     true
 }
 
