@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 
 use crate::dispatch::OBSERVER_RESTARTS_ENV;
 use crate::harness::{
-    agent, end_driver, end_lock_holder, human, plan_of, process_ended, rows, still_running_as,
-    World, NOTHING_DRIVING, REFUSED,
+    agent, end_driver, end_lock_holder, human, plan_of, process_ended, rows, World,
+    NOTHING_DRIVING, REFUSED,
 };
 // The journeys that end a process, and those that assert against a process table,
 // are `#[cfg(unix)]`, so what only they reach for is imported on the same terms.
@@ -1356,9 +1356,9 @@ fn a_detached_adoption_whose_driver_dies_is_refused_with_what_that_driver_said()
     });
     let died = world.run_json(&run, "launch.json")["pid"].clone();
     assert_eq!(died, json!(driver));
-    // `PAUSED` is read off the record a driver writes as it lets go, which it
-    // writes while it still holds the run: the lock it removes on release is
-    // the file this journey is about to break, so it waits for the process.
+    // `PAUSED` is read once the driver has released the lock this journey is
+    // about to break; it waits for the process too, so nothing the driver does
+    // on its way out lands after the break.
     world.until("the driver to exit", |_| {
         crate::harness::process_ended(driver)
     });
@@ -1441,15 +1441,13 @@ fn identity_in(record: &Value) -> Identity {
     )
 }
 
-/// An observed run paused on a person's approval, read once its first driver is
-/// gone: the run each ordering below adopts, and the driver it was taken from.
+/// An observed run paused on a person's approval, read once its first driver has
+/// let go of it: the run each ordering below adopts, and the driver it was taken
+/// from.
 ///
 /// `PAUSED` is the word for a paused run nothing drives, so it is read only once
-/// that driver has stopped writing to the run. A driver's scratch record is
-/// written before it lets go; read as its letting go, the run read `PAUSED` while
-/// the driver still held the lock and its observer watch was still writing the
-/// launch record — and whatever a journey arranged on the run in that window was
-/// written over before the adoption ever read it.
+/// that driver has released the run's lock — see
+/// [`a_run_reads_let_go_only_once_its_driver_has_released_it`].
 fn paused_and_observed(world: &World, name: &str) -> (String, Identity) {
     let run = start_detached_observed(world, name, vec![human("approve", &[])]);
     world.until("the driver to exit", |world| {
@@ -1459,52 +1457,58 @@ fn paused_and_observed(world: &World, name: &str) -> (String, Identity) {
     (run, displaced)
 }
 
-/// A run reads `PAUSED` — paused, and nothing driving it — only once the driver
-/// that paused it has stopped running, and with it stopped writing.
+/// A run reads as let go — nothing driving it, and so `PAUSED` — only once its
+/// driver has released the run's lock, not once it has written its last word.
 ///
-/// Every observer graph this run starts answers late, so its driver's watch is
-/// mid-restart when the run pauses: the driver journals its scratch record and
-/// its `driver-exited`, lets go of the lock, and then goes on running until that
-/// restart returns and it writes the launch record once more. A run read
-/// `PAUSED` in that window is a run an operator is told to adopt or repair while
-/// its driver is still writing over it — the window both detached-adoption
-/// journeys above lost their arrangement in on a slow host.
+/// A driver journals its scratch record and its `driver-exited` inside its final
+/// handover, *before* it releases the lock. Read as let go there, the run told
+/// an operator to adopt it while its lock was still held: the adoption's own
+/// driver was then refused by that lock, and a fault arranged on the lock was
+/// removed by the release that followed. The failpoint holds the driver inside
+/// that window, so the run is read there every time rather than once in a while.
 #[test]
-fn a_run_reads_paused_only_once_the_driver_that_paused_it_has_stopped() {
-    let world = World::new("driver-paused-once-gone");
-    world.script("run.start-after", "3000");
-    let run = start_detached_observed(&world, "paused-once-gone", vec![human("approve", &[])]);
-    let launch = world.run_json(&run, "launch.json");
-    let pid = launch["pid"]
-        .as_u64()
-        .and_then(|pid| u32::try_from(pid).ok())
-        .expect("the launch record names its driver");
-    let started = launch["started"]
-        .as_str()
-        .expect("the launch record stamps its driver")
-        .to_owned();
+fn a_run_reads_let_go_only_once_its_driver_has_released_it() {
+    let world = World::new("driver-let-go-once-released");
+    let run = "releasing";
+    let path = world.plan(run, &plan_of(run, vec![human("approve", &[])]));
+    // llmlint: ignore-block[tests_mirror_real_usage] an ordering failpoint holds the real
+    // driver between its last record and its release, which no user-facing input can place.
+    // The launch, the run, every reading of it and the adoption are the real CLI's own.
+    let release = crate::harness::Rendezvous::failpoint();
+    let mut start = world.cmd(&["start", &path, "--detach"]);
+    start.env("ONEPIPELINE_TEST_RELEASE_GATE", release.address());
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    world.run_on(start, "start --detach").exited(0);
+    let held = release.arrived();
 
-    world.until("the driver to journal its ending", |world| {
-        !world.events_of(&run, "driver-exited").is_empty()
-    });
-    let mut read_while_running = false;
-    world.until("the run to read PAUSED", |world| {
-        let paused = world.run(&["status", &run]).stdout.contains("PAUSED");
-        // Asked after the reading, so a driver running now was running while
-        // the run was read.
-        let running = still_running_as(pid, &started);
-        assert!(
-            !(paused && running),
-            "the run read PAUSED while its driver, pid {pid}, was still running:\n{}",
-            world.dump()
-        );
-        read_while_running |= running;
-        paused
-    });
-    assert!(
-        read_while_running,
-        "the driver had stopped before the run was first read, so nothing here was proved"
+    // Its last word is written and its lock is still held: the run is driven.
+    assert_eq!(world.events_of(run, "driver-exited").len(), 1);
+    assert_eq!(
+        world.run_json(run, "owner.lock")["pid"],
+        world.run_json(run, "launch.json")["pid"],
+        "the held driver no longer holds the run"
     );
+    let status = world.run(&["status", run, "--json"]);
+    status.exited(0).out_has("\"driven\":true");
+    assert!(
+        !status.stdout.contains("PAUSED"),
+        "the run read PAUSED while its driver held its lock:\n{}",
+        status.stdout
+    );
+    world
+        .run(&["adopt", run, "--detach"])
+        .exited(REFUSED)
+        .err_has("still being driven");
+
+    // Released, it is let go of — while the driver is still running, on its way out.
+    held.release();
+    world.until("the driver to release the run", |world| {
+        world.run(&["status", run]).stdout.contains("PAUSED")
+    });
+    world
+        .run(&["status", run, "--json"])
+        .exited(0)
+        .out_has("\"driven\":false");
 }
 
 /// The run a refused or dead adoption leaves: the record still names the driver

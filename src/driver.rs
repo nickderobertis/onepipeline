@@ -3023,6 +3023,7 @@ fn validate_and_displace_for_adoption(paths: &RunPaths) -> Result<(LaunchRecord,
         record.recorded_host(),
         record.driver_pid(),
         view.state.let_go_by.as_ref(),
+        paths,
     ) {
         displace_the_undriven_driver(&record);
     }

@@ -485,17 +485,6 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         eprintln!("oneagentgraph: invalid config: the graph names a member that does not exist");
         return invalid_config();
     }
-    // The same wait ending in a start rather than a refusal: a graph that answers
-    // late but answers, so a journey can hold whoever is waiting on it past any
-    // moment it might have decided early.
-    if let Some(delay) = fake::node_script(dir, "run", "start-after") {
-        let Ok(millis) = delay.trim().parse::<u64>() else {
-            fake::fail(&format!(
-                "run.start-after holds {delay:?}, which is not a number of milliseconds"
-            ));
-        };
-        std::thread::sleep(std::time::Duration::from_millis(millis));
-    }
 
     // A graph that neither announces itself nor exits — the third answer, and
     // the only one a launcher cannot wait out. The rendezvous is bounded by the

@@ -9385,7 +9385,7 @@ fn the_grouped_listing_is_what_the_contract_states() {
 
     // Rows over the checked-in golden document, so a row here is a document this
     // build reads rather than one assembled by hand.
-    let golden: RunSummary = serde_json::from_str(include_str!("golden/run-summary-v11.json"))
+    let golden: RunSummary = serde_json::from_str(include_str!("golden/run-summary-v10.json"))
         .expect("the golden reads");
     let row = |run: &str, project: &str, name: Option<&str>, at: Option<u64>| RunSummary {
         run_id: run.into(),

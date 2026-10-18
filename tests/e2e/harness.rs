@@ -5495,12 +5495,6 @@ pub fn end_lock_holder(world: &World, run: &str) -> u32 {
     pid
 }
 
-/// Whether the process a record stamped `started` for is still running at `pid`
-/// — the same proof [`end_driver`] asks, without the signal.
-pub fn still_running_as(pid: u32, started: &str) -> bool {
-    !started.is_empty() && start_stamp(pid).as_deref() == Some(started)
-}
-
 /// When the process at `pid` started, spelled the way the engine stamps a launch
 /// record, or nothing for no such process.
 ///
