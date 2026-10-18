@@ -463,8 +463,8 @@ fn answer_owed(
     Ok(())
 }
 
-/// Journal a drafting that posted nothing, and surface it once per set of owed
-/// revisions: non-blocking, since the next pass drafts it again.
+/// Journal a drafting that posted nothing, and surface it once per node, set of
+/// comment ids and ending: non-blocking, since the next pass drafts it again.
 fn not_drafted(
     paths: &RunPaths,
     journal: &mut Journal,
