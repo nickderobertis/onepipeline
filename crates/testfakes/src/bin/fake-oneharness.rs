@@ -1522,11 +1522,6 @@ fn turn_gates(dir: &std::path::Path, prompt: &str) -> Result<Option<[String; 2]>
                         .chars()
                         .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
             });
-        // llmlint: ignore[changed_behavior_has_e2e] this refuses a test author's own
-        // `turn.gates` script at this double's boundary, not behaviour a user of onepipeline
-        // can reach; the well-formed path is driven by the per-receiver journeys in
-        // `tests/note`, and a journey writing a malformed line would prove this parser and
-        // not the product.
         let Some((marker, name)) = named else {
             return Err(format!(
                 "turn.gates holds {line:?}, which is not `<marker> <name>` with a name of \
