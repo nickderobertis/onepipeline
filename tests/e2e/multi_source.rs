@@ -408,6 +408,19 @@ fn a_settlement_wait_outlasts_one_step_while_each_dispatch_on_a_cross_source_cha
     let mut first = Some(holds[0].arrived());
     std::thread::scope(|scope| {
         let waiter = scope.spawn(|| until_settled_on(&world, &clock, name, &plan));
+        // Dropped before the scope joins the wait, on a failure here as on success: the wait
+        // ends at its next look rather than holding the scope on a clock nothing moves.
+        let _expiry = clock.expiring();
+        // The wait sets its deadline at its first read, and has looked again by the second:
+        // every move below is spent from that deadline, not before it was set.
+        assert!(
+            waited(|| clock.read_again() || waiter.is_finished()),
+            "the settlement wait never started reading its clock"
+        );
+        assert!(
+            !waiter.is_finished(),
+            "the settlement wait ended before any time was spent"
+        );
         let mut spent = std::time::Duration::ZERO;
         for (at, hold) in holds.iter().enumerate() {
             let held = first.take().unwrap_or_else(|| hold.arrived());

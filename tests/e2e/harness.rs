@@ -3615,7 +3615,7 @@ fn waited_on(
     interval: std::time::Duration,
     mut ready: impl FnMut() -> bool,
 ) -> bool {
-    let deadline = clock.elapsed() + duration;
+    let deadline = clock.elapsed().saturating_add(duration);
     while clock.elapsed() < deadline {
         if ready() {
             return true;
@@ -3667,12 +3667,31 @@ impl ManualClock {
     /// Move the clock on by `by`.
     pub fn advance(&self, by: std::time::Duration) {
         let mut time = self.time.lock().expect("the clock is readable");
-        *time = (time.0 + by, 0);
+        *time = (time.0.saturating_add(by), 0);
     }
 
     /// Whether the wait has read the time since the last move at least twice.
     pub fn read_again(&self) -> bool {
         self.time.lock().expect("the clock is readable").1 >= 2
+    }
+
+    /// A guard that, once dropped, moves the clock past any deadline — so a wait on it
+    /// ends, rather than holding the scope its journey runs it in when that journey
+    /// fails with the clock still.
+    pub fn expiring(&self) -> Expiry<'_> {
+        Expiry(self)
+    }
+}
+
+/// [`ManualClock::expiring`]'s guard.
+pub struct Expiry<'a>(&'a ManualClock);
+
+impl Drop for Expiry<'_> {
+    fn drop(&mut self) {
+        // Poisoned only by a panic while the lock was held, which nothing here makes.
+        if let Ok(mut time) = self.0.time.lock() {
+            *time = (std::time::Duration::MAX, 0);
+        }
     }
 }
 
