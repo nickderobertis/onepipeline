@@ -1073,6 +1073,18 @@ impl Writeback {
         lock.lock().is_ok_and(|pending| pending.unlanded())
     }
 
+    /// Whether a projection carrying `node`'s settlement has landed on the store: every later
+    /// one carries it too, so the newest that landed answers.
+    pub(crate) fn has_landed_settlement(&self, node: &str) -> bool {
+        let (lock, _) = &*self.pending;
+        lock.lock().is_ok_and(|pending| {
+            pending
+                .last_success
+                .as_ref()
+                .is_some_and(|landed| landed.settlements.contains_key(node))
+        })
+    }
+
     /// Whether another run took the project over, so this driver writes nothing more to it.
     pub(crate) fn is_retired(&self) -> bool {
         self.board
@@ -1759,6 +1771,10 @@ fn worker(
                 || member_sources(&store, &snapshot.project),
             )
         });
+        // A failpoint, so a journey can hold one settlement off the store.
+        if let Err(error) = crate::ordering::settlement_projecting(snapshot.settlements.keys()) {
+            eprintln!("{error}");
+        }
         let landing = landing_lock(&run_dir).and_then(|file| file.lock().map(|()| file));
         // llmlint: ignore-block[changed_behavior_has_e2e] a run directory the driver cannot open a
         // file in is one it cannot write this attempt's record into either, a line below; the
