@@ -34,6 +34,16 @@ const SERVICE_IDENTITY: &str = "github.com/owner/service";
 /// something a journey can wait for rather than a thing that happens next week.
 const FAST_PACE: &str = "1";
 
+/// A pace for a journey that asserts on the journal after its run has closed.
+///
+/// A driver that closes while a sweep is in flight records that sweep as cut
+/// short, so such a journey needs its release to land, and its node to finish,
+/// before the next sweep falls due. Under [`FAST_PACE`] that window is the second
+/// less the sweep it follows, and on a Windows runner a release took all of it:
+/// run 39129002719 journaled a third sweep begun as the node finished. Three
+/// seconds leaves that latency twice over.
+const CLOSING_PACE: &str = "3";
+
 /// A world whose driver names its pool-maintenance schedule and reports what its
 /// reconcile loop did.
 ///
@@ -2174,7 +2184,7 @@ fn a_slot_that_grew_or_could_not_be_measured_frees_nothing_in_the_summary() {
 // src/maintenance.rs journey has no narrower Nx edge: noteJourneySource includes src/**/*.
 #[test]
 fn a_sweep_over_identities_that_declare_nothing_journals_nothing() {
-    let world = pooled_world("maintenance-undeclared", Some(FAST_PACE));
+    let world = pooled_world("maintenance-undeclared", Some(CLOSING_PACE));
     let service = world.repository("local-direct", &[]);
     let other = world.extra_repository("other");
     sized_pools(&world, &[("service", 1, None), ("other", 1, None)]);
