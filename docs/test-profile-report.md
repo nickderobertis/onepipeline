@@ -993,6 +993,11 @@ Five other journeys in `tests/e2e/maintenance.rs` assert an empty journal after 
 
 ## Checks
 
+**On d085c0d.** The judged lint on 9c102f4 reported one `changed_behavior_has_e2e` finding: nothing held a record's persisted `unattributed_s` to what the writer subtracts. `profiling::a_records_inclusive_and_background_figures_are_the_ones_the_test_measured` now holds it to the record's `wall_s` less every category's own `s`, within a microsecond. It failed as intended at `tests/e2e/profiling.rs:405` when the writer persisted the whole wall clock as unattributed; that was reverted. Re-run on d085c0d:
+- the 22 e2e `profiling::` journeys: 22 of 22 passed;
+- `cargo fmt --check` and `cargo clippy --test e2e --locked -D warnings`: clean;
+- `just lint-llm-diff origin/main`: 39 rules, 21 passed, 0 failed.
+
 **On 6c4a488** (the merge of main at 54cfa4a, and the maintenance pace):
 - **The merge.** It kept both sides of `tests/ci_workflows.rs`: main's sharded-Windows test and this branch's two profile-record tests. `ci_workflows::every_test_leg_keeps_the_profile_records_from_where_the_harness_writes_them` now renders each leg's artifact name and requires them distinct. Against the merged `ci.yml`, before the rename, it failed as intended: `["test-profile-gate", "test-profile-windows-latest", "test-profile-windows-latest", "test-profile-macos-latest"]`.
 - `cargo test --test ci_workflows`: 11 of 11 passed, on 997aaa8.
