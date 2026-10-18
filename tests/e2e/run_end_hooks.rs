@@ -43,6 +43,13 @@ pub(crate) const RECORD_ENV: &str = "ONEPIPELINE_E2E_HOOK_RECORD";
 /// asks what the default *is* names none, and the product default is untouched.
 pub(crate) const HOOK_TIMEOUT: &str = "120";
 
+/// The shorter timeout the one journey about the timeout names: the hook it ends
+/// must first have said everything it says before its hold, since the journey reads
+/// that back. One second was not that on Windows — run 39066551450 ended the
+/// fixture at `said line 24` — and thirty still ends its 300-second hold well inside
+/// that journey's 120-second bound on the whole launch.
+const OUTLIVED_TIMEOUT: &str = "30";
+
 fn both_hooks_under_timeout(hook: &str) -> [&str; 6] {
     [
         "--success-hook",
@@ -477,7 +484,13 @@ fn a_hook_that_fails_cannot_start_or_outlives_its_timeout_changes_nothing_the_ru
             HOOK_TIMEOUT,
             None,
         ),
-        ("outlives", "timed-out", hook.as_str(), "1", None),
+        (
+            "outlives",
+            "timed-out",
+            hook.as_str(),
+            OUTLIVED_TIMEOUT,
+            None,
+        ),
     ] {
         let extra = [
             "--success-hook",

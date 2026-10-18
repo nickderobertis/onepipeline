@@ -211,5 +211,8 @@ def publish(path, text):
 
 
 server = HTTPServer(("127.0.0.1", 0), Handler)
+# Published by a rename, so a reader that sees `endpoint` sees the whole address: a
+# file written in place exists, empty, before its contents land, and a journey that
+# read it then sent its first request to a bare path.
 publish(root / "endpoint", f"http://127.0.0.1:{server.server_port}")
 server.serve_forever()

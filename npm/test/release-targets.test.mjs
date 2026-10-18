@@ -20,7 +20,7 @@
 // itself is what would then be under test; the real ones are asked by
 // `tests/smoke/release_probe.rs`, in the tier that is not offline.
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import {
   mkdirSync,
@@ -202,18 +202,23 @@ function objectLiteral(source, name) {
   return source.slice(start, end);
 }
 
-function workflowTargets(workflow, job) {
-  const start = workflow.indexOf(`\n  ${job}:\n`);
-  assert.notEqual(start, -1, `no \`${job}\` job in release.yml`);
-  const rest = workflow.slice(start + 1);
-  const nextJob = rest.slice(1).search(/\n {2}[a-z][a-z0-9-]*:\n/);
-  const body = nextJob === -1 ? rest : rest.slice(0, nextJob + 1);
-  return [...body.matchAll(/^\s*- target: (\S+)$/gm)].map((match) => match[1]);
+/// The targets release.yml's build jobs build: each one's recipe plan.
+function builtTargets() {
+  return ["linux", "macos", "windows"].flatMap(
+    (platform) =>
+      JSON.parse(
+        execFileSync("python3", ["release/release.py", "plan", platform], {
+          cwd: REPO_ROOT,
+          encoding: "utf8",
+        }),
+      ).targets,
+  );
 }
 
 /**
- * How each registry is *reached* by the release workflow, and what to look for
- * to know that it still is.
+ * How each registry is *reached* by the release — release.yml and the
+ * release/release.py its recipes run — and what to look for to know that it
+ * still is.
  *
  * A publish step is what makes a name a name this repository publishes: with the
  * step gone, the name is not published and a target declaring it is stale. Each
@@ -221,15 +226,16 @@ function workflowTargets(workflow, job) {
  * publishing action — rather than a job name a rename would quietly break.
  */
 const PUBLISH_STEPS = {
-  crate: { marker: "cargo publish", where: "the crates.io publish step" },
-  pypi: { marker: "pypa/gh-action-pypi-publish", where: "the PyPI publish action" },
-  npm: { marker: "scripts/publish-npm.sh", where: "the npm publish step" },
+  crate: { marker: "'cargo', 'publish'", where: "the crates.io publish step" },
+  pypi: { marker: "'uv', 'publish'", where: "the PyPI publish step" },
+  npm: { marker: "'publish-npm.sh'", where: "the npm publish step" },
 };
 
 function releaseConfiguration() {
   const cargo = read("Cargo.toml");
   return {
-    workflow: read(".github", "workflows", "release.yml"),
+    workflow: read(".github", "workflows", "release.yml") + read("release", "release.py"),
+    built: builtTargets(),
     cargo,
     members: Object.fromEntries(
       workspaceMembers(cargo).map((member) => [
@@ -272,7 +278,7 @@ function publishedNames(config) {
         ),
       ].map(([, triple, platform, arch]) => [triple, `onepipeline-cli-${platform}-${arch}`]),
     );
-    for (const triple of workflowTargets(config.workflow, "build-npm")) {
+    for (const triple of config.built) {
       const name = facts.get(triple);
       assert.ok(name, `scripts/npm-build.mjs names no npm package for the target ${triple}`);
       published.npm.push(name);

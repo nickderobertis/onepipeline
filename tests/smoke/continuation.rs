@@ -42,6 +42,84 @@ const CLAIM_INTERVAL_SECONDS: &str = "10";
 /// How long a step may take against the real services before the journey gives up on it.
 const PATIENCE: Duration = Duration::from_secs(120);
 
+/// How often a wait reads the hosts and the services again.
+const POLL: Duration = Duration::from_secs(3);
+
+// What bounds a lifecycle node's settlement here. Every driver runs on the production
+// publication settings — `onepipeline` below removes any override of them from its
+// environment — so the documented values are the defaults, restated where the crate that
+// owns them keeps them private.
+
+/// onevcs's `DEFAULT_DRAFT_GRACE_SECONDS` (`ONEVCS_DRAFT_CHECKS_GRACE_SECONDS`,
+/// `onevcs` 0.52 `src/gh.rs`): "How long a draft waits for any of its required checks to run
+/// before it is lifted". **Documented.** A host that says completely that nothing is required
+/// is green at once — `settle_draft`: "A host that says, completely, that nothing is required
+/// is green at once: no grace window and no warning" — and one that will not say waits this.
+const DRAFT_GRACE: Duration = Duration::from_secs(120);
+
+/// onevcs's `DEFAULT_CHECKS_POLL_SECONDS` (`ONEVCS_CHECKS_POLL_SECONDS`, the same file): how
+/// long the watch sleeps between two readings of the host, which it can sleep once past the
+/// grace before it reads the elapsed window. **Documented.**
+const CHECKS_POLL: Duration = Duration::from_secs(30);
+
+/// What one publication's calls to git and GitHub — the session, the push, the change
+/// request's opening and the reads around them — are allowed beyond its watch.
+/// **Discretionary**: neither the contract nor `onevcs` bounds any of those calls, so this is
+/// the journey's allowance for the real services, sized from passing runs, where a stacked
+/// node's change request opens about ten seconds after its parent's.
+const PUBLICATION_CALLS: Duration = Duration::from_secs(30);
+
+/// How long the stacked node may take, from its turn, to settle on **one** publication: the
+/// documented bound of one change-open publication on a repository with no required checks
+/// ([`DRAFT_GRACE`] and one [`CHECKS_POLL`]), plus the discretionary [`PUBLICATION_CALLS`].
+///
+/// It is not the engine's bound on the node's settlement. Under the production settings the
+/// contract allows a failing publication `ONEPIPELINE_PUBLICATION_ATTEMPTS` (3) dispatches,
+/// each read up to `ONEPIPELINE_MERGE_PATH_READS` (3) times with a watch of up to
+/// `ONEVCS_CHECKS_TIMEOUT_SECONDS` (3600s) — about nine hours — and no runner waits that out.
+/// So a path that needs a retry is not waited for: [`retried`] fails the wait at once,
+/// naming what the hosts recorded.
+fn settlement_bound() -> Duration {
+    DRAFT_GRACE + CHECKS_POLL + PUBLICATION_CALLS
+}
+
+/// The settings a driver here would otherwise read from whoever runs the journey, removed
+/// so it publishes on the production defaults [`settlement_bound`] is written against.
+const PUBLICATION_SETTINGS: [&str; 6] = [
+    "ONEPIPELINE_PUBLICATION_ATTEMPTS",
+    "ONEPIPELINE_MERGE_PATH_READS",
+    "ONEPIPELINE_MERGE_PATH_BACKOFF_SECONDS",
+    "ONEVCS_CHECKS_TIMEOUT_SECONDS",
+    "ONEVCS_CHECKS_POLL_SECONDS",
+    "ONEVCS_DRAFT_CHECKS_GRACE_SECONDS",
+];
+
+/// How `node`'s publication went past one attempt on `world`, if it did: dispatched again
+/// after a failed publication, or published again to re-read its merge path — either way a
+/// path [`settlement_bound`] does not cover.
+fn retried(world: &World, run: &str, node: &str) -> Option<String> {
+    let dispatches: Vec<Value> = world
+        .events_of(run, "node-dispatched")
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == node)
+        .collect();
+    if dispatches.len() > 1 {
+        return Some(format!(
+            "{node} was dispatched again after its publication failed: {}",
+            dispatches.last().expect("more than one")["payload"]
+        ));
+    }
+    let pushes = world
+        .journal(run)
+        .into_iter()
+        .filter(|event| {
+            event["source"] == "vcs" && event["kind"] == "push" && event["labels"]["node"] == node
+        })
+        .count();
+    (pushes > 1)
+        .then(|| format!("{node} was published {pushes} times: its merge path is being read again"))
+}
+
 /// Every task of `project` as the shared store holds it.
 fn tasks(world: &World, project: &str) -> Vec<Value> {
     world.store_tasks(project)
@@ -462,6 +540,9 @@ fn onepipeline(world: &World, args: &[&str]) -> Command {
         .env("GH_TOKEN", gh_token())
         .env("GIT_CONFIG_GLOBAL", git_credentials(world))
         .env("ONEPIPELINE_CLAIM_INTERVAL_SECONDS", CLAIM_INTERVAL_SECONDS);
+    for setting in PUBLICATION_SETTINGS {
+        command.env_remove(setting);
+    }
     command
 }
 
@@ -478,34 +559,99 @@ fn said(output: &Output) -> String {
     )
 }
 
-/// Wait for `ready`, reading the real services, or fail naming `what`.
-fn until(what: &str, ready: impl FnMut() -> bool) {
-    until_or(what, ready, String::new);
+/// What a wait reads time on: the wall clock for the journey, and a counted one for the
+/// tests of the wait itself, so neither depends on how fast its host runs.
+trait Clock {
+    /// How long since the wait began.
+    fn elapsed(&self) -> Duration;
+    /// Let `step` pass.
+    fn sleep(&self, step: Duration);
 }
 
-/// [`until`], failing with what `why` says the hosts recorded.
-fn until_or(what: &str, mut ready: impl FnMut() -> bool, why: impl Fn() -> String) {
-    let deadline = Instant::now() + PATIENCE;
-    while Instant::now() < deadline {
-        if ready() {
-            return;
-        }
-        std::thread::sleep(Duration::from_secs(3));
+/// The wall clock, from the moment a wait began.
+struct Wall(Instant);
+
+impl Clock for Wall {
+    fn elapsed(&self) -> Duration {
+        self.0.elapsed()
     }
-    panic!("timed out waiting for {what}\n{}", why());
+
+    fn sleep(&self, step: Duration) {
+        std::thread::sleep(step);
+    }
 }
 
-/// What a run's driver said and what its projections recorded, for a failure to name.
+/// Wait on `clock` for `ready`, reading it every [`POLL`] and once more at `bound`, and
+/// answer a wait that ran out with `what` and what `why` says the hosts held then.
+fn waited(
+    clock: &dyn Clock,
+    what: &str,
+    bound: Duration,
+    mut ready: impl FnMut() -> bool,
+    why: impl FnOnce() -> String,
+) -> Result<(), String> {
+    loop {
+        if ready() {
+            return Ok(());
+        }
+        let elapsed = clock.elapsed();
+        if elapsed >= bound {
+            return Err(format!("timed out waiting {bound:?} for {what}\n{}", why()));
+        }
+        clock.sleep(POLL.min(bound - elapsed));
+    }
+}
+
+/// Wait up to `bound` for `ready`, reading the real services, or fail naming `what` and
+/// what `why` says the hosts recorded.
+fn until(what: &str, bound: Duration, ready: impl FnMut() -> bool, why: impl FnOnce() -> String) {
+    if let Err(timed_out) = waited(&Wall(Instant::now()), what, bound, ready, why) {
+        panic!("{timed_out}");
+    }
+}
+
+/// What every host of the journey made so far recorded for `run`, by name, for a failure
+/// to name — and which have not been made yet.
+fn hosts_held(hosts: &[(&str, Option<&World>)], run: &str) -> String {
+    hosts
+        .iter()
+        .map(|(name, world)| match world {
+            Some(world) => format!("the {name} host:\n{}", recorded(world, run)),
+            None => format!("the {name} host: not made yet, so it recorded nothing"),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// What a run's journal, its driver and its projections recorded, for a failure to name.
 fn recorded(world: &World, run: &str) -> String {
     let read = |file: &str| std::fs::read_to_string(world.run_file(run, file)).unwrap_or_default();
+    let journal: Vec<String> = world
+        .journal(run)
+        .iter()
+        .rev()
+        .take(20)
+        .map(|event| {
+            let payload = event["payload"].to_string();
+            let payload: String = payload.chars().take(400).collect();
+            format!(
+                "{} {} {} {payload}",
+                event["source"], event["kind"], event["labels"]
+            )
+        })
+        .collect();
     let log = read("driver.log");
     let tail: Vec<&str> = log.lines().rev().take(20).collect();
     let projections = read("writeback-projections.jsonl");
     let last: Vec<&str> = projections.lines().rev().take(5).collect();
+    let result = read("result.json");
     format!(
-        "driver.log, newest first:\n{}\nprojections, newest first:\n{}",
+        "journal, newest first:\n{}\ndriver.log, newest first:\n{}\nprojections, newest \
+         first:\n{}\nresult.json: {}",
+        journal.join("\n"),
         tail.join("\n"),
-        last.join("\n")
+        last.join("\n"),
+        if result.is_empty() { "none" } else { &result }
     )
 }
 
@@ -565,6 +711,12 @@ fn a_stored_project_is_carried_on_by_a_cold_host_that_takes_it_over() {
     );
     first.script("harness.work", &format!("continued from the store {stamp}"));
     first.script("harness.work-per-task", "");
+    // Only the agent node above the stack is held, and from before the launch: the engine
+    // dispatches a lifecycle node again after a failed publication, and a hold on every
+    // turn would hold that dispatch of the stacked node until the takeover below, which
+    // needs the node above it started first.
+    first.script("turn.hold-what", "Do hold.");
+    first.script("turn.hold", "");
     let name = format!("continue-{}", stamp.replace(['_', '.'], "-"));
     let project = first.plan(
         &name,
@@ -605,39 +757,80 @@ fn a_stored_project_is_carried_on_by_a_cold_host_that_takes_it_over() {
             panic!("the first run ended before {what}: {settled:#?}");
         }
     };
-    until("the stacked node's turn", || {
-        early("its stacked node's turn");
-        if saw_dispatch.is_none() {
-            saw_dispatch = tasks(&first, &project).into_iter().find_map(|task| {
-                task["item"]["metadata"]
-                    .get("onepipeline.dispatch")
-                    .cloned()
-            });
-        }
-        first
-            .invocations()
-            .iter()
-            .filter(|call| {
-                call["tool"]
-                    .as_str()
-                    .is_some_and(|tool| tool.ends_with("-work"))
-            })
-            .count()
-            >= 2
-    });
-    first.script("turn.hold", "");
+    let first_held = || hosts_held(&[("first", Some(&first)), ("second", None)], &run);
     until(
-        "the first host to settle the stack and start the node above it",
+        "the stacked node's turn",
+        PATIENCE,
+        || {
+            early("its stacked node's turn");
+            if saw_dispatch.is_none() {
+                saw_dispatch = tasks(&first, &project).into_iter().find_map(|task| {
+                    task["item"]["metadata"]
+                        .get("onepipeline.dispatch")
+                        .cloned()
+                });
+            }
+            first
+                .invocations()
+                .iter()
+                .filter(|call| {
+                    call["tool"]
+                        .as_str()
+                        .is_some_and(|tool| tool.ends_with("-work"))
+                })
+                .count()
+                >= 2
+        },
+        first_held,
+    );
+    // The node above the stack is started only once the stacked one settles `done`, and
+    // what that settlement may take is the publication's own bound, not one step's.
+    let settled_b = || {
+        first
+            .events_of(&run, "node-settled")
+            .into_iter()
+            .rfind(|event| event["labels"]["node"] == "b")
+    };
+    until(
+        "the first host to settle the stacked node",
+        settlement_bound(),
+        || {
+            early("it settled the stacked node");
+            if let Some(how) = retried(&first, &run, "b") {
+                panic!(
+                    "the stacked node needed a publication retry, which the journey's bound \
+                     on its settlement does not cover: {how}\n{}",
+                    first_held()
+                );
+            }
+            settled_b().is_some()
+        },
+        first_held,
+    );
+    let b_settled = settled_b().expect("b settled");
+    assert_eq!(
+        b_settled["payload"]["status"],
+        "done",
+        "the stacked node settled on the first host as {}, so the node above it is never \
+         started there\n{}",
+        b_settled["payload"],
+        first_held()
+    );
+    until(
+        "the first host to start the node above the stack",
+        PATIENCE,
         || {
             early("it started the node above the stack");
             dispatched(&first, &run).contains(&"hold".to_owned())
         },
+        first_held,
     );
     println!(
         "smoke: a dispatch key the store carried while the first host worked: {saw_dispatch:?}"
     );
-    until_or(
+    until(
         "the store to hold both settlements",
+        PATIENCE,
         || {
             ["a", "b"].iter().all(|node| {
                 task(&first, &project, node)["item"]["metadata"]
@@ -645,7 +838,7 @@ fn a_stored_project_is_carried_on_by_a_cold_host_that_takes_it_over() {
                     .is_some_and(Value::is_object)
             })
         },
-        || recorded(&first, &run),
+        first_held,
     );
     let stored: BTreeMap<String, Value> = ["a", "b"]
         .into_iter()
@@ -684,15 +877,22 @@ fn a_stored_project_is_carried_on_by_a_cold_host_that_takes_it_over() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("the takeover starts");
-    until("the second host's claim to reach the store", || {
-        claim(&first, &project)["host"] == "smoke-host-b"
-    });
+    let both_held = || hosts_held(&[("first", Some(&first)), ("second", Some(&second))], &run);
+    until(
+        "the second host's claim to reach the store",
+        PATIENCE,
+        || claim(&first, &project)["host"] == "smoke-host-b",
+        both_held,
+    );
     let claimed = claim(&first, &project);
     println!("smoke: the store's claim after the takeover: {claimed}");
     let since = Instant::now();
-    until("the first driver to notice the takeover", || {
-        !first.events_of(&run, "driver-superseded").is_empty()
-    });
+    until(
+        "the first driver to notice the takeover",
+        PATIENCE,
+        || !first.events_of(&run, "driver-superseded").is_empty(),
+        both_held,
+    );
     println!(
         "smoke: the first driver noticed the takeover {:?} after the claim reached the store",
         since.elapsed()
@@ -718,9 +918,12 @@ fn a_stored_project_is_carried_on_by_a_cold_host_that_takes_it_over() {
     // and the second carries on.
     first.release("turn.go");
     first.release("turn.settle");
-    until("the first driver to end", || {
-        first.run_file(&run, "result.json").is_file()
-    });
+    until(
+        "the first driver to end",
+        PATIENCE,
+        || first.run_file(&run, "result.json").is_file(),
+        both_held,
+    );
     let taken = taking.wait_with_output().expect("the takeover answers");
     assert!(taken.status.success(), "the takeover: {}", said(&taken));
     assert!(
@@ -730,9 +933,14 @@ fn a_stored_project_is_carried_on_by_a_cold_host_that_takes_it_over() {
     );
     let taken_over = second.events_of(&run, "driver-taken-over");
     assert_eq!(taken_over[0]["payload"]["previous"], held);
-    until("the second driver to settle", || {
-        second.run_file(&run, "result.json").is_file()
-    });
+    // What is left publishes on the second host — the node above the stack and the one
+    // drafted on the stacked one's branch — so its settlement takes a publication's bound.
+    until(
+        "the second driver to settle",
+        settlement_bound(),
+        || second.run_file(&run, "result.json").is_file(),
+        both_held,
+    );
     let second_dispatched = dispatched(&second, &run);
     println!("smoke: the second host dispatched {second_dispatched:?}");
     for (node, settlement) in &stored {
@@ -801,6 +1009,7 @@ fn a_stored_project_is_carried_on_by_a_cold_host_that_takes_it_over() {
     for gate in ["turn.go", "turn.settle"] {
         let _ = std::fs::remove_file(first.fakes.join(gate));
     }
+    first.script("turn.hold-what", "Linger.");
     first.script("turn.hold", "");
     let racing: Vec<World> = ["smoke-host-c", "smoke-host-d"]
         .into_iter()
@@ -885,9 +1094,21 @@ fn a_stored_project_is_carried_on_by_a_cold_host_that_takes_it_over() {
     first.release("turn.settle");
     for (host, output) in racing.iter().zip(&outputs) {
         if output.status.success() {
-            until("a racing driver to end", || {
-                host.run_file(&run, "result.json").is_file()
-            });
+            until(
+                "a racing driver to end",
+                PATIENCE,
+                || host.run_file(&run, "result.json").is_file(),
+                || {
+                    hosts_held(
+                        &[
+                            ("first", Some(&first)),
+                            ("second", Some(&second)),
+                            ("racing", Some(host)),
+                        ],
+                        &run,
+                    )
+                },
+            );
         }
     }
     for (node, settlement) in &stored {
@@ -931,4 +1152,175 @@ fn a_stored_project_is_carried_on_by_a_cold_host_that_takes_it_over() {
     );
     drop(racing);
     drop(second);
+}
+
+/// The journey's wait, read on a counted clock rather than the wall's, so what it proves
+/// does not depend on how fast the host running it is. No credential: nothing here
+/// reaches a service.
+mod waiting {
+    use std::cell::Cell;
+    use std::time::Duration;
+
+    use serde_json::json;
+
+    use super::{hosts_held, retried, settlement_bound, waited, Clock, POLL};
+    use crate::harness::World;
+
+    /// A clock that moves only when the wait sleeps.
+    #[derive(Default)]
+    struct Counted(Cell<Duration>);
+
+    impl Clock for Counted {
+        fn elapsed(&self) -> Duration {
+            self.0.get()
+        }
+
+        fn sleep(&self, step: Duration) {
+            self.0.set(self.0.get() + step);
+        }
+    }
+
+    /// A host's run directory holding what a driver part-way through its run records.
+    fn host_part_way(world: &World, run: &str, driver_said: &str) {
+        let dir = world.run_file(run, "");
+        std::fs::create_dir_all(&dir).expect("a run directory");
+        let settled = json!({"source": "onepipeline", "kind": "node-settled",
+                             "labels": {"node": "a"},
+                             "payload": {"status": "done", "outcome": "change-review-draft"}});
+        let dispatched = json!({"source": "onepipeline", "kind": "node-dispatched",
+                                "labels": {"node": "b"}, "payload": {"attempt": 2}});
+        std::fs::write(
+            dir.join("events.jsonl"),
+            format!("{settled}\n{dispatched}\n"),
+        )
+        .expect("the journal is written");
+        std::fs::write(dir.join("driver.log"), format!("{driver_said}\n"))
+            .expect("the driver's log is written");
+        std::fs::write(
+            dir.join("writeback-projections.jsonl"),
+            "{\"node\":\"a\",\"projected\":\"done\"}\n",
+        )
+        .expect("the projections are written");
+    }
+
+    #[test]
+    fn a_state_arriving_late_but_inside_the_settlement_bound_is_waited_for() {
+        let clock = Counted::default();
+        let bound = settlement_bound();
+        let arrives = bound - Duration::from_secs(1);
+        let mut readings = 0;
+        let answered = waited(
+            &clock,
+            "the stacked node to settle",
+            bound,
+            || {
+                readings += 1;
+                clock.elapsed() >= arrives
+            },
+            || unreachable!("a wait that was answered names nothing"),
+        );
+        assert_eq!(answered, Ok(()));
+        assert!(
+            clock.elapsed() >= arrives && clock.elapsed() <= bound,
+            "{:?}",
+            clock.elapsed()
+        );
+        assert!(readings > 1, "the wait read once: {readings}");
+    }
+
+    #[test]
+    fn a_state_arriving_after_the_bound_is_not_waited_for() {
+        let clock = Counted::default();
+        let bound = settlement_bound();
+        let answered = waited(
+            &clock,
+            "the stacked node to settle",
+            bound,
+            || clock.elapsed() > bound,
+            || "what the hosts held".to_owned(),
+        );
+        assert!(answered.is_err(), "{answered:?}");
+        assert_eq!(clock.elapsed(), bound, "the wait slept past its bound");
+    }
+
+    #[test]
+    fn a_wait_that_runs_out_names_what_every_host_recorded() {
+        let first = World::new("wait-first");
+        let second = first.on_host("smoke-host-b");
+        let run = "continue-run-1";
+        host_part_way(&first, run, "driver: publishing b, attempt 2");
+        host_part_way(
+            &second,
+            run,
+            "driver: waiting for the first driver to let go",
+        );
+        let clock = Counted::default();
+        let refused = waited(
+            &clock,
+            "the first host to settle the stacked node",
+            POLL * 4,
+            || false,
+            || hosts_held(&[("first", Some(&first)), ("second", Some(&second))], run),
+        )
+        .expect_err("a state that never arrives");
+        assert_eq!(clock.elapsed(), POLL * 4);
+        for needle in [
+            "timed out waiting 12s for the first host to settle the stacked node",
+            "the first host:",
+            "driver: publishing b, attempt 2",
+            "the second host:",
+            "driver: waiting for the first driver to let go",
+            "\"node-dispatched\" {\"node\":\"b\"} {\"attempt\":2}",
+            "\"node-settled\" {\"node\":\"a\"}",
+            "{\"node\":\"a\",\"projected\":\"done\"}",
+            "result.json: none",
+        ] {
+            assert!(refused.contains(needle), "{needle:?} is not in:\n{refused}");
+        }
+        let alone = hosts_held(&[("first", Some(&first)), ("second", None)], run);
+        assert!(alone.contains("the second host: not made yet"), "{alone}");
+    }
+
+    /// A run's journal holding exactly `events`.
+    fn journal(world: &World, run: &str, events: &[serde_json::Value]) {
+        let dir = world.run_file(run, "");
+        std::fs::create_dir_all(&dir).expect("a run directory");
+        let lines: String = events.iter().map(|event| format!("{event}\n")).collect();
+        std::fs::write(dir.join("events.jsonl"), lines).expect("the journal is written");
+    }
+
+    #[test]
+    fn a_publication_that_needed_a_retry_is_named_rather_than_waited_out() {
+        let world = World::new("wait-retried");
+        let dispatched = |attempt: u32| {
+            json!({"source": "onepipeline", "kind": "node-dispatched", "labels": {"node": "b"},
+                   "payload": {"attempt": attempt, "reason": "push-rejected: refused"}})
+        };
+        let pushed = json!({"source": "vcs", "kind": "push", "labels": {"node": "b"},
+                            "payload": {"accepted": true}});
+        let other = json!({"source": "vcs", "kind": "push", "labels": {"node": "a"},
+                           "payload": {"accepted": true}});
+
+        journal(
+            &world,
+            "once",
+            &[dispatched(1), pushed.clone(), other.clone(), other],
+        );
+        assert_eq!(retried(&world, "once", "b"), None);
+
+        journal(
+            &world,
+            "again",
+            &[dispatched(1), pushed.clone(), dispatched(2)],
+        );
+        let again = retried(&world, "again", "b").expect("a second dispatch");
+        assert!(
+            again.contains("dispatched again") && again.contains("push-rejected: refused"),
+            "{again}"
+        );
+
+        journal(&world, "reread", &[dispatched(1), pushed.clone(), pushed]);
+        let reread = retried(&world, "reread", "b").expect("a second publication");
+        assert!(reread.contains("published 2 times"), "{reread}");
+    }
 }

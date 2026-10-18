@@ -81,7 +81,10 @@
     "test-quick": {
       "command": "just _crate-test-quick",
       "inputs": [
-        "crateTestSource"
+        "crateTestSource",
+        {
+          "env": "ONEPIPELINE_TEST_PARTITION"
+        }
       ],
       "dependsOn": [
         "test-quick-archive"
@@ -95,13 +98,10 @@
       ]
     },
     "lint-llm-diff": {
-      "command": "bash scripts/llmlint-judge.sh",
+      "command": "llmlint --diff --diff-base \"$LLMLINT_DIFF_BASE_SHA\"",
       "options": {
         "cwd": "."
-      },
-      "outputs": [
-        "{workspaceRoot}/.lint-llm-diff/verdict"
-      ]
+      }
     },
     "check": {
       "executor": "nx:noop",

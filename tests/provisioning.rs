@@ -322,6 +322,69 @@ esac
         );
     }
 
+    /// On a GitHub Actions runner the llmlint installer puts its install
+    /// directory on `GITHUB_PATH`, because the cached `lint-llm-diff` target and
+    /// its journeys run `llmlint` from PATH in later steps; off a runner it writes
+    /// nothing, and a `GITHUB_PATH` it cannot append to is logged, never fatal.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn setup_llmlint_puts_its_install_directory_on_a_runner_path() {
+        let root = std::env::temp_dir().join(format!(
+            "onepipeline-provisioning-llmlint-{}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).expect("a fresh provisioning scratch directory");
+        let _scratch = Scratch(root.clone());
+        let bin = root.join("bin");
+        fs::create_dir(&bin).expect("the test PATH has a bin directory");
+        // No `uv`, so nothing is installed: the subject is what the recipe
+        // persists, not a registry download.
+        // `sed` is the justfile's own need, to read its MSRV when it loads.
+        tools_only(&bin, &["bash", "just", "sed"]);
+        let path = std::env::join_paths([&bin]).expect("the test PATH joins");
+        let setup = |github_path: Option<&Path>| {
+            let mut command = Command::new("just");
+            command
+                .arg("setup-llmlint")
+                .current_dir(env!("CARGO_MANIFEST_DIR"))
+                .env_clear()
+                .env("PATH", &path)
+                .env("HOME", &root);
+            if let Some(file) = github_path {
+                command.env("GITHUB_PATH", file);
+            }
+            let output = command.output().expect("just setup-llmlint runs");
+            assert!(
+                output.status.success(),
+                "setup-llmlint exited non-zero:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stderr).into_owned()
+        };
+
+        let runner_path = root.join("github-path");
+        setup(Some(&runner_path));
+        assert_eq!(
+            fs::read_to_string(&runner_path).expect("setup-llmlint wrote GITHUB_PATH"),
+            format!("{}\n", root.join(".local").join("bin").display()),
+        );
+
+        fs::remove_file(&runner_path).expect("the runner path file is removed");
+        setup(None);
+        assert!(
+            !runner_path.exists(),
+            "setup-llmlint wrote a runner path off a runner"
+        );
+
+        let unwritable = root.join("github-path-is-a-directory");
+        fs::create_dir(&unwritable).expect("an unwritable GITHUB_PATH");
+        let said = setup(Some(&unwritable));
+        assert!(
+            said.contains("could not append to GITHUB_PATH"),
+            "setup-llmlint did not report the GITHUB_PATH it could not append to:\n{said}"
+        );
+    }
+
     /// Old clones retain hooksPath, but ordinary pushes must run no visual work.
     #[test]
     fn old_hook_configuration_allows_pushes_without_visual_work() {

@@ -1046,9 +1046,21 @@ pub fn claim(paths: &RunPaths) -> Result<OwnershipLock> {
 /// graph is terminal or when nothing can move without something arriving over
 /// the channel — a decision point cleared while the loop is still running
 /// resumes the subtree it held, without any external driver action.
-pub fn drive_holding(paths: &RunPaths, lock: OwnershipLock) -> Result<Driven> {
-    exiting_from(paths, lock, |paths, held, answered_from| {
-        driving(paths, held, answered_from, None)
+///
+/// `letting_go` is called once, the moment this driver starts letting go of the
+/// run and while it still holds it: before the record that says it let go, and
+/// before the release. A driver that leaves its claim standing instead — the
+/// handover it could not take — is not letting go, and is never told it is. Whatever else this process writes to the run on the
+/// driver's behalf stops there, so nothing it writes lands after a reader was
+/// told the run is free — over the next holder's claim, or over a record an
+/// operator corrected for the adoption they are about to make.
+pub fn drive_holding(
+    paths: &RunPaths,
+    lock: OwnershipLock,
+    letting_go: &dyn Fn(),
+) -> Result<Driven> {
+    exiting_from(paths, lock, letting_go, |paths, held, answered_from| {
+        driving(paths, held, answered_from, None, letting_go)
     })
 }
 
@@ -1059,8 +1071,8 @@ pub(crate) fn drive_after_readjust(
     lock: OwnershipLock,
     readjuster: crate::readjust::Readjuster,
 ) -> Result<Driven> {
-    exiting_from(paths, lock, |paths, held, answered_from| {
-        driving(paths, held, answered_from, Some(readjuster))
+    exiting_from(paths, lock, &|| {}, |paths, held, answered_from| {
+        driving(paths, held, answered_from, Some(readjuster), &|| {})
     })
 }
 
@@ -1073,9 +1085,12 @@ pub(crate) fn drive_after_readjust(
 /// run is held: it is recorded, and only then is the lock released, so a reader
 /// that finds the run free finds the reason with it. A panic unwinds past the
 /// record and writes nothing, as a signal does, which is how a crash reads.
+///
+/// `letting_go` is [`drive_holding`]'s, called here before that record.
 fn exiting_from(
     paths: &RunPaths,
     lock: OwnershipLock,
+    letting_go: &dyn Fn(),
     body: impl FnOnce(&RunPaths, &mut Option<OwnershipLock>, usize) -> Result<Driven>,
 ) -> Result<Driven> {
     // Taken before anything is applied, so every outcome line after it is this
@@ -1084,6 +1099,7 @@ fn exiting_from(
     let mut held = Some(lock);
     let driven = body(paths, &mut held, answered_from);
     if let (Err(error), Some(_)) = (&driven, &held) {
+        letting_go();
         record_exit(
             paths,
             crate::payload::ExitSettlementWord::Error,
@@ -1138,6 +1154,7 @@ fn driving(
     held: &mut Option<OwnershipLock>,
     answered_from: usize,
     readjuster: Option<crate::readjust::Readjuster>,
+    letting_go: &dyn Fn(),
 ) -> Result<Driven> {
     let launch: LaunchRecord = ledger::read_json(&paths.launch())?;
     // llmlint: ignore-block[boundary_inputs_validated] graph-reference syntax and
@@ -1207,8 +1224,11 @@ fn driving(
         // stopped claiming is an edit accepted from a run that is free. Its
         // scratch record and then its `driver-exited` are written inside that
         // section, after the last outcome line and before the release, so
-        // `driver-exited` is this driver's last word.
+        // `driver-exited` is this driver's last word. What it writes on its own
+        // behalf stops first, since the scratch record is what tells a reader
+        // the run is let go of.
         let exiting = || {
+            letting_go();
             crate::scratch::at_writer_ending(paths, &state);
             record_exit(paths, settlement.into(), None, answered_from);
         };
@@ -2761,8 +2781,11 @@ fn wait_for_work(
                 // message is about to cause. Narration and settlement share this
                 // channel, so taking one message a pass made a settlement wait a
                 // whole pass for every envelope queued ahead of it.
+                let mut drain_started = Instant::now();
+                if held_at_push(&message)? {
+                    drain_started = Instant::now();
+                }
                 let mut batch = vec![message];
-                let drain_started = Instant::now();
                 while drain_started.elapsed() < DRAIN_WINDOW {
                     // One arm for both refusals: nothing is queued, or nothing
                     // ever will be again. The second is answered one pass later,
@@ -2770,6 +2793,9 @@ fn wait_for_work(
                     let Ok(message) = rx.try_recv() else {
                         break;
                     };
+                    if held_at_push(&message)? {
+                        drain_started = Instant::now();
+                    }
                     batch.push(message);
                 }
                 return Ok(Some(batch));
@@ -2793,6 +2819,23 @@ fn wait_for_work(
             return Ok(Some(Vec::new()));
         }
     }
+}
+
+/// Whether `message` is a relayed push the private ordering gate held the loop on —
+/// see [`crate::ordering::push_received`] — so the drain after it starts again from the
+/// release rather than from before the hold.
+fn held_at_push(message: &Message) -> Result<bool> {
+    let Message::Event(envelope) = message else {
+        return Ok(false);
+    };
+    if envelope.source != crate::event::Source::Vcs || !crate::vcs::is_push(&envelope.kind) {
+        return Ok(false);
+    }
+    envelope
+        .labels
+        .node
+        .as_deref()
+        .map_or(Ok(false), crate::ordering::push_received)
 }
 
 /// One reason the loop is not running a node it has not settled.
@@ -6889,7 +6932,8 @@ fn review_change_for(state: &Projected, node: &str) -> Option<String> {
 
 /// Claim the standings read owed by this pass's placements on unlanded drafts and its
 /// restacks, for each node not read for yet, once per node however many passes it is
-/// held across: marks those nodes read for, and answers whether any were.
+/// held across: marks those nodes read for, records the heads those restacks bring
+/// their drafts onto as the verdicts the read defers, and answers whether any were.
 fn claim_placement_reads(
     state: &mut Projected,
     statuses: &BTreeMap<String, NodeStatus>,
@@ -6910,6 +6954,7 @@ fn claim_placement_reads(
         })
         .map(|node| node.id.clone())
         .collect();
+    let mut onto = BTreeSet::new();
     wanted.extend(
         crate::stack::restacks_owed(state, statuses, &|node| {
             in_flight.contains_key(node)
@@ -6924,6 +6969,7 @@ fn claim_placement_reads(
                 .iter()
                 .map(|onto| onto.head.clone())
                 .collect();
+            onto.extend(heads.iter().cloned());
             format!("{}@{}", owed.node, heads.join(","))
         }),
     );
@@ -6935,6 +6981,7 @@ fn claim_placement_reads(
         return false;
     }
     state.readjust.placed.extend(fresh);
+    state.readjust.deferred = onto;
     true
 }
 
@@ -10487,18 +10534,30 @@ mod tests {
     ///
     /// The error half: the body reports an error with the lock still its own, and
     /// one `error` record carrying the error's own message is written — and the
-    /// lock is released only after it. The panic half is the crash a journey
+    /// lock is released only after it, with the driver told it is letting go
+    /// before either. The panic half is the crash a journey
     /// cannot stage against the compiled binary: it unwinds past the record, so
     /// the run is released with nothing on it, which is how a crash reads.
     #[test]
     fn a_reported_error_is_recorded_before_the_release_and_a_panic_records_nothing() {
         let paths = handover_scratch("exit-error");
         let lock = OwnershipLock::acquire(&paths, "drive").expect("the run is driven");
-        let failed = exiting_from(&paths, lock, |paths, held, _| {
+        // What the run held when the driver began letting go: still claimed, and
+        // with nothing yet saying it was let go of.
+        let at_letting_go = std::cell::Cell::new(None);
+        let letting_go = || {
+            at_letting_go.set(Some((paths.lock().is_file(), exits_of(&paths).len())));
+        };
+        let failed = exiting_from(&paths, lock, &letting_go, |paths, held, _| {
             assert!(held.is_some() && paths.lock().is_file());
             Err(Error::Invalid("the queue could not be read".to_string()))
         });
         assert!(failed.is_err());
+        assert_eq!(
+            at_letting_go.get(),
+            Some((true, 0)),
+            "the driver was told it is letting go after the run was released or said so"
+        );
         let exits = exits_of(&paths);
         assert_eq!(exits.len(), 1, "{exits:?}");
         assert_eq!(
@@ -10516,7 +10575,7 @@ mod tests {
         let paths = handover_scratch("exit-panic");
         let lock = OwnershipLock::acquire(&paths, "drive").expect("the run is driven");
         let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            exiting_from(&paths, lock, |_, _, _| panic!("a driver bug"))
+            exiting_from(&paths, lock, &|| {}, |_, _, _| panic!("a driver bug"))
         }));
         assert!(unwound.is_err(), "the panic did not unwind");
         assert!(
@@ -13908,6 +13967,77 @@ mod tests {
             "the held envelopes were not each answered, in claim order, once both notes were"
         );
         assert!(deliveries.idle(), "an envelope is still held");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The placement read a restack is claimed for defers the verdict on the head that
+    /// restack is brought onto — the stack parent's fresh push — and that read is the
+    /// only one it defers: the next read, a later trigger's, defers nothing.
+    #[test]
+    fn a_restack_s_claimed_read_defers_the_pushed_head_once() {
+        let root = std::env::temp_dir().join(format!("onepipeline-deferred-{}", sys::pid()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = RunPaths::under(&root, "deferred");
+        paths.create().expect("the run directory");
+        let mut journal = Journal::open(&paths);
+        let mut state = Projected::open(&paths);
+        let mut statuses = BTreeMap::new();
+        for (id, deps) in [("a", vec![]), ("b", vec!["a".to_owned()])] {
+            state.graph.insert(crate::plan::Node {
+                id: id.into(),
+                repo: Some("service".into()),
+                deps,
+                ..crate::plan::Node::default()
+            });
+            statuses.insert(id.to_owned(), NodeStatus::Done);
+            state.landings.insert(id.to_owned(), Landing::Unlanded);
+            state.branches.insert(id.to_owned(), format!("me/{id}"));
+            state
+                .branch_heads
+                .insert(format!("me/{id}"), format!("old-{id}"));
+        }
+        state.stacks.insert(
+            "b".into(),
+            crate::payload::SettledStack {
+                parents: vec![crate::payload::StackParent {
+                    node: "a".into(),
+                    branch: "me/a".into(),
+                    head: "old-a".into(),
+                }],
+                stack_base: None,
+            },
+        );
+        let (in_flight, paused) = (BTreeMap::new(), BTreeSet::new());
+        assert!(!claim_placement_reads(
+            &mut state, &statuses, &in_flight, &paused
+        ));
+        assert!(state.readjust.deferred.is_empty());
+
+        // `a`'s republication pushed: `b` is owed its restack onto that push.
+        state.branch_heads.insert("me/a".into(), "new-a".into());
+        assert!(claim_placement_reads(
+            &mut state, &statuses, &in_flight, &paused
+        ));
+        assert_eq!(
+            state.readjust.deferred,
+            std::iter::once("new-a".to_owned()).collect::<BTreeSet<_>>()
+        );
+        crate::readjust::run(
+            &paths,
+            &mut journal,
+            &mut state,
+            crate::payload::ReadjustTrigger::Placement,
+        )
+        .expect("the placement read runs");
+        assert!(
+            state.readjust.deferred.is_empty(),
+            "a later trigger's read would defer the pushed head too"
+        );
+        // Held across passes, the restack is not read for again, so nothing is deferred.
+        assert!(!claim_placement_reads(
+            &mut state, &statuses, &in_flight, &paused
+        ));
+        assert!(state.readjust.deferred.is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
 }

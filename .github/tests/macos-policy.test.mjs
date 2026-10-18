@@ -319,7 +319,7 @@ test("actual workflow graph routes all events, preserves contexts and records li
               } else if (eventName === "release") {
                 assert.deepEqual(
                   mac.map((j) => j.job),
-                  ["darwin"],
+                  ["build-macos"],
                 );
                 // Intel macOS is discontinued: the one Mac job builds Apple silicon only.
                 assert.deepEqual(mac[0].targets, ["aarch64-apple-darwin"]);
@@ -540,16 +540,26 @@ test("the real path carriers pass only a proven leg or an authorized path omissi
     assert.equal(job.if, "always()", key);
     const proof = job.needs.find((need) => need !== "changes");
     assert.deepEqual(job.needs, ["changes", proof], key);
-    const leg = step.env.LEG_VERDICT.match(/outputs\['([^']+)'\]/)?.[1];
-    assert.ok(leg, `${key} reads one leg's verdict`);
+    // Every verdict the carrier reads: one per leg, or one per shard of a leg
+    // split across jobs, which passes only when every shard recorded its own.
+    const legs = [...step.env.LEG_VERDICT.matchAll(/outputs\['([^']+)'\]/g)].map((m) => m[1]);
+    assert.ok(legs.length, `${key} reads a leg's verdict`);
+    const leg = step.env.LEG;
+    const recorded = legs.length > 1 ? ["every", "some", "none"] : ["every", "none"];
     for (const changes of ["success", "failure", "cancelled", "skipped", ""])
       for (const crate of ["true", "false", ""])
         for (const result of ["success", "failure", "cancelled", "skipped", ""])
-          for (const verdict of ["success", ""]) {
+          for (const shards of recorded) {
+            const verdict = shards === "every" ? "success" : "";
+            const outputs = Object.fromEntries(
+              legs
+                .slice(0, { every: legs.length, some: 1, none: 0 }[shards])
+                .map((l) => [l, "success"]),
+            );
             const context = {
               needs: {
                 changes: { result: changes, outputs: changes === "success" ? { crate } : {} },
-                [proof]: { result, outputs: verdict ? { [leg]: verdict } : {} },
+                [proof]: { result, outputs },
               },
             };
             const env = Object.fromEntries(
@@ -570,7 +580,7 @@ test("the real path carriers pass only a proven leg or an authorized path omissi
                 (crate === "true" &&
                   ["success", "failure"].includes(result) &&
                   verdict === "success"));
-            const label = `${key}/${changes}/${crate}/${result}/${verdict}`;
+            const label = `${key}/${changes}/${crate}/${result}/${shards}`;
             assert.equal(run.status === 0, accepted, `${label}: ${run.stdout}${run.stderr}`);
             if (accepted && crate === "false") assert.match(run.stdout, /no tests claimed/);
             if (accepted && crate === "true")
@@ -727,49 +737,31 @@ test("same-named registry dependency version changes require Mac coverage", () =
   assert.equal(classify(event(), heads.version).isReleaseOnly, true);
 });
 
-test("release artifact downloads use this run's exact tagged builders and successful Darwin proof", () => {
+test("release publication waits for every platform's own build, test-install and publication", () => {
   const release = workflows()["release.yml"];
-  const produced = [];
   const ancestors = (key) => {
     const need = release.jobs[key].needs;
     const direct = need ? (Array.isArray(need) ? need : [need]) : [];
     return [...direct, ...direct.flatMap(ancestors)];
   };
   for (const [key, job] of Object.entries(release.jobs)) {
-    for (const leg of matrix(job.strategy?.matrix, {})) {
-      for (const step of job.steps ?? []) {
-        if (step.uses === "actions/checkout@v4") {
-          assert.ok(
-            !step.with?.ref || step.with.ref === `\${{ github.sha }}`,
-            `${key} must build the event's tagged tree`,
-          );
-        }
-        if (step.uses === "actions/upload-artifact@v4") {
-          const expression = step.with.name;
-          const name = expression.replace(/\$\{\{(.*?)\}\}/g, (_, e) =>
-            String(evaluate(e, { matrix: leg })),
-          );
-          produced.push({ key, name });
-        }
+    for (const step of job.steps ?? []) {
+      if (step.uses === "actions/checkout@v4") {
+        assert.ok(
+          !step.with?.ref || step.with.ref === `\${{ github.sha }}`,
+          `${key} must build the event's tagged tree`,
+        );
       }
+      // Each build job publishes the files it built and installed itself, so
+      // no artifact crosses between jobs, nor between runs.
+      assert.doesNotMatch(step.uses ?? "", /(upload|download)-artifact/, `${key} moves artifacts`);
     }
   }
-  for (const [key, job] of Object.entries(release.jobs)) {
-    for (const step of job.steps ?? [])
-      if (step.uses === "actions/download-artifact@v4") {
-        assert.equal(step.with["run-id"], undefined, `${key} must consume its own workflow run`);
-        const name = step.with.name ?? step.with.pattern;
-        const pattern = new RegExp(`^${name.replaceAll("*", ".*")}$`);
-        const inputs = produced.filter((p) => pattern.test(p.name));
-        assert.ok(inputs.length, `${key} has unresolved artifact ${name}`);
-        for (const input of inputs)
-          assert.ok(ancestors(key).includes(input.key), `${key} must wait for ${input.key}`);
-      }
-  }
-  for (const key of ["publish-crate", "publish-pypi", "publish-npm", "upload", "upload-darwin"]) {
+  for (const key of ["build-linux", "build-macos", "build-windows"]) {
+    assert.deepEqual(ancestors(key), [], `${key} waits for no other platform`);
     assert.ok(
-      ancestors(key).includes("darwin"),
-      `${key} cannot publish before Darwin installs pass`,
+      ancestors("publish").includes(key),
+      `publish cannot publish the platform-independent artifacts before ${key} has`,
     );
   }
 });
@@ -974,12 +966,15 @@ test("actual producer commands govern credential guards and architecture overrid
     npm: "false",
     crate: "false",
   });
-  assert.equal(runGraph(release, s).find((j) => j.job === "publish-crate").selected, false);
-  assert.equal(
-    runGraph(release, { ...s, cratePublish: "true" }).find((j) => j.job === "publish-crate")
-      .selected,
-    true,
-  );
+  // The crate's credential is read by the publish recipe rather than a job
+  // guard (release/tests/release-checks.test.mjs drives it), so the graph is the same either way.
+  for (const cratePublish of ["false", "true"])
+    assert.deepEqual(
+      runGraph(release, { ...s, cratePublish })
+        .filter((j) => j.selected)
+        .map((j) => j.job),
+      ["build-linux", "build-macos", "build-windows", "publish"],
+    );
   const snapshot = JSON.parse(
     readFileSync(".github/fixtures/visual-docs-reusable.origin.json", "utf8"),
   );
@@ -1289,6 +1284,9 @@ test("the budget wrapper diagnoses a fresh clone whose pinned checker is missing
   mkdirSync(join(fresh, ".github"), { recursive: true });
   writeFileSync(join(fresh, ".github/check-budgets.sh"), readFileSync(".github/check-budgets.sh"));
   writeFileSync(join(fresh, "justfile"), readFileSync("justfile"));
+  // The justfile evaluates `msrv-version` out of the manifest whatever is asked of
+  // it, so a clone without one fails there, before the diagnosis under test.
+  writeFileSync(join(fresh, "Cargo.toml"), readFileSync("Cargo.toml"));
   const result = spawnSync("bash", [join(fresh, ".github/check-budgets.sh")], { encoding: "utf8" });
   assert.equal(result.status, 1);
   assert.match(result.stderr, /pinned onebudgetspec is missing; run just bootstrap/);
