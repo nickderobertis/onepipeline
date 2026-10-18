@@ -118,7 +118,8 @@ const UNIFORM_EXEMPT = ["onepipeline-visual-docs"];
 const uniform = projects.filter((declared) => !UNIFORM_EXEMPT.includes(declared.name));
 
 // The live and network tiers (`tier:live`: `onepipeline-real-smoke` reaches GitHub,
-// `onepipeline-release-compat` PyPI) declare every uniform target but `test`.
+// `onepipeline-release-compat` PyPI, `onepipeline-release-journeys` Docker and the
+// toolchains the release builds with) declare every uniform target but `test`.
 // Their journey is a target of its own, uncached and reached by no `check`, so
 // `just test` and `just check` stay offline and credential-free; a `test` that
 // ran it would put the network into both, and one that ran nothing would look
@@ -127,6 +128,7 @@ const LIVE = projects.filter((declared) => declared.tags?.includes("tier:live"))
 const LIVE_TARGETS = {
   "onepipeline-real-smoke": "smoke",
   "onepipeline-release-compat": "release-compat",
+  "onepipeline-release-journeys": "release-journeys",
 };
 const declaresUniform = (declared, target) =>
   target !== "test" ||
@@ -209,7 +211,7 @@ describe("the uniform target set", () => {
 });
 
 describe("the live and network tiers", () => {
-  it("are the two projects that run outside the offline tier", () => {
+  it("are the projects that run outside the offline tier", () => {
     assert.deepEqual(
       LIVE.map((declared) => declared.name).sort(),
       Object.keys(LIVE_TARGETS).sort(),

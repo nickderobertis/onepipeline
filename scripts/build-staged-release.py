@@ -22,7 +22,9 @@ import zipfile
 
 
 def run(*args, **kwargs):
-    subprocess.run(args, check=True, **kwargs)
+    # Resolved on PATH first: Windows runs `npm` only by its full `.cmd` path.
+    path = (kwargs.get('env') or os.environ).get('PATH')
+    subprocess.run((shutil.which(args[0], path=path) or args[0], *args[1:]), check=True, **kwargs)
 
 
 def target_facts():
@@ -160,8 +162,7 @@ def validate_record(record):
         raise ValueError('invalid executable inventory')
 
 
-def build(target, out, profile, tag=None):
-    validate_target(target)
+def release_version(tag=None):
     package = tomllib.loads(Path('Cargo.toml').read_text()).get('package')
     if not isinstance(package, dict):
         raise ValueError('Cargo.toml has no package metadata')
@@ -169,18 +170,46 @@ def build(target, out, profile, tag=None):
     validate_version(version)
     if tag is not None and tag != f'v{version}':
         raise ValueError('release tag differs from Cargo.toml version')
-    out = out.resolve()
+    return version
+
+
+def binary_name(target):
+    return 'onepipeline.exe' if target_facts()[target]['exe'] else 'onepipeline'
+
+
+def archive_name(version, target):
+    """The Release asset name: `.zip` where the binary is a Windows executable, as
+    every release has published it, and `.tar.gz` everywhere else."""
+    return f'onepipeline-v{version}-{target}' + ('.zip' if target_facts()[target]['exe'] else '.tar.gz')
+
+
+def compile_wheel(target, out, profile):
+    """Maturin on this host. It compiles with Cargo and retains the generated
+    CycloneDX SBOM; its final stripped payload is the single binary every other
+    form reuses."""
     wheels = out / 'wheels' / target
     wheels.mkdir(parents=True, exist_ok=True)
-    # Maturin compiles with Cargo and retains its generated CycloneDX SBOM.
-    # Its final stripped payload is the single binary used by every other form.
     run('maturin', 'build', '--locked', '--profile', profile, '--target', target,
         '--out', str(wheels))
     wheel, = wheels.glob('*.whl')
+    return wheel
+
+
+def build(target, out, profile, tag=None):
+    validate_target(target)
+    version = release_version(tag)
+    return package(target, compile_wheel(target, out.resolve(), profile), out, version)
+
+
+def package(target, wheel, out, version):
+    """Package the archive and the npm platform package from the binary inside
+    `wheel`, so all three carry the same bytes."""
+    validate_target(target)
+    out = out.resolve()
     stage = out / 'stage' / target
     stage.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(wheel) as bundle:
-        bins = wheel_scripts(bundle, 'onepipeline.exe' if target_facts()[target]['exe'] else 'onepipeline')
+        bins = wheel_scripts(bundle, binary_name(target))
         for name in bins:
             binary = stage / Path(name).name
             binary.write_bytes(bundle.read(name))
@@ -191,13 +220,18 @@ def build(target, out, profile, tag=None):
         shutil.copyfile(name, stage / name)
     archives = out / 'archives'
     archives.mkdir(exist_ok=True)
-    archive = archives / f'onepipeline-v{version}-{target}.tar.gz'
-    with tarfile.open(archive, 'w:gz') as bundle:
-        for path in sorted(stage.iterdir()):
-            bundle.add(path, arcname=path.name)
+    archive = archives / archive_name(version, target)
+    if archive.suffix == '.zip':
+        with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as bundle:
+            for path in sorted(stage.iterdir()):
+                bundle.write(path, arcname=path.name)
+    else:
+        with tarfile.open(archive, 'w:gz') as bundle:
+            for path in sorted(stage.iterdir()):
+                bundle.add(path, arcname=path.name)
     digest = hashlib.sha256(archive.read_bytes()).hexdigest()
     (archives / f'onepipeline-v{version}-{target}.sha256').write_text(f'{digest}  {archive.name}\n')
-    binary = stage / ('onepipeline.exe' if 'windows' in target else 'onepipeline')
+    binary = stage / binary_name(target)
     package = subprocess.check_output(['node', 'scripts/npm-build.mjs', 'platform', '--target',
         target, '--binary', str(binary), '--out', str(out / 'npm')], text=True).strip()
     tarballs = out / 'npm-artifacts' / target
@@ -255,18 +289,31 @@ def verify(record, quiet=False):
             if len(payload) < 8 or payload[:4] != b'\xcf\xfa\xed\xfe' or struct.unpack('<I', payload[4:8])[0] != expected:
                 raise ValueError('Mach-O architecture mismatch')
         validate_wheel_filename(record['wheel'], version, tags)
-        with tarfile.open(record['archive']) as archive:
-            expected_names = sorted(record['executables'] + ['README.md', 'LICENSE', 'CHANGELOG.md'])
-            if sorted(archive.getnames()) != expected_names:
-                raise ValueError('archive layout mismatch')
-            for member in archive.getmembers():
-                if not member.isfile():
-                    raise ValueError(f'archive member is not a regular file: {member.name}')
-                if member.name in record['executables'] and 'windows' not in target and not member.mode & 0o111:
-                    raise ValueError(f'archive executable lacks execute permission: {member.name}')
-            for name in scripts:
-                if tar_payload(archive, Path(name).name) != wheel.read(name):
-                    raise ValueError('archive executable differs from wheel payload')
+        expected_names = sorted(record['executables'] + ['README.md', 'LICENSE', 'CHANGELOG.md'])
+        if record['archive'].endswith('.zip'):
+            with zipfile.ZipFile(record['archive']) as archive:
+                if sorted(archive.namelist()) != expected_names:
+                    raise ValueError('archive layout mismatch')
+                for info in archive.infolist():
+                    # Unix mode bits, where the archiver recorded any: a link or
+                    # a directory under an expected name is not the file it names.
+                    if info.is_dir() or (info.external_attr >> 16) & 0o170000 not in (0, 0o100000):
+                        raise ValueError(f'archive member is not a regular file: {info.filename}')
+                for name in scripts:
+                    if archive.read(Path(name).name) != wheel.read(name):
+                        raise ValueError('archive executable differs from wheel payload')
+        else:
+            with tarfile.open(record['archive']) as archive:
+                if sorted(archive.getnames()) != expected_names:
+                    raise ValueError('archive layout mismatch')
+                for member in archive.getmembers():
+                    if not member.isfile():
+                        raise ValueError(f'archive member is not a regular file: {member.name}')
+                    if member.name in record['executables'] and 'windows' not in target and not member.mode & 0o111:
+                        raise ValueError(f'archive executable lacks execute permission: {member.name}')
+                for name in scripts:
+                    if tar_payload(archive, Path(name).name) != wheel.read(name):
+                        raise ValueError('archive executable differs from wheel payload')
         with tarfile.open(record['npm']) as npm:
             validate_npm_archive(npm, binary_name)
             if tar_payload(npm, f'package/bin/{binary_name}') != payload:
@@ -283,7 +330,7 @@ def verify(record, quiet=False):
             raise ValueError('payload hash mismatch')
     archive = Path(record['archive'])
     expected_name = f'onepipeline-v{version}-{target}'
-    if archive.name != expected_name + '.tar.gz':
+    if archive.name != archive_name(version, target):
         raise ValueError('archive name mismatch')
     checksum = archive.parent / (expected_name + '.sha256')
     if checksum.read_text() != f'{hashlib.sha256(archive.read_bytes()).hexdigest()}  {archive.name}\n':
@@ -293,7 +340,7 @@ def verify(record, quiet=False):
 
 
 def install(record, out, python, node):
-    """Native installs of the staged wheel and npm packages with the host's runtimes."""
+    """Native installs of the staged wheel, npm packages and archive with the host's runtimes."""
     prefix = out.resolve() / 'install' / record['target']
     run(python, '-m', 'venv', str(prefix / 'python'))
     scripts = 'Scripts' if os.name == 'nt' else 'bin'
@@ -323,7 +370,20 @@ def install(record, out, python, node):
     env['PATH'] = f"{wrapper}{os.pathsep}{os.environ['PATH']}"
     run('bash', 'scripts/smoke-published.sh', '--expect-version', record['version'],
         '--label', f"staged npm {record['target']}", env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    print(f"staged-release: installed wheel and npm for {record['target']} {record['version']}")
+    # The archive is what a manual download unpacks: its binary, run from where
+    # it was unpacked, is the third install of the same bytes.
+    unpacked = prefix / 'archive'
+    unpacked.mkdir(parents=True, exist_ok=True)
+    if record['archive'].endswith('.zip'):
+        with zipfile.ZipFile(record['archive']) as bundle:
+            bundle.extractall(unpacked)
+    else:
+        with tarfile.open(record['archive']) as bundle:
+            bundle.extractall(unpacked, filter='data')
+    env['PATH'] = f"{unpacked}{os.pathsep}{os.environ['PATH']}"
+    run('bash', 'scripts/smoke-published.sh', '--expect-version', record['version'],
+        '--label', f"staged archive {record['target']}", env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    print(f"staged-release: installed wheel, npm and archive for {record['target']} {record['version']}")
 
 
 if __name__ == '__main__':

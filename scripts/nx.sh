@@ -34,6 +34,20 @@ export NX_DAEMON="${NX_DAEMON-false}"
 # for housekeeping: this workspace's pinned Nx is the only one that may run.
 export NX_USE_LOCAL=true
 
+# Stopgap for Nx bug nrwl/nx#37452: a `nx:run-commands` target Nx runs in its
+# own process can drop the output of a child that exits fast, and every early
+# refusal of the judged lint target is one. Forking the target keeps that output.
+# Nx reads this from its own environment, not a target's `env`, hence here.
+# Remove it once Nx fixes that issue.
+for argument in "$@"; do
+  case "$argument" in
+    lint-llm-diff | *:lint-llm-diff)
+      export NX_RUN_COMMANDS_DIRECTLY=false
+      break
+      ;;
+  esac
+done
+
 # The pinned `onemessagebus` CLI is the other shim the checks read — the
 # layout-document journey drives it — and the pinned `@onebudgetspec/sdk` is the
 # `report` the stage budget's command imports, so a tree installed before either
