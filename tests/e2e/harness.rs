@@ -5864,6 +5864,38 @@ impl HeldPublication {
     pub fn release(&self) {
         std::fs::write(&self.rendezvous, "go").expect("the held publication is released");
     }
+
+    /// Hold the next push again, once every push this hold let through is over:
+    /// the rendezvous and the marker the last push left are both taken away, so
+    /// [`holding`](Self::holding) answers for the next one alone.
+    pub fn rearm(&self) {
+        let mut marker = self.rendezvous.clone().into_os_string();
+        marker.push(".holding");
+        for path in [PathBuf::from(marker), self.rendezvous.clone()] {
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => panic!("{} could not be taken away: {error}", path.display()),
+            }
+        }
+    }
+}
+
+/// Hold every push from here on at `held`'s rendezvous rather than at the one the
+/// repository's hook was installed with.
+///
+/// git reads the hook again at every push, so a push already inside the old hook
+/// waits on the old rendezvous and every later push on `held`'s — which is how a
+/// journey holds the second of two pushes it cannot tell apart by anything else,
+/// switching once it has seen the first held. Only for a world whose
+/// [`World::repository`] installed a hook, since that is what points git here.
+pub fn hold_later_pushes_at(world: &World, held: &HeldPublication) {
+    let hook = hooks_dir(world).join("pre-push");
+    assert!(
+        hook.is_file(),
+        "this world's repository has no hook of its own to hold a push with"
+    );
+    install_hook(&hook, &held.argv());
 }
 
 impl Drop for HeldPublication {

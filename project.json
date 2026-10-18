@@ -81,7 +81,10 @@
     "test-quick": {
       "command": "just _crate-test-quick",
       "inputs": [
-        "crateTestSource"
+        "crateTestSource",
+        {
+          "env": "ONEPIPELINE_TEST_PARTITION"
+        }
       ],
       "dependsOn": [
         "test-quick-archive"
