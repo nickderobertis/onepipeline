@@ -482,19 +482,27 @@ fn lingerers_outliving(fixture: &Fixture, patience: std::time::Duration) -> (usi
 /// and `rerun-failed` reads that as the failure it is. Under the default profile
 /// the same test is still a leaky pass. Every process those runs leak has ended,
 /// by its pid, before this test returns, so this test leaks nothing itself.
+///
+/// The fixture's runs take one test at a time. Run together, a test nextest is
+/// still spawning holds every capture pipe open in nextest when it forks, its
+/// siblings' among them, until it execs; on a loaded host that can outlast a
+/// sibling's exit by more than the 100ms leak timeout, and the sibling is then
+/// leaky too. The gate of run 39076493816 read "6 passed (3 leaky)" that way.
+/// One at a time, only a process a test started can hold its output.
 #[test]
 fn a_test_leaving_a_process_holding_its_output_fails_the_ci_profile_by_name() {
     let fixture = leaking_fixture("leak-fails");
     archive(&fixture);
     let leaker = "nextest-scheduling-fixture::e2e leaves_a_process_holding_its_output";
+    let one_at_a_time = ["--no-fail-fast", "--test-threads", "1"];
 
-    let (output, log) = fixture.nextest_run(&["--no-fail-fast"]);
+    let (output, log) = fixture.nextest_run(&one_at_a_time);
     assert!(
         output.status.success() && log.contains("passed (1 leaky)"),
         "under the default profile a leak is still counted as a leaky pass:\n{log}"
     );
 
-    let (output, log) = fixture.nextest_run(&["--no-fail-fast", "--profile", "ci"]);
+    let (output, log) = fixture.nextest_run(&[&one_at_a_time[..], &["--profile", "ci"]].concat());
     assert!(
         !output.status.success(),
         "under the ci profile a test that left a process holding its output passed:\n{log}"
