@@ -5997,7 +5997,7 @@ for each engine-owned key whose value moved, `metadata_remove` for each one no l
 (a retry's new head carries no settlement or landing keys of its own yet), `content` and `title`
 where the text moved, `delivers` where it moved — the store re-evaluates each ticket as `task
 status` does — and `depends_on`, the whole declared set with each far end the item its lineage's
-root keys, where the edges moved. Labels, repositories, project membership and every key the
+root keys, where the set of edges moved (a `deps` reordered moves none). Labels, repositories, project membership and every key the
 engine does not own are never named, so a person's edit to any field stands until the run next
 changes that same field. The baseline advances per item as each update lands, recording the
 fields the store says it wrote. An item that does not exist — an `add`ed node — is created by
@@ -9975,7 +9975,9 @@ labelled with the head's own id would name a node the launched plan does not hol
 A task key, `{"branch": string, "base": string, "opened_at": RFC 3339}`, written by
 the projection that follows a node's session opening and removed by the one that
 follows its settlement. `branch` is the session's, `base` the one `onevcs`'s
-`session-opened` names, and `opened_at` that record's own time. A cold host reads it
+`session-opened` names, and `opened_at` the time of the first record of that session the
+journal holds — an open is journalled twice, as the dispatch relays it and as `onevcs`
+streams it, and the second never moves the key. A cold host reads it
 to pin an in-flight node to the branch it was working on.
 
 ### `onepipeline.driver`
@@ -11050,9 +11052,11 @@ are unchanged since 0.49.0 — makes its own: a
 `retarget_change` two single-change standings reads (before and after its write) and
 the repository's visibility read its write guard makes; a `reopen_change` two
 single-change standings reads, the same visibility read and the restore push. The
-restack's session open asks whether the host requires an up-to-date branch
-(`rules/branches/<base>`) and its visibility, as every continued session's base merge
-does.
+restack's session open declares that the engine merges the moved base itself
+(`onevcs`'s `caller_merges_base`), so it asks the repository's visibility and never
+whether the host requires an up-to-date branch (`rules/branches/<base>`); the busy review
+round (`the_busy_review_round_ends_answered_and_true_and_records_what_it_spent`) holds
+that none of its restacks or readjustments makes that read.
 
 **The SDK.** `verbs::readjust(paths, session, timeout) -> Result<ReadjustReceipt>`,
 `verbs::render_readjust` and `ReadjustReceipt::exit_code` (the `review` verb's shape,
@@ -11516,3 +11520,311 @@ lease's two bounds and its watchdog, the wait's sum over the displaced claim's o
 the acknowledged claim's shape and its refusals, a claim's `lease` and a driver's
 publications and their refusals, and the block above against the constants, the claim boundary and the
 README.
+
+## 129. Entry 128's bounds let a takeover start before what the displaced driver settled was on the store — OPEN
+
+**Proposal, for the planner who owns the contract, whose ruling kept the deferred
+acknowledgement below: entry 128 promises that a takeover "reads the project again, and
+continues and pins from that read — so what the displaced driver settled while it was being
+taken over is continued rather than dispatched again". Two of its other rules let the
+adopter start before that settlement was on the store, so that read missed it and the
+adopter dispatched a published node again. This build keeps the continuation promise and
+departs from those two rules as follows. Entry 128's wording is unchanged until this is
+ruled on.**
+
+- **The fence lets go of a settled publication only once its settlement has landed.**
+  Entry 128 has the driver rewrite `onepipeline.publishing` without a node "once a
+  publication has settled". This build drops the node only once a projection carrying the
+  node's settlement has landed on the store. Before that, an adopter past its wait that
+  found no fence started without the settlement. That was the Windows failure of
+  `a_publication_held_past_the_whole_takeover_wait_holds_the_takeover_until_it_has_finished`,
+  and `a_takeover_reading_before_a_settled_publication_has_landed_waits_until_it_has`
+  drives it.
+- **A superseded driver acknowledges only once what it settled has landed.** Entry 128
+  says it acknowledges once nothing of its own is in progress "and that projection has
+  landed (waited for at most one interval)". Read literally, a projection held longer than
+  that one interval is acknowledged anyway: the adopter starts on the acknowledgement, reads
+  the project without the settlement, and dispatches the node twice.
+  `a_settlement_held_past_the_displaced_drivers_wait_holds_the_takeover_until_it_lands`
+  is the evidence: it fails on the literal bound with the fence cleared and the takeover
+  acknowledged. This build keeps the one bounded wait. Past it, the driver goes on passing,
+  saying on standard error that the settlement "has not reached the store" and that it
+  acknowledges once it has. It does not clear its fence, acknowledge, retire its write-back
+  or close out until a projection carrying the settlement has landed.
+- **A driver whose lease had lapsed when it read the takeover still projects a settlement
+  its fence holds the adopter for.** Entry 128 has such a driver project nothing more,
+  because the adopter "may be writing to the board already". An adopter held by that
+  driver's fence has started nothing, so it writes nothing that projection could overwrite.
+- **A run closing out with a settlement that has not landed leaves its fence naming it.**
+  A later takeover then waits for an acknowledgement, as it does for a driver that died
+  mid-publication.
+
+Refused projections are untouched: entry 72 still attempts a refused snapshot again only
+when the run's graph next changes, and republishing the same snapshot attempts nothing. A
+settlement the store refuses is therefore not on the store, and the fence and the
+acknowledgement wait for it like any other. If the graph never changes, the takeover waits
+until somebody clears the fence, or until the displaced host's own records prove its run
+gone. It never starts without the settlement. That remaining case is a follow-up, not part
+of this record.
+
+## 130. A reviewer was never answered where they left a comment — OPEN
+
+**Proposal, for the planner who owns the contract: one launch flag and launch-config
+key, `--review-reply-graph` / `review_reply_graph`; one reserved persona and history
+scope, `review-reply`; one planner-channel op, `decline`, with its compiled operation
+`decline-applied`; two journal kinds, `review-reply-posted` and
+`review-reply-not-drafted`; one surface kind, `review-reply-pending`; the typed
+refusal `channel::Refusal`, carried as an optional `refusal` beside `reason` on a
+command's outcome; and a reply step at the end of `onepipeline review`.** Discovery
+(entries 122 and 124) brought each comment to its node, and a rework (entry 121)
+answered it with commits, but nothing told the reviewer: the user went back to each
+thread to say what changed. The rule below is the approved design of
+`authoring:pr-feedback-rework` (node `op-review`, which owns it; `ui-relink` and
+`aio-adopt` restate it), and this build implements it.
+
+**The pass, extended.** `onepipeline review <RUN>` — its exit codes and its driven and
+undriven behaviour unchanged, the readjustment still its first step — gains one step
+after discovery: it drafts and posts every **owed** reply. A comment is owed by a
+rework replacement that names it in its `onepipeline.rework` and has settled as a
+review draft (`done`, its outcome `change-review-draft` or
+`change-review-draft-unchecked`), where no marked reply answers its current revision —
+and, where an older reply answered an earlier revision, only where the rework's newest
+commit is later than the edit, so a rework never answers an edit it did not see. One
+drafting runs per replacement, and each reply is posted out of the read the pass has
+just made. On a run nothing drives, `review` returns only once every step is done; on
+a driven run it returns the driver's receipt within `ONEPIPELINE_REPLY_TIMEOUT_SECONDS`,
+`requested` where the driver is still drafting, and the driver finishes after. A
+drafting that cannot post — no drafter configured (`unconfigured`), a dispatch that
+failed or answered nothing its schema accepted (`failed`), or a result the rules
+refuse (`invalid`) — posts nothing, journals `review-reply-not-drafted {node,
+comments, ending, detail}` and raises a non-blocking `review-reply-pending` once per
+set of owed comments and ending; the next pass drafts it again, and the pass still
+exits 0. A post the host refuses is the pass's host failure (exit 1).
+
+**`decline`.** `{op: decline, id, comments: [{id, url}], reason}`, granted to the
+planner alone as `rework` is. Applying it **is** posting its replies: one fresh read of
+the change request (`review_comments(change, None)`), one drafting of the comments no
+`declined` reply answers yet — `## Commits` empty, `## Reason` the op's `reason`
+byte-for-byte, `## Worker transcript` the no-transcript sentence — and one POST per
+reply labelled `declined`, before the edit commits as `decline-applied {node,
+comments, reason, replies: [url]}` (each reply then journalled `review-reply-posted`).
+Nothing is written to the plan store, no branch moves and no worker is dispatched. It
+is refused, each as a `channel::Refusal`: `comment-not-read` for a comment no read of
+the node's lineage journalled; `blank-reason`; `already-answered` naming the reply,
+where a rework's reply answers a named comment, or every named comment is declined
+already — so the same decline sent again posts nothing; and `decline-not-posted
+{node, comments, detail}` where no drafter is configured, the read, the drafting or a
+post failed, any reply posted before the failure staying on the host and the same
+decline sent again posting only the rest. The two record-side refusals are judged by
+the reconciler, so a driven run's outcome carries every one by kind. On a driven run
+the driver applies it, and its receipt may be `queued`.
+
+**The reply drafter.** `start --review-reply-graph <path>`, recorded in `launch.json` as
+`review_reply_graph` and named in launch-config schema 13 by the same key, runs as the
+reserved persona `review-reply` — refused for a node or a step where a plan is read —
+composed without node overrides as `pr-author` is, and stamped under the history scope
+`review-reply` (the contract's scope list names three). Its task is a fixed preamble,
+then `## Change request`, `## Comments` (each comment's id, URL, author, location and
+text), `## Commits` (each commit the rework added between the superseded node's
+settled head and the replacement's: sha, subject and URL), `## Reason` (the rework's
+reason and instruction, byte-for-byte, or the decline's reason) and `## Worker
+transcript` (the retained transcript's path where this host's journal holds it, and the
+sentence below otherwise). Its result, read from `results[].structured` where
+`schema_valid` is true, is `{replies: [{comment, disposition: answered | declined,
+body}]}`, held to: every named comment exactly once and no other, every body non-empty
+and at most 500 characters, an `answered` body carrying a supplied commit URL, a
+`declined` body carrying none, and — for a decline — every reply `declined` and no
+commit URL at all.
+
+**Drafting input from the store and the host alone.** By the manager's ruling on this
+node, the replacement's `onepipeline.rework` carries one more field, `replaces_head` —
+the superseded node's settled head — written with the rest of that record, optional
+and read as before where absent; continuation's `continued.rework` carries it with the
+rework's `reason` and `instruction`, so a cold host drafts what the original would. The
+commits are read off the branch on its origin, fetched into a commit cache under the
+run, so no checkout anybody works in moves; a record written before the field carries
+none, and `## Commits` then holds what the store can show — the replacement's settled
+head alone. The checkpoint advances to version 13 with its golden, because a version-12
+fold would drop those three fields.
+
+**Posting and recovery.** Each reply is one `reply_to_comment` with key
+`sha256(<lineage root>:<comment id>:<revision>)`, label `declined` for a declined one,
+and `verified_absent: true`: the read that decided it was owed has just shown no reply
+carrying that key, so a reply is one POST and no plan-store write. No reply state is
+kept anywhere but the host: a host lost before the post leaves the comment owed, and
+one lost after the host took it leaves a marked reply the next read sees. No thread is
+ever resolved. Two hosts posting the same key at the same instant are the accepted
+limit, by the manager's ruling.
+
+**The typed refusal, by the manager's ruling.** `channel::Refusal` is public and
+`#[non_exhaustive]`, tagged `kind`; `CommandResult` gains the optional `refusal`
+(omitted when absent, so every outcome written before reads unchanged), its `reason`
+the refusal's text; `edit-rejected` carries the same optional `refusal`; and the error
+behind it is the new `Error::Rejected`, which exits as `Refused` does.
+
+**Views.** `status` and `results` name, beside an answered comment, the rework whose
+provenance names it and the short sha of each commit its reply links; `results --json`
+rises to schema version 2 for the two optional fields (`rework`, `commits`), omitted
+where empty.
+
+**What breaks, for an exhaustive Rust caller.** `cli::StartArgs::review_reply_graph`,
+`filter::LaunchConfig::review_reply_graph` and `ledger::LaunchRecord::review_reply_graph`
+are new fields; `agents::Scope::ReviewReply` and `agents::Launched::ReviewReply` new
+variants, and `Scope::ALL` four long; `channel::Command::Decline` and
+`channel::layout::Op::Decline` new variants; `CommandResult::refusal` a new field;
+`event::PipelineKind` two new variants. `Error` is `#[non_exhaustive]` already.
+
+**Test seams.** Debug binaries stop at three more `ONEPIPELINE_REVIEW_FAILPOINT` stages
+(entry 122's seam): `after-reply-post`, after the host took a rework's reply and before
+`review-reply-posted` is journalled; `after-decline-post`, after a decline's replies
+were posted and before `decline-applied` is journalled; and `after-edit-rejected`, after
+a driven reconciler journalled an envelope's `edit-rejected` records and before it
+answered the envelope. Release binaries ignore them; none is a public interface or a
+launch setting.
+
+```json
+{
+  "verb": "review",
+  "launch": {
+    "flag": "--review-reply-graph",
+    "config_key": "review_reply_graph",
+    "launch_record_key": "review_reply_graph",
+    "config_schema_version": 13
+  },
+  "persona": "review-reply",
+  "history_scope": "review-reply",
+  "op": {
+    "op": "decline",
+    "id": "reader-rework-1",
+    "comments": [{"id": "IC_kwABzgAAAfU", "url": "https://github.com/owner/service/pull/4#issuecomment-501"}],
+    "reason": "Out of scope for this change: the cache is tracked in #42."
+  },
+  "operation_kinds": ["decline-applied"],
+  "decline_applied": {
+    "node": "reader-rework-1",
+    "comments": [{"id": "IC_kwABzgAAAfU", "url": "https://github.com/owner/service/pull/4#issuecomment-501"}],
+    "reason": "Out of scope for this change: the cache is tracked in #42.",
+    "replies": ["https://github.com/owner/service/pull/4#issuecomment-9001"]
+  },
+  "event_kinds": ["review-reply-posted", "review-reply-not-drafted"],
+  "records": {
+    "review-reply-posted": {
+      "node": "reader-rework-1",
+      "comment": "PRRC_kwABzgAAAlk",
+      "disposition": "answered",
+      "url": "https://github.com/owner/service/pull/4#discussion_r9002",
+      "commits": ["1f2e3d4c5b6a79881726354453627180918a7b6c"]
+    },
+    "review-reply-not-drafted": {
+      "node": "reader-rework-1",
+      "comments": ["PRRC_kwABzgAAAlk"],
+      "ending": "invalid",
+      "detail": "comment PRRC_kwABzgAAAlk has no reply"
+    }
+  },
+  "dispositions": ["answered", "declined"],
+  "endings": ["unconfigured", "failed", "invalid"],
+  "surface_kind": "review-reply-pending",
+  "refusals": [
+    {"kind": "comment-not-read", "node": "reader-rework-1", "comment": "IC_kwABzgAAAfU"},
+    {"kind": "blank-reason", "node": "reader-rework-1"},
+    {"kind": "already-answered", "node": "reader-rework-1", "comment": "IC_kwABzgAAAfU", "url": "https://github.com/owner/service/pull/4#issuecomment-9001"},
+    {"kind": "decline-not-posted", "node": "reader-rework-1", "comments": ["IC_kwABzgAAAfU"], "detail": "the reply drafting settled without succeeding"}
+  ],
+  "command_result_refusal_field": "refusal",
+  "task_sections": ["## Change request", "## Comments", "## Commits", "## Reason", "## Worker transcript"],
+  "no_transcript": "No worker transcript is available on this host; draft from the sections above.",
+  "result": {
+    "replies": [
+      {"comment": "PRRC_kwABzgAAAlk", "disposition": "answered", "body": "Retried instead: https://github.com/owner/service/commit/1f2e3d4c5b6a79881726354453627180918a7b6c"},
+      {"comment": "IC_kwABzgAAAfU", "disposition": "declined", "body": "Left as it is: the cache is tracked in #42."}
+    ]
+  },
+  "body_limit": 500,
+  "declined_label": "declined",
+  "key": "sha256(<lineage root>:<comment id>:<revision>)",
+  "verified_absent": true,
+  "rework_metadata": {
+    "replaces": "reader",
+    "reason": "the reviewer asked for a retry instead of a cache",
+    "instruction": "remove the read-through cache and retry a failed read",
+    "comments": [{"id": "PRRC_kwABzgAAAlk", "url": "https://github.com/owner/service/pull/4#discussion_r601"}],
+    "replaces_head": "0a1b2c3d4e5f60718293a4b5c6d7e8f901a2b3c4"
+  },
+  "continued_rework_added": ["reason", "instruction", "replaces_head"],
+  "store_review_keys": [],
+  "results_schema_version": 2,
+  "results_golden": "tests/golden/review-results-v2.json",
+  "checkpoint_schema_version": 13,
+  "test_seams": ["after-reply-post", "after-decline-post", "after-edit-rejected"],
+  "bundle_versions": {"events": "1.7.0", "planner_channel": "1.5.0"}
+}
+```
+
+Merging `main`, whose scratch reclamation (entry 127) and claim lease (entry 128) took
+that number and the events bundles `1.5.0` and `1.6.0` first, moved this record from 127
+to 129 and its events bundle from `1.5.0` to `1.7.0`: the next free entry and the
+bundle's next minor. A later merge of `main`, whose takeover settlement record took 129
+first, moved it to 130. The planner-channel bundle, which neither raised, stays `1.5.0`.
+
+**What this build does.** `tests/e2e/review_reply.rs` drives every rule through the
+compiled binary and the real linked `onevcs` over real git, with GitHub at `onevcs`'s
+`ONEVCS_GH` seam: `fake-gh` answers each reply POST — a thread's `replies` route, or the
+conversation's `issues/<n>/comments` with its `Re:` line — through `onevcs-testing`'s
+remote double, whose ledger and state the journeys read back, and the reply drafter is
+the `oneagentgraph` double answering a `review-reply` dispatch from its task or a
+scripted result held to the graph's own schema. The journeys:
+`a_rework_s_replies_are_drafted_once_and_posted_one_post_each_in_their_threads` (one
+drafting, each section of its task, a thread reply and a linked conversation reply,
+each key, `review-reply-posted`, the ledger's one POST each with no read between, no
+store write, no thread resolved, nothing posted again);
+`a_decline_posts_one_declined_reply_and_is_the_whole_of_its_record_on_every_host` (its
+task, its one reply labelled `declined`, posted before `decline-applied`, no worker,
+branch or store write, `already-answered` on the identical decline, and `declined` on a
+cold host); `every_decline_refusal_reaches_the_outcome_by_kind_and_posts_nothing_it_should_not`
+(on a driven run, every refusal kind read off the outcome document — an unread comment,
+a blank reason, a failed drafting and each invalid result, a second post refused and
+the resend posting only the rest, and every comment already declined);
+`a_decline_with_no_reply_drafter_is_refused_and_posts_nothing`;
+`a_rework_s_drafting_that_fails_or_answers_against_the_rules_posts_nothing_until_it_drafts`
+(each invalid result and a failed drafting, journalled, surfaced once per ending, and
+posted once drafting succeeds); `with_no_reply_drafter_a_rework_s_replies_stay_owed_and_surfaced`;
+`an_edit_after_its_reply_is_pending_again_and_a_rework_naming_it_answers_the_new_revision`;
+`a_cold_host_reworks_a_stack_on_its_existing_branch_and_change_request_and_replies`;
+the three lost-host journeys, `a_host_lost_after_the_rework_settled_leaves_its_replies_to_the_next_host`,
+`a_host_lost_after_the_host_took_a_reply_leaves_nothing_to_post_again` and
+`a_host_lost_after_a_decline_posted_leaves_the_decline_answered_on_the_next_host`, the
+last two stopped at the seams above; `a_driven_review_still_drafting_at_the_reply_timeout_returns_requested_and_posts_after`;
+and `both_views_on_both_hosts_name_the_rework_and_commits_that_answered_and_the_decline`;
+`the_launch_config_names_the_reply_drafter_the_flag_overrides_it_and_a_blank_names_none`;
+`a_drafter_answer_its_schema_refuses_is_never_read_and_the_one_after_it_is`;
+`a_rework_s_reply_the_host_refuses_is_posted_by_the_next_pass_and_the_one_it_took_is_not_again`;
+`a_stored_rework_record_naming_no_superseded_head_drafts_from_the_replacement_s_head_alone`;
+`a_decline_whose_read_of_the_change_request_fails_posts_nothing_and_posts_once_it_reads`;
+`a_decline_of_a_comment_a_rework_answered_is_refused_already_answered_and_posts_nothing`;
+`a_decline_whose_drafting_cannot_start_or_be_given_a_directory_posts_once_it_can`;
+`a_rework_whose_commits_cannot_be_read_surfaces_its_replies_and_posts_once_they_can`;
+`a_decline_the_plan_refuses_names_why_and_posts_nothing`;
+`a_rework_s_drafter_may_decline_one_comment_while_it_answers_another`;
+and `a_typed_refusal_a_lost_driver_never_answered_is_answered_from_the_journal_by_kind`,
+stopped at `after-edit-rejected`. `tests/e2e/agents.rs`'s `a_reply_drafting_is_its_own_scope_in_history_and_takes_none_of_the_node_s_sets`
+runs the drafter through the real `oneagentgraph` and reads its history scope.
+`tests/e2e/plan.rs` holds the reserved persona's refusal. `src/reply.rs` holds the
+task, the rules and the commit links over its own types, and `tests/contract.rs`'s
+`the_review_reply_surface_is_what_the_divergence_record_names` holds the block above
+against the public types, the registered documents and both bundles.
+`tests/e2e/review_round.rs`'s
+`the_busy_review_round_ends_answered_and_true_and_records_what_it_spent` runs the busy
+round `review-round-github-quota` states and records its telemetry, which
+`scripts/review-round-quota-budget.sh` charges for that budget in the root `budgets.yaml`.
+Every call the scripted store received is charged or is its session's handshake or close:
+the driver's own writes of its claim and of entry 128's `onepipeline.publishing` fence,
+which no projection record names, are charged as `driver-metadata-set`, and a store call of
+any other kind fails the round. It also holds that the round makes no board write the store answers as changing nothing,
+that each reworked node's item is written its Queued claim, start, dispatch and settlement
+once each, and that no restack's or readjustment's open reads the base's branch rules.
+The live tier's `tests/smoke/review.rs`,
+`review_comments_found_on_one_host_are_reworked_and_declined_on_a_cold_one_from_the_store`,
+drives the same rework and decline against real pull-request comments on the scratch
+repository, its plan on a local Markdown store every host shares, its drafter the real `oneagentgraph` over the paid-turn stand-in,
+which answers a drafting's turn from its task as the graph double does.

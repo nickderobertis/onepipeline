@@ -41,6 +41,7 @@ mod harness;
 mod continuation;
 mod release_probe;
 mod repo;
+mod review;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

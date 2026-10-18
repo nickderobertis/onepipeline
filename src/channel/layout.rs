@@ -445,6 +445,12 @@ pub struct CommandResult {
     // llmlint: ignore[invalid_states_unrepresentable] the record `command-outcomes.jsonl` holds, in the shape 0.28.2 wrote and the recorded directories carry; folding `reason` into the verdict would change the bytes this layout must read and write exactly, and the reconciler that writes a result is where the pairing is enforced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// The refusal by kind, where the reconciler refused this command for a
+    /// reason it names as one — `reason` is then its text. Omitted otherwise, so
+    /// every outcome written before it existed reads unchanged.
+    // llmlint: ignore[invalid_states_unrepresentable] the manager's ruling on this node fixes the wire shape: an optional `refusal` beside `reason`, `reason` its display text, every existing outcome reading unchanged — so it cannot fold into the verdict or replace `reason` without changing bytes this layout reads and writes; the reconciler sets both from one refusal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<crate::channel::Refusal>,
 }
 
 /// The reconciler's answer to one submitted envelope, as
@@ -535,11 +541,13 @@ pub enum Op {
     Rework,
     /// Retitle a node's open change request.
     Retitle,
+    /// Decline review comments on a node's draft, posting a reply to each.
+    Decline,
 }
 
 impl Op {
     /// Every op, in the order the contract lists them.
-    pub const ALL: [Op; 18] = [
+    pub const ALL: [Op; 19] = [
         Op::SetNodeSets,
         Op::SetRunNodeSets,
         Op::Add,
@@ -558,6 +566,7 @@ impl Op {
         Op::Retitle,
         Op::Review,
         Op::Readjust,
+        Op::Decline,
     ];
 
     /// The op's wire word.
@@ -582,6 +591,7 @@ impl Op {
             Op::Retitle => "retitle",
             Op::Review => "review",
             Op::Readjust => "readjust",
+            Op::Decline => "decline",
         }
     }
 

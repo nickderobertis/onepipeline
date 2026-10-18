@@ -755,10 +755,14 @@ fn supersede(
     writeback: Option<&crate::writeback::Writeback>,
     claims: Option<&crate::continuation::ClaimWatch>,
     by: &crate::payload::DriverClaim,
+    fenced: bool,
 ) -> Result<bool> {
     let owed = claims.is_some_and(|watch| watch.lease().ever_held());
     if let Some(writeback) = writeback {
-        if claims.is_some_and(|watch| !watch.lease().lapsed()) {
+        // A publication this driver fenced holds the run that took over until its settlement
+        // is on the store, so that run is writing nothing yet: the settlement is projected
+        // even on a lapsed lease.
+        if fenced || claims.is_some_and(|watch| !watch.lease().lapsed()) {
             writeback.hand_over();
         } else {
             writeback.retire(by);
@@ -801,6 +805,8 @@ fn supersede(
 struct Superseded {
     by: crate::payload::DriverClaim,
     owed: bool,
+    /// Whether this driver has spent its one bounded wait for what it settled to land.
+    waited: bool,
 }
 
 /// The kind of the non-blocking surface a superseded driver raises.
@@ -1528,6 +1534,11 @@ fn converge(
     // The nodes whose publication this driver cleared and which have not settled: a
     // publication under way is finished, so neither a takeover nor a lapsed lease ends it.
     let mut publishing: BTreeSet<String> = BTreeSet::new();
+    // The nodes whose publication has settled and whose settlement the store does not hold
+    // yet: each stays named on the fence until a projection carrying it has landed, so a run
+    // taking the project over that finds it gone from the fence finds its settlement, and
+    // continues it rather than dispatching it again.
+    let mut unlanded: BTreeSet<String> = BTreeSet::new();
     // Rework republications waiting on the standings read that continues their trigger.
     let mut reworks_due: Vec<ReworkDue> = Vec::new();
     let channel = ChannelState::of_run(paths, launch);
@@ -1785,8 +1796,20 @@ fn converge(
                 .filter(|watch| watch.read_due())
                 .and_then(crate::continuation::ClaimWatch::check)
             {
-                let owed = supersede(paths, journal, writeback.as_ref(), claims.as_ref(), &by)?;
-                superseded_by = Some(Superseded { by, owed });
+                let fenced = !publishing.is_empty() || !unlanded.is_empty();
+                let owed = supersede(
+                    paths,
+                    journal,
+                    writeback.as_ref(),
+                    claims.as_ref(),
+                    &by,
+                    fenced,
+                )?;
+                superseded_by = Some(Superseded {
+                    by,
+                    owed,
+                    waited: false,
+                });
             }
         }
         // A publication waits on the pass rather than reading the claim itself: it starts
@@ -1808,8 +1831,10 @@ fn converge(
         // none named knows none is under way. One that cannot be named yet waits, as one on
         // a stale lease does — and the lease is asked again once the fence has landed.
         // llmlint: ignore[changed_behavior_has_e2e] the lease asked again after the fence lands is the one admission every start asks, whose refusal on a stale lease is driven by `continuation::a_publication_asked_for_on_a_stale_lease_waits_for_the_next_read`; reaching it *between* the fence's write and that question needs a store that holds one write for a whole claim interval and then answers, which is the sibling suspended mid-command — host-level process control no CLI journey exposes.
+        unlanded.retain(|node| settlement_unlanded(writeback.as_ref(), node));
         let fenced = claims.as_mut().is_none_or(|watch| {
             let mut nodes = publishing.clone();
+            nodes.extend(unlanded.iter().cloned());
             nodes.extend(starting.iter().map(|due| due.node.clone()));
             watch.fence(&nodes) && (starting.is_empty() || watch.may_start(None))
         });
@@ -2026,29 +2051,53 @@ fn converge(
         // the project is the run that took it over's to drive. Before it goes it says so on
         // that run's claim, once what it settled is on the board, which is what that run
         // starts on.
-        if let Some(Superseded { by, owed }) = superseded_by
+        if let Some(Superseded { by, owed, waited }) = superseded_by
             .as_mut()
             .filter(|superseded| superseded.owed && in_flight.is_empty())
         {
-            *owed = false;
             if let Some(writeback) = writeback
                 .as_ref()
                 .filter(|writeback| !writeback.is_retired())
             {
                 writeback.publish(paths, launch, state, &statuses);
-                // Bounded by one interval: the adopter's own wait is longer than that by more
-                // than an interval, so a board that is slow to take this is not one that
-                // could still be taking it once the adopter writes its own.
-                // llmlint: ignore[changed_behavior_has_e2e] the bound is reached only by a store that holds this one projection for a whole claim interval and then answers, which needs the sibling suspended mid-command — host-level process control no CLI journey exposes; what follows it, the acknowledgement, is driven by every takeover journey in `tests/e2e/continuation.rs`, and an acknowledgement that cannot be written by `a_takeover_waits_out_a_board_that_refuses_a_poll_and_the_acknowledgement`.
-                writeback.wait_until_landed(crate::continuation::claim_interval());
-                writeback.retire(by);
+                // The loop waits once, bounded by one interval, for the board to take it; past
+                // that it goes on passing, and the settlement's arrival wakes it.
+                if !*waited {
+                    writeback.wait_until_landed(crate::continuation::claim_interval());
+                }
             }
-            if let Some(watch) = &claims {
-                watch.acknowledge(by);
+            unlanded.retain(|node| settlement_unlanded(writeback.as_ref(), node));
+            if unlanded.is_empty() {
+                // What it settled is on the board: the run that took over continues it, so it
+                // writes nothing more there, names no publication of its, and lets that run go.
+                *owed = false;
+                if let Some(writeback) = &writeback {
+                    writeback.retire(by);
+                }
+                if let Some(watch) = claims.as_mut() {
+                    watch.fence(&publishing);
+                    watch.acknowledge(by);
+                }
+            } else if !*waited {
+                // A settlement the board has not taken would be dispatched again by a run that
+                // started without it, so the fence stands and nothing is acknowledged until it
+                // has.
+                eprintln!(
+                    "onepipeline: run '{}': the settlement of {} has not reached the store; it \
+                     acknowledges run '{}' on host '{}' once it has",
+                    paths.run,
+                    quoted(&unlanded),
+                    by.run,
+                    by.host
+                );
             }
+            *waited = true;
         }
+        // A superseded driver still owing its acknowledgement waits for what it settled to
+        // land rather than closing out.
+        let leaving = superseded_by.as_ref().map(|superseded| !superseded.owed);
         if in_flight.is_empty()
-            && (superseded_by.is_some() || watching_merge_paths.is_empty() && deliveries.idle())
+            && leaving.unwrap_or_else(|| watching_merge_paths.is_empty() && deliveries.idle())
         {
             // Nothing is running and nothing became ready, so no further
             // message can arrive: the graph is as converged as it will get.
@@ -2161,6 +2210,13 @@ fn converge(
                 if writeback
                     .as_ref()
                     .is_some_and(crate::writeback::Writeback::has_unprojected)
+                {
+                    return true;
+                }
+                // A settlement the fence still names has landed, so the fence can let it go.
+                if unlanded
+                    .iter()
+                    .any(|node| !settlement_unlanded(writeback.as_ref(), node))
                 {
                     return true;
                 }
@@ -2495,7 +2551,9 @@ fn converge(
                 Message::Settled(settled) => {
                     let settlement = &settled.settlement;
                     in_flight.remove(&settlement.node);
-                    publishing.remove(&settlement.node);
+                    if publishing.remove(&settlement.node) {
+                        unlanded.insert(settlement.node.clone());
+                    }
                     // A restack says what it did ahead of the node's ordinary
                     // settlement, which follows it as any settlement does.
                     let readjusting = state.readjust.plans.remove(&settlement.node);
@@ -2585,6 +2643,17 @@ fn converge(
         watch_for_quiet(paths, journal, stall_after, &mut in_flight)?;
     }
 
+    // The close-out projected every settlement this run made, or spent its window trying:
+    // the fence lets go of each that has landed since the last pass, and goes on naming one
+    // that has not — a run that took the project over without it would dispatch it again.
+    if !unlanded.is_empty() {
+        unlanded.retain(|node| settlement_unlanded(writeback.as_ref(), node));
+        if let Some(watch) = claims.as_mut() {
+            let mut nodes = publishing.clone();
+            nodes.extend(unlanded.iter().cloned());
+            watch.fence(&nodes);
+        }
+    }
     // A landing the last pass settled is told to `onevcs` before the driver
     // lets go, since no pass follows it.
     supersessions.pass(paths, journal, state)?;
@@ -2596,6 +2665,21 @@ fn converge(
     maintenance.close(paths, journal, &rx)?;
 
     Ok(graph::state_of(&statuses_of(&mut derived, state)))
+}
+
+/// `nodes`, each quoted, as a line names them.
+fn quoted(nodes: &BTreeSet<String>) -> String {
+    nodes
+        .iter()
+        .map(|node| format!("'{node}'"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Whether `node`'s settlement has yet to reach the store: until a projection carrying it has
+/// landed. A run with no write-back projects nothing, so has nothing to wait on.
+fn settlement_unlanded(writeback: Option<&crate::writeback::Writeback>, node: &str) -> bool {
+    writeback.is_some_and(|writeback| !writeback.has_landed_settlement(node))
 }
 
 /// What a close-out's last claim on the command queue found, and so what the
@@ -3807,7 +3891,7 @@ fn answer_recovered(
                         &error,
                         Some(envelope.id),
                     )?;
-                    Answered::Refused(error.to_string())
+                    Answered::Refused(RecordedRefusal::of(&error))
                 }
                 // llmlint: ignore[changed_behavior_has_e2e] only a note is ever written down
                 // with no operations, so no write-ahead a build makes reaches this; it keeps a
@@ -3838,7 +3922,7 @@ struct Effect {
     committed: Vec<Value>,
     /// Each command refused, as recorded with the reason its submitter was
     /// owed, in record order.
-    rejected: Vec<(Value, String)>,
+    rejected: Vec<(Value, RecordedRefusal)>,
 }
 
 /// Every record of the run's journal that names the command envelope it came
@@ -3892,7 +3976,7 @@ enum Evidence {
     Rejected {
         envelope: u64,
         command: Value,
-        reason: String,
+        reason: RecordedRefusal,
     },
 }
 
@@ -3937,7 +4021,10 @@ impl Evidence {
                 Some(Self::Rejected {
                     envelope: rejected.envelope?,
                     command: Value::Object(rejected.command),
-                    reason: rejected.reason,
+                    reason: match rejected.refusal {
+                        Some(refusal) => RecordedRefusal::Typed(refusal),
+                        None => RecordedRefusal::Text(rejected.reason),
+                    },
                 })
             }
             _ => None,
@@ -3952,9 +4039,9 @@ impl Evidence {
 fn refused_again(
     id: u64,
     commands: &[Command],
-    mut rejections: Vec<(Value, String)>,
+    mut rejections: Vec<(Value, RecordedRefusal)>,
 ) -> CommandOutcome {
-    let evaluated: Vec<std::result::Result<Staged, String>> = commands
+    let evaluated: Vec<std::result::Result<Staged, RecordedRefusal>> = commands
         .iter()
         .map(|command| {
             let sent = json!(command);
@@ -4076,6 +4163,7 @@ fn reconcile_envelope(
                     )?;
                 }
             }
+            crate::review::failpoint("after-edit-rejected")?;
             channel.answer_commands(&refused_envelope(envelope.id, commands, &evaluated))?;
             return Ok(false);
         }
@@ -4402,6 +4490,7 @@ fn record_delivered(
                     )?;
                 }
             }
+            crate::review::failpoint("after-edit-rejected")?;
             channel.answer_commands(&refused_envelope(envelope.id, commands, &evaluated))?;
             return Ok(false);
         }
@@ -4598,6 +4687,7 @@ fn applied_envelope(id: u64, commands: &[Command]) -> CommandOutcome {
                 op: crate::channel::op_of(command).to_string(),
                 outcome: crate::channel::CommandVerdict::Applied,
                 reason: None,
+                refusal: None,
             })
             .collect(),
     }
@@ -4628,7 +4718,7 @@ fn answered_envelope(
         return applied_envelope(id, commands);
     }
     if !answered.contains(&Answered::Committed) {
-        let evaluated: Vec<std::result::Result<Delivery, String>> = answered
+        let evaluated: Vec<std::result::Result<Delivery, RecordedRefusal>> = answered
             .into_iter()
             .map(|answer| match answer {
                 Answered::Refused(reason) => Err(reason),
@@ -4664,7 +4754,7 @@ fn partly_applied(id: u64, commands: &[Command], answered: &[Answered]) -> Comma
     let committed = listed(|answer| *answer == Answered::Committed);
     let refused = listed(|answer| matches!(answer, Answered::Refused(_)));
     let first = answered.iter().find_map(|answer| match answer {
-        Answered::Refused(reason) => Some(reason.as_str()),
+        Answered::Refused(reason) => Some(reason.to_string()),
         _ => None,
     });
     CommandOutcome {
@@ -4674,18 +4764,22 @@ fn partly_applied(id: u64, commands: &[Command], answered: &[Answered]) -> Comma
             "applied in part: command(s) {committed} committed and are in the run's record; \
              command(s) {refused} refused — {}. What committed is not undone: resend only what \
              refused",
-            first.unwrap_or("no reason was recorded")
+            first.as_deref().unwrap_or("no reason was recorded")
         )),
         results: commands
             .iter()
             .zip(answered)
             .enumerate()
             .map(|(index, (command, answer))| {
+                let refusal = match answer {
+                    Answered::Refused(reason) => reason.refusal(),
+                    Answered::Committed | Answered::NotAttempted => None,
+                };
                 let (outcome, reason) = match answer {
                     Answered::Committed => (crate::channel::CommandVerdict::Applied, None),
                     Answered::Refused(reason) => (
                         crate::channel::CommandVerdict::Refused,
-                        Some(reason.clone()),
+                        Some(reason.to_string()),
                     ),
                     Answered::NotAttempted => (
                         crate::channel::CommandVerdict::Validated,
@@ -4701,6 +4795,7 @@ fn partly_applied(id: u64, commands: &[Command], answered: &[Answered]) -> Comma
                     op: crate::channel::op_of(command).to_string(),
                     outcome,
                     reason,
+                    refusal,
                 }
             })
             .collect(),
@@ -4742,6 +4837,67 @@ fn all_or_each_ruling<T>(
     Ok(evaluated.into_iter().flatten().collect())
 }
 
+/// A refusal journalled as `edit-rejected`: the refusal by kind where it was one, whose
+/// text is the one [`Error::Rejected`] gives it — the text [`record_rejection`] journals
+/// beside it — and otherwise the reason recorded.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum RecordedRefusal {
+    /// Refused for a reason no kind names, in the words recorded.
+    Text(String),
+    /// Refused for a reason the reconciler names by kind.
+    Typed(crate::channel::Refusal),
+}
+
+impl RecordedRefusal {
+    /// `error` as its journalled refusal records it: by kind where it names one.
+    fn of(error: &Error) -> Self {
+        match error.refusal() {
+            Some(refusal) => Self::Typed(refusal),
+            None => Self::Text(error.to_string()),
+        }
+    }
+}
+
+impl From<String> for RecordedRefusal {
+    fn from(reason: String) -> Self {
+        Self::Text(reason)
+    }
+}
+
+impl std::fmt::Display for RecordedRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Text(reason) => f.write_str(reason),
+            Self::Typed(refusal) => write!(f, "{}", Error::Rejected(refusal.clone())),
+        }
+    }
+}
+
+/// A refusal an outcome answers a command with: its text, and its kind where it
+/// names one.
+pub(crate) trait Refused: std::fmt::Display {
+    /// The refusal by kind, where this is one.
+    fn refusal(&self) -> Option<crate::channel::Refusal>;
+}
+
+impl Refused for Error {
+    fn refusal(&self) -> Option<crate::channel::Refusal> {
+        match self {
+            Error::Rejected(refusal) => Some(refusal.clone()),
+            _ => None,
+        }
+    }
+}
+
+impl Refused for RecordedRefusal {
+    fn refusal(&self) -> Option<crate::channel::Refusal> {
+        match self {
+            Self::Text(_) => None,
+            Self::Typed(refusal) => Some(refusal.clone()),
+        }
+    }
+}
+
 /// What each command of a refused envelope is told.
 ///
 /// Every command has its own entry, and the words tell apart the facts a single
@@ -4752,7 +4908,7 @@ fn all_or_each_ruling<T>(
 /// refused, which is the one a manager must not resend blind. The envelope's own
 /// `reason` names the first refusal, which is what a reader of only that field
 /// has always had.
-fn refused_envelope<T: Unapplied, E: std::fmt::Display>(
+fn refused_envelope<T: Unapplied, E: Refused>(
     id: u64,
     commands: &[Command],
     evaluated: &[std::result::Result<T, E>],
@@ -4803,6 +4959,7 @@ fn refused_envelope<T: Unapplied, E: std::fmt::Display>(
                         Ok(_) => blamed(outcome),
                         Err(error) => error.to_string(),
                     }),
+                    refusal: ruling.as_ref().err().and_then(Refused::refusal),
                 }
             })
             .collect(),
@@ -4829,6 +4986,9 @@ pub(crate) enum Staged {
     /// delivery phase — the other command whose record a write outside the run
     /// decides, since what it replaced is what the host held.
     Retitle(Box<ValidatedRetitle>),
+    /// A `decline` whose replies the delivery phase drafts and posts: what it
+    /// commits names the replies the host took.
+    Decline(Box<crate::reply::ValidatedDecline>),
 }
 
 /// A `retitle`, judged and not yet written: the one operation it compiled to, and
@@ -4938,11 +5098,12 @@ impl Staged {
     /// whose disposition validation *did* settle is a [`Compiled`](Self::Compiled)
     /// like any other, and stages the record it commits — which is what a carried
     /// note owes the node's next dispatch.
-    pub(crate) fn staged(&self) -> &[edits::Operation] {
+    pub(crate) fn staged(&self) -> std::borrow::Cow<'_, [edits::Operation]> {
         match self {
-            Self::Compiled(operations) => operations,
-            Self::Note(_) => &[],
-            Self::Retitle(retitle) => &retitle.compiled,
+            Self::Compiled(operations) => operations.into(),
+            Self::Note(_) => (&[] as &[edits::Operation]).into(),
+            Self::Retitle(retitle) => retitle.compiled.as_slice().into(),
+            Self::Decline(decline) => vec![decline.staged()].into(),
         }
     }
 }
@@ -4975,6 +5136,9 @@ pub(crate) fn commits_of(step: Staged) -> Result<Vec<edits::Operation>> {
         // is_left_unverified_until_a_retitle_sets_one`, and the all-or-nothing journalling by
         // `record_delivered`'s note journeys, the same path.
         Staged::Retitle(retitle) => retitle_change(&retitle),
+        // Posting is applying it: the replies are the decline's record, so a decline
+        // whose posting fails commits nothing and leaves on the host what was posted.
+        Staged::Decline(decline) => crate::reply::decline(&decline),
     }
 }
 
@@ -5032,7 +5196,7 @@ fn validate_envelope(
         if let Ok(step) = &ruling {
             crate::projection::fold_operations(
                 &mut staged_state,
-                step.staged(),
+                &step.staged(),
                 Some(sys::now_millis()),
             );
         }
@@ -5284,12 +5448,12 @@ struct Outstanding {
 }
 
 /// What became of one command of a handed envelope.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 enum Answered {
     /// Its record is in the journal.
     Committed,
     /// It refused, for this reason, and its refusal is in the journal.
-    Refused(String),
+    Refused(RecordedRefusal),
     /// Never offered, because an earlier note to the same receiver refused:
     /// nothing of it happened.
     NotAttempted,
@@ -5930,7 +6094,7 @@ fn settle_lane(
             Ok(Delivery::NotAttempted) => Answered::NotAttempted,
             Err(error) => {
                 record_rejection(paths, journal, author.clone(), command, &error, Some(id))?;
-                Answered::Refused(error.to_string())
+                Answered::Refused(RecordedRefusal::of(&error))
             }
         };
         if let Some(slot) = outstanding.answers.get_mut(index) {
@@ -6018,6 +6182,9 @@ fn validate_command(
     if let Command::Retitle { id, .. } = command {
         let scope = crate::boundary::of_run(&crate::boundary::plan_now(state)).term_scope();
         return Ok(staged_retitle(operations, state.sessions.get(id), scope));
+    }
+    if let Command::Decline { .. } = command {
+        return crate::reply::staged_decline(paths, state, launch.review_reply_graph(), operations);
     }
     let Command::Note {
         id,
@@ -6229,6 +6396,9 @@ pub(crate) fn record_rejection(
     ]);
     if let Some(envelope) = envelope {
         payload.insert("envelope".into(), json!(envelope));
+    }
+    if let Some(refusal) = error.refusal() {
+        payload.insert("refusal".into(), json!(refusal));
     }
     journal.emit(
         journal::PipelineKind::EditRejected,
@@ -10217,6 +10387,28 @@ pub(crate) fn record_operation_facts(
                     by: crate::payload::RetitledBy::Retitle,
                 })?,
             )?,
+            // Each reply a `decline` posted, under the kind every posted reply is
+            // recorded as, after the commit that the posting was.
+            edits::Operation::DeclineApplied {
+                node,
+                comments,
+                replies,
+                ..
+            } => {
+                for (comment, url) in comments.iter().zip(replies) {
+                    journal.emit(
+                        journal::PipelineKind::ReviewReplyPosted,
+                        journal::labels(&paths.run, Some(node)),
+                        payload_of(&crate::payload::ReviewReplyPosted {
+                            node: node.clone(),
+                            comment: comment.id.clone(),
+                            disposition: crate::payload::ReplyDisposition::Declined,
+                            url: url.clone(),
+                            commits: Vec::new(),
+                        })?,
+                    )?;
+                }
+            }
             // A note no turn took is owed to the node's next dispatch: the commit
             // just journalled says so, and the bus's carry store is what hands it
             // over when that dispatch is composed.
@@ -11110,10 +11302,13 @@ mod tests {
             7,
             &commands,
             vec![
-                (json!(cancel("build")), "refused: the first copy".to_owned()),
                 (
                     json!(cancel("build")),
-                    "refused: the second copy".to_owned(),
+                    "refused: the first copy".to_owned().into(),
+                ),
+                (
+                    json!(cancel("build")),
+                    "refused: the second copy".to_owned().into(),
                 ),
             ],
         );
@@ -13365,6 +13560,12 @@ mod tests {
                 to: "fix: after".into(),
                 reason: "the title was unverified".into(),
             },
+            edits::Operation::DeclineApplied {
+                node: node(),
+                comments: vec![],
+                reason: "out of scope".into(),
+                replies: vec![],
+            },
         ];
         assert_eq!(
             every.iter().map(edits::Operation::kind).collect::<Vec<_>>(),
@@ -14263,6 +14464,7 @@ mod tests {
             observer_ending: String::new(),
             node_graph: String::new(),
             pr_author_graph: String::new(),
+            review_reply_graph: String::new(),
             node_validator: String::new(),
             envelope_reviewer: String::new(),
             launcher: launcher.into(),

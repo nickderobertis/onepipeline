@@ -40,13 +40,17 @@ use crate::taskgraph::{
 };
 
 // llmlint: ignore-block[invalid_states_unrepresentable] The store’s existing onepipeline.rework contract uses string identities. This boundary DTO rejects unknown fields; rework_provenance validates its values before continuation or baseline preservation uses them. Changing the serialized fields belongs to the shared contract’s owner.
-#[derive(serde::Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct StoredRework {
     pub(crate) replaces: String,
-    reason: String,
-    instruction: String,
+    pub(crate) reason: String,
+    pub(crate) instruction: String,
     pub(crate) comments: Vec<crate::channel::ReworkComment>,
+    /// The superseded node's settled head, absent from a record written before it
+    /// was carried (entry 130).
+    #[serde(default)]
+    pub(crate) replaces_head: Option<String>,
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
@@ -68,6 +72,15 @@ pub(crate) fn rework_provenance(value: &Value) -> Result<StoredRework> {
     }) {
         return Err(Error::Invalid(
             "invalid comment in rework provenance".to_owned(),
+        ));
+    }
+    // A commit id git names in full — SHA-1's 40 hex digits or SHA-256's 64 — and nothing
+    // else, because the drafting asks git for the commits after it.
+    if stored.replaces_head.as_deref().is_some_and(|head| {
+        !matches!(head.len(), 40 | 64) || !head.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }) {
+        return Err(Error::Invalid(
+            "rework provenance names a superseded head that is no full commit id".to_owned(),
         ));
     }
     Ok(stored)
@@ -122,6 +135,10 @@ const BEGIN_GATE_NODE_ENV: &str = "ONEPIPELINE_TEST_CLAIM_BEGIN_NODE";
 /// The test failpoint met before each read of the claim, so a journey can tell when a
 /// driver's lease began and hold it there.
 const READ_GATE_ENV: &str = "ONEPIPELINE_TEST_CLAIM_READ_GATE";
+
+/// The test failpoint met before each read a takeover makes once its wait has passed, so a
+/// journey can hold that read until the displaced driver has got where it needs it.
+const TAKEOVER_PAST_WAIT_GATE_ENV: &str = "ONEPIPELINE_TEST_TAKEOVER_PAST_WAIT_GATE";
 
 /// The key a displaced driver's acknowledgement is written under, inside the claim it
 /// acknowledges.
@@ -640,7 +657,10 @@ pub(crate) fn continuation_of(read: &Read, claim: Option<&DriverClaim>) -> Resul
                     from["rework"] = json!(crate::payload::ContinuedRework {
                         replacement: replacement.to_owned(),
                         replaces: stored.replaces,
-                        comments: stored.comments
+                        comments: stored.comments,
+                        reason: stored.reason,
+                        instruction: stored.instruction,
+                        replaces_head: stored.replaces_head,
                     });
                 }
             }
@@ -911,6 +931,11 @@ impl ClaimWatch {
             return true;
         }
         if crate::writeback::store_asked_to_wait(&self.run_dir) {
+            return false;
+        }
+        // A write the store refused is made again when its retry is due, and not on whatever
+        // pass something else woke first.
+        if self.fence_refused.is_some() && !self.until_fence_retry().is_zero() {
             return false;
         }
         if nodes.is_empty() && self.superseded {
@@ -1291,6 +1316,9 @@ pub(crate) fn hand_over(
         } else {
             every.min(left)
         });
+        if wait.is_some_and(|wait| written.elapsed() >= wait) {
+            let _ = crate::ordering::meet(TAKEOVER_PAST_WAIT_GATE_ENV);
+        }
         let read = store
             .project_metadata_within(project, CLAIM_READ_DEADLINE)
             .and_then(|metadata| {
@@ -1508,6 +1536,43 @@ pub(crate) fn takeover_wait(terms: ClaimLease) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stored_superseded_head_is_read_only_as_a_full_commit_id() {
+        let stored = |head: Value| {
+            let mut record = json!({"replaces": "a", "reason": "the review asked",
+                "instruction": "Rename it", "comments": []});
+            if !head.is_null() {
+                record["replaces_head"] = head;
+            }
+            rework_provenance(&record)
+        };
+        let sha1 = "1234567890abcdef1234567890abcdef12345678";
+        let sha256 = "ab".repeat(32);
+        assert_eq!(stored(Value::Null).unwrap().replaces_head, None);
+        assert_eq!(
+            stored(json!(sha1)).unwrap().replaces_head.as_deref(),
+            Some(sha1)
+        );
+        assert_eq!(
+            stored(json!(sha256)).unwrap().replaces_head,
+            Some(sha256.clone())
+        );
+        for refused in [
+            json!("main"),
+            json!("1234567"),
+            json!(format!("{sha1}0")),
+            json!("g234567890abcdef1234567890abcdef12345678"),
+            json!(format!("{sha1}\n")),
+            json!(""),
+        ] {
+            let why = stored(refused.clone()).expect_err("refused");
+            assert!(
+                why.to_string().contains("no full commit id"),
+                "{refused}: {why}"
+            );
+        }
+    }
 
     /// Lease terms of `interval` and `grace` seconds, each positive.
     fn terms(interval: u64, grace: u64) -> ClaimLease {

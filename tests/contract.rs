@@ -1020,9 +1020,9 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), EVENTS_BUNDLE_VERSION);
     assert_eq!(
-        divergence_block("128.")["bundle_versions"]["events"],
+        divergence_block("130.")["bundle_versions"]["events"],
         EVENTS_BUNDLE_VERSION,
-        "the events bundle version must be the one the claim lease entry records"
+        "the events bundle version must be the one the newest entry raising it records"
     );
     let carried: Vec<String> = bundle
         .schemas()
@@ -1230,7 +1230,7 @@ fn the_contract_states_the_planner_channel_documents_path_version_and_source() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), DOCUMENT_VERSION);
     assert_eq!(
-        divergence_block("126.")["bundle_versions"]["planner_channel"],
+        divergence_block("130.")["bundle_versions"]["planner_channel"],
         DOCUMENT_VERSION,
         "the planner-channel version must be the one the newest entry raising it records"
     );
@@ -2201,6 +2201,7 @@ fn op_of(command: &Edit) -> &'static str {
         Edit::Retitle { .. } => "retitle",
         Edit::Review { .. } => "review",
         Edit::Readjust { .. } => "readjust",
+        Edit::Decline { .. } => "decline",
     }
 }
 
@@ -4438,8 +4439,17 @@ fn the_run_history_surface_is_what_the_contract_names() {
     );
     let scopes: std::collections::BTreeMap<String, String> =
         serde_json::from_value(history["scopes"].clone()).expect("the scopes are words");
+    // The contract's three, and the reply drafter's that entry 130 proposes.
+    let proposed = divergence_block("130.")["history_scope"]
+        .as_str()
+        .expect("entry 130 names the reply drafter's scope")
+        .to_owned();
     assert_eq!(
-        scopes.values().cloned().collect::<BTreeSet<_>>(),
+        scopes
+            .values()
+            .cloned()
+            .chain(std::iter::once(proposed))
+            .collect::<BTreeSet<_>>(),
         agents::Scope::ALL
             .iter()
             .map(|scope| scope.as_str().to_string())
@@ -6653,7 +6663,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // undocumented wire; a kind the contract lists and the enum does not carry is
     // a promise nothing keeps. `PIPELINE_KINDS` is what `Journal::emit` accepts,
     // so this is the emitted set and not a second copy of it.
-    assert_eq!(PIPELINE_KINDS.len(), 62, "the closed set changed size");
+    assert_eq!(PIPELINE_KINDS.len(), 64, "the closed set changed size");
     let listed: BTreeSet<String> = backticked()
         .into_iter()
         .filter(|token| {
@@ -6664,6 +6674,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // record proposes, and no others: a kind neither document names fails here.
     let proposed: BTreeSet<String> = [
         "40.", "47.", "55.", "65.", "70.", "92.", "119.", "121.", "122.", "123.", "126.", "127.",
+        "130.",
     ]
     .into_iter()
     .flat_map(|entry| {
@@ -9706,7 +9717,11 @@ fn the_task_templates_are_what_the_contract_names() {
         assert_eq!(rung["launch_record_key"].as_str(), Some(key));
         assert_eq!(rung["config_schema_version"], json!(CONFIG_SCHEMA_VERSION));
     }
-    assert_eq!(CONFIG_SCHEMA_VERSION, LAUNCH_CONFIG_SCHEMA_VERSION);
+    // The version the template keys arrived at, which every later one still reads.
+    const { assert!(CONFIG_SCHEMA_VERSION <= LAUNCH_CONFIG_SCHEMA_VERSION) };
+    assert!(
+        onepipeline::filter::LAUNCH_CONFIG_SCHEMA_VERSIONS_READ.contains(&CONFIG_SCHEMA_VERSION)
+    );
     assert_eq!(
         block["layers"],
         json!([
@@ -10662,7 +10677,8 @@ fn dispatch_scratch_lifetime_is_the_divergence_surface() {
     use onepipeline::event::{EventKind, PipelineKind};
     let contract = divergence_block("127.");
     // The events bundle that first carried the scratch kinds; entry 128's claim
-    // lease raised the compiled-in one since, which that entry's own test pins.
+    // lease and entry 130's reply surface raised the compiled-in one since, which
+    // entry 130's own test pins.
     assert_eq!(contract["bundle_versions"]["events"], "1.5.0");
     assert!(
         matches!(Cli::try_parse_from(["onepipeline", "scratch", "discard", "example"]).unwrap().command, Command::Scratch(ScratchCommand::Discard { run }) if run == "example")
@@ -10842,7 +10858,6 @@ fn deferred_review_republication_is_the_recorded_outcome() {
 /// verb's do; and both bundles are at the versions it names.
 #[test]
 fn the_readjustment_is_what_the_divergence_record_names() {
-    use onepipeline::channel::layout::DOCUMENT_VERSION;
     use onepipeline::event::{EventKind, PipelineKind, PIPELINE_KINDS};
     use onepipeline::payload::{registry, schema_of};
     use onepipeline::verbs::{render_readjust, render_review, ReadjustReceipt, ReviewReceipt};
@@ -10969,12 +10984,11 @@ fn the_readjustment_is_what_the_divergence_record_names() {
         json!({"state": "performed"})
     );
 
-    // The events bundle that first carried the readjustment; entry 127's scratch
-    // kinds and entry 128's claim lease raised the compiled-in one since, which
-    // entry 128's own test pins.
+    // The versions the readjustment raised both bundles to; entries 127 and 128 raised
+    // the events bundle since, and entry 130 both.
     assert_eq!(
         block["bundle_versions"],
-        json!({"events": "1.4.0", "planner_channel": DOCUMENT_VERSION})
+        json!({"events": "1.4.0", "planner_channel": "1.4.0"})
     );
     assert!(
         onepipeline::channel::layout::bundle_json().contains(&format!("\"{op}\"")),
@@ -11071,7 +11085,7 @@ fn the_manager_landing_contract_is_what_the_divergence_record_names() {
         serde_json::from_value::<onepipeline::vocabulary::Significance>(word.clone())
             .unwrap_or_else(|why| panic!("{kind}'s word {word} is not onevcs's: {why}"));
     }
-    // The bundle that first carried the landings; entries 127 and 128 raised
+    // The bundle that first carried the landings; entries 127, 128 and 130 raised
     // it since, so the compiled-in bundle is that one or a later minor.
     let release = |text: &str| -> (u64, u64, u64) {
         let parts: Vec<u64> = text
@@ -11091,4 +11105,204 @@ fn the_manager_landing_contract_is_what_the_divergence_record_names() {
         carried.0 == compiled.0 && carried <= compiled,
         "{compiled:?}"
     );
+}
+
+/// Entry 130's reply surface is this build's own: the flag is `start`'s and the key
+/// the launch config's, at the schema version the entry names; the history scope is
+/// the agents module's; `decline` deserializes into its own variant, round-trips, is
+/// the planner's to issue and no other author's by default; both kinds are spelled by
+/// `PipelineKind` and their records admitted by the registered documents, each closed
+/// word admitted and an unnamed one refused; `decline-applied` is admitted inside an
+/// `edit-committed`; each refusal is a `channel::Refusal` carried on a command's
+/// outcome under the field the entry names, and omitted where there is none; the
+/// results golden is at the version it names; no plan-store key for replies is added;
+/// and both bundles are at its versions and carry the op and the kinds.
+#[test]
+fn the_review_reply_surface_is_what_the_divergence_record_names() {
+    use onepipeline::channel::layout::{CommandOutcome, Op, DOCUMENT_VERSION};
+    use onepipeline::channel::{Author, Command, CommandResult, CommandVerdict, Refusal};
+    use onepipeline::payload::{registry, schema_of};
+    let block = divergence_block("130.");
+
+    let start = Cli::command();
+    let start = start
+        .find_subcommand("start")
+        .expect("`start` is a verb of the binary");
+    let flag = block["launch"]["flag"].as_str().expect("the flag");
+    assert!(
+        start.get_arguments().any(|argument| argument
+            .get_long()
+            .map(|long| format!("--{long}"))
+            .as_deref()
+            == Some(flag)),
+        "`start` takes no {flag}"
+    );
+    assert_eq!(
+        block["launch"]["config_schema_version"],
+        json!(LAUNCH_CONFIG_SCHEMA_VERSION)
+    );
+    let key = block["launch"]["config_key"].as_str().expect("the key");
+    assert_eq!(block["launch"]["launch_record_key"], key);
+    let named = LaunchConfig {
+        review_reply_graph: Some("./graphs/review-reply.yaml".to_owned()),
+        ..LaunchConfig::default()
+    };
+    let written = serde_json::to_value(&named).expect("a launch config serializes");
+    assert_eq!(written[key], "./graphs/review-reply.yaml");
+    assert!(serde_json::to_value(LaunchConfig::default())
+        .expect("a launch config serializes")
+        .get(key)
+        .is_none());
+    assert_eq!(
+        block["history_scope"],
+        onepipeline::agents::Scope::ReviewReply.as_str()
+    );
+    assert_eq!(block["persona"], block["history_scope"]);
+
+    let op: Command = serde_json::from_value(block["op"].clone()).expect("the op deserializes");
+    assert!(matches!(op, Command::Decline { .. }), "{op:?}");
+    assert_eq!(
+        serde_json::to_value(&op).expect("it serializes"),
+        block["op"]
+    );
+    assert_eq!(onepipeline::channel::op_of(&op), "decline");
+    assert_eq!(Op::of_word("decline"), Some(Op::Decline));
+    onepipeline::channel::allows(Author::planner(), &op).expect("the planner may decline");
+    let allowlist = onepipeline::channel::layout::allowlist();
+    assert_eq!(
+        allowlist.authors().len(),
+        1,
+        "the compiled-in allowlist declares an author beside the planner"
+    );
+    let mut typo = block["op"].clone();
+    typo["typo"] = json!(true);
+    assert!(serde_json::from_value::<Command>(typo).is_err());
+
+    let registry = registry();
+    let kinds: Vec<String> =
+        serde_json::from_value(block["event_kinds"].clone()).expect("the kinds");
+    assert_eq!(
+        kinds,
+        [
+            PipelineKind::ReviewReplyPosted,
+            PipelineKind::ReviewReplyNotDrafted
+        ]
+        .map(|kind| kind.as_str().to_owned())
+    );
+    for (kind, record) in block["records"].as_object().expect("the records") {
+        let kind = PipelineKind::from_wire(&EventKind(kind.clone()))
+            .unwrap_or_else(|| panic!("{kind} is not a kind this build emits"));
+        registry
+            .check(&schema_of(kind), record)
+            .unwrap_or_else(|why| panic!("{kind}: {why:?}"));
+        let mut missing = record.clone();
+        missing.as_object_mut().unwrap().remove("node");
+        assert!(
+            registry.check(&schema_of(kind), &missing).is_err(),
+            "{kind}"
+        );
+    }
+    let posted = schema_of(PipelineKind::ReviewReplyPosted);
+    for word in block["dispositions"].as_array().expect("the dispositions") {
+        let mut record = block["records"]["review-reply-posted"].clone();
+        record["disposition"] = word.clone();
+        registry
+            .check(&posted, &record)
+            .expect("a disposition the entry names");
+    }
+    let mut unnamed = block["records"]["review-reply-posted"].clone();
+    unnamed["disposition"] = json!("ignored");
+    assert!(registry.check(&posted, &unnamed).is_err());
+    let undrafted = schema_of(PipelineKind::ReviewReplyNotDrafted);
+    for word in block["endings"].as_array().expect("the endings") {
+        let mut record = block["records"]["review-reply-not-drafted"].clone();
+        record["ending"] = word.clone();
+        registry
+            .check(&undrafted, &record)
+            .expect("an ending the entry names");
+    }
+    let mut unnamed = block["records"]["review-reply-not-drafted"].clone();
+    unnamed["ending"] = json!("forgotten");
+    assert!(registry.check(&undrafted, &unnamed).is_err());
+    let mut applied = block["decline_applied"].clone();
+    applied["kind"] = json!(block["operation_kinds"][0]);
+    registry
+        .check(
+            &schema_of(PipelineKind::EditCommitted),
+            &json!({"author": "planner", "command": block["op"], "operations": [applied],
+                    "operation_kinds": block["operation_kinds"]}),
+        )
+        .expect("an edit-committed carrying decline-applied");
+    assert_eq!(
+        block["surface_kind"],
+        onepipeline::channel::SurfaceKind::REVIEW_REPLY_PENDING
+    );
+    assert!(block["surface_kind"]
+        .as_str()
+        .unwrap()
+        .parse::<onepipeline::channel::SurfaceKind>()
+        .is_ok());
+
+    let field = block["command_result_refusal_field"]
+        .as_str()
+        .expect("the field");
+    for refusal in block["refusals"].as_array().expect("the refusals") {
+        let typed: Refusal = serde_json::from_value(refusal.clone())
+            .unwrap_or_else(|why| panic!("{refusal} is not a refusal: {why}"));
+        assert_eq!(&serde_json::to_value(&typed).unwrap(), refusal);
+        assert!(typed
+            .to_string()
+            .contains(refusal["node"].as_str().unwrap()));
+        let result = CommandResult {
+            index: 0,
+            op: "decline".to_owned(),
+            outcome: CommandVerdict::Refused,
+            reason: Some(typed.to_string()),
+            refusal: Some(typed.clone()),
+        };
+        let wire = serde_json::to_value(&result).unwrap();
+        assert_eq!(&wire[field], refusal);
+        let outcome = CommandOutcome {
+            id: 1,
+            applied: false,
+            reason: result.reason.clone(),
+            results: vec![result],
+        };
+        let read: CommandOutcome =
+            serde_json::from_value(serde_json::to_value(&outcome).unwrap()).unwrap();
+        assert_eq!(read, outcome);
+        assert_eq!(
+            onepipeline::error::Error::from(typed).exit_code(),
+            EXIT_REFUSED
+        );
+    }
+    let bare = serde_json::to_value(CommandResult {
+        index: 0,
+        op: "decline".to_owned(),
+        outcome: CommandVerdict::Applied,
+        reason: None,
+        refusal: None,
+    })
+    .unwrap();
+    assert!(bare.get(field).is_none(), "{bare}");
+
+    let golden: Value = serde_json::from_str(
+        &std::fs::read_to_string(repo_root().join(block["results_golden"].as_str().unwrap()))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(golden["schema_version"], block["results_schema_version"]);
+    assert_eq!(block["store_review_keys"], json!([]));
+    assert_eq!(
+        block["bundle_versions"],
+        json!({"events": onepipeline::vocabulary::EVENTS_BUNDLE_VERSION, "planner_channel": DOCUMENT_VERSION})
+    );
+    assert!(onepipeline::channel::layout::bundle_json().contains("\"decline\""));
+    let events = onepipeline::vocabulary::events_bundle_json();
+    for kind in &kinds {
+        assert!(
+            events.contains(&format!("agent.pipeline.{kind}@")),
+            "{kind}"
+        );
+    }
 }

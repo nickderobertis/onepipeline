@@ -1219,6 +1219,17 @@ impl GitHubEndpoint {
     }
 
     fn serve_with_replace_refusal(world: &World, seeded: &Value, refuse_replace: bool) -> Self {
+        Self::start(world, seeded, refuse_replace, None).listening(world)
+    }
+
+    /// Start the endpoint without waiting for it to publish its URL; `publish_hold` names the
+    /// directory its publication stops in until `go` appears there.
+    fn start(
+        world: &World,
+        seeded: &Value,
+        refuse_replace: bool,
+        publish_hold: Option<&Path>,
+    ) -> StartedEndpoint {
         let dir = world.root.join("github-endpoint");
         std::fs::create_dir_all(&dir).expect("endpoint directory");
         let seed = dir.join("seeded.json");
@@ -1260,27 +1271,19 @@ runpy.run_path(sys.argv[0], run_name='__main__')
             ]);
         }
         // llmlint: ignore-end[tests_mirror_real_usage]
-        let mut child = command
+        if let Some(hold) = publish_hold {
+            command.env("GITHUB_LOOPBACK_PUBLISH_HOLD", hold);
+        }
+        let child = command
             .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/e2e/github_loopback.py"))
             .arg(&dir)
             .arg(&seed)
             .spawn()
             .expect("loopback endpoint starts");
-        world.until("the GitHub endpoint to listen", |_| {
-            assert!(
-                child
-                    .try_wait()
-                    .expect("the endpoint process is readable")
-                    .is_none(),
-                "the GitHub endpoint exited before listening"
-            );
-            dir.join("endpoint").is_file()
-        });
-        let url = std::fs::read_to_string(dir.join("endpoint")).expect("endpoint URL");
-        Self {
+        StartedEndpoint {
             child,
-            _held_state: held_state,
-            url,
+            held_state,
+            dir,
         }
     }
 
@@ -1310,11 +1313,80 @@ runpy.run_path(sys.argv[0], run_name='__main__')
     }
 }
 
+/// A started endpoint whose URL has not been read yet.
+struct StartedEndpoint {
+    child: std::process::Child,
+    held_state: Option<std::fs::File>,
+    dir: PathBuf,
+}
+
+impl StartedEndpoint {
+    fn endpoint_file(&self) -> PathBuf {
+        self.dir.join("endpoint")
+    }
+
+    /// Wait for the endpoint to publish its URL and read it. The endpoint renames the whole URL
+    /// into place, so the file existing is the URL being complete.
+    fn listening(mut self, world: &World) -> GitHubEndpoint {
+        let endpoint = self.endpoint_file();
+        world.until("the GitHub endpoint to listen", |_| {
+            self.assert_running("listening");
+            endpoint.is_file()
+        });
+        let url = std::fs::read_to_string(&endpoint).expect("endpoint URL");
+        GitHubEndpoint {
+            child: self.child,
+            _held_state: self.held_state,
+            url,
+        }
+    }
+
+    fn assert_running(&mut self, before: &str) {
+        assert!(
+            self.child
+                .try_wait()
+                .expect("the endpoint process is readable")
+                .is_none(),
+            "the GitHub endpoint exited before {before}"
+        );
+    }
+}
+
 impl Drop for GitHubEndpoint {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+/// The loopback endpoint's URL is never readable half-written: held between writing the first
+/// half of the URL and the rest, the endpoint shows a reader no `endpoint` file at all, and once
+/// released the file it shows is the whole `http://` URL the endpoint answers on.
+#[test]
+fn the_github_endpoint_url_is_readable_only_once_completely_written() {
+    let world = World::new("github-endpoint-publication");
+    let hold = world.root.join("publish-hold");
+    std::fs::create_dir_all(&hold).expect("publication hold directory");
+    let mut started = GitHubEndpoint::start(&world, &json!({}), false, Some(&hold));
+    world.until("the endpoint's publication to be held", |_| {
+        started.assert_running("its publication was held");
+        hold.join("held").is_file()
+    });
+    let endpoint = started.endpoint_file();
+    assert!(
+        !endpoint.exists(),
+        "a reader found the endpoint file while its URL was half-written: {:?}",
+        std::fs::read_to_string(&endpoint)
+    );
+    std::fs::write(hold.join("go"), "").expect("the publication is released");
+    let served = started.listening(&world);
+    let port = served
+        .url
+        .strip_prefix("http://127.0.0.1:")
+        .unwrap_or_else(|| panic!("a whole loopback URL, not {:?}", served.url));
+    port.parse::<u16>()
+        .unwrap_or_else(|_| panic!("a whole port, not {port:?}"));
+    assert_eq!(served.state()["issues"]["work"]["status"], "Todo");
 }
 
 /// A reused GitHub Projects source must release its command snapshot: a metadata-only

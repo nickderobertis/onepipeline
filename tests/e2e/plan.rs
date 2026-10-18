@@ -740,6 +740,20 @@ fn a_project_the_schema_refuses_never_starts_a_run() {
                  "steps": [{"id": "draft", "persona": "pr-author", "task": "t"}]}]}),
             "step 'draft': `pr-author` is the persona this crate dispatches",
         ),
+        // And the persona a review comment's reply is drafted under, on the same terms.
+        (
+            "reservedreplypersona",
+            json!({"schema_version": 3, "tasks": [
+                {"id": "answer", "persona": "review-reply", "task": "t"}]}),
+            "node 'answer': `review-reply` is the persona this crate dispatches",
+        ),
+        (
+            "reservedreplysteppersona",
+            json!({"schema_version": 3, "tasks": [
+                {"id": "service", "repo": "o/r", "title": "feat: x",
+                 "steps": [{"id": "answer", "persona": "review-reply", "task": "t"}]}]}),
+            "step 'answer': `review-reply` is the persona this crate dispatches",
+        ),
         // ...and a plan below it that names `body` is refused by that field's
         // name, exactly as a field no schema ever had is. Silently dropping it
         // would leave its author to find out from the published change request.

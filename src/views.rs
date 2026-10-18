@@ -5305,6 +5305,7 @@ mod tests {
             observer_ending: String::new(),
             node_graph: String::new(),
             pr_author_graph: String::new(),
+            review_reply_graph: String::new(),
             node_validator: String::new(),
             envelope_reviewer: String::new(),
             launcher: "claude-code".into(),
