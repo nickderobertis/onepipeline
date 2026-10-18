@@ -22,7 +22,8 @@ Commits after dd2e5d6:
 - **c551671** only moves `Cargo.lock` to the engine patch releases the manifest already permits: oneagentgraph 0.5.14, onevcs 0.52.1, onevcs-testing 0.19.5.
 - **f2b9566**, the commit adding this document, writes `docs/test-profile-report.md` and nothing else.
 - **c93fa56** changes product timing: a driver no longer writes a refused publications fence again before its 5 s retry is due (`src/continuation.rs`). It also adds one e2e test, `continuation::a_pass_inside_a_refused_fences_retry_does_not_write_it_early`.
-- **7574f2f** and the commit regenerating these figures change only this document.
+- **7574f2f** and 644b02e change only this document.
+- **953fda8** names the record directory once, as `profile::RECORD_DIR`. The harness writes to the same `target/test-profile` it did before, and each CI leg's upload of it now warns if it found no records. It changes no test's work, so the local figures below, taken on 7574f2f, stand for it.
 
 The hosted dd2e5d6 records therefore predate the lock refresh and the fence fix. The local runs show neither moved the harness. The c551671 counts match the a94701b run: spawn 13,686 vs 13,575, git 9,048 vs 9,048, build 3,261 vs 3,259, fixture 7,766 vs 7,765. The 7574f2f counts are spawn 13,822, git 9,055, build 3,263 and fixture 7,773. The difference from c551671 is mostly the one added test and run-to-run variation in retries and polls.
 
@@ -972,7 +973,12 @@ The earlier runs at a94701b, dd2e5d6 and 049ba74 are recorded under the Checks h
 
 The fix adds one e2e test, 1,661 in all.
 
-**On 7574f2f** (the tree containing c93fa56; the commit after it changes only this document). The full e2e tier ran instrumented as `gate` runs it: `cargo llvm-cov --no-report nextest --locked -E 'binary(e2e)' --final-status-level fail --no-fail-fast`, with the `ONETASKGRAPH_*` dispatch variables unset. That was run `a989b0b5`, at load 4-10: **1,660 of 1,661 passed in 4,175.7 s**. Both fence tests passed: `a_publication_whose_fence_the_board_refuses_starts_once_a_later_write_lands` in 8.2 s and `a_pass_inside_a_refused_fences_retry_does_not_write_it_early` in 9.1 s. The only failure was `host_view`, at `tests/e2e/host_view.rs:799:5` with `"read_bytes":0`, as before. Every record in `target/test-profile/e2e` is from that run. The Linux breakdown, the ratios against local Linux, the local replay weighting and the per-module table's local column were regenerated from it.
+**On 953fda8** (after the regeneration). The judged lint on 644b02e reported one `changed_behavior_has_e2e` finding: the three profile uploads in `ci.yml` had no structural assertion, and `if-no-files-found: ignore` hid a wrong path. `ci_workflows::every_test_leg_keeps_the_profile_records_from_where_the_harness_writes_them` now holds `gate`, `cross` and `macos` to one `always()` upload of `RECORD_DIR`, with `warn`. It failed as intended when one path was changed to `target/test-profiles/` (the count assertion) and when one `warn` was put back to `ignore`; both were reverted. Re-run on 953fda8:
+- `cargo clippy --all-targets` (and `-p onepipeline-testfakes --all-targets`) with `-D warnings`, and `cargo fmt --check`: clean.
+- `cargo nextest run -p onepipeline-testfakes`: 2 of 2 passed.
+- `binary(ci_workflows)` with the e2e `profiling::` journeys: 31 of 31 passed.
+
+**On 7574f2f** (the tree containing c93fa56; the commit after it changes only this document). The full e2e tier ran instrumented as `gate` runs it: `cargo llvm-cov --no-report nextest --locked -E 'binary(e2e)' --final-status-level fail --no-fail-fast`, with the `ONETASKGRAPH_*` dispatch variables unset. That was run `a989b0b5`, at load 4-10: **1,660 of 1,661 passed in 4,175.7 s**. Both fence tests passed: `a_publication_whose_fence_the_board_refuses_starts_once_a_later_write_lands` in 8.2 s and `a_pass_inside_a_refused_fences_retry_does_not_write_it_early` in 9.1 s. The only failure was `host_view`, at `tests/e2e/host_view.rs:799:5` with `"read_bytes":0`, as before. All 1,661 records the figures read are from that run. They were copied aside before the later re-runs below rewrote the profiling journeys' records. The Linux breakdown, the ratios against local Linux, the local replay weighting and the per-module table's local column were regenerated from it.
 
 **On c551671** (head before this document):
 - The full e2e tier: 1,659 of 1,660 passed, in 4,412.6 s. The only failure was host_view, above.
