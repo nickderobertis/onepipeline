@@ -42,6 +42,7 @@ export function digest(root = process.cwd()) {
     "Cargo.toml",
     "release-targets.toml",
     "scripts/build-staged-release.py",
+    "release/release.py",
     "scripts/npm-build.mjs",
     "npm/onepipeline-cli/package.json",
   ]) {
@@ -87,6 +88,21 @@ function resolve(v, context, status) {
   if (v && typeof v === "object")
     return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, resolve(x, context, status)]));
   return v;
+}
+const planCache = new Map();
+function releaseTargets(root, platform) {
+  const key = `${root}\0${platform}`;
+  if (!planCache.has(key))
+    planCache.set(
+      key,
+      JSON.parse(
+        execFileSync("python3", ["release/release.py", "plan", platform], {
+          cwd: root,
+          encoding: "utf8",
+        }),
+      ).targets,
+    );
+  return planCache.get(key);
 }
 const producerCache = new Map();
 function producerOutputs(kind, job, context, root, scenario) {
@@ -385,9 +401,9 @@ export function runGraph(workflow, scenario, root = process.cwd(), prefix = "") 
         const targets = leg.target
           ? [leg.target]
           : (job.steps ?? []).flatMap((step) =>
-              [...(step.run ?? "").matchAll(/build-staged-release.py --target (\S+)/g)].map(
-                (match) => match[1],
-              ),
+              [
+                ...(step.run ?? "").matchAll(/^just release-(linux|macos|windows) build$/gm),
+              ].flatMap((match) => releaseTargets(root, match[1])),
             );
         rows.push({
           targets,

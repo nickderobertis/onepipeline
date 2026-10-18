@@ -326,6 +326,12 @@ fn turn(args: &[String], dir: &std::path::Path) -> ExitCode {
                 Some(_) => format!("{body}\n{}", what_the_task_says(&prompt)),
                 None => body,
             };
+            // `harness.work-anew` numbers every turn it writes, so a node dispatched again
+            // changes the tree its last attempt left rather than writing it over unaltered.
+            let body = match fake::node_script(dir, "harness", "work-anew") {
+                Some(_) => format!("{body}\nturn {}", fake::count(dir, "harness.work-anew")),
+                None => body,
+            };
             if let Err(error) = std::fs::write(&path, format!("{body}\n")) {
                 return fake::refuse(&format!("cannot write {}: {error}", path.display()));
             }
@@ -380,8 +386,11 @@ fn turn(args: &[String], dir: &std::path::Path) -> ExitCode {
     // running dispatch is read against. The first event proves the stream
     // arrives; a second, released while the node is still in flight, proves the
     // readout *advances*. The driver's own turn is left alone — it is the
-    // member running the engine verbs, not the one being watched.
-    if !observing && dir.join("turn.hold").exists() {
+    // member running the engine verbs, not the one being watched. Where
+    // `turn.hold-what` names a task, only that task's turn is held: a journey
+    // holding one node in flight must not also hold another node's turn the
+    // engine dispatches again after a failed publication.
+    if !observing && dir.join("turn.hold").exists() && held_here(dir, &prompt) {
         fake::wait_for(&dir.join("turn.go"));
         if streaming {
             tool_call(2, "cargo llvm-cov --workspace");
@@ -691,6 +700,13 @@ fn structured(prompt: &str, dir: &std::path::Path) -> serde_json::Value {
         });
     }
     answer
+}
+
+/// Whether `turn.hold` holds this turn: every worker turn, or — where `turn.hold-what`
+/// names one — only the turn whose task's `## What` opens with that line.
+fn held_here(dir: &std::path::Path, prompt: &str) -> bool {
+    fake::node_script(dir, "turn", "hold-what")
+        .is_none_or(|what| what_the_task_says(prompt) == what)
 }
 
 /// The line after a task's `## What` heading in `prompt`, or nothing where it has none.

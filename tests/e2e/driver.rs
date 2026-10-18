@@ -1342,11 +1342,19 @@ fn a_detached_adoption_whose_driver_dies_is_refused_with_what_that_driver_said()
     // binary. `dispatch::broken_launch_records_refuse_the_adoption_before_direct_or_lifecycle_dispatch`
     // arranges the neighbouring fault the same way.
     let world = World::new("driver-adopt-detached-refused");
-    let run = start_detached(&world, "half-written", vec![human("approve", &[])]);
-    world.until("the driver to exit", |world| {
+    let (run, driver) =
+        start_detached_announcing(&world, "half-written", vec![human("approve", &[])]);
+    world.until("the driver to let go of the run", |world| {
         world.run(&["status", &run]).stdout.contains("PAUSED")
     });
     let died = world.run_json(&run, "launch.json")["pid"].clone();
+    assert_eq!(died, json!(driver));
+    // `PAUSED` is read off the record a driver writes as it lets go, which it
+    // writes while it still holds the run: the lock it removes on release is
+    // the file this journey is about to break, so it waits for the process.
+    world.until("the driver to exit", |_| {
+        crate::harness::process_ended(driver)
+    });
 
     std::fs::write(world.run_file(&run, "owner.lock"), "not json")
         .expect("the ownership lock is half-written");
@@ -1408,6 +1416,150 @@ fn a_detached_adoption_reports_an_observer_that_refuses_to_relaunch() {
     assert!(world.run_file(&run, "launch.pre-adopt-1.json").exists());
     assert_eq!(world.events_of(&run, "driver-adopted").len(), 1);
 } // llmlint: ignore-end[tests_mirror_real_usage]
+
+/// A run whose observer restart is stopped inside its launch, and the driver
+/// that started it.
+///
+/// The watch restarting an observer runs beside the driver's loop, so this is
+/// the state a driver lets go of the run in when a restart is under way. Held
+/// rather than raced, so what happens next is the journey's order and not the
+/// host's.
+struct HeldRestart {
+    run: String,
+    driver: u32,
+    restart: crate::harness::Arrival,
+}
+
+/// [`HeldRestart`], with the run's `build` dispatch held inside its own hold
+/// beside it: releasing that is what moves the driver on to letting go.
+fn a_restart_held_inside_its_launch(
+    world: &World,
+    name: &str,
+    nodes: Vec<Value>,
+) -> (HeldRestart, crate::harness::Arrival) {
+    // The node's dispatch meets the journey inside its hold, so it is past the
+    // point the launch hold below would catch it.
+    let build = world.rendezvous("build");
+    world.script("observer.wait", "hold");
+    let run = start_detached_observed(world, name, nodes);
+    let dispatch = build.arrived();
+    world.until("the observer to watch", |world| {
+        !world.observer_saw().is_empty()
+    });
+    let driver = world.run_json(&run, "launch.json")["pid"]
+        .as_u64()
+        .and_then(|pid| u32::try_from(pid).ok())
+        .unwrap_or_else(|| panic!("the record names no driver:\n{}", world.dump()));
+    let launches = world.rendezvous("run");
+    world.release("observer.go.1");
+    let restart = launches.arrived();
+    world.unscript("run.rendezvous");
+    (
+        HeldRestart {
+            run,
+            driver,
+            restart,
+        },
+        dispatch,
+    )
+}
+
+/// Correct the run's launch record once its driver has let go, let the held
+/// restart finish, and prove the departed driver wrote nothing over the
+/// correction and left no observer behind. The corrected record names a
+/// directory that is not there; it is returned for the caller to read.
+fn the_departed_driver_writes_nothing(world: &World, held: HeldRestart) -> PathBuf {
+    let HeldRestart {
+        run,
+        driver,
+        restart,
+    } = held;
+    // llmlint: ignore-block[tests_mirror_real_usage] no CLI command edits a run's
+    // durable launch record after its driver has let go. The corrected record is
+    // the premise `a_detached_adoption_reports_an_observer_that_refuses_to_relaunch`
+    // arranges the same way, at the persisted boundary; the departed driver, its held
+    // restart, and every observation still go through the compiled binary.
+    let missing = world.run_file(&run, "missing-observer-directory");
+    let mut record = world.run_json(&run, "launch.json");
+    record["dir"] = json!(missing);
+    std::fs::write(world.run_file(&run, "launch.json"), record.to_string())
+        .expect("the launch record names an unavailable observer directory");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+
+    let observer = restart.pid;
+    restart.release();
+    world.until("the driver that let go to exit", |_| {
+        crate::harness::process_ended(driver)
+    });
+    assert_eq!(
+        world.run_json(&run, "launch.json")["dir"],
+        json!(missing),
+        "the driver that let go put its own record back over the run's:\n{}",
+        world.dump()
+    );
+    assert!(
+        !std::fs::read_to_string(world.run_file(&run, "driver.log"))
+            .expect("the driver's log")
+            .contains("started another observer graph"),
+        "a driver that had let go of the run claimed another observer for it"
+    );
+    world.until("the observer the restart launched to be ended", |_| {
+        crate::harness::process_ended(observer)
+    });
+    missing
+}
+
+/// A driver that lets go of its run writes nothing more to it — not even the
+/// observer it was in the middle of restarting — so a record corrected after
+/// the run reads as let go is the record the next adoption meets.
+#[test]
+fn a_restart_finishing_after_its_driver_let_go_writes_nothing_to_the_run() {
+    let world = World::new("driver-let-go-restart");
+    let (held, dispatch) = a_restart_held_inside_its_launch(
+        &world,
+        "let-go-restart",
+        vec![agent("build", &[]), human("approve", &[])],
+    );
+    let run = held.run.clone();
+    // The run pauses on its human node, and its driver lets go of it.
+    dispatch.release();
+    world.until("the driver to let go of the run", |world| {
+        world.run(&["status", &run]).stdout.contains("PAUSED")
+    });
+    the_departed_driver_writes_nothing(&world, held);
+
+    let adopted = world.run(&["adopt", &run, "--detach"]);
+    adopted.exited(REFUSED);
+    adopted.err_has("did not claim it");
+    adopted.err_has("not a directory");
+}
+
+/// The same of a driver that lets go of its run over an error it reports: the
+/// run is free the moment its `driver-exited` is written, so the restart under
+/// way then writes nothing either.
+#[test]
+fn a_restart_finishing_after_its_driver_let_go_over_an_error_writes_nothing_to_the_run() {
+    let world = World::new("driver-let-go-restart-error");
+    let (held, dispatch) =
+        a_restart_held_inside_its_launch(&world, "let-go-error", vec![agent("build", &[])]);
+    let run = held.run.clone();
+    // llmlint: ignore-block[tests_mirror_real_usage] a queue log that stops being a file
+    // under a live driver is a storage fault no verb writes, and is how
+    // `driver_exit::a_driver_that_reports_an_error_records_it_while_it_still_holds_the_run`
+    // makes the compiled driver's own pass fail; the driver, its held restart, and every
+    // observation are the real ones.
+    std::fs::create_dir_all(world.run_file(&run, "channel/commands.jsonl"))
+        .expect("the queue log is replaced by a directory");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    dispatch.release();
+    world.until("the driver to record its error", |world| {
+        world
+            .events_of(&run, "driver-exited")
+            .iter()
+            .any(|exited| exited["payload"]["settlement"] == "error")
+    });
+    the_departed_driver_writes_nothing(&world, held);
+}
 
 #[test]
 fn a_detached_adoption_refuses_when_the_prior_launch_record_cannot_be_preserved() {
@@ -2746,19 +2898,19 @@ fn a_restart_the_observers_graph_refuses_is_reported_and_not_asked_again() {
     // Both held, so the observer is watching and the node is genuinely in flight
     // before the graph becomes unrunnable: what is under test is a *restart*
     // being refused, not a launch being refused.
+    //
+    // The node is held at a rendezvous rather than seen in the invocation log,
+    // because the double records an invocation before it reads its refusal
+    // script: a dispatch merely *invoked* can still take the refusal scripted
+    // below for its own, fail all its attempts, and settle the run before the
+    // observer is ever restarted. Arrived, it is past that read.
     world.script("observer.wait", "hold");
-    world.script("build.wait", "hold");
+    let build = world.rendezvous("build");
     let run = start_detached_observed(&world, "refused-restart", vec![agent("build", &[])]);
-    world.until(
-        "the observer to be watching and the node to be in flight",
-        |world| {
-            !world.observer_saw().is_empty()
-                && world.was_invoked(
-                    "oneagentgraph",
-                    &["run", "--label", "onepipeline.node=build"],
-                )
-        },
-    );
+    let held = build.arrived();
+    world.until("the observer to be watching", |world| {
+        !world.observer_saw().is_empty()
+    });
 
     // From here the graph will not start at all — a config that no longer
     // resolves, a directory that has gone — and then the observer goes.
@@ -2795,8 +2947,24 @@ fn a_restart_the_observers_graph_refuses_is_reported_and_not_asked_again() {
         "a run whose observer would not start again reads as watched: {}",
         rendered.stdout
     );
+    // The refusal was the observer's alone: the node went on in the one dispatch
+    // it started with, rather than spending its attempts on the same answer.
+    assert_eq!(
+        world.events_of(&run, "node-dispatched").len(),
+        1,
+        "the node's own dispatch took the observer's refusal\n{}",
+        world.dump()
+    );
+    assert!(
+        world.events_of(&run, "node-settled").is_empty(),
+        "the node settled while its dispatch was held\n{}",
+        world.dump()
+    );
 
-    world.release("build.go");
+    held.release();
+    world.until("the run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
 }
 
 /// The shipped bound, unset and unreadable, is eight restarts.

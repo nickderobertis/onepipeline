@@ -20,7 +20,7 @@
 // suppression and the full rationale.
 
 use crate::draft_lifecycle::{team_repository, GREEN};
-use crate::harness::{git, lifecycle, plan_of, Repository, World};
+use crate::harness::{agent, git, lifecycle, plan_of, Repository, World};
 use serde_json::{json, Value};
 
 /// The lines the engine's Stack block opens and closes with.
@@ -1054,4 +1054,120 @@ fn a_stacked_settlement_is_projected_onto_the_store() {
     assert_eq!(projected["head"], b["head"], "{projected}");
     assert_eq!(projected["stack"], b["stack"], "{projected}");
     assert_eq!(projected["stack"]["parents"][0]["node"], "a", "{projected}");
+}
+
+/// The deadlock the continuation smoke met, offline: a stacked node whose publication
+/// fails in a way that preserves its work is dispatched again as a fresh worker turn, and
+/// that turn runs while the one node above it is held — so the stacked node settles `done`
+/// and the node above it is started only then.
+///
+/// Driven through the real `oneagentgraph` to the model-turn double, which is where the
+/// smoke's hold lives: the origin refuses the stacked node's first push, which `onevcs`
+/// answers as `push-rejected` and the engine re-dispatches on the preserved branch. A hold
+/// on every worker turn would hold that re-dispatch until the node above it ran, which it
+/// never would.
+#[test]
+fn a_stacked_parents_retry_runs_free_while_only_its_dependent_is_held() {
+    let world = team_world("stacked-retry-free");
+    world.write_graphs();
+    world.script("harness.work", "the worker wrote this");
+    world.script("harness.work-anew", "");
+    world.script("turn.hold-what", "Do hold.");
+    world.script("turn.hold", "");
+    refuse_the_first_push_of(&world.root.join("origin.git"), "/b");
+    let run = "stacked-retry-free";
+    let mut plan = plan_of(
+        run,
+        vec![
+            lifecycle("a", &[]),
+            lifecycle("b", &["a"]),
+            agent("hold", &["b"]),
+        ],
+    );
+    plan["concurrency"] = json!(1);
+    let path = world.plan(run, &plan);
+    world
+        .run_on_agentgraph(&["start", &path, "--detach"])
+        .exited(0);
+    world.until("the node above the stack to be started", |world| {
+        dispatches(world, run, "hold") > 0
+    });
+
+    let journal = world.journal(run);
+    let b_dispatched: Vec<&Value> = journal
+        .iter()
+        .filter(|event| event["kind"] == "node-dispatched" && event["labels"]["node"] == "b")
+        .collect();
+    assert_eq!(b_dispatched.len(), 2, "{b_dispatched:#?}\n{}", world.dump());
+    assert_eq!(
+        b_dispatched[1]["payload"]["attempt"], 2,
+        "{}",
+        b_dispatched[1]
+    );
+    assert!(
+        b_dispatched[1]["payload"]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.starts_with("push-rejected:")),
+        "{}",
+        b_dispatched[1]
+    );
+    let b = settled(&world, run, "b");
+    assert_eq!(b["status"], "done", "{b}\n{}", world.dump());
+    assert_eq!(b["stack"]["parents"][0]["node"], "a", "{b}");
+    let at = |kind: &str, node: &str| {
+        journal
+            .iter()
+            .position(|event| event["kind"] == kind && event["labels"]["node"] == node)
+            .unwrap_or_else(|| panic!("no {kind} for {node}"))
+    };
+    assert!(
+        at("node-settled", "b") < at("node-dispatched", "hold"),
+        "the node above the stack was started before the stacked node settled"
+    );
+
+    // Held, and only it: in flight until let go, and settled once it is.
+    world.until("the held node's turn to start", |world| {
+        world
+            .turns()
+            .iter()
+            .any(|turn| turn.prompt.contains("Do hold."))
+    });
+    assert!(
+        !world
+            .events_of(run, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "hold"),
+        "the held node settled while its hold stood"
+    );
+    world.release("turn.go");
+    world.release("turn.settle");
+    world.until("the run to settle", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+}
+
+/// How many times `node` was dispatched in `run`.
+fn dispatches(world: &World, run: &str, node: &str) -> usize {
+    world
+        .events_of(run, "node-dispatched")
+        .iter()
+        .filter(|event| event["labels"]["node"] == node)
+        .count()
+}
+
+/// An origin that refuses the first push of a branch whose name ends with `ending`, and
+/// takes every other push.
+fn refuse_the_first_push_of(origin: &std::path::Path, ending: &str) {
+    let hook = origin.join("hooks").join("pre-receive");
+    std::fs::create_dir_all(hook.parent().expect("hooks has a directory"))
+        .expect("the hooks directory");
+    onepipeline_testfakes::executable(
+        &hook,
+        format!(
+            "#!/bin/sh\nwhile read old new ref; do\n  case \"$ref\" in\n    *{ending})\n      \
+             if [ ! -f \"$0.refused\" ]; then\n        touch \"$0.refused\"\n        \
+             echo \"this origin refuses the first push of $ref\" >&2\n        exit 1\n      \
+             fi\n      ;;\n  esac\ndone\n"
+        ),
+    );
 }

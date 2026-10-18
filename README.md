@@ -53,9 +53,9 @@ The package name is not optional: `cargo install --git` searches the whole
 repository, and this one also carries the `onepipeline-testfakes` test harness,
 so an unqualified command fails with `multiple packages with binaries found`.
 
-Prebuilt archives for Linux (x86-64, arm64), macOS (Apple silicon), and Windows
-(x86-64) are attached to every release, with `sha256` checksums. Intel macOS
-builds are discontinued: on an Intel Mac, build from source with the command
+Prebuilt archives for Linux (x86-64), macOS (Apple silicon), and Windows
+(x86-64) are attached to every release, with `sha256` checksums. Intel macOS and
+arm64 Linux builds are discontinued: there, build from source with the command
 above.
 
 ## How the npm launcher is published
@@ -76,9 +76,9 @@ window after each release.
 `scripts/publish-npm.sh` therefore asks the registry rather than the exit code:
 it does not return until the version it just published is served, and it refuses
 to publish any package before the exact versions that package's own manifest
-pins are served. `verify-npm` then installs and starts the launcher on every
-platform the manifest declares a package for, so a release that would ship that
-window is red rather than green.
+pins are served. Each platform's build job then installs its own platform
+package from npm and starts it on that OS, and `publish` installs and starts the
+launcher, so a release that would ship that window is red rather than green.
 
 ## Release outcome
 
@@ -86,7 +86,7 @@ Every release attaches **`release-outcome.json`** to its GitHub Release. It
 answers one question in three states, so a consumer can tell a publication that
 was verified from one that was not without opening a job log:
 
-- `nothing-shipped` — no publish job ran, so no artifact can have reached a
+- `nothing-shipped` — no publish step ran, so no artifact can have reached a
   registry. A publish that *failed* does not say this: it may have published
   part of what it was given, so it reads as `shipped-unverified`.
 - `shipped-unverified` — artifacts are public, and installing one of them was
@@ -904,6 +904,11 @@ just bootstrap   # from a clean clone
 just check       # the deterministic gate
 just gate        # check + the diff-scoped llmlint tier
 ```
+
+The llmlint tier, `just lint-llm-diff <base>`, runs the llmlint CLI as a cached Nx
+target keyed on the tracked tree, the resolved base commit and `llmlint
+fingerprint`: an unchanged pass is replayed, a failure is judged again, and
+`--skip-nx-cache` forces a fresh judgement.
 
 `just --list` is the full command surface.
 [`docs/contract-divergences.md`](docs/contract-divergences.md) records every place

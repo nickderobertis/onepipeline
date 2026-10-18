@@ -5,9 +5,8 @@
 //
 //   onepipeline-cli                 launcher (npm/onepipeline-cli, committed)
 //     bin/onepipeline.js            resolves + execs the platform binary
-//     optionalDependencies:           one per Rust target in release.yml's matrix
+//     optionalDependencies:           one per Rust target a release.yml build job builds
 //       onepipeline-cli-linux-x64
-//       onepipeline-cli-linux-arm64
 //       onepipeline-cli-darwin-arm64
 //       onepipeline-cli-win32-x64   each carries the matching prebuilt binary
 //
@@ -21,7 +20,7 @@
 // The version is sourced from Cargo.toml (release-plz stays the single version
 // driver, exactly like the wheels' `dynamic = ["version"]`); pass --version to
 // override. Nothing here publishes — it only assembles package directories under
-// --out; release.yml packs and publishes them.
+// --out; release/release.py packs and publishes them.
 //
 // Usage:
 //   node scripts/npm-build.mjs platform --target <triple> --binary <path> \
@@ -45,13 +44,12 @@ import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
-// Rust target triple -> npm platform package facts. Keys must match the release
-// matrix in .github/workflows/release.yml; the (platform, arch) pair must match
+// Rust target triple -> npm platform package facts. Keys must match PLATFORMS in
+// release/release.py, which the release.yml build jobs build; the (platform, arch) pair must match
 // the PACKAGES map in npm/onepipeline-cli/bin/onepipeline.js and the
 // optionalDependencies in npm/onepipeline-cli/package.json.
 const TARGETS = {
   "x86_64-unknown-linux-gnu": { platform: "linux", arch: "x64", exe: false },
-  "aarch64-unknown-linux-gnu": { platform: "linux", arch: "arm64", exe: false },
   "aarch64-apple-darwin": { platform: "darwin", arch: "arm64", exe: false },
   "x86_64-pc-windows-msvc": { platform: "win32", arch: "x64", exe: true },
 };

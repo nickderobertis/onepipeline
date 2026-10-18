@@ -52,7 +52,10 @@
     "test-quick": {
       "command": "just _note-test-quick",
       "inputs": [
-        "noteJourneySource"
+        "noteJourneySource",
+        {
+          "env": "ONEPIPELINE_TEST_PARTITION"
+        }
       ],
       "dependsOn": [
         {

@@ -52,7 +52,10 @@
     "test-quick": {
       "command": "just _contract-test-quick",
       "inputs": [
-        "contractSource"
+        "contractSource",
+        {
+          "env": "ONEPIPELINE_TEST_PARTITION"
+        }
       ],
       "dependsOn": [
         {

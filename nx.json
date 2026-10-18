@@ -57,6 +57,7 @@
       "{workspaceRoot}/graphs/**/*",
       "{workspaceRoot}/personas/**/*",
       "{workspaceRoot}/scripts/**/*",
+      "{workspaceRoot}/release/release.py",
       "{workspaceRoot}/screenshots/**/*",
       "{workspaceRoot}/.github/**/*",
       "{workspaceRoot}/AGENTS.md",
@@ -211,7 +212,10 @@
     "test-quick": {
       "cache": true,
       "inputs": [
-        "default"
+        "default",
+        {
+          "env": "ONEPIPELINE_TEST_PARTITION"
+        }
       ]
     },
     "doc": {
@@ -232,6 +236,9 @@
     "release-compat": {
       "cache": false
     },
+    "release-journeys": {
+      "cache": false
+    },
     "workload": {
       "cache": false
     },
@@ -243,7 +250,7 @@
           "env": "LLMLINT_DIFF_BASE_SHA"
         },
         {
-          "runtime": "bash scripts/llmlint-fingerprint.sh"
+          "runtime": "llmlint fingerprint"
         }
       ]
     },
