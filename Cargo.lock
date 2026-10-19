@@ -1630,9 +1630,9 @@ dependencies = [
 
 [[package]]
 name = "onetaskgraph-core"
-version = "0.7.1"
+version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e25d62dc2989e49108f6d8862f80eea4da48a5a6836a056439c6155fa75a509"
+checksum = "f3a73bdafe561abeee4be822a55ab8e8e4efbfe137778e58d7b9ac8dda36128e"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1656,9 +1656,9 @@ dependencies = [
 
 [[package]]
 name = "onetaskgraph-github-projects"
-version = "0.7.1"
+version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ba39f294223c861ff3793cf71d2e364075e19c2535d4b0bda92c525b7831e1e"
+checksum = "289a04a825903fcf756fa8f136ff12c8fec867c5c27fa4f124541b357cb942e3"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1674,9 +1674,9 @@ dependencies = [
 
 [[package]]
 name = "onetaskgraph-in-memory"
-version = "0.7.1"
+version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "198125d755acfe5d48f2baddd7ce87475e7c44787cd2694090952ecab273d307"
+checksum = "23e1ba7c30fd28a31b1f1d8a1617c5e3adf2e55b0bf884dd81a1bd49398f2fc4"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1688,9 +1688,9 @@ dependencies = [
 
 [[package]]
 name = "onetaskgraph-linear"
-version = "0.7.1"
+version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf0ed73704489ff5673d5cbbc73ddf2361b4b9f2481dbbc561421cf64b0f02b6"
+checksum = "3ced062ad9b5dc074920c1da6ac73f108085170d848f7e93b60e7b70e384663b"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1704,9 +1704,9 @@ dependencies = [
 
 [[package]]
 name = "onetaskgraph-local-md"
-version = "0.7.1"
+version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f5cfd3699eaa920019cf972ff397ae5e318f60bd5a33077ea7a4a94364422e2"
+checksum = "f0fc7d122d0e0037bcd666e3ed360edfa809c31d4941a6dcf2c9974f469fcb9c"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1721,9 +1721,9 @@ dependencies = [
 
 [[package]]
 name = "onetaskgraph-plugin-api"
-version = "0.7.1"
+version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7653cbfdacd97ab813d0063b587b5a1231ced02f55fc821c90a545b99641664d"
+checksum = "2eefe759ec32b79e6aaba72995dee09fbc4ae62730a95d48b14d7c5c8ef781c7"
 dependencies = [
  "async-trait",
  "base64 0.22.1",

@@ -2607,7 +2607,10 @@ pub(crate) fn status_reporting(view: &RunView, providers: Providers) -> String {
             if *node_status != NodeStatus::Ready {
                 continue;
             }
-            match held_for_release(view, id).or_else(|| held_for_workspace(view, id)) {
+            match held_for_release(view, id)
+                .or_else(|| held_for_workspace(view, id))
+                .or_else(|| held_for_source(view, id))
+            {
                 Some(held) => out.push_str(&format!("  {id}: {held}\n")),
                 None => out.push_str(&format!(
                     "  {id}: ready — {}\n",
@@ -3394,6 +3397,21 @@ fn held_for_workspace(view: &RunView, id: &str) -> Option<String> {
     ))
 }
 
+/// What a ready node reads as while the driver holds it for a source declared private that
+/// could not be asked about it, or `None` for a node no such hold holds.
+///
+/// Off the run's own record, on [`held_for_release`]'s terms: the hold is the `node-held`
+/// with a `source` reason, read through the engine's own reader of one.
+fn held_for_source(view: &RunView, id: &str) -> Option<String> {
+    let hold = view
+        .state
+        .holds
+        .get(id)?
+        .iter()
+        .find_map(crate::engine::source_held)?;
+    Some(format!("held — {}", one_line(&hold.describe())))
+}
+
 /// The kinds of hold a run records a node under, in the words its `node-held`
 /// records and an elapsed watch's summary both spell them with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
@@ -3409,6 +3427,8 @@ pub(crate) enum HoldKind {
     Release,
     /// Held for room in its repository identity's workspace.
     Workspace,
+    /// Held for a source declared private that could not be asked about it.
+    Source,
 }
 
 impl HoldKind {
@@ -3420,6 +3440,7 @@ impl HoldKind {
             Self::Decision => "decision",
             Self::Release => "release",
             Self::Workspace => "workspace",
+            Self::Source => "source",
         }
     }
 }

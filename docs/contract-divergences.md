@@ -11715,3 +11715,78 @@ The live tier's `tests/smoke/review.rs`,
 drives the same rework and decline against real pull-request comments on the scratch
 repository, its plan on a local Markdown store every host shares, its drafter the real `oneagentgraph` over the paid-turn stand-in,
 which answers a drafting's turn from its task as the graph double does.
+
+## 131. A plan read without a private source's answer was dispatched as if that source held nothing — OPEN
+
+**Proposal, for the planner who owns the contract: a sixth hold reason, `source`; one
+surface kind, `source-wait`; and one pacing variable, `ONEPIPELINE_SOURCE_POLL_SECONDS`.**
+The planner ruled the behaviour over the planner channel while this build adopted
+`onetaskgraph`'s partial dependency read — hold each affected node, re-read it on every
+later pass, release it the pass the source answers with no relaunch, re-surface it on the
+held-wait cadence naming the source, the nodes and what the reader lacks, and have
+`plan check` say the same; neither refuse the whole load nor dispatch past a possible
+prerequisite. The contract's hold list and kind lists do not name it yet, which is this
+entry.
+
+The store's dependency read now answers, by default, every edge the sources that could
+answer hold, and names in `unanswered` each source declared private it could not ask what
+that source records of the task — a credential absent or refused, a source unreachable or
+rate-limited. A private task records the public tasks that depend on it on its own side,
+so a reader without that source's credential cannot tell whether a node has a prerequisite
+there. Before this entry the engine asked for a complete read, so one such source refused
+the launch of every plan beside it.
+
+What this build does is the block below, and the block is the source.
+
+**The read.** `taskgraph` asks each task's edges with `Completeness::NamingUnasked`; a
+failure in `errors` is still refused as a partial answer, and a source in `unanswered` is
+kept beside the node it was reported for. The plan loads.
+
+**The hold.** `start` journals, after `run-started`, one `node-held` per such node carrying
+a `source` entry, and says on stderr, per source, the source, why it did not answer and the
+nodes it holds; `plan check` says the same on stderr and keeps its stdout and exit code.
+The driver seeds the holds from the record — no driver repeats the launch's read — keeps
+each node out of `start_ready` as it does a release hold, and re-reads the held nodes'
+edges through the store configured from the launch directory, off the loop's thread, every
+`ONEPIPELINE_SOURCE_POLL_SECONDS` — sixty seconds where it is unset or is not a positive
+whole number of seconds, and longer only where a host sets it longer. A re-read that asks every
+source and resolves no prerequisite the run's graph does not already give the node clears
+the hold. One that resolves such a prerequisite keeps the node held with it in `missing`,
+because starting the node then would start it before that prerequisite; an edit giving the
+node the edge — a `reparent` — is what the next read clears it on. A read the store fails
+outright leaves the holds as they are. A node that leaves the waiting statuses holds
+nothing. Nothing times a hold out, and a run whose remaining nodes are held this way is
+neither terminal nor `awaiting-planner`.
+
+**The surface.** A held node raises `source-wait`, non-blocking, source proposal,
+workstream the node, on the cadence `release-wait` uses, naming the source, its reason or
+the missing prerequisite, what clears it, and that nothing times it out. `status` renders
+the hold on the node's line.
+
+Driven end to end by `tests/e2e/store.rs`: a plan in a public source beside a private
+`scripted-source` answering every task query with an authentication failure loads, `plan
+check` exits 0 naming the source and nodes, nothing is dispatched across several re-reads,
+`status` and the surface name the source, and the run completes in edge order once the
+source answers; and a private task carrying a plan node's id and recording another node as
+its dependent keeps that node held naming the prerequisite after the source answers, until
+a `reparent` gives it the edge, after which it starts only once the prerequisite settles.
+`unanswered::tests` holds the block below against the types.
+
+```json
+{
+  "hold": {
+    "kind": "source",
+    "unanswered": [{"source": "vault", "reason": "authentication for this source failed: VAULT_TOKEN is missing or empty"}]
+  },
+  "hold_with_missing": {
+    "kind": "source",
+    "unanswered": [],
+    "missing": ["review"]
+  },
+  "surface_kind": "source-wait",
+  "surface": {"blocking": false, "source": "proposal", "workstream": "the held node"},
+  "poll_env": "ONEPIPELINE_SOURCE_POLL_SECONDS",
+  "default_poll_seconds": 60,
+  "surface_cadence_env": "ONEPIPELINE_RELEASE_SURFACE_SECONDS"
+}
+```
