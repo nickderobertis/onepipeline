@@ -4137,11 +4137,23 @@ fn two_concurrent_judged_codex_turns_share_one_app_server() {
     // no later pool operation — is started only by a process that hosts one, so
     // its record in the one pool entry says the process that started the server
     // was such a process: the `oneharness` a member's onejudge spawns, never
-    // this engine, which runs no controlled turn of its own.
+    // this engine, which runs no controlled turn of its own. An entry is a
+    // directory named by a pool key: the pooled server runs in the pool's root,
+    // so whatever else it leaves there — the `.profraw` an instrumented double
+    // writes under the coverage tier — is no server.
     let entries: Vec<std::path::PathBuf> =
         std::fs::read_dir(state.0.join("oneharness").join("servers"))
             .expect("the pool root holds the shared server's entry")
             .map(|entry| entry.expect("a pool entry").path())
+            .filter(|path| {
+                path.is_dir()
+                    && path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| {
+                            oneharness_core::domain::control::PoolKey::parse(name).is_ok()
+                        })
+            })
             .collect();
     assert_eq!(entries.len(), 1, "{entries:#?}");
     assert!(
