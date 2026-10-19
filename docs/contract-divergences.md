@@ -12088,7 +12088,11 @@ retire this interim. The manager approved the record's `text` under correlation
 was carried onto, and nothing else. Beside it the record carries `alike_after` — omitted
 where it is `0` — counting the notes still owed to the node, carried after this one, that
 read the same, so replay takes out exactly this one of several identical entries, counted
-back from the latest. Inside a carried entry a blank line is written as a line holding one
+back from the latest — approved under correlation `c-a8f7631e42a3be052eee59da9fdc9a9f`,
+and held by `tests/e2e/store.rs`'s
+`a_withdrawn_carried_note_leaves_its_twin_after_the_note_between_live_and_after_replay`,
+which carries A, B, A, withdraws the first A, and reads B then A on the board and in the
+next dispatch, live and after an adopting driver replays the journal. Inside a carried entry a blank line is written as a line holding one
 space, so no entry holds the separator and the context always splits into its notes.
 
 **Carried notes accumulate, ruled.** Before this entry each note carried to a node replaced
