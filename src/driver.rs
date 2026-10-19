@@ -4845,14 +4845,26 @@ mod tests {
 
         // The retained driver's pid under another process's start — this one's,
         // as the displaced driver's would be — is not its claim, and what it
-        // said comes back with the refusal. A displaced driver started before
-        // the one retained to replace it, and by more than a start token
-        // resolves — one clock tick on Linux, a microsecond on macOS — so this
-        // test process, started moments earlier, stands in for it only once
-        // that much time separates the two starts.
-        std::thread::sleep(Duration::from_millis(50));
-        let mut driver = retained();
-        recorded(&launched_by(driver.id(), &here, &start_of(sys::pid())));
+        // said comes back with the refusal. A start token is only as fine as its
+        // host keeps it — one second for macOS's `ps lstart`, one clock tick for
+        // Linux's procfs — and this test process was itself started moments ago,
+        // so a child spawned inside the same unit carries this very token. Such a
+        // child is set aside and another spawned, until one's start is not ours.
+        let displaced = start_of(sys::pid());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut driver = loop {
+            let mut driver = retained();
+            if start_of(driver.id()) != displaced {
+                break driver;
+            }
+            driver.wait().expect("a set-aside driver exits");
+            assert!(
+                Instant::now() < deadline,
+                "every retained driver started under this process's own token"
+            );
+            std::thread::sleep(ATTACH_POLL);
+        };
+        recorded(&launched_by(driver.id(), &here, &displaced));
         std::fs::write(paths.driver_log(), "onepipeline: an unreadable lock\n")
             .expect("the driver's log is written");
         let refused = confirm_driving(&paths, &mut driver)
