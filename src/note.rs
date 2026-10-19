@@ -475,16 +475,59 @@ pub(crate) fn with_carried(context: Option<&str>, text: &str) -> String {
 /// The planner context left once the carried note `text` is withdrawn from it:
 /// that note's text taken out, and every other note's left where it was.
 ///
-/// `None` where nothing is left. A context that does not hold `text` as one of
-/// the notes [`with_carried`] put there is returned unchanged.
+/// The note is matched **whole**, between the separators [`with_carried`] put
+/// around it — never as one paragraph of a split — so a note whose own text
+/// holds a blank line is taken out entire. Where the same text was carried more
+/// than once, the latest is the one taken out. `None` where nothing is left; a
+/// context that does not hold `text` as one of its notes is returned unchanged.
 pub(crate) fn without_carried(context: &str, text: &str) -> Option<String> {
-    let mut parts: Vec<&str> = context.split(CARRIED_SEPARATOR).collect();
-    let Some(at) = parts.iter().rposition(|part| *part == text) else {
-        return Some(context.to_string());
-    };
-    parts.remove(at);
-    let left = parts.join(CARRIED_SEPARATOR);
-    (!left.trim().is_empty()).then_some(left)
+    if context == text {
+        return None;
+    }
+    let last = format!("{CARRIED_SEPARATOR}{text}");
+    if let Some(rest) = context.strip_suffix(&last) {
+        return Some(rest.to_string());
+    }
+    let between = format!("{CARRIED_SEPARATOR}{text}{CARRIED_SEPARATOR}");
+    if let Some(at) = context.rfind(&between) {
+        return Some(format!(
+            "{}{CARRIED_SEPARATOR}{}",
+            &context[..at],
+            &context[at + between.len()..]
+        ));
+    }
+    let first = format!("{text}{CARRIED_SEPARATOR}");
+    Some(context.strip_prefix(&first).unwrap_or(context).to_string())
+}
+
+/// Why a note was withdrawn, as a `withdraw-note` said it: never blank, in the
+/// record that commits the withdrawal or anywhere it is read back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub(crate) struct WithdrawalReason(String);
+
+impl WithdrawalReason {
+    /// The reason's text.
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for WithdrawalReason {
+    type Error = String;
+
+    fn try_from(text: String) -> std::result::Result<Self, Self::Error> {
+        if text.trim().is_empty() {
+            return Err("a withdrawal's `reason` is blank".to_string());
+        }
+        Ok(Self(text))
+    }
+}
+
+impl From<WithdrawalReason> for String {
+    fn from(reason: WithdrawalReason) -> Self {
+        reason.0
+    }
 }
 
 /// What [`with_carried`] puts between two carried notes.

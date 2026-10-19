@@ -319,7 +319,7 @@ pub enum Operation {
         /// The note's 0-based position among that envelope's commands.
         index: u32,
         /// Why it was withdrawn, as the `withdraw-note` said.
-        reason: String,
+        reason: crate::note::WithdrawalReason,
         /// Where the note was when it was withdrawn.
         from: crate::note::WithdrawnFrom,
         /// What the withdrawn note said: what replay takes back off the node a

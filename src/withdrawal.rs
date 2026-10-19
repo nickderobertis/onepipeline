@@ -17,7 +17,7 @@ use crate::channel::{ChannelState, Command, CommandVerdict};
 use crate::edits::Operation;
 use crate::error::{Error, Result};
 use crate::event::Envelope;
-use crate::note::{Placement, Reached, WithdrawnFrom};
+use crate::note::{Placement, Reached, WithdrawalReason, WithdrawnFrom};
 use crate::views::RunPaths;
 
 /// Validate one `withdraw-note` against the run's record, and compile the one
@@ -36,11 +36,11 @@ pub(crate) fn validate(
     reason: &str,
 ) -> Result<Vec<Operation>> {
     let refuse = |why: String| Error::Refused(format!("withdraw-note: {why}"));
-    if reason.trim().is_empty() {
+    let Ok(reason) = WithdrawalReason::try_from(reason.to_string()) else {
         return Err(refuse(
             "`reason` is blank; say why the note is withdrawn".to_string(),
         ));
-    }
+    };
     let Ok(id) = envelope.trim().parse::<u64>() else {
         return Err(refuse(format!(
             "'{envelope}' is not an envelope id: the run numbers its envelopes 0, 1, 2, …"
@@ -92,7 +92,7 @@ pub(crate) fn validate(
                 node,
                 envelope: id,
                 index,
-                reason: reason.to_string(),
+                reason,
                 from: WithdrawnFrom::Carried,
                 text: text.clone(),
             }])
@@ -138,7 +138,7 @@ pub(crate) fn answer_withdrawn(
     paths: &RunPaths,
     sent: u64,
     index: u32,
-    reason: &str,
+    reason: &WithdrawalReason,
     by: u64,
 ) -> Result<()> {
     let channel = ChannelState::new(paths);
@@ -149,7 +149,7 @@ pub(crate) fn answer_withdrawn(
     let Some(result) = outcome.results.get_mut(position) else {
         return Ok(());
     };
-    let why = format!("withdrawn by envelope {by}: {reason}");
+    let why = format!("withdrawn by envelope {by}: {}", reason.as_str());
     result.outcome = CommandVerdict::Refused;
     result.reason = Some(why.clone());
     result.refusal = None;
@@ -319,5 +319,19 @@ mod tests {
             without_carried(&two, "neither").as_deref(),
             Some(two.as_str())
         );
+        // A note whose own text holds a blank line is one note, taken out whole,
+        // wherever it sits among the others.
+        let spaced = "keep the loader\n\nand its signature";
+        let three = with_carried(Some(&with_carried(Some("first"), spaced)), "last");
+        assert_eq!(
+            without_carried(&three, spaced).as_deref(),
+            Some("first\n\nlast")
+        );
+        let led = with_carried(Some(spaced), "last");
+        assert_eq!(without_carried(&led, spaced).as_deref(), Some("last"));
+        let trailed = with_carried(Some("first"), spaced);
+        assert_eq!(without_carried(&trailed, spaced).as_deref(), Some("first"));
+        // And a blank reason is no withdrawal's, read back from a record or not.
+        assert!(serde_json::from_value::<WithdrawalReason>(serde_json::json!("  ")).is_err());
     }
 }

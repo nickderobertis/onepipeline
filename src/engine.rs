@@ -3914,9 +3914,9 @@ fn answer_recovered(
         .iter()
         .map(|command| {
             let sent = json!(command);
-            if let Some(at) = committed.iter().position(|recorded| *recorded == sent) {
-                committed.remove(at);
-                Some(Answered::Committed(None))
+            if let Some(at) = committed.iter().position(|(recorded, _)| *recorded == sent) {
+                let (_, turn) = committed.remove(at);
+                Some(Answered::Committed(turn))
             } else {
                 rejected
                     .iter()
@@ -3994,8 +3994,9 @@ fn answer_recovered(
 /// holds a commit or acceptance of, and each it holds a refusal of, as sent.
 #[derive(Debug, Clone, PartialEq, Default)]
 struct Effect {
-    /// Each command committed or accepted, as recorded, in record order.
-    committed: Vec<Value>,
+    /// Each command committed or accepted, as recorded, in record order, with how
+    /// the live turn that took it took it where it is a note one did.
+    committed: Vec<(Value, Option<crate::note::NoteTurn>)>,
     /// Each command refused, as recorded with the reason its submitter was
     /// owed, in record order.
     rejected: Vec<(Value, RecordedRefusal)>,
@@ -4022,9 +4023,15 @@ impl EnvelopeEffects {
                     .or_default()
                     .rejected
                     .push((command, reason)),
-                Some(Evidence::Applied { envelope, command }) => {
+                Some(Evidence::Applied {
+                    envelope,
+                    command,
+                    turn,
+                }) => {
                     let effect = effects.entry(envelope).or_default();
-                    effect.committed.extend(command);
+                    effect
+                        .committed
+                        .extend(command.map(|command| (command, turn)));
                 }
                 None => {}
             }
@@ -4047,6 +4054,9 @@ enum Evidence {
     Applied {
         envelope: u64,
         command: Option<Value>,
+        /// How the live turn that took it took it, where the record is of a note
+        /// one did.
+        turn: Option<crate::note::NoteTurn>,
     },
     /// One command refused: the command as sent, and the reason recorded.
     Rejected {
@@ -4066,13 +4076,32 @@ impl Evidence {
             envelope.map(|envelope| Self::Applied {
                 envelope,
                 command: command.map(Value::Object),
+                turn: None,
             })
         };
         match journal::PipelineKind::from_wire(&record.kind)? {
             journal::PipelineKind::EditCommitted => {
                 let committed =
                     serde_json::from_value::<crate::payload::EditCommitted>(payload).ok()?;
-                applied(committed.envelope, Some(committed.command))
+                let turn = serde_json::from_value::<Vec<edits::Operation>>(Value::Array(
+                    committed
+                        .operations
+                        .into_iter()
+                        .map(Value::Object)
+                        .collect(),
+                ))
+                .ok()
+                .and_then(|operations| turn_of(&operations));
+                applied(committed.envelope, Some(committed.command)).map(|applied| match applied {
+                    Self::Applied {
+                        envelope, command, ..
+                    } => Self::Applied {
+                        envelope,
+                        command,
+                        turn,
+                    },
+                    rejected @ Self::Rejected { .. } => rejected,
+                })
             }
             journal::PipelineKind::CommandAccepted => {
                 let accepted =
@@ -11436,7 +11465,7 @@ mod tests {
         assert_eq!(
             recovered.evidence[&1],
             Effect {
-                committed: vec![json!(amend)],
+                committed: vec![(json!(amend), None)],
                 rejected: Vec::new(),
             }
         );
@@ -13827,7 +13856,10 @@ mod tests {
                 node: node(),
                 envelope: 3,
                 index: 0,
-                reason: "the fixture moved back".into(),
+                reason: crate::note::WithdrawalReason::try_from(
+                    "the fixture moved back".to_string(),
+                )
+                .expect("a reason"),
                 from: crate::note::WithdrawnFrom::Carried,
                 text: "the fixture moved".parse().expect("a usable note"),
             },

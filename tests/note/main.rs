@@ -3110,6 +3110,13 @@ fn a_receiver_still_delivering_when_its_driver_died_is_refused_by_the_next() {
         [json!("refused"), json!("applied")],
         "{outcome}"
     );
+    // Answered from the journal, the note the dead driver recorded keeps how its
+    // turn took it.
+    assert_eq!(
+        outcome["results"][1]["turn"],
+        json!("turn-end"),
+        "the recovered answer dropped how lint's turn took its note: {outcome}"
+    );
     assert!(
         outcome["results"][0]["reason"]
             .as_str()
@@ -5959,26 +5966,47 @@ fn a_carried_note_withdrawn_before_its_nodes_next_dispatch_is_composed_into_none
 }
 
 /// A `withdraw-note` is applied while another note to the same node is still
-/// waiting on its live conversation — it is held behind no note — and every
-/// refusal it can earn is journalled, naming why, without touching the note it
-/// names: a live note (this build cannot take one back while it is waited on),
-/// an envelope or a position holding no note, a note already withdrawn, a note
-/// already answered, and a blank reason.
+/// waiting on its live conversation — it is held behind no note — and answers
+/// again only the withdrawn note of its envelope, leaving the command beside it
+/// applied. Every refusal it can earn is journalled, naming why, without touching
+/// the note it names: a live note (this build cannot take one back while it is
+/// waited on), an envelope id that is none, an envelope or a position holding no
+/// note, a position holding another op, a note already withdrawn, a note already
+/// answered — delivered, refused, or never offered — and a blank reason.
 #[test]
 fn a_withdrawal_is_applied_beside_a_waiting_note_and_each_refusal_names_why() {
     let world = World::new("note-withdraw-refusals");
     let run = "withdrawrefusals";
     held_conversation(&world, run, vec![agent("build", &[])]);
 
-    // Carried to build's next dispatch by construction: no live attempt.
+    // Carried to build's next dispatch by construction — no live attempt — beside
+    // an amendment the same envelope applies.
     world
         .run_with_stdin_on(
             world.agentgraph_cmd(&["reply", run]),
-            &envelope(note_op_with("build", NOTE, "next", true)),
+            &json!({"version": 2, "commands": [
+                note_op_with("build", NOTE, "next", true),
+                {"op": "amend", "id": "build", "text": BUILD_RULING},
+            ]})
+            .to_string(),
         )
         .exited(0)
         .out_has("\"state\":\"applied\"");
     let carried = queued_id_of(&world, run, NOTE);
+    // A note refused at its deadline, and the note behind it to the same node,
+    // never offered because the one before it refused — both answered before the
+    // live note below is sent.
+    world
+        .run_with_stdin_on(
+            world.agentgraph_cmd(&["reply", run]),
+            &json!({"version": 2, "commands": [
+                timed_note("build", UNCARRIED_NOTE, "turn-end", false, 1),
+                note_op("build", "worker", NOWHERE_RULING, None),
+            ]})
+            .to_string(),
+        )
+        .exited(REFUSED);
+    let answered_both = queued_id_of(&world, run, UNCARRIED_NOTE);
     // And a live one, which waits for the held turn to end.
     let before = admitted(&world, run);
     let live = submitted(
@@ -6007,10 +6035,12 @@ fn a_withdrawal_is_applied_beside_a_waiting_note_and_each_refusal_names_why() {
     assert_eq!(
         [
             &withdrawn["results"][0]["outcome"],
+            &withdrawn["results"][1]["outcome"],
             &json!(outcomes_for(&world, run, carried))
         ],
-        [&json!("refused"), &json!(2)],
-        "the withdrawn note's envelope was not answered again with it refused: {withdrawn}"
+        [&json!("refused"), &json!("applied"), &json!(2)],
+        "the withdrawn note's envelope was not answered again with that note alone refused: \
+         {withdrawn}"
     );
 
     let refused = |op: Value, why: &str| {
@@ -6025,6 +6055,11 @@ fn a_withdrawal_is_applied_beside_a_waiting_note_and_each_refusal_names_why() {
         "a live note cannot be withdrawn yet",
     );
     refused(
+        json!({"op": "withdraw-note", "envelope": "the first one", "index": 0,
+               "reason": WITHDRAWN_BECAUSE}),
+        "'the first one' is not an envelope id",
+    );
+    refused(
         withdraw_op(999, 0, WITHDRAWN_BECAUSE),
         "holds no envelope 999",
     );
@@ -6033,18 +6068,39 @@ fn a_withdrawal_is_applied_beside_a_waiting_note_and_each_refusal_names_why() {
         "holds no note at index 3",
     );
     refused(
+        withdraw_op(carried, 1, WITHDRAWN_BECAUSE),
+        "is a 'amend', not a note",
+    );
+    refused(
         withdraw_op(carried, 0, WITHDRAWN_BECAUSE),
         "already withdrawn",
     );
     refused(withdraw_op(carried, 0, "   "), "`reason` is blank");
+    refused(
+        withdraw_op(answered_both, 0, WITHDRAWN_BECAUSE),
+        "already answered refused",
+    );
+    refused(
+        withdraw_op(answered_both, 1, WITHDRAWN_BECAUSE),
+        "already answered `validated`",
+    );
     let rejected = world
         .events_of(run, "edit-rejected")
         .into_iter()
         .filter(|event| event["payload"]["command"]["op"] == "withdraw-note")
         .count();
     assert_eq!(
-        rejected, 5,
+        rejected, 9,
         "each refused withdrawal was not journalled once"
+    );
+    assert_eq!(
+        [
+            &result_of(&world, run, answered_both, 0)["outcome"],
+            &result_of(&world, run, answered_both, 1)["outcome"],
+            &json!(outcomes_for(&world, run, answered_both))
+        ],
+        [&json!("refused"), &json!("validated"), &json!(1)],
+        "a refused withdrawal changed the outcome of the notes it named"
     );
     assert_eq!(
         withdrawals(&world, run).len(),
@@ -6078,4 +6134,59 @@ fn a_withdrawal_is_applied_beside_a_waiting_note_and_each_refusal_names_why() {
     world.until("the run to settle", |world| {
         !world.events_of(run, "node-settled").is_empty()
     });
+}
+
+/// A note to the supervisor that interrupts its held turn, where the decision
+/// re-taken on it sends the worker back, is recorded as having interrupted the
+/// supervisor's turn — in the journal and in the envelope's outcome — and rides
+/// that decision to the worker as the supervisor's note.
+#[test]
+fn a_note_that_interrupts_the_held_judge_turn_rides_its_re_taken_decision_to_the_worker() {
+    let world = World::new("note-judge-interrupt-continues");
+    let run = "judgecontinues";
+    world.script("harness.control", "serve");
+    world.script(
+        "judge.asks-again",
+        "Run the check again and report what it said.",
+    );
+    held_judge(&world, run, vec![agent("build", &[])]);
+    let held = held_judge_prompt(&world);
+
+    let note = submitted(
+        &world,
+        run,
+        &envelope(note_op("build", "supervisor", NOTE, None)),
+    );
+    assert!(answered(note).contains("\"state\":\"applied\""));
+    let id = queued_id_of(&world, run, NOTE);
+    assert_eq!(
+        aborted(&world),
+        std::slice::from_ref(&held),
+        "the held judge turn was not aborted by the note"
+    );
+    let operation = recorded(&world, run);
+    assert_eq!(
+        [&operation["reached"], &operation["turn"]],
+        [&json!("supervisor"), &json!("interrupted")],
+        "{operation}"
+    );
+    assert_eq!(
+        result_of(&world, run, id, 0)["turn"],
+        json!("interrupted"),
+        "the note's channel outcome does not say the supervisor's turn was interrupted"
+    );
+    world.until("the worker's turn the re-taken decision opened", |world| {
+        worker_turns(world).iter().any(|prompt| {
+            prompt.contains("delivered to the SUPERVISOR, addressed to it and not to you")
+                && prompt.contains(NOTE)
+        })
+    });
+    release(&world.fakes, "judge.go");
+    world.until("the run to settle", |world| {
+        !world.events_of(run, "node-settled").is_empty()
+    });
+    assert!(
+        !ended(&world).contains(&held),
+        "the aborted judge turn was recorded as running to its end"
+    );
 }

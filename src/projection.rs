@@ -3270,7 +3270,10 @@ mod tests {
                         node: "build".into(),
                         envelope,
                         index: 0,
-                        reason: "the fixture moved back".into(),
+                        reason: crate::note::WithdrawalReason::try_from(
+                            "the fixture moved back".to_string(),
+                        )
+                        .expect("a reason"),
                         from: crate::note::WithdrawnFrom::Carried,
                         text: text.parse().expect("a usable note"),
                     }]),
