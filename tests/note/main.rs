@@ -6429,9 +6429,10 @@ fn planner_notes(task: &str) -> String {
         .unwrap_or_else(|| panic!("the dispatch has no planner context:\n{task}"))
 }
 
-/// Withdrawing a carried note takes out that note alone, even where a later
-/// carried note reads as it and another joined: the two are separate notes, and
-/// the next dispatch is composed with the other two, in carry order.
+/// Withdrawing a carried note takes out that note alone — even where a later
+/// carried note reads as it and another joined, and where the same text is
+/// carried again after it — and the next dispatch is composed with every other,
+/// in carry order.
 #[test]
 fn a_withdrawn_note_another_note_reads_as_part_of_takes_out_only_itself() {
     let world = World::new("note-withdraw-overlap");
@@ -6441,7 +6442,8 @@ fn a_withdrawn_note_another_note_reads_as_part_of_takes_out_only_itself() {
         run,
         vec![agent("build", &[]), agent("later", &["build"])],
     );
-    for text in [READ_AS_ONE, READ_AS_TWO, READ_AS_BOTH] {
+    // The first note is carried again last, so two carried notes read the same.
+    for text in [READ_AS_ONE, READ_AS_TWO, READ_AS_BOTH, READ_AS_ONE] {
         world
             .run_with_stdin_on(
                 world.agentgraph_cmd(&["reply", run]),
@@ -6471,14 +6473,21 @@ fn a_withdrawn_note_another_note_reads_as_part_of_takes_out_only_itself() {
     let entries: Vec<&str> = notes.split("\n\n").collect();
     assert_eq!(
         entries.len(),
-        2,
-        "later's planner context is not the two notes left:\n{task}"
+        3,
+        "later's planner context is not the three notes left:\n{task}"
     );
-    assert_eq!(entries[0], READ_AS_TWO, "{task}");
+    assert_eq!(
+        entries[0], READ_AS_TWO,
+        "the withdrawn note's later twin was taken out in its place:\n{task}"
+    );
     assert_eq!(
         entries[1].replace("\n \n", "\n\n"),
         READ_AS_BOTH,
         "the note reading as the other two was not composed whole:\n{task}"
+    );
+    assert_eq!(
+        entries[2], READ_AS_ONE,
+        "the twin carried after the withdrawn note is not where it was carried:\n{task}"
     );
     world.until("the run to settle", |world| {
         world.events_of(run, "node-settled").len() >= 2
@@ -6537,6 +6546,15 @@ fn a_carried_note_withdrawn_with_nothing_driving_stays_withdrawn_once_the_run_is
         "the envelope was not answered again with the note withdrawn: {answered_again}"
     );
 
+    // A second withdrawal of it, still with nothing driving, finds the first.
+    world
+        .run_with_stdin_on(
+            world.agentgraph_cmd(&["reply", run]),
+            &envelope(withdraw_op(sent, 0, WITHDRAWN_BECAUSE)),
+        )
+        .exited(REFUSED)
+        .err_has("already withdrawn by a `withdraw-note`");
+    assert_eq!(withdrawals(&world, run).len(), 1);
     world
         .run_on(
             world.agentgraph_cmd(&["adopt", run, "--detach"]),

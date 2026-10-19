@@ -519,22 +519,33 @@ pub(crate) fn with_carried(context: Option<&str>, text: &str) -> String {
 }
 
 /// The planner context left once the carried note reading `text` is withdrawn
-/// from it: the latest entry that note was carried as taken out, and every other
-/// entry left where it was, in order.
+/// from it: that note's entry taken out, and every other entry left where it was,
+/// in order.
 ///
 /// The context is split into its entries on the separator, which no carried
 /// entry holds ([`entry_of`]), so a note is matched whole — never one of its
 /// paragraphs, and never a run of other notes that happen to read as it. Where
-/// the same text was carried more than once, the latest is the one taken out.
-/// `None` where nothing is left; a context holding no entry for `text` is
-/// returned unchanged.
-pub(crate) fn without_carried(context: &str, text: &str) -> Option<String> {
+/// the same text was carried more than once, `alike_after` says which: how many
+/// entries reading the same come after the withdrawn one, so counting back from
+/// the latest finds exactly it. `None` where nothing is left; a context holding
+/// no such entry is returned unchanged.
+pub(crate) fn without_carried(context: &str, text: &str, alike_after: u32) -> Option<String> {
     let entry = entry_of(text);
     let mut entries: Vec<&str> = context.split(CARRIED_SEPARATOR).collect();
-    let Some(at) = entries.iter().rposition(|candidate| *candidate == entry) else {
+    let alike: Vec<usize> = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, candidate)| **candidate == entry)
+        .map(|(at, _)| at)
+        .collect();
+    let Some(at) = alike
+        .iter()
+        .rev()
+        .nth(usize::try_from(alike_after).unwrap_or(usize::MAX))
+    else {
         return Some(context.to_string());
     };
-    entries.remove(at);
+    entries.remove(*at);
     let left = entries.join(CARRIED_SEPARATOR);
     (!left.trim().is_empty()).then_some(left)
 }

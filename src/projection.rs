@@ -2282,11 +2282,15 @@ pub(crate) fn fold_operations(state: &mut RunState, operations: &[Operation], at
             }
             // A carried note withdrawn before a dispatch took it is owed to
             // nobody, and every other note carried beside it still is.
-            Operation::NoteWithdrawn { node, text, .. } => {
-                let left = state
-                    .pending_context
-                    .get(node)
-                    .and_then(|context| crate::note::without_carried(context, text.as_str()));
+            Operation::NoteWithdrawn {
+                node,
+                text,
+                alike_after,
+                ..
+            } => {
+                let left = state.pending_context.get(node).and_then(|context| {
+                    crate::note::without_carried(context, text.as_str(), *alike_after)
+                });
                 match left {
                     Some(left) => {
                         state.pending_context.insert(node.clone(), left);
@@ -3276,6 +3280,7 @@ mod tests {
                         .expect("a reason"),
                         from: crate::note::WithdrawnFrom::Carried,
                         text: text.parse().expect("a usable note"),
+                        alike_after: 0,
                     }]),
                 )],
             )

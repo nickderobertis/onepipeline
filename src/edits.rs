@@ -326,6 +326,11 @@ pub enum Operation {
         /// What the withdrawn note said: what replay takes back off the node a
         /// carried note was folded onto.
         text: crate::note::NoteText,
+        /// How many notes still owed to the node, carried after this one, read
+        /// the same: which of several identical carried entries replay takes
+        /// out, counted back from the latest. Omitted where none does.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        alike_after: u32,
     },
     // llmlint: ignore-block[invalid_states_unrepresentable] a durable record field, as
     // `NodeParked`'s `reason` is: the reason, the instruction and the title are the prose
@@ -3015,6 +3020,15 @@ fn compile_decline(
     }])
 }
 
+/// Whether a count is zero, so a record omits it.
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "the signature serde's `skip_serializing_if` requires"
+)]
+fn is_zero(count: &u32) -> bool {
+    *count == 0
+}
+
 /// Fold one recorded operation back onto a graph.
 ///
 /// This is replay's half of [`compile`]: the reconciler validated and mutated,
@@ -3140,12 +3154,16 @@ pub fn apply(graph: &mut Graph, operation: &Operation) {
         Operation::ContextAdded { .. } => {}
         // A carried note taken back is owed to no dispatch, so the context it
         // was folded onto the node as comes off again — and only that note's.
-        Operation::NoteWithdrawn { node, text, .. } => {
+        Operation::NoteWithdrawn {
+            node,
+            text,
+            alike_after,
+            ..
+        } => {
             if let Some(node) = graph.get_mut(node) {
-                node.context = node
-                    .context
-                    .as_deref()
-                    .and_then(|context| crate::note::without_carried(context, text.as_str()));
+                node.context = node.context.as_deref().and_then(|context| {
+                    crate::note::without_carried(context, text.as_str(), *alike_after)
+                });
             }
         }
         // The one disposition that moved the graph: no turn took the note, so it

@@ -71,24 +71,35 @@ pub(crate) fn validate(
     let records = committed(&journal)?;
     if let Some(by) = withdrawn_by(&records, id, index) {
         return Err(refuse(format!(
-            "{named} was already withdrawn by envelope {by}"
+            "{named} was already {}",
+            withdrawn_by_words(by).trim_end_matches(':')
         )));
     }
     match delivered(&records, id, index) {
         Some(Reached::Carried { .. }) => {
             let standing = crate::note::standing(&journal, &node)?;
-            let owed = standing.held.iter().any(|held| {
-                held.placement == Placement::DeliveredSince && held.sent == Some((id, index))
-            });
-            if !owed {
+            let owed: Vec<&crate::note::Held> = standing
+                .held
+                .iter()
+                .filter(|held| held.placement == Placement::DeliveredSince)
+                .collect();
+            let Some(at) = owed.iter().position(|held| held.sent == Some((id, index))) else {
                 return Err(refuse(format!(
                     "{named} was carried and has already been composed into a dispatch of \
                      that node, which read it"
                 )));
-            }
+            };
             let Some(Command::Note { text, .. }) = sent.commands.get(position) else {
                 return Err(refuse(format!("{named} is no longer a note")));
             };
+            // Which of the node's identical carried entries is this note's, for
+            // replay to take out exactly it.
+            let alike_after = owed[at + 1..]
+                .iter()
+                .filter(|held| {
+                    !held.note.reached.a_conversation_read_it() && held.note.text == *text
+                })
+                .count();
             Ok(vec![Operation::NoteWithdrawn {
                 node,
                 envelope: id,
@@ -96,6 +107,7 @@ pub(crate) fn validate(
                 reason,
                 from: WithdrawnFrom::Carried,
                 text: text.clone(),
+                alike_after: u32::try_from(alike_after).unwrap_or(u32::MAX),
             }])
         }
         Some(reached) => Err(refuse(format!(
@@ -276,8 +288,14 @@ pub(crate) fn answer_each(
     Ok(())
 }
 
-/// The envelope that already withdrew note `index` of envelope `sent`, if one did.
-fn withdrawn_by(records: &[(Option<u64>, Operation)], sent: u64, index: u32) -> Option<u64> {
+/// Whether note `index` of envelope `sent` was already withdrawn, and by which
+/// envelope where a queued one carried the withdrawal: `Some(None)` is one `reply`
+/// applied with nothing driving the run.
+fn withdrawn_by(
+    records: &[(Option<u64>, Operation)],
+    sent: u64,
+    index: u32,
+) -> Option<Option<u64>> {
     records
         .iter()
         .find_map(|(envelope, operation)| match operation {
@@ -285,7 +303,7 @@ fn withdrawn_by(records: &[(Option<u64>, Operation)], sent: u64, index: u32) -> 
                 envelope: from,
                 index: at,
                 ..
-            } if *from == sent && *at == index => *envelope,
+            } if *from == sent && *at == index => Some(*envelope),
             _ => None,
         })
 }
@@ -516,11 +534,11 @@ mod tests {
         use crate::note::{with_carried, without_carried};
         let two = with_carried(Some(&with_carried(None, "first")), "second");
         assert_eq!(two, "first\n\nsecond");
-        assert_eq!(without_carried(&two, "first").as_deref(), Some("second"));
-        assert_eq!(without_carried(&two, "second").as_deref(), Some("first"));
-        assert_eq!(without_carried("only", "only"), None);
+        assert_eq!(without_carried(&two, "first", 0).as_deref(), Some("second"));
+        assert_eq!(without_carried(&two, "second", 0).as_deref(), Some("first"));
+        assert_eq!(without_carried("only", "only", 0), None);
         assert_eq!(
-            without_carried(&two, "neither").as_deref(),
+            without_carried(&two, "neither", 0).as_deref(),
             Some(two.as_str())
         );
         // A note whose own text holds a blank line is one note, taken out whole,
@@ -528,7 +546,7 @@ mod tests {
         let spaced = "keep the loader\n\nand its signature";
         let three = with_carried(Some(&with_carried(Some("first"), spaced)), "last");
         assert_eq!(
-            without_carried(&three, spaced).as_deref(),
+            without_carried(&three, spaced, 0).as_deref(),
             Some("first\n\nlast")
         );
         // A note reading as two others joined is itself one entry: withdrawing
@@ -538,17 +556,25 @@ mod tests {
             "a\n\nb",
         );
         assert_eq!(
-            without_carried(&joined, "a").as_deref(),
+            without_carried(&joined, "a", 0).as_deref(),
             Some("b\n\na\n \nb")
         );
         assert_eq!(
-            without_carried(&joined, "a\n\nb").as_deref(),
+            without_carried(&joined, "a\n\nb", 0).as_deref(),
             Some("a\n\nb")
         );
+        // The same text carried twice, another between: which one is withdrawn
+        // is the count of identical entries after it.
+        let twice = with_carried(Some(&with_carried(Some("a"), "b")), "a");
+        assert_eq!(without_carried(&twice, "a", 1).as_deref(), Some("b\n\na"));
+        assert_eq!(without_carried(&twice, "a", 0).as_deref(), Some("a\n\nb"));
         let led = with_carried(Some(&with_carried(None, spaced)), "last");
-        assert_eq!(without_carried(&led, spaced).as_deref(), Some("last"));
+        assert_eq!(without_carried(&led, spaced, 0).as_deref(), Some("last"));
         let trailed = with_carried(Some("first"), spaced);
-        assert_eq!(without_carried(&trailed, spaced).as_deref(), Some("first"));
+        assert_eq!(
+            without_carried(&trailed, spaced, 0).as_deref(),
+            Some("first")
+        );
         // And a blank reason is no withdrawal's, read back from a record or not.
         assert!(serde_json::from_value::<WithdrawalReason>(serde_json::json!("  ")).is_err());
     }

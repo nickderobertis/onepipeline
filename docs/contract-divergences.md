@@ -12085,7 +12085,11 @@ declared and written by no build yet. An `oneagentgraph` node that makes an offe
 withdrawable while it is waited on, and a later onepipeline node that relinks onto it,
 retire this interim. The manager approved the record's `text` under correlation
 `c-6e20576dba29b78e543c876cbb9a85c8`: replay takes a withdrawn note's text off the node it
-was carried onto, and nothing else.
+was carried onto, and nothing else. Beside it the record carries `alike_after` — omitted
+where it is `0` — counting the notes still owed to the node, carried after this one, that
+read the same, so replay takes out exactly this one of several identical entries, counted
+back from the latest. Inside a carried entry a blank line is written as a line holding one
+space, so no entry holds the separator and the context always splits into its notes.
 
 **Carried notes accumulate, ruled.** Before this entry each note carried to a node replaced
 the one before it as the node's planner context, so a second carried note dropped the first

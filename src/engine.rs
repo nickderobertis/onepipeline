@@ -13864,6 +13864,7 @@ mod tests {
                 .expect("a reason"),
                 from: crate::note::WithdrawnFrom::Carried,
                 text: "the fixture moved".parse().expect("a usable note"),
+                alike_after: 0,
             },
             edits::Operation::ReworkRequested {
                 node: node(),
