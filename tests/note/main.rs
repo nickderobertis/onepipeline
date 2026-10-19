@@ -5851,6 +5851,12 @@ const MULTILINE_CARRIED: &str =
 /// A third note carried beside the other two, which stays with the second.
 const THIRD_CARRIED: &str = "and leave the fixture's old path as a redirect";
 
+/// A fourth carried note, which stays.
+const FOURTH_CARRIED: &str = "and keep the loader's error text unchanged";
+
+/// A fifth carried note, withdrawn as the last carried.
+const FIFTH_CARRIED: &str = "and drop the deprecation warning after one release";
+
 /// Why the manager takes a note back.
 const WITHDRAWN_BECAUSE: &str = "the fixture moved back before anyone read this";
 
@@ -5874,13 +5880,14 @@ fn withdrawals(world: &World, run: &str) -> Vec<Value> {
         .collect()
 }
 
-/// A carried note withdrawn before its node's next dispatch is composed into none
-/// of it — whole, though its own text holds a blank line — and the note carried
-/// beside it still is: the run commits
-/// `note-withdrawn` naming where it was, and the envelope that sent it is
-/// answered again with that note refused, carrying the withdrawal's reason.
-/// Withdrawing the other note once a dispatch has been composed with it is
-/// refused, naming why.
+/// Carried notes withdrawn before their node's next dispatch are composed into
+/// none of it — the last of them, one between two others, and the first, whole
+/// though its own text holds a blank line — and the notes carried beside them
+/// still are, together and in carry order. Each withdrawal commits
+/// `note-withdrawn` naming where its note was, and the envelope that sent the note
+/// is answered again with it refused, carrying the withdrawal's reason.
+/// Withdrawing a note once a dispatch has been composed with it is refused,
+/// naming why.
 #[test]
 fn a_carried_note_withdrawn_before_its_nodes_next_dispatch_is_composed_into_none_of_it() {
     let world = World::new("note-withdraw-carried");
@@ -5891,7 +5898,14 @@ fn a_carried_note_withdrawn_before_its_nodes_next_dispatch_is_composed_into_none
         vec![agent("build", &[]), agent("later", &["build"])],
     );
     // `later` has no dispatch yet, so each note to it is carried to its first.
-    for text in [MULTILINE_CARRIED, SECOND_CARRIED, THIRD_CARRIED] {
+    let carried = [
+        MULTILINE_CARRIED,
+        SECOND_CARRIED,
+        THIRD_CARRIED,
+        FOURTH_CARRIED,
+        FIFTH_CARRIED,
+    ];
+    for text in carried {
         world
             .run_with_stdin_on(
                 world.agentgraph_cmd(&["reply", run]),
@@ -5901,22 +5915,28 @@ fn a_carried_note_withdrawn_before_its_nodes_next_dispatch_is_composed_into_none
             .out_has("\"state\":\"applied\"");
     }
     let first = queued_id_of(&world, run, "fixtures/v3");
-    let second = queued_id_of(&world, run, SECOND_CARRIED);
+    let [second, third, fifth] =
+        [SECOND_CARRIED, THIRD_CARRIED, FIFTH_CARRIED].map(|text| queued_id_of(&world, run, text));
     assert_eq!(
         recorded_note(&world, run, MULTILINE_CARRIED)["reached"],
         json!("carried")
     );
 
-    world
-        .run_with_stdin_on(
-            world.agentgraph_cmd(&["reply", run]),
-            &envelope(withdraw_op(first, 0, WITHDRAWN_BECAUSE)),
-        )
-        .exited(0)
-        .out_has("\"state\":\"applied\"");
+    // The last carried, then one between two others, then the first.
+    for sent in [fifth, third, first] {
+        world
+            .run_with_stdin_on(
+                world.agentgraph_cmd(&["reply", run]),
+                &envelope(withdraw_op(sent, 0, WITHDRAWN_BECAUSE)),
+            )
+            .exited(0)
+            .out_has("\"state\":\"applied\"");
+    }
+    let recorded = withdrawals(&world, run);
+    assert_eq!(recorded.len(), 3, "{recorded:#?}");
     assert_eq!(
-        withdrawals(&world, run),
-        [json!({
+        recorded[2],
+        json!({
             "kind": "note-withdrawn",
             "node": "later",
             "envelope": first,
@@ -5924,23 +5944,25 @@ fn a_carried_note_withdrawn_before_its_nodes_next_dispatch_is_composed_into_none
             "reason": WITHDRAWN_BECAUSE,
             "from": "carried",
             "text": MULTILINE_CARRIED,
-        })],
+        }),
         "the withdrawal was not recorded as the note it took back"
     );
-    let answered_again = outcome_of(&world, run, first).expect("answered");
-    assert_eq!(answered_again["applied"], json!(false), "{answered_again}");
-    assert_eq!(answered_again["results"][0]["outcome"], json!("refused"));
-    assert!(
-        answered_again["results"][0]["reason"]
-            .as_str()
-            .is_some_and(|reason| reason.contains(WITHDRAWN_BECAUSE)),
-        "the withdrawn note's own command does not carry the withdrawal's reason: \
-         {answered_again}"
-    );
+    for sent in [fifth, third, first] {
+        let answered_again = outcome_of(&world, run, sent).expect("answered");
+        assert_eq!(answered_again["applied"], json!(false), "{answered_again}");
+        assert_eq!(answered_again["results"][0]["outcome"], json!("refused"));
+        assert!(
+            answered_again["results"][0]["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains(WITHDRAWN_BECAUSE)),
+            "a withdrawn note's own command does not carry the withdrawal's reason: \
+             {answered_again}"
+        );
+    }
     assert_eq!(
         result_of(&world, run, second, 0)["outcome"],
         json!("applied"),
-        "the note carried beside the withdrawn one was answered again too"
+        "the note carried beside the withdrawn ones was answered again too"
     );
 
     release(&world.fakes, "turn.go");
@@ -5955,20 +5977,21 @@ fn a_carried_note_withdrawn_before_its_nodes_next_dispatch_is_composed_into_none
         .split_once("## Planner context")
         .map(|(_, context)| context)
         .unwrap_or_else(|| panic!("later's dispatch has no planner context:\n{task}"));
-    // Every carried note but the withdrawn one, together and in carry order.
+    // Every carried note but the withdrawn ones, together and in carry order.
     assert_eq!(
         context
             .trim()
             .split_once("\n\n")
             .map(|(_, notes)| notes.trim()),
-        Some(format!("{SECOND_CARRIED}\n\n{THIRD_CARRIED}").as_str()),
+        Some(format!("{SECOND_CARRIED}\n\n{FOURTH_CARRIED}").as_str()),
         "later's planner context is not the two remaining carried notes in carry order:\n{task}"
     );
     assert!(
         MULTILINE_CARRIED
             .split("\n\n")
-            .all(|paragraph| !task.contains(paragraph)),
-        "later's dispatch was composed with part of the withdrawn note:\n{task}"
+            .chain([THIRD_CARRIED, FIFTH_CARRIED])
+            .all(|withdrawn| !task.contains(withdrawn)),
+        "later's dispatch was composed with part of a withdrawn note:\n{task}"
     );
 
     // Composed into that dispatch now, so there is nothing left to take back.
@@ -5979,7 +6002,7 @@ fn a_carried_note_withdrawn_before_its_nodes_next_dispatch_is_composed_into_none
         )
         .exited(REFUSED)
         .err_has("already been composed into a dispatch");
-    assert_eq!(withdrawals(&world, run).len(), 1);
+    assert_eq!(withdrawals(&world, run).len(), 3);
     assert_eq!(
         result_of(&world, run, second, 0)["outcome"],
         json!("applied")
