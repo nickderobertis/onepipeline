@@ -14,10 +14,10 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 
 use crate::draft_lifecycle::{team_repository, GREEN};
-use crate::harness::{agent, double, lifecycle, plan_of, World};
+use crate::harness::{agent, double, git, lifecycle, onevcs_binary, plan_of, Repository, World};
 use crate::stacked_drafts::{change_from, settled};
 use crate::linear_loopback::Linear;
-use crate::linear_writeback::GitHubEndpoint;
+use crate::linear_writeback::{from_the_launch_directory, GitHubEndpoint};
 
 /// The variable every loopback board's source reads its token from.
 const TOKEN_ENV: &str = "ONEPIPELINE_LOOPBACK_BOARD_TOKEN";
@@ -759,4 +759,305 @@ fn a_closure_being_retried_holds_back_no_dependent_of_the_landed_node() {
     );
     read_no_board_whole(&served);
     finished(&world, run);
+}
+
+/// One of the engine's own landing verbs, over a branch of the world's `local-direct`
+/// repository whose commit closes issue 7.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verb {
+    PublishBranch,
+    RepoRecover,
+    Integrate,
+}
+
+impl Verb {
+    fn name(self) -> &'static str {
+        match self {
+            Self::PublishBranch => "publish-branch",
+            Self::RepoRecover => "repo-recover",
+            Self::Integrate => "integrate",
+        }
+    }
+
+    /// Cut the branch this verb lands — a finished one, or for `repo-recover` one carrying an
+    /// unattested incomplete-step marker, preserved on the origin — and answer the verb's
+    /// arguments.
+    fn prepare(self, world: &World, repository: &Repository) -> Vec<&'static str> {
+        let subject = match self {
+            Self::RepoRecover => "feat: add the widget (incomplete step)",
+            Self::PublishBranch | Self::Integrate => "feat: add the widget",
+        };
+        let checkout = &repository.checkout;
+        git(world, checkout, &["checkout", "-b", "widget"]);
+        std::fs::write(checkout.join("widget.txt"), "a widget\n").expect("the work is written");
+        git(world, checkout, &["add", "-A"]);
+        git(
+            world,
+            checkout,
+            &["commit", "-m", &format!("{subject}\n\nCloses #7")],
+        );
+        git(world, checkout, &["checkout", "main"]);
+        match self {
+            Self::PublishBranch => vec!["publish-branch", "widget", "--repo", "service"],
+            Self::RepoRecover => {
+                let preserved = world
+                    .cmd_on(&onevcs_binary(), &["preserve", "widget", "--repo", "service"])
+                    .output()
+                    .expect("onevcs runs");
+                assert!(
+                    preserved.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&preserved.stderr)
+                );
+                vec![
+                    "repo-recover",
+                    "widget",
+                    "--repo",
+                    "service",
+                    "--title",
+                    "feat: add the widget",
+                    "--no-draft",
+                ]
+            }
+            Self::Integrate => vec!["integrate", "widget", "--push"],
+        }
+    }
+
+    /// Where the verb runs from, and where the store configuration it reads sits at or above:
+    /// the repository's checkout for `integrate`, which resolves its repository from there,
+    /// and a directory of its own for the branch-keyed verbs.
+    fn dir(self, world: &World, repository: &Repository) -> PathBuf {
+        match self {
+            Self::Integrate => repository.checkout.clone(),
+            Self::PublishBranch | Self::RepoRecover => {
+                let dir = world.root.join("launch");
+                std::fs::create_dir_all(&dir).expect("the directory the verb runs in");
+                dir
+            }
+        }
+    }
+
+    /// Where its store configuration is written: at the directory it runs from, or — for
+    /// `integrate`, whose checkout it must not dirty — the directory above it, which the
+    /// store's discovery reaches the same way.
+    fn configuration(self, world: &World, repository: &Repository) -> PathBuf {
+        match self {
+            Self::Integrate => world.root.join("onetaskgraph.yaml"),
+            Self::PublishBranch | Self::RepoRecover => {
+                self.dir(world, repository).join("onetaskgraph.yaml")
+            }
+        }
+    }
+}
+
+/// What one landing verb did: its exit status, both streams, and its world.
+struct Landed {
+    world: World,
+    repository: Repository,
+    served: GitHubEndpoint,
+    code: i32,
+    stdout: String,
+    stderr: String,
+}
+
+/// Run `verb` over its branch in a world of its own, from a directory whose store
+/// configuration declares the loopback board — or, where `configured` is false, declares
+/// nothing at all — with `fault` answering the closure's Status write where one is given.
+fn landed_by(verb: Verb, configured: bool, fault: Option<&str>) -> Landed {
+    let name = format!(
+        "closures-{}-{}{}",
+        verb.name(),
+        if configured { "board" } else { "bare" },
+        fault.map(|fault| format!("-{fault}")).unwrap_or_default()
+    );
+    let world = World::new(&name).with_env(TOKEN_ENV, "loopback-token");
+    // A recovery attests the repository's bar, so its repository has one: a `pre-push` hook
+    // that passes.
+    let bar: &[&str] = match verb {
+        Verb::RepoRecover => &["true"],
+        Verb::PublishBranch | Verb::Integrate => &[],
+    };
+    let repository = world.repository("local-direct", bar);
+    let served = GitHubEndpoint::serve_issues(&world, &one_board());
+    if let Some(fault) = fault {
+        served.fault(fault);
+    }
+    let args = verb.prepare(&world, &repository);
+    let dir = verb.dir(&world, &repository);
+    if configured {
+        std::fs::write(
+            verb.configuration(&world, &repository),
+            format!("sources:\n{}", board_source("board", &served, 1)),
+        )
+        .expect("the store configuration");
+    }
+    // Only the directory's own configuration: none of this world's environment layer.
+    let output = from_the_launch_directory(&world, &dir, &args)
+        .output()
+        .expect("the landing verb runs");
+    Landed {
+        world,
+        repository,
+        served,
+        code: output.status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    }
+}
+
+/// Every `landing-closures` record the landing journals of `world`'s flows hold.
+fn landing_records(world: &World) -> Vec<Value> {
+    let mut records = Vec::new();
+    let Ok(flows) = std::fs::read_dir(world.runs.join(".flows")) else {
+        return records;
+    };
+    for flow in flows.flatten() {
+        let Ok(landings) = std::fs::read_dir(flow.path().join("landings")) else {
+            continue;
+        };
+        for landing in landings.flatten() {
+            let journal =
+                std::fs::read_to_string(landing.path().join("events.jsonl")).unwrap_or_default();
+            records.extend(
+                journal
+                    .lines()
+                    .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                    .filter(|event| event["kind"] == "landing-closures"),
+            );
+        }
+    }
+    records
+}
+
+/// The verb landed the branch on the base, carrying its closing line.
+fn landed_widget(landed: &Landed) {
+    assert_eq!(
+        landed.repository.base_file("widget.txt").as_deref(),
+        Some("a widget\n"),
+        "the branch did not land:\n{}\n{}",
+        landed.stdout,
+        landed.stderr
+    );
+    let message = git(
+        &landed.world,
+        &landed.repository.origin,
+        &["log", "-1", "--format=%B", "main"],
+    );
+    assert!(
+        message.lines().any(|line| line.trim() == "Closes #7"),
+        "the landing commit does not carry its closing line: {message}"
+    );
+}
+
+/// The one record a landing verb journalled, for the landing commit it made.
+fn the_record(landed: &Landed) -> Value {
+    let records = landing_records(&landed.world);
+    assert_eq!(
+        records.len(),
+        1,
+        "{records:#?}\n{}\n{}",
+        landed.stdout,
+        landed.stderr
+    );
+    let payload = records[0]["payload"].clone();
+    assert_eq!(payload["node"], Value::Null, "{payload}");
+    assert_eq!(
+        payload["commit"],
+        landed_on_main(&landed.world),
+        "{payload}"
+    );
+    assert_eq!(payload["closes"], json!(["owner/service#7"]), "{payload}");
+    payload
+}
+
+/// `verb` from a directory whose store configuration declares the board moves issue 7's card
+/// to `Done`, prints what the store answered, exits as it does from a directory declaring
+/// nothing — where it asks nothing and says so — and journals one projected record.
+fn a_landing_verb_closes_the_issues_its_landing_closes(verb: Verb) {
+    let bare = landed_by(verb, false, None);
+    landed_widget(&bare);
+    assert!(
+        bare.stderr
+            .contains("no store configuration here declares a source, so no closure request"),
+        "{}",
+        bare.stderr
+    );
+    assert!(log_of(&bare.served).is_empty(), "{:#?}", log_of(&bare.served));
+    assert!(landing_records(&bare.world).is_empty());
+
+    let landed = landed_by(verb, true, None);
+    landed_widget(&landed);
+    assert_eq!(landed.code, bare.code, "{}", landed.stderr);
+    assert_eq!(landed.code, 0, "{}", landed.stderr);
+    assert!(
+        landed.stderr.contains("owner/service#7 on board: updated"),
+        "{} did not print what the store answered:\n{}",
+        verb.name(),
+        landed.stderr
+    );
+    assert_eq!(
+        card(&landed.served, "1", "7"),
+        (json!("Done"), issue("CLOSED", Some("COMPLETED")))
+    );
+    assert_eq!(
+        card(&landed.served, "1", "9"),
+        (json!("Todo"), issue("OPEN", None))
+    );
+    read_no_board_whole(&landed.served);
+    let record = the_record(&landed);
+    assert_eq!(record["outcome"], "projected", "{record}");
+    assert_eq!(record["class"], Value::Null, "{record}");
+}
+
+/// `verb` against a board that refuses the closure's Status write still lands, exits as it
+/// does from a directory declaring nothing, and records the closure `failed` with the store's
+/// class and reason.
+fn a_landing_verb_lands_whatever_the_board_answers(verb: Verb) {
+    let bare = landed_by(verb, false, None);
+    let landed = landed_by(verb, true, Some("refuse"));
+    landed_widget(&landed);
+    assert_eq!(landed.code, bare.code, "{}", landed.stderr);
+    assert_eq!(card(&landed.served, "1", "7"), (json!("Todo"), issue("OPEN", None)));
+    let record = the_record(&landed);
+    assert_eq!(record["outcome"], "failed", "{record}");
+    assert_eq!(record["class"], "refused", "{record}");
+    assert!(
+        record["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("the loopback refuses this Status write")),
+        "{record}"
+    );
+    assert!(
+        landed.stderr.contains("failed (refused)"),
+        "{}",
+        landed.stderr
+    );
+}
+
+#[test]
+fn publish_branch_closes_the_issues_its_landing_closes() {
+    a_landing_verb_closes_the_issues_its_landing_closes(Verb::PublishBranch);
+}
+
+#[test]
+fn publish_branch_lands_whatever_the_board_answers() {
+    a_landing_verb_lands_whatever_the_board_answers(Verb::PublishBranch);
+}
+
+#[test]
+fn repo_recover_closes_the_issues_its_landing_closes() {
+    a_landing_verb_closes_the_issues_its_landing_closes(Verb::RepoRecover);
+}
+
+#[test]
+fn repo_recover_lands_whatever_the_board_answers() {
+    a_landing_verb_lands_whatever_the_board_answers(Verb::RepoRecover);
+}
+
+/// `integrate`'s train squashes the branch onto the base carrying its closing line, and the
+/// landing it reports closes issue 7 — and nothing else — through the store the directory above
+/// the checkout configures.
+#[test]
+fn integrate_closes_the_issues_its_train_lands() {
+    a_landing_verb_closes_the_issues_its_landing_closes(Verb::Integrate);
 }
