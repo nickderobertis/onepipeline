@@ -11852,9 +11852,11 @@ has finished — projected, or failed for good — in the shape below: `node` is
 landing a landing verb made outside a run, `items` and `unsupported` are the store's own,
 verbatim, and `class` and `reason` are `null` unless `outcome` is `failed`. A run writes it to
 its own journal; a landing verb to the landing's journal and every associated run's. It is
-declared once in the event vocabulary, beside `node-settled`. A landing whose call never
-finished — the driver stopped while it was being asked again — has no record, so the next
-adoption makes the call.
+declared once in the event vocabulary, beside `node-settled`. A run whose every node has
+settled waits for its closures still owed up to thirty seconds past the projection's close-out
+window, since a board paces its writes and nothing adopts a finished run again; a run stopped
+before then gets the projection's window. A landing whose call never finished — the driver
+stopped while it was being asked again — has no record, so the next adoption makes the call.
 
 Driven end to end by `tests/e2e/closures.rs`: a run on a real `local-direct` landing over two
 loopback boards, a `local-md` source and a Linear source; a change request's

@@ -159,6 +159,12 @@ const RETRY_CEILING: Duration = Duration::from_secs(60);
 // Closeout never inherits the duration of a store call. A slow store may keep working in
 // the worker, but it still cannot turn a completed graph into run settlement.
 const CLOSEOUT_WAIT: Duration = Duration::from_millis(2_250);
+// How long a settled run's close-out waits for the closures of its landings still owed: past
+// the projection's window because a GitHub board spaces its writes (`onetaskgraph`'s
+// `MIN_MUTATION_INTERVAL_MS`, 750 ms), and two of them close each issue, so ten issues are
+// fifteen seconds of pacing alone; bounded because a board that never answers holds the run's
+// settlement no longer than this.
+const CLOSURES_CLOSEOUT_WAIT: Duration = Duration::from_secs(30);
 // The store calls an attempt makes, by the name each one's refusals carry. Each one's failure
 // is classified by its own type.
 const PROJECT_SHOW: &str = WRITEBACK_CLASSIFIED_COMMANDS[0];
@@ -1448,10 +1454,19 @@ impl Writeback {
             // while the hard call limit preserves write-back's latency boundary.
             self.closing_out_until(deadline, Pending::unlanded);
         }
-        // And the closures still owed, inside the same window: a run that took the project
-        // over owns its board, not the issues this run's own landings closed. One still being
-        // called when the window ends has no record, so the next adoption makes it.
-        self.closing_out_until(deadline, Pending::closing_owed);
+        // And the closures still owed — whoever holds the project's board, the issues this
+        // run's own landings closed are this run's. A run every node of which has settled has
+        // nothing to adopt it again, so its closures get a window of their own, bounded by
+        // [`CLOSURES_CLOSEOUT_WAIT`]: a board paces its writes, and a landing closing a few
+        // issues outlasts the projection's window by that alone. A run stopped before it
+        // settled gets the shared window; one still being called when its window ends has no
+        // record, so the next adoption makes it.
+        let closures = if crate::graph::is_terminal(statuses) {
+            deadline.max(Instant::now() + CLOSURES_CLOSEOUT_WAIT)
+        } else {
+            deadline
+        };
+        self.closing_out_until(closures, Pending::closing_owed);
     }
 
     /// Owe the closures of one landing, unless this driver already owes or has made them.
@@ -2098,7 +2113,10 @@ fn closer(store: &Store, per_item: NonZeroU64, pending: &(Mutex<Pending>, Condva
                             RETRY_CEILING.as_secs()
                         );
                     }
-                    if !should_retry_after(pending, Interval::Scheduled(retry_after(failures))) {
+                    // Binding, so a close-out does not lift it: a closure has a window of its
+                    // own there, which a board failing at once would otherwise spend asked as
+                    // fast as it can refuse.
+                    if !should_retry_after(pending, Interval::Asked(retry_after(failures))) {
                         return;
                     }
                 }

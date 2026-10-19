@@ -1234,10 +1234,15 @@ impl GitHubEndpoint {
         format!("{}/board/{number}/graphql", self.url.trim())
     }
 
-    /// Answer the next Status write of a numbered card with `fault`: `refuse`, `transient` or
-    /// `hold`.
+    /// Answer the next Status write of a numbered card with `fault`: `refuse`, `fail-once`,
+    /// `transient` or `hold`.
     pub(super) fn fault(&self, fault: &str) {
-        self.post("/fault", &json!({"status": fault}));
+        self.faults(&[fault]);
+    }
+
+    /// Answer the next Status writes of numbered cards with `faults`, one each, in order.
+    pub(super) fn faults(&self, faults: &[&str]) {
+        self.post("/fault", &json!({"status": faults}));
     }
 
     /// Let every held Status write go.

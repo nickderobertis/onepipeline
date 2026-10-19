@@ -1254,6 +1254,11 @@ const RELEASES: &str = "version: 1\n\
 /// runs — here by a person's own `onevcs change standings` read of the merged change request,
 /// which nothing of the run asked for — is met on the driver's next pass over that stream and
 /// closes issue 7 once, with no readjustment and no adoption.
+///
+/// The repository declares a release target because that pass is the release relay's, which
+/// reads the settled sessions only of repositories that release anything — a run in one that
+/// releases nothing reads no stream on a timer, and meets such a landing at its next
+/// readjustment or adoption, which the journeys above drive.
 #[test]
 fn a_late_landing_on_a_settled_node_s_session_stream_closes_its_issues_while_the_driver_runs() {
     let (world, served) = team("closures-stream");
@@ -1312,4 +1317,129 @@ fn a_late_landing_on_a_settled_node_s_session_stream_closes_its_issues_while_the
     assert_eq!(records[0]["payload"]["outcome"], "projected");
     read_no_board_whole(&served);
     finished(&world, run);
+}
+
+/// One store call whose answer fails an item for good and another for now is asked again —
+/// the transient failure decides — and the retry, which the board answers, writes both cards:
+/// the record says `projected`, after four Status writes, two of them refused.
+#[test]
+fn a_closure_failing_for_good_and_for_now_at_once_is_asked_again() {
+    let issues = json!({
+        "repository": REPOSITORY,
+        "issues": {"7": issue("OPEN", None), "9": issue("OPEN", None)},
+        "boards": {"1": {"7": "Todo", "9": "Todo"}},
+    });
+    let (world, served) = world_with("closures-mixed", "local-direct", &issues);
+    let launch = one_board_launch(&world, &served);
+    world.script("service.work", "the worker wrote this\n");
+    world.script(
+        "service.commit-saying",
+        "feat: ship the service\n\nCloses #7\nCloses #9",
+    );
+    served.faults(&["refuse", "fail-once"]);
+    let run = "mixed";
+    let project = world.plan(run, &plan_of(run, vec![lifecycle("service", &[])]));
+    start_from(&world, &launch, &project);
+    world.until("the landing's closures to be recorded", |world| {
+        !closures_of(world, run).is_empty() && world.run_file(run, "result.json").is_file()
+    });
+
+    let records = closures_of(&world, run);
+    assert_eq!(records.len(), 1, "{records:#?}");
+    assert_eq!(
+        records[0]["payload"]["outcome"], "projected",
+        "{records:#?}"
+    );
+    for number in ["7", "9"] {
+        assert_eq!(
+            card(&served, "1", number),
+            (json!("Done"), issue("CLOSED", Some("COMPLETED")))
+        );
+    }
+    let statuses = log_of(&served)
+        .iter()
+        .filter(|request| {
+            request["query"]
+                .as_str()
+                .is_some_and(|query| query.contains("updateProjectV2ItemFieldValue("))
+        })
+        .count();
+    assert_eq!(statuses, 4, "the mixed failure was not asked again");
+    read_no_board_whole(&served);
+}
+
+/// An integration train landing two branches, each closing an issue of its own, makes one
+/// closure call and one record per branch it lands, each naming that branch's landing commit
+/// and only its own issue.
+#[test]
+fn an_integrate_train_closes_each_branch_s_issues_with_a_record_of_its_own() {
+    let issues = json!({
+        "repository": REPOSITORY,
+        "issues": {"7": issue("OPEN", None), "9": issue("OPEN", None)},
+        "boards": {"1": {"7": "Todo", "9": "Todo"}},
+    });
+    let world = World::new("closures-train").with_env(TOKEN_ENV, "loopback-token");
+    let repository = world.repository("local-direct", &[]);
+    let served = GitHubEndpoint::serve_issues(&world, &issues);
+    let checkout = &repository.checkout;
+    for (branch, number) in [("widget", 7), ("gadget", 9)] {
+        git(&world, checkout, &["checkout", "-b", branch, "main"]);
+        std::fs::write(
+            checkout.join(format!("{branch}.txt")),
+            format!("a {branch}\n"),
+        )
+        .expect("the work is written");
+        git(&world, checkout, &["add", "-A"]);
+        git(
+            &world,
+            checkout,
+            &[
+                "commit",
+                "-m",
+                &format!("feat: add the {branch}\n\nCloses #{number}"),
+            ],
+        );
+        git(&world, checkout, &["checkout", "main"]);
+    }
+    std::fs::write(
+        world.root.join("onetaskgraph.yaml"),
+        format!("sources:\n{}", board_source("board", &served, 1)),
+    )
+    .expect("the store configuration");
+    let output = from_the_launch_directory(
+        &world,
+        checkout,
+        &["integrate", "widget", "gadget", "--push"],
+    )
+    .output()
+    .expect("integrate runs");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+
+    let records = landing_records(&world);
+    assert_eq!(records.len(), 2, "{records:#?}\n{stderr}");
+    let closes: Vec<Value> = records
+        .iter()
+        .map(|record| record["payload"]["closes"].clone())
+        .collect();
+    assert_eq!(
+        closes,
+        [json!(["owner/service#7"]), json!(["owner/service#9"])]
+    );
+    assert_ne!(
+        records[0]["payload"]["commit"], records[1]["payload"]["commit"],
+        "the two branches' landings were recorded as one"
+    );
+    assert_eq!(records[1]["payload"]["commit"], landed_on_main(&world));
+    for record in &records {
+        assert_eq!(record["payload"]["node"], Value::Null);
+        assert_eq!(record["payload"]["outcome"], "projected");
+    }
+    for number in ["7", "9"] {
+        assert_eq!(
+            card(&served, "1", number),
+            (json!("Done"), issue("CLOSED", Some("COMPLETED")))
+        );
+    }
+    read_no_board_whole(&served);
 }

@@ -10,10 +10,11 @@ for the journeys about the issues a landing closes: `{"repository": "owner/name"
 {"7": {"state": "OPEN", "reason": null}, ...}, "boards": {"1": {"7": "Todo"}, ...}}`. Those
 issues are read by repository and number, as `task status complete` reads them, and a board's
 source names its board in its endpoint, `/board/<number>/graphql`, so every request is logged
-under the board that sent it. POST `/fault` with `{"status": "refuse" | "transient" | "hold"}`
-answers the next Status write of a numbered card that way: refused for good, failed once with
-an HTTP 502 and then held until POST `/release`, or held until `/release` and then dropped
-unapplied — the request a stopped driver sent and never saw answered.
+under the board that sent it. POST `/fault` with `{"status": FAULT}`, or a list of them for
+successive writes, answers the next Status write of a numbered card that way: `refuse`d for
+good, `fail-once` with an HTTP 502, `transient` — failed once with an HTTP 502 and the retry
+then held until POST `/release` — or `hold` until `/release` and then dropped unapplied, the
+request a stopped driver sent and never saw answered.
 
 The URL is published to `<root>/endpoint` whole or not at all. For the regression journey that
 proves it, `GITHUB_LOOPBACK_PUBLISH_HOLD` names a directory: publication stops half-written,
@@ -118,6 +119,15 @@ state["log"] = []
 state["writes"] = []
 state["fault"] = None
 state["holding"] = False
+state["queued"] = []
+FAULTS = ["refuse", "fail-once", "transient", "hold"]
+
+
+def next_fault():
+    """The fault the next numbered Status write meets, once the current one has answered."""
+    state["fault"] = state["queued"].pop(0) if state["queued"] else None
+
+
 # One lock over every read and write of state, since a held write waits on its own thread.
 lock = threading.Lock()
 released = threading.Event()
@@ -244,17 +254,21 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(state)
 
     def held_write(self, request):
-        """The Status write a fault holds: answered only once `/release` is posted."""
+        """The Status write the current fault answers, the next queued fault taking its place
+        once it has — a held one answered only once `/release` is posted."""
         fault = state["fault"]
         if fault == "refuse":
-            state["fault"] = None
+            next_fault()
             return {"errors": [{"type": "UNPROCESSABLE",
                                 "message": "the loopback refuses this Status write"}]}, 200
+        if fault == "fail-once":
+            next_fault()
+            return {"errors": [{"message": "the loopback is failing for now"}]}, 502
         if fault == "transient":
             state["fault"] = "hold-then-apply"
             return {"errors": [{"message": "the loopback is failing for now"}]}, 502
         if fault in ("hold", "hold-then-apply"):
-            state["fault"] = None
+            next_fault()
             state["holding"] = True
             lock.release()
             try:
@@ -275,10 +289,13 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(request, dict):
                 raise ValueError("request must be an object")
             if self.path == "/fault":
-                if set(request) != {"status"} or request["status"] not in ["refuse", "transient", "hold"]:
-                    raise ValueError("a fault names a Status write's fault")
+                faults = request.get("status") if set(request) == {"status"} else None
+                faults = [faults] if isinstance(faults, str) else faults
+                if (not isinstance(faults, list) or not faults
+                        or any(fault not in FAULTS for fault in faults)):
+                    raise ValueError("a fault names the Status writes' faults, in order")
                 with lock:
-                    state["fault"] = request["status"]
+                    state["fault"], state["queued"] = faults[0], faults[1:]
                 answer = {"data": {}}
             elif self.path == "/release":
                 released.set()
