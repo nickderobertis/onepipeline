@@ -717,13 +717,21 @@ resolver = "2"
 # `src/maintenance.rs` matches `IdentityOutcome::MaintenanceUnreadable` and reads
 # `SlotOutcome::Ran`'s `disk`, neither of which an earlier release defines.
 #
-# `onevcs` 0.52.0 is the floor because it is the release the declared-maintenance
+# `onevcs` 0.56.2 is the floor because every landing event it writes carries
+# `closes` — the GitHub issues the landing closes, as `owner/name#N` — on the
+# `merge-completed` and `change-merged` of a change request, a `local-direct`
+# squash and the integrate train alike, read here through
+# `onevcs::landing_closes` in `closures::Landing::of`. `src/closures.rs` hands
+# those issues to the store (entry 132 of `docs/contract-divergences.md`);
+# `tests/e2e/closures.rs` drives it. A **requirement**, because `^0.52` admits no
+# 0.56.x; `onevcs-testing` 0.19.12 requires exactly `=0.56.2`, so the pair moves
+# as one.
+#
+# The floor may not fall below `onevcs` 0.52.0, the release the declared-maintenance
 # producer supplied for this crate's idle pool maintenance, the `onevcs.toml`
 # reading 0.50.0 brought. It also adds `SessionRequest::caller_merges_base`
 # (onevcs #434), which every request this crate builds sets `false`, so a
-# session open still runs onevcs's rules probe as before. A **requirement**,
-# because `^0.51` admits no 0.52.x; `onevcs-testing` 0.19.4 requires exactly
-# `=0.52.0`, so the pair moves as one. 0.51.3 below it carried the same
+# session open still runs onevcs's rules probe as before. 0.51.3 below it carried the same
 # declared-maintenance reading, released again with no change to the library's
 # source. 0.51.2 below that is the release the operation-progress producer
 # supplied for this crate's manager landings; it carries the
@@ -794,7 +802,7 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 oneagentgraph = "0.5.14"
-onevcs = "0.52.0"
+onevcs = "0.56.2"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is
@@ -1039,7 +1047,7 @@ oneharness-core = "0.28.5"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.19.4"
+onevcs-testing = "0.19.12"
 # The store, linked: `src/taskgraph.rs` says how the engine calls it. `-plugin-api` is
 # named for the values the store answers with, and `-local-md` for the plugin
 # `crates/testfakes` hosts in process.
@@ -1075,13 +1083,19 @@ onevcs-testing = "0.19.4"
 # local-md source is what reads back and edits the run's write-back shadow documents
 # (`src/writeback.rs`).
 #
-# **0.7.3 is the floor.** It leaves a source a layer refines but no layer defines
+# **0.8.0 is the floor.** It adds `Engine::complete_issues`, which moves to `done` the
+# items every configured source holds for the GitHub issues a landing closed, the
+# store choosing the sources (`src/closures.rs`, entry 132). It is breaking: a copy
+# takes `statuses` and may report an item `skipped`, a store failure gains
+# `statuses-not-tasks`, and a closed item's status name follows its closure.
+#
+# **No earlier release than 0.7.3**: it leaves a source a layer refines but no layer defines
 # unconfigured rather than failing every load, so a host's user layer may route to
 # sources only one checkout defines; and it answers a dependency read a private source
 # cannot without failing it. `tests/e2e/store.rs` drives both.
-onetaskgraph-core = "=0.7.3"
-onetaskgraph-plugin-api = "=0.7.3"
-onetaskgraph-local-md = "=0.7.3"
+onetaskgraph-core = "=0.8.0"
+onetaskgraph-plugin-api = "=0.8.0"
+onetaskgraph-local-md = "=0.8.0"
 # Test-support only: the budget checker's own library, at exactly the release `justfile`'s
 # `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
 onebudgetspec-core = "=0.1.5"

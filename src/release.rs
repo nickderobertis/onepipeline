@@ -868,6 +868,15 @@ impl Watch {
     /// recorded about it, so there is nothing to go and read. Answered off the
     /// per-driver cache, so asking again costs nothing.
     pub(crate) fn relays_anything(&mut self, state: &RunState) -> bool {
+        // And a settled draft that may yet land, whose stream the pass reads for that landing
+        // wherever its repository releases nothing.
+        if state
+            .sessions
+            .keys()
+            .any(|node| awaits_late_landing(state, node))
+        {
+            return true;
+        }
         let repositories: Vec<String> = state
             .sessions
             .keys()
@@ -1135,12 +1144,16 @@ impl Watch {
         state: &RunState,
         statuses: &BTreeMap<String, NodeStatus>,
         filter: Option<&crate::filter::EventFilter>,
-    ) -> Result<()> {
+    ) -> Result<BTreeSet<String>> {
+        // The settled nodes whose streams carry a landing recorded since this run last relayed
+        // them — a merge found after its publication ended — which the closures owe a catch-up
+        // (entry 132). Not relayed: the session's own records were the follow's.
+        let mut met_landings = BTreeSet::new();
         if !self
             .relayed
             .is_none_or(|last| last.elapsed() >= self.relay_every)
         {
-            return Ok(());
+            return Ok(met_landings);
         }
         self.relayed = Some(Instant::now());
         let mut relayed = crate::vcs::Watermarks::of_relayed(&journal::read(&paths.journal()));
@@ -1160,10 +1173,13 @@ impl Watch {
                 .and_then(|repo| self.repositories.of(&repo).ok())
                 .is_none_or(|releases| releases.targets.is_empty());
             // A repository that declares no release targets releases nothing, so
-            // there is nothing recorded about it to read — which is every host
+            // there is no release recorded about it to relay — which is every host
             // that has configured none, and is what keeps such a run's store
             // exactly the store it held before there was a release record at all.
-            if releases_nothing {
+            // Its stream is still read for a draft that may yet land, for the
+            // landing alone.
+            let awaits_landing = awaits_late_landing(state, node);
+            if releases_nothing && !awaits_landing {
                 continue;
             }
             let known = crate::engine::dispatch_labels(
@@ -1176,7 +1192,15 @@ impl Watch {
                     .and_then(|node| node.persona.as_deref()),
             );
             for mut envelope in crate::vcs::events(session.token(), filter) {
-                if envelope.dimensions.phase != Some(crate::event::Phase::Release) {
+                if releases_nothing
+                    || envelope.dimensions.phase != Some(crate::event::Phase::Release)
+                {
+                    if envelope.source == crate::event::Source::Vcs
+                        && crate::vcs::is_landing(&envelope.kind)
+                        && relayed.beyond(&envelope)
+                    {
+                        met_landings.insert(node.clone());
+                    }
                     continue;
                 }
                 if !relayed.beyond(&envelope) {
@@ -1190,7 +1214,7 @@ impl Watch {
                 relayed.reached(&envelope);
             }
         }
-        Ok(())
+        Ok(met_landings)
     } // llmlint: ignore-end[changed_behavior_has_e2e]
 
     /// The word a payload and a surface name one awaited release's last answer
@@ -2666,6 +2690,16 @@ impl Resurfacing {
     pub(crate) fn retain(&mut self, held: impl Fn(&str) -> bool) {
         self.last.retain(|node, _| held(node));
     }
+}
+
+/// Whether `node` settled having published a change that has not landed, and no landing of it
+/// has been recorded since: the one node a merge somebody makes later, recorded on its own
+/// session stream, can land — what the closures' catch-up reads that stream for (entry 132 of
+/// `docs/contract-divergences.md`).
+fn awaits_late_landing(state: &RunState, node: &str) -> bool {
+    state.landings.get(node) == Some(&crate::graph::Landing::Unlanded)
+        && !state.landing_commits.contains_key(node)
+        && !state.landed_how.contains_key(node)
 }
 
 #[cfg(test)]
