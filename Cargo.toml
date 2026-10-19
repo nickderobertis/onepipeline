@@ -723,9 +723,15 @@ resolver = "2"
 # squash and the integrate train alike, read here through
 # `onevcs::landing_closes` in `closures::Landing::of`. `src/closures.rs` hands
 # those issues to the store (entry 132 of `docs/contract-divergences.md`);
-# `tests/e2e/closures.rs` drives it. `onevcs-testing` 0.19.12 requires exactly
-# `=0.56.2`, so the pair moves as one. A **requirement**, because `^0.52` admits
+# `tests/e2e/closures.rs` drives it. A **requirement**, because `^0.52` admits
 # no 0.56.x.
+#
+# `onevcs` 0.56.3 is the floor only because `onevcs-testing` 0.19.13 — the
+# release that carries every one of the test-support implementations this
+# crate's journeys double the host with — requires exactly `=0.56.3`, so the
+# pair moves as one. Its library source is 0.56.2's, released again for a
+# change to onevcs's own release tooling, so nothing here reads anything new
+# from it.
 #
 # 0.56.1 below it is the release whose two new shapes this crate reads: a
 # publication held on `boundary::Unavailability::HostVisibility` settles as that
@@ -808,7 +814,7 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 oneagentgraph = "0.5.14"
-onevcs = "0.56.2"
+onevcs = "0.56.3"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is
@@ -1053,7 +1059,7 @@ oneharness-core = "0.28.5"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.19.12"
+onevcs-testing = "0.19.13"
 # The store, linked: `src/taskgraph.rs` says how the engine calls it. `-plugin-api` is
 # named for the values the store answers with, and `-local-md` for the plugin
 # `crates/testfakes` hosts in process.
