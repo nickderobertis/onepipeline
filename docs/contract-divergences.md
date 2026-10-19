@@ -11825,7 +11825,9 @@ landing that closes no issue costs no request at all.
 `driver-adopted` and the adoption-time standings read, `readjust::run` — and whenever the run
 meets a landing recorded for one of its nodes since that node settled — a `node-landed` a
 readjustment journals, or a landing event on a settled node's session stream, which the
-per-pass session read `release::Watch::relay_releases` reads — the driver reads, for every
+per-pass session read `release::Watch::relay_releases` reads — for a settled draft whose change
+has not landed, whether or not its repository declares a release target, relaying nothing of a
+repository that releases nothing — the driver reads, for every
 node of the run with a recorded landing, that node's own `onevcs` session stream, and hands
 over each landing commit whose `merge-completed` or `change-merged` carries a non-empty
 `closes` and which no `landing-closures` record of the run's journal names yet. It reads only

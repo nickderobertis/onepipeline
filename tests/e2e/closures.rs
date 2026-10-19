@@ -1247,17 +1247,15 @@ const RELEASES: &str = "version: 1\n\
 /// A landing recorded on a settled node's own session stream while its run's driver still
 /// runs — here by a person's own `onevcs change standings` read of the merged change request,
 /// which nothing of the run asked for — is met on the driver's next pass over that stream and
-/// closes issue 7 once, with no readjustment and no adoption.
-///
-/// The repository declares a release target because that pass is the release relay's, which
-/// reads the settled sessions only of repositories that release anything — a run in one that
-/// releases nothing reads no stream on a timer, and meets such a landing at its next
-/// readjustment or adoption, which the journeys above drive.
-#[test]
-fn a_late_landing_on_a_settled_node_s_session_stream_closes_its_issues_while_the_driver_runs() {
-    let (world, served) = team("closures-stream");
+/// closes issue 7 once, with no readjustment and no adoption: whether or not the repository
+/// declares a release target, since the pass reads an unlanded draft's stream for its landing
+/// either way.
+fn a_late_landing_on_the_stream_closes_its_issues(name: &str, releases: Option<&str>) {
+    let (world, served) = team(name);
     let world = world.with_env("ONEPIPELINE_RELEASE_POLL_SECONDS", "1");
-    world.releases(RELEASES);
+    if let Some(releases) = releases {
+        world.releases(releases);
+    }
     let run = "stream";
     drafted(&world, &served, run);
     merged_by_a_person(&world, run);
@@ -1311,6 +1309,18 @@ fn a_late_landing_on_a_settled_node_s_session_stream_closes_its_issues_while_the
     assert_eq!(records[0]["payload"]["outcome"], "projected");
     read_no_board_whole(&served);
     finished(&world, run);
+}
+
+#[test]
+fn a_late_landing_on_a_settled_node_s_session_stream_closes_its_issues_while_the_driver_runs() {
+    a_late_landing_on_the_stream_closes_its_issues("closures-stream", Some(RELEASES));
+}
+
+/// The same, in a repository that declares no release target: nothing about its releases is
+/// read, and its unlanded draft's stream is still read for the landing.
+#[test]
+fn a_late_landing_in_a_repository_that_releases_nothing_closes_its_issues_while_the_driver_runs() {
+    a_late_landing_on_the_stream_closes_its_issues("closures-stream-bare", None);
 }
 
 /// One store call whose answer fails an item for good and another for now is asked again —
