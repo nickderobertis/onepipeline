@@ -521,7 +521,10 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
                 ),
                 name,
             );
-            passed(&world.run(&["adopt", run]), name);
+            let record = world.root.join(format!("{name}.reads"));
+            let adopted = world.run_recording_renders(&record, &["adopt", run]);
+            passed(&adopted, name);
+            restacked_drafts_were_read_again(&world, &record, &adopted.stderr, run);
         });
         reworked.push((node, from, projection_lines(&world, run).len()));
     }
@@ -872,6 +875,36 @@ fn the_counted_git_counts_each_start_and_is_the_real_git_for_it() {
         std::fs::read_to_string(&log).unwrap().lines().count(),
         3,
         "only the start whose real git could not run is counted, before it was tried"
+    );
+}
+
+/// Every draft a rework restacked had its landing read again in the render that printed
+/// it restacking, whatever read of it the attach stream that render was part of already
+/// held: the base under the draft moved, which is the one move of an already-settled
+/// node a run makes on its own.
+///
+/// What [`crate::landing::stream_renders`] splits the stream into. Where the restack
+/// lands inside the window the stream carries a read for — every one of them, on a host
+/// as quick as this suite's Linux runners — it is the restack alone that asks again.
+fn restacked_drafts_were_read_again(world: &World, record: &Path, stderr: &str, run: &str) {
+    let renders = crate::landing::stream_renders(world, record, stderr, run);
+    let last = renders.len() - 1;
+    let mut restacked = 0;
+    for (at, render) in renders.iter().enumerate().take(last) {
+        for (node, _) in STACK {
+            if render.printed_of(node, "node-restacked") {
+                restacked += 1;
+                assert!(
+                    render.read_at().contains_key(node),
+                    "render {at} printed {node} restacking and did not read its landing \
+                     again:\n{stderr}"
+                );
+            }
+        }
+    }
+    assert!(
+        restacked > 0,
+        "the rework's stream printed no restack before its last render:\n{stderr}"
     );
 }
 

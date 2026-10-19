@@ -2007,12 +2007,20 @@ pub fn follow(
                 if stopping.load(Ordering::SeqCst) {
                     return;
                 }
+                // llmlint: ignore-block[changed_behavior_has_e2e] no journey can reach a session
+                // closed elsewhere while its follow runs: every command that follows a session
+                // ends the follow through `Follower::finish` before it closes the session, and
+                // the binary has no verb that closes another process's live session. The cadence
+                // is held by `a_follow_nobody_finishes_relays_its_stream_and_ends_once_it_asks_after_its_session`
+                // over a real stream on disk, through the one arm a scratch state root reaches —
+                // a session with no readable record — which is the same `settled` answer a
+                // closed one gives.
                 if asked.elapsed() >= FOLLOW_CLOSED_ASK {
                     if settled(&followed) {
                         return;
                     }
                     asked = std::time::Instant::now();
-                }
+                } // llmlint: ignore-end[changed_behavior_has_e2e]
                 std::thread::sleep(FOLLOW_POLL);
             }
         });
