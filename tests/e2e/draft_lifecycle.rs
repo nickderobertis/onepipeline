@@ -39,10 +39,30 @@ const NEVER_SETTLES: &str = "lint in_progress - required";
 /// short enough that the lift happens inside the watch's two-second bound.
 const SHORT_GRACE: &str = "0.2";
 
-/// How long the work on a held draft's head runs, in seconds, from the host's first
-/// answer about it: five of [`SHORT_GRACE`]'s windows, so it is still running well
-/// past the window, and half the watch's two-second bound, so it ends inside it.
-const RUNS_PAST_GRACE: &str = "1";
+/// The draft grace window a journey about a **held** draft runs under, in seconds:
+/// longer than a slow machine takes over a fresh draft's first reads, so the read that
+/// decides the hold always comes well after them. That is where a Windows runner met it
+/// while the work on the head finished on a one-second clock, which ran out unseen there.
+const HELD_GRACE: &str = "1.5";
+
+/// The watch's bound for a held draft, in seconds. The host answers every read here,
+/// so the bound only ends a journey that has gone wrong; it is wide enough for
+/// [`HELD_GRACE`] and the two polls after it on any machine.
+const HELD_BOUND: &str = "30";
+
+/// A world whose draft is held while the work on its head runs: that work finishes
+/// once the host has reported it still running, never on a clock, under
+/// [`HELD_GRACE`] and [`HELD_BOUND`].
+fn held_draft(name: &str) -> World {
+    let world = World::new(name)
+        .with_env("ONEVCS_DRAFT_CHECKS_GRACE_SECONDS", HELD_GRACE)
+        .with_env("ONEVCS_CHECKS_TIMEOUT_SECONDS", HELD_BOUND);
+    world.repository("change-open", &[]);
+    world.script("service.work", "the worker wrote this\n");
+    world.script("gh.no-ready-trigger", "");
+    world.script("gh.draft.finishes-once-reported", "");
+    world
+}
 
 /// Give the world's identity a rules file: `publication`, `approvals`, and a
 /// `drafts:` mapping where one is given.
@@ -690,12 +710,7 @@ fn lifted_once_green(world: &World, run: &str) {
 /// workflow has no `ready_for_review` trigger, so the lift starts no run.
 #[test]
 fn a_needs_gated_draft_is_held_while_a_check_on_its_head_runs_and_lifted_once_green() {
-    let world =
-        World::new("draft-needs").with_env("ONEVCS_DRAFT_CHECKS_GRACE_SECONDS", SHORT_GRACE);
-    world.repository("change-open", &[]);
-    world.script("service.work", "the worker wrote this\n");
-    world.script("gh.no-ready-trigger", "");
-    world.script("gh.draft.finishes-after", RUNS_PAST_GRACE);
+    let world = held_draft("draft-needs");
     // `lint` is the aggregate: absent until the advisory `build` it needs has finished.
     world.script("gh.checks.draft", "build in_progress - advisory");
     world.script(
@@ -722,11 +737,7 @@ fn a_needs_gated_draft_is_held_while_a_check_on_its_head_runs_and_lifted_once_gr
 /// suite, which never completes, holds nothing.
 #[test]
 fn a_draft_whose_head_has_a_workflow_run_in_progress_is_held_until_it_is_green() {
-    let world = World::new("draft-busy").with_env("ONEVCS_DRAFT_CHECKS_GRACE_SECONDS", SHORT_GRACE);
-    world.repository("change-open", &[]);
-    world.script("service.work", "the worker wrote this\n");
-    world.script("gh.no-ready-trigger", "");
-    world.script("gh.draft.finishes-after", RUNS_PAST_GRACE);
+    let world = held_draft("draft-busy");
     world.script("gh.checks.draft", "build completed success advisory");
     world.script("gh.runs.draft", "CI in_progress -");
     world.script("gh.suites.draft", "Some App queued - 0");
@@ -760,12 +771,7 @@ fn a_draft_whose_head_has_a_workflow_run_in_progress_is_held_until_it_is_green()
 /// held until the suite completes and the required check reports green.
 #[test]
 fn a_draft_whose_head_has_a_check_suite_in_progress_is_held_until_it_is_green() {
-    let world =
-        World::new("draft-suite").with_env("ONEVCS_DRAFT_CHECKS_GRACE_SECONDS", SHORT_GRACE);
-    world.repository("change-open", &[]);
-    world.script("service.work", "the worker wrote this\n");
-    world.script("gh.no-ready-trigger", "");
-    world.script("gh.draft.finishes-after", RUNS_PAST_GRACE);
+    let world = held_draft("draft-suite");
     world.script("gh.checks.draft", "build completed success advisory");
     world.script("gh.suites.draft", "Some App in_progress - 1");
     world.script(
@@ -786,6 +792,83 @@ fn a_draft_whose_head_has_a_check_suite_in_progress_is_held_until_it_is_green() 
         })
         .count();
     assert!(suites >= 1, "{:?}", gh_calls(&world));
+}
+
+/// The work on a held draft's head finishes on what the host has said, never on a
+/// clock. Until a read has reported it running, it runs however many reads and however
+/// long pass — longer than the one second a slow Windows runner once spent before the
+/// read that decided its hold. The first rollup read, however late, still meets it
+/// running and holds the draft, and the next settles it green.
+#[test]
+fn a_held_draft_s_work_finishes_once_reported_running_and_never_on_a_clock() {
+    let world = World::new("draft-reported");
+    world.repository("change-open", &[]);
+    world.script("service.work", "the worker wrote this\n");
+    world.script("gh.checks", GREEN);
+    let mut node = lifecycle("service", &[]);
+    node["draft"] = json!(true);
+    let plan = world.plan("reported", &plan_of("reported", vec![node]));
+    world
+        .run_from(&world.project, &["start", &plan, "--attach"])
+        .exited(0)
+        .settled();
+
+    world.script("gh.draft.finishes-once-reported", "");
+    world.script("gh.checks.draft", "build in_progress - advisory");
+    world.script(
+        "gh.checks",
+        "build completed success advisory\nlint completed success required",
+    );
+    let view = |fields: &str| {
+        let output = onepipeline_testfakes::profile::process::Command::new(crate::harness::double(
+            "fake-gh",
+        ))
+        .args([
+            "pr",
+            "view",
+            "1",
+            "--repo",
+            "owner/service",
+            "--json",
+            fields,
+        ])
+        .env("ONEPIPELINE_FAKE_DIR", &world.fakes)
+        .output()
+        .expect("fake-gh starts");
+        assert!(output.status.success(), "{output:?}");
+        serde_json::from_slice::<Value>(&output.stdout).expect("GitHub JSON")
+    };
+    let rollup = "number,state,mergeStateStatus,headRefOid,mergeCommit,statusCheckRollup";
+    let names = |view: &Value| -> Vec<(String, String)> {
+        view["statusCheckRollup"]
+            .as_array()
+            .expect("a rollup")
+            .iter()
+            .map(|check| {
+                (
+                    check["name"].as_str().unwrap_or_default().to_owned(),
+                    check["status"].as_str().unwrap_or_default().to_owned(),
+                )
+            })
+            .collect()
+    };
+    let running = vec![("build".to_owned(), "in_progress".to_owned())];
+
+    // Nothing has been told the work is running: reads that did not ask for the
+    // rollup, spread past a second, leave it running.
+    for _ in 0..3 {
+        assert_eq!(view("isDraft")["isDraft"], true);
+        onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_millis(600));
+    }
+    let late = view(rollup);
+    assert_eq!(names(&late), running, "{late}");
+
+    // That late read reported it running, so the next one meets it finished.
+    let green = view(rollup);
+    assert!(
+        names(&green).contains(&("lint".to_owned(), "completed".to_owned())),
+        "{green}"
+    );
 }
 
 /// A poll must not mix absent required checks with activity from the next phase.
@@ -816,7 +899,7 @@ fn activity_finishes_after_check_read(repo_numbering: bool) {
         .exited(0)
         .settled();
 
-    world.script("gh.draft.finishes-after", "1000000");
+    world.script("gh.draft.finishes-once-reported", "");
     world.script("gh.checks.draft", "build completed success advisory");
     world.script("gh.runs.draft", "CI in_progress -");
     world.script(
@@ -854,8 +937,8 @@ fn activity_finishes_after_check_read(repo_numbering: bool) {
     let runs = format!("repos/owner/service/actions/runs?head_sha={head}&per_page=100");
     let suites = format!("repos/owner/service/commits/{head}/check-suites?per_page=100");
 
-    // Make the timer expire between the check read and both activity reads.
-    world.script("gh.draft.finishes-after", "0");
+    // The runs read reports the work running, which finishes it from the next rollup
+    // on; the suites read in the same poll still answers in the rollup's phase.
     assert_eq!(
         read(&["api", &runs])["workflow_runs"][0]["status"],
         "in_progress"
@@ -892,7 +975,7 @@ fn activity_finishes_after_check_read(repo_numbering: bool) {
     }
 
     // A newer ready request on this same head supersedes the old draft's activity.
-    world.script("gh.draft.finishes-after", "1000000");
+    world.unscript("gh.draft.finishes-once-reported");
     view();
     let opened: Value = serde_json::from_str(
         &std::fs::read_to_string(world.fakes.join("gh/opened.jsonl")).unwrap(),
@@ -972,7 +1055,7 @@ fn activity_finishes_after_check_read(repo_numbering: bool) {
         assert_eq!(other_view()["isDraft"], true);
 
         // Each repository's checks are read under its own number and phase.
-        world.script("gh.draft.finishes-after", "0");
+        world.script("gh.draft.finishes-once-reported", "");
         other_view();
         world.script(
             "gh.checks.owner-service-1",
