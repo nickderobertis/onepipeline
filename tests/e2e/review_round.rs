@@ -381,14 +381,10 @@ fn passed(output: &crate::harness::Run, what: &str) {
 
 /// Where `bash` resolves on `path`, given the Windows directory `system_root` names.
 ///
-/// Not `Command::new("bash")`: on Windows `CreateProcess` searches the system directory
-/// before `PATH`, and the `bash.exe` there is the WSL launcher, which on a host with no
-/// distribution writes its refusal to stdout and exits 1. Every record the reporter refuses
-/// was then a failure with nothing on stderr, which is what `cross proof (windows-latest)`
-/// reported; `tests/linked_engines.rs` gives the reason at length. Windows spells that
-/// directory in either case, `C:\Windows` beside `C:\WINDOWS\system32`, so it is compared
-/// without case. Taken as parameters so that the case only Windows produces is driven on
-/// every platform.
+/// Not `Command::new("bash")`, which on Windows finds the WSL launcher first — the reason
+/// `tests/linked_engines.rs` gives. Windows spells that directory in either case,
+/// `C:\Windows` beside `C:\WINDOWS\system32`, so it is compared without case. Taken as
+/// parameters so that the case only Windows produces is driven on every platform.
 fn bash_on(path: &OsStr, system_root: Option<&OsStr>) -> PathBuf {
     let windows_dir = system_root.map(|root| root.to_string_lossy().to_lowercase());
     std::env::split_paths(path)
