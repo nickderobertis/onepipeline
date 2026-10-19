@@ -237,9 +237,9 @@ fn release_when_the_note_is_queued(
     std::thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(120);
         while Instant::now() < deadline && !a_note_is_queued(&queue) {
-            std::thread::sleep(Duration::from_millis(20));
+            onepipeline_testfakes::profile::thread::sleep(Duration::from_millis(20));
         }
-        std::thread::sleep(Duration::from_secs(2));
+        onepipeline_testfakes::profile::thread::sleep(Duration::from_secs(2));
         for gate in &gates {
             release(&fakes, gate);
         }
@@ -329,7 +329,7 @@ fn release_once_the_note_is_taken(world: &World, gates: &[&str]) -> std::thread:
     std::thread::spawn(move || {
         let taken = until_a_note_is_taken(&root, &BTreeSet::new());
         if taken.is_some() {
-            std::thread::sleep(IN_PROCESS_MARGIN);
+            onepipeline_testfakes::profile::thread::sleep(IN_PROCESS_MARGIN);
         }
         for gate in &gates {
             release(&fakes, gate);
@@ -361,7 +361,7 @@ fn until_a_note_is_taken(root: &Path, besides: &BTreeSet<String>) -> Option<Stri
         if Instant::now() >= deadline {
             return None;
         }
-        std::thread::sleep(Duration::from_millis(50));
+        onepipeline_testfakes::profile::thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -639,7 +639,11 @@ fn held_heartbeating_conversation(world: &World, run: &str, nodes: Vec<Value>) {
 /// note is owed only once its conversation has taken it — which these journeys
 /// hold back on purpose — so the submitter runs beside the journey rather than in
 /// front of it. The wait is long enough to outlast the hold.
-fn submitted(world: &World, run: &str, envelope: &str) -> std::process::Child {
+fn submitted(
+    world: &World,
+    run: &str,
+    envelope: &str,
+) -> onepipeline_testfakes::profile::process::Child {
     use std::io::Write;
     let mut reply = world.agentgraph_cmd(&["reply", run]);
     reply
@@ -657,7 +661,7 @@ fn submitted(world: &World, run: &str, envelope: &str) -> std::process::Child {
     child
 }
 
-fn answered(child: std::process::Child) -> String {
+fn answered(child: onepipeline_testfakes::profile::process::Child) -> String {
     let output = child.wait_with_output().expect("the binary runs");
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     assert!(
@@ -1492,7 +1496,7 @@ fn a_cancel_preempts_the_unanswered_note_to_its_node_and_what_waits_behind_it() 
     );
     let unauthorized = queued_id_of(&world, run, UNAUTHORIZED_CANCEL);
     // The reconciler's own pass, which has nothing durable to watch for.
-    std::thread::sleep(Duration::from_secs(3));
+    onepipeline_testfakes::profile::thread::sleep(Duration::from_secs(3));
     assert!(
         outcome_of(&world, run, note_id).is_none()
             && outcome_of(&world, run, refused_cancel).is_none()
@@ -1625,7 +1629,7 @@ fn a_cancel_preempts_the_unanswered_note_to_its_node_and_what_waits_behind_it() 
 
     // The preempted delivery's member has been reaped, so its conversation has
     // said whatever it will; `lint`'s held turn keeps the writer there to read it.
-    std::thread::sleep(Duration::from_secs(5));
+    onepipeline_testfakes::profile::thread::sleep(Duration::from_secs(5));
     assert!(
         world
             .events_of(run, "node-settled")
@@ -3049,7 +3053,7 @@ fn two_notes_in_one_envelope_are_each_recorded_on_the_turn_that_opened_on_them()
     // `release_once_the_note_is_taken` gives the in-process rest of the hand-over.
     let first_taken = until_a_note_is_taken(&world.root, &BTreeSet::new())
         .expect("the first note was taken by the member's courier");
-    std::thread::sleep(IN_PROCESS_MARGIN);
+    onepipeline_testfakes::profile::thread::sleep(IN_PROCESS_MARGIN);
     release(&world.fakes, "turn.go");
     release(&world.fakes, "turn.settle");
     // The first note's turn is open and held; release it so the second note is
@@ -3063,7 +3067,7 @@ fn two_notes_in_one_envelope_are_each_recorded_on_the_turn_that_opened_on_them()
     // first's.
     until_a_note_is_taken(&world.root, &BTreeSet::from([first_taken]))
         .expect("the second note was taken by the member's courier");
-    std::thread::sleep(IN_PROCESS_MARGIN);
+    onepipeline_testfakes::profile::thread::sleep(IN_PROCESS_MARGIN);
     release(&world.fakes, "turn.go");
     release(&world.fakes, "turn.settle");
     let output = replied.join().expect("the reply thread finishes");

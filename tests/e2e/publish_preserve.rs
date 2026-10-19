@@ -71,7 +71,7 @@ fn refused_by_check(world: &World, name: &str, plan: &Value) -> Value {
 
 /// What the origin carries under a branch name, if anything.
 fn origin_tip(origin: &Path, branch: &str) -> Option<String> {
-    let shown = std::process::Command::new("git")
+    let shown = onepipeline_testfakes::profile::process::Command::new("git")
         .args([
             "rev-parse",
             "--verify",
@@ -567,7 +567,7 @@ fn end_the_lingering(world: &World, key: &str) {
         .and_then(|pid| pid.trim().parse::<u32>().ok())
         .filter(|pid| *pid > 1);
     if let Some(pid) = recorded {
-        let _ = std::process::Command::new("kill")
+        let _ = onepipeline_testfakes::profile::process::Command::new("kill")
             .arg(pid.to_string())
             .status();
     }
@@ -1073,7 +1073,7 @@ fn cross_repository_preserve_dependencies_only_order_sessions() {
         file_at(&world, &second.origin, head, "A.md").trim(),
         "different repository measurement"
     );
-    let absent = std::process::Command::new("git")
+    let absent = onepipeline_testfakes::profile::process::Command::new("git")
         .args(["cat-file", "-e", &format!("{head}:H.md")])
         .current_dir(&second.origin)
         .output()
@@ -1400,7 +1400,7 @@ fn no_remote_kept_work_is_also_the_dependent_session_base() {
 }
 
 fn budget_report(cwd: &Path, result: &Path) -> std::process::Output {
-    std::process::Command::new("node")
+    onepipeline_testfakes::profile::process::Command::new("node")
         .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/stacked-spikes-budget.mjs"))
         .current_dir(cwd)
         .env("ONEBUDGETSPEC_RESULT", result)
@@ -1446,7 +1446,7 @@ fn the_budget_reporter_refuses_missing_and_malformed_records() {
         );
     }
     std::fs::write(&record, r#"{"wall_ms":1000,"run_id":"run"}"#).unwrap();
-    let missing_env = std::process::Command::new("node")
+    let missing_env = onepipeline_testfakes::profile::process::Command::new("node")
         .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/stacked-spikes-budget.mjs"))
         .current_dir(&world.root)
         .env_remove("ONEBUDGETSPEC_RESULT")
@@ -1781,7 +1781,9 @@ fn the_worker_file_check_refuses_a_missing_worktree_argument_without_panicking()
     let repo = world.repository("local-direct", &[]);
     world.script("A.work", "area measurement\n");
     let run_worker = |workspace: Option<&Path>| {
-        let mut command = std::process::Command::new(crate::harness::double("fake-oneagentgraph"));
+        let mut command = onepipeline_testfakes::profile::process::Command::new(
+            crate::harness::double("fake-oneagentgraph"),
+        );
         command.args([
             "run",
             world.graphs().join("node-scope.yaml").to_str().unwrap(),

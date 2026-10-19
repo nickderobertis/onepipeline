@@ -8,7 +8,7 @@
 //! the way the note binary includes `tests/e2e/harness.rs`. Nothing here is
 //! substituted in the smoke itself.
 
-use std::process::Command;
+use onepipeline_testfakes::profile::process::Command;
 
 /// The variable that names the scratch repository, as `owner/name`.
 ///
@@ -262,7 +262,7 @@ pub fn ensure_repo(slug: &str) {
                  failed: {refusal}"
             ),
         }
-        std::thread::sleep(std::time::Duration::from_secs(1));
+        onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_secs(1));
     }
     panic!("the scratch repository {slug} was created but never got its first commit");
 }

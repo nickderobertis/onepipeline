@@ -174,7 +174,7 @@ fn a_targeted_update_held_past_the_floor_still_lands_inside_its_item_budget() {
     // Held past the floor. Slept rather than polled: there is nothing to observe until the
     // hold ends, and the whole point is that the update is still alive at the end of it.
     let past_the_floor = Duration::from_secs(floor + held_past);
-    std::thread::sleep(past_the_floor.saturating_sub(started.elapsed()));
+    onepipeline_testfakes::profile::thread::sleep(past_the_floor.saturating_sub(started.elapsed()));
     assert!(
         !a_projection_failed(&world, run),
         "the update was cancelled inside {} seconds under a budget of {per_item}:\n{}",
@@ -259,7 +259,7 @@ fn a_seven_item_copy_held_at_eleven_seconds_per_item_lands_inside_its_deadline()
         .exited(0);
     let held = meeting.arrived();
     let started = Instant::now();
-    std::thread::sleep(held_for);
+    onepipeline_testfakes::profile::thread::sleep(held_for);
     assert!(
         !a_projection_failed(&world, run),
         "the seven-item copy was cancelled inside {held_for:?}:\n{}",
@@ -359,7 +359,7 @@ fn an_update_held_past_a_tiny_budget_is_cancelled_and_the_refusal_names_the_arit
     // change that write carried. An update the deadline had not really ended would write it now.
     let board = world.store_tasks(&project);
     held.release();
-    std::thread::sleep(Duration::from_secs(3));
+    onepipeline_testfakes::profile::thread::sleep(Duration::from_secs(3));
     assert_eq!(
         world.store_tasks(&project),
         board,
@@ -473,7 +473,7 @@ fn a_creating_copy_held_past_a_tiny_budget_is_cancelled_and_the_next_attempt_cre
     // The write the cancelled copy was held at is let go, and nothing it carried lands.
     let board = world.store_tasks(&project);
     held.release();
-    std::thread::sleep(Duration::from_secs(3));
+    onepipeline_testfakes::profile::thread::sleep(Duration::from_secs(3));
     assert!(
         (1..=items).all(|nth| board_status(&world, &project, &format!("added{nth}")).is_none()),
         "a write from the cancelled copy landed after its refusal was recorded: {board:?}"

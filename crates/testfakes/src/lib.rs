@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 
 pub mod containment;
 pub mod hosted;
+pub mod profile;
 pub mod yaml;
 
 /// The environment variable naming the directory a double is scripted from.

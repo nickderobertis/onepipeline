@@ -136,13 +136,17 @@ fn records_under(world: &World, run: &str) -> Vec<PathBuf> {
 /// watching when the question is asked, and a bounded one would be a race with the
 /// clock. Its streams go nowhere: a supervisor's terminal is not what any claim
 /// here is about, and a pipe nobody reads is a watch that blocks on its own output.
-fn arm(world: &World, run: &str) -> std::process::Child {
+fn arm(world: &World, run: &str) -> onepipeline_testfakes::profile::process::Child {
     arm_until(world, run, "surface")
 }
 
 /// The same, told what to return on — for the one journey that needs a watch to
 /// **end** without the run it was watching ending with it.
-fn arm_until(world: &World, run: &str, until: &str) -> std::process::Child {
+fn arm_until(
+    world: &World,
+    run: &str,
+    until: &str,
+) -> onepipeline_testfakes::profile::process::Child {
     let watching = world
         .cmd(&["watch", run, "--timeout", "none", "--until", until])
         .stdout(std::process::Stdio::null())
@@ -511,7 +515,7 @@ fn a_watch_killed_and_left_unreaped_is_not_a_live_watch() {
 /// process this journey did not start.
 #[cfg(unix)]
 fn state_of(pid: u32) -> String {
-    let listed = std::process::Command::new("ps")
+    let listed = onepipeline_testfakes::profile::process::Command::new("ps")
         .args(["-o", "state=", "-p", &pid.to_string()])
         .output()
         .expect("ps runs");
@@ -1984,7 +1988,7 @@ fn a_host_sized_runs_root_is_answered_in_well_under_a_second_whatever_its_journa
 #[cfg(target_os = "linux")]
 fn opened_by(world: &World, argv: &[&str], into: &std::path::Path) -> Vec<String> {
     let inner = world.cmd(argv);
-    let mut traced = std::process::Command::new("strace");
+    let mut traced = onepipeline_testfakes::profile::process::Command::new("strace");
     traced
         // Children too: a verb that shelled out to read a store would have read it
         // just the same.

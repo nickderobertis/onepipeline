@@ -2367,7 +2367,7 @@ fn a_node_pinned_to_a_retired_branch_is_cut_fresh_from_the_base() {
         git(&world, &repo.origin, &["rev-parse", &format!("{landed}^")]).trim(),
         base
     );
-    let ancestry = std::process::Command::new("git")
+    let ancestry = onepipeline_testfakes::profile::process::Command::new("git")
         .args(["merge-base", "--is-ancestor", &retired_tip, "main"])
         .current_dir(&repo.origin)
         .status()
@@ -2658,7 +2658,9 @@ fn a_run_settling_mid_sweep_journals_its_maintenance_and_the_retirement_it_never
     // began the retirement pass this journey says is never begun, and waited on
     // the held origin for good.
     world.until("the driver to close out", closed_out);
-    std::thread::sleep(std::time::Duration::from_secs(CLOSE_OUT_STOP_SECONDS));
+    onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_secs(
+        CLOSE_OUT_STOP_SECONDS,
+    ));
 
     assert!(
         !world.run_file("closing", "result.json").is_file(),

@@ -824,11 +824,13 @@ fn activity_finishes_after_check_read(repo_numbering: bool) {
         "Some App in_progress - 1\nEmpty App queued - 0",
     );
     let invoke = |args: &[&str]| {
-        let output = std::process::Command::new(crate::harness::double("fake-gh"))
-            .args(args)
-            .env("ONEPIPELINE_FAKE_DIR", &world.fakes)
-            .output()
-            .expect("fake-gh starts");
+        let output = onepipeline_testfakes::profile::process::Command::new(crate::harness::double(
+            "fake-gh",
+        ))
+        .args(args)
+        .env("ONEPIPELINE_FAKE_DIR", &world.fakes)
+        .output()
+        .expect("fake-gh starts");
         assert!(output.status.success(), "{:?}", output);
         output
     };

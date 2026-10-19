@@ -134,7 +134,7 @@ mod platform {
         if unsafe { libc::kill(raw, 0) } != 0 {
             return std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
         }
-        std::process::Command::new("ps")
+        crate::profile::process::Command::new("ps")
             .args(["-o", "stat=", "-p", &pid.to_string()])
             .env("LC_ALL", "C")
             .stdin(std::process::Stdio::null())
@@ -248,7 +248,7 @@ mod platform {
             for found in &frozen {
                 signal(found.pid, libc::SIGKILL);
             }
-            std::thread::sleep(POLL);
+            crate::profile::thread::sleep(POLL);
         }
     }
 
@@ -293,7 +293,7 @@ mod platform {
     /// and a new one each time, so it is left out by its pid: counted, it would
     /// be a descendant every listing found afresh.
     fn list() -> Result<Vec<Row>, String> {
-        let lister = std::process::Command::new("ps")
+        let lister = crate::profile::process::Command::new("ps")
             .args(["-A", "-o", "pid=,ppid=,stat=,lstart="])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
@@ -485,7 +485,7 @@ mod platform {
             for pid in members {
                 end(job, pid, deadline);
             }
-            std::thread::sleep(POLL);
+            crate::profile::thread::sleep(POLL);
         }
     }
 

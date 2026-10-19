@@ -893,6 +893,96 @@ fn the_pr_and_opted_in_diagnostic_lanes_preserve_the_three_former_mac_proofs() {
     }
 }
 
+/// Every pull-request leg that runs the e2e tier keeps the per-test profile
+/// records it wrote, whatever the leg's verdict, from the directory the harness
+/// writes them to: an upload naming any other path would publish nothing, and
+/// `scripts/test-profile-report.mjs` would read a platform as having no records.
+/// No leg moves the records elsewhere through the recorder's environment
+/// variable, a leg that wrote none says so in its run, and every matrix leg
+/// keeps them under a name of its own: `upload-artifact` refuses a second
+/// artifact of a name a run already holds, so two shards sharing one would
+/// lose the second shard's records.
+#[test]
+fn every_test_leg_keeps_the_profile_records_from_where_the_harness_writes_them() {
+    use onepipeline_testfakes::profile::{DIR_ENV, RECORD_DIR};
+    let ci = workflow("ci.yml");
+    assert!(
+        !onepipeline_testfakes::yaml::to_string(&ci)
+            .unwrap()
+            .contains(DIR_ENV),
+        "ci.yml sets {DIR_ENV}, so its records are not where its uploads look"
+    );
+    let mut names = Vec::new();
+    for key in ["gate", "cross", "macos"] {
+        let steps = ci["jobs"][key]["steps"]
+            .as_array()
+            .unwrap_or_else(|| panic!("job {key} has no steps"));
+        let kept: Vec<&Value> = steps
+            .iter()
+            .filter(|step| {
+                scalar(&step["uses"]).starts_with("actions/upload-artifact@")
+                    && scalar(&step["with"]["path"]).trim_end_matches('/') == RECORD_DIR
+            })
+            .collect();
+        assert_eq!(
+            kept.len(),
+            1,
+            "job {key} keeps {RECORD_DIR} {} times, not once",
+            kept.len()
+        );
+        let step = kept[0];
+        assert_eq!(scalar(&step["if"]), "always()", "job {key}: {step}");
+        assert_eq!(
+            scalar(&step["with"]["if-no-files-found"]),
+            "warn",
+            "job {key}: {step}"
+        );
+        assert!(
+            scalar(&step["with"]["name"]).starts_with("test-profile-"),
+            "job {key}: {step}"
+        );
+        let mut artifact = ci["jobs"][key].clone();
+        artifact["name"] = step["with"]["name"].clone();
+        names.extend(rendered(key, &artifact));
+    }
+    let mut distinct = names.clone();
+    distinct.sort();
+    distinct.dedup();
+    assert_eq!(
+        distinct.len(),
+        names.len(),
+        "two legs keep their records under one artifact name: {names:?}"
+    );
+    assert!(
+        names.iter().all(|name| !name.contains("${{")),
+        "an artifact name is not rendered from its leg's matrix: {names:?}"
+    );
+}
+
+/// The e2e project's test targets declare the records their run writes as Nx
+/// outputs, at the directory the harness writes them to, so a cached run
+/// restores them: an output naming any other path would restore nothing.
+#[test]
+fn the_e2e_test_targets_declare_the_profile_records_as_outputs() {
+    use onepipeline_testfakes::profile::RECORD_DIR;
+    let path = repo_root().join("tests/e2e/project.json");
+    let text = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("could not read {}: {e}", path.display()));
+    let project: Value = serde_json::from_str(&text).expect("tests/e2e/project.json parses");
+    let records = format!("{{workspaceRoot}}/{RECORD_DIR}/e2e");
+    for target in ["test", "test-quick"] {
+        let outputs = project["targets"][target]["outputs"]
+            .as_array()
+            .unwrap_or_else(|| panic!("the e2e {target} target declares no outputs"));
+        assert!(
+            outputs
+                .iter()
+                .any(|output| output.as_str() == Some(&records)),
+            "the e2e {target} target does not declare {records} among {outputs:?}"
+        );
+    }
+}
+
 /// The Windows leg is one leg split across the jobs of `cross`'s `shard` axis.
 /// Each job is handed `count:K/N` of one partition — N the axis's length, K its own
 /// place on it — under a name of its own, and records a verdict of its own; and

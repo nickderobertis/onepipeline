@@ -24,7 +24,7 @@ fn before() -> &'static Path {
     static PROGRAM: OnceLock<PathBuf> = OnceLock::new();
     PROGRAM.get_or_init(|| {
         let from = format!("onepipeline-cli=={BEFORE}");
-        let resolved = std::process::Command::new("uv")
+        let resolved = onepipeline_testfakes::profile::process::Command::new("uv")
             .args([
                 "tool",
                 "run",
@@ -48,7 +48,7 @@ fn before() -> &'static Path {
             String::from_utf8_lossy(&resolved.stderr)
         );
         let program = PathBuf::from(String::from_utf8_lossy(&resolved.stdout).trim());
-        let reported = std::process::Command::new(&program)
+        let reported = onepipeline_testfakes::profile::process::Command::new(&program)
             .arg("--version")
             .output()
             .expect("the release's binary runs");

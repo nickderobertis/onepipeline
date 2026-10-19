@@ -190,7 +190,7 @@ pub(crate) fn the_reply_to(host: &FileHost, number: u32, comment: &HostComment) 
 
 /// The commits on the origin from `from` (exclusive) to `to`.
 pub(crate) fn commits_between(world: &World, from: &str, to: &str) -> Vec<String> {
-    let listed = std::process::Command::new("git")
+    let listed = onepipeline_testfakes::profile::process::Command::new("git")
         .arg("--git-dir")
         .arg(world.root.join("origin.git"))
         .args(["rev-list", "--reverse", &format!("{from}..{to}")])
@@ -400,7 +400,7 @@ pub(crate) fn decline(
 
 /// The head `branch` stands at on the origin.
 pub(crate) fn origin_head(world: &World, branch: &str) -> String {
-    let read = std::process::Command::new("git")
+    let read = onepipeline_testfakes::profile::process::Command::new("git")
         .arg("--git-dir")
         .arg(world.root.join("origin.git"))
         .args(["rev-parse", &format!("refs/heads/{branch}")])
@@ -615,7 +615,11 @@ fn driven(
     run: &str,
     extra: &[&str],
     concurrency: u64,
-) -> (std::process::Child, FileHost, u32) {
+) -> (
+    onepipeline_testfakes::profile::process::Child,
+    FileHost,
+    u32,
+) {
     world.script("a.work", "first draft\n");
     world.script("b.work", "second draft\n");
     world.script("hold.wait", "");
@@ -674,7 +678,7 @@ fn driven(
 }
 
 /// Let the held node finish, and wait for the driver to end the run.
-fn released(world: &World, mut driver: std::process::Child) {
+fn released(world: &World, mut driver: onepipeline_testfakes::profile::process::Child) {
     world.script("hold.go", "");
     let ended = driver.wait().expect("the driver ends");
     assert!(ended.success(), "{ended:?}");
@@ -1070,7 +1074,7 @@ fn an_edit_after_its_reply_is_pending_again_and_a_rework_naming_it_answers_the_n
 
     // Second granularity is what a commit's own clock keeps: the edit lands a whole
     // second after the rework's commits, and the next rework's a second after it.
-    std::thread::sleep(std::time::Duration::from_millis(1100));
+    onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_millis(1100));
     host.edit_comment(
         &ChangeId("1".into()),
         &comment.id,
@@ -1104,7 +1108,7 @@ fn an_edit_after_its_reply_is_pending_again_and_a_rework_naming_it_answers_the_n
         status.stdout
     );
 
-    std::thread::sleep(std::time::Duration::from_millis(1100));
+    onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_millis(1100));
     world.script("a-rework-2.work", "reworked again, as the edit asked\n");
     let output = reply(
         &world,
@@ -1147,7 +1151,7 @@ fn an_edit_after_its_reply_is_pending_again_and_a_rework_naming_it_answers_the_n
 
 /// Every branch the origin holds.
 pub(crate) fn origin_branches(world: &World) -> Vec<String> {
-    let listed = std::process::Command::new("git")
+    let listed = onepipeline_testfakes::profile::process::Command::new("git")
         .arg("--git-dir")
         .arg(world.root.join("origin.git"))
         .args(["for-each-ref", "--format=%(refname:short)", "refs/heads"])

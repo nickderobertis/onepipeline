@@ -197,7 +197,7 @@ pub(super) fn from_the_launch_directory(
     world: &World,
     dir: &Path,
     args: &[&str],
-) -> std::process::Command {
+) -> onepipeline_testfakes::profile::process::Command {
     let mut command = world.cmd(args);
     // This journey's file is the only source configuration: inherited host settings
     // must not introduce another source, endpoint or credential into the measurement.
@@ -269,7 +269,7 @@ impl Scenario {
                     .collect::<Vec<_>>(),
                 self.world.dump()
             );
-            std::thread::sleep(Duration::from_millis(50));
+            onepipeline_testfakes::profile::thread::sleep(Duration::from_millis(50));
         }
     }
 
@@ -293,7 +293,7 @@ impl Scenario {
         loop {
             let sent = self.linear.log().len();
             let recorded = self.records().len();
-            std::thread::sleep(Duration::from_millis(1_500));
+            onepipeline_testfakes::profile::thread::sleep(Duration::from_millis(1_500));
             if self.linear.log().len() == sent && self.records().len() == recorded {
                 return;
             }
@@ -956,11 +956,13 @@ fn a_retained_stores_blocked_configuration_read_is_bounded_and_rebuilt() {
     let document = scenario.launch.join("onetaskgraph.yaml");
     let configured = std::fs::read_to_string(&document).expect("readable configuration");
     std::fs::remove_file(&document).expect("replace configuration with a FIFO");
-    assert!(std::process::Command::new("mkfifo")
-        .arg(&document)
-        .status()
-        .expect("create the filesystem FIFO")
-        .success());
+    assert!(
+        onepipeline_testfakes::profile::process::Command::new("mkfifo")
+            .arg(&document)
+            .status()
+            .expect("create the filesystem FIFO")
+            .success()
+    );
     let sent = scenario.linear.log().len();
     let recorded = scenario.records().len();
     scenario.reply(&settle("done", "after a blocked configuration read"));
@@ -1205,7 +1207,7 @@ fn a_previous_projection_does_not_answer_for_a_write_held_in_the_source() {
 /// this is held. Snapshots are read from the same server that accepts mutations,
 /// so a reader never holds a filesystem handle across the server’s next write.
 pub(super) struct GitHubEndpoint {
-    child: std::process::Child,
+    child: onepipeline_testfakes::profile::process::Child,
     // Only the refusal regression holds this decoy snapshot without delete sharing.
     _held_state: Option<std::fs::File>,
     pub(super) url: String,
@@ -1247,7 +1249,7 @@ impl GitHubEndpoint {
                 .open(dir.join("state.json"))
                 .expect("the regression reader holds the existing snapshot")
         });
-        let mut command = std::process::Command::new("python3");
+        let mut command = onepipeline_testfakes::profile::process::Command::new("python3");
         // llmlint: ignore-block[tests_mirror_real_usage] the dispatch explicitly requires a
         // Microsoft-documented Windows semantic imposed through an OS seam on Linux. An existing
         // snapshot is held without delete sharing for this endpoint's lifetime; only os.replace
@@ -1315,7 +1317,7 @@ runpy.run_path(sys.argv[0], run_name='__main__')
 
 /// A started endpoint whose URL has not been read yet.
 struct StartedEndpoint {
-    child: std::process::Child,
+    child: onepipeline_testfakes::profile::process::Child,
     held_state: Option<std::fs::File>,
     dir: PathBuf,
 }
@@ -1398,7 +1400,7 @@ fn github_snapshots_and_mutations_do_not_replace_an_open_state_file() {
     let world = World::new("github-sharing-refusal");
     let served = GitHubEndpoint::serve_with_replace_refusal(&world, &json!({}), true);
     assert_eq!(served.state()["issues"]["work"]["status"], "Todo");
-    let output = std::process::Command::new("python3")
+    let output = onepipeline_testfakes::profile::process::Command::new("python3")
         .args([
             "-c",
             r#"
@@ -1439,7 +1441,7 @@ fn a_reused_github_store_keeps_body_edits_and_status_moves_between_settlements()
     world.script("anchor.wait", "hold");
     let served = GitHubEndpoint::serve(&world, &json!({}));
     let endpoint = served.url.clone();
-    let rejected = std::process::Command::new("python3").args(["-c", r#"
+    let rejected = onepipeline_testfakes::profile::process::Command::new("python3").args(["-c", r#"
 import json, sys, urllib.request, urllib.error
 base = sys.argv[1]
 invalid = [
@@ -1510,7 +1512,7 @@ graphql(mutation, {"input":{"id":"work","title":"work"}})
                     .is_some_and(|line| line.contains("projected"))
             })
         });
-        std::thread::sleep(Duration::from_millis(1500));
+        onepipeline_testfakes::profile::thread::sleep(Duration::from_millis(1500));
     };
     reply(
         vec![settle("failed", "first board settlement")],
@@ -1521,7 +1523,7 @@ graphql(mutation, {"input":{"id":"work","title":"work"}})
         .expect("body")
         .to_owned();
     let edited = format!("A person's edit above the task.\n{body}");
-    let human = std::process::Command::new("python3").args(["-c",
+    let human = onepipeline_testfakes::profile::process::Command::new("python3").args(["-c",
         "import sys, urllib.request; urllib.request.urlopen(urllib.request.Request(sys.argv[1], data=sys.argv[2].encode(), headers={'Content-Type':'application/json'})).read()",
         &format!("{endpoint}/human"), &json!({"body": edited, "status": "Queued"}).to_string()
     ]).status().expect("person's edit reaches the endpoint");
@@ -1707,7 +1709,7 @@ fn a_github_source_projecting_a_follow_ups_host_is_read_and_settled_without_writ
 
     // The reader above is not blind to a Host write: one sent as the store sends a lone field
     // write is read back as what it set.
-    let wrote = std::process::Command::new("python3").args(["-c", r#"
+    let wrote = onepipeline_testfakes::profile::process::Command::new("python3").args(["-c", r#"
 import json, sys, urllib.request
 host = {"projectId": "BOARD", "itemId": "ITEM-other", "fieldId": "HOST", "value": {"text": sys.argv[2]}}
 query = "mutation($input:UpdateProjectV2ItemFieldValueInput!){updateProjectV2ItemFieldValue(input:$input){projectV2Item{id}}}"

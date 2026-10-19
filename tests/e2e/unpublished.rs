@@ -1374,7 +1374,7 @@ fn spawned_by_the_guard(
     std::fs::create_dir_all(into).expect("a trace directory");
     let prefix = into.join("trace");
     let inner = world.cmd(argv);
-    let mut traced = std::process::Command::new("strace");
+    let mut traced = onepipeline_testfakes::profile::process::Command::new("strace");
     traced
         .args([
             "-ff",
@@ -1532,12 +1532,14 @@ fn slow_file(
             {
                 Ok(file) => break file,
                 Err(_) if std::time::Instant::now() < deadline => {
-                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    onepipeline_testfakes::profile::thread::sleep(
+                        std::time::Duration::from_millis(5),
+                    );
                 }
                 Err(error) => panic!("nothing opened {} to read: {error}", path.display()),
             }
         };
-        std::thread::sleep(delay);
+        onepipeline_testfakes::profile::thread::sleep(delay);
         use std::io::Write;
         file.write_all(contents.as_bytes())
             .expect("the answer is written");
@@ -2317,7 +2319,7 @@ fn a_printed_acknowledging_command_records_where_its_listing_reads() {
     std::os::unix::fs::symlink(crate::harness::binary(), bin.join("onepipeline"))
         .expect("the binary on PATH");
     let inner = world.cmd(&[]);
-    let mut shell = std::process::Command::new("sh");
+    let mut shell = onepipeline_testfakes::profile::process::Command::new("sh");
     shell.arg("-c").arg(&filled);
     for (key, value) in inner.get_envs() {
         match value {

@@ -43,8 +43,8 @@ mod release_probe;
 mod repo;
 mod review;
 
+use onepipeline_testfakes::profile::process::Command;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde_json::{json, Value};
 

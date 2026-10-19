@@ -103,7 +103,7 @@ fn answers_over(fixture: &str, program: &Path) -> Value {
 /// [`RELEASE`] — so an answer file is never overwritten with what some other
 /// program, or another release, answered.
 fn the_release_named(program: &Path) -> PathBuf {
-    let reported = std::process::Command::new(program)
+    let reported = onepipeline_testfakes::profile::process::Command::new(program)
         .arg("--version")
         .output()
         .unwrap_or_else(|error| {

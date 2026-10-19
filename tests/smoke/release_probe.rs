@@ -20,8 +20,8 @@
 //! registry that cannot be reached, a probe that could not answer, and a declared
 //! target no registry serves are each a failure naming what to do about it.
 
+use onepipeline_testfakes::profile::process::{Command, Output};
 use std::path::PathBuf;
-use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
 use onevcs::read_release_declaration;
