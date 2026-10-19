@@ -3225,6 +3225,94 @@ mod tests {
         assert_eq!(taken.graph.get("build").expect("build").context, None);
     }
 
+    /// Replay reaches the planner context the live driver composed: two notes
+    /// carried to one node are both owed to its next dispatch, and withdrawing
+    /// either — the first or the last — leaves exactly the other, in the graph
+    /// the dispatch renders and in what the run says is pending.
+    #[test]
+    fn a_withdrawn_carried_note_leaves_the_other_carried_note_owed_on_replay() {
+        let plan = plan_of_nodes(vec![agent("build", &[])]);
+        let started = pipeline(
+            journal::PipelineKind::RunStarted,
+            0,
+            None,
+            &[("plan", json!(plan))],
+        );
+        let carried = |seq: u64, text: &str| {
+            pipeline(
+                journal::PipelineKind::EditCommitted,
+                seq,
+                None,
+                &[(
+                    "operations",
+                    json!([Operation::NoteDelivered {
+                        node: "build".into(),
+                        addressee: crate::note::Addressee::Worker,
+                        text: text.parse().expect("a usable note"),
+                        criterion: None,
+                        shown_to: Vec::new(),
+                        routed_to: Vec::new(),
+                        reached: crate::note::Reached::Carried { reason: None },
+                        envelope: Some(seq),
+                        index: Some(0),
+                    }]),
+                )],
+            )
+        };
+        let withdrawn = |envelope: u64, text: &str| {
+            pipeline(
+                journal::PipelineKind::EditCommitted,
+                3,
+                None,
+                &[(
+                    "operations",
+                    json!([Operation::NoteWithdrawn {
+                        node: "build".into(),
+                        envelope,
+                        index: 0,
+                        reason: "the fixture moved back".into(),
+                        from: crate::note::WithdrawnFrom::Carried,
+                        text: text.parse().expect("a usable note"),
+                    }]),
+                )],
+            )
+        };
+        let both = [
+            started.clone(),
+            carried(1, "the fixture moved"),
+            carried(2, "keep the loader"),
+        ];
+        let owed = fold(&both);
+        assert_eq!(
+            owed.pending_context["build"],
+            "the fixture moved\n\nkeep the loader"
+        );
+        for (envelope, gone, left) in [
+            (1, "the fixture moved", "keep the loader"),
+            (2, "keep the loader", "the fixture moved"),
+        ] {
+            let mut journal = both.to_vec();
+            journal.push(withdrawn(envelope, gone));
+            let replayed = fold(&journal);
+            assert_eq!(replayed.pending_context["build"], left);
+            assert_eq!(
+                replayed
+                    .graph
+                    .get("build")
+                    .expect("build")
+                    .context
+                    .as_deref(),
+                Some(left),
+                "replay did not leave the other carried note in the planner context"
+            );
+        }
+        let mut alone = vec![started, carried(1, "the fixture moved")];
+        alone.push(withdrawn(1, "the fixture moved"));
+        let none = fold(&alone);
+        assert!(none.pending_context.is_empty());
+        assert_eq!(none.graph.get("build").expect("build").context, None);
+    }
+
     /// An arrival note the running turn could not take is owed to the node's next
     /// dispatch, and is reconstructed from the versions the record names.
     ///
