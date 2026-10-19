@@ -5158,6 +5158,21 @@ fn a_note_the_envelope_cannot_carry_is_refused_at_the_wire_and_nothing_is_queued
             note_op_with("build", NOTE, "next", false),
             "reaches nobody whatever the run does",
         ),
+        // A deadline no note can meet, and one bounding a wait `deliver: next`
+        // never makes: refused at the envelope, naming the field.
+        (
+            timed_note("build", NOTE, "live", true, 0),
+            "`delivery_timeout_seconds` is 0",
+        ),
+        (
+            timed_note("build", NOTE, "next", true, 2),
+            "`deliver: next` waits on none",
+        ),
+        (
+            json!({"op": "note", "id": "build", "addressee": "worker", "text": NOTE,
+                   "deliver": "turn_end"}),
+            "unknown variant `turn_end`",
+        ),
         (
             json!({"op": "note", "id": "build", "addressee": "worker", "text": "   \n"}),
             "this one was blank",
@@ -5495,4 +5510,318 @@ fn a_note_to_the_supervisor_interrupts_the_held_judge_turn_and_its_replacement_d
             .all(|prompt| !prompt.contains(NOTE)),
         "a worker turn was handed a note the judge completed the work with"
     );
+}
+
+/// A second note, which `persist: false` refuses where the first is carried.
+const UNCARRIED_NOTE: &str = "and stop reading fixtures/v1 as well";
+
+/// A `note` op bounded by `delivery_timeout_seconds`.
+fn timed_note(node: &str, text: &str, deliver: &str, persist: bool, seconds: u64) -> Value {
+    let mut op = note_op_with(node, text, deliver, persist);
+    op["delivery_timeout_seconds"] = json!(seconds);
+    op
+}
+
+/// The one `note-delivered` the run committed for the note reading `text`.
+fn recorded_note(world: &World, run: &str, text: &str) -> Value {
+    let committed: Vec<Value> = world
+        .events_of(run, "edit-committed")
+        .into_iter()
+        .filter(|event| event["payload"]["command"]["op"] == "note")
+        .map(|event| event["payload"]["operations"][0].clone())
+        .filter(|operation| operation["text"] == text)
+        .collect();
+    let [one] = &committed[..] else {
+        panic!(
+            "the run committed {} notes reading {text:?}",
+            committed.len()
+        );
+    };
+    one.clone()
+}
+
+/// The reason the run refused the command whose note reads `text`, once.
+fn refused_note(world: &World, run: &str, text: &str) -> String {
+    let refused: Vec<String> = world
+        .events_of(run, "edit-rejected")
+        .into_iter()
+        .filter(|event| event["payload"]["command"]["text"] == text)
+        .filter_map(|event| event["payload"]["reason"].as_str().map(str::to_owned))
+        .collect();
+    let [one] = &refused[..] else {
+        panic!("the run refused {} notes reading {text:?}", refused.len());
+    };
+    one.clone()
+}
+
+/// Start a run of `build` and `keep` in which every worker turn of `build` is held
+/// and `keep`'s judge is too, so the run is still being driven after `build`'s
+/// dispatch is parked — the shape [`a_note_a_running_turn_took_is_not_carried_to_that_nodes_next_dispatch`]
+/// documents — and answer `build`'s held prompt.
+fn held_build_beside_a_kept_node(world: &World, run: &str) -> String {
+    world.script("turn.hold-each", "Do build.");
+    world.script("turn.hold", "hold");
+    world.script("judge.hold", "hold");
+    world.write_graphs();
+    world.write_supervised_node_graph();
+    let path = world.plan(
+        run,
+        &plan_of(run, vec![agent("build", &[]), agent("keep", &[])]),
+    );
+    let mut launch = world.agentgraph_cmd(&["start", &path, "--detach"]);
+    launch.env(CANCEL_GRACE_ENV, "1");
+    world.run_on(launch, "start --detach").exited(0);
+    world.until("build's worker turn to record its prompt", |world| {
+        worker_turns(world)
+            .iter()
+            .any(|prompt| prompt.contains("Do build."))
+    });
+    worker_turns(world)
+        .into_iter()
+        .find(|prompt| prompt.contains("Do build."))
+        .expect("build's prompt")
+}
+
+/// A `turn-end` note with a deadline that the held turn outlasts is withdrawn
+/// untaken at the deadline, and `persist` then decides, while that turn is still
+/// held: `true` carries it — answered and recorded `carried`, naming the deadline
+/// — and `false` refuses it, naming the deadline. Neither ever reaches the held
+/// turn, and the node's next dispatch is composed with the carried one under its
+/// `## Planner context` and without the refused one.
+///
+/// Both answers are written while the target turn is still held, which is the
+/// half of onepipeline#512 an interrupt cannot close: a note to a turn that will
+/// not take it has an outcome, bounded by its deadline, rather than none.
+#[test]
+fn a_turn_end_note_untaken_by_its_deadline_is_carried_or_refused_while_the_turn_is_held() {
+    let world = World::new("note-deadline");
+    let run = "deadline";
+    let held = held_build_beside_a_kept_node(&world, run);
+
+    world
+        .run_with_stdin_on(
+            world.agentgraph_cmd(&["reply", run]),
+            &envelope(timed_note("build", NOTE, "turn-end", true, 2)),
+        )
+        .exited(0)
+        .out_has("\"state\":\"applied\"");
+    let carried = recorded_note(&world, run, NOTE);
+    assert_eq!(carried["reached"], json!("carried"), "{carried}");
+    assert!(
+        carried["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("delivery_timeout_seconds: 2")),
+        "the carried note does not say its deadline passed: {carried}"
+    );
+    world
+        .run_with_stdin_on(
+            world.agentgraph_cmd(&["reply", run]),
+            &envelope(timed_note("build", UNCARRIED_NOTE, "turn-end", false, 2)),
+        )
+        .exited(REFUSED)
+        .err_has("delivery_timeout_seconds: 2");
+    assert!(
+        refused_note(&world, run, UNCARRIED_NOTE).contains("delivery_timeout_seconds: 2"),
+        "the refusal does not name the deadline"
+    );
+    // Both answered, and the turn they were sent to still held.
+    assert!(
+        !ended(&world).contains(&held) && aborted(&world).is_empty(),
+        "the held turn ended before both deadlines were answered"
+    );
+    assert!(
+        worker_turns(&world)
+            .iter()
+            .all(|prompt| !prompt.contains(NOTE) && !prompt.contains(UNCARRIED_NOTE)),
+        "a note whose deadline passed reached the turn it was sent to"
+    );
+
+    // Parked and brought back, which is how this node is dispatched again.
+    world
+        .run_with_stdin_on(
+            world.agentgraph_cmd(&["reply", run]),
+            &envelope(json!({"op": "cancel", "id": "build", "reason": "re-dispatch it"})),
+        )
+        .exited(0);
+    world.until("the held dispatch to be reaped", |world| {
+        world
+            .events_of(run, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "build")
+    });
+    world
+        .run_with_stdin_on(
+            world.agentgraph_cmd(&["reply", run]),
+            &envelope(json!({"op": "requeue", "id": "build"})),
+        )
+        .exited(0)
+        .out_has("\"state\":\"applied\"");
+    world.until("build to be dispatched again", |world| {
+        dispatches_of(world, run, "build")
+            .get(1)
+            .is_some_and(|turns| !turns.is_empty())
+    });
+    let dispatched = dispatches_of(&world, run, "build");
+    let task = &dispatched[1][0];
+    let context = task
+        .split_once("## Planner context")
+        .map(|(_, context)| context)
+        .unwrap_or_else(|| panic!("the next dispatch has no planner context:\n{task}"));
+    assert!(
+        context.contains(NOTE) && !task.contains(UNCARRIED_NOTE),
+        "the next dispatch is not composed with the carried note alone:\n{task}"
+    );
+    assert!(
+        !ended(&world).contains(&held),
+        "the turn the deadline passed in was recorded as running to its end"
+    );
+    for gate in ["turn.go", "turn.settle", "judge.go"] {
+        release(&world.fakes, gate);
+    }
+}
+
+/// A default `live` note bounded by a deadline, sent to a held worker turn that
+/// **cannot** be interrupted, is carried or refused at that deadline while the
+/// turn is still held: once where the harness offers no control at all, and once
+/// where it does and the redirect is refused, because nothing answers its control
+/// socket. In neither is the turn aborted, and once it is released its
+/// continuation is never handed either note.
+#[test]
+fn a_live_note_to_a_turn_that_cannot_be_interrupted_is_carried_or_refused_at_its_deadline() {
+    for (name, control) in [
+        ("note-deadline-uncontrolled", None),
+        ("note-deadline-refused", Some("unreachable")),
+    ] {
+        let world = World::new(name);
+        let run = "livedeadline";
+        if let Some(control) = control {
+            world.script("harness.control", control);
+        }
+        held_conversation(&world, run, vec![agent("build", &[])]);
+        let held = held_worker_prompt(&world);
+
+        world
+            .run_with_stdin_on(
+                world.agentgraph_cmd(&["reply", run]),
+                &envelope(timed_note("build", NOTE, "live", true, 2)),
+            )
+            .exited(0)
+            .out_has("\"state\":\"applied\"");
+        let carried = recorded_note(&world, run, NOTE);
+        assert_eq!(carried["reached"], json!("carried"), "{name}: {carried}");
+        assert!(
+            carried["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("delivery_timeout_seconds: 2")),
+            "{name}: the carried note does not say its deadline passed: {carried}"
+        );
+        world
+            .run_with_stdin_on(
+                world.agentgraph_cmd(&["reply", run]),
+                &envelope(timed_note("build", UNCARRIED_NOTE, "live", false, 2)),
+            )
+            .exited(REFUSED)
+            .err_has("delivery_timeout_seconds: 2");
+        assert!(
+            !ended(&world).contains(&held) && aborted(&world).is_empty(),
+            "{name}: the held turn ended, or was aborted, before both deadlines were answered"
+        );
+
+        release(&world.fakes, "turn.go");
+        release(&world.fakes, "turn.settle");
+        world.until("the run to settle", |world| {
+            !world.events_of(run, "node-settled").is_empty()
+        });
+        assert!(
+            ended(&world).contains(&held),
+            "{name}: the held turn never ended"
+        );
+        assert!(
+            worker_turns(&world)
+                .iter()
+                .all(|prompt| !prompt.contains(NOTE) && !prompt.contains(UNCARRIED_NOTE)),
+            "{name}: the held turn's continuation was handed a note whose deadline passed"
+        );
+    }
+}
+
+/// While a note with a deadline is pending at a held turn, `status` shows that
+/// deadline beside its delivering state, and `status --json` carries the same
+/// instant on the envelope's `delivery` reading; a pending note with no deadline
+/// shows none.
+#[test]
+fn status_shows_a_pending_notes_deadline_beside_its_delivering_state() {
+    let world = World::new("note-status-deadline");
+    let run = "statusdeadline";
+    held_apart(&world, run, vec![agent("build", &[]), agent("lint", &[])]);
+    let before = admitted(&world, run);
+    let timed = submitted(
+        &world,
+        run,
+        &envelope(timed_note("build", BUILD_NOTE, "turn-end", true, 600)),
+    );
+    let untimed = submitted(
+        &world,
+        run,
+        &envelope(note_op_with("lint", LINT_NOTE, "turn-end", true)),
+    );
+    world.until("both notes to be admitted", |world| {
+        admitted(world, run) >= before + 2
+    });
+    let timed_id = queued_id_of(&world, run, BUILD_NOTE);
+    let untimed_id = queued_id_of(&world, run, LINT_NOTE);
+    let line = |status: &str, id: u64| {
+        status
+            .lines()
+            .find(|line| line.trim_start().starts_with(&format!("envelope {id}:")))
+            .map(str::to_owned)
+    };
+    world.until("status to name both deliveries", |world| {
+        let status = world.run(&["status", run]).stdout;
+        line(&status, timed_id).is_some() && line(&status, untimed_id).is_some()
+    });
+    let status = world.run(&["status", run]);
+    status.exited(0);
+    let reading = world.run(&["status", run, "--json"]);
+    reading.exited(0);
+    let reading = reading.json();
+    let delivery = |id: u64| {
+        reading["unanswered"]
+            .as_array()
+            .and_then(|unanswered| {
+                unanswered
+                    .iter()
+                    .find(|envelope| envelope["envelope"] == json!(id.to_string()))
+            })
+            .map(|envelope| envelope["delivery"].clone())
+            .unwrap_or_else(|| panic!("the reading names no envelope {id}: {reading}"))
+    };
+    let deadline = delivery(timed_id)["deadline"]
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| panic!("the timed note's reading carries no deadline: {reading}"));
+    let timed_line = line(&status.stdout, timed_id).expect("the timed note's line");
+    assert!(
+        timed_line.contains("delivering a live note to build since ")
+            && timed_line.contains(&format!("until its deadline {deadline}")),
+        "status does not show the pending note's deadline beside its delivering state:\n{}",
+        status.stdout
+    );
+    assert_eq!(
+        delivery(untimed_id).get("deadline"),
+        None,
+        "a pending note with no deadline reads as having one: {reading}"
+    );
+    let untimed_line = line(&status.stdout, untimed_id).expect("the untimed note's line");
+    assert!(
+        untimed_line.contains("delivering a live note to lint since ")
+            && !untimed_line.contains("deadline"),
+        "status shows a deadline for a note with none:\n{}",
+        status.stdout
+    );
+
+    release_turn_of(&world, "build");
+    release_turn_of(&world, "lint");
+    answered(timed);
+    answered(untimed);
 }
