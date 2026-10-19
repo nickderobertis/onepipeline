@@ -521,7 +521,6 @@ fn a_private_source_that_cannot_authenticate_holds_each_node_until_it_answers() 
         ),
     );
 
-    // The plan loads, and says what it holds and why.
     world
         .run(&["plan", "check", &project])
         .exited(0)

@@ -72,9 +72,8 @@ skip-tree = []
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# Empty, and the unreleased `onetaskgraph` revision was the last entry: every
-# sibling resolves from the registry again, and an allowance for a pin no build asks
-# for is one a revision could quietly come back through. With `unknown-git` at `deny`
+# Empty: an allowance for a pin no build asks for is one a revision could quietly
+# come back through. With `unknown-git` at `deny`
 # this is the whole of what a git source may be, so any of them — a sibling pinned
 # back, or a transitive dependency that grew one — fails here.
 #
