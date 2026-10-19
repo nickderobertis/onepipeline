@@ -3049,6 +3049,10 @@ fn a_later_edit_to_a_node_a_held_envelope_names_waits_behind_that_envelope() {
 /// still delivering leaves the next driver to answer it: the note already
 /// recorded is applied, and the one still being delivered is refused — journalled
 /// once, saying whether it was read is not known — rather than offered again.
+///
+/// The regression journey for onepipeline#512's first half: the envelope is
+/// answered exactly once, by the successor, and no note of it is recorded
+/// delivered twice.
 #[cfg(unix)]
 #[test]
 fn a_receiver_still_delivering_when_its_driver_died_is_refused_by_the_next() {
@@ -3089,6 +3093,11 @@ fn a_receiver_still_delivering_when_its_driver_died_is_refused_by_the_next() {
     });
     let output = both.wait_with_output().expect("the binary runs");
     assert_eq!(output.status.code(), Some(REFUSED));
+    assert_eq!(
+        outcomes_for(&world, run, id),
+        1,
+        "the successor did not answer the envelope exactly once"
+    );
     let outcome = outcome_of(&world, run, id).expect("answered");
     assert_eq!(outcome["applied"], json!(false), "{outcome}");
     assert!(
@@ -3125,6 +3134,22 @@ fn a_receiver_still_delivering_when_its_driver_died_is_refused_by_the_next() {
         "the note lint answered was committed again"
     );
     release_turn_of(&world, run, "build");
+    // And once build's held turn has ended, with the dead driver's offer still in
+    // its conversation's inbox, nothing records that note a second time.
+    world.until("the run to settle", |world| {
+        world.events_of(run, "node-settled").len() >= 2
+    });
+    for (text, kind) in [(BUILD_NOTE, "edit-rejected"), (LINT_NOTE, "edit-committed")] {
+        assert_eq!(
+            records_of(&world, run, text)
+                .into_iter()
+                .map(|(_, kind)| kind)
+                .collect::<Vec<_>>(),
+            [kind],
+            "a note of the envelope a dead driver left was recorded twice"
+        );
+    }
+    assert_eq!(outcomes_for(&world, run, id), 1);
 }
 
 /// A note the conversation refuses while the run is still being driven is
