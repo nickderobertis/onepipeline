@@ -804,6 +804,63 @@ fn a_prerequisite_the_private_source_records_holds_its_node_until_the_graph_has_
     );
 }
 
+/// A private source slow to answer a re-read holds nothing else up: the re-read runs off the
+/// driver's loop, so an edit the planner sends while it is held open is applied, and the
+/// held node dispatches once the read answers.
+#[test]
+fn a_reread_the_private_source_is_slow_to_answer_leaves_the_driver_answering() {
+    let world = with_private_vault(World::new("store-private-slow"));
+    let refusal = "vault.query_tasks.refuse";
+    world.script(
+        refusal,
+        &json!({"kind": "auth", "message": "VAULT_TOKEN is missing or empty"}).to_string(),
+    );
+    let name = "slow";
+    let project = world.plan(
+        name,
+        &plan_of(name, vec![agent("design", &[]), agent("spare", &[])]),
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("both nodes to be held", |world| {
+        held_for_source(world, name, "design").is_some()
+            && held_for_source(world, name, "spare").is_some()
+    });
+
+    // The source answers, slowly: the next re-read is held inside its first task query.
+    let slow = world.rendezvous("vault.query_tasks");
+    world.unscript(refusal);
+    let inside = slow.arrived();
+    world.unscript("vault.query_tasks.rendezvous");
+    world
+        .run_with_stdin(
+            &["reply", name],
+            &json!({
+                "version": 2,
+                "commands": [{"op": "drop", "id": "spare", "dependents": "detach"}]
+            })
+            .to_string(),
+        )
+        .exited(0)
+        .out_has("\"applied\"");
+    world.until("the drop to be taken up while the read is held", |world| {
+        world
+            .events_of(name, "node-unheld")
+            .iter()
+            .any(|event| event["labels"]["node"] == "spare")
+    });
+    assert!(
+        world.events_of(name, "node-dispatched").is_empty(),
+        "a node was dispatched while its re-read was still under way"
+    );
+
+    inside.release();
+    world.until("the run to settle", |world| {
+        world.run_file(name, "result.json").is_file()
+    });
+    assert_eq!(world.run_json(name, "result.json")["state"], "complete");
+    assert_eq!(dispatched(&world, name), ["design"]);
+}
+
 /// This world, with a second source `vault`: a real `scripted-source` serving its own
 /// folder of Markdown through `local-md`, declared `visibility: private`, and every held
 /// node's edges read again each second.

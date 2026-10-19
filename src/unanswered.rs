@@ -77,7 +77,6 @@ impl SourceHold {
         })
     }
 
-    /// The sources not asked, in name order.
     pub(crate) fn unanswered(&self) -> &[Unanswered] {
         &self.unanswered
     }
@@ -232,17 +231,13 @@ type Reading = Receiver<Result<BTreeMap<String, Reread>>>;
 /// the nodes held and why, the re-read under way, and when each held node's wait was last
 /// surfaced.
 pub(crate) struct SourceHolds {
-    /// The nodes held, and what holds each.
     held: BTreeMap<String, SourceHold>,
-    /// Where the re-reads go: the store the launch read the plan through, and the project.
+    /// The store the launch read the plan through, and the project: `None` only for a launch
+    /// record naming no qualified project, which nothing re-reads.
     store: Option<(Store, QualifiedId)>,
-    /// The re-read under way, if one is.
     reading: Option<Reading>,
-    /// When the last re-read was started.
     read_at: Option<Instant>,
-    /// How often a held node's edges are read again.
     every: Duration,
-    /// When each held node's wait is surfaced again, on the release hold's cadence.
     surfaced: crate::release::Resurfacing,
 }
 
@@ -369,7 +364,6 @@ impl SourceHolds {
         });
     }
 
-    /// The nodes held, and what holds each.
     pub(crate) fn held(&self) -> &BTreeMap<String, SourceHold> {
         &self.held
     }
@@ -466,6 +460,7 @@ fn quoted(ids: &[String]) -> String {
 }
 
 /// How often a held node's edges are read again.
+// llmlint: ignore[changed_behavior_has_e2e] the journeys set the variable to a usable value to drive the re-read (`tests/e2e/store.rs`'s private-source journeys read again each second); an unset or unusable one selects the shipped minute, which no journey can wait out, so its parsing is held by `unanswered::tests::the_pace_is_a_positive_whole_number_of_seconds_or_the_default`, as `pool.rs` holds its own.
 fn poll_seconds() -> u64 {
     std::env::var(POLL_ENV)
         .ok()
