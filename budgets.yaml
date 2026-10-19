@@ -121,7 +121,7 @@ budgets:
     command: [bash, scripts/review-round-quota-budget.sh]
     unit: quota-units
     direction: max
-    threshold: 45
+    threshold: 175
     description: >-
       GraphQL points plus REST requests one busy review round spends across the two tokens it
       touches: the host's `gh` token and the plan store's board token. The round is ten stacked
@@ -130,4 +130,15 @@ budgets:
       records over onevcs-testing's remote double, fake agents and a local Markdown store,
       because no check may spend the shared account's quota. Each ledger call is charged what
       the spikes measured on GitHub, each store task written 2 points, and each store read 1.
-      The threshold is spike-quota-round-report's measured round of about 42, with a little room.
+      The threshold is this journey's measured round, 152 to 162 over eight runs on 2026-10-18
+      and 2026-10-19 (CI 156 at #935's head, 160 on main at 645ca97f and 162 at #1015; locally
+      152, 152, 154, 158, 162), with a little room. The gh token is 54 in every run: 30 GraphQL
+      points (both passes' review reads 11, the decline's comment read 1, sixteen standings
+      reads — the reworks' and the readjustment's placement reads and one per retarget — 16, two
+      open-change lookups 2) and 24
+      REST requests (six reply posts, two retargets, sixteen visibility probes). The board token
+      is 98 to 108, as concurrency groups the publications: each publication's fence written
+      and cleared on the project, each command's claim written and released, about eleven task
+      writes and six claim reads. The 45 it replaces was arithmetic of 2026-10-10 over a design
+      without the boundary's visibility probes (#852), the driver's claim (#862), the placement
+      read (#916) or the publication fence (#965); the fence's writes alone are over 45.

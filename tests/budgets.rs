@@ -302,7 +302,7 @@ fn the_budgets_file_registers_the_review_round_quota_budget() {
     assert_eq!(budget.unit, "quota-units");
     assert_eq!(budget.direction, Direction::Max);
     assert!(
-        (budget.threshold - 45.0).abs() < f64::EPSILON,
+        (budget.threshold - 175.0).abs() < f64::EPSILON,
         "{}",
         budget.threshold
     );
