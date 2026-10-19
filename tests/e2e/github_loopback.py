@@ -200,7 +200,8 @@ def write_numbered_status(supplied):
             or supplied["fieldId"] != "STATUS-" + board
             or number not in numbered["boards"].get(board, {})
             or not isinstance(supplied["value"], dict)
-            or supplied["value"].get("singleSelectOptionId") not in options):
+            or set(supplied["value"]) != {"singleSelectOptionId"}
+            or supplied["value"]["singleSelectOptionId"] not in options):
         raise ValueError("invalid numbered Status mutation input")
     state["writes"].append({"board": int(board), "issue": int(number), "field": "Status",
                             "value": supplied["value"]["singleSelectOptionId"]})

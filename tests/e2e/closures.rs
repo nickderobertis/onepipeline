@@ -78,13 +78,13 @@ fn world_with(name: &str, policy: &str, issues: &Value) -> (World, GitHubEndpoin
     (world, served)
 }
 
-/// Issue `number` of the repository, with its state and the reason it was closed for.
+/// A numbered issue's state, and the reason it was closed for.
 fn issue(state: &str, reason: Option<&str>) -> Value {
     json!({"state": state, "reason": reason})
 }
 
-/// The one board every journey but the first reads: issue 7 open at `Todo`, issue 9 open at
-/// `Todo` and never named.
+/// The one board most journeys read: issue 7 open at `Todo`, and issue 9 open at `Todo`, which
+/// those journeys never name.
 fn one_board() -> Value {
     json!({
         "repository": REPOSITORY,
@@ -347,7 +347,7 @@ fn a_landing_moves_exactly_the_cards_of_the_issues_it_closes_on_every_configured
     );
 }
 
-/// The one-board launch directory every later journey launches from.
+/// A launch directory declaring that one board alone.
 fn one_board_launch(world: &World, served: &GitHubEndpoint) -> PathBuf {
     launch_dir(world, &board_source("board", served, 1))
 }
@@ -1623,5 +1623,46 @@ fn a_landing_verb_prints_each_item_the_store_answered_and_every_source_it_sent_n
     assert_eq!(
         card(&served, "1", "8"),
         (json!("Todo"), issue("CLOSED", Some("NOT_PLANNED")))
+    );
+}
+
+/// The window is the closures' own: a settled run whose closure the board holds past the
+/// projection's close-out window still records it, once the board answers inside the closures'
+/// window, and only then ends.
+#[test]
+fn a_settled_run_records_a_closure_the_board_answers_past_the_projection_window() {
+    let (world, served, launch) = landing_closing_seven("closures-window-answered");
+    served.fault("transient");
+    let run = "window-answered";
+    let project = world.plan(run, &plan_of(run, vec![lifecycle("service", &[])]));
+    start_from(&world, &launch, &project);
+    world.until(
+        "the board to hold the closure's retried Status write",
+        |_| served.state()["holding"] == true,
+    );
+    world.until("the run's node to settle", |world| {
+        !world.events_of(run, "node-settled").is_empty()
+    });
+    // Past the projection's close-out window, with the driver still waiting.
+    std::thread::sleep(std::time::Duration::from_secs(5));
+    assert!(
+        world.events_of(run, "driver-exited").is_empty(),
+        "the settled run ended inside the projection's window, leaving its closure"
+    );
+    served.release();
+    world.until("the settled run's driver to end", |world| {
+        !world.events_of(run, "driver-exited").is_empty()
+    });
+    let records = closures_of(&world, run);
+    assert_eq!(records.len(), 1, "{records:#?}");
+    assert_eq!(records[0]["payload"]["outcome"], "projected");
+    assert!(
+        position(&world, run, "landing-closures", None)
+            < position(&world, run, "driver-exited", None),
+        "the closure was recorded after the driver ended"
+    );
+    assert_eq!(
+        card(&served, "1", "7"),
+        (json!("Done"), issue("CLOSED", Some("COMPLETED")))
     );
 }
