@@ -222,14 +222,26 @@ fn forward(
             return Ok(match supervision {
                 Some(supervision) => {
                     let identity = supervision.identity();
-                    report_integration(supervision.operate(
+                    let status = report_integration(supervision.operate(
                         onevcs::DirectOperation::Integrate {
                             repository: identity,
                         },
                         |handle| onevcs::integrate_in_operation(&request, handle),
-                    )?)
+                    )?);
+                    supervision.close_issues();
+                    status
                 }
-                None => report_integration(onevcs::integrate(&request)),
+                None => {
+                    let selector = identity_of(&cli.command)
+                        .map(|repository| onevcs::DirectOperation::Integrate { repository });
+                    let (integrated, landings) = unsupervised(selector, |handle| match handle {
+                        Some(handle) => onevcs::integrate_in_operation(&request, handle),
+                        None => onevcs::integrate(&request),
+                    });
+                    let status = report_integration(integrated);
+                    close_issues(&landings, |_| {});
+                    status
+                }
             });
         }
     }
@@ -255,9 +267,20 @@ fn forward(
         return Ok(match supervision {
             Some(supervision) => {
                 let selector = request.selector(supervision.identity());
-                report(supervision.operate(selector, |handle| request.land_in(handle))?)
+                let status = report(supervision.operate(selector, |handle| request.land_in(handle))?);
+                supervision.close_issues();
+                status
             }
-            None => report(request.land()),
+            None => {
+                let selector = identity_of(&cli.command).map(|identity| request.selector(identity));
+                let (landed, landings) = unsupervised(selector, |handle| match handle {
+                    Some(handle) => request.land_in(handle),
+                    None => request.land(),
+                });
+                let status = report(landed);
+                close_issues(&landings, |_| {});
+                status
+            }
         });
     }
     // A command line the verb would refuse as it stands: forwarded to it, so it is
@@ -270,6 +293,105 @@ fn forward(
         )?;
     }
     Ok(i32::from(onevcs::run(cli)))
+}
+
+/// The identity a landing's subjects resolve to, where they resolve: what an unsupervised
+/// landing prepares its own operation in.
+fn identity_of(command: &onevcs::cli::Command) -> Option<String> {
+    subjects_of(command)
+        .ok()?
+        .into_iter()
+        .next()
+        .map(|subject| subject.identity)
+}
+
+/// Make an unsupervised landing inside an operation of its own, so the landings it records
+/// can be read back for the issues they close — and, where none can be prepared, make it as
+/// it always was, reading none.
+fn unsupervised<T>(
+    selector: Option<onevcs::DirectOperation>,
+    call: impl FnOnce(Option<&onevcs::OperationHandle>) -> T,
+) -> (T, Vec<crate::closures::Landing>) {
+    let Some(handle) = selector.and_then(|selector| onevcs::OperationHandle::prepare(&selector).ok())
+    else {
+        return (call(None), Vec::new());
+    };
+    let out = call(Some(&handle));
+    let mut landings = Vec::new();
+    if let Ok(mut reader) = onevcs::OperationEvents::open(&handle) {
+        while let Ok(batch) = reader.read() {
+            if batch.is_empty() {
+                break;
+            }
+            for envelope in &batch {
+                gather(&mut landings, envelope);
+            }
+        }
+    }
+    (out, landings)
+}
+
+/// Keep the landing one operation record reports, once per landing commit.
+fn gather(landings: &mut Vec<crate::closures::Landing>, envelope: &onevcs::Envelope) {
+    if let Some(landing) = crate::closures::Landing::of_operation(envelope) {
+        if !landings.iter().any(|held| held.commit == landing.commit) {
+            landings.push(landing);
+        }
+    }
+}
+
+/// Hand the store the issues each of `landings` closed — one `complete_issues` call per
+/// landing, through the store configuration the current directory declares — printing what it
+/// answered and handing each record to `recorded`. Entry 132 of
+/// `docs/contract-divergences.md`.
+///
+/// Best effort: the landing has happened whatever the store answers, so nothing here changes
+/// the verb's exit status. A directory whose configuration declares no source is asked
+/// nothing, and said so.
+fn close_issues(
+    landings: &[crate::closures::Landing],
+    mut recorded: impl FnMut(&crate::payload::LandingClosures),
+) {
+    if landings.is_empty() {
+        return;
+    }
+    let dir = match std::env::current_dir() {
+        Ok(dir) => dir,
+        // llmlint: ignore[changed_behavior_has_e2e] a working directory removed under the
+        // running verb is host state no journey arranges; it is said, and nothing is asked.
+        Err(error) => {
+            eprintln!(
+                "onepipeline: the current directory cannot be read ({error}), so no store \
+                 configuration was found and the issues the landing closed were not handed \
+                 to the store"
+            );
+            return;
+        }
+    };
+    let store = crate::taskgraph::Store::at(dir);
+    for landing in landings {
+        let within = std::time::Duration::from_secs(
+            crate::cli::DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS
+                .get()
+                .saturating_mul(u64::try_from(landing.closes.len()).unwrap_or(u64::MAX))
+                .max(crate::cli::DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS.get()),
+        );
+        let record = match crate::closures::complete(&store, landing, within) {
+            crate::closures::Answer::Unconfigured => {
+                eprintln!(
+                    "onepipeline: no store configuration here declares a source, so no closure \
+                     request was made for {}, which the landing at {} closes",
+                    landing.closes.join(", "),
+                    landing.commit
+                );
+                return;
+            }
+            crate::closures::Answer::Finished(record)
+            | crate::closures::Answer::Transient { record, .. } => record,
+        };
+        eprintln!("{}", crate::closures::said(&record));
+        recorded(&record);
+    }
 }
 
 /// Render what an integration train answered, exactly as `onevcs integrate`
@@ -1506,6 +1628,25 @@ impl Supervision {
         Ok(out)
     }
 
+    /// Hand the store the issues the landings this operation relayed closed, journalling each
+    /// call's `landing-closures` record beside the landing's own progress.
+    fn close_issues(&mut self) {
+        let landings = std::mem::take(&mut lock_relay(&self.relay).landings);
+        let relay = Arc::clone(&self.relay);
+        close_issues(&landings, |record| {
+            let journalled = crate::journal::object(record).and_then(|payload| {
+                lock_relay(&relay).transition(PipelineKind::LandingClosures, payload)
+            });
+            if let Err(error) = journalled {
+                eprintln!(
+                    "onepipeline: the record of the closures of the landing at {} could not be \
+                     journalled: {error}",
+                    record.commit
+                );
+            }
+        });
+    }
+
     /// Record how the landing ended and end its flow where it holds one,
     /// answering what the forwarded verb answered.
     fn settle(mut self, forwarded: Result<i32>) -> Result<i32> {
@@ -1655,6 +1796,8 @@ pub(crate) struct Relay {
     journal: LandingJournal,
     runs: Vec<(String, crate::journal::Journal, Seen)>,
     seen: Seen,
+    /// The landings the operation recorded whose `closes` names an issue, once each.
+    landings: Vec<crate::closures::Landing>,
 }
 
 // llmlint: ignore-end[invalid_states_unrepresentable]
@@ -1689,6 +1832,7 @@ impl Relay {
             operation_id,
             journal: LandingJournal::open(landing.journal()),
             runs,
+            landings: Vec::new(),
         })
     }
 
@@ -1716,6 +1860,7 @@ impl Relay {
     /// Relay one `onevcs` operation record, as its producer wrote it plus this
     /// landing's labels, into every journal that does not already hold it.
     fn vcs(&mut self, envelope: &onevcs::Envelope) -> Result<()> {
+        gather(&mut self.landings, envelope);
         let mut value = serde_json::to_value(envelope)
             .map_err(|e| Error::Invalid(format!("an operation event did not serialize: {e}")))?;
         let key = (envelope.stream.clone(), envelope.seq);

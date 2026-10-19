@@ -1020,7 +1020,7 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), EVENTS_BUNDLE_VERSION);
     assert_eq!(
-        divergence_block("130.")["bundle_versions"]["events"],
+        divergence_block("132.")["bundle_versions"]["events"],
         EVENTS_BUNDLE_VERSION,
         "the events bundle version must be the one the newest entry raising it records"
     );
@@ -2341,6 +2341,43 @@ fn the_stacked_settlement_is_what_the_divergence_record_names() {
         block["block_markers"],
         serde_json::json!(["<!-- onepipeline:stack -->", "<!-- /onepipeline:stack -->"])
     );
+}
+
+/// The record entry 132 proposes is the one this build declares for `landing-closures`:
+/// both of its examples — a projected landing and a failed one outside a run — are admitted by
+/// the published document, a record missing a member every writer writes with a value, or
+/// naming an outcome or class nobody declared, is refused, and the kind is the vocabulary's
+/// own. `node`, `class` and `reason` may be `null`, which the vocabulary's documents leave
+/// optional as they do every such key.
+#[test]
+fn the_landing_closures_record_is_what_the_divergence_record_names() {
+    use onepipeline::event::PipelineKind;
+    use onepipeline::payload::{registry, schema_of};
+    let block = divergence_block("132.");
+    assert_eq!(block["kind"], PipelineKind::LandingClosures.as_str());
+    let id = schema_of(PipelineKind::LandingClosures);
+    let registry = registry();
+    for example in ["record", "failed"] {
+        registry
+            .check(&id, &block[example])
+            .unwrap_or_else(|why| panic!("entry 132's {example} is refused: {why}"));
+    }
+    for member in ["commit", "closes", "outcome", "items", "unsupported"] {
+        let mut short = block["record"].clone();
+        short.as_object_mut().expect("a record").remove(member);
+        assert!(
+            registry.check(&id, &short).is_err(),
+            "a landing-closures record without {member} was admitted"
+        );
+    }
+    for (member, word) in [("outcome", "landed"), ("class", "slow")] {
+        let mut unknown = block["failed"].clone();
+        unknown[member] = Value::String(word.into());
+        assert!(
+            registry.check(&id, &unknown).is_err(),
+            "a landing-closures record whose {member} is {word:?} was admitted"
+        );
+    }
 }
 
 /// The rework surface entry 121 proposes is this build's own: its two ops
@@ -6663,7 +6700,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // undocumented wire; a kind the contract lists and the enum does not carry is
     // a promise nothing keeps. `PIPELINE_KINDS` is what `Journal::emit` accepts,
     // so this is the emitted set and not a second copy of it.
-    assert_eq!(PIPELINE_KINDS.len(), 64, "the closed set changed size");
+    assert_eq!(PIPELINE_KINDS.len(), 65, "the closed set changed size");
     let listed: BTreeSet<String> = backticked()
         .into_iter()
         .filter(|token| {
@@ -6674,7 +6711,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // record proposes, and no others: a kind neither document names fails here.
     let proposed: BTreeSet<String> = [
         "40.", "47.", "55.", "65.", "70.", "92.", "119.", "121.", "122.", "123.", "126.", "127.",
-        "130.",
+        "130.", "132.",
     ]
     .into_iter()
     .flat_map(|entry| {
@@ -11294,7 +11331,8 @@ fn the_review_reply_surface_is_what_the_divergence_record_names() {
     assert_eq!(block["store_review_keys"], json!([]));
     assert_eq!(
         block["bundle_versions"],
-        json!({"events": onepipeline::vocabulary::EVENTS_BUNDLE_VERSION, "planner_channel": DOCUMENT_VERSION})
+        // The events bundle this entry raised; entry 132 raised it again.
+        json!({"events": "1.7.0", "planner_channel": DOCUMENT_VERSION})
     );
     assert!(onepipeline::channel::layout::bundle_json().contains("\"decline\""));
     let events = onepipeline::vocabulary::events_bundle_json();

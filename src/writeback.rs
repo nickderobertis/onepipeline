@@ -6228,6 +6228,7 @@ mod tests {
             worker: WorkerState::Working,
             phase: super::RunPhase::Running,
             unprojected: Vec::new(),
+            ..Pending::default()
         };
 
         assert!(pending.queue(first.clone()));
@@ -6249,6 +6250,7 @@ mod tests {
             per_item: DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS,
             held: Mutex::new(None),
             board: Mutex::new(super::Board::Driving),
+            closures_owed: Mutex::new(std::collections::BTreeSet::new()),
         };
         writeback.closing_out_until(Instant::now() + super::CLOSEOUT_WAIT, Pending::unlanded);
         assert!(

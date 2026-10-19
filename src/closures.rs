@@ -15,7 +15,6 @@
 //! (`crate::land`) outside one.
 
 use std::collections::BTreeSet;
-use std::path::Path;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -115,25 +114,6 @@ fn closes_of(closes: Option<&Value>) -> Result<Vec<String>, String> {
             IssueRef::from_str(spelled)
                 .map(|_| spelled.to_owned())
                 .map_err(|why| format!("`{spelled}` is not `owner/name#N`: {why}"))
-        })
-        .collect()
-}
-
-/// Every landing commit a `landing-closures` record of `journal` already names: what a
-/// catch-up asks nothing about again.
-pub(crate) fn recorded(journal: &Path) -> BTreeSet<String> {
-    crate::journal::read(journal)
-        .into_iter()
-        .filter(|event| {
-            event.source == Source::Pipeline
-                && event.kind.as_str() == PipelineKind::LandingClosures.as_str()
-        })
-        .filter_map(|event| {
-            event
-                .payload
-                .get("commit")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
         })
         .collect()
 }
@@ -353,6 +333,136 @@ pub(crate) fn said(record: &LandingClosures) -> String {
         _ => lines.push("  projected".to_owned()),
     }
     lines.join("\n")
+}
+
+/// What one driver's reconcile loop owes the closure thread, read off the run's own journal
+/// and sessions and never off a board or another run.
+///
+/// Three things hand a landing over, each once per landing commit: a relayed landing event
+/// labelled for one of the run's nodes whose `closes` is non-empty, read off the journal as it
+/// grows; and a **catch-up** — on a driver's first pass, after an adoption's standings read,
+/// and again whenever the run meets a landing it did not watch happen (a `node-landed`, or a
+/// landing event on a settled node's session stream) — which reads the session stream of every
+/// node with a recorded landing. A landing a `landing-closures` record already names is never
+/// handed over again, so stopping and adopting a run asks the store nothing new.
+pub(crate) struct Watch {
+    /// How far into the journal this driver has read.
+    read_to: u64,
+    /// Every landing commit a `landing-closures` record names.
+    recorded: BTreeSet<String>,
+    /// Whether a catch-up is due on the next pass.
+    catch_up: bool,
+    /// The nodes whose session a catch-up of this driver has read since they landed.
+    scanned: BTreeSet<String>,
+}
+
+impl Default for Watch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Watch {
+    /// A driver's watch, owing a catch-up on its first pass.
+    pub(crate) fn new() -> Self {
+        Self {
+            read_to: 0,
+            recorded: BTreeSet::new(),
+            catch_up: true,
+            scanned: BTreeSet::new(),
+        }
+    }
+
+    /// The run met a landing it did not watch happen: catch up on the next pass.
+    pub(crate) fn met_a_landing(&mut self) {
+        self.catch_up = true;
+    }
+
+    /// One pass: hand `writeback` every landing of the run the journal or a catch-up shows
+    /// that no record names yet. Reads the journal only past where it last stopped, and a
+    /// session stream only for a node that landed since this driver last read it.
+    pub(crate) fn pass(
+        &mut self,
+        paths: &crate::ledger::RunPaths,
+        state: &crate::projection::RunState,
+        writeback: &crate::writeback::Writeback,
+    ) {
+        let grown = crate::journal::finished_records_after(&paths.journal(), self.read_to);
+        let mut relayed = Vec::new();
+        for (record, occupies) in grown {
+            self.read_to += occupies;
+            let Some(record) = record else { continue };
+            if record.source == Source::Pipeline {
+                match PipelineKind::from_wire(&record.kind) {
+                    Some(PipelineKind::LandingClosures) => {
+                        if let Some(commit) = record.payload.get("commit").and_then(Value::as_str)
+                        {
+                            self.recorded.insert(commit.to_owned());
+                        }
+                    }
+                    Some(PipelineKind::NodeLanded) => self.catch_up = true,
+                    _ => {}
+                }
+                continue;
+            }
+            let ours = record
+                .labels
+                .node
+                .as_deref()
+                .is_some_and(|node| state.graph.get(node).is_some());
+            if ours {
+                if let Some(landing) = Landing::of_event(&record) {
+                    relayed.push(landing);
+                }
+            }
+        }
+        // Records first: a record later in the same read names a landing relayed earlier in
+        // it, which a run adopted after its closure was written must not ask about again.
+        for landing in relayed {
+            self.owe(landing, writeback);
+        }
+        if !std::mem::take(&mut self.catch_up) {
+            return;
+        }
+        for node in landed_nodes(state) {
+            if self.scanned.contains(&node) {
+                continue;
+            }
+            let Some(session) = state
+                .sessions
+                .get(&node)
+                .or_else(|| state.abandoned.get(&node))
+            else {
+                continue;
+            };
+            self.scanned.insert(node.clone());
+            for envelope in crate::vcs::events(session.token(), None) {
+                if let Some(mut landing) = Landing::of_unlabelled(&envelope) {
+                    landing.node = Some(node.clone());
+                    self.owe(landing, writeback);
+                }
+            }
+        }
+    }
+
+    fn owe(&self, landing: Landing, writeback: &crate::writeback::Writeback) {
+        if !self.recorded.contains(&landing.commit) {
+            writeback.close_landing(landing);
+        }
+    }
+}
+
+/// Every node of the run with a recorded landing: one its settlement saw land, one whose
+/// `merge-completed` was relayed, and one a readjustment found landed.
+fn landed_nodes(state: &crate::projection::RunState) -> BTreeSet<String> {
+    state
+        .landings
+        .iter()
+        .filter(|(_, landing)| **landing == crate::graph::Landing::Landed)
+        .map(|(node, _)| node.clone())
+        .chain(state.landing_commits.keys().cloned())
+        .chain(state.landed_how.keys().cloned())
+        .collect()
 }
 
 #[cfg(test)]
