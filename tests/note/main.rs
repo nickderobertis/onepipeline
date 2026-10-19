@@ -34,12 +34,10 @@
 #[path = "../e2e/harness.rs"]
 mod harness;
 
-use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use oneagentgraph::event::{Origin, TurnMessage, TurnStarted};
-use oneagentgraph::note::NOTES_DIR;
 use onemessagebus::{Config, Layouts, LocalTransport, Transport, TransportKinds};
 use onepipeline::channel::layout::{PlannerChannel, COMMANDS, PLANNER_CHANNEL, REPLIES};
 use onepipeline::channel::Command;
@@ -218,32 +216,59 @@ fn held_judge(world: &World, run: &str, nodes: Vec<Value>) {
     });
 }
 
-/// Release the held turn once the note is really on its way to it.
+/// Release the held turn once the note is really in its conversation's hands, or
+/// once the run has answered it without offering it to any.
 ///
-/// The wait is on the run's own durable command queue rather than on a clock: the
-/// note is in it before the reconciler can offer it, and the held turn cannot end
-/// until this releases it — so the note reaches a turn that is still live rather
-/// than whichever party happened to be speaking when a timer went off. The short
-/// pause after it is the reconciler's own pass, which is the one step with nothing
-/// durable to watch for.
-fn release_when_the_note_is_queued(
-    world: &World,
-    run: &str,
-    gates: &[&str],
-) -> std::thread::JoinHandle<()> {
-    let queue = world.run_file(run, "channel/commands.jsonl");
+/// The signal is the member's own: `oneagentgraph` publishes `note-admitted` once
+/// a note is in the onejudge inbox, untaken, and this engine relays it into the
+/// run's journal. A turn released after it ends with the note already waiting for
+/// the turn's end, so the note reaches the turn it was sent to rather than
+/// whichever party happened to be speaking when a timer went off. A note the run
+/// carries or refuses without offering it is never admitted, and its envelope's
+/// answer is the signal instead. Both are counted from when this is called, so a
+/// note admitted earlier in the journey is not mistaken for this one.
+fn release_once_admitted(world: &World, run: &str, gates: &[&str]) -> std::thread::JoinHandle<()> {
+    let journal = world.run_file(run, "events.jsonl");
+    let outcomes = world.run_file(run, "channel/command-outcomes.jsonl");
     let fakes = world.fakes.clone();
     let gates: Vec<String> = gates.iter().map(|gate| (*gate).to_string()).collect();
+    let (admitted_before, answered_before) = (admissions_in(&journal), lines_in(&outcomes));
     std::thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(120);
-        while Instant::now() < deadline && !a_note_is_queued(&queue) {
+        let arrived =
+            || admissions_in(&journal) > admitted_before || lines_in(&outcomes) > answered_before;
+        while Instant::now() < deadline && !arrived() {
             std::thread::sleep(Duration::from_millis(20));
         }
-        std::thread::sleep(Duration::from_secs(2));
+        let arrived = arrived();
         for gate in &gates {
             release(&fakes, gate);
         }
+        assert!(
+            arrived,
+            "no note was admitted or answered in {} within 120 seconds",
+            journal.display()
+        );
     })
+}
+
+/// How many `note-admitted` envelopes the journal at `path` holds.
+fn admissions_in(path: &Path) -> usize {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|envelope| envelope["kind"] == "note-admitted")
+        .count()
+}
+
+/// How many records the log at `path` holds.
+fn lines_in(path: &Path) -> usize {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count()
 }
 
 /// Whether the run's durable command queue already carries a `note` op.
@@ -283,114 +308,6 @@ fn a_note_is_queued(queue: &Path) -> bool {
             .any(|command| matches!(command, Command::Note { .. }));
     }
     queued
-}
-
-/// Release the held turn once the note is really in its conversation's hands.
-///
-/// [`release_when_the_note_is_queued`]'s counterpart for a journey whose claim is
-/// *which party* the note reached, and it waits on the member's own note spool
-/// rather than on a pause after the run's queue. A note reaches a live judge only
-/// if it is in the conversation's inbox when the held decision returns — onejudge
-/// looks for notes then, and not before — and the queue says nothing about when
-/// the reconciler gets to it: between the two lie the driver's claim of the
-/// envelope, its delivery thread, and the spool's courier in the member's process,
-/// and a turn released before they finish reaches a different party — the ordering
-/// `a_note_that_reaches_the_conversation_after_the_judge_decided_reaches_the_worker`
-/// drives on purpose.
-///
-/// **What this guarantees, and the window it leaves.** The gate opens on the
-/// courier's rename of `<id>.offer.json` to `<id>.taken.json` (onemessagebus'
-/// `spool::take_offer`), the last step any process outside the member can see.
-/// The window from there is entirely inside the member's process, on two of its
-/// threads, with no file, no other process and no poll in it: the courier reads
-/// the taken file and queues the note on the member's inbox, whose condition
-/// variable wakes the relay at once (its 50 ms is a timeout on that wait, not a
-/// poll); the relay hands the note to onejudge's `Notes::send`, which queues it
-/// on the conversation's inbox. The window closes there. It has to close before
-/// onejudge's `take_notes`, which runs only after this releases the gate *and*
-/// the judge double has seen the gate (a 10 ms poll), exited, and had its
-/// decision read back — so the 500 ms pause is the only margin added to that,
-/// and it is not one that an observable condition could replace: nothing in
-/// oneagentgraph 0.5.6 or onejudge 0.19.0 writes anything between the rename and
-/// the answer, and the answer comes only after the release. A failure now needs
-/// those two threads to be kept off the CPU for longer than all of that, where
-/// the fixed pause this replaced raced the driver's claim of the envelope, its
-/// delivery thread and the courier's own 20 ms poll across processes. Closing
-/// the window outright needs an acknowledgment from inside oneagentgraph that the
-/// note is in onejudge's inbox, which this repository cannot add.
-///
-/// A spool that never shows the note taken still releases the turn, so the run
-/// ends, and then fails the journey naming the wait rather than leaving it to an
-/// assertion about who the note reached.
-fn release_once_the_note_is_taken(world: &World, gates: &[&str]) -> std::thread::JoinHandle<()> {
-    let root = world.root.clone();
-    let fakes = world.fakes.clone();
-    let gates: Vec<String> = gates.iter().map(|gate| (*gate).to_string()).collect();
-    std::thread::spawn(move || {
-        let taken = until_a_note_is_taken(&root, &BTreeSet::new());
-        if taken.is_some() {
-            std::thread::sleep(IN_PROCESS_MARGIN);
-        }
-        for gate in &gates {
-            release(&fakes, gate);
-        }
-        assert!(
-            taken.is_some(),
-            "no member's note spool under {} showed a note taken within 120 seconds",
-            root.display()
-        );
-    })
-}
-
-/// The margin [`release_once_the_note_is_taken`] gives the in-process hand-over
-/// between the courier's rename and the conversation's inbox, as its doc says.
-const IN_PROCESS_MARGIN: Duration = Duration::from_millis(500);
-
-/// The id of a note some member's spool under `root` holds taken and not yet
-/// answered, other than any of `besides` — waited for, up to two minutes, and
-/// `None` past that.
-fn until_a_note_is_taken(root: &Path, besides: &BTreeSet<String>) -> Option<String> {
-    let deadline = Instant::now() + Duration::from_secs(120);
-    loop {
-        if let Some(id) = notes_taken(root)
-            .into_iter()
-            .find(|id| !besides.contains(id))
-        {
-            return Some(id);
-        }
-        if Instant::now() >= deadline {
-            return None;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-}
-
-/// The id of each note a member's spool under `dir` holds taken and not yet
-/// answered.
-///
-/// Read off the spool's own file names — an offer becomes `<id>.taken.json` when
-/// its courier takes it and gains `<id>.answer.json` when answered — under each
-/// directory named [`NOTES_DIR`], which is where a two-party member binds it.
-/// Repositories are not descended into: no member's scratch lives inside one's
-/// history.
-fn notes_taken(dir: &Path) -> BTreeSet<String> {
-    let mut taken = BTreeSet::new();
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return taken;
-    };
-    let spool = dir.file_name().is_some_and(|name| name == NOTES_DIR);
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if let Some(id) = name.strip_suffix(".taken.json").filter(|_| spool) {
-            if !dir.join(format!("{id}.answer.json")).exists() {
-                taken.insert(id.to_string());
-            }
-        } else if name != ".git" && entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-            taken.extend(notes_taken(&entry.path()));
-        }
-    }
-    taken
 }
 
 fn release(fakes: &Path, name: &str) {
@@ -456,7 +373,7 @@ fn a_note_into_a_live_dispatch_reaches_both_parties_before_the_judges_verdict() 
     let run = "live";
     held_conversation(&world, run, vec![agent("build", &[])]);
 
-    let releasing = release_when_the_note_is_queued(&world, run, &["turn.go", "turn.settle"]);
+    let releasing = release_once_admitted(&world, run, &["turn.go", "turn.settle"]);
     let replied = world.run_with_stdin_on(
         world.agentgraph_cmd(&["reply", run]),
         &envelope(note_op("build", "worker", NOTE, None)),
@@ -683,13 +600,40 @@ fn answered(child: std::process::Child) -> String {
 
 /// The notes a conversation's inbox holds and has not answered yet.
 ///
-/// Read off the member's note spool itself, which is where `oneagentgraph` puts a
-/// note it has been handed: `<id>.offer.json` until the conversation's courier
-/// takes it, `<id>.taken.json` from then, and `<id>.answer.json` beside it once
-/// the conversation has said what became of it. A note counted here is one the
-/// run has **offered** and is waiting on — the exact window the writer used to
-/// spend doing nothing else.
-fn awaiting_an_answer(world: &World) -> usize {
+/// Read off the run's own stream, as the member published it: each note it
+/// admitted names its offer on `note-admitted`, and the answer that note later
+/// gets names the same offer — a `turn-interrupted` for one a turn took or that
+/// was not delivered, a `note-withdrawn` for one taken back. A note counted here
+/// is one the run has **offered** and is waiting on — the exact window the
+/// writer used to spend doing nothing else.
+fn awaiting_an_answer(world: &World, run: &str) -> usize {
+    let offers = |kind: &str| -> Vec<Value> {
+        world
+            .events_of(run, kind)
+            .into_iter()
+            .map(|event| event["payload"]["offer"].clone())
+            .filter(|offer| !offer.is_null())
+            .collect()
+    };
+    let answered: Vec<Value> = offers("turn-interrupted")
+        .into_iter()
+        .chain(offers("note-withdrawn"))
+        .collect();
+    offers("note-admitted")
+        .iter()
+        .filter(|offer| !answered.contains(offer))
+        .count()
+}
+
+/// The requests a member's note spool holds that nothing has answered.
+///
+/// The one wait in this suite that is **not** on admission: with nothing driving
+/// the run, nothing relays the member's stream into the run's journal and nothing
+/// services the offer, so the note never reaches a conversation's inbox at all —
+/// it waits in the spool, as `<id>.offer.json`, until the sibling's own bound
+/// gives up on it. What is read is that spool's file names under each directory
+/// called `notes`, which is where a two-party member binds it.
+fn offers_in_spool(world: &World) -> usize {
     fn walk(dir: &Path, found: &mut usize) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
@@ -746,7 +690,7 @@ fn a_note_waiting_on_a_held_turn_leaves_the_run_journalling_its_dispatch() {
         &envelope(note_op("build", "worker", NOTE, None)),
     );
     world.until("the note to wait in the conversation's inbox", |world| {
-        awaiting_an_answer(world) == 1
+        awaiting_an_answer(world, run) == 1
     });
     // Naming `build` among its `deps`, and valid however `build` has ended by
     // the time it is judged.
@@ -774,7 +718,7 @@ fn a_note_waiting_on_a_held_turn_leaves_the_run_journalling_its_dispatch() {
         |world| world.events_of(run, "member-heartbeat").len() >= beats + 2,
     );
     assert_eq!(
-        awaiting_an_answer(&world),
+        awaiting_an_answer(&world, run),
         1,
         "the conversation answered the note before its turn ended, so nothing above was \
          recorded while one was waiting"
@@ -880,7 +824,7 @@ fn notes_to_one_conversation_are_delivered_and_recorded_in_the_order_they_were_c
     );
     world.until(
         "the first note to wait in the conversation's inbox",
-        |world| awaiting_an_answer(world) == 1,
+        |world| awaiting_an_answer(world, run) == 1,
     );
     // Two more, both queued while the first is outstanding, so the pass after its
     // answer claims them together.
@@ -908,7 +852,7 @@ fn notes_to_one_conversation_are_delivered_and_recorded_in_the_order_they_were_c
         world.events_of(run, "member-heartbeat").len() >= beats + 2
     });
     assert_eq!(
-        awaiting_an_answer(&world),
+        awaiting_an_answer(&world, run),
         1,
         "a later note was offered while the first was still waiting on its conversation"
     );
@@ -921,14 +865,14 @@ fn notes_to_one_conversation_are_delivered_and_recorded_in_the_order_they_were_c
     answered(first);
     world.until(
         "the second note to wait in the conversation's inbox",
-        |world| awaiting_an_answer(world) == 1,
+        |world| awaiting_an_answer(world, run) == 1,
     );
     let beats = world.events_of(run, "member-heartbeat").len();
     world.until("the run to go on recording its dispatch", |world| {
         world.events_of(run, "member-heartbeat").len() >= beats + 2
     });
     assert_eq!(
-        awaiting_an_answer(&world),
+        awaiting_an_answer(&world, run),
         1,
         "the note claimed behind the second was offered while the second was still waiting"
     );
@@ -939,7 +883,7 @@ fn notes_to_one_conversation_are_delivered_and_recorded_in_the_order_they_were_c
     answered(second);
     world.until(
         "the third note to wait in the conversation's inbox",
-        |world| awaiting_an_answer(world) == 1,
+        |world| awaiting_an_answer(world, run) == 1,
     );
     // No turn after this one is held, so the conversation runs to its end.
     std::fs::remove_file(world.fakes.join("turn.hold")).expect("the hold is lifted");
@@ -1112,7 +1056,7 @@ fn only_an_envelope_naming_what_a_waiting_note_names_is_held_behind_it() {
         .to_string(),
     );
     world.until("the note to wait in the conversation's inbox", |world| {
-        awaiting_an_answer(world) == 1
+        awaiting_an_answer(world, run) == 1
     });
     // Claimed behind the note, and each naming `build`.
     let mut after_build = submitted(
@@ -1197,7 +1141,7 @@ fn only_an_envelope_naming_what_a_waiting_note_names_is_held_behind_it() {
         );
     }
     assert_eq!(
-        awaiting_an_answer(&world),
+        awaiting_an_answer(&world, run),
         1,
         "the conversation answered the note before its turn ended, so nothing above was \
          applied while one was waiting"
@@ -1460,7 +1404,7 @@ fn a_cancel_preempts_the_unanswered_note_to_its_node_and_what_waits_behind_it() 
         .to_string(),
     );
     world.until("the notes to wait in build's and lint's inboxes", |world| {
-        awaiting_an_answer(world) == 2
+        awaiting_an_answer(world, run) == 2
     });
     let note_id = queued_id_of(&world, run, NOTE);
     let amend = submitted(
@@ -1524,7 +1468,7 @@ fn a_cancel_preempts_the_unanswered_note_to_its_node_and_what_waits_behind_it() 
         outcome_of(&world, run, note_id).is_none()
             && outcome_of(&world, run, refused_cancel).is_none()
             && outcome_of(&world, run, unauthorized).is_none()
-            && awaiting_an_answer(&world) == 2,
+            && awaiting_an_answer(&world, run) == 2,
         "a cancel its own envelope refuses preempted the note, or was answered ahead of it"
     );
     let cancel = submitted(
@@ -1728,7 +1672,7 @@ fn a_cancel_overtakes_an_envelope_also_waiting_on_another_nodes_note() {
         &envelope(note_op("lint", "worker", PLANNER_CONTEXT, None)),
     );
     world.until("both notes to wait in their inboxes", |world| {
-        awaiting_an_answer(world) == 2
+        awaiting_an_answer(world, run) == 2
     });
     let note_id = queued_id_of(&world, run, NOTE);
     let mut both = submitted(
@@ -1780,7 +1724,7 @@ fn a_cancel_overtakes_an_envelope_also_waiting_on_another_nodes_note() {
     assert_preempted(&world, run, note_id, cancel_id, NOTE);
     assert_preempted(&world, run, held_note_id, cancel_id, PREEMPTED_NOTE);
     assert!(
-        awaiting_an_answer(&world) >= 1,
+        awaiting_an_answer(&world, run) >= 1,
         "lint's note was answered, so nothing showed the held note preempted ahead of it"
     );
     assert!(
@@ -1874,7 +1818,7 @@ fn a_cancel_overtakes_an_envelope_naming_its_node_and_delivering_elsewhere() {
         .to_string(),
     );
     world.until("the note to wait in lint's inbox", |world| {
-        awaiting_an_answer(world) == 1
+        awaiting_an_answer(world, run) == 1
     });
     let overtaken = queued_id_of(&world, run, BUILD_RULING);
     let cancel = submitted(
@@ -1893,7 +1837,7 @@ fn a_cancel_overtakes_an_envelope_naming_its_node_and_delivering_elsewhere() {
         "the cancel was not applied"
     );
     assert!(
-        awaiting_an_answer(&world) == 1
+        awaiting_an_answer(&world, run) == 1
             && outcome_of(&world, run, overtaken).is_none()
             && to_lint.try_wait().expect("the reply is readable").is_none(),
         "lint answered, so nothing showed the cancel applied without waiting for it"
@@ -1974,7 +1918,7 @@ fn a_cancel_beside_a_live_note_is_applied_as_its_envelope_is_handed() {
         .to_string(),
     );
     world.until("the note to wait in lint's inbox", |world| {
-        awaiting_an_answer(world) == 1
+        awaiting_an_answer(world, run) == 1
     });
     let beside = queued_id_of(&world, run, OVERTAKEN_CANCEL);
     world.until_within(
@@ -2006,7 +1950,7 @@ fn a_cancel_beside_a_live_note_is_applied_as_its_envelope_is_handed() {
         "the second cancel was not judged against the node the first parked: {said}"
     );
     assert!(
-        awaiting_an_answer(&world) == 1 && outcome_of(&world, run, beside).is_none(),
+        awaiting_an_answer(&world, run) == 1 && outcome_of(&world, run, beside).is_none(),
         "lint answered, so nothing showed the cancel applied without waiting for it"
     );
 
@@ -2080,7 +2024,7 @@ fn an_untaken_note_into_a_cancelled_node_is_preempted_beside_one_another_node_re
         .to_string(),
     );
     world.until("both notes to wait in their inboxes", |world| {
-        awaiting_an_answer(world) == 2
+        awaiting_an_answer(world, run) == 2
     });
     let both = queued_id_of(&world, run, LINT_NOTE);
     let cancel = submitted(
@@ -2171,7 +2115,7 @@ fn notes_to_two_conversations_wait_in_both_inboxes_at_once() {
     );
     world.until(
         "both notes to wait in their conversations' inboxes",
-        |world| awaiting_an_answer(world) == 2,
+        |world| awaiting_an_answer(world, run) == 2,
     );
     let mut about_both = submitted(
         &world,
@@ -2257,40 +2201,43 @@ fn held_apart(world: &World, run: &str, nodes: Vec<Value>) {
 }
 
 /// Release the held turn of `node`'s worker, and no other, under [`held_apart`],
-/// once no note offered to any member is still waiting for its courier.
+/// once every live note queued to that node is in its conversation's hands.
 ///
-/// A note is in its conversation's hands only once the courier has taken it, and
-/// onejudge looks for notes only as the held decision returns; a turn released
-/// while its note is still an offer ends with the judge deciding on nothing, the
-/// node settled, and the note recorded after the dispatch it was meant for — the
-/// window [`release_once_the_note_is_taken`] documents, given the same margin.
-fn release_turn_of(world: &World, node: &str) {
-    world.until("every offered note to be taken by its courier", |world| {
-        notes_offered(&world.graph_state()).is_empty()
-    });
-    std::thread::sleep(IN_PROCESS_MARGIN);
+/// onejudge looks for a note only as the held turn returns, so a turn released
+/// while its note is still on its way ends with nothing in the inbox, the node
+/// settled, and the note recorded after the dispatch it was meant for. The wait
+/// is on the member's own `note-admitted`, relayed into the run's journal, for as
+/// many notes as the run's command queue holds for the node to be delivered live.
+fn release_turn_of(world: &World, run: &str, node: &str) {
+    world.until(
+        &format!("every live note to {node} to be admitted"),
+        |world| admitted_to(world, run, node) >= live_notes_to(world, run, node),
+    );
     release(&world.fakes, &format!("turn-{node}.go"));
     release(&world.fakes, &format!("turn-{node}.settle"));
 }
 
-/// The id of each note a member's spool under `dir` holds offered and not yet
-/// taken by its courier: [`notes_taken`]'s earlier half.
-fn notes_offered(dir: &Path) -> BTreeSet<String> {
-    let mut offered = BTreeSet::new();
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return offered;
-    };
-    let spool = dir.file_name().is_some_and(|name| name == NOTES_DIR);
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if let Some(id) = name.strip_suffix(".offer.json").filter(|_| spool) {
-            offered.insert(id.to_string());
-        } else if name != ".git" && entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-            offered.extend(notes_offered(&entry.path()));
-        }
-    }
-    offered
+/// How many notes the run's stream shows admitted into `node`'s conversation.
+fn admitted_to(world: &World, run: &str, node: &str) -> usize {
+    world
+        .events_of(run, "note-admitted")
+        .iter()
+        .filter(|event| event["labels"]["node"] == node)
+        .count()
+}
+
+/// How many notes the run's command queue holds for `node` that ask for a live
+/// attempt.
+fn live_notes_to(world: &World, run: &str, node: &str) -> usize {
+    std::fs::read_to_string(world.run_file(run, "channel/commands.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .flat_map(|envelope| envelope["commands"].as_array().cloned().unwrap_or_default())
+        .filter(|command| {
+            command["op"] == "note" && command["id"] == node && command["deliver"] != "next"
+        })
+        .count()
 }
 
 /// Where the journal records the note to `node` reading `text` as committed.
@@ -2333,11 +2280,11 @@ fn a_note_to_each_of_two_receivers_is_recorded_as_each_answers() {
         .to_string(),
     );
     world.until("both notes to wait in their inboxes", |world| {
-        awaiting_an_answer(world) == 2
+        awaiting_an_answer(world, run) == 2
     });
     let id = queued_id_of(&world, run, BUILD_NOTE);
 
-    release_turn_of(&world, "lint");
+    release_turn_of(&world, run, "lint");
     world.until("lint's note to be recorded", |world| {
         noted_at(&world.journal(run), "lint", LINT_NOTE).is_some()
     });
@@ -2347,7 +2294,7 @@ fn a_note_to_each_of_two_receivers_is_recorded_as_each_answers() {
             .any(|prompt| prompt.contains(LINT_NOTE))
     });
     assert_eq!(
-        awaiting_an_answer(&world),
+        awaiting_an_answer(&world, run),
         1,
         "build answered, so nothing showed lint recorded while build was held"
     );
@@ -2361,7 +2308,7 @@ fn a_note_to_each_of_two_receivers_is_recorded_as_each_answers() {
         "the envelope was answered while build's note was still waiting"
     );
 
-    release_turn_of(&world, "build");
+    release_turn_of(&world, run, "build");
     assert!(
         answered(both).contains("\"state\":\"applied\""),
         "the envelope of both notes was not applied"
@@ -2407,7 +2354,7 @@ fn each_of_three_receivers_of_one_envelope_is_recorded_as_it_answers() {
         .to_string(),
     );
     world.until("all three notes to wait in their inboxes", |world| {
-        awaiting_an_answer(world) == 3
+        awaiting_an_answer(world, run) == 3
     });
     let id = queued_id_of(&world, run, BUILD_NOTE);
     let recorded = |world: &World| {
@@ -2419,12 +2366,12 @@ fn each_of_three_receivers_of_one_envelope_is_recorded_as_it_answers() {
         ]
     };
 
-    release_turn_of(&world, "lint");
+    release_turn_of(&world, run, "lint");
     world.until("lint's note to be recorded", |world| recorded(world)[1]);
     assert_eq!(recorded(&world), [false, true, false]);
     assert!(outcome_of(&world, run, id).is_none());
 
-    release_turn_of(&world, "docs");
+    release_turn_of(&world, run, "docs");
     world.until("docs' note to be recorded", |world| recorded(world)[2]);
     assert_eq!(recorded(&world), [false, true, true]);
     assert!(
@@ -2433,7 +2380,7 @@ fn each_of_three_receivers_of_one_envelope_is_recorded_as_it_answers() {
         "the envelope was answered while build's note was still waiting"
     );
 
-    release_turn_of(&world, "build");
+    release_turn_of(&world, run, "build");
     assert!(
         answered(all).contains("\"state\":\"applied\""),
         "the envelope of three notes was not applied"
@@ -2486,7 +2433,7 @@ fn a_note_held_on_one_receiver_holds_nothing_that_names_only_others() {
         .to_string(),
     );
     world.until("both notes to wait in their inboxes", |world| {
-        awaiting_an_answer(world) == 2
+        awaiting_an_answer(world, run) == 2
     });
     let notes_id = queued_id_of(&world, run, BUILD_NOTE);
     assert!(
@@ -2507,9 +2454,9 @@ fn a_note_held_on_one_receiver_holds_nothing_that_names_only_others() {
         .contains("\"state\":\"applied\""),
         "an amend naming only a node no note waits on was not applied"
     );
-    assert_eq!(awaiting_an_answer(&world), 2);
+    assert_eq!(awaiting_an_answer(&world, run), 2);
 
-    release_turn_of(&world, "lint");
+    release_turn_of(&world, run, "lint");
     world.until("lint's note to be recorded", |world| {
         noted_at(&world.journal(run), "lint", LINT_NOTE).is_some()
     });
@@ -2550,7 +2497,7 @@ fn a_note_held_on_one_receiver_holds_nothing_that_names_only_others() {
         "an envelope naming build was applied while build's note was still waiting"
     );
 
-    release_turn_of(&world, "build");
+    release_turn_of(&world, run, "build");
     assert!(answered(notes).contains("\"state\":\"applied\""));
     assert!(
         answered(on_build).contains("\"state\":\"applied\""),
@@ -2563,7 +2510,7 @@ fn a_note_held_on_one_receiver_holds_nothing_that_names_only_others() {
         "the amend of build overtook build's note"
     );
     for turn in ["build-noted", "lint-noted", "other"] {
-        release_turn_of(&world, turn);
+        release_turn_of(&world, run, turn);
     }
     world.until("the run to settle", |world| {
         world.events_of(run, "node-settled").len() == 3
@@ -2589,7 +2536,7 @@ fn a_finding_about_a_node_surfaces_while_its_note_waits() {
         &envelope(note_op("build", "worker", NOTE, None)),
     );
     world.until("the note to wait in the conversation's inbox", |world| {
-        awaiting_an_answer(world) == 1
+        awaiting_an_answer(world, run) == 1
     });
     for finding in [
         json!({"op": "finding", "id": "build", "message": FINDING}),
@@ -2610,7 +2557,7 @@ fn a_finding_about_a_node_surfaces_while_its_note_waits() {
         })
     });
     assert_eq!(
-        awaiting_an_answer(&world),
+        awaiting_an_answer(&world, run),
         1,
         "the conversation answered the note, so nothing showed a finding surfaced ahead of it"
     );
@@ -2658,7 +2605,7 @@ fn status_reads_a_held_delivery_as_delivering_and_what_waits_behind_it_as_held()
         .to_string(),
     );
     world.until("the note to wait in the conversation's inbox", |world| {
-        awaiting_an_answer(world) == 1
+        awaiting_an_answer(world, run) == 1
     });
     let queue = world.run_file(run, "channel/commands.jsonl");
     let queued = |text: &str| {
@@ -2699,7 +2646,7 @@ fn status_reads_a_held_delivery_as_delivering_and_what_waits_behind_it_as_held()
         "an amend naming only a node no note or held envelope names waited on build's note"
     );
     assert_eq!(
-        awaiting_an_answer(&world),
+        awaiting_an_answer(&world, run),
         1,
         "the conversation answered the note, so nothing showed the docs-only amend applied \
          while it was outstanding"
@@ -2906,7 +2853,7 @@ fn status_names_each_receiver_still_delivering_and_drops_each_as_it_answers() {
         .to_string(),
     );
     world.until("both notes to wait in their inboxes", |world| {
-        awaiting_an_answer(world) == 2
+        awaiting_an_answer(world, run) == 2
     });
     let id = queued_id_of(&world, run, BUILD_NOTE);
     let line = |status: &str| {
@@ -2942,7 +2889,7 @@ fn status_names_each_receiver_still_delivering_and_drops_each_as_it_answers() {
         "{delivery}"
     );
 
-    release_turn_of(&world, "build");
+    release_turn_of(&world, run, "build");
     world.until("build's note to be recorded", |world| {
         noted_at(&world.journal(run), "build", BUILD_NOTE).is_some()
     });
@@ -2964,7 +2911,7 @@ fn status_names_each_receiver_still_delivering_and_drops_each_as_it_answers() {
         status.stdout
     );
 
-    release_turn_of(&world, "lint");
+    release_turn_of(&world, run, "lint");
     assert!(
         answered(both).contains("\"state\":\"applied\""),
         "the envelope of both notes was not applied"
@@ -3009,7 +2956,7 @@ fn a_later_edit_to_a_node_a_held_envelope_names_waits_behind_that_envelope() {
         &envelope(note_op("build", "worker", NOTE, None)),
     );
     world.until("the note to wait in the conversation's inbox", |world| {
-        awaiting_an_answer(world) == 1
+        awaiting_an_answer(world, run) == 1
     });
     let queue = world.run_file(run, "channel/commands.jsonl");
     let queued = |text: &str| {
@@ -3050,7 +2997,7 @@ fn a_later_edit_to_a_node_a_held_envelope_names_waits_behind_that_envelope() {
         "an amend naming nothing held waited on build's note"
     );
     assert_eq!(
-        awaiting_an_answer(&world),
+        awaiting_an_answer(&world, run),
         1,
         "the conversation answered the note, so nothing showed the later amend waiting on it"
     );
@@ -3118,10 +3065,10 @@ fn a_receiver_still_delivering_when_its_driver_died_is_refused_by_the_next() {
         .to_string(),
     );
     world.until("both notes to wait in their inboxes", |world| {
-        awaiting_an_answer(world) == 2
+        awaiting_an_answer(world, run) == 2
     });
     let id = queued_id_of(&world, run, BUILD_NOTE);
-    release_turn_of(&world, "lint");
+    release_turn_of(&world, run, "lint");
     world.until("lint's note to be recorded", |world| {
         noted_at(&world.journal(run), "lint", LINT_NOTE).is_some()
     });
@@ -3177,7 +3124,7 @@ fn a_receiver_still_delivering_when_its_driver_died_is_refused_by_the_next() {
         ["edit-committed"],
         "the note lint answered was committed again"
     );
-    release_turn_of(&world, "build");
+    release_turn_of(&world, run, "build");
 }
 
 /// A note the conversation refuses while the run is still being driven is
@@ -3405,8 +3352,8 @@ fn a_note_submitted_with_nothing_driving_waits_on_no_turn_and_leaves_the_run_ado
         &envelope(note_op("build", "worker", NOTE, None)),
     );
     let writer = reply.id();
-    world.until("the note to wait in the conversation's inbox", |world| {
-        awaiting_an_answer(world) == 1
+    world.until("the note's offer to wait in the member's spool", |world| {
+        offers_in_spool(world) == 1
     });
 
     // While it waits, the reply is the run's writer, and a driver that tries to
@@ -3493,7 +3440,7 @@ fn a_note_in_an_envelope_the_run_refuses_is_never_offered_to_the_conversation() 
     // journeys that *do* deliver release it — so the turn this note would have
     // been offered to was live and reachable for the whole window, and the reason
     // it was never offered is the pass rather than the timing.
-    let releasing = release_when_the_note_is_queued(&world, run, &["turn.go", "turn.settle"]);
+    let releasing = release_once_admitted(&world, run, &["turn.go", "turn.settle"]);
     let replied = world.run_with_stdin_on(
         world.agentgraph_cmd(&["reply", run]),
         &json!({"version": 2, "commands": [
@@ -3573,7 +3520,7 @@ fn a_note_to_a_node_with_no_conversation_refuses_before_any_note_of_it_is_offere
         vec![agent("build", &[]), agent("later", &["build"])],
     );
 
-    let releasing = release_when_the_note_is_queued(&world, run, &["turn.go", "turn.settle"]);
+    let releasing = release_once_admitted(&world, run, &["turn.go", "turn.settle"]);
     let replied = world.run_with_stdin_on(
         world.agentgraph_cmd(&["reply", run]),
         &json!({"version": 2, "commands": [
@@ -3644,7 +3591,7 @@ fn a_binding_note_enters_the_bar_its_judge_decides_against_as_the_workers_own() 
     let run = "binding";
     held_conversation(&world, run, vec![agent("build", &[])]);
 
-    let releasing = release_when_the_note_is_queued(&world, run, &["turn.go", "turn.settle"]);
+    let releasing = release_once_admitted(&world, run, &["turn.go", "turn.settle"]);
     let replied = world.run_with_stdin_on(
         world.agentgraph_cmd(&["reply", run]),
         &envelope(note_op("build", "worker", NOTE, Some(CRITERION))),
@@ -3851,7 +3798,7 @@ fn the_note_seam_answers_a_delivery_and_a_non_delivery_through_this_crates_own_a
 
     // Then the delivery, into the conversation that is live — answered with which
     // party took it, which is what a caller has no second source for.
-    let releasing = release_when_the_note_is_queued(&world, run, &["turn.go", "turn.settle"]);
+    let releasing = release_once_admitted(&world, run, &["turn.go", "turn.settle"]);
     let delivered = deliver(
         &paths,
         "build",
@@ -3908,7 +3855,7 @@ fn a_note_no_turn_took_is_carried_to_the_nodes_next_dispatch_and_named_as_carrie
         .err_has("`persist: false` composes it into no dispatch");
 
     // The same note under the defaults is not a refusal: it is carried.
-    let releasing = release_when_the_note_is_queued(&world, run, &["turn.go", "turn.settle"]);
+    let releasing = release_once_admitted(&world, run, &["turn.go", "turn.settle"]);
     world
         .run_with_stdin_on(
             world.agentgraph_cmd(&["reply", run]),
@@ -4024,7 +3971,7 @@ fn a_note_recorded_carried_whose_text_a_turn_then_opens_on_is_recorded_as_shown(
 
     // Recorded `carried` while the conversation is live and the worker's turn is
     // held open: no live attempt was asked for, so the seam took nothing.
-    let releasing = release_when_the_note_is_queued(&world, run, &["turn.go", "turn.settle"]);
+    let releasing = release_once_admitted(&world, run, &["turn.go", "turn.settle"]);
     world
         .run_with_stdin_on(
             world.agentgraph_cmd(&["reply", run]),
@@ -4154,11 +4101,11 @@ fn two_notes_in_one_envelope_are_each_recorded_on_the_turn_that_opened_on_them()
         child.wait_with_output().expect("the binary runs")
     });
     // Each note is offered while a held worker turn is live, and that turn is
-    // released only once the member's spool shows the note taken, with the margin
-    // `release_once_the_note_is_taken` gives the in-process rest of the hand-over.
-    let first_taken = until_a_note_is_taken(&world.root, &BTreeSet::new())
-        .expect("the first note was taken by the member's courier");
-    std::thread::sleep(IN_PROCESS_MARGIN);
+    // released only once the run's stream shows the note admitted to the
+    // conversation's inbox.
+    world.until("the first note to be admitted", |world| {
+        admitted(world, run) >= 1
+    });
     release(&world.fakes, "turn.go");
     release(&world.fakes, "turn.settle");
     // The first note's turn is open and held; release it so the second note is
@@ -4167,12 +4114,10 @@ fn two_notes_in_one_envelope_are_each_recorded_on_the_turn_that_opened_on_them()
     world.until("the turn carrying the first note to open", |world| {
         worked(world).len() >= 2
     });
-    // The second note is offered once the first is acknowledged; the first's own
-    // spool files may still be there, so it is the taken note that is not the
-    // first's.
-    until_a_note_is_taken(&world.root, &BTreeSet::from([first_taken]))
-        .expect("the second note was taken by the member's courier");
-    std::thread::sleep(IN_PROCESS_MARGIN);
+    // The second note is offered once the first is acknowledged.
+    world.until("the second note to be admitted", |world| {
+        admitted(world, run) >= 2
+    });
     release(&world.fakes, "turn.go");
     release(&world.fakes, "turn.settle");
     let output = replied.join().expect("the reply thread finishes");
@@ -4323,7 +4268,7 @@ fn a_retry_replacement_spends_the_notes_the_node_it_supersedes_read_and_says_so(
         !openings_of(world, run, "build").is_empty()
     });
 
-    let releasing = release_when_the_note_is_queued(&world, run, &["turn.go", "turn.settle"]);
+    let releasing = release_once_admitted(&world, run, &["turn.go", "turn.settle"]);
     world
         .run_with_stdin_on(
             world.agentgraph_cmd(&["reply", run]),
@@ -4438,7 +4383,7 @@ fn a_note_a_running_turn_took_is_not_carried_to_that_nodes_next_dispatch() {
         !openings_of(world, run, "build").is_empty()
     });
 
-    let releasing = release_when_the_note_is_queued(&world, run, &["turn.go", "turn.settle"]);
+    let releasing = release_once_admitted(&world, run, &["turn.go", "turn.settle"]);
     world
         .run_with_stdin_on(
             world.agentgraph_cmd(&["reply", run]),
@@ -4595,7 +4540,7 @@ fn a_note_a_dispatch_read_survives_the_engines_own_redispatch_of_the_node() {
     // The ruling, addressed to both parties, delivered into the held worker
     // turn — so it is read by the worker and, with the worker's response, by the
     // judge of the first conversation.
-    let releasing = release_when_the_note_is_queued(&world, run, &["turn.go", "turn.settle"]);
+    let releasing = release_once_admitted(&world, run, &["turn.go", "turn.settle"]);
     let replied = world.run_with_stdin_on(
         world.agentgraph_cmd(&["reply", run]),
         &envelope(note_op("service", "both", NOTE, Some(CRITERION))),
@@ -4817,7 +4762,7 @@ fn a_note_reaching_the_live_judge_re_takes_its_decision_and_rides_it_to_the_work
     world.script("judge.asks-again-times", "2");
     held_judge(&world, run, vec![agent("build", &[])]);
 
-    let releasing = release_once_the_note_is_taken(&world, &["judge.go"]);
+    let releasing = release_once_admitted(&world, run, &["judge.go"]);
     let replied = world.run_with_stdin_on(
         world.agentgraph_cmd(&["reply", run]),
         &envelope(note_op("build", "supervisor", NOTE, None)),
@@ -4882,7 +4827,7 @@ fn a_note_reaching_the_live_judge_re_takes_its_decision_and_rides_it_to_the_work
 ///
 /// This is the routing a release that overtakes the reconciler produces — a
 /// note-delivered record of `reached: worker`, `routed_to: [worker, supervisor]` —
-/// and so what [`release_once_the_note_is_taken`] keeps the live-judge journeys
+/// and so what [`release_once_admitted`] keeps the live-judge journeys
 /// from reaching: the judge decides with nothing in the inbox, the worker turn its
 /// decision opens is held, and only then is the note sent.
 #[test]
@@ -4898,11 +4843,12 @@ fn a_note_that_reaches_the_conversation_after_the_judge_decided_reaches_the_work
 
     // The judge decides with nothing in the conversation's inbox, and the worker
     // turn its decision opens is held, so the note arrives while that one is live.
-    // This release is the one the gate refuses: no spool shows a note taken.
+    // This release is the one the gate refuses: no note has been admitted.
     world.script("turn.hold", "hold");
-    assert!(
-        notes_taken(&world.root).is_empty(),
-        "a note was taken before any was sent, so this release is not the ordering it means"
+    assert_eq!(
+        admitted(&world, run),
+        0,
+        "a note was admitted before any was sent, so this release is not the ordering it means"
     );
     release(&world.fakes, "judge.go");
     world.until(
@@ -4910,7 +4856,7 @@ fn a_note_that_reaches_the_conversation_after_the_judge_decided_reaches_the_work
         |world| worked(world).len() >= 2,
     );
 
-    let releasing = release_once_the_note_is_taken(&world, &["turn.go", "turn.settle"]);
+    let releasing = release_once_admitted(&world, run, &["turn.go", "turn.settle"]);
     let replied = world.run_with_stdin_on(
         world.agentgraph_cmd(&["reply", run]),
         &envelope(note_op("build", "supervisor", NOTE, None)),
@@ -4964,7 +4910,7 @@ fn a_note_the_judge_passed_the_work_with_is_recorded_as_judged_with() {
     let run = "passed";
     held_judge(&world, run, vec![agent("build", &[])]);
 
-    let releasing = release_once_the_note_is_taken(&world, &["judge.go"]);
+    let releasing = release_once_admitted(&world, run, &["judge.go"]);
     let replied = world.run_with_stdin_on(
         world.agentgraph_cmd(&["reply", run]),
         &envelope(note_op("build", "both", NOTE, None)),
@@ -5103,7 +5049,7 @@ fn an_undeclared_monitor_is_refused_before_its_note_is_queued() {
 
     // And the same note from the author that may send it goes through against the
     // same live node, so what was refused is the authority rather than the author.
-    let releasing = release_when_the_note_is_queued(&world, run, &["turn.go", "turn.settle"]);
+    let releasing = release_once_admitted(&world, run, &["turn.go", "turn.settle"]);
     let replied = world.run_with_stdin_on(
         world.agentgraph_cmd(&["reply", run]),
         &envelope(note_op("build", "worker", NOTE, Some(CRITERION))),
@@ -5852,8 +5798,8 @@ fn status_shows_a_pending_notes_deadline_beside_its_delivering_state() {
         status.stdout
     );
 
-    release_turn_of(&world, "build");
-    release_turn_of(&world, "lint");
+    release_turn_of(&world, run, "build");
+    release_turn_of(&world, run, "lint");
     answered(timed);
     answered(untimed);
 }
