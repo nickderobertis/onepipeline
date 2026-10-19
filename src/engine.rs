@@ -3990,7 +3990,10 @@ fn answer_recovered(
             });
         }
     }
-    channel.answer_commands(&answered_envelope(envelope.id, commands, &answers))?;
+    channel.answer_commands(&crate::withdrawal::as_withdrawn(
+        paths,
+        answered_envelope(envelope.id, commands, &answers),
+    )?)?;
     Ok(changed)
 }
 
@@ -5964,7 +5967,7 @@ impl NoteDeliveries {
         // Held until the delivery is on the record, so a re-dispatch waiting on
         // it reads the record with the delivery in it.
         drop(lane.pending);
-        self.finish(envelope, channel)?;
+        self.finish(paths, envelope, channel)?;
         Ok(changed)
     }
 
@@ -5976,7 +5979,7 @@ impl NoteDeliveries {
     }
 
     /// Write envelope `id`'s one outcome once its last receiver has answered.
-    fn finish(&mut self, id: u64, channel: &ChannelState) -> Result<()> {
+    fn finish(&mut self, paths: &RunPaths, id: u64, channel: &ChannelState) -> Result<()> {
         if !self
             .outstanding
             .get(&id)
@@ -5987,11 +5990,12 @@ impl NoteDeliveries {
         let Some(done) = self.outstanding.remove(&id) else {
             return Ok(());
         };
-        channel.answer_commands(&answered_envelope(
-            done.envelope.id,
-            &done.envelope.commands,
-            &done.answers,
-        ))
+        // A note of it carried as it was handed may have been withdrawn while the
+        // rest of it was still being delivered.
+        channel.answer_commands(&crate::withdrawal::as_withdrawn(
+            paths,
+            answered_envelope(done.envelope.id, &done.envelope.commands, &done.answers),
+        )?)
     }
 
     /// Stop waiting on every outstanding receiver among `cancelled` whose thread
@@ -6083,7 +6087,7 @@ impl NoteDeliveries {
                 &lane.witnessed,
             )?;
             drop(lane.pending);
-            self.finish(id, channel)?;
+            self.finish(paths, id, channel)?;
         }
         Ok(())
     }

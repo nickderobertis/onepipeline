@@ -13,7 +13,7 @@
 //! carries on untouched. `docs/contract-divergences.md` states the interim and
 //! what retires it.
 
-use crate::channel::{ChannelState, Command, CommandVerdict};
+use crate::channel::{ChannelState, Command, CommandOutcome, CommandVerdict};
 use crate::edits::Operation;
 use crate::error::{Error, Result};
 use crate::event::Envelope;
@@ -129,8 +129,9 @@ pub(crate) fn validate(
 /// `by`: that command refused, carrying `reason`, and every other command's
 /// answer as it stood.
 ///
-/// An envelope that was never answered is left alone: its answer, when it comes,
-/// is its own.
+/// An envelope not answered yet is left alone here: it is answered once its last
+/// note is, and that answer is written through [`as_withdrawn`], which refuses
+/// this note there.
 ///
 /// # Errors
 ///
@@ -146,9 +147,53 @@ pub(crate) fn answer_withdrawn(
     let Some(mut outcome) = channel.outcome_of(sent) else {
         return Ok(());
     };
+    if !refuse_withdrawn(&mut outcome, index, reason, by) {
+        return Ok(());
+    }
+    channel.answer_commands(&outcome)
+}
+
+/// `outcome`, with each note of its envelope a committed withdrawal took back
+/// answered refused, carrying why: what an envelope's answer is written as when
+/// a note of it was withdrawn while the rest of it was still being delivered.
+///
+/// # Errors
+///
+/// [`committed`]'s.
+pub(crate) fn as_withdrawn(
+    paths: &RunPaths,
+    mut outcome: CommandOutcome,
+) -> Result<CommandOutcome> {
+    for (by, operation) in committed(&crate::journal::read(&paths.journal()))? {
+        if let (
+            Some(by),
+            Operation::NoteWithdrawn {
+                envelope,
+                index,
+                reason,
+                ..
+            },
+        ) = (by, operation)
+        {
+            if envelope == outcome.id {
+                refuse_withdrawn(&mut outcome, index, &reason, by);
+            }
+        }
+    }
+    Ok(outcome)
+}
+
+/// Answer command `index` of `outcome` refused, as withdrawn by envelope `by` for
+/// `reason`. `false` where the outcome has no such command.
+fn refuse_withdrawn(
+    outcome: &mut CommandOutcome,
+    index: u32,
+    reason: &WithdrawalReason,
+    by: u64,
+) -> bool {
     let position = usize::try_from(index).unwrap_or(usize::MAX);
     let Some(result) = outcome.results.get_mut(position) else {
-        return Ok(());
+        return false;
     };
     let why = format!("{} {}", withdrawn_by_words(by), reason.as_str());
     result.outcome = CommandVerdict::Refused;
@@ -159,7 +204,7 @@ pub(crate) fn answer_withdrawn(
     outcome.reason = Some(format!(
         "command {index} ('note') was {why}; every other command's answer stands"
     ));
-    channel.answer_commands(&outcome)
+    true
 }
 
 /// Answer again every envelope a committed withdrawal took a note of that is not
@@ -254,6 +299,7 @@ fn committed(journal: &[Envelope]) -> Result<Vec<(Option<u64>, Operation)>> {
             .payload
             .get("envelope")
             .and_then(serde_json::Value::as_u64);
+        // llmlint: ignore[changed_behavior_has_e2e] a commit of this crate's own whose operations this build cannot read is a journal edited by hand — no verb, driver or death writes one — so a journey reaching it would prove the fixture rather than the code; the refusal is held by `withdrawal::tests` over such a record, as `note::standing`'s is by `note::tests`, and `validate` and `as_withdrawn` take it through `?`.
         let operations: Vec<Operation> = serde_json::from_value(
             envelope
                 .payload
@@ -359,6 +405,37 @@ mod tests {
         assert_eq!(
             reason,
             crate::note::expired(std::time::Duration::from_secs(2))
+        );
+    }
+
+    /// A commit whose operations this build cannot read is refused by name, never
+    /// read past: a withdrawal it hid would let the same note be withdrawn twice.
+    #[test]
+    fn a_commit_a_withdrawal_cannot_read_is_refused_by_name() {
+        use crate::journal::{labels, payload, PipelineKind};
+        let unreadable = Envelope {
+            v: crate::event::ENVELOPE_VERSION,
+            ts: crate::sys::rfc3339_from_millis(1_786_000_000_000),
+            stream: "s".into(),
+            seq: 4,
+            source: crate::event::Source::Pipeline,
+            kind: PipelineKind::EditCommitted.into(),
+            dimensions: Default::default(),
+            labels: labels("demo", None),
+            payload: payload(&[
+                (
+                    "operations",
+                    serde_json::json!([{"kind": "from-the-future"}]),
+                ),
+                ("envelope", serde_json::json!(3)),
+            ]),
+            artifacts: Vec::new(),
+        };
+        let refused = committed(&[unreadable]).expect_err("an unreadable commit is not read past");
+        let said = refused.to_string();
+        assert!(
+            said.contains("edit-committed") && said.contains("s/4"),
+            "the refusal does not name the record: {said}"
         );
     }
 

@@ -6289,3 +6289,86 @@ fn a_withdrawal_its_driver_died_before_answering_is_answered_by_the_next_driver(
     });
     assert_eq!(outcomes_for(&world, run, sent), 2);
 }
+
+/// A carried note withdrawn while the rest of its envelope is still being
+/// delivered is refused in that envelope's one answer, written once its live note
+/// is answered: the withdrawal does not wait behind the envelope, and the answer
+/// that comes after it does not call the withdrawn note applied.
+#[test]
+fn a_note_withdrawn_while_its_envelope_still_waits_is_refused_in_that_envelopes_answer() {
+    let world = World::new("note-withdraw-waiting");
+    let run = "withdrawwaiting";
+    held_conversation(
+        &world,
+        run,
+        vec![agent("build", &[]), agent("later", &["build"])],
+    );
+    // The note to `later` is carried as the envelope is handed; the one to
+    // `build` waits for its held turn to end.
+    let before = admitted(&world, run);
+    let both = submitted(
+        &world,
+        run,
+        &json!({"version": 2, "commands": [
+            note_op("later", "worker", NOTE, None),
+            note_op_with("build", SECOND_CARRIED, "turn-end", true),
+        ]})
+        .to_string(),
+    );
+    world.until("build's note to be admitted", |world| {
+        admitted(world, run) > before
+    });
+    let sent = queued_id_of(&world, run, NOTE);
+    assert_eq!(
+        recorded_note(&world, run, NOTE)["reached"],
+        json!("carried")
+    );
+    assert!(outcome_of(&world, run, sent).is_none());
+
+    world
+        .run_with_stdin_on(
+            world.agentgraph_cmd(&["reply", run]),
+            &envelope(withdraw_op(sent, 0, WITHDRAWN_BECAUSE)),
+        )
+        .exited(0)
+        .out_has("\"state\":\"applied\"");
+    assert_eq!(withdrawals(&world, run).len(), 1);
+    assert!(
+        outcome_of(&world, run, sent).is_none(),
+        "the envelope was answered before its live note was"
+    );
+
+    release(&world.fakes, "turn.go");
+    release(&world.fakes, "turn.settle");
+    let _ = both.wait_with_output().expect("the binary runs");
+    let outcome = outcome_of(&world, run, sent).expect("answered");
+    assert_eq!(
+        [
+            &outcome["results"][0]["outcome"],
+            &outcome["results"][1]["outcome"],
+            &json!(outcomes_for(&world, run, sent))
+        ],
+        [&json!("refused"), &json!("applied"), &json!(1)],
+        "the envelope's one answer does not refuse the note withdrawn while it waited: {outcome}"
+    );
+    assert!(
+        outcome["results"][0]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains(WITHDRAWN_BECAUSE)),
+        "{outcome}"
+    );
+    world.until("later to be dispatched", |world| {
+        dispatches_of(world, run, "later")
+            .first()
+            .is_some_and(|turns| !turns.is_empty())
+    });
+    assert!(
+        dispatches_of(&world, run, "later")[0]
+            .iter()
+            .all(|turn| !turn.contains(NOTE)),
+        "later's dispatch was composed with the note withdrawn before it"
+    );
+    world.until("the run to settle", |world| {
+        world.events_of(run, "node-settled").len() >= 2
+    });
+}

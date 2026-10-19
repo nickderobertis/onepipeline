@@ -727,10 +727,15 @@ mod control {
         }
     }
 
+    /// Where the turn's control stands: not held, so nothing can be redirected,
+    /// or held, with the redirect that ends the hold once one arrives.
     #[derive(Default)]
-    struct State {
-        holding: bool,
-        taken: Option<Redirect>,
+    enum State {
+        #[default]
+        Idle,
+        Holding {
+            taken: Option<Redirect>,
+        },
     }
 
     struct Bound {
@@ -763,15 +768,14 @@ mod control {
             fake::wait_for(gate);
             return None;
         };
-        bound
-            .state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .holding = true;
+        *bound.state.lock().unwrap_or_else(PoisonError::into_inner) =
+            State::Holding { taken: None };
         fake::wait_for_any(&[gate.to_path_buf(), bound.marker.clone()]);
         let mut state = bound.state.lock().unwrap_or_else(PoisonError::into_inner);
-        state.holding = false;
-        state.taken.take()
+        match std::mem::take(&mut *state) {
+            State::Holding { taken } => taken,
+            State::Idle => None,
+        }
     }
 
     #[cfg(unix)]
@@ -858,14 +862,17 @@ mod control {
                     let (answer, answered) = std::sync::mpsc::channel();
                     let taken = {
                         let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
-                        if state.holding && state.taken.is_none() {
-                            state.taken = Some(Redirect {
-                                input: input.as_str().to_string(),
-                                answer,
-                            });
-                            true
-                        } else {
-                            false
+                        match &mut *state {
+                            State::Holding {
+                                taken: taken @ None,
+                            } => {
+                                *taken = Some(Redirect {
+                                    input: input.as_str().to_string(),
+                                    answer,
+                                });
+                                true
+                            }
+                            State::Holding { taken: Some(_) } | State::Idle => false,
                         }
                     };
                     if taken && std::fs::write(marker, "redirected").is_ok() {
