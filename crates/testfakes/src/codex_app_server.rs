@@ -36,7 +36,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 /// The file in the script directory naming how many turns a turn waits for.
@@ -78,7 +78,7 @@ struct Server {
     turns_started: AtomicUsize,
     next_thread: AtomicUsize,
     /// Every thread a connection opened or rejoined: a turn may only name one.
-    threads: Mutex<HashSet<String>>,
+    threads: Mutex<HashSet<ThreadId>>,
 }
 
 /// Serve on `listen` (the `unix://PATH` of `--listen`) until idle, recording
@@ -517,7 +517,7 @@ struct ShellEnvironmentPolicy {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct TurnParams {
-    thread_id: String,
+    thread_id: ThreadId,
     #[serde(rename = "cwd")]
     _cwd: String,
     input: Vec<InputItem>,
@@ -554,13 +554,37 @@ enum SandboxPolicy {
     },
 }
 
+/// An opaque protocol identity. Membership, rather than its spelling, decides
+/// whether a turn may use it; unsubscribe also accepts an unloaded identity.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[serde(try_from = "String", into = "String")]
+struct ThreadId(String);
+
+impl TryFrom<String> for ThreadId {
+    type Error = &'static str;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if value.is_empty() {
+            Err("empty thread identity")
+        } else {
+            Ok(Self(value))
+        }
+    }
+}
+
+impl From<ThreadId> for String {
+    fn from(value: ThreadId) -> Self {
+        value.0
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct ThreadRef {
-    thread_id: String,
+    thread_id: ThreadId,
 }
 
-fn threads(server: &Server) -> std::sync::MutexGuard<'_, HashSet<String>> {
+fn threads(server: &Server) -> std::sync::MutexGuard<'_, HashSet<ThreadId>> {
     server
         .threads
         .lock()
@@ -582,11 +606,11 @@ fn handle(server: &Server, writer: &Writer, message: Message) -> Result<(), Stri
             "userAgent": format!("onepipeline-fake-codex-app-server (for {})", client_info.name)
         })),
         Call::ThreadStart(ThreadParams { model, .. }) => {
-            let thread = format!(
+            let thread = ThreadId(format!(
                 "fake-thread-{}-{}",
                 std::process::id(),
                 server.next_thread.fetch_add(1, Ordering::SeqCst)
-            );
+            ));
             reply(opened(server, thread, model));
         }
         Call::TurnStart(params) => turn(server, writer, params, reply)?,
@@ -599,7 +623,7 @@ fn handle(server: &Server, writer: &Writer, message: Message) -> Result<(), Stri
 }
 
 /// Hold `thread` open and answer for it under the model the client asked for.
-fn opened(server: &Server, thread: String, model: Option<String>) -> Value {
+fn opened(server: &Server, thread: ThreadId, model: Option<String>) -> Value {
     threads(server).insert(thread.clone());
     let mut result = json!({"thread": {"id": thread}});
     if let Some(model) = model {
@@ -630,11 +654,12 @@ fn turn(
     } = params;
     if !threads(server).contains(&thread_id) {
         return Err(format!(
-            "turn/start names thread {thread_id}, which no client opened"
+            "turn/start names thread {}, which no client opened",
+            thread_id.0
         ));
     }
     if input.is_empty() {
-        return Err(format!("turn/start on {thread_id} carries no input"));
+        return Err(format!("turn/start on {} carries no input", thread_id.0));
     }
     let started = server.turns_started.fetch_add(1, Ordering::SeqCst) + 1;
     let turn_id = format!("fake-turn-{}-{started}", std::process::id());

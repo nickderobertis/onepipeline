@@ -1382,3 +1382,9 @@ path = "tests/scratch_workload/main.rs"
 strip = true
 lto = "thin"
 codegen-units = 1
+
+# Wire-level refusal checks for the shared Codex app-server double, isolated
+# from the dispatch journeys so its backstops rerun only for their own inputs.
+[[test]]
+name = "codex_server"
+path = "tests/codex_server/main.rs"

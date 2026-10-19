@@ -161,6 +161,20 @@
       "{workspaceRoot}/.cargo/config.toml",
       "{workspaceRoot}/.config/nextest.toml",
       "sharedGlobals"
+    ],
+    "codexServerSource": [
+      "{workspaceRoot}/tests/codex_server/**/*",
+      "{workspaceRoot}/crates/testfakes/Cargo.toml",
+      "{workspaceRoot}/crates/testfakes/src/*.rs",
+      "{workspaceRoot}/crates/testfakes/src/bin/fake-codex.rs",
+      "{workspaceRoot}/Cargo.toml",
+      "{workspaceRoot}/Cargo.lock",
+      "{workspaceRoot}/rust-toolchain.toml",
+      "{workspaceRoot}/.cargo/config.toml",
+      "{workspaceRoot}/.config/nextest.toml",
+      "{workspaceRoot}/rustfmt.toml",
+      "{workspaceRoot}/clippy.toml",
+      "sharedGlobals"
     ]
   },
   "targetDefaults": {
