@@ -4826,9 +4826,22 @@ mod tests {
 
         // The retained driver's pid under another process's start — this one's,
         // as the displaced driver's would be — is not its claim, and what it
-        // said comes back with the refusal.
-        let mut driver = retained();
-        recorded(&launched_by(driver.id(), &here, &start_of(sys::pid())));
+        // said comes back with the refusal. "Another" is read off the host rather
+        // than assumed: macOS stamps a start to the second, and a test process
+        // that spawns its child within the second it started gives the two one
+        // stamp, so a child is taken only once its own reads differently.
+        let displaced = start_of(sys::pid());
+        let mut driver = loop {
+            let mut driver = retained();
+            if start_of(driver.id()) != displaced {
+                break driver;
+            }
+            driver
+                .wait()
+                .expect("a child sharing this process's stamp is reaped");
+            std::thread::sleep(ATTACH_POLL);
+        };
+        recorded(&launched_by(driver.id(), &here, &displaced));
         std::fs::write(paths.driver_log(), "onepipeline: an unreadable lock\n")
             .expect("the driver's log is written");
         let refused = confirm_driving(&paths, &mut driver)
