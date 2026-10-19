@@ -1285,6 +1285,8 @@ const BUILD_RULING: &str = "build: keep the public API unchanged";
 const LINT_RULING: &str = "lint: check only the files this change touched";
 
 /// A second ruling on `lint`, held behind an envelope that carries the first.
+/// `#[cfg(unix)]` because every journey that sends it is.
+#[cfg(unix)]
 const LINT_SECOND_RULING: &str = "lint: and report each finding once";
 
 const LINT_NOTE: &str = "lint: the fixture moved to fixtures/v2";
