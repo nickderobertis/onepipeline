@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.78.0](https://github.com/nickderobertis/onepipeline/compare/v0.77.0...v0.78.0) - 2026-10-19
+
+### Fixed
+
+- hold live notes per receiver and never hold findings behind them ([#1026](https://github.com/nickderobertis/onepipeline/pull/1026))
+- *(deps)* adopt the plan store that tolerates a source no layer defines ([#1030](https://github.com/nickderobertis/onepipeline/pull/1030))
+
 ## [0.77.0](https://github.com/nickderobertis/onepipeline/compare/v0.76.0...v0.77.0) - 2026-10-19
 
 ### Added
