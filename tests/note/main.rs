@@ -5848,6 +5848,9 @@ const SECOND_CARRIED: &str = "and keep the fixture loader's public signature";
 const MULTILINE_CARRIED: &str =
     "the fixture moved to fixtures/v3\n\nand the loader that reads it moved with it";
 
+/// A third note carried beside the other two, which stays with the second.
+const THIRD_CARRIED: &str = "and leave the fixture's old path as a redirect";
+
 /// Why the manager takes a note back.
 const WITHDRAWN_BECAUSE: &str = "the fixture moved back before anyone read this";
 
@@ -5888,7 +5891,7 @@ fn a_carried_note_withdrawn_before_its_nodes_next_dispatch_is_composed_into_none
         vec![agent("build", &[]), agent("later", &["build"])],
     );
     // `later` has no dispatch yet, so each note to it is carried to its first.
-    for text in [MULTILINE_CARRIED, SECOND_CARRIED] {
+    for text in [MULTILINE_CARRIED, SECOND_CARRIED, THIRD_CARRIED] {
         world
             .run_with_stdin_on(
                 world.agentgraph_cmd(&["reply", run]),
@@ -5952,12 +5955,20 @@ fn a_carried_note_withdrawn_before_its_nodes_next_dispatch_is_composed_into_none
         .split_once("## Planner context")
         .map(|(_, context)| context)
         .unwrap_or_else(|| panic!("later's dispatch has no planner context:\n{task}"));
+    // Every carried note but the withdrawn one, together and in carry order.
+    assert_eq!(
+        context
+            .trim()
+            .split_once("\n\n")
+            .map(|(_, notes)| notes.trim()),
+        Some(format!("{SECOND_CARRIED}\n\n{THIRD_CARRIED}").as_str()),
+        "later's planner context is not the two remaining carried notes in carry order:\n{task}"
+    );
     assert!(
-        context.contains(SECOND_CARRIED)
-            && MULTILINE_CARRIED
-                .split("\n\n")
-                .all(|paragraph| !task.contains(paragraph)),
-        "later's dispatch was not composed with the remaining carried note alone:\n{task}"
+        MULTILINE_CARRIED
+            .split("\n\n")
+            .all(|paragraph| !task.contains(paragraph)),
+        "later's dispatch was composed with part of the withdrawn note:\n{task}"
     );
 
     // Composed into that dispatch now, so there is nothing left to take back.

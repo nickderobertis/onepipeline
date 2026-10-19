@@ -1543,6 +1543,16 @@ fn an_unreachable_store_is_reported_and_attempted_again_on_the_next_change_while
                 )
         })
     });
+    // Both notes carried to `later`, together and in carry order: the one sent
+    // while the store was away is projected beside the one after it, not lost.
+    assert!(
+        world.store_tasks(&project).iter().any(|task| {
+            task["item"]["metadata"]["onepipeline.id"] == "later"
+                && task["item"]["metadata"]["onepipeline.context"]
+                    == "retry this projection\n\nproject this now the store is back"
+        }),
+        "the store does not carry both of later's carried notes in carry order"
+    );
 
     // Take it away again for terminal settlement. It remains unreachable until
     // the journal says the graph is complete and the terminal publication has
