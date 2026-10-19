@@ -881,6 +881,14 @@ fn a_render_asks_the_landing_read_once_per_node_it_prints_and_does_nothing_else_
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 
+// llmlint: ignore-block[tests_mirror_real_usage] the claim under test is *when an attach
+// stream reads a landing*, and the terminal cannot say: a read carried and a read taken
+// afresh print the same line whenever nothing moved, which is the case the carrying exists
+// for. So it is counted by the record the binary writes of its own renders — the seam and
+// the reason of the cost journey above, and of `loopcost.rs`. Everything here is still the
+// compiled binary over a real run: the command is the one a user types, its exit is
+// asserted, and the record is read after it exits rather than substituted for anything it
+// does.
 /// The nodes of the attach-stream journey, each published under `change-open` and left
 /// unlanded, one after another.
 const STREAMED: [&str; 3] = ["first", "second", "third"];
@@ -1142,3 +1150,4 @@ fn an_attach_stream_carries_a_landing_read_until_something_moves_it_and_reads_af
         }
     }
 }
+// llmlint: ignore-end[tests_mirror_real_usage]

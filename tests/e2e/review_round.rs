@@ -904,6 +904,12 @@ fn the_counted_git_counts_each_start_and_is_the_real_git_for_it() {
     );
 }
 
+// llmlint: ignore-block[tests_mirror_real_usage] whether a render read a landing again or
+// carried the read it held prints the same line on the terminal whenever both answers
+// agree, so it is counted by the record the binary writes of its own renders — the seam
+// `tests/e2e/landing.rs` measures every render's reads by, for the reason recorded there.
+// The command is the `adopt` a user types, over the real round; the record is read after it
+// exits.
 /// Every draft a rework moved had its landing read again in the render that printed the
 /// move, whatever read of it the attach stream that render was part of already held: its
 /// `node-restacked`, or a push, a merge of its base or a change request opened from its
@@ -979,6 +985,7 @@ fn moved_drafts_were_read_again(world: &World, record: &Path, stderr: &str, run:
          beside it, so nothing here shows a session's record ending a carried read:\n{stderr}"
     );
 }
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// A whole round's record, as the journey writes one, with `replies` reply posts on its
 /// last pass's ledger and every other figure the smallest a phase can carry.
