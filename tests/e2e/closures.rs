@@ -9,6 +9,13 @@
 //! launch directory's `onetaskgraph.yaml` is all the store configuration there is, and the
 //! store decides which of its sources hold an item for each issue.
 
+// llmlint: ignore-file[e2e_not_mocked] the crate under test is driven as a real compiled binary,
+// `onevcs` is the real linked library over real git and a real origin on disk, and the plan store
+// is the real linked `onetaskgraph` speaking real HTTP to the GitHub loopback. `oneagentgraph` is
+// substituted at its subprocess boundary so a journey states what a worker committed, and GitHub's
+// CLI at `onevcs`'s own `ONEVCS_GH` override so a change request can be opened, merged by a person
+// and read offline. `harness.rs` carries the same suppression and the full rationale.
+
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};

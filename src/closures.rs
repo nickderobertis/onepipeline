@@ -65,7 +65,6 @@ impl Landing {
         Self::of(envelope, None)
     }
 
-    /// The same landing, as `node`'s.
     pub(crate) fn of_node(self, node: String) -> Self {
         Self {
             node: Some(node),
@@ -73,7 +72,6 @@ impl Landing {
         }
     }
 
-    /// The commit the landing reached its base at.
     pub(crate) fn commit(&self) -> &str {
         &self.commit
     }

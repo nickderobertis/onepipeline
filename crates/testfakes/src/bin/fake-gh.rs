@@ -1193,7 +1193,6 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
 /// `gh.closes`, whitespace-separated, and none where it scripted nothing.
 fn closing_issues(dir: &Path) -> Vec<serde_json::Value> {
     let scripted = read_if_present(&dir.join("gh.closes")).unwrap_or_default();
-    // A login or repository name GitHub could hold: letters, digits, `-`, `_` and `.`.
     let named = |part: &str| {
         !part.is_empty()
             && part
