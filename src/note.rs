@@ -467,6 +467,13 @@ fn deadline_of(
 ) -> Result<Option<std::time::Duration>> {
     match (seconds, deliver) {
         (None, _) => Ok(None),
+        (Some(seconds), _) if seconds > MAX_DELIVERY_TIMEOUT_SECONDS => {
+            Err(Error::Refused(format!(
+                "note: node '{node}': `delivery_timeout_seconds` is {seconds}, past the longest \
+                 a note may wait, {MAX_DELIVERY_TIMEOUT_SECONDS} (thirty days); omit it to wait \
+                 for as long as the dispatch runs"
+            )))
+        }
         (Some(0), _) => Err(Error::Refused(format!(
             "note: node '{node}': `delivery_timeout_seconds` is 0, which no turn can meet; \
              omit it to wait for as long as the dispatch runs, or give at least one second"
@@ -481,6 +488,11 @@ fn deadline_of(
         }
     }
 }
+
+/// The longest `delivery_timeout_seconds` a note may carry: thirty days. Bounded
+/// so the deadline is always an instant this host's clock can name; a note that
+/// should wait longer waits for as long as its dispatch runs, by omitting it.
+pub(crate) const MAX_DELIVERY_TIMEOUT_SECONDS: u64 = 30 * 24 * 60 * 60;
 
 /// The reason a note whose deadline passed untaken is recorded with, carried or
 /// refused alike.

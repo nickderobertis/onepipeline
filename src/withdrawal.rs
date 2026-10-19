@@ -406,6 +406,10 @@ mod tests {
             reason,
             crate::note::expired(std::time::Duration::from_secs(2))
         );
+        assert_eq!(
+            block["max_delivery_timeout_seconds"],
+            serde_json::json!(crate::note::MAX_DELIVERY_TIMEOUT_SECONDS)
+        );
     }
 
     /// A commit whose operations this build cannot read is refused by name, never

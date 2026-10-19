@@ -5158,6 +5158,10 @@ fn a_note_the_envelope_cannot_carry_is_refused_at_the_wire_and_nothing_is_queued
             "`deliver: next` waits on none",
         ),
         (
+            timed_note("build", NOTE, "turn-end", true, u64::MAX),
+            "past the longest a note may wait",
+        ),
+        (
             json!({"op": "note", "id": "build", "addressee": "worker", "text": NOTE,
                    "deliver": "turn_end"}),
             "unknown variant `turn_end`",

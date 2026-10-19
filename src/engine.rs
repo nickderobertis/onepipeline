@@ -6993,7 +6993,9 @@ pub(crate) fn deliver_manager_note(validated: &ValidatedNote) -> Result<Vec<edit
     // conversation to make it to is the one that validation resolved. So the
     // whole of what is left here is what that conversation says. A deadline is
     // measured from the offer, so it is fixed before the note is offered.
-    let until = deadline.and_then(|deadline| Instant::now().checked_add(deadline));
+    // Bounded at the envelope by `MAX_DELIVERY_TIMEOUT_SECONDS`, so the instant
+    // always forms.
+    let until = deadline.map(|deadline| Instant::now() + deadline);
     let offer = match agentgraph::offer_note(address, composed) {
         Ok(offer) => offer,
         Err(why) => return untaken(&why.to_string(), None),

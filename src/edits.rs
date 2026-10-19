@@ -313,6 +313,7 @@ pub enum Operation {
     /// into no dispatch, and its own command is answered refused.
     NoteWithdrawn {
         /// The node the note was for.
+        // llmlint: ignore[invalid_states_unrepresentable] the `String` every neighbouring variant spells a node id with; a withdrawal's node is never typed in — `withdrawal::validate` reads it off the envelope's own `note` command, whose node `compile_note` already judged against the graph — so there is no unjudged node id here to narrow.
         node: String,
         /// The envelope the note was sent in.
         envelope: u64,

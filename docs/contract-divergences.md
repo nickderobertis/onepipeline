@@ -12046,8 +12046,9 @@ which party took a note, but not whether its turn was interrupted or only reache
    interrupts. `next` makes no live attempt. `persist` is unchanged, and `next` with
    `persist: false` is still refused.
 2. **`delivery_timeout_seconds`** is optional, with no default; absent, a note waits for as
-   long as the dispatch runs. It is refused at the envelope when it is `0` or beside
-   `deliver: next`. It is measured from the offer: a note no turn took by then is withdrawn
+   long as the dispatch runs. It is refused at the envelope when it is `0`, past thirty
+   days (`2592000`, so its deadline is always an instant the host's clock can name — a
+   bound the task did not state, proposed here), or beside `deliver: next`. It is measured from the offer: a note no turn took by then is withdrawn
    whole (`NoteOffer::wait_until` answers `Expired`), and `persist` decides what follows.
    `true` records it `carried`, with a `reason` naming the deadline, into the node's next
    dispatch; `false` refuses it with an `edit-rejected` naming the deadline. That holds for
@@ -12114,9 +12115,11 @@ first, moved this record to 133.
 {
   "deliver": ["live", "turn-end", "next"],
   "default_deliver": "live",
+  "max_delivery_timeout_seconds": 2592000,
   "note": {"op": "note", "id": "build", "addressee": "worker", "text": "stop editing src/old.rs", "deliver": "turn-end", "delivery_timeout_seconds": 2},
   "refused_at_the_envelope": [
     {"command": {"op": "note", "id": "build", "addressee": "worker", "text": "stop editing src/old.rs", "delivery_timeout_seconds": 0}, "refused": "`delivery_timeout_seconds` is 0"},
+    {"command": {"op": "note", "id": "build", "addressee": "worker", "text": "stop editing src/old.rs", "delivery_timeout_seconds": 2592001}, "refused": "past the longest a note may wait"},
     {"command": {"op": "note", "id": "build", "addressee": "worker", "text": "stop editing src/old.rs", "deliver": "next", "delivery_timeout_seconds": 2}, "refused": "`deliver: next` waits on none"}
   ],
   "withdraw_note": {"op": "withdraw-note", "envelope": "3", "index": 0, "reason": "the fixture moved back"},
