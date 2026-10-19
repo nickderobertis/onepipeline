@@ -232,6 +232,22 @@ impl Store {
         }
     }
 
+    /// The store a configuration discovered from `dir` describes, read with no user layer
+    /// but the empty one under `dir`: for a test whose claim is about every source the
+    /// store builds, which the host's own `~/.config/onetaskgraph` would otherwise add to.
+    #[cfg(test)]
+    pub(crate) fn isolated(dir: impl Into<PathBuf>) -> Self {
+        let dir = dir.into();
+        let home = dir.to_string_lossy().into_owned();
+        Self {
+            environment: Environment::from_pairs([
+                ("HOME", home.clone()),
+                ("XDG_CONFIG_HOME", format!("{home}/xdg")),
+            ]),
+            dir,
+        }
+    }
+
     /// Load this store's configuration, `flags` layered last, and build the engine it
     /// describes — afresh, every time.
     ///

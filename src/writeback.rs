@@ -6993,7 +6993,9 @@ mod tests {
             ),
         )
         .expect("the run's store configuration is written");
-        let store = crate::taskgraph::Store::at(fixture.dir.to_path_buf());
+        // Isolated from the host's user layer: a source it declares that cannot be built here
+        // is a source this store holds unavailable, which is the one thing this test counts.
+        let store = crate::taskgraph::Store::isolated(fixture.dir.to_path_buf());
         let mut baseline = super::Baseline::load(
             &fixture.dir,
             &fixture.snapshot.project,
