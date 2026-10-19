@@ -5,7 +5,7 @@
 //! Only as much of Codex's protocol as one turn needs, and only what this
 //! suite's journeys send — each method below is one the shared-server journey
 //! in `tests/e2e/dispatch.rs` fails without: the WebSocket upgrade, then
-//! JSON-RPC — `initialize`, `thread/start`, `turn/start`
+//! JSON-RPC — `initialize`, `thread/start` / `thread/resume`, `turn/start`
 //! (answered with the turn, then `turn/started`, one `item/agentMessage/delta`
 //! carrying the reply and `turn/completed`) and `thread/unsubscribe`. Like the
 //! rest of the doubles it refuses everything else — a malformed upgrade, frame,
@@ -20,6 +20,8 @@
 //!   until this **process** has started `N` turns, bounded by [`AWAIT_LIMIT`].
 //!   Turns served by two different servers can never satisfy it, so turns that
 //!   each completed having seen `N` started ran concurrently on one process.
+//! * [`RESUMES_FILE`] — accepted resume requests, with server pid and thread:
+//!   the linked judged-retry journey proves this request schema against its client.
 //! * [`TURNS_FILE`] — written, never read: one JSON line per completed turn,
 //!   `{"server_pid", "thread", "turns_started"}`, the last being how many turns
 //!   this process had started when the turn completed.
@@ -44,6 +46,9 @@ pub const AWAIT_TURNS_FILE: &str = "codex-await-turns";
 
 /// The file in the script directory each completed turn is recorded into.
 pub const TURNS_FILE: &str = "codex-turns.jsonl";
+
+/// Accepted resume requests, proving the linked client's shape reaches this double.
+pub const RESUMES_FILE: &str = "codex-resumes.jsonl";
 
 /// How long a turn waits for [`AWAIT_TURNS_FILE`]'s count before completing
 /// anyway, so a journey whose turns never meet fails on what was recorded
@@ -172,12 +177,10 @@ fn serve(server: &Server, stream: UnixStream) -> Result<(), String> {
         return Ok(());
     }
     while let Some(message) = read_message(&mut reader, &writer)? {
-        let parsed: Message = serde_json::from_slice(&message).map_err(|e| {
-            format!(
-                "not a JSON-RPC 2.0 message oneharness sends ({e}): {}",
-                String::from_utf8_lossy(&message)
-            )
-        })?;
+        // A request can carry the caller's environment. The schema error says
+        // what was refused without copying those values into a server log.
+        let parsed: Message = serde_json::from_slice(&message)
+            .map_err(|e| format!("not a JSON-RPC 2.0 message oneharness sends ({e})"))?;
         handle(server, &writer, parsed)?;
     }
     Ok(())
@@ -425,6 +428,8 @@ enum Call {
     Initialize(InitializeParams),
     #[serde(rename = "thread/start")]
     ThreadStart(ThreadParams),
+    #[serde(rename = "thread/resume")]
+    ThreadResume(ResumeParams),
     #[serde(rename = "turn/start")]
     TurnStart(TurnParams),
     #[serde(rename = "thread/unsubscribe")]
@@ -512,6 +517,22 @@ struct ShellEnvironmentPolicy {
     _set: BTreeMap<String, String>,
     #[serde(rename = "exclude")]
     _exclude: Vec<String>,
+}
+
+/// The linked resume frame is exercised by dispatch's shared-server journey:
+/// judged retries resume previously opened threads.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ResumeParams {
+    thread_id: ThreadId,
+    #[serde(rename = "cwd")]
+    _cwd: String,
+    #[serde(rename = "approvalPolicy")]
+    _approval_policy: ApprovalPolicy,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default, rename = "config")]
+    _config: Option<ThreadConfig>,
 }
 
 #[derive(Deserialize)]
@@ -612,6 +633,18 @@ fn handle(server: &Server, writer: &Writer, message: Message) -> Result<(), Stri
                 server.next_thread.fetch_add(1, Ordering::SeqCst)
             ));
             reply(opened(server, thread, model));
+        }
+        Call::ThreadResume(ResumeParams {
+            thread_id, model, ..
+        }) => {
+            crate::append(
+                &server.dir.join(RESUMES_FILE),
+                &json!({
+                    "server_pid": std::process::id(), "thread": thread_id
+                })
+                .to_string(),
+            );
+            reply(opened(server, thread_id, model));
         }
         Call::TurnStart(params) => turn(server, writer, params, reply)?,
         Call::ThreadUnsubscribe(ThreadRef { thread_id }) => {

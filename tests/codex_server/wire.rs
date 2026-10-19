@@ -106,7 +106,7 @@ impl Server {
         stream
     }
 
-    fn exited(&mut self, limit: Duration, refusal: Option<&str>) {
+    fn exited(&mut self, limit: Duration, refusal: Option<&str>) -> String {
         let until = Instant::now() + limit;
         let status = loop {
             if let Some(status) = self.child.try_wait().unwrap() {
@@ -129,6 +129,7 @@ impl Server {
             }
             None => assert!(status.success(), "{status}: {stderr}"),
         }
+        stderr
     }
 }
 
@@ -210,6 +211,8 @@ fn codex_server_double_refuses_malformed_upgrades_frames_and_envelopes() {
         server.exited(Duration::from_secs(5), Some(reason));
     }
     for (index, (bytes, reason)) in [
+        (frame(0x81, br#"{"jsonrpc":"2.0","id":1,"method":"thread/resume","params":{"threadId":"unloaded","cwd":"/","approvalPolicy":"never","typo":true}}"#), "unknown field"),
+        (frame(0x81, br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{},"typo":"wire-secret-canary"}"#), "unknown field"),
         (frame(0x81, br#"{"jsonrpc":"2.0","id":1,"method":"thread/unsubscribe","params":{"threadId":""}}"#), "empty thread identity"),
         (vec![0x81, 0], "unmasked"),
         (vec![0xc1, 0x80], "reserved bits"),
@@ -233,7 +236,8 @@ fn codex_server_double_refuses_malformed_upgrades_frames_and_envelopes() {
         let mut server = Server::start(&world, &format!("frame-{index}"), false);
         let mut stream = server.websocket();
         stream.write_all(&bytes).unwrap();
-        server.exited(Duration::from_secs(5), Some(reason));
+        let stderr = server.exited(Duration::from_secs(5), Some(reason));
+        assert!(!stderr.contains("wire-secret-canary"), "a refused request leaked its payload");
     }
 }
 
@@ -361,4 +365,57 @@ fn codex_server_double_bounds_unused_servers_and_unmet_concurrency() {
     unused.exited(Duration::from_secs(10), None);
     drop(stream);
     waiting.exited(Duration::from_secs(10), None);
+}
+
+#[test]
+fn codex_server_double_resumes_an_unloaded_thread_on_another_connection() {
+    use onepipeline_testfakes::codex_app_server::{RESUMES_FILE, TURNS_FILE};
+    let world = World::new("codex-server-resume");
+    let mut server = Server::start(&world, "resume", false);
+    let mut first = server.websocket();
+    let thread = open_thread(&mut first);
+    send(
+        &mut first,
+        json!({"jsonrpc":"2.0","id":2,"method":"thread/unsubscribe","params":{"threadId":thread}}),
+    );
+    let (_, reply) = received(&mut first);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&reply).unwrap()["result"]["status"],
+        "unsubscribed"
+    );
+    first.write_all(&frame(0x88, &[])).unwrap();
+    drop(first);
+
+    let mut next = server.websocket();
+    send(
+        &mut next,
+        json!({"jsonrpc":"2.0","id":3,"method":"thread/resume","params":{
+            "threadId":thread,"cwd":"/","approvalPolicy":"never","model":"recording-model",
+            "config":{"shell_environment_policy":{"set":{"WIRE":"value"},"exclude":["UNUSED"]}}
+        }}),
+    );
+    let (_, reply) = received(&mut next);
+    let reply: Value = serde_json::from_slice(&reply).unwrap();
+    assert_eq!(reply["result"]["thread"]["id"], thread);
+    assert_eq!(reply["result"]["model"], "recording-model");
+    send(
+        &mut next,
+        turn(thread.clone(), json!([{"type":"text","text":"continue"}])),
+    );
+    for _ in 0..4 {
+        received(&mut next);
+    }
+    for file in [RESUMES_FILE, TURNS_FILE] {
+        let record: Value = serde_json::from_str(
+            std::fs::read_to_string(world.fakes.join(file))
+                .unwrap()
+                .trim(),
+        )
+        .unwrap();
+        assert_eq!(record["thread"], thread);
+        assert_eq!(record["server_pid"], server.child.id());
+    }
+    next.write_all(&frame(0x88, &[])).unwrap();
+    drop(next);
+    server.exited(Duration::from_secs(10), None);
 }

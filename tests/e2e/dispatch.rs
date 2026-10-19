@@ -4026,7 +4026,7 @@ fn a_judged_codex_turn_starts_with_plugins_off_unless_its_config_opts_in() {
 #[cfg(unix)]
 #[test]
 fn two_concurrent_judged_codex_turns_share_one_app_server() {
-    use onepipeline_testfakes::codex_app_server::{AWAIT_TURNS_FILE, TURNS_FILE};
+    use onepipeline_testfakes::codex_app_server::{AWAIT_TURNS_FILE, RESUMES_FILE, TURNS_FILE};
 
     let name = "judged-codex-shared-app-server";
     let world = World::new(name);
@@ -4102,13 +4102,18 @@ fn two_concurrent_judged_codex_turns_share_one_app_server() {
         .iter()
         .filter(|call| call["tool"] == "codex" && call["args"][0] == "app-server")
         .collect();
+    let turns = crate::harness::read_jsonl(&world.fakes.join(TURNS_FILE));
+    let pool_logs: Vec<_> = std::fs::read_dir(state.0.join("oneharness/servers"))
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| std::fs::read_to_string(entry.ok()?.path().join("server.log")).ok())
+        .collect();
     assert_eq!(
         servers.len(),
         1,
         "two concurrent turns under one config did not start exactly one app-server: \
-         {invocations:#?}"
+         {invocations:#?}; completed turns: {turns:#?}; server logs: {pool_logs:#?}"
     );
-    let turns = crate::harness::read_jsonl(&world.fakes.join(TURNS_FILE));
     assert!(
         turns.len() >= 2,
         "fewer than two codex turns ran on an app-server: {turns:#?}"
@@ -4121,6 +4126,21 @@ fn two_concurrent_judged_codex_turns_share_one_app_server() {
         pids.len(),
         1,
         "the codex turns ran on more than one app-server process: {turns:#?}"
+    );
+    // The double answers "ok", which is not an evaluator verdict. Judged
+    // retries resume existing threads through the real linked client, holding
+    // the double's resume schema alongside the fresh-thread turns.
+    let resumes = crate::harness::read_jsonl(&world.fakes.join(RESUMES_FILE));
+    assert!(
+        !resumes.is_empty(),
+        "no linked resume request reached the double"
+    );
+    assert!(
+        resumes
+            .iter()
+            .all(|resume| pids
+                .contains(&resume["server_pid"].as_u64().expect("a resumed server pid"))),
+        "a resumed turn left the shared server: {resumes:#?}"
     );
     // Every turn, the first to complete included: turns run one after another
     // leave the first waiting out the double's bound alone and recording one.
