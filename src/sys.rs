@@ -1508,10 +1508,10 @@ fn platform_process_start_token(pid: u32) -> Option<StartToken> {
 /// one's pid and its record would read as claimed before the driver had done
 /// anything. So on macOS the kernel's own microseconds of the same start —
 /// `proc_pidinfo`'s `PROC_PIDTBSDINFO`, which answers for a zombie too — follow
-/// the second, see `kernel_start_micros`. Where the kernel will not say, the
-/// token is `lstart` alone, which reads as another process against any record
-/// that carries them. The other targets without procfs keep the one-second
-/// spelling.
+/// the second, see `kernel_start_micros`. Where the kernel will not say there
+/// is no token, as where `ps` will not: a second alone would read as another
+/// process against the record this very process wrote. The other targets
+/// without procfs keep the one-second spelling.
 ///
 /// Read strictly. A `ps` that cannot run, exits non-zero, or writes bytes this
 /// cannot decode is not an answer, and neither is an empty line — a token
@@ -1527,10 +1527,7 @@ fn platform_process_start_token(pid: u32) -> Option<StartToken> {
 fn platform_process_start_token(pid: u32) -> Option<StartToken> {
     let second = ps_process_start_token(pid)?;
     #[cfg(target_os = "macos")]
-    let recorded = match kernel_start_micros(pid) {
-        Some(micros) => format!("{second}{START_MICROS}{micros:06}"),
-        None => second,
-    };
+    let recorded = format!("{second}{START_MICROS}{:06}", kernel_start_micros(pid)?);
     #[cfg(not(target_os = "macos"))]
     let recorded = second;
     Some(StartToken { recorded })
@@ -2348,14 +2345,6 @@ mod tests {
         ] {
             assert_eq!(macos_reading(now, recorded), reading, "{recorded:?}");
         }
-        assert_eq!(
-            macos_reading(
-                "Sun Oct 11 19:23:36 2026",
-                "Sun Oct 11 19:23:36 2026 +0.004211"
-            ),
-            TokenReading::Different,
-            "a reading the kernel gave no microseconds for proved a record that has them"
-        );
         let token = process_start_token(pid()).expect("this host says when a process started");
         assert!(
             token.recorded().contains(START_MICROS),
