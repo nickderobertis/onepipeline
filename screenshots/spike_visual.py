@@ -71,7 +71,7 @@ def main(argv: list[str]) -> int:
                 ("note-queued", note_queued),
             ):
                 text = take(world, fixture, scratch / f"{label}-{scene}", binaries)
-                image = out / f"{scene}-{label}.svg"
+                image = out / f"{scene}-{label}.png"
                 capture.render(text, image)
                 (out / f"{scene}-{label}.txt").write_text(text)
                 print(f"spike-visual: wrote {image}", file=sys.stderr)

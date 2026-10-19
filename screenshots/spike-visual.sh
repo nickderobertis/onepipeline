@@ -6,7 +6,7 @@
 #
 # "after" is this checkout's `onepipeline` (the mock); "before" is BASE_COMMIT's
 # (default a77106ce, the unchanged base), built from `git archive` under
-# target/spike-visual/. Writes <scene>-{before,after}.svg (and the .txt each was
+# target/spike-visual/. Writes <scene>-{before,after}.png (and the .txt each was
 # rendered from) into OUT_DIR. Needs `freeze` on PATH, as `just screenshots` does.
 set -euo pipefail
 
