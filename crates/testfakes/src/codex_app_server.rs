@@ -26,7 +26,7 @@
 //! none for [`IDLE_EXIT`], so a suite's servers are gone well before the runner
 //! reaps its processes whether or not a sweeper stopped them first.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -170,20 +170,20 @@ fn serve(server: &Server, stream: UnixStream) -> Result<(), String> {
         return Ok(());
     }
     while let Some(message) = read_message(&mut reader, &writer)? {
-        let envelope: Envelope = serde_json::from_slice(&message).map_err(|e| {
+        let parsed: Message = serde_json::from_slice(&message).map_err(|e| {
             format!(
-                "not a JSON-RPC 2.0 message ({e}): {}",
+                "not a JSON-RPC 2.0 message oneharness sends ({e}): {}",
                 String::from_utf8_lossy(&message)
             )
         })?;
-        handle(server, &writer, envelope)?;
+        handle(server, &writer, parsed)?;
     }
     Ok(())
 }
 
 /// The client's upgrade request, checked as RFC 6455 §4.2.1 asks of a server:
 /// a `GET`, `Upgrade: websocket`, a `Connection` naming `Upgrade`, version 13
-/// and a key. `Ok(None)` when the client left before finishing it.
+/// and a 16-byte key. `Ok(None)` when the client left before finishing it.
 fn read_upgrade(reader: &mut impl BufRead) -> Result<Option<String>, String> {
     let mut lines = Vec::new();
     loop {
@@ -227,9 +227,20 @@ fn read_upgrade(reader: &mut impl BufRead) -> Result<Option<String>, String> {
             "the upgrade request is missing a required header: {lines:?}"
         ));
     }
-    header("sec-websocket-key")
-        .map(Some)
-        .ok_or_else(|| format!("the upgrade request carries no Sec-WebSocket-Key: {lines:?}"))
+    let key = header("sec-websocket-key")
+        .ok_or_else(|| format!("the upgrade request carries no Sec-WebSocket-Key: {lines:?}"))?;
+    // RFC 6455's nonce is 16 bytes, so its base64 is 22 characters and `==`.
+    let nonce = key.len() == 24
+        && key.ends_with("==")
+        && key[..22]
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/');
+    if !nonce {
+        return Err(format!(
+            "Sec-WebSocket-Key {key:?} is not 16 bytes of base64"
+        ));
+    }
+    Ok(Some(key))
 }
 
 fn lock(writer: &Writer) -> std::sync::MutexGuard<'_, UnixStream> {
@@ -238,7 +249,6 @@ fn lock(writer: &Writer) -> std::sync::MutexGuard<'_, UnixStream> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Write one unfragmented server frame of `opcode` carrying `payload`.
 fn write_frame(writer: &Writer, opcode: u8, payload: &[u8]) {
     let mut bytes = vec![0x80 | opcode];
     match payload.len() {
@@ -338,17 +348,28 @@ fn read_message(stream: &mut impl Read, writer: &Writer) -> Result<Option<Vec<u8
     }
 }
 
-/// One JSON-RPC 2.0 message from the client. This server sends no requests of
-/// its own, so every client message names a `method`: a request with an `id`,
-/// or a notification without one.
+/// One JSON-RPC 2.0 message from the client, typed at the frame: this server
+/// sends no requests of its own, so every client message is a request with an
+/// `id` or the one notification, and its `params` are the shape that method's
+/// sender — oneharness-core's Codex dialogue — builds, field for field.
+#[derive(Deserialize)]
+#[serde(try_from = "RawEnvelope")]
+enum Message {
+    Request {
+        id: u64,
+        call: Call,
+    },
+    /// `initialized`, which oneharness sends after `initialize` with `{}`.
+    Initialized,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Envelope {
+struct RawEnvelope {
     jsonrpc: JsonRpcVersion,
     #[serde(default)]
     id: Option<u64>,
     method: String,
-    #[serde(default)]
     params: Value,
 }
 
@@ -358,35 +379,167 @@ enum JsonRpcVersion {
     V2,
 }
 
+/// Every request this server answers. A method outside it is refused, so a
+/// request oneharness started sending fails a journey rather than being
+/// answered.
 #[derive(Deserialize)]
-struct OpenParams {
-    #[serde(default)]
-    model: Option<String>,
+#[serde(tag = "method", content = "params")]
+enum Call {
+    #[serde(rename = "initialize")]
+    Initialize(InitializeParams),
+    #[serde(rename = "thread/start")]
+    ThreadStart(ThreadParams),
+    #[serde(rename = "thread/resume")]
+    ThreadResume(ResumeParams),
+    #[serde(rename = "turn/start")]
+    TurnStart(TurnParams),
+    #[serde(rename = "thread/unsubscribe")]
+    ThreadUnsubscribe(ThreadRef),
+    #[serde(rename = "thread/loaded/list")]
+    ThreadLoadedList(Empty),
+}
+
+impl TryFrom<RawEnvelope> for Message {
+    type Error = String;
+
+    fn try_from(raw: RawEnvelope) -> Result<Self, String> {
+        let RawEnvelope {
+            jsonrpc: JsonRpcVersion::V2,
+            id,
+            method,
+            params,
+        } = raw;
+        match id {
+            None if method == "initialized" => {
+                serde_json::from_value::<Empty>(params)
+                    .map_err(|e| format!("initialized params: {e}"))?;
+                Ok(Message::Initialized)
+            }
+            None => Err(format!("`{method}` is not a notification oneharness sends")),
+            Some(id) => {
+                let call = serde_json::from_value(json!({"method": &method, "params": params}))
+                    .map_err(|e| format!("`{method}` is not a request oneharness sends: {e}"))?;
+                Ok(Message::Request { id, call })
+            }
+        }
+    }
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+struct Empty {}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct InitializeParams {
+    client_info: ClientInfo,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClientInfo {
+    name: String,
+    #[serde(rename = "title")]
+    _title: String,
+    #[serde(rename = "version")]
+    _version: String,
+}
+
+/// Codex's approval spelling; oneharness runs headless, so only `never`.
+#[derive(Deserialize)]
+enum ApprovalPolicy {
+    #[serde(rename = "never")]
+    Never,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ThreadParams {
+    #[serde(rename = "cwd")]
+    _cwd: String,
+    #[serde(rename = "approvalPolicy")]
+    _approval_policy: ApprovalPolicy,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default, rename = "config")]
+    _config: Option<ThreadConfig>,
+}
+
+/// The per-thread environment a pooled dispatch carries.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ThreadConfig {
+    #[serde(rename = "shell_environment_policy")]
+    _shell_environment_policy: ShellEnvironmentPolicy,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShellEnvironmentPolicy {
+    #[serde(rename = "set")]
+    _set: BTreeMap<String, String>,
+    #[serde(rename = "exclude")]
+    _exclude: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct ResumeParams {
     thread_id: String,
+    #[serde(rename = "cwd")]
+    _cwd: String,
+    #[serde(rename = "approvalPolicy")]
+    _approval_policy: ApprovalPolicy,
     #[serde(default)]
     model: Option<String>,
+    #[serde(default, rename = "config")]
+    _config: Option<ThreadConfig>,
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct TurnParams {
     thread_id: String,
-    input: Vec<Value>,
+    #[serde(rename = "cwd")]
+    _cwd: String,
+    input: Vec<InputItem>,
+    #[serde(rename = "approvalPolicy")]
+    _approval_policy: ApprovalPolicy,
+    #[serde(rename = "sandboxPolicy")]
+    _sandbox_policy: SandboxPolicy,
+    #[serde(default, rename = "model")]
+    _model: Option<String>,
+}
+
+/// A turn's input item: oneharness sends its prompt as text and nothing else.
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
+enum InputItem {
+    Text {
+        #[serde(rename = "text")]
+        _text: String,
+    },
+}
+
+/// The sandbox each permission mode maps onto, in Codex's own spelling.
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
+enum SandboxPolicy {
+    DangerFullAccess,
+    ReadOnly,
+    #[serde(rename_all = "camelCase")]
+    WorkspaceWrite {
+        #[serde(rename = "writableRoots")]
+        _writable_roots: Vec<String>,
+        #[serde(rename = "networkAccess")]
+        _network_access: bool,
+    },
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ThreadParams {
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ThreadRef {
     thread_id: String,
-}
-
-fn typed<T: serde::de::DeserializeOwned>(method: &str, params: Value) -> Result<T, String> {
-    serde_json::from_value(params).map_err(|e| format!("{method} params: {e}"))
 }
 
 fn threads(server: &Server) -> std::sync::MutexGuard<'_, HashSet<String>> {
@@ -396,17 +549,9 @@ fn threads(server: &Server) -> std::sync::MutexGuard<'_, HashSet<String>> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Answer one message. Every method outside the module's list is refused, so a
-/// request oneharness started sending fails a journey rather than being
-/// answered.
-fn handle(server: &Server, writer: &Writer, envelope: Envelope) -> Result<(), String> {
-    let JsonRpcVersion::V2 = envelope.jsonrpc;
-    let Some(id) = envelope.id else {
-        // The one notification oneharness sends, after `initialize`.
-        return match envelope.method.as_str() {
-            "initialized" => Ok(()),
-            other => Err(format!("`{other}` is not a notification oneharness sends")),
-        };
+fn handle(server: &Server, writer: &Writer, message: Message) -> Result<(), String> {
+    let Message::Request { id, call } = message else {
+        return Ok(());
     };
     let reply = |result: Value| {
         send(
@@ -414,11 +559,11 @@ fn handle(server: &Server, writer: &Writer, envelope: Envelope) -> Result<(), St
             &json!({"jsonrpc": "2.0", "id": id, "result": result}),
         );
     };
-    let method = envelope.method.as_str();
-    match method {
-        "initialize" => reply(json!({"userAgent": "onepipeline-fake-codex-app-server"})),
-        "thread/start" => {
-            let OpenParams { model } = typed(method, envelope.params)?;
+    match call {
+        Call::Initialize(InitializeParams { client_info }) => reply(json!({
+            "userAgent": format!("onepipeline-fake-codex-app-server (for {})", client_info.name)
+        })),
+        Call::ThreadStart(ThreadParams { model, .. }) => {
             let thread = format!(
                 "fake-thread-{}-{}",
                 std::process::id(),
@@ -426,22 +571,20 @@ fn handle(server: &Server, writer: &Writer, envelope: Envelope) -> Result<(), St
             );
             reply(opened(server, thread, model));
         }
-        // Codex rejoins a stored thread by the id it is named.
-        "thread/resume" => {
-            let ResumeParams { thread_id, model } = typed(method, envelope.params)?;
+        Call::ThreadResume(ResumeParams {
+            thread_id, model, ..
+        }) => {
             reply(opened(server, thread_id, model));
         }
-        "turn/start" => turn(server, writer, typed(method, envelope.params)?, reply)?,
-        "thread/unsubscribe" => {
-            let ThreadParams { thread_id } = typed(method, envelope.params)?;
+        Call::TurnStart(params) => turn(server, writer, params, reply)?,
+        Call::ThreadUnsubscribe(ThreadRef { thread_id }) => {
             let held = threads(server).remove(&thread_id);
             reply(json!({"status": if held { "unsubscribed" } else { "notLoaded" }}));
         }
-        "thread/loaded/list" => {
+        Call::ThreadLoadedList(Empty {}) => {
             let held: Vec<String> = threads(server).iter().cloned().collect();
             reply(json!({"data": held, "nextCursor": null}));
         }
-        other => return Err(format!("`{other}` is not a request oneharness sends")),
     }
     Ok(())
 }
@@ -456,7 +599,6 @@ fn opened(server: &Server, thread: String, model: Option<String>) -> Value {
     result
 }
 
-/// How many started turns a turn waits for, from the script directory.
 fn awaited(dir: &Path) -> Result<usize, String> {
     match std::fs::read_to_string(dir.join(AWAIT_TURNS_FILE)) {
         Ok(text) => text
@@ -474,7 +616,9 @@ fn turn(
     params: TurnParams,
     reply: impl FnOnce(Value),
 ) -> Result<(), String> {
-    let TurnParams { thread_id, input } = params;
+    let TurnParams {
+        thread_id, input, ..
+    } = params;
     if !threads(server).contains(&thread_id) {
         return Err(format!(
             "turn/start names thread {thread_id}, which no client opened"

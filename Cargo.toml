@@ -769,12 +769,9 @@ resolver = "2"
 # `^0.19.5`, so the three move as one.
 #
 # `oneagentgraph` 0.5.14 is the floor because it is the release that links the
-# shared app-server core: no turn it runs leases a pooled server — a single-sided
-# turn is an uncontrolled `codex exec`, and a two-party member's sides run in the
-# `oneharness` CLI its spawn hook starts, which pools and sweeps its own — so its
-# binary hosts no sweeper, and neither does `onepipeline` (see the
-# `oneharness-core` pin). It still requires `^0.28.1` and `onejudge` `^0.19.5`,
-# so the lock resolves the one core 0.28.3 below for all three.
+# shared app-server core 0.28.3 (see that pin for where the pool lives). It still
+# requires `^0.28.1` and `onejudge` `^0.19.5`, so the lock resolves that one core
+# for all three.
 #
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
