@@ -65,6 +65,7 @@ mod compatibility;
 // could not honestly run them, and any change under `src/` can put the cost back. Same
 // grounds as `mod landing` and `mod watch` below.
 mod checkpoint;
+mod closures;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod concurrency;
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] a continuation is read by
