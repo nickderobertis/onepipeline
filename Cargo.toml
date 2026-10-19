@@ -1359,8 +1359,9 @@ codegen-units = 1
 # revision declares it) and the lock records what is linked, `source = "git+…?rev=…"`.
 # All three come from the one revision: the family is lock-step.
 #
-# `cargo publish` ignores `[patch]`, so this tree must not be published while it
-# stands; the node holding this pin settles complete-but-draft and cannot land. Delete
+# `cargo publish` ignores `[patch]`, so a package cut from this tree would resolve the
+# 0.7.2 release, which carries neither fix nor the fields `src/taskgraph.rs` reads: it
+# must not be published while this block stands. Delete
 # this block when the release carrying `ed797894` is out and move the three
 # requirements to it; `deny.toml`'s `allow-git` entry names the same revision and goes
 # with it, which `tests/patch_pin.rs` is what insists on.
