@@ -940,8 +940,13 @@ fn landed_by(verb: Verb, setup: Setup<'_>) -> Landed {
         Verb::PublishBranch | Verb::Integrate => Vec::new(),
     };
     if setup.unreadable {
-        // The owner's read bit, off for long enough that the relay's reads meet it several
-        // times over, and back on before the push ends: the writer appends all the while.
+        // llmlint: ignore[tests_mirror_real_usage] no interface of this build or of `onevcs`
+        // makes a read of an operation's stream fail for a moment: what does is the operating
+        // system, which on Windows refuses a read meeting the writer's locked append (os error
+        // 33). Unix has no such lock, so the hook takes the owner's read bit off the stream for
+        // long enough that the relay's reads meet it several times over, and puts it back before
+        // the push ends, while `onevcs` appends all the while. Everything asserted is the
+        // compiled binary's own output, journal and board writes.
         let streams = format!(
             "'{}'/operations/*/events.ndjson",
             world.onevcs_home().display()

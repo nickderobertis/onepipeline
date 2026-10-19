@@ -1818,6 +1818,11 @@ fn drain(
     loop {
         let stopping = stop.load(std::sync::atomic::Ordering::SeqCst);
         let batch = match read() {
+            // llmlint: ignore[changed_behavior_has_e2e] the budget's reset needs more failed
+            // reads than RELAY_READ_ATTEMPTS, split by successful ones, which no journey can
+            // stage on a schedule: `a_landing_verb_relays_past_a_read_of_its_stream_that_fails_for_now`
+            // drives the retry through the binary, and `budget_resets_at_every_read_that_succeeds`
+            // below holds the reset exactly.
             Ok(batch) => {
                 failed = 0;
                 batch
@@ -2239,6 +2244,28 @@ mod tests {
         )
         .expect("the relay ends cleanly");
         assert_eq!(delivered, [0, 1, 2]);
+    }
+
+    #[test]
+    fn budget_resets_at_every_read_that_succeeds() {
+        let stop = std::sync::atomic::AtomicBool::new(true);
+        let failing = || (1..RELAY_READ_ATTEMPTS).map(|_| Err("os error 33".to_owned()));
+        let mut answers = failing()
+            .chain([Ok(vec![envelope(0)])])
+            .chain(failing())
+            .chain([Ok(vec![envelope(1)]), Ok(Vec::new())]);
+        let mut delivered = Vec::new();
+        drain(
+            || answers.next().expect("asked past its end"),
+            |envelope| {
+                delivered.push(envelope.seq);
+                Ok(())
+            },
+            &stop,
+            std::time::Duration::ZERO,
+        )
+        .expect("no run of failures reached the budget");
+        assert_eq!(delivered, [0, 1]);
     }
 
     #[test]
