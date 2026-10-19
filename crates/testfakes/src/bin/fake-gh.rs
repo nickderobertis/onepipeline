@@ -35,13 +35,16 @@
 //! holding a count, is the host landing an armed change at that many reads of it
 //! after it was armed — its required checks passing while nobody was publishing.
 //!
-//! And one on the draft's: `gh.draft.finishes-after`, holding seconds, is the work
-//! on a draft's head finishing that long after the host was first asked about the
-//! draft. Until then the draft reports `gh.checks.draft`, and its workflow runs and
-//! check suites `gh.runs.draft` and `gh.suites.draft`; from then on it reports
+//! And one on the draft's: `gh.draft.finishes-once-reported` is the work on a
+//! draft's head finishing once this host has told its caller that work is still
+//! running — a rollup naming a check that has not completed, or a workflow-run or
+//! check-suite read naming one in progress — and not on any clock, so how long a
+//! machine takes between two reads cannot decide what a journey meets. Until then
+//! the draft reports `gh.checks.draft`, and its workflow runs and check suites
+//! `gh.runs.draft` and `gh.suites.draft`; from the next `pr view` on it reports
 //! `gh.checks` as a ready change would, and those runs and suites completed. Each
 //! check rollup starts a poll: its check-name and activity reads reuse that phase
-//! until the next rollup, so a timer expiring between reads cannot mix phases. What
+//! until the next rollup, so the work finishing between reads cannot mix phases. What
 //! the runs and suites are for is `onevcs`'s question whether anything on a head is
 //! still running before it lifts a draft early, which it asks of exactly those two
 //! reads. `gh.no-ready-trigger` is the workflow that does not run on
@@ -1122,6 +1125,15 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
         fake::fail(&format!("cannot write {}: {error}", path.display()));
     }
     let reported = scripted_checks(dir, &id, state);
+    // Only a read that asked for the rollup has been told what is still running.
+    if fields.contains("statusCheckRollup")
+        && reported_draft_running(dir, &id, state)
+        && reported
+            .iter()
+            .any(|check| !matches!(check.state, State::Settled(_)))
+    {
+        report_running(dir, &id);
+    }
     let head = head_of(dir, &opened);
     // A fixture that pushed the host's merge can report its actual base commit.
     let merge_commit = if dir.join("gh.real-merge-commit").exists() {
@@ -1365,8 +1377,8 @@ const READY_RUN_STARTED: &str = "2026-01-01T00:05:00Z";
 /// this host to answer differently about each. `gh.checks.draft`, where scripted,
 /// is what the host reports **while the change is a draft**, over both: the
 /// repository whose workflows skip a draft, whose checks run only once it is
-/// lifted — or, where `gh.draft.finishes-after` is scripted, only until the work on
-/// the draft's head finishes ([`draft_running`]).
+/// lifted — or, where `gh.draft.finishes-once-reported` is scripted, only until the
+/// work on the draft's head finishes ([`draft_running`]).
 ///
 /// A line this program cannot read is **fatal**, not skipped: a journey scripting
 /// a check this host quietly dropped would assert against a rollup nobody wrote.
@@ -1396,46 +1408,35 @@ fn reran_on_lift(dir: &Path, change: Change) -> bool {
 /// Whether change request `id` is a draft whose head is still being worked on, which
 /// is when it reports the `.draft` scripts.
 ///
-/// Without `gh.draft.finishes-after` that is the whole of its time as a draft. With
-/// it, the work finishes that many seconds after this host was first asked about the
-/// draft — the moment written down at that first ask, because nothing carries a clock
-/// between two invocations of a program that exits. A script that is not a number of
-/// seconds is fatal, for [`unreachable`]'s reason.
+/// Without `gh.draft.finishes-once-reported` that is the whole of its time as a draft.
+/// With it, the work finishes once this host has reported it still running
+/// ([`report_running`]): a journey about a draft held while something runs meets that
+/// hold however long the machine takes to reach the read that decides it, where a
+/// clock started at the host's first answer would have the work finish unseen on a
+/// slow one.
 fn draft_running(dir: &Path, id: &str, change: Change) -> bool {
     if change != Change::Draft {
         return false;
     }
-    let Some(after) = fake::node_script(dir, "gh", "draft.finishes-after") else {
-        return true;
-    };
-    let after: f64 = after
-        .parse()
-        .ok()
-        .filter(|after: &f64| after.is_finite() && *after >= 0.0)
-        .unwrap_or_else(|| {
-            fake::fail(&format!(
-                "gh.draft.finishes-after holds {after:?}, which is not a number of seconds"
-            ))
-        });
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_else(|error| fake::fail(&format!("the clock is before the epoch: {error}")))
-        .as_millis();
-    let path = dir
-        .join("gh")
-        .join(format!("{}.first-asked", fake::segment(id)));
-    let first = match read_if_present(&path) {
-        Some(first) => first.trim().parse::<u128>().unwrap_or_else(|_| {
-            fake::fail(&format!("{} holds {first:?}, not a moment", path.display()))
-        }),
-        None => {
-            if let Err(error) = std::fs::write(&path, now.to_string()) {
-                fake::fail(&format!("cannot write {}: {error}", path.display()));
-            }
-            now
-        }
-    };
-    (now.saturating_sub(first) as f64) < after * 1000.0
+    !dir.join("gh.draft.finishes-once-reported").exists() || !running_reported(dir, id).exists()
+}
+
+/// Where it is written down that this host told its caller the work on draft `id`'s
+/// head was still running, because nothing carries that between two invocations of a
+/// program that exits.
+fn running_reported(dir: &Path, id: &str) -> PathBuf {
+    dir.join("gh")
+        .join(format!("{}.running-reported", fake::segment(id)))
+}
+
+/// Write down that a read just reported the work on draft `id`'s head as running, so
+/// it finishes from the next `pr view` on — the reads of the poll this one belongs to
+/// keep its phase ([`reported_draft_running`]).
+fn report_running(dir: &Path, id: &str) {
+    let path = running_reported(dir, id);
+    if let Err(error) = std::fs::write(&path, "") {
+        fake::fail(&format!("cannot write {}: {error}", path.display()));
+    }
 }
 
 /// The last rollup's phase, persisted between the host's separate reads.
@@ -1453,8 +1454,8 @@ fn draft_phase_path(dir: &Path, id: &str) -> PathBuf {
 }
 
 /// Reuse the last rollup's phase until another rollup reports the required check.
-/// Reads before any rollup fall back to the scripted clock, and a ready change
-/// finishes immediately regardless of what the last draft rollup reported.
+/// Reads before any rollup fall back to whether the work was reported running, and a
+/// ready change finishes immediately regardless of what the last draft rollup reported.
 fn reported_draft_running(dir: &Path, id: &str, change: Change) -> bool {
     if change != Change::Draft {
         return false;
@@ -1625,10 +1626,20 @@ fn activity(dir: &Path, opened: Option<&Opened>, kind: Kind) -> Vec<Activity> {
     };
     let id = change_key(dir, opened);
     let running = reported_draft_running(dir, &id, state_of_opened(dir, opened));
-    Activity::scripted(dir, kind)
+    let records: Vec<Activity> = Activity::scripted(dir, kind)
         .into_iter()
         .map(|record| if running { record } else { record.finished() })
-        .collect()
+        .collect();
+    // The empty suite never completes and holds nothing, so it reports nothing running.
+    if running
+        && records.iter().any(|record| {
+            !matches!(record.state, State::Settled(_))
+                && record.record != (Record::Suite { runs: 0 })
+        })
+    {
+        report_running(dir, &id);
+    }
+    records
 }
 
 /// `gh api repos/O/R/actions/runs?head_sha=SHA&per_page=N`
