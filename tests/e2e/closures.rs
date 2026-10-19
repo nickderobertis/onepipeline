@@ -1443,3 +1443,109 @@ fn an_integrate_train_closes_each_branch_s_issues_with_a_record_of_its_own() {
     }
     read_no_board_whole(&served);
 }
+
+/// A settled run waits for the closures it still owes no longer than their own close-out
+/// window: a board that never answers the Status write leaves the run to end — `driver-exited`
+/// inside that bound — with no record of a call that never finished, which the next adoption
+/// makes.
+#[test]
+fn a_settled_run_waits_for_its_closures_no_longer_than_their_window() {
+    let (world, served, launch) = landing_closing_seven("closures-window");
+    served.fault("hold");
+    let run = "window";
+    let project = world.plan(run, &plan_of(run, vec![lifecycle("service", &[])]));
+    start_from(&world, &launch, &project);
+    world.until("the board to hold the closure's Status write", |_| {
+        served.state()["holding"] == true
+    });
+    let held_at = std::time::Instant::now();
+    world.until_within(
+        std::time::Duration::from_secs(90),
+        "the settled run's driver to end",
+        |world| !world.events_of(run, "driver-exited").is_empty(),
+    );
+    let waited = held_at.elapsed();
+    assert!(
+        waited < std::time::Duration::from_secs(60),
+        "the run waited {waited:?} for a closure the board never answered"
+    );
+    assert_eq!(settled(&world, run, "service")["status"], "done");
+    assert!(
+        closures_of(&world, run).is_empty(),
+        "a call that never finished was recorded: {:#?}",
+        closures_of(&world, run)
+    );
+    assert_eq!(served.state()["holding"], true, "the write was answered");
+    served.release();
+    assert_eq!(
+        card(&served, "1", "7"),
+        (json!("Todo"), issue("OPEN", None))
+    );
+}
+
+/// A landing verb's closure record reaches the journal of every run the landing is associated
+/// with — here the run whose node holds a session on the branch a manager lands — exactly as
+/// the landing's own transitions do, labelled with the landing and naming no node.
+#[test]
+fn a_landing_verb_s_closure_record_reaches_the_runs_its_landing_is_associated_with() {
+    let (world, served) = world_with("closures-associated", "local-direct", &one_board());
+    let launch = one_board_launch(&world, &served);
+    world.script("service.wait", "hold");
+    let run = "associated";
+    let project = world.plan(run, &plan_of(run, vec![lifecycle("service", &[])]));
+    start_from(&world, &launch, &project);
+    world.until("the node's session to open", |world| {
+        world
+            .journal(run)
+            .iter()
+            .any(|event| event["source"] == "vcs" && event["kind"] == "session-opened")
+    });
+    let opened = world
+        .journal(run)
+        .into_iter()
+        .find(|event| event["source"] == "vcs" && event["kind"] == "session-opened")
+        .expect("the session opened");
+    let branch = opened["payload"]["branch"]
+        .as_str()
+        .expect("the session names its branch")
+        .to_owned();
+    let worktree = PathBuf::from(
+        opened["payload"]["worktree"]
+            .as_str()
+            .expect("the session names its worktree"),
+    );
+    std::fs::write(worktree.join("widget.txt"), "a widget\n").expect("the work is written");
+    git(&world, &worktree, &["add", "-A"]);
+    git(
+        &world,
+        &worktree,
+        &["commit", "-m", "feat: add the widget\n\nCloses #7"],
+    );
+
+    let output = from_the_launch_directory(
+        &world,
+        &launch,
+        &["publish-branch", &branch, "--repo", "service", "--no-draft"],
+    )
+    .output()
+    .expect("publish-branch runs");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+
+    let records = landing_records(&world);
+    assert_eq!(records.len(), 1, "{records:#?}\n{stderr}");
+    let landing = records[0]["labels"]["landing_id"].clone();
+    let mirrored: Vec<Value> = closures_of(&world, run)
+        .into_iter()
+        .filter(|event| event["labels"]["landing_id"] == landing)
+        .collect();
+    assert_eq!(mirrored.len(), 1, "{:#?}", world.journal(run));
+    assert_eq!(mirrored[0]["payload"], records[0]["payload"]);
+    assert_eq!(mirrored[0]["payload"]["node"], Value::Null);
+    assert_eq!(mirrored[0]["payload"]["outcome"], "projected");
+    assert_eq!(
+        card(&served, "1", "7"),
+        (json!("Done"), issue("CLOSED", Some("COMPLETED")))
+    );
+    world.release("service.go");
+}
