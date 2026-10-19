@@ -939,14 +939,14 @@ fn landed_by(verb: Verb, setup: Setup<'_>) -> Landed {
         Verb::RepoRecover => vec!["true".to_owned()],
         Verb::PublishBranch | Verb::Integrate => Vec::new(),
     };
+    // llmlint: ignore-block[tests_mirror_real_usage] no interface of this build or of `onevcs`
+    // makes a read of an operation's stream fail for a moment: what does is the operating
+    // system, which on Windows refuses a read meeting the writer's locked append (os error
+    // 33). Unix has no such lock, so the hook takes the owner's read bit off the stream for
+    // long enough that the relay's reads meet it several times over, and puts it back before
+    // the push ends, while `onevcs` appends all the while. Everything asserted is the
+    // compiled binary's own output, journal and board writes.
     if setup.unreadable {
-        // llmlint: ignore[tests_mirror_real_usage] no interface of this build or of `onevcs`
-        // makes a read of an operation's stream fail for a moment: what does is the operating
-        // system, which on Windows refuses a read meeting the writer's locked append (os error
-        // 33). Unix has no such lock, so the hook takes the owner's read bit off the stream for
-        // long enough that the relay's reads meet it several times over, and puts it back before
-        // the push ends, while `onevcs` appends all the while. Everything asserted is the
-        // compiled binary's own output, journal and board writes.
         let streams = format!(
             "'{}'/operations/*/events.ndjson",
             world.onevcs_home().display()
@@ -957,6 +957,7 @@ fn landed_by(verb: Verb, setup: Setup<'_>) -> Landed {
             format!("chmod u-r {streams} && sleep 0.3 && chmod u+r {streams}"),
         ];
     }
+    // llmlint: ignore-end[tests_mirror_real_usage]
     let bar: Vec<&str> = bar.iter().map(String::as_str).collect();
     let repository = world.repository("local-direct", &bar);
     let served = GitHubEndpoint::serve_issues(&world, &one_board());
