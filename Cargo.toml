@@ -723,10 +723,9 @@ resolver = "2"
 # squash and the integrate train alike, read here through
 # `onevcs::landing_closes` in `closures::Landing::of`. `src/closures.rs` hands
 # those issues to the store (entry 132 of `docs/contract-divergences.md`);
-# `tests/e2e/closures.rs` drives it. It is also the release `onevcs-testing`
-# 0.19.12, the test-support release named as carrying this batch's onevcs fixes,
-# requires exactly, so the pair moves as one. A **requirement**, because `^0.52`
-# admits no 0.56.x.
+# `tests/e2e/closures.rs` drives it. `onevcs-testing` 0.19.12 requires exactly
+# `=0.56.2`, so the pair moves as one. A **requirement**, because `^0.52` admits
+# no 0.56.x.
 #
 # 0.56.1 below it is the release whose two new shapes this crate reads: a
 # publication held on `boundary::Unavailability::HostVisibility` settles as that
@@ -1071,8 +1070,7 @@ onevcs-testing = "0.19.12"
 # local-md source is what reads back and edits the run's write-back shadow documents
 # (`src/writeback.rs`).
 #
-# **0.8.0 is the floor**, and the release named as carrying this batch's
-# onetaskgraph fix. It adds `Engine::complete_issues`, which moves to `done` the
+# **0.8.0 is the floor.** It adds `Engine::complete_issues`, which moves to `done` the
 # items every configured source holds for the GitHub issues a landing closed, the
 # store choosing the sources (`src/closures.rs`, entry 132). It is breaking: a copy
 # takes `statuses` and may report an item `skipped`, a store failure gains
