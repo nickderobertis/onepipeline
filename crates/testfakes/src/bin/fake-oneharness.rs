@@ -1069,8 +1069,13 @@ fn work(
     // arrives; a second, released while the node is still in flight, proves the
     // readout *advances*. The driver's own turn is left alone — it is the
     // member running the engine verbs, not the one being watched.
-    if !observing && dir.join("turn.hold").exists() {
-        fake::wait_for(&dir.join("turn.go"));
+    let gates = if !observing && dir.join("turn.hold").exists() {
+        turn_gates(dir, prompt)?
+    } else {
+        None
+    };
+    if let Some([go, settle]) = gates {
+        fake::wait_for(&dir.join(&go));
         let held = [call(3, "cargo llvm-cov --workspace"), observation(4)];
         for event in &held {
             drew_any |= view.event(event)?;
@@ -1079,7 +1084,7 @@ fn work(
         // Held again, so the node is *still in flight* when the second reading
         // is taken: a readout that only advances as the dispatch ends proves
         // nothing about supervising a live one.
-        fake::wait_for(&dir.join("turn.settle"));
+        fake::wait_for(&dir.join(&settle));
         // A journey that needs the turn *after* this one held too asks for it
         // with `turn.hold-each`, and the gates are consumed here rather than
         // re-armed by the journey afterwards. Re-arming from outside is a race
@@ -1088,13 +1093,13 @@ fn work(
         // is still in flight, which is exactly the window that race loses.
         //
         // The script's own text narrows it to the member whose prompt carries
-        // that text, because the gates are one pair for the whole world: a
+        // that text, because the default gates are one pair for the whole world: a
         // second node's turn consuming them would take the gate the first one is
         // still waiting on, and hang it.
         if fake::node_script(dir, "turn", "hold-each")
             .is_some_and(|marker| marker.trim().is_empty() || prompt.contains(marker.trim()))
         {
-            for gate in ["turn.go", "turn.settle"] {
+            for gate in [&go, &settle] {
                 let _ = std::fs::remove_file(dir.join(gate));
             }
         }
@@ -1484,6 +1489,53 @@ fn asks_again_times(dir: &std::path::Path) -> Result<usize, String> {
             format!("judge.asks-again-times holds {text:?}, which is not a count: {error}")
         }),
     }
+}
+
+/// The pair of gates a held worker turn waits on: `turn.go` and `turn.settle`,
+/// unless `turn.gates` names others — and `None`, for a turn that is not held.
+///
+/// The default pair is one for the whole world, so releasing it releases every
+/// held turn at once. A journey about one held conversation answering while
+/// another is still held names a pair per turn instead: each line of
+/// `turn.gates` is `<marker> <name>` — the name is its last word — and a turn
+/// whose prompt carries `<marker>` waits on `<name>.go` and `<name>.settle`; the
+/// first line that matches wins. Where `turn.gates` is written, a turn whose
+/// prompt carries none of its markers is not held: a journey naming its gates
+/// holds exactly the turns it names.
+///
+/// A line with no marker, or a name that is not one file name of letters,
+/// digits, `-` and `_`, is a scenario nobody wrote, and is refused rather than
+/// read as something it might have meant — wherever it stands, so every line is
+/// read before any is matched.
+fn turn_gates(dir: &std::path::Path, prompt: &str) -> Result<Option<[String; 2]>, String> {
+    let pair = |name: &str| Some([format!("{name}.go"), format!("{name}.settle")]);
+    let Some(gates) = fake::node_script(dir, "turn", "gates") else {
+        return Ok(pair("turn"));
+    };
+    let mut named_gates = Vec::new();
+    for line in gates.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let named = line
+            .rsplit_once(' ')
+            .map(|(marker, name)| (marker.trim(), name))
+            .filter(|(marker, name)| {
+                !marker.is_empty()
+                    && !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            });
+        let Some((marker, name)) = named else {
+            return Err(format!(
+                "turn.gates holds {line:?}, which is not `<marker> <name>` with a name of \
+                 letters, digits, `-` and `_`"
+            ));
+        };
+        named_gates.push((marker, name));
+    }
+    Ok(named_gates
+        .into_iter()
+        .find(|(marker, _)| prompt.contains(marker))
+        .and_then(|(_, name)| pair(name)))
 }
 
 /// Hold this supervisor turn open, when a journey asked for one that is.
