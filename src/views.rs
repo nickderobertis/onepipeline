@@ -5410,14 +5410,40 @@ mod tests {
             )
         };
         let stream = StreamReads::begin();
-        for (moving, kind) in [
-            (true, onevcs::EventKind::Push),
-            (true, onevcs::EventKind::ChangeMerged),
-            (true, onevcs::EventKind::BaseMerge),
-            (false, onevcs::EventKind::Fetch),
-            (false, onevcs::EventKind::ChecksSettled),
-            (false, onevcs::EventKind::SessionClosed),
-        ] {
+        use onevcs::EventKind as Kind;
+        // Every kind that moves a landing, by name, and the ones a session records most
+        // often that do not.
+        let moving = [
+            Kind::Push,
+            Kind::ChangeOpened,
+            Kind::ChangeDrafted,
+            Kind::DraftLifted,
+            Kind::ChangeReopened,
+            Kind::ChangeRetargeted,
+            Kind::ChangeMerged,
+            Kind::MergeCompleted,
+            Kind::BaseArrived,
+            Kind::BaseMerge,
+            Kind::CommitPreserved,
+            Kind::BranchPreserved,
+            Kind::BranchSuperseded,
+            Kind::BranchRetired,
+            Kind::StackBaseAssembled,
+        ]
+        .map(|kind| (true, kind));
+        let still = [
+            Kind::SessionOpened,
+            Kind::Fetch,
+            Kind::LockWait,
+            Kind::ChangeCheck,
+            Kind::ChecksSettled,
+            Kind::GateRun,
+            Kind::DraftKeptForReview,
+            Kind::ChangeDescribed,
+            Kind::SessionClosed,
+        ]
+        .map(|kind| (false, kind));
+        for (moving, kind) in moving.into_iter().chain(still) {
             carry(&["a", "b"]);
             stream.forget_moved("demo", &[&vcs(kind, "a")]);
             assert_eq!(held("a"), !moving, "{kind:?} of a's session");

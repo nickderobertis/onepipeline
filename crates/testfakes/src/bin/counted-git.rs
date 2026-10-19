@@ -59,6 +59,9 @@ fn run(mut real: Command) -> ExitCode {
     onepipeline_testfakes::refuse(&format!("cannot run the real git: {error}"))
 }
 
+// llmlint: ignore[changed_behavior_has_e2e] never installed off Unix: `World::counting_git`
+// is itself `#[cfg(unix)]`, so no journey on another host starts this, and the refusal is what
+// a hand-run start there meets instead of a count that would be two processes, not one.
 #[cfg(not(unix))]
 fn run(real: Command) -> ExitCode {
     let _ = real;

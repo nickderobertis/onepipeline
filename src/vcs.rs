@@ -937,6 +937,12 @@ pub(crate) fn landings_now(asked: &[LandingAsk<'_>]) -> Vec<LandingRead> {
         }
     };
     std::thread::scope(|scope| {
+        // llmlint: ignore-block[changed_behavior_has_e2e] a thread the host will not start
+        // cannot be staged from a test. What it leaves is the calling thread reading the
+        // whole queue alone, which is exactly the one-read case
+        // `landings_asked_side_by_side_are_each_answered_in_the_order_asked` drives — no
+        // helper is started for a single read — and that test holds every read answered, in
+        // order, by however many hands took them.
         for _ in 0..helpers {
             if std::thread::Builder::new()
                 .spawn_scoped(scope, reading)
@@ -944,7 +950,7 @@ pub(crate) fn landings_now(asked: &[LandingAsk<'_>]) -> Vec<LandingRead> {
             {
                 break;
             }
-        }
+        } // llmlint: ignore-end[changed_behavior_has_e2e]
         reading();
     });
     let mut read = read

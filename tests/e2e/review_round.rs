@@ -885,6 +885,22 @@ fn the_counted_git_counts_each_start_and_is_the_real_git_for_it() {
         3,
         "a refused start was counted, or the one whose git would not run was not"
     );
+
+    // And a start it cannot count is not run: a gap in the count would be a cost the
+    // bound never saw.
+    let uncounted = counted_git(&world, Some(&real), Some(&world.root))
+        .args(["init", "--quiet", "uncounted"])
+        .output()
+        .expect("the counted git runs");
+    assert!(!uncounted.status.success(), "{uncounted:?}");
+    assert!(
+        String::from_utf8_lossy(&uncounted.stderr).contains("cannot"),
+        "the refusal says it could not count: {uncounted:?}"
+    );
+    assert!(
+        !world.root.join("uncounted").exists(),
+        "a start nothing counted ran the real git"
+    );
 }
 
 /// Every draft a rework moved had its landing read again in the render that printed the
