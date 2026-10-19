@@ -5,6 +5,26 @@ use std::process::Command;
 #[cfg(unix)]
 mod wire;
 
+struct World {
+    root: PathBuf,
+    fakes: PathBuf,
+}
+
+impl World {
+    fn new(tag: &str) -> Self {
+        let root = std::env::temp_dir().join(format!("{tag}-{}", std::process::id()));
+        let fakes = root.join("fakes");
+        std::fs::create_dir_all(&fakes).unwrap();
+        Self { root, fakes }
+    }
+}
+
+impl Drop for World {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
 fn double() -> PathBuf {
     static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     BUILT
@@ -74,10 +94,12 @@ fn the_codex_double_answers_its_version_probe() {
 
 #[test]
 fn codex_server_double_refuses_incomplete_duplicate_and_unsupported_listeners() {
-    let root = std::env::temp_dir().join(format!("codex-listen-{}", std::process::id()));
-    std::fs::create_dir_all(&root).unwrap();
-    let first = format!("unix://{}", root.join("missing/first.sock").display());
-    let second = format!("unix://{}", root.join("missing/second.sock").display());
+    let world = World::new("codex-listen");
+    let first = format!("unix://{}", world.root.join("missing/first.sock").display());
+    let second = format!(
+        "unix://{}",
+        world.root.join("missing/second.sock").display()
+    );
     let duplicate = ["app-server", "--listen", &first, "--listen", &second];
     let missing_parent = ["app-server", "--listen", &first];
     let wrong_scheme = ["app-server", "--listen", "tcp://127.0.0.1:1234"];
@@ -119,7 +141,7 @@ fn codex_server_double_refuses_incomplete_duplicate_and_unsupported_listeners() 
     for (args, reason, code) in cases {
         let output = Command::new(double())
             .args(args)
-            .env(onepipeline_testfakes::SCRIPT_DIR_ENV, &root)
+            .env(onepipeline_testfakes::SCRIPT_DIR_ENV, &world.fakes)
             .output()
             .unwrap();
         assert_eq!(output.status.code(), Some(i32::from(code)));
@@ -127,5 +149,4 @@ fn codex_server_double_refuses_incomplete_duplicate_and_unsupported_listeners() 
         assert!(stderr.contains(reason), "{args:?}: {stderr}");
         assert!(output.stdout.is_empty());
     }
-    std::fs::remove_dir_all(root).unwrap();
 }

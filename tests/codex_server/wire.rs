@@ -8,30 +8,10 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 
-use super::double;
+use super::{double, World};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
-
-struct World {
-    root: PathBuf,
-    fakes: PathBuf,
-}
-
-impl World {
-    fn new(tag: &str) -> Self {
-        let root = std::env::temp_dir().join(format!("{tag}-{}", std::process::id()));
-        let fakes = root.join("fakes");
-        std::fs::create_dir_all(&fakes).unwrap();
-        Self { root, fakes }
-    }
-}
-
-impl Drop for World {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
-    }
-}
 
 struct Server {
     child: Child,
