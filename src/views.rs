@@ -1098,24 +1098,95 @@ impl StreamReads {
     }
 
     /// Take a node's landing afresh where the stream just recorded something that
-    /// can move it: a settlement or restack of the node, or any record of its
-    /// session — the push, the change request, the merge.
+    /// can move it: a settlement or restack of the node, or a record of its
+    /// session that moves the branch the read compares or the base it compares
+    /// it against — see [`MOVES_A_LANDING`].
     pub(crate) fn forget_moved(&self, run: &str, events: &[&Envelope]) {
         STREAM_READS.with_borrow_mut(|reads| {
             let Some(reads) = reads else {
                 return;
             };
             for event in events {
-                let moves = event.source == Source::Vcs
-                    || event.kind.0 == PipelineKind::NodeSettled.as_str()
-                    || event.kind.0 == PipelineKind::NodeRestacked.as_str();
+                let moves = match event.source {
+                    Source::Vcs => MOVES_A_LANDING.contains(&event.kind.0.as_str()),
+                    Source::Pipeline => {
+                        event.kind.0 == PipelineKind::NodeSettled.as_str()
+                            || event.kind.0 == PipelineKind::NodeRestacked.as_str()
+                    }
+                    Source::Agentgraph => false,
+                };
                 if let (true, Some(node)) = (moves, event.labels.node.as_deref()) {
                     reads.remove(&(run.to_owned(), node.to_owned()));
                 }
             }
         });
     }
+
+    /// Take, side by side, every landing the summary of `view` reads that this
+    /// stream does not already hold — see [`crate::vcs::landings_now`] — so the
+    /// render after it finds each one carried rather than asking for them one
+    /// after another.
+    ///
+    /// Before the stream's final render that is every landing the summary
+    /// reports, and it is the read that render reports from. Taken outside the
+    /// render, so a [`crate::rendercost`] record of an attach stream holds only
+    /// what the render itself went on to read.
+    pub(crate) fn read_ahead(&self, view: &RunView) {
+        let run = &view.paths.run;
+        let wanted: Vec<((String, String), &str, &str)> = summarised(view)
+            .into_iter()
+            // The two answers a render never reads again — see [`reported_landing_of`].
+            .filter(|node| {
+                !view.state.stated_landings.contains_key(*node)
+                    && view.state.landings.get(*node) != Some(&Landing::Landed)
+            })
+            .filter_map(|node| {
+                let branch = view.state.branches.get(node)?;
+                let repo = view.state.graph.get(node)?.repo.as_deref()?;
+                Some(((run.clone(), node.clone()), branch.as_str(), repo))
+            })
+            .filter(|(key, _, _)| carried(key).is_none())
+            .collect();
+        let read = crate::vcs::landings_now(
+            &wanted
+                .iter()
+                .map(|(_, branch, repo)| (*branch, Some(*repo)))
+                .collect::<Vec<_>>(),
+        );
+        STREAM_READS.with_borrow_mut(|reads| {
+            if let Some(reads) = reads {
+                let taken = std::time::Instant::now();
+                for ((key, _, _), read) in wanted.into_iter().zip(read) {
+                    reads.insert(key, (std::rc::Rc::new(read), taken));
+                }
+            }
+        });
+    }
 }
+
+/// The `onevcs` records after which an attach stream reads the node's landing
+/// again rather than carrying the read it holds: its publication, its landing,
+/// and every other record of the branch or its base moving. The rest — a fetch,
+/// a lock, a check, a description, the session opening or closing — leave both
+/// where the last read found them.
+const MOVES_A_LANDING: [&str; 16] = [
+    "published",
+    "push",
+    "change-opened",
+    "change-drafted",
+    "draft-lifted",
+    "change-reopened",
+    "change-retargeted",
+    "change-merged",
+    "merge-completed",
+    "base-arrived",
+    "base-merge",
+    "commit-preserved",
+    "branch-preserved",
+    "branch-superseded",
+    "branch-retired",
+    "stack-base-assembled",
+];
 
 impl Drop for StreamReads {
     fn drop(&mut self) {
@@ -3421,22 +3492,8 @@ struct Outstanding {
 /// while nine of the eleven had landed, and an adoption node was dispatched three
 /// times against work that was already on its base.
 fn outstanding_landings(view: &RunView, render: &Rendering) -> Outstanding {
-    let statuses = view.state.statuses();
     let mut outstanding = Outstanding::default();
-    for (node, _) in view
-        .state
-        .landings
-        .iter()
-        // A node whose change is held as a draft has not landed and is not one of
-        // these: this list is work an operator has to *decide* about — a change
-        // sitting open that nobody merged — and a draft is a change this run is
-        // deliberately holding and will lift itself. It has a line of its own,
-        // which says what it is waiting on.
-        .filter(|(node, _)| statuses.get(*node) != Some(&NodeStatus::CompleteDraft))
-        // A reworked node's change is its replacement's now — the same branch and
-        // the same change request — so it is counted once, under the replacement.
-        .filter(|(node, _)| !view.state.reworks.contains_key(*node))
-    {
+    for node in summarised(view) {
         match reported_landing(view, render, node).stands() {
             Stands::NotLanded => outstanding.not_landed.push(node.clone()),
             Stands::Undecided => outstanding.undecided.push(node.clone()),
@@ -3444,6 +3501,24 @@ fn outstanding_landings(view: &RunView, render: &Rendering) -> Outstanding {
         }
     }
     outstanding
+}
+
+/// The nodes whose landing [`outstanding_landings`] reports on, in id order.
+fn summarised(view: &RunView) -> Vec<&String> {
+    let statuses = view.state.statuses();
+    view.state
+        .landings
+        .keys()
+        // A node whose change is held as a draft has not landed and is not one of
+        // these: this list is work an operator has to *decide* about — a change
+        // sitting open that nobody merged — and a draft is a change this run is
+        // deliberately holding and will lift itself. It has a line of its own,
+        // which says what it is waiting on.
+        .filter(|node| statuses.get(*node) != Some(&NodeStatus::CompleteDraft))
+        // A reworked node's change is its replacement's now — the same branch and
+        // the same change request — so it is counted once, under the replacement.
+        .filter(|node| !view.state.reworks.contains_key(*node))
+        .collect()
 }
 
 /// The nodes whose work is complete and whose change is held back as a draft,

@@ -812,6 +812,14 @@ pub(crate) enum LandingRead {
     },
 }
 
+impl LandingRead {
+    /// Whether this read shows the work on its base: `onevcs` answered, and what
+    /// it answered is landed. A refusal proves nothing either way.
+    pub(crate) fn proves_landed(&self) -> bool {
+        matches!(self, LandingRead::Answered(landed) if landed.is_landed())
+    }
+}
+
 /// Ask `onevcs` whether one branch's work has reached its base, as of now.
 ///
 /// [`onevcs::landing_status`] is the landing decision on that library's public
@@ -840,15 +848,6 @@ pub(crate) enum LandingRead {
 // by `usable`, which is what wrote every value that reaches this.
 pub(crate) fn landing_now(branch: &str, repo: Option<&str>) -> LandingRead {
     crate::rendercost::landing_read_taken(branch, repo);
-    if let Some(log) = std::env::var_os("RR_LANDING_LOG") {
-        use std::io::Write;
-        let a: Vec<String> = std::env::args().skip(1).take(1).collect();
-        let bt = std::backtrace::Backtrace::force_capture().to_string();
-        let caller: Vec<&str> = bt.lines().filter(|l| l.contains("onepipeline::") && !l.contains("landing_now") && !l.contains("backtrace")).take(9).collect();
-        if let Ok(mut f) = std::fs::OpenOptions::new().append(true).create(true).open(log) {
-            let _ = writeln!(f, "{}\t{}\t{}\t{}", a.join(" "), std::thread::current().name().unwrap_or("?"), branch, caller.join(" | ").replace(char::is_whitespace, ""));
-        }
-    }
     let answered = read_of(onevcs::landing_status(branch, repo));
     // One per read, because the read takes one from scratch. Recorded after it
     // rather than inferred from it, so a build that asked about a repository
@@ -881,10 +880,41 @@ fn read_of(answered: onevcs::Result<onevcs::Landed>) -> LandingRead {
 /// replaces a settlement's own dated claim — so collapsing the other two costs
 /// nothing and a name promising a verdict would.
 pub(crate) fn proved_landed(branch: &str, repo: Option<&str>) -> bool {
-    matches!(
-        landing_now(branch, repo),
-        LandingRead::Answered(landed) if landed.is_landed()
-    )
+    landing_now(branch, repo).proves_landed()
+}
+
+/// [`landing_now`] of each of `asked`, in order, taken side by side on as many
+/// threads as the host has cores and never more than there are reads.
+///
+/// For the places that take every read at once and wait on all of them: each
+/// is `onevcs` taking the repository from scratch and running `git` tens of
+/// times, none depends on another, and one after another they were a tail as
+/// long as their sum — longest where starting a process is slowest.
+pub(crate) fn landings_now(asked: &[(&str, Option<&str>)]) -> Vec<LandingRead> {
+    let workers = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(asked.len());
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let read = std::sync::Mutex::new(Vec::with_capacity(asked.len()));
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| loop {
+                let at = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some((branch, repo)) = asked.get(at) else {
+                    return;
+                };
+                let answer = landing_now(branch, *repo);
+                read.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push((at, answer));
+            });
+        }
+    });
+    let mut read = read
+        .into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    read.sort_by_key(|(at, _)| *at);
+    read.into_iter().map(|(_, answer)| answer).collect()
 }
 
 /// The nodes whose publication left its work on the origin with the merge path
@@ -1909,8 +1939,10 @@ const FOLLOW_POLL: Duration = Duration::from_millis(20);
 /// clone to answer it. What ends a follow is [`Follower::finish`], called before
 /// the close; this is only what ends one whose session something else closed,
 /// so asking it every pass bought nothing but those processes — on a host where
-/// starting one is slow, a core's worth for every session open.
-const FOLLOW_CLOSED_ASK: Duration = Duration::from_secs(1);
+/// starting one is slow, a core's worth for every session open, and still a
+/// third of one when asked every second. Five seconds is the longest a follow
+/// outlives a close made elsewhere.
+const FOLLOW_CLOSED_ASK: Duration = Duration::from_secs(5);
 
 /// A session's own event stream, followed as `onevcs` writes it.
 ///
@@ -4774,6 +4806,6 @@ mod tests {
 
     /// What [`proved_landed`] decides, without a repository to ask.
     fn proved_landed_from(read: &LandingRead) -> bool {
-        matches!(read, LandingRead::Answered(landed) if landed.is_landed())
+        read.proves_landed()
     }
 }
