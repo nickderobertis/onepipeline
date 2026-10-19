@@ -141,7 +141,7 @@ pub(crate) fn answer_withdrawn(
     sent: u64,
     index: u32,
     reason: &WithdrawalReason,
-    by: u64,
+    by: Option<u64>,
 ) -> Result<()> {
     let channel = ChannelState::new(paths);
     let Some(mut outcome) = channel.outcome_of(sent) else {
@@ -165,15 +165,12 @@ pub(crate) fn as_withdrawn(
     mut outcome: CommandOutcome,
 ) -> Result<CommandOutcome> {
     for (by, operation) in readable(&crate::journal::read(&paths.journal())) {
-        if let (
-            Some(by),
-            Operation::NoteWithdrawn {
-                envelope,
-                index,
-                reason,
-                ..
-            },
-        ) = (by, operation)
+        if let Operation::NoteWithdrawn {
+            envelope,
+            index,
+            reason,
+            ..
+        } = operation
         {
             if envelope == outcome.id {
                 refuse_withdrawn(&mut outcome, index, &reason, by);
@@ -189,7 +186,7 @@ fn refuse_withdrawn(
     outcome: &mut CommandOutcome,
     index: u32,
     reason: &WithdrawalReason,
-    by: u64,
+    by: Option<u64>,
 ) -> bool {
     let position = usize::try_from(index).unwrap_or(usize::MAX);
     let Some(result) = outcome.results.get_mut(position) else {
@@ -220,15 +217,12 @@ fn refuse_withdrawn(
 pub(crate) fn answer_owed(paths: &RunPaths) -> Result<()> {
     let channel = ChannelState::new(paths);
     for (by, operation) in readable(&crate::journal::read(&paths.journal())) {
-        let (
-            Some(by),
-            Operation::NoteWithdrawn {
-                envelope: sent,
-                index,
-                reason,
-                ..
-            },
-        ) = (by, operation)
+        let Operation::NoteWithdrawn {
+            envelope: sent,
+            index,
+            reason,
+            ..
+        } = operation
         else {
             continue;
         };
@@ -246,9 +240,40 @@ pub(crate) fn answer_owed(paths: &RunPaths) -> Result<()> {
     Ok(())
 }
 
-/// How an answer names the withdrawal that refused a note.
-fn withdrawn_by_words(by: u64) -> String {
-    format!("withdrawn by envelope {by}:")
+/// How an answer names the withdrawal that refused a note: by its envelope, or —
+/// for one `reply` applied with nothing driving the run, which no queued envelope
+/// carried — as a `withdraw-note`.
+fn withdrawn_by_words(by: Option<u64>) -> String {
+    match by {
+        Some(by) => format!("withdrawn by envelope {by}:"),
+        None => "withdrawn by a `withdraw-note`:".to_string(),
+    }
+}
+
+/// Answer again, for each withdrawal among `operations`, the envelope it took a
+/// note of: what either writer does once it has committed them, `by` naming the
+/// envelope that carried the withdrawals where a queued one did.
+///
+/// # Errors
+///
+/// The channel's, where an answer cannot be written.
+pub(crate) fn answer_each(
+    paths: &RunPaths,
+    operations: &[Operation],
+    by: Option<u64>,
+) -> Result<()> {
+    for operation in operations {
+        if let Operation::NoteWithdrawn {
+            envelope: sent,
+            index,
+            reason,
+            ..
+        } = operation
+        {
+            answer_withdrawn(paths, *sent, *index, reason, by)?;
+        }
+    }
+    Ok(())
 }
 
 /// The envelope that already withdrew note `index` of envelope `sent`, if one did.
@@ -506,7 +531,21 @@ mod tests {
             without_carried(&three, spaced).as_deref(),
             Some("first\n\nlast")
         );
-        let led = with_carried(Some(spaced), "last");
+        // A note reading as two others joined is itself one entry: withdrawing
+        // either of the two leaves it, and withdrawing it leaves both.
+        let joined = with_carried(
+            Some(&with_carried(Some(&with_carried(None, "a")), "b")),
+            "a\n\nb",
+        );
+        assert_eq!(
+            without_carried(&joined, "a").as_deref(),
+            Some("b\n\na\n \nb")
+        );
+        assert_eq!(
+            without_carried(&joined, "a\n\nb").as_deref(),
+            Some("a\n\nb")
+        );
+        let led = with_carried(Some(&with_carried(None, spaced)), "last");
         assert_eq!(without_carried(&led, spaced).as_deref(), Some("last"));
         let trailed = with_carried(Some("first"), spaced);
         assert_eq!(without_carried(&trailed, spaced).as_deref(), Some("first"));

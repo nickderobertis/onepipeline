@@ -4229,6 +4229,9 @@ pub(crate) fn submit_envelope(
                         envelope.author.clone(),
                         operations,
                     )?;
+                    // A note this withdrew is its own envelope's to answer again,
+                    // as it is when a driver applies the withdrawal.
+                    crate::withdrawal::answer_each(paths, operations, None)?;
                     // The planner is told what any other author did here as well as
                     // in the loop: which of the two applied an edit is an accident of
                     // whether anything was driving the run, and the planner owns the

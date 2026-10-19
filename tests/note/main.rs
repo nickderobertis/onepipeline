@@ -6410,3 +6410,154 @@ fn a_note_withdrawn_while_its_envelope_still_waits_is_refused_in_that_envelopes_
         world.events_of(run, "node-settled").len() >= 2
     });
 }
+
+/// The first of two carried notes that a third carried note reads as, joined.
+const READ_AS_ONE: &str = "the fixture moved to fixtures/v4";
+
+/// The second of them.
+const READ_AS_TWO: &str = "and the loader moved beside it";
+
+/// A carried note whose text is two other carried notes joined by a blank line.
+const READ_AS_BOTH: &str = "the fixture moved to fixtures/v4\n\nand the loader moved beside it";
+
+/// The planner context `task` was composed with: its notes, after the heading
+/// and the sentence that says the section reports observed state.
+fn planner_notes(task: &str) -> String {
+    task.split_once("## Planner context")
+        .and_then(|(_, context)| context.trim().split_once("\n\n"))
+        .map(|(_, notes)| notes.trim().to_string())
+        .unwrap_or_else(|| panic!("the dispatch has no planner context:\n{task}"))
+}
+
+/// Withdrawing a carried note takes out that note alone, even where a later
+/// carried note reads as it and another joined: the two are separate notes, and
+/// the next dispatch is composed with the other two, in carry order.
+#[test]
+fn a_withdrawn_note_another_note_reads_as_part_of_takes_out_only_itself() {
+    let world = World::new("note-withdraw-overlap");
+    let run = "withdrawoverlap";
+    held_conversation(
+        &world,
+        run,
+        vec![agent("build", &[]), agent("later", &["build"])],
+    );
+    for text in [READ_AS_ONE, READ_AS_TWO, READ_AS_BOTH] {
+        world
+            .run_with_stdin_on(
+                world.agentgraph_cmd(&["reply", run]),
+                &envelope(note_op("later", "worker", text, None)),
+            )
+            .exited(0)
+            .out_has("\"state\":\"applied\"");
+    }
+    let first = queued_id_of(&world, run, READ_AS_ONE);
+    world
+        .run_with_stdin_on(
+            world.agentgraph_cmd(&["reply", run]),
+            &envelope(withdraw_op(first, 0, WITHDRAWN_BECAUSE)),
+        )
+        .exited(0)
+        .out_has("\"state\":\"applied\"");
+
+    release(&world.fakes, "turn.go");
+    release(&world.fakes, "turn.settle");
+    world.until("later to be dispatched", |world| {
+        dispatches_of(world, run, "later")
+            .first()
+            .is_some_and(|turns| !turns.is_empty())
+    });
+    let task = dispatches_of(&world, run, "later")[0][0].clone();
+    let notes = planner_notes(&task);
+    let entries: Vec<&str> = notes.split("\n\n").collect();
+    assert_eq!(
+        entries.len(),
+        2,
+        "later's planner context is not the two notes left:\n{task}"
+    );
+    assert_eq!(entries[0], READ_AS_TWO, "{task}");
+    assert_eq!(
+        entries[1].replace("\n \n", "\n\n"),
+        READ_AS_BOTH,
+        "the note reading as the other two was not composed whole:\n{task}"
+    );
+    world.until("the run to settle", |world| {
+        world.events_of(run, "node-settled").len() >= 2
+    });
+}
+
+/// A `withdraw-note` sent with nothing driving the run is applied by `reply`
+/// itself, as the run's writer: the withdrawal is committed, the envelope that
+/// carried the note while a driver ran is answered again with it refused, and a
+/// driver that then adopts the run composes the node's next dispatch without it.
+#[test]
+fn a_carried_note_withdrawn_with_nothing_driving_stays_withdrawn_once_the_run_is_adopted() {
+    let world = World::new("note-withdraw-undriven");
+    let run = "withdrawundriven";
+    held_conversation(
+        &world,
+        run,
+        vec![agent("build", &[]), agent("later", &["build"])],
+    );
+    for text in [NOTE, SECOND_CARRIED] {
+        world
+            .run_with_stdin_on(
+                world.agentgraph_cmd(&["reply", run]),
+                &envelope(note_op_with("later", text, "next", true)),
+            )
+            .exited(0)
+            .out_has("\"state\":\"applied\"");
+    }
+    let sent = queued_id_of(&world, run, NOTE);
+    // Then nothing drives the run: the withdrawal is applied by `reply` itself.
+    let holder: Value = serde_json::from_str(
+        &std::fs::read_to_string(world.run_file(run, "owner.lock"))
+            .expect("the driver holds the run's lock"),
+    )
+    .expect("the lock is a record");
+    let driver = holder["pid"]
+        .as_u64()
+        .and_then(|pid| u32::try_from(pid).ok())
+        .unwrap_or_else(|| panic!("the lock names its holder's pid: {holder}"));
+    harness::end_process(driver);
+    world
+        .run_with_stdin_on(
+            world.agentgraph_cmd(&["reply", run]),
+            &envelope(withdraw_op(sent, 0, WITHDRAWN_BECAUSE)),
+        )
+        .exited(0)
+        .out_has("\"state\":\"applied\"");
+    assert_eq!(withdrawals(&world, run).len(), 1);
+    let answered_again = outcome_of(&world, run, sent).expect("answered");
+    assert_eq!(
+        [
+            &answered_again["results"][0]["outcome"],
+            &json!(outcomes_for(&world, run, sent))
+        ],
+        [&json!("refused"), &json!(2)],
+        "the envelope was not answered again with the note withdrawn: {answered_again}"
+    );
+
+    world
+        .run_on(
+            world.agentgraph_cmd(&["adopt", run, "--detach"]),
+            "adopt --detach",
+        )
+        .exited(0);
+    release(&world.fakes, "turn.go");
+    release(&world.fakes, "turn.settle");
+    world.until("later to be dispatched", |world| {
+        dispatches_of(world, run, "later")
+            .first()
+            .is_some_and(|turns| !turns.is_empty())
+    });
+    let task = dispatches_of(&world, run, "later")[0][0].clone();
+    assert_eq!(
+        planner_notes(&task),
+        SECOND_CARRIED,
+        "the adopted run's dispatch is not composed with the remaining note alone:\n{task}"
+    );
+    assert_eq!(withdrawals(&world, run).len(), 1);
+    world.until("the run to settle", |world| {
+        world.events_of(run, "node-settled").len() >= 2
+    });
+}

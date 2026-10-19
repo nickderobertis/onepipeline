@@ -507,44 +507,51 @@ pub(crate) fn expired(deadline: std::time::Duration) -> String {
 /// it: every note carried there before it, then it.
 ///
 /// Carried notes accumulate rather than replace one another, so each one the
-/// node is owed reaches its next dispatch's `## Planner context`.
+/// node is owed reaches its next dispatch's `## Planner context`. Each is one
+/// entry, set off from the one before it by a blank line — see [`entry_of`] for
+/// how a note's own blank lines are kept from reading as that separator.
 pub(crate) fn with_carried(context: Option<&str>, text: &str) -> String {
+    let entry = entry_of(text);
     match context.filter(|context| !context.trim().is_empty()) {
-        Some(context) => format!("{context}{CARRIED_SEPARATOR}{text}"),
-        None => text.to_string(),
+        Some(context) => format!("{context}{CARRIED_SEPARATOR}{entry}"),
+        None => entry,
     }
 }
 
 /// The planner context left once the carried note reading `text` is withdrawn
-/// from it: the latest entry reading exactly `text` taken out, and every other
-/// entry left where it was.
+/// from it: the latest entry that note was carried as taken out, and every other
+/// entry left where it was, in order.
 ///
-/// Carried notes are joined into one prose context by [`with_carried`], so a
-/// note is found there **by its text**, as a whole entry: bounded by the
-/// separator on both sides, or by the context's start or end — never as one
-/// paragraph of a split, so a note whose own text holds a blank line is taken out
-/// entire. The one shape text alone cannot tell apart is a note whose text is
-/// exactly a run of the entries other notes' paragraphs make; there the latest
-/// such run is the one taken out. `None` where nothing is left; a context holding
-/// no entry reading `text` is returned unchanged.
+/// The context is split into its entries on the separator, which no carried
+/// entry holds ([`entry_of`]), so a note is matched whole — never one of its
+/// paragraphs, and never a run of other notes that happen to read as it. Where
+/// the same text was carried more than once, the latest is the one taken out.
+/// `None` where nothing is left; a context holding no entry for `text` is
+/// returned unchanged.
 pub(crate) fn without_carried(context: &str, text: &str) -> Option<String> {
-    if context == text {
-        return None;
+    let entry = entry_of(text);
+    let mut entries: Vec<&str> = context.split(CARRIED_SEPARATOR).collect();
+    let Some(at) = entries.iter().rposition(|candidate| *candidate == entry) else {
+        return Some(context.to_string());
+    };
+    entries.remove(at);
+    let left = entries.join(CARRIED_SEPARATOR);
+    (!left.trim().is_empty()).then_some(left)
+}
+
+/// A carried note as its node's planner context holds it: its text, with every
+/// blank line inside it written as a line holding one space.
+///
+/// The blank line is what sets one carried note off from the next, so a note's
+/// own would otherwise read as two notes, and a note reading as two others joined
+/// would read as them. A line holding a space renders as the same paragraph break
+/// in the task a worker reads, and never as the separator.
+fn entry_of(text: &str) -> String {
+    let mut entry = text.trim().to_string();
+    while entry.contains(CARRIED_SEPARATOR) {
+        entry = entry.replace(CARRIED_SEPARATOR, "\n \n");
     }
-    let last = format!("{CARRIED_SEPARATOR}{text}");
-    if let Some(rest) = context.strip_suffix(&last) {
-        return Some(rest.to_string());
-    }
-    let between = format!("{CARRIED_SEPARATOR}{text}{CARRIED_SEPARATOR}");
-    if let Some(at) = context.rfind(&between) {
-        return Some(format!(
-            "{}{CARRIED_SEPARATOR}{}",
-            &context[..at],
-            &context[at + between.len()..]
-        ));
-    }
-    let first = format!("{text}{CARRIED_SEPARATOR}");
-    Some(context.strip_prefix(&first).unwrap_or(context).to_string())
+    entry
 }
 
 /// Why a note was withdrawn, as a `withdraw-note` said it: never blank, in the

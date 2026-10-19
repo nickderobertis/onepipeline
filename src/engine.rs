@@ -6452,17 +6452,7 @@ fn commit_command(
     {
         crate::review::failpoint("after-note-withdrawn")?;
     }
-    for operation in operations {
-        if let edits::Operation::NoteWithdrawn {
-            envelope: sent,
-            index,
-            reason,
-            ..
-        } = operation
-        {
-            crate::withdrawal::answer_withdrawn(paths, *sent, *index, reason, envelope)?;
-        }
-    }
+    crate::withdrawal::answer_each(paths, operations, Some(envelope))?;
     // An edit any author but the planner made is the planner's to review: it was
     // applied on that author's own judgement, so the planner learns of it without
     // being asked to approve it first.
