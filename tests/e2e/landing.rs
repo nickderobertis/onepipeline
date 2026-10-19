@@ -891,7 +891,9 @@ const QUIET_MS: u64 = 11_000;
 
 /// How long an attach stream carries a landing read across its renders: the ten seconds
 /// divergence 33 states, held here as the journeys that state it are — one requiring no
-/// read again inside it and the other requiring one again after [`QUIET_MS`].
+/// read again inside it and the other requiring one again after [`QUIET_MS`]. The crate's
+/// own `views::STREAM_READ_REUSE` is private to it, so its unit test
+/// `a_carried_landing_read_lapses_at_the_end_of_its_window` pins it to this same figure.
 pub(crate) const STREAM_READ_REUSE_MS: u64 = 10_000;
 
 /// One render of an attach stream: the lines it printed above its trailer, and the acts
