@@ -27,6 +27,7 @@ use crate::stacked_drafts::{
 use onevcs::{ChangeId, CommentId, CommentKind};
 use onevcs_testing::{FileHost, HostComment, HostState};
 use serde_json::{json, Value};
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 /// Where the round's telemetry is written for the budget's script to read.
@@ -378,14 +379,56 @@ fn passed(output: &crate::harness::Run, what: &str) {
     );
 }
 
+/// Where `bash` resolves on `path`, given the Windows directory `system_root` names.
+///
+/// Not `Command::new("bash")`: on Windows `CreateProcess` searches the system directory
+/// before `PATH`, and the `bash.exe` there is the WSL launcher, which on a host with no
+/// distribution writes its refusal to stdout and exits 1. Every record the reporter refuses
+/// was then a failure with nothing on stderr, which is what `cross proof (windows-latest)`
+/// reported; `tests/linked_engines.rs` gives the reason at length. Windows spells that
+/// directory in either case, `C:\Windows` beside `C:\WINDOWS\system32`, so it is compared
+/// without case. Taken as parameters so that the case only Windows produces is driven on
+/// every platform.
+fn bash_on(path: &OsStr, system_root: Option<&OsStr>) -> PathBuf {
+    let windows_dir = system_root.map(|root| root.to_string_lossy().to_lowercase());
+    std::env::split_paths(path)
+        .filter(|dir| {
+            windows_dir.as_ref().is_none_or(|root| {
+                !dir.to_string_lossy()
+                    .to_lowercase()
+                    .starts_with(root.as_str())
+            })
+        })
+        .flat_map(|dir| ["bash", "bash.exe"].map(|name| dir.join(name)))
+        .find(|candidate| candidate.is_file())
+        .expect("a bash on PATH outside the Windows system directory runs the reporter")
+}
+
+/// The reporter, run from `cwd` by the `bash` [`bash_on`] finds on `path`, with `path` as
+/// its own `PATH`.
+///
+/// The script is named with `/`: it finds its module through `$(dirname "$0")`, and `/` is
+/// the separator that both `dirname` and `node` read on every platform.
+fn reporter(cwd: &Path, path: &OsStr, system_root: Option<&OsStr>) -> std::process::Command {
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/review-round-quota-budget.sh");
+    let mut command = std::process::Command::new(bash_on(path, system_root));
+    command
+        .arg(script.to_string_lossy().replace('\\', "/"))
+        .current_dir(cwd)
+        .env("PATH", path);
+    command
+}
+
 /// What `scripts/review-round-quota-budget.sh` reports over `record`, run from `cwd`.
 pub(crate) fn budget_report(cwd: &Path, result: &Path) -> std::process::Output {
-    std::process::Command::new("bash")
-        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/review-round-quota-budget.sh"))
-        .current_dir(cwd)
-        .env("ONEBUDGETSPEC_RESULT", result)
-        .output()
-        .expect("the committed reporter runs")
+    reporter(
+        cwd,
+        &std::env::var_os("PATH").unwrap_or_default(),
+        std::env::var_os("SystemRoot").as_deref(),
+    )
+    .env("ONEBUDGETSPEC_RESULT", result)
+    .output()
+    .expect("the committed reporter runs")
 }
 
 #[test]
@@ -749,6 +792,64 @@ fn whole_round(replies: usize) -> Value {
     })
 }
 
+/// The reporter where the first `bash` the child's search meets is not a shell but a
+/// stand-in for the WSL launcher in the Windows directory — writing its refusal to stdout and
+/// exiting 1, as it does on a Windows runner — spelled in the two cases Windows spells that
+/// directory. It still refuses a missing record by naming it, and reports a whole round.
+///
+/// Unix only: on Windows the real launcher is the condition, and
+/// `the_round_quota_reporter_refuses_missing_and_malformed_records` meets it there.
+#[cfg(unix)]
+#[test]
+fn the_round_quota_reporter_runs_its_shell_and_not_the_windows_wsl_launcher() {
+    let world = World::new("review-round-reporter-wsl");
+    let system32 = world.root.join("WINDOWS").join("system32");
+    std::fs::create_dir_all(&system32).unwrap();
+    onepipeline_testfakes::executable(
+        &system32.join("bash"),
+        "#!/bin/sh\necho 'Windows Subsystem for Linux has no installed distributions.'\nexit 1\n",
+    );
+    let path = std::env::join_paths(std::iter::once(system32).chain(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    )))
+    .unwrap();
+    let system_root = world.root.join("Windows").into_os_string();
+    let result = world.root.join("result.json");
+    let record = world.root.join(RECORD);
+    std::fs::create_dir_all(record.parent().unwrap()).unwrap();
+
+    let missing = reporter(&world.root, &path, Some(&system_root))
+        .env("ONEBUDGETSPEC_RESULT", &result)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&missing.stdout);
+    let stderr = String::from_utf8_lossy(&missing.stderr);
+    assert!(!missing.status.success(), "a missing record was accepted");
+    assert!(
+        !stdout.contains("Windows Subsystem for Linux"),
+        "the launcher answered for the reporter: {stdout}"
+    );
+    assert!(
+        stderr.contains(&format!("{RECORD}: missing")) && stderr.contains("review_round::"),
+        "stderr: {stderr}\nstdout: {stdout}"
+    );
+    assert!(!result.exists(), "a failed measurement reported a value");
+
+    std::fs::write(&record, whole_round(6).to_string()).unwrap();
+    let whole = reporter(&world.root, &path, Some(&system_root))
+        .env("ONEBUDGETSPEC_RESULT", &result)
+        .output()
+        .unwrap();
+    assert!(
+        whole.status.success(),
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&whole.stderr),
+        String::from_utf8_lossy(&whole.stdout)
+    );
+    let reported: Value = serde_json::from_slice(&std::fs::read(&result).unwrap()).unwrap();
+    assert_eq!(reported["value"], json!(6 + 1 + 6 + 2 + 1));
+}
+
 #[test]
 fn the_round_quota_reporter_refuses_missing_and_malformed_records() {
     let world = World::new("review-round-reporter");
@@ -792,7 +893,8 @@ fn the_round_quota_reporter_refuses_missing_and_malformed_records() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
             stderr.contains(RECORD) && stderr.contains("review_round::"),
-            "{stderr}"
+            "stderr: {stderr}\nstdout: {}",
+            String::from_utf8_lossy(&output.stdout)
         );
     }
     std::fs::write(&record, whole_round(6).to_string()).unwrap();
@@ -813,12 +915,14 @@ fn the_round_quota_reporter_refuses_missing_and_malformed_records() {
     );
     let reported: Value = serde_json::from_slice(&std::fs::read(&result).unwrap()).unwrap();
     assert_eq!(reported["value"], json!(6 + 1 + 6 + 2 + 1));
-    let missing_env = std::process::Command::new("bash")
-        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/review-round-quota-budget.sh"))
-        .current_dir(&world.root)
-        .env_remove("ONEBUDGETSPEC_RESULT")
-        .output()
-        .unwrap();
+    let missing_env = reporter(
+        &world.root,
+        &std::env::var_os("PATH").unwrap_or_default(),
+        std::env::var_os("SystemRoot").as_deref(),
+    )
+    .env_remove("ONEBUDGETSPEC_RESULT")
+    .output()
+    .unwrap();
     assert!(!missing_env.status.success());
     assert!(String::from_utf8_lossy(&missing_env.stderr).contains("ONEBUDGETSPEC_RESULT"));
 }
