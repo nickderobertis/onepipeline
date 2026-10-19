@@ -894,7 +894,8 @@ fn a_render_asks_the_landing_read_once_per_node_it_prints_and_does_nothing_else_
 const STREAMED: [&str; 3] = ["first", "second", "third"];
 
 /// How long the last of them works, so the stream goes quiet for longer than it carries
-/// a read — the ten seconds divergence 33 states — and the reads before it lapse.
+/// a read — the window its renders' record states, which the journey holds shorter than
+/// this — and the reads before it lapse.
 const QUIET_MS: u64 = 11_000;
 
 /// One render of an attach stream: the lines it printed above its trailer, and the acts

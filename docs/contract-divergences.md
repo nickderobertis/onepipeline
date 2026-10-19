@@ -1156,7 +1156,8 @@ unlanded node's landing from scratch, about forty `git` processes a node, was
 nearly half of what a ten-draft review round started, and on a host where
 starting a process is slow that round ran past its journey's bound. So within
 one attach stream a node's read is carried across the stream's consecutive
-renders for at most ten seconds (`views::STREAM_READ_REUSE`), and is taken again
+renders for at most a short, fixed window (`views::STREAM_READ_REUSE`, which each
+of the stream's render-cost records states), and is taken again
 at once after the stream records a settlement or restack of that node, or a
 publication or landing record of its session (`views::moves_a_landing`). The
 stream's final render — the one reporting the run as it settled, made once the

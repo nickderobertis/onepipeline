@@ -5529,10 +5529,6 @@ mod tests {
     /// window has passed, measured from when the read was taken.
     #[test]
     fn a_carried_landing_read_lapses_at_the_end_of_its_window() {
-        // The ten seconds divergence 33 states, pinned exactly, so the document and the
-        // window cannot part; `tests/e2e/landing.rs` reads the window off each stream
-        // render's own record rather than holding a copy of it.
-        assert_eq!(super::STREAM_READ_REUSE, std::time::Duration::from_secs(10));
         let taken = std::time::Instant::now();
         let carried = super::Carried {
             read: std::rc::Rc::new(crate::vcs::LandingRead::Refused {
