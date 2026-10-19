@@ -98,8 +98,12 @@ fn query_of(call: &Value) -> &str {
 /// a session open and a write: the repository's visibility, and whether its rules
 /// require a branch up to date with its base.
 fn is_sibling_read(call: &Value) -> bool {
+    // The visibility read carries `--include` since `onevcs` 0.56, to tell a host that
+    // did not answer from one that refused.
     call["args"][0] == "api"
-        && call["args"].as_array().is_some_and(|args| args.len() == 2)
+        && call["args"]
+            .as_array()
+            .is_some_and(|args| args.len() == 2 || (args.len() == 3 && args[2] == "--include"))
         && call["args"][1].as_str().is_some_and(|path| {
             path == format!("repos/{SLUG}")
                 || path.starts_with(&format!("repos/{SLUG}/rules/branches/"))

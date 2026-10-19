@@ -1219,7 +1219,67 @@ impl GitHubEndpoint {
     }
 
     fn serve_with_replace_refusal(world: &World, seeded: &Value, refuse_replace: bool) -> Self {
-        Self::start(world, seeded, refuse_replace, None).listening(world)
+        Self::start(world, seeded, refuse_replace, None, None).listening(world)
+    }
+
+    /// Serve the board under `world` with the numbered issues and boards `issues` states, in
+    /// the shape `github_loopback.py`'s `GITHUB_LOOPBACK_ISSUES` reads.
+    pub(super) fn serve_issues(world: &World, issues: &Value) -> Self {
+        Self::start(world, &json!({}), false, None, Some(issues)).listening(world)
+    }
+
+    /// The GraphQL endpoint the source of board `number` names, so the request log says which
+    /// board sent each request.
+    pub(super) fn board(&self, number: u64) -> String {
+        format!("{}/board/{number}/graphql", self.url.trim())
+    }
+
+    /// Answer the next Status write of a numbered card with `fault`: `refuse`, `fail-once`,
+    /// `transient` or `hold`.
+    pub(super) fn fault(&self, fault: &str) {
+        self.faults(&[fault]);
+    }
+
+    /// Answer the next Status writes of numbered cards with `faults`, one each, in order.
+    pub(super) fn faults(&self, faults: &[&str]) {
+        self.post("/fault", &json!({"status": faults}));
+    }
+
+    /// Answer the next reads of numbered issues by reference with `reads`, one each, in order:
+    /// `pass`, or `refuse`.
+    pub(super) fn reads(&self, reads: &[&str]) {
+        self.post("/reads", &json!({"reads": reads}));
+    }
+
+    /// Let every held Status write go.
+    pub(super) fn release(&self) {
+        self.post("/release", &json!({}));
+    }
+
+    fn post(&self, path: &str, body: &Value) {
+        use std::io::{Read, Write};
+        let address = self
+            .url
+            .trim()
+            .strip_prefix("http://")
+            .expect("a loopback URL");
+        let mut socket = std::net::TcpStream::connect(address).expect("the endpoint listens");
+        socket
+            .set_read_timeout(Some(Duration::from_secs(120)))
+            .expect("a read backstop");
+        let body = body.to_string();
+        write!(
+            socket,
+            "POST {path} HTTP/1.0\r\nHost: {address}\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .expect("the control request");
+        let mut response = String::new();
+        socket
+            .read_to_string(&mut response)
+            .expect("the control response");
+        assert!(response.starts_with("HTTP/1.0 200 "), "{response}");
     }
 
     /// Start the endpoint without waiting for it to publish its URL; `publish_hold` names the
@@ -1229,11 +1289,17 @@ impl GitHubEndpoint {
         seeded: &Value,
         refuse_replace: bool,
         publish_hold: Option<&Path>,
+        issues: Option<&Value>,
     ) -> StartedEndpoint {
         let dir = world.root.join("github-endpoint");
         std::fs::create_dir_all(&dir).expect("endpoint directory");
         let seed = dir.join("seeded.json");
         std::fs::write(&seed, seeded.to_string()).expect("seeded metadata");
+        let numbered = issues.map(|issues| {
+            let path = dir.join("issues.json");
+            std::fs::write(&path, issues.to_string()).expect("the numbered issues");
+            path
+        });
         let held_state = refuse_replace.then(|| {
             let mut options = std::fs::OpenOptions::new();
             options.read(true).write(true).create_new(true);
@@ -1273,6 +1339,9 @@ runpy.run_path(sys.argv[0], run_name='__main__')
         // llmlint: ignore-end[tests_mirror_real_usage]
         if let Some(hold) = publish_hold {
             command.env("GITHUB_LOOPBACK_PUBLISH_HOLD", hold);
+        }
+        if let Some(numbered) = &numbered {
+            command.env("GITHUB_LOOPBACK_ISSUES", numbered);
         }
         let child = command
             .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/e2e/github_loopback.py"))
@@ -1367,7 +1436,7 @@ fn the_github_endpoint_url_is_readable_only_once_completely_written() {
     let world = World::new("github-endpoint-publication");
     let hold = world.root.join("publish-hold");
     std::fs::create_dir_all(&hold).expect("publication hold directory");
-    let mut started = GitHubEndpoint::start(&world, &json!({}), false, Some(&hold));
+    let mut started = GitHubEndpoint::start(&world, &json!({}), false, Some(&hold), None);
     world.until("the endpoint's publication to be held", |_| {
         started.assert_running("its publication was held");
         hold.join("held").is_file()

@@ -5,6 +5,20 @@ no request reaches GitHub or reads a production credential. The board carries a
 `Host` text field a source's `metadata_fields` can project onto, and an optional
 second argument names a JSON file of caller metadata to seed onto issues by name.
 
+`GITHUB_LOOPBACK_ISSUES` names a JSON file of numbered issues and the boards that hold them,
+for the journeys about the issues a landing closes: `{"repository": "owner/name", "issues":
+{"7": {"state": "OPEN", "reason": null, "delivers": ["source:ticket"]}, ...}, "boards": {"1":
+{"7": "Todo"}, ...}}`, `delivers` optional and written into the issue's metadata slot. A read
+of an `ISSUE-<n>` this endpoint holds no issue for fails with an HTTP 502. Those
+issues are read by repository and number, as `task status complete` reads them, and a board's
+source names its board in its endpoint, `/board/<number>/graphql`, so every request is logged
+under the board that sent it. POST `/fault` with `{"status": FAULT}`, or a list of them for
+successive writes, answers the next Status write of a numbered card that way: `refuse`d for
+good, `fail-once` with an HTTP 502, `transient` — failed once with an HTTP 502 and the retry
+then held until POST `/release` — or `hold` until `/release` and then dropped unapplied, the
+request a stopped driver sent and never saw answered. POST `/reads` with `{"reads": ["pass" |
+"refuse", ...]}` answers the next reads of issues by reference that way, one each, in order.
+
 The URL is published to `<root>/endpoint` whole or not at all. For the regression journey that
 proves it, `GITHUB_LOOPBACK_PUBLISH_HOLD` names a directory: publication stops half-written,
 creates `held` there, and finishes only once `go` appears.
@@ -12,9 +26,11 @@ creates `held` there, and finishes only once `go` appears.
 import json
 import os
 import pathlib
+import re
 import sys
+import threading
 import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 root = pathlib.Path(sys.argv[1])
 seeded = json.loads(pathlib.Path(sys.argv[2]).read_text()) if len(sys.argv) > 2 else {}
@@ -71,6 +87,138 @@ def issue(name):
     return value
 
 
+STATES = {"OPEN": [None], "CLOSED": ["COMPLETED", "NOT_PLANNED", "DUPLICATE"]}
+NUMBER = re.compile(r"^[1-9]\d*$")
+REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+
+
+def numbered_fixture(document):
+    """The numbered issues and boards a journey seeds, refused unless every part is one this
+    endpoint can answer as GitHub would."""
+    if (not isinstance(document, dict) or set(document) != {"repository", "issues", "boards"}
+            or not isinstance(document["repository"], str)
+            or not REPOSITORY.match(document["repository"])
+            or not isinstance(document["issues"], dict)
+            or not isinstance(document["boards"], dict)):
+        raise SystemExit("numbered issues must name a repository, its issues and its boards")
+    for number, held in document["issues"].items():
+        if (not NUMBER.match(number) or not isinstance(held, dict)
+                or not {"state", "reason"} <= set(held) <= {"state", "reason", "delivers"}
+                or held["reason"] not in STATES.get(held["state"], [])
+                or not isinstance(held.get("delivers", []), list)
+                or not all(isinstance(ticket, str) and ":" in ticket
+                           for ticket in held.get("delivers", []))):
+            raise SystemExit("issue %r is not a number with a state, the reason it fits and the "
+                             "tickets it delivers" % number)
+    for board, cards in document["boards"].items():
+        if (not NUMBER.match(board) or not isinstance(cards, dict)
+                or any(number not in document["issues"] or card not in options
+                       for number, card in cards.items())):
+            raise SystemExit("board %r must hold seeded issues at Status options" % board)
+    return document
+
+
+numbered = (numbered_fixture(json.loads(pathlib.Path(os.environ["GITHUB_LOOPBACK_ISSUES"]).read_text()))
+            if os.environ.get("GITHUB_LOOPBACK_ISSUES") else
+            {"repository": None, "issues": {}, "boards": {}})
+state["numbered"] = numbered
+state["log"] = []
+state["writes"] = []
+state["fault"] = None
+state["holding"] = False
+state["queued"] = []
+state["reads"] = []
+FAULTS = ["refuse", "fail-once", "transient", "hold"]
+
+
+def next_fault():
+    """The fault the next numbered Status write meets, once the current one has answered."""
+    state["fault"] = state["queued"].pop(0) if state["queued"] else None
+
+
+# One lock over every read and write of state, since a held write waits on its own thread.
+lock = threading.Lock()
+released = threading.Event()
+
+
+def numbered_status_field(board):
+    return {"id": "STATUS-" + board, "name": "Status",
+            "options": [{"id": name, "name": name} for name in options]}
+
+
+def numbered_issue(number):
+    """The `HeldIssue` an issue read by reference answers: its every board membership, each
+    carrying its card's `Status` option by name."""
+    held = numbered["issues"][number]
+    owner, name = numbered["repository"].split("/")
+    memberships = [
+        {"id": "ITEM-" + board + "-" + number, "updatedAt": "2026-10-01T00:00:00Z",
+         "project": {"id": "BOARD-" + board, "number": int(board)},
+         "status": {"name": cards[number], "field": numbered_status_field(board)}}
+        for board, cards in sorted(numbered["boards"].items()) if number in cards]
+    return {"__typename": "Issue", "id": "ISSUE-" + number, "number": int(number),
+            "title": "issue " + number,
+            "body": ("Issue " + number + "." if not held.get("delivers") else
+                     described("Issue " + number + ".", {"onetaskgraph.delivers": held["delivers"]})),
+            "url": "https://github.com/" + numbered["repository"] + "/issues/" + number,
+            "createdAt": "2026-10-01T00:00:00Z", "updatedAt": "2026-10-01T00:00:00Z",
+            "state": held["state"], "stateReason": held["reason"],
+            "repository": {"nameWithOwner": numbered["repository"]}, "parent": None,
+            "subIssuesSummary": {"total": 0}, "commentCount": {"totalCount": 0},
+            "relationshipEvents": {"totalCount": 0},
+            "projectItems": {"nodes": memberships,
+                             "pageInfo": {"hasNextPage": False, "endCursor": None}}}
+
+
+def issues_by_reference(variables):
+    data, errors = {}, []
+    slot = 0
+    while "owner%d" % slot in variables:
+        owner, name = variables["owner%d" % slot], variables.get("name%d" % slot)
+        number = variables.get("number%d" % slot)
+        if (not isinstance(owner, str) or not isinstance(name, str)
+                or not isinstance(number, int) or isinstance(number, bool) or number < 1):
+            raise ValueError("slot %d of a read by reference names no owner, name and number" % slot)
+        repository = "%s/%s" % (owner, name)
+        number = str(number)
+        if repository != numbered["repository"]:
+            data["r%d" % slot] = None
+            errors.append({"type": "NOT_FOUND", "path": ["r%d" % slot],
+                           "message": "Could not resolve to a Repository"})
+        elif number not in numbered["issues"]:
+            data["r%d" % slot] = {"issue": None}
+            errors.append({"type": "NOT_FOUND", "path": ["r%d" % slot, "issue"],
+                           "message": "Could not resolve to an issue"})
+        else:
+            data["r%d" % slot] = {"issue": numbered_issue(number)}
+        slot += 1
+    answer = {"data": data}
+    if errors:
+        answer["errors"] = errors
+    return answer
+
+
+NUMBERED_ITEM = re.compile(r"^ITEM-(\d+)-(\d+)$")
+
+
+def write_numbered_status(supplied):
+    """A Status write of a numbered card: what the fault says, or the card moved."""
+    matched = NUMBERED_ITEM.match(supplied.get("itemId", ""))
+    board, number = matched.groups()
+    if (set(supplied) != {"projectId", "itemId", "fieldId", "value"}
+            or supplied["projectId"] != "BOARD-" + board
+            or supplied["fieldId"] != "STATUS-" + board
+            or number not in numbered["boards"].get(board, {})
+            or not isinstance(supplied["value"], dict)
+            or set(supplied["value"]) != {"singleSelectOptionId"}
+            or supplied["value"]["singleSelectOptionId"] not in options):
+        raise ValueError("invalid numbered Status mutation input")
+    state["writes"].append({"board": int(board), "issue": int(number), "field": "Status",
+                            "value": supplied["value"]["singleSelectOptionId"]})
+    numbered["boards"][board][number] = supplied["value"]["singleSelectOptionId"]
+    return {"data": {"updateProjectV2ItemFieldValue": {"projectV2Item": {"id": supplied["itemId"]}}}}
+
+
 def write_field(supplied, clear=False):
     keys = {"projectId", "itemId", "fieldId"} if clear else {"projectId", "itemId", "fieldId", "value"}
     if (not isinstance(supplied, dict) or set(supplied) != keys
@@ -113,7 +261,35 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != "/state":
             self.reply({"errors": [{"message": "unknown route"}]}, 404)
             return
-        self.reply(state)
+        with lock:
+            self.reply(state)
+
+    def held_write(self, request):
+        """The Status write the current fault answers, the next queued fault taking its place
+        once it has — a held one answered only once `/release` is posted."""
+        fault = state["fault"]
+        if fault == "refuse":
+            next_fault()
+            return {"errors": [{"type": "UNPROCESSABLE",
+                                "message": "the loopback refuses this Status write"}]}, 200
+        if fault == "fail-once":
+            next_fault()
+            return {"errors": [{"message": "the loopback is failing for now"}]}, 502
+        if fault == "transient":
+            state["fault"] = "hold-then-apply"
+            return {"errors": [{"message": "the loopback is failing for now"}]}, 502
+        if fault in ("hold", "hold-then-apply"):
+            next_fault()
+            state["holding"] = True
+            lock.release()
+            try:
+                released.wait()
+            finally:
+                lock.acquire()
+            state["holding"] = False
+            if fault == "hold":
+                return {"errors": [{"message": "the loopback dropped a held write"}]}, 502
+        return write_numbered_status(request["variables"]["input"]), 200
 
     def do_POST(self):
         try:
@@ -123,15 +299,38 @@ class Handler(BaseHTTPRequestHandler):
             request = json.loads(self.rfile.read(length))
             if not isinstance(request, dict):
                 raise ValueError("request must be an object")
-            if self.path == "/human":
+            if self.path == "/reads":
+                reads = request.get("reads") if set(request) == {"reads"} else None
+                if (not isinstance(reads, list)
+                        or any(read not in ["pass", "refuse"] for read in reads)):
+                    raise ValueError("reads name how the next reads by reference are answered")
+                with lock:
+                    state["reads"] = reads
+                answer = {"data": {}}
+            elif self.path == "/fault":
+                faults = request.get("status") if set(request) == {"status"} else None
+                faults = [faults] if isinstance(faults, str) else faults
+                if (not isinstance(faults, list) or not faults
+                        or any(fault not in FAULTS for fault in faults)):
+                    raise ValueError("a fault names the Status writes' faults, in order")
+                with lock:
+                    state["fault"], state["queued"] = faults[0], faults[1:]
+                answer = {"data": {}}
+            elif self.path == "/release":
+                released.set()
+                answer = {"data": {}}
+            elif self.path == "/human":
                 if set(request) != {"body", "status"} or not isinstance(request["body"], str):
                     raise ValueError("human edit must contain only a body string and a status")
                 if request["status"] not in options:
                     raise ValueError("unknown human status")
                 state["issues"]["work"].update(request)
                 answer = {"data": {}}
-            elif self.path == "/graphql":
-                answer = self.graphql(request)
+            elif self.path == "/graphql" or re.fullmatch(r"/board/\d+/graphql", self.path):
+                with lock:
+                    answer, status = self.graphql(request)
+                self.reply(answer, status)
+                return
             else:
                 raise ValueError("unknown route")
         except (ValueError, TypeError, KeyError) as error:
@@ -149,6 +348,48 @@ class Handler(BaseHTTPRequestHandler):
                     and not isinstance(request["operationName"], str))):
             raise ValueError("GraphQL requires a query string and an object of variables")
         state["requests"].append(request)
+        state["log"].append({"path": self.path, "query": query, "variables": variables})
+        answer = self.numbered(query, variables, request)
+        if answer is not None:
+            return answer
+        return self.named(query, variables), 200
+
+    def numbered(self, query, variables, request):
+        """The numbered issues' operations, or `None` for one about the named ones."""
+        if "r0:repository(owner:$owner0" in query:
+            read = state["reads"].pop(0) if state["reads"] else "pass"
+            if read == "refuse":
+                return {"errors": [{"type": "FORBIDDEN",
+                                    "message": "the loopback refuses this read by reference"}]}, 200
+            return issues_by_reference(variables), 200
+        read = variables.get("id")
+        if ("node(id:" in query and isinstance(read, str) and read.startswith("ISSUE-")
+                and read.removeprefix("ISSUE-") not in numbered["issues"]):
+            # An issue this endpoint holds no record of: a ticket a seeded issue delivers,
+            # whose read GitHub is failing to answer for now.
+            return {"errors": [{"message": "the loopback cannot read this issue for now"}]}, 502
+        supplied = variables.get("input") if isinstance(variables.get("input"), dict) else {}
+        item, issue_id = supplied.get("itemId"), supplied.get("id")
+        if ("updateProjectV2ItemFieldValue(" in query and isinstance(item, str)
+                and NUMBERED_ITEM.match(item)):
+            return self.held_write(request)
+        if "updateIssue(" in query and isinstance(issue_id, str) and issue_id.startswith("ISSUE-"):
+            number = supplied["id"].removeprefix("ISSUE-")
+            movement = supplied.get("stateInput")
+            if (number not in numbered["issues"] or set(supplied) != {"id", "stateInput"}
+                    or not isinstance(movement, dict)
+                    or set(movement) - {"value", "stateReason"}
+                    or movement.get("value") not in STATES
+                    or movement.get("stateReason") not in STATES[movement["value"]]):
+                raise ValueError("invalid numbered issue mutation input")
+            numbered["issues"][number] = {"state": movement["value"],
+                                          "reason": movement.get("stateReason")}
+            state["writes"].append({"issue": int(number), "state": movement["value"],
+                                    "reason": movement.get("stateReason")})
+            return {"data": {"updateIssue": {"issue": {"id": supplied["id"]}}}}, 200
+        return None
+
+    def named(self, query, variables):
         if "updateIssue(" in query:
             supplied = variables.get("input")
             if (not isinstance(supplied, dict) or not isinstance(supplied.get("id"), str)
@@ -210,7 +451,7 @@ def publish(path, text):
     os.replace(staged, path)
 
 
-server = HTTPServer(("127.0.0.1", 0), Handler)
+server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
 # Published by a rename, so a reader that sees `endpoint` sees the whole address: a
 # file written in place exists, empty, before its contents land, and a journey that
 # read it then sent its first request to a bare path.

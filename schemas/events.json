@@ -1,5 +1,5 @@
 {
-  "version": "1.7.0",
+  "version": "1.8.0",
   "description": "The agent stack's event envelope, filter, artifact reference and labels, and the payload of every onepipeline pipeline kind, as onepipeline declares them.",
   "schemas": [
     {
@@ -1314,6 +1314,109 @@
               }
             ],
             "description": "Where a continued settlement was read."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.landing-closures@2",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "node": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The node whose landing it is, or `null` for a `publish-branch`, `repo-recover` or\n`integrate` landing outside a run."
+          },
+          "commit": {
+            "type": "string",
+            "description": "The commit the landing reached its base at."
+          },
+          "closes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The issues the landing reported closing, as `owner/name#N`, as it reported them."
+          },
+          "outcome": {
+            "$ref": "#/$defs/ClosureOutcome",
+            "description": "Whether the store's call finished with every item written, or failed for good."
+          },
+          "items": {
+            "type": "array",
+            "items": true,
+            "description": "The store's `items`, verbatim: one per issue and source asked."
+          },
+          "unsupported": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The store's `unsupported` sources, verbatim: each was sent no request."
+          },
+          "class": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/FailureClass"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The failure's class, as the store decided it — `null` unless `outcome` is `failed`."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why it failed, in the store's words — `null` unless `outcome` is `failed`."
+          }
+        },
+        "required": [
+          "commit",
+          "closes",
+          "outcome",
+          "items",
+          "unsupported"
+        ],
+        "description": "`landing-closures`: what the store did with the GitHub issues one landing closed —\nentry 132 of `docs/contract-divergences.md`, whose fenced example `tests/contract.rs`\nholds to this type.\n\nEvery member is always written, `node`, `class` and `reason` as `null` when they have\nnothing to say, so a reader reads one fixed shape.",
+        "title": "LandingClosures",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "ClosureOutcome": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "projected",
+                "description": "The call finished and no item it reports failed."
+              },
+              {
+                "type": "string",
+                "const": "failed",
+                "description": "The call, or an item it reports, failed, and is not asked again."
+              }
+            ],
+            "description": "What one landing's closure call came to."
+          },
+          "FailureClass": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "refused",
+                "description": "A failure no retry can change."
+              },
+              {
+                "type": "string",
+                "const": "transient",
+                "description": "A failure a wait can change."
+              }
+            ],
+            "description": "Whether asking the store again, unchanged, could change its answer — the store's own\nword, and the one thing this worker branches on.\n\n`refused` is a failure no retry can change: a projection the store refused never reaches\nthe board however often it is asked, and each attempt against a hosted destination spends\nits allowance for nothing. `transient` is everything a wait can change, a rate limit\nincluded. The mapping from a failure to its class is the store's —\n[`onetaskgraph_core::classify`] — and is never restated here, and no message is ever read\nto decide. This is the record's own vocabulary, which [`ProjectionRecord`] writes and a\nreader of it names, so it is converted from the store's by an exhaustive match: a class\nthe store adds is a compile error here rather than a line this build writes and cannot\nread back."
           }
         }
       }
