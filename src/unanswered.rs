@@ -544,8 +544,9 @@ mod tests {
             &SourceHold::of_payload(&block["hold"]).expect("reads"),
         );
         assert_eq!(surface.kind, WAIT_SURFACE_KIND);
-        assert!(!surface.blocking);
-        assert_eq!(surface.source, crate::channel::source::PROPOSAL);
+        assert_eq!(json!(surface.blocking), block["surface"]["blocking"]);
+        assert_eq!(json!(surface.source), block["surface"]["source"]);
+        assert_eq!(block["surface"]["workstream"], "the held node");
         assert_eq!(surface.workstream.as_deref(), Some("build"));
     }
 

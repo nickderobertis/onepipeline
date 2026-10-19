@@ -735,6 +735,21 @@ fn a_prerequisite_the_private_source_records_holds_its_node_until_the_graph_has_
     world.until("build to be held", |world| {
         held_for_source(world, name, "build").is_some()
     });
+    // A watch that runs out says what holds each node, in the hold's own word.
+    let watched = world.run(&[
+        "watch",
+        name,
+        "--until",
+        "node=build",
+        "--timeout",
+        "3",
+        "--tick-interval",
+        "1",
+    ]);
+    watched
+        .exited(crate::harness::WATCH_ELAPSED)
+        .err_has("design on source")
+        .out_has("\"reason\":\"source\"");
     // The source answers: what it records is read, and `build` is held for it while the
     // nodes it does not hold anything of start.
     world.unscript(refusal);
