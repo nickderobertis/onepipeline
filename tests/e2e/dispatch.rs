@@ -4006,6 +4006,128 @@ fn a_judged_codex_turn_starts_with_plugins_off_unless_its_config_opts_in() {
     }
 }
 
+/// Two judged Codex turns dispatched at once run on **one** `codex app-server`
+/// process when their config names no `app_server` key, rather than each
+/// starting its own.
+///
+/// What decides it is **this build's lock**: from `oneharness-core` 0.28 a
+/// controlled Codex turn leases a pooled server keyed by its configuration, and
+/// 0.28.3 is the release a host adopts for it. The path is the one a supervised
+/// node takes, as in the plugins journey above: the engine dispatches two
+/// `kind: onejudge` members side by side, the real graph drives onejudge in
+/// process, and onejudge spawns the **real** `oneharness` CLI — built from this
+/// lock, over its one core — whose linked pool starts the harness. Only `codex`
+/// is stood in for, by `fake-codex` under that name on `PATH`, which serves the
+/// app-server and records every turn it completes with its own pid and how many
+/// turns that process had started by then. Each turn waits until the process
+/// serving it has started two, so records from one pid that each saw two
+/// started are concurrent turns on one server: turns on two servers, or run one
+/// after another, leave the first to complete having seen one.
+#[cfg(unix)]
+#[test]
+fn two_concurrent_judged_codex_turns_share_one_app_server() {
+    use onepipeline_testfakes::codex_app_server::{AWAIT_TURNS_FILE, TURNS_FILE};
+
+    let name = "judged-codex-shared-app-server";
+    let world = World::new(name);
+    world.write_graphs();
+    world.write_supervised_node_graph();
+    // No `app_server` key: the pool's default, which is the one a host's
+    // dispatches run under unless they configure otherwise.
+    std::fs::write(
+        world.graphs().join("oneharness.toml"),
+        "run_mode = \"fallback\"\nharnesses = [\"codex\"]\nserver_overloaded_max_retries = 0\n",
+    )
+    .expect("both sides' codex config is written");
+    let config = std::fs::read_to_string(world.graphs().join("oneharness.toml"))
+        .expect("the config reads back");
+    assert!(!config.contains("app_server"), "{config}");
+    std::fs::write(world.fakes.join(AWAIT_TURNS_FILE), "2")
+        .expect("the double is told how many turns to wait for");
+    let path = world.plan(
+        name,
+        &plan_of(name, vec![agent("left", &[]), agent("right", &[])]),
+    );
+
+    let on_path = world.root.join("codex-on-path");
+    std::fs::create_dir_all(&on_path).expect("a directory for codex");
+    std::fs::copy(crate::harness::double("fake-codex"), on_path.join("codex"))
+        .expect("the codex double is placed under codex's own name");
+    // The shared app-server runs under an environment cleared to its base
+    // variables, so the double finds its world here.
+    std::fs::write(
+        on_path.join("onepipeline-fake-dir"),
+        world.fakes.to_string_lossy().as_bytes(),
+    )
+    .expect("the codex double is told where its world is");
+    let daemon_dir = world.root.join("codex-daemon");
+    let mut launch = world.agentgraph_cmd(&["start", &path, "--attach"]);
+    let inherited = launch
+        .get_envs()
+        .find(|(key, _)| *key == "PATH")
+        .and_then(|(_, value)| value.map(std::ffi::OsStr::to_os_string))
+        .expect("the graph's launch names a PATH");
+    launch
+        .env(
+            "PATH",
+            std::env::join_paths(std::iter::once(on_path).chain(std::env::split_paths(&inherited)))
+                .expect("a PATH"),
+        )
+        .env(
+            "ONEAGENTGRAPH_ONEHARNESS_BIN",
+            crate::harness::oneharness_binary(),
+        )
+        // Codex's socket rendezvous directory, which a launch prepares: the
+        // world's own rather than the host's, which every Codex on it shares.
+        .env(oneharness_core::io::app_server::DAEMON_DIR_ENV, &daemon_dir)
+        .env_remove("ONEHARNESS_BIN_CODEX");
+    world.run_on(launch, "start --attach").settled();
+    world.until("both judged nodes to settle", |world| {
+        world.run_file(name, "result.json").is_file()
+    });
+
+    let invocations = world.invocations();
+    assert!(
+        !invocations.iter().any(|call| call["tool"] == "oneharness"),
+        "a turn reached the oneharness double rather than the real CLI: {invocations:#?}"
+    );
+    let servers: Vec<&Value> = invocations
+        .iter()
+        .filter(|call| call["tool"] == "codex" && call["args"][0] == "app-server")
+        .collect();
+    assert_eq!(
+        servers.len(),
+        1,
+        "two concurrent turns under one config did not start exactly one app-server: \
+         {invocations:#?}"
+    );
+    let turns = crate::harness::read_jsonl(&world.fakes.join(TURNS_FILE));
+    assert!(
+        turns.len() >= 2,
+        "fewer than two codex turns ran on an app-server: {turns:#?}"
+    );
+    let pids: std::collections::BTreeSet<u64> = turns
+        .iter()
+        .map(|turn| turn["server_pid"].as_u64().expect("a recorded pid"))
+        .collect();
+    assert_eq!(
+        pids.len(),
+        1,
+        "the codex turns ran on more than one app-server process: {turns:#?}"
+    );
+    // Every turn, the first to complete included: turns run one after another
+    // leave the first waiting out the double's bound alone and recording one.
+    let alone: Vec<&Value> = turns
+        .iter()
+        .filter(|turn| turn["turns_started"].as_u64() < Some(2))
+        .collect();
+    assert!(
+        alone.is_empty(),
+        "a turn completed before a second had started on its server, so the two did not \
+         run on it concurrently: {turns:#?}"
+    );
+}
+
 /// The line `fake-codex` answers with is one the **linked** classifier reads as
 /// a server overload.
 ///
@@ -4067,7 +4189,8 @@ fn the_codex_doubles_overload_answer_is_the_one_the_linked_classifier_reads() {
 /// than `exec`, a `resume` with no thread, an option with no value or an
 /// unknown one, a flag Codex does not take, two prompts, none, and the probe's
 /// flag sent inside a turn, which the real CLI exits on and which a looser
-/// double would answer as a probe.
+/// double would answer as a probe — and an `app-server` line with no address,
+/// an argument oneharness does not send, or a setting it does not send.
 // llmlint: ignore-block[tests_mirror_real_usage] the subject is a *double*, driven at the
 // process boundary the real `oneharness` reaches it on and with the argv that sibling sends
 // plus one flag. Going through `onepipeline` would prove the opposite of the point: this
@@ -4194,6 +4317,29 @@ fn the_codex_double_answers_each_exec_line_oneharness_builds_and_refuses_each_it
         (
             &["exec", "--json", "Do build.", "-c"][..],
             "-c takes a setting",
+        ),
+        (
+            &["app-server", "-c", "features.plugins=false"][..],
+            "no --listen address",
+        ),
+        (
+            &[
+                "app-server",
+                "--stdio",
+                "--listen",
+                "unix:///app-server.sock",
+            ][..],
+            "no argument \"--stdio\"",
+        ),
+        (
+            &[
+                "app-server",
+                "-c",
+                "model=o3",
+                "--listen",
+                "unix:///app-server.sock",
+            ][..],
+            "no argument \"-c\" Some(\"model=o3\")",
         ),
     ] {
         let refused = sent(argv);

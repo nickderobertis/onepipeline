@@ -772,9 +772,9 @@ resolver = "2"
 # shared app-server core: no turn it runs leases a pooled server — a single-sided
 # turn is an uncontrolled `codex exec`, and a two-party member's sides run in the
 # `oneharness` CLI its spawn hook starts, which pools and sweeps its own — so its
-# binary hosts no sweeper, and neither does this one (see the `oneharness-core`
-# pin). It still requires `^0.28.1` and `onejudge` `^0.19.5`, so the lock
-# resolves the one core 0.28.3 below for all three.
+# binary hosts no sweeper, and neither does `onepipeline` (see the
+# `oneharness-core` pin). It still requires `^0.28.1` and `onejudge` `^0.19.5`,
+# so the lock resolves the one core 0.28.3 below for all three.
 #
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
@@ -1022,9 +1022,10 @@ onejudge = "0.19.5"
 # #1495): concurrent controlled Codex turns under one configuration share one
 # pooled `codex app-server`, which starts on macOS too and reports why one exits
 # early. The pool lives in the `oneharness` process a two-party member's
-# onejudge spawns, which hosts its sweeper; the `onepipeline` binary leases no
-# pooled server itself — a single-sided turn is an uncontrolled `codex exec` —
-# so it hosts none. `tests/e2e/dispatch.rs`'s
+# onejudge spawns, which hosts its sweeper. The `onepipeline` binary — the only
+# one this repository ships — runs no turn itself: it spawns `oneagentgraph`,
+# whose single-sided turn is an uncontrolled `codex exec`, so it leases no pooled
+# server and hosts no sweeper. `tests/e2e/dispatch.rs`'s
 # `two_concurrent_judged_codex_turns_share_one_app_server` holds it. A
 # **requirement** and not only a lock floor, so a build that admits 0.28.2 cannot
 # be the one a host adopts for it; `oneagentgraph` 0.5.14 and `onejudge` 0.19.5
