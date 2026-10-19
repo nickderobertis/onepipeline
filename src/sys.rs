@@ -1210,6 +1210,10 @@ impl StartToken {
 ///
 /// Pure, so it is compiled into every target's tests and held on hosts that are
 /// not macOS too.
+// llmlint: ignore[changed_behavior_has_e2e] what this tells apart is one pid handed to a second
+// process inside the second the first started in, and no test can ask a host to reuse a pid that
+// fast; every journey that records a start and reads it back runs through here on macOS, and
+// `a_macos_start_token_tells_apart_two_starts_in_one_second` holds each spelling on every host.
 #[cfg(any(test, target_os = "macos"))]
 fn macos_reading(now: &str, recorded: &str) -> TokenReading {
     let legacy = !recorded.contains(START_MICROS);
@@ -1518,6 +1522,9 @@ fn kernel_start_micros(pid: u32) -> Option<u64> {
             size,
         )
     };
+    // llmlint: ignore[changed_behavior_has_e2e] a short `proc_pidinfo` answer or a
+    // microsecond field of a million or more is the kernel misreporting a process, not a state a
+    // test can put it in; the process that is not there at all is the `ps` refusal above.
     if written != size {
         return None;
     }

@@ -729,9 +729,7 @@ resolver = "2"
 # `onevcs` 0.56.3 is the floor only because `onevcs-testing` 0.19.13 — the
 # release that carries every one of the test-support implementations this
 # crate's journeys double the host with — requires exactly `=0.56.3`, so the
-# pair moves as one. Its library source is 0.56.2's, released again for a
-# change to onevcs's own release tooling, so nothing here reads anything new
-# from it.
+# pair moves as one.
 #
 # 0.56.1 below it is the release whose two new shapes this crate reads: a
 # publication held on `boundary::Unavailability::HostVisibility` settles as that
