@@ -880,3 +880,159 @@ fn a_render_asks_the_landing_read_once_per_node_it_prints_and_does_nothing_else_
     );
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
+
+/// The nodes of the attach-stream journey, each published under `change-open` and left
+/// unlanded, one after another.
+const STREAMED: [&str; 3] = ["first", "second", "third"];
+
+/// Every summary render one attach stream recorded, each as the acts it recorded.
+///
+/// Split on the act each render opens with, which is what the record writes first —
+/// the reads a render takes side by side are written from other threads, but always
+/// after it opened and before the next one does.
+fn summary_renders(acts: &[Value]) -> Vec<Vec<Value>> {
+    let mut renders: Vec<Vec<Value>> = Vec::new();
+    for act in acts.iter().filter(|act| act["view"] == "summary") {
+        if act["act"] == "render" {
+            renders.push(Vec::new());
+        }
+        renders
+            .last_mut()
+            .unwrap_or_else(|| panic!("an act before any render opened: {act}"))
+            .push(act.clone());
+    }
+    renders
+}
+
+/// How long an attach stream carries a landing read across its renders: the ten seconds
+/// divergence 33 states, held here as the journey that states it is.
+const STREAM_READ_REUSE_MS: u64 = 10_000;
+
+/// When each landing read in `render` began, by node.
+fn read_at(render: &[Value]) -> BTreeMap<String, u64> {
+    render
+        .iter()
+        .filter(|act| act["act"] == "landing-read")
+        .map(|act| {
+            (
+                act["node"]
+                    .as_str()
+                    .expect("a read names its node")
+                    .to_owned(),
+                act["at_ms"].as_u64().expect("a read says when it began"),
+            )
+        })
+        .collect()
+}
+
+/// An attach stream reads a node's landing in a render that printed something moving it,
+/// carries that read across the renders after it — which still report the node — until
+/// something moves it again or its window lapses, and reads every landing afresh for its
+/// final render. The
+/// same record a standalone render is held to, over one stream: each render recorded,
+/// each read against the node and the render it was taken for, including those the
+/// summary takes side by side.
+#[test]
+fn an_attach_stream_carries_a_landing_read_until_something_moves_it_and_reads_afresh_last() {
+    let world = World::new("landing-stream");
+    world.repository("change-open", &[]);
+    for node in STREAMED {
+        world.script(&format!("{node}.work"), &format!("the work of {node}\n"));
+    }
+    let run = "landing-stream";
+    let plan = world.plan(
+        run,
+        &serde_json::json!({
+            "schema_version": onepipeline::plan::PLAN_SCHEMA_VERSION,
+            "name": run,
+            "goal": {"text": format!("Deliver {run}")},
+            // One at a time, so each node settles while the stream has others still to
+            // render, and its read has renders to be carried across.
+            "concurrency": 1,
+            "tasks": STREAMED.iter().map(|node| lifecycle(node, &[])).collect::<Vec<Value>>(),
+        }),
+    );
+    let record = world.root.join("stream.reads");
+    let streamed = world.run_recording_renders(&record, &["start", &plan, "--attach"]);
+    streamed.settled();
+    let renders = summary_renders(&acts(&world, &record));
+
+    // Each render prints the records it was handed and then its trailer, so the stream
+    // splits into one block per render, in the order the record holds them.
+    let trailer = format!("-- {run}  ");
+    let mut printed: Vec<Vec<&str>> = vec![Vec::new()];
+    for line in streamed.stderr.lines() {
+        if line.starts_with(&trailer) {
+            printed.push(Vec::new());
+        } else if let Some(block) = printed.last_mut() {
+            block.push(line);
+        }
+    }
+    printed.pop();
+    assert_eq!(
+        printed.len(),
+        renders.len(),
+        "the stream printed {} trailers over {} recorded renders:\n{}",
+        printed.len(),
+        renders.len(),
+        streamed.stderr
+    );
+    let last = renders.len() - 1;
+
+    // The final render reports the run as it settled, and carries nothing into it.
+    let finally: Vec<String> = read_at(&renders[last]).into_keys().collect();
+    assert_eq!(
+        finally,
+        STREAMED.map(str::to_owned),
+        "the stream's final render did not read every landing afresh:\n{}",
+        streamed.stderr
+    );
+
+    for node in STREAMED {
+        let mut previous: Option<u64> = None;
+        let mut carried = 0;
+        for (at, render) in renders.iter().enumerate().take(last) {
+            let Some(read) = read_at(render).get(node).copied() else {
+                if previous.is_some()
+                    && render
+                        .iter()
+                        .any(|act| act["act"] == "reported" && act["node"] == node)
+                {
+                    carried += 1;
+                }
+                continue;
+            };
+            // What the stream printed for this render that can move the node: its own
+            // records, and any of a session's, whose lines name the session's stream
+            // rather than the node it is working for.
+            let moved = printed[at].iter().any(|line| {
+                line.split_whitespace()
+                    .nth(1)
+                    .is_some_and(|id| id == format!("graph:{node}") || id.starts_with("vcs:"))
+            });
+            if !moved {
+                let before = previous.unwrap_or_else(|| {
+                    panic!(
+                        "render {at} read {node} with nothing it printed moving it and no \
+                         read before it:\n{}",
+                        streamed.stderr
+                    )
+                });
+                assert!(
+                    read - before >= STREAM_READ_REUSE_MS,
+                    "render {at} read {node} again {} ms after the read it carried, with \
+                     nothing it printed moving it:\n{}",
+                    read - before,
+                    streamed.stderr
+                );
+            }
+            previous = Some(read);
+        }
+        if node == STREAMED[0] {
+            assert!(
+                carried > 0,
+                "no render carried {node}'s read, so nothing here shows one being carried"
+            );
+        }
+    }
+}

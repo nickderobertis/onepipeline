@@ -146,7 +146,9 @@ fn record(act: Act, detail: serde_json::Value) {
         .append(true)
         .open(path)
     {
-        let _ = writeln!(file, "{line}");
+        // One write of the whole line, so a line recorded by a render's reads on
+        // other threads at the same moment cannot land inside this one.
+        let _ = file.write_all(format!("{line}\n").as_bytes());
     }
 }
 
@@ -208,6 +210,54 @@ impl Drop for Render {
     }
 }
 
+/// The render a thread is inside, taken so that work it hands to other threads is
+/// counted against that render as if it had done the work itself.
+pub(crate) struct Within(Option<(Rendered, String)>);
+
+/// The render this thread is inside, if any — see [`Within::adopted`].
+pub(crate) fn within() -> Within {
+    Within(INSIDE.with_borrow(|inside| {
+        inside
+            .as_ref()
+            .map(|inside| (inside.view, inside.run.clone()))
+    }))
+}
+
+impl Within {
+    /// Count what this thread does next against the render [`within`] was taken
+    /// inside, until the scope is dropped. Nothing on a thread already inside a
+    /// render — the one that took it, among others — and nothing where it was
+    /// taken outside one, so a read nobody is rendering stays uncounted.
+    pub(crate) fn adopted(&self) -> Adopted {
+        let adopted = INSIDE.with_borrow_mut(|inside| match (&*inside, &self.0) {
+            (None, Some((view, run))) => {
+                *inside = Some(Inside {
+                    view: *view,
+                    run: run.clone(),
+                    node: None,
+                });
+                true
+            }
+            _ => false,
+        });
+        Adopted { adopted }
+    }
+}
+
+/// A thread counting against a render another thread is inside.
+pub(crate) struct Adopted {
+    /// Whether this scope set the render, so it is the one that clears it.
+    adopted: bool,
+}
+
+impl Drop for Adopted {
+    fn drop(&mut self) {
+        if self.adopted {
+            INSIDE.with_borrow_mut(|inside| *inside = None);
+        }
+    }
+}
+
 /// The scope in which one node's landing is decided.
 pub(crate) struct Deciding {
     /// Whether this scope set the node, so an inner one cannot clear it.
@@ -253,10 +303,16 @@ pub(crate) fn repository_asked(repo: Option<&str>) {
     record(Act::RepositoryAsked, json!({ "repo": repo }));
 }
 
+/// Record that one landing decision began a read, and when.
+///
+/// The moment is the wall clock's, in milliseconds, because what it is read for
+/// is the gap between two reads of one node: an attach stream carries a read
+/// across its renders for a bounded window, and a journey tells a read taken
+/// after that window lapsed from one taken inside it by the gap alone.
 pub(crate) fn landing_read_taken(reference: &str, repo: Option<&str>) {
     record(
         Act::LandingRead,
-        json!({ "reference": reference, "repo": repo }),
+        json!({ "reference": reference, "repo": repo, "at_ms": crate::sys::now_millis() }),
     );
 }
 

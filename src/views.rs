@@ -1081,6 +1081,13 @@ struct Carried {
     taken: std::time::Instant,
 }
 
+impl Carried {
+    /// Whether, at `now`, the read is still inside [`STREAM_READ_REUSE`].
+    fn still_carried(&self, now: std::time::Instant) -> bool {
+        now.saturating_duration_since(self.taken) < STREAM_READ_REUSE
+    }
+}
+
 /// An attach stream's reads, carried across its renders while this is held.
 ///
 /// Held by [`crate::driver`]'s attach loop on the thread that renders, and by
@@ -1115,7 +1122,9 @@ impl StreamReads {
             };
             for event in events {
                 let moves = match event.source {
-                    Source::Vcs => MOVES_A_LANDING.contains(&event.kind.0.as_str()),
+                    Source::Vcs => MOVES_A_LANDING
+                        .into_iter()
+                        .any(|kind| crate::vcs::kind_of(kind) == event.kind),
                     Source::Pipeline => {
                         event.kind.0 == PipelineKind::NodeSettled.as_str()
                             || event.kind.0 == PipelineKind::NodeRestacked.as_str()
@@ -1128,53 +1137,6 @@ impl StreamReads {
             }
         });
     }
-
-    /// Take, side by side, every landing the summary of `view` reads that this
-    /// stream does not already hold — see [`crate::vcs::landings_now`] — so the
-    /// render after it finds each one carried rather than asking for them one
-    /// after another.
-    ///
-    /// Before the stream's final render that is every landing the summary
-    /// reports, and it is the read that render reports from. Taken outside the
-    /// render, so a [`crate::rendercost`] record of an attach stream holds only
-    /// what the render itself went on to read.
-    pub(crate) fn read_ahead(&self, view: &RunView) {
-        let run = &view.paths.run;
-        let wanted: Vec<((String, String), &str, &str)> = summarised(view)
-            .into_iter()
-            // The two answers a render never reads again — see [`reported_landing_of`].
-            .filter(|node| {
-                !view.state.stated_landings.contains_key(*node)
-                    && view.state.landings.get(*node) != Some(&Landing::Landed)
-            })
-            .filter_map(|node| {
-                let branch = view.state.branches.get(node)?;
-                let repo = view.state.graph.get(node)?.repo.as_deref()?;
-                Some(((run.clone(), node.clone()), branch.as_str(), repo))
-            })
-            .filter(|(key, _, _)| carried(key).is_none())
-            .collect();
-        let read = crate::vcs::landings_now(
-            &wanted
-                .iter()
-                .map(|(_, branch, repo)| (*branch, Some(*repo)))
-                .collect::<Vec<_>>(),
-        );
-        STREAM_READS.with_borrow_mut(|reads| {
-            if let Some(reads) = reads {
-                let taken = std::time::Instant::now();
-                for ((key, _, _), read) in wanted.into_iter().zip(read) {
-                    reads.insert(
-                        key,
-                        Carried {
-                            read: std::rc::Rc::new(read),
-                            taken,
-                        },
-                    );
-                }
-            }
-        });
-    }
 }
 
 /// The `onevcs` records after which an attach stream reads the node's landing
@@ -1182,23 +1144,22 @@ impl StreamReads {
 /// and every other record of the branch or its base moving. The rest — a fetch,
 /// a lock, a check, a description, the session opening or closing — leave both
 /// where the last read found them.
-const MOVES_A_LANDING: [&str; 16] = [
-    "published",
-    "push",
-    "change-opened",
-    "change-drafted",
-    "draft-lifted",
-    "change-reopened",
-    "change-retargeted",
-    "change-merged",
-    "merge-completed",
-    "base-arrived",
-    "base-merge",
-    "commit-preserved",
-    "branch-preserved",
-    "branch-superseded",
-    "branch-retired",
-    "stack-base-assembled",
+const MOVES_A_LANDING: [onevcs::EventKind; 15] = [
+    onevcs::EventKind::Push,
+    onevcs::EventKind::ChangeOpened,
+    onevcs::EventKind::ChangeDrafted,
+    onevcs::EventKind::DraftLifted,
+    onevcs::EventKind::ChangeReopened,
+    onevcs::EventKind::ChangeRetargeted,
+    onevcs::EventKind::ChangeMerged,
+    onevcs::EventKind::MergeCompleted,
+    onevcs::EventKind::BaseArrived,
+    onevcs::EventKind::BaseMerge,
+    onevcs::EventKind::CommitPreserved,
+    onevcs::EventKind::BranchPreserved,
+    onevcs::EventKind::BranchSuperseded,
+    onevcs::EventKind::BranchRetired,
+    onevcs::EventKind::StackBaseAssembled,
 ];
 
 impl Drop for StreamReads {
@@ -1212,7 +1173,9 @@ impl Drop for StreamReads {
 fn carried(key: &(String, String)) -> Option<std::rc::Rc<LandingRead>> {
     STREAM_READS.with_borrow(|reads| {
         let carried = reads.as_ref()?.get(key)?;
-        (carried.taken.elapsed() < STREAM_READ_REUSE).then(|| std::rc::Rc::clone(&carried.read))
+        carried
+            .still_carried(std::time::Instant::now())
+            .then(|| std::rc::Rc::clone(&carried.read))
     })
 }
 
@@ -1395,6 +1358,14 @@ fn read_now(run: &str, node: &str, branch: &str, repo: &str) -> std::rc::Rc<Land
         let _deciding = crate::rendercost::deciding(node);
         std::rc::Rc::new(crate::vcs::landing_now(branch, Some(repo)))
     };
+    hold(run, node, std::rc::Rc::clone(&read));
+    read
+}
+
+/// Hold a read just taken of one node for the rest of this render, and for the
+/// attach stream this render is part of, if any.
+fn hold(run: &str, node: &str, read: std::rc::Rc<LandingRead>) {
+    let key = (run.to_owned(), node.to_owned());
     STREAM_READS.with_borrow_mut(|reads| {
         if let Some(reads) = reads {
             reads.insert(
@@ -1407,9 +1378,8 @@ fn read_now(run: &str, node: &str, branch: &str, repo: &str) -> std::rc::Rc<Land
         }
     });
     READ_THIS_RENDER.with_borrow_mut(|reads| {
-        reads.insert(key, std::rc::Rc::clone(&read));
+        reads.insert(key, read);
     });
-    read
 }
 
 /// Everything a view needs about one run, read once.
@@ -3508,8 +3478,10 @@ struct Outstanding {
 /// while nine of the eleven had landed, and an adoption node was dispatched three
 /// times against work that was already on its base.
 fn outstanding_landings(view: &RunView, render: &Rendering) -> Outstanding {
+    let summarised = summarised(view);
+    read_side_by_side(view, &summarised);
     let mut outstanding = Outstanding::default();
-    for node in summarised(view) {
+    for node in summarised {
         match reported_landing(view, render, node).stands() {
             Stands::NotLanded => outstanding.not_landed.push(node.clone()),
             Stands::Undecided => outstanding.undecided.push(node.clone()),
@@ -3517,6 +3489,44 @@ fn outstanding_landings(view: &RunView, render: &Rendering) -> Outstanding {
         }
     }
     outstanding
+}
+
+/// Take, side by side, the landing reads `nodes` will ask this render for and it
+/// does not already hold — see [`crate::vcs::landings_now`] — so the render finds
+/// each one taken rather than taking them one after another.
+///
+/// The same reads [`reported_landing_of`] would take, of the same nodes, counted
+/// against the same render: a node recorded landed or stated is never read, a
+/// node with no branch or no repository has nothing to read, and a node this
+/// render or the attach stream it is part of already holds is not read again.
+fn read_side_by_side(view: &RunView, nodes: &[&String]) {
+    let run = &view.paths.run;
+    let wanted: Vec<(&String, &str, &str)> = nodes
+        .iter()
+        .filter(|node| {
+            !view.state.stated_landings.contains_key(**node)
+                && view.state.landings.get(**node) != Some(&Landing::Landed)
+        })
+        .filter_map(|node| {
+            let branch = view.state.branches.get(*node)?;
+            let repo = view.state.graph.get(*node)?.repo.as_deref()?;
+            Some((*node, branch.as_str(), repo))
+        })
+        .filter(|(node, _, _)| {
+            let key = (run.clone(), (*node).clone());
+            !READ_THIS_RENDER.with_borrow(|reads| reads.contains_key(&key))
+                && carried(&key).is_none()
+        })
+        .collect();
+    let read = crate::vcs::landings_now(
+        &wanted
+            .iter()
+            .map(|(node, branch, repo)| (node.as_str(), *branch, Some(*repo)))
+            .collect::<Vec<_>>(),
+    );
+    for ((node, _, _), read) in wanted.into_iter().zip(read) {
+        hold(run, node, std::rc::Rc::new(read));
+    }
 }
 
 /// The nodes whose landing [`outstanding_landings`] reports on, in id order.
@@ -5328,6 +5338,24 @@ fn review_lines(view: &RunView) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// An attach stream's read is carried inside its window and taken again once the
+    /// window has passed, measured from when the read was taken.
+    #[test]
+    fn a_carried_landing_read_lapses_at_the_end_of_its_window() {
+        let taken = std::time::Instant::now();
+        let carried = super::Carried {
+            read: std::rc::Rc::new(crate::vcs::LandingRead::Refused {
+                because: "unread".into(),
+            }),
+            taken,
+        };
+        assert!(carried.still_carried(taken));
+        assert!(carried
+            .still_carried(taken + super::STREAM_READ_REUSE - std::time::Duration::from_millis(1)));
+        assert!(!carried.still_carried(taken + super::STREAM_READ_REUSE));
+        assert!(!carried.still_carried(taken + super::STREAM_READ_REUSE * 6));
+    }
+
     use super::*;
     use crate::event::{EventKind, Labels, ENVELOPE_VERSION};
     use crate::filter::Filters;

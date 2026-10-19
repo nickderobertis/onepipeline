@@ -48,6 +48,12 @@ pub const RUN_ID_ENV: &str = "ONEPIPELINE_RUN_ID";
 /// binary cargo built too.
 pub const CLI_BIN_ENV: &str = "ONEPIPELINE_FAKE_CLI_BIN";
 
+/// The environment variable naming the file `counted-git` counts each start into.
+pub const COUNTED_GIT_LOG_ENV: &str = "ONEPIPELINE_COUNTED_GIT_LOG";
+
+/// The environment variable naming the real `git` each `counted-git` start runs.
+pub const COUNTED_GIT_REAL_ENV: &str = "ONEPIPELINE_COUNTED_GIT_REAL";
+
 /// The environment variable a member's own harness config stamps its name into.
 ///
 /// A single-sided member's turn is a library call inside `oneagentgraph`, so the

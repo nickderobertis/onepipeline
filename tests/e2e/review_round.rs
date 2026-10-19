@@ -774,12 +774,104 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
 const GIT_STARTS: usize = 15_000;
 
 /// Hold the round to [`GIT_STARTS`].
+///
+/// Floored as well as bounded: a count that saw nothing is a `counted-git` the round's
+/// commands never reached, and an empty log is under any bound.
 #[cfg(unix)]
 fn the_round_started_few_enough_gits(world: &World) {
     let started = world.git_starts().len();
+    assert!(started > 0, "the round's git starts were never counted");
     assert!(
         started <= GIT_STARTS,
         "the round started {started} git processes, over its {GIT_STARTS}"
+    );
+}
+
+/// `counted-git` run as a command would run `git`: with both of its settings, from a
+/// directory, and with whatever arguments the caller has.
+#[cfg(unix)]
+fn counted_git(world: &World, real: Option<&Path>, log: Option<&Path>) -> std::process::Command {
+    let mut command = std::process::Command::new(crate::harness::double("counted-git"));
+    command
+        .current_dir(&world.root)
+        .env_remove(onepipeline_testfakes::COUNTED_GIT_REAL_ENV)
+        .env_remove(onepipeline_testfakes::COUNTED_GIT_LOG_ENV);
+    if let Some(real) = real {
+        command.env(onepipeline_testfakes::COUNTED_GIT_REAL_ENV, real);
+    }
+    if let Some(log) = log {
+        command.env(onepipeline_testfakes::COUNTED_GIT_LOG_ENV, log);
+    }
+    command
+}
+
+#[cfg(unix)]
+#[test]
+fn the_counted_git_counts_each_start_and_is_the_real_git_for_it() {
+    let world = World::new("counted-git");
+    let real =
+        World::resolved_on(&std::process::Command::new("git"), "git").expect("the host has a git");
+    let log = world.root.join("starts.jsonl");
+
+    // Counted, and then the real program, which answers and fails as itself.
+    let init = counted_git(&world, Some(&real), Some(&log))
+        .args(["init", "--quiet", "here"])
+        .output()
+        .expect("the counted git runs");
+    assert!(init.status.success(), "{init:?}");
+    assert!(
+        world.root.join("here/.git").is_dir(),
+        "the real git made no repository"
+    );
+    let refused = counted_git(&world, Some(&real), Some(&log))
+        .args(["-C", "nowhere", "status"])
+        .output()
+        .expect("the counted git runs");
+    assert_eq!(refused.status.code(), Some(128), "{refused:?}");
+    let starts: Vec<Value> = std::fs::read_to_string(&log)
+        .expect("the starts were counted")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("each start is one JSON line"))
+        .collect();
+    assert_eq!(
+        starts,
+        [
+            json!({"args": ["init", "--quiet", "here"]}),
+            json!({"args": ["-C", "nowhere", "status"]}),
+        ]
+    );
+
+    // Refused, counting nothing, without a git to run, a file to count into, or a git
+    // that runs at all.
+    for (real, log, says) in [
+        (
+            None,
+            Some(log.as_path()),
+            onepipeline_testfakes::COUNTED_GIT_REAL_ENV,
+        ),
+        (
+            Some(real.as_path()),
+            None,
+            onepipeline_testfakes::COUNTED_GIT_LOG_ENV,
+        ),
+        (
+            Some(Path::new("/nonexistent/git")),
+            Some(log.as_path()),
+            "cannot run the real git",
+        ),
+    ] {
+        let out = counted_git(&world, real, log)
+            .arg("--version")
+            .output()
+            .expect("the counted git runs");
+        assert!(!out.status.success(), "{out:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(says), "the refusal names {says}: {stderr}");
+    }
+    assert_eq!(
+        std::fs::read_to_string(&log).unwrap().lines().count(),
+        3,
+        "only the start whose real git could not run is counted, before it was tried"
     );
 }
 

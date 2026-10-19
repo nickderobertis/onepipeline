@@ -959,8 +959,11 @@ impl World {
         ]);
         let log = path_text(&self.root.join("git-starts.jsonl"));
         self.with_env("PATH", path.to_str().expect("a PATH this host can spell"))
-            .with_env("ONEPIPELINE_COUNTED_GIT_LOG", &log)
-            .with_env("ONEPIPELINE_COUNTED_GIT_REAL", &path_text(&real))
+            .with_env(onepipeline_testfakes::COUNTED_GIT_LOG_ENV, &log)
+            .with_env(
+                onepipeline_testfakes::COUNTED_GIT_REAL_ENV,
+                &path_text(&real),
+            )
     }
 
     /// Every `git` this world's commands have started so far, each by its argv,

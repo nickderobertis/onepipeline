@@ -883,32 +883,54 @@ pub(crate) fn proved_landed(branch: &str, repo: Option<&str>) -> bool {
     landing_now(branch, repo).proves_landed()
 }
 
-/// [`landing_now`] of each of `asked`, in order, taken side by side on as many
-/// threads as the host has cores and never more than there are reads.
+/// [`landing_now`] of each of `asked` — a node, its branch, and its repository —
+/// in order, taken side by side on as many threads as the host has cores and
+/// never more than there are reads.
 ///
 /// For the places that take every read at once and wait on all of them: each
 /// is `onevcs` taking the repository from scratch and running `git` tens of
 /// times, none depends on another, and one after another they were a tail as
 /// long as their sum — longest where starting a process is slowest.
-pub(crate) fn landings_now(asked: &[(&str, Option<&str>)]) -> Vec<LandingRead> {
-    let workers = std::thread::available_parallelism()
+///
+/// Each read is counted against the node it was asked for and the render the
+/// caller is inside, if any — see [`crate::rendercost::within`] — so a read
+/// taken on another thread costs the render exactly what one taken in it would.
+/// The calling thread reads too, so a thread the host will not start leaves the
+/// reads fewer hands rather than unread.
+pub(crate) fn landings_now(asked: &[(&str, &str, Option<&str>)]) -> Vec<LandingRead> {
+    let helpers = std::thread::available_parallelism()
         .map_or(1, std::num::NonZeroUsize::get)
-        .min(asked.len());
+        .min(asked.len())
+        .saturating_sub(1);
+    let within = crate::rendercost::within();
     let next = std::sync::atomic::AtomicUsize::new(0);
     let read = std::sync::Mutex::new(Vec::with_capacity(asked.len()));
-    std::thread::scope(|scope| {
-        for _ in 0..workers {
-            scope.spawn(|| loop {
-                let at = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let Some((branch, repo)) = asked.get(at) else {
-                    return;
-                };
-                let answer = landing_now(branch, *repo);
-                read.lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push((at, answer));
-            });
+    let reading = || {
+        let _adopted = within.adopted();
+        loop {
+            let at = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let Some((node, branch, repo)) = asked.get(at) else {
+                return;
+            };
+            let answer = {
+                let _deciding = crate::rendercost::deciding(node);
+                landing_now(branch, *repo)
+            };
+            read.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((at, answer));
         }
+    };
+    std::thread::scope(|scope| {
+        for _ in 0..helpers {
+            if std::thread::Builder::new()
+                .spawn_scoped(scope, &reading)
+                .is_err()
+            {
+                break;
+            }
+        }
+        reading();
     });
     let mut read = read
         .into_inner()
@@ -1916,7 +1938,7 @@ fn phase_of_kind(kind: onevcs::EventKind) -> Option<crate::event::Phase> {
 /// copy of a vocabulary this crate does not own — which is what
 /// `src/AGENTS.md` forbids and what let a double script a kind the sibling has
 /// never emitted.
-fn kind_of(kind: onevcs::EventKind) -> crate::event::EventKind {
+pub(crate) fn kind_of(kind: onevcs::EventKind) -> crate::event::EventKind {
     let wire = serde_json::to_value(kind)
         .ok()
         .and_then(|value| value.as_str().map(str::to_string))
@@ -4556,6 +4578,80 @@ mod tests {
         // session that recorded nothing.
         assert!(events(&SessionToken("s-neverwritten".into()), None).is_empty());
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A follow nobody finishes still relays its stream as it grows, and ends on
+    /// its own once it asks whether its session closed — every
+    /// [`FOLLOW_CLOSED_ASK`] rather than on every read of the stream.
+    ///
+    /// The session here has no record at all, which [`settled`] answers as closed
+    /// for the reason it gives; a session somebody else closed takes the same arm.
+    /// Driven through [`follow`] itself over a real stream on disk, and timed only
+    /// as loosely as the interval it is about.
+    #[test]
+    fn a_follow_nobody_finishes_relays_its_stream_and_ends_once_it_asks_after_its_session() {
+        let _home = super::scratch_home_held();
+        let root = std::env::temp_dir().join(format!("onepipeline-asked-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("streams")).expect("a scratch state root");
+        std::env::set_var(onevcs_home(), &root);
+
+        let token = "s-closed-elsewhere";
+        let record = |seq: u64, kind: &str| {
+            serde_json::json!({
+                "v": 1,
+                "ts": "2026-01-01T00:00:00.000Z",
+                "stream": token,
+                "seq": seq,
+                "source": "vcs",
+                "kind": kind,
+                "labels": {},
+                "payload": {},
+                "artifacts": [],
+            })
+            .to_string()
+        };
+        let stream = root.join("streams").join(format!("{token}.ndjson"));
+        std::fs::write(&stream, format!("{}\n", record(1, "session-opened")))
+            .expect("the stream is written");
+
+        let relayed = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&relayed);
+        let began = std::time::Instant::now();
+        let follower = follow(
+            &SessionToken(token.into()),
+            None,
+            Box::new(move |envelope| sink.lock().expect("the relay").push(envelope.seq)),
+        )
+        .expect("the stream is followed");
+        std::thread::sleep(Duration::from_millis(300));
+        std::fs::write(
+            &stream,
+            format!("{}\n{}\n", record(1, "session-opened"), record(2, "push")),
+        )
+        .expect("the stream grows");
+
+        let reader = follower.reader.as_ref().expect("the follow has a reader");
+        std::thread::sleep(Duration::from_secs(2));
+        assert!(
+            !reader.is_finished(),
+            "the follow asked whether its session closed sooner than every {FOLLOW_CLOSED_ASK:?}"
+        );
+        let deadline = FOLLOW_CLOSED_ASK + Duration::from_secs(5);
+        while !reader.is_finished() && began.elapsed() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            reader.is_finished(),
+            "a follow whose session closed elsewhere was still running after {deadline:?}"
+        );
+        assert_eq!(
+            *relayed.lock().expect("the relay"),
+            vec![1, 2],
+            "the follow did not relay its stream, before and after it started, before it ended"
+        );
+        let _ = follower.finish();
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -2862,15 +2862,13 @@ fn attach(
             .collect();
         // The stream's last render reports the run as it settled, so it reads every
         // landing afresh; before it, a node's read is carried only until the stream
-        // records something that moves it. Either way the reads a render needs
-        // are taken side by side just before it, rather than one by one inside it.
+        // records something that moves it.
         if concluded {
             carried.forget_all();
         } else {
             carried.forget_moved(&paths.run, &fresh);
         }
         if !fresh.is_empty() || !headed {
-            carried.read_ahead(&view);
             let rendered = views::monitor_shown(&view, fresh);
             for line in rendered.lines().skip(usize::from(headed)) {
                 eprintln!("{line}");

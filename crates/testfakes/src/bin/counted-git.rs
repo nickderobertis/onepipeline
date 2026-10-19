@@ -1,6 +1,6 @@
 //! The real `git`, counted: one line per start appended to the file
-//! `ONEPIPELINE_COUNTED_GIT_LOG` names, and then the real program, which
-//! `ONEPIPELINE_COUNTED_GIT_REAL` names, run in its place.
+//! [`COUNTED_GIT_LOG_ENV`] names, and then the real program, which
+//! [`COUNTED_GIT_REAL_ENV`] names, run in its place.
 //!
 //! **Not a double**: every command reaches the real git with its argv, its
 //! environment and its directory untouched. What it adds is the one figure no
@@ -10,8 +10,9 @@
 //! on Linux.
 //!
 //! On Unix the real program *replaces* this one, so a start counted is exactly
-//! one process. Elsewhere it is started and waited for, which is two, and is why
-//! the harness installs it on Unix alone.
+//! one process. Elsewhere it would have to be started and waited for, which is
+//! two and would double what it measures on the host where that is dearest, so
+//! there it refuses and the harness installs it on Unix alone.
 
 // llmlint: ignore-file[new_code_lands_in_a_project] `crates/testfakes` has no `project.json`
 // of its own, like every double beside this file: its files are inputs of the
@@ -22,23 +23,29 @@
 
 use std::process::{Command, ExitCode};
 
-/// The file each start is counted into.
-const LOG_ENV: &str = "ONEPIPELINE_COUNTED_GIT_LOG";
-
-/// The real `git` each start runs.
-const REAL_ENV: &str = "ONEPIPELINE_COUNTED_GIT_REAL";
+use onepipeline_testfakes::{COUNTED_GIT_LOG_ENV, COUNTED_GIT_REAL_ENV};
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let Some(real) = std::env::var_os(REAL_ENV) else {
-        return onepipeline_testfakes::refuse(&format!("{REAL_ENV} names no git to run"));
+    // As the OS handed them over, so the real git is run with exactly these; the
+    // count's own line spells them lossily, which is all a count needs.
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    let Some(real) = std::env::var_os(COUNTED_GIT_REAL_ENV) else {
+        return onepipeline_testfakes::refuse(&format!(
+            "{COUNTED_GIT_REAL_ENV} names no git to run"
+        ));
     };
-    let Some(log) = std::env::var_os(LOG_ENV) else {
-        return onepipeline_testfakes::refuse(&format!("{LOG_ENV} names no file to count into"));
+    let Some(log) = std::env::var_os(COUNTED_GIT_LOG_ENV) else {
+        return onepipeline_testfakes::refuse(&format!(
+            "{COUNTED_GIT_LOG_ENV} names no file to count into"
+        ));
     };
+    let spelled: Vec<String> = args
+        .iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
     onepipeline_testfakes::append(
         std::path::Path::new(&log),
-        &serde_json::json!({ "args": args }).to_string(),
+        &serde_json::json!({ "args": spelled }).to_string(),
     );
     let mut real = Command::new(real);
     real.args(&args);
@@ -53,9 +60,7 @@ fn run(mut real: Command) -> ExitCode {
 }
 
 #[cfg(not(unix))]
-fn run(mut real: Command) -> ExitCode {
-    match real.status() {
-        Ok(status) => ExitCode::from(status.code().map_or(1, |code| code as u8)),
-        Err(error) => onepipeline_testfakes::refuse(&format!("cannot run the real git: {error}")),
-    }
+fn run(real: Command) -> ExitCode {
+    let _ = real;
+    onepipeline_testfakes::refuse("counts on Unix alone, where the real git replaces it")
 }
