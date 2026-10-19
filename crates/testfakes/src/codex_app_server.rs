@@ -230,11 +230,13 @@ fn read_upgrade(reader: &mut impl BufRead) -> Result<Option<String>, String> {
     let key = header("sec-websocket-key")
         .ok_or_else(|| format!("the upgrade request carries no Sec-WebSocket-Key: {lines:?}"))?;
     // RFC 6455's nonce is 16 bytes, so its base64 is 22 characters and `==`.
-    let nonce = key.len() == 24
-        && key.ends_with("==")
-        && key[..22]
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/');
+    // Read as bytes: a header may carry any UTF-8, and a slice could split it.
+    let bytes = key.as_bytes();
+    let nonce = bytes.len() == 24
+        && bytes.ends_with(b"==")
+        && bytes[..22]
+            .iter()
+            .all(|&b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/');
     if !nonce {
         return Err(format!(
             "Sec-WebSocket-Key {key:?} is not 16 bytes of base64"
@@ -295,14 +297,24 @@ fn read_message(stream: &mut impl Read, writer: &Writer) -> Result<Option<Vec<u8
                 if stream.read_exact(&mut ext).is_err() {
                     return Ok(None);
                 }
-                u64::from(u16::from_be_bytes(ext))
+                let len = u64::from(u16::from_be_bytes(ext));
+                if len < 126 {
+                    return Err(format!("a 16-bit frame length that fits in 7 bits ({len})"));
+                }
+                len
             }
             127 => {
                 let mut ext = [0u8; 8];
                 if stream.read_exact(&mut ext).is_err() {
                     return Ok(None);
                 }
-                u64::from_be_bytes(ext)
+                let len = u64::from_be_bytes(ext);
+                if len <= u64::from(u16::MAX) || len >> 63 != 0 {
+                    return Err(format!(
+                        "a 64-bit frame length that is not minimal or sets its top bit ({len})"
+                    ));
+                }
+                len
             }
             short => u64::from(short),
         };
@@ -328,7 +340,7 @@ fn read_message(stream: &mut impl Read, writer: &Writer) -> Result<Option<Vec<u8
             *byte ^= mask[index % 4];
         }
         match (opcode, message.as_mut()) {
-            (0x8, _) => return Ok(None),
+            (0x8, _) => return close_payload(&payload).map(|()| None),
             (0x9, _) => {
                 write_frame(writer, 0xA, &payload);
                 continue;
@@ -346,6 +358,28 @@ fn read_message(stream: &mut impl Read, writer: &Writer) -> Result<Option<Vec<u8
             return Ok(message.take());
         }
     }
+}
+
+/// A close frame's payload as RFC 6455 §5.5.1 and §7.4 allow a client to send
+/// it: empty, or a status code a sender may use followed by a UTF-8 reason.
+fn close_payload(payload: &[u8]) -> Result<(), String> {
+    let [high, low, reason @ ..] = payload else {
+        return if payload.is_empty() {
+            Ok(())
+        } else {
+            Err("a close frame carries one byte, which is no status code".to_string())
+        };
+    };
+    let code = u16::from_be_bytes([*high, *low]);
+    let sendable = matches!(code, 1000..=1003 | 1007..=1011 | 3000..=4999);
+    if !sendable {
+        return Err(format!(
+            "a close frame carries status {code}, which no endpoint sends"
+        ));
+    }
+    std::str::from_utf8(reason)
+        .map(|_| ())
+        .map_err(|e| format!("a close frame's reason is not UTF-8: {e}"))
 }
 
 /// One JSON-RPC 2.0 message from the client, typed at the frame: this server
