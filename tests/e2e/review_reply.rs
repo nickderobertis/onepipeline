@@ -562,7 +562,9 @@ fn visibility_probes(world: &World, from: usize) -> usize {
                 .as_array()
                 .map(|args| args.iter().filter_map(Value::as_str).collect())
                 .unwrap_or_default();
-            args.len() == 2 && args[0] == "api" && args[1].split('/').count() == 3
+            // `onevcs` 0.56 asks it with `--include`, to tell an unanswered read apart.
+            matches!(args.as_slice(), ["api", path] | ["api", path, "--include"]
+                if path.split('/').count() == 3)
         })
         .count()
 }
