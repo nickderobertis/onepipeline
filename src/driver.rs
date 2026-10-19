@@ -1962,6 +1962,12 @@ fn confirm_driving(paths: &RunPaths, driver: &mut std::process::Child) -> Result
     // write — is decided by the pid: one carrying a start is some process's, and
     // nothing here can say it is this one's.
     let stamp = sys::child_start_token(driver);
+    // llmlint: ignore-block[changed_behavior_has_e2e] no journey through the binary
+    // reaches an unreadable start here: every launch reads it off a child it has not
+    // reaped, which Linux and macOS answer by pid and Windows through the child's
+    // handle. A reaped child is the one way Linux and macOS leave it unreadable, and
+    // `a_retained_driver_whose_start_cannot_be_read_is_not_confirmed_by_another_start`
+    // drives this wait over exactly that.
     let claimed = || {
         ledger::read_json_opt::<LaunchRecord>(&paths.launch()).is_some_and(|record| {
             record.pid == pid
@@ -1970,6 +1976,7 @@ fn confirm_driving(paths: &RunPaths, driver: &mut std::process::Child) -> Result
                 })
         })
     };
+    // llmlint: ignore-end[changed_behavior_has_e2e]
     // Test failpoints only, and nothing at all where their variables are unset:
     // a journey holds this process before its first reading, or between that
     // reading and its first look at whether the driver has exited, so what the
@@ -4916,9 +4923,10 @@ mod tests {
     /// Windows answers a process's start by pid only while it runs, so a driver
     /// that refused at once left nothing to compare a record against, and a
     /// record naming its pid under the displaced driver's start read as its
-    /// claim. Driven on every host by reaping the driver first, which leaves no
-    /// host a start to give for it; a record carrying none is all its pid can
-    /// decide.
+    /// claim. Driven by reaping the driver first, which leaves Linux and macOS
+    /// no start to give for it, so a record carrying none is all its pid can
+    /// decide; Windows reads the reaped child's start through its handle, which
+    /// is not the displaced one's either.
     #[test]
     fn a_retained_driver_whose_start_cannot_be_read_is_not_confirmed_by_another_start() {
         let root = scratch("confirm-unread");

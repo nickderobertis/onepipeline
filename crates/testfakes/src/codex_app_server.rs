@@ -5,7 +5,7 @@
 //! Only as much of Codex's protocol as one turn needs, and only what this
 //! suite's journeys send — each method below is one the shared-server journey
 //! in `tests/e2e/dispatch.rs` fails without: the WebSocket upgrade, then
-//! JSON-RPC — `initialize`, `thread/start` / `thread/resume`, `turn/start`
+//! JSON-RPC — `initialize`, `thread/start`, `turn/start`
 //! (answered with the turn, then `turn/started`, one `item/agentMessage/delta`
 //! carrying the reply and `turn/completed`) and `thread/unsubscribe`. Like the
 //! rest of the doubles it refuses everything else — a malformed upgrade, frame,
@@ -425,8 +425,6 @@ enum Call {
     Initialize(InitializeParams),
     #[serde(rename = "thread/start")]
     ThreadStart(ThreadParams),
-    #[serde(rename = "thread/resume")]
-    ThreadResume(ResumeParams),
     #[serde(rename = "turn/start")]
     TurnStart(TurnParams),
     #[serde(rename = "thread/unsubscribe")]
@@ -518,20 +516,6 @@ struct ShellEnvironmentPolicy {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct ResumeParams {
-    thread_id: String,
-    #[serde(rename = "cwd")]
-    _cwd: String,
-    #[serde(rename = "approvalPolicy")]
-    _approval_policy: ApprovalPolicy,
-    #[serde(default)]
-    model: Option<String>,
-    #[serde(default, rename = "config")]
-    _config: Option<ThreadConfig>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct TurnParams {
     thread_id: String,
     #[serde(rename = "cwd")]
@@ -604,11 +588,6 @@ fn handle(server: &Server, writer: &Writer, message: Message) -> Result<(), Stri
                 server.next_thread.fetch_add(1, Ordering::SeqCst)
             );
             reply(opened(server, thread, model));
-        }
-        Call::ThreadResume(ResumeParams {
-            thread_id, model, ..
-        }) => {
-            reply(opened(server, thread_id, model));
         }
         Call::TurnStart(params) => turn(server, writer, params, reply)?,
         Call::ThreadUnsubscribe(ThreadRef { thread_id }) => {
