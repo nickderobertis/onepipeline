@@ -1275,7 +1275,6 @@ fn a_label_strict_destination_accepts_the_settlement_projection() {
                     comments: false,
                     no_link: false,
                     expect: None,
-                    statuses: Vec::new(),
                 })
                 .await
         },

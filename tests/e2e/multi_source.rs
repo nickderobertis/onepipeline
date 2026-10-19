@@ -98,7 +98,6 @@ fn filed(world: &World, name: &str, plan: &Value) -> String {
                 comments: false,
                 no_link: false,
                 expect: None,
-                statuses: Vec::new(),
             })
             .await
             .unwrap_or_else(|error| panic!("the routed copy files the plan: {error}"))
@@ -1098,7 +1097,6 @@ fn a_design_documents_fragment_link_to_a_filed_task_lands_on_that_tasks_copy() {
                 comments: false,
                 no_link: false,
                 expect: None,
-                statuses: Vec::new(),
             })
             .await
             .unwrap_or_else(|error| panic!("the document copy runs: {error}"));
@@ -1218,7 +1216,6 @@ fn a_private_drafts_document_is_filed_under_the_boards_copy_of_its_plan() {
                     comments: false,
                     no_link: false,
                     expect: None,
-                    statuses: Vec::new(),
                 })
                 .await
                 .unwrap_or_else(|error| panic!("the document copy runs: {error}"));

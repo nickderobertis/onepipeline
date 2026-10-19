@@ -1073,23 +1073,16 @@ onevcs-testing = "0.19.12"
 # `a_create_the_destination_stored_and_answered_malformed_names_the_destination_and_its_residue`
 # drives it. The variant is new, so a lower pin does not compile.
 #
-# 0.7.3 below it is the release first named as carrying that fix. It leaves a source
+# **0.7.3 is the floor**, and the release named as carrying that fix. It leaves a source
 # a layer refines but no layer defines unconfigured rather than failing every load, so a
 # host's user layer may route to sources only one checkout defines, and names a ticket in
 # such a source `EngineError::IncompleteSource`, which write-back names
 # `incomplete-source` as the store does. It answers a dependency read a private source
 # cannot without failing it: `src/taskgraph.rs` asks `Completeness::NamingUnasked` and
 # holds each node the read could not ask about. `tests/e2e/store.rs` drives both.
-#
-# **0.8.0 is the floor**: the release named as carrying the uncertain-copy fix this batch
-# adopts, so the engine this host installs links it. Its copy takes `CopyRequest::statuses`, which
-# write-back leaves empty so every status is kept, and so never meets the new
-# `CopyAction::Skipped`; `src/writeback.rs` counts one as no mutation all the same, and names
-# `EngineError::StatusesNotTasks` `statuses-not-tasks` as the store does. The field and both
-# variants are new, so a lower pin does not compile.
-onetaskgraph-core = "=0.8.0"
-onetaskgraph-plugin-api = "=0.8.0"
-onetaskgraph-local-md = "=0.8.0"
+onetaskgraph-core = "=0.7.3"
+onetaskgraph-plugin-api = "=0.7.3"
+onetaskgraph-local-md = "=0.7.3"
 # Test-support only: the budget checker's own library, at exactly the release `justfile`'s
 # `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
 onebudgetspec-core = "=0.1.5"

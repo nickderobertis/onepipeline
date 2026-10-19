@@ -632,8 +632,7 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         EngineError::IncompleteSource { .. } => decided("incomplete-source"),
         // llmlint: ignore-block[changed_behavior_has_e2e] These store refusals are
         // unreachable from settlement writes: copies use project members, carry no
-        // comments, set no expected version, keep every status, and read immutable local
-        // shadow tasks.
+        // comments, set no expected version, and read immutable local shadow tasks.
         // `every_engine_failure_is_named_as_the_store_names_it` verifies their mapping.
         EngineError::ExpectOneTask => decided("expect-one-task"),
         EngineError::NotCached { .. } => decided("not-cached"),
@@ -641,7 +640,6 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         EngineError::QueryNotTasks => decided("query-not-tasks"),
         EngineError::CommentsNotDocuments => decided("comments-not-documents"),
         EngineError::ChangedWhileCopied { .. } => decided("changed-while-copied"),
-        EngineError::StatusesNotTasks => decided("statuses-not-tasks"),
         // llmlint: ignore-end[changed_behavior_has_e2e]
         EngineError::NotWritable { .. }
         | EngineError::CommentsNotWritable { .. }
@@ -2933,7 +2931,6 @@ fn create(
         comments: false,
         no_link: false,
         expect: None,
-        statuses: Vec::new(),
     };
     // The one call that is linear in what it carries, so the one whose deadline is.
     let deadline = Deadline::Write {
@@ -4451,16 +4448,15 @@ fn actions(report: &CopyReport) -> ProjectionActions {
             CopyAction::Created { .. }
             | CopyAction::Unchanged { .. }
             | CopyAction::Orphaned { .. }
-            | CopyAction::Failed { .. }
-            | CopyAction::Skipped { .. } => None,
+            | CopyAction::Failed { .. } => None,
         })
         .collect();
     let mut actions = ProjectionActions::default();
     for item in &report.items {
         let count = match &item.action {
             CopyAction::Orphaned { destination } if rewritten.contains(destination) => continue,
-            // Failed and skipped items made no mutation and are not successful projections.
-            CopyAction::Failed { .. } | CopyAction::Skipped { .. } => continue,
+            // Failed items made no mutation and are not successful projections.
+            CopyAction::Failed { .. } => continue,
             CopyAction::Created { .. } => &mut actions.created,
             CopyAction::Updated { .. } => &mut actions.updated,
             CopyAction::Unchanged { .. } => &mut actions.unchanged,
@@ -5760,7 +5756,6 @@ mod tests {
             EngineError::QueryNotTasks,
             EngineError::CommentsNotDocuments,
             EngineError::ChangedWhileCopied { item: id() },
-            EngineError::StatusesNotTasks,
             EngineError::NotWritable {
                 name: "plans".into(),
                 kind: "in-memory".into(),
