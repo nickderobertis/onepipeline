@@ -59,7 +59,8 @@
         "crateTestSource",
         "e2eSource",
         "contractSource",
-        "noteJourneySource"
+        "noteJourneySource",
+        "codexServerSource"
       ],
       "//": "llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the one 95% floor merges every tier's profiles, so this report depends on each tier's `test`. An unchanged tier replays only where the Nx cache is warm: a CI runner starts cold, so there a tier-only change re-runs every tier under this aggregate. That cost is accepted for now because selection stays per tier; restoring the Nx cache in CI is recorded as a follow-up.",
       "dependsOn": [
@@ -68,7 +69,8 @@
           "projects": [
             "onepipeline-e2e",
             "onepipeline-contract",
-            "onepipeline-note-journeys"
+            "onepipeline-note-journeys",
+            "onepipeline-codex-server"
           ],
           "target": "test"
         }
@@ -159,7 +161,7 @@
       ]
     }
   },
-  "//": "llmlint: ignore[expensive_tests_stay_behind_their_own_edge] project selection stays per tier — a change only one tier reads selects that tier and this crate, never a sibling tier (npm/test/workspace-nx.test.mjs drives it). This edge is what makes ci.yml's `changes` answer `true` for a tier-only change, so `cross`, `msrv`, `deny`, `install` and `wheel` still run on it.",
+  "//": "llmlint: ignore[expensive_tests_stay_behind_their_own_edge] project selection stays per tier \u2014 a change only one tier reads selects that tier and this crate, never a sibling tier (npm/test/workspace-nx.test.mjs drives it). This edge is what makes ci.yml's `changes` answer `true` for a tier-only change, so `cross`, `msrv`, `deny`, `install` and `wheel` still run on it.",
   "implicitDependencies": [
     "onepipeline-note-journeys",
     "onepipeline-e2e",

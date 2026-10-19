@@ -1,0 +1,80 @@
+{
+  "name": "onepipeline-codex-server",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "library",
+  "sourceRoot": "tests/codex_server",
+  "tags": [
+    "scope:tests",
+    "lang:rust"
+  ],
+  "targets": {
+    "bootstrap": {
+      "executor": "nx:noop"
+    },
+    "build": {
+      "command": "just _tier-build codex_server",
+      "inputs": [
+        "codexServerSource"
+      ]
+    },
+    "format": {
+      "command": "just _tier-format tests/codex_server/main.rs"
+    },
+    "format-check": {
+      "command": "just _tier-fmt-check tests/codex_server/main.rs",
+      "inputs": [
+        "codexServerSource"
+      ]
+    },
+    "lint": {
+      "command": "just _tier-lint codex_server",
+      "inputs": [
+        "codexServerSource"
+      ]
+    },
+    "test": {
+      "command": "just _codex-server-test",
+      "inputs": [
+        "codexServerSource"
+      ],
+      "dependsOn": [
+        {
+          "projects": [
+            "onepipeline"
+          ],
+          "target": "test-archive"
+        }
+      ],
+      "outputs": [
+        "{workspaceRoot}/target/llvm-cov-target/onepipeline-codex_server-*.profraw"
+      ],
+      "parallelism": false
+    },
+    "test-quick": {
+      "command": "just _codex-server-test-quick",
+      "inputs": [
+        "codexServerSource",
+        {
+          "env": "ONEPIPELINE_TEST_PARTITION"
+        }
+      ],
+      "dependsOn": [
+        {
+          "projects": [
+            "onepipeline"
+          ],
+          "target": "test-quick-archive"
+        }
+      ],
+      "parallelism": false
+    },
+    "check": {
+      "executor": "nx:noop",
+      "dependsOn": [
+        "format-check",
+        "lint",
+        "test"
+      ]
+    }
+  }
+}

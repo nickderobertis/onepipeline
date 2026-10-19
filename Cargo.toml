@@ -776,6 +776,11 @@ resolver = "2"
 # `oneharness-core` 0.28.1 (see that pin). It requires `^0.28.1` and `onejudge`
 # `^0.19.5`, so the three move as one.
 #
+# `oneagentgraph` 0.5.14 is the floor because it is the release that links the
+# shared app-server core 0.28.3 (see that pin for where the pool lives). It still
+# requires `^0.28.1` and `onejudge` `^0.19.5`, so the lock resolves that one core
+# for all three.
+#
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
 # second with no registry at all. A newer release one of these pins **holds back**
@@ -796,7 +801,7 @@ resolver = "2"
 rust-version = "1.97"
 
 [workspace.dependencies]
-oneagentgraph = "0.5.13"
+oneagentgraph = "0.5.14"
 onevcs = "0.56.2"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
@@ -918,6 +923,9 @@ onemessagebus = "0.9.1"
 # translation reaches this build through it; `oneagentgraph` 0.5.13 requires it.
 # It also relinks onto `oneharness-core` 0.28.x, so the spawned side of a
 # two-party member resolves the same plugins-off core.
+# 0.19.5 carries the shared app-server sweeper (onejudge #177). Keep it
+# instead of 0.20.0: that unrelated breaking release (#182) is outside the
+# linked oneagentgraph 0.5.14's ^0.19.5 requirement and would resolve twice.
 onejudge = "0.19.5"
 # **Test-support only**, and named for one reason: `crates/testfakes`'s
 # `oneharness` double writes the report onejudge reads back, and that report is
@@ -1017,7 +1025,18 @@ onejudge = "0.19.5"
 # caret admits a 0.28.x. `oneagentgraph` 0.5.13 and `onejudge` 0.19.5 each
 # require `^0.28.1`, so the three move together or the lock resolves the core
 # twice.
-oneharness-core = "0.28.2"
+#
+# **0.28.5 is the shared app-server release** a host adopts (oneharness #1488,
+# #1495): concurrent controlled Codex turns under one configuration share one
+# pooled `codex app-server`. The pool and its sweeper live in the `oneharness`
+# process a judged member's onejudge spawns; the `onepipeline` binary runs only
+# uncontrolled single-sided turns in process, so it leases no pooled server and
+# hosts no sweeper. `tests/e2e/dispatch.rs`'s
+# `two_concurrent_judged_codex_turns_share_one_app_server` holds both. A
+# **requirement**, so no build admitting 0.28.2 is one a host adopts for it;
+# `oneagentgraph` 0.5.14 and `onejudge` 0.19.5 admit this core, so the
+# lock resolves the core once.
+oneharness-core = "0.28.5"
 # The sibling's own test-support crate, from the **same** revision as the library
 # it implements — here by resolving both from the registry at the releases cut
 # from one commit, each release of this crate requiring the exact `onevcs` it was
@@ -1377,3 +1396,9 @@ path = "tests/scratch_workload/main.rs"
 strip = true
 lto = "thin"
 codegen-units = 1
+
+# Wire-level refusal checks for the shared Codex app-server double, isolated
+# from the dispatch journeys so its backstops rerun only for their own inputs.
+[[test]]
+name = "codex_server"
+path = "tests/codex_server/main.rs"
