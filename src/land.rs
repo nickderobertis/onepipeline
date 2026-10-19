@@ -1792,26 +1792,64 @@ fn pump(
     stop: &std::sync::atomic::AtomicBool,
 ) -> std::result::Result<(), String> {
     let mut reader = onevcs::OperationEvents::open(handle).map_err(|e| e.to_string())?;
+    drain(
+        || reader.read().map_err(|e| e.to_string()),
+        |envelope| lock_relay(relay).vcs(envelope).map_err(|e| e.to_string()),
+        stop,
+        RELAY_POLL,
+    )
+}
+
+/// Hand every record `read` returns to `deliver` until `stop` is set and a read
+/// finds nothing more.
+///
+/// A failed read is asked again, up to [`RELAY_READ_ATTEMPTS`] times in a row,
+/// before it ends the relay: on Windows the operation's writer locks the range
+/// it appends, so a read meeting that append fails with a lock violation (os
+/// error 33) that its next read does not, and `OperationEvents::read` keeps its
+/// place when it fails, so the retry reads what the failed one would have.
+fn drain(
+    mut read: impl FnMut() -> std::result::Result<Vec<onevcs::Envelope>, String>,
+    mut deliver: impl FnMut(&onevcs::Envelope) -> std::result::Result<(), String>,
+    stop: &std::sync::atomic::AtomicBool,
+    poll: std::time::Duration,
+) -> std::result::Result<(), String> {
+    let mut failed = 0;
     loop {
         let stopping = stop.load(std::sync::atomic::Ordering::SeqCst);
-        let batch = reader.read().map_err(|e| e.to_string())?;
+        let batch = match read() {
+            Ok(batch) => {
+                failed = 0;
+                batch
+            }
+            Err(why) => {
+                failed += 1;
+                if failed >= RELAY_READ_ATTEMPTS {
+                    return Err(why);
+                }
+                std::thread::sleep(poll);
+                continue;
+            }
+        };
         let drained = batch.is_empty();
-        for envelope in batch {
-            lock_relay(relay)
-                .vcs(&envelope)
-                .map_err(|e| e.to_string())?;
+        for envelope in &batch {
+            deliver(envelope)?;
         }
         if stopping && drained {
             return Ok(());
         }
         if drained {
-            std::thread::sleep(RELAY_POLL);
+            std::thread::sleep(poll);
         }
     }
 }
 
 /// How often the relay asks the operation's stream for what was appended.
 const RELAY_POLL: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// How many reads of the operation's stream may fail in a row before the relay
+/// gives up: about a second at [`RELAY_POLL`], far past any one append's lock.
+const RELAY_READ_ATTEMPTS: u32 = 50;
 
 /// Where one landing's progress is written: its own journal and every
 /// associated run's, each appended through the store's locked writer and never
@@ -2163,6 +2201,66 @@ mod tests {
             .collect();
         assert_eq!(lineage_head(&superseded, "a"), "b");
         assert_eq!(lineage_head(&superseded, "c"), "c");
+    }
+
+    fn envelope(seq: u64) -> onevcs::Envelope {
+        serde_json::from_value(serde_json::json!({
+            "v": 2, "ts": "2026-10-19T00:00:00.000Z", "stream": "o", "seq": seq,
+            "source": "vcs", "kind": "merge-completed", "labels": {}, "payload": {},
+            "artifacts": [],
+        }))
+        .expect("an onevcs envelope")
+    }
+
+    /// A read that meets the writer's lock fails and the next one does not, as
+    /// git for Windows' locked append does: every record still reaches the
+    /// journal, once, in order, and the relay ends cleanly.
+    #[test]
+    fn a_read_that_fails_for_now_is_asked_again_and_loses_nothing() {
+        let stop = std::sync::atomic::AtomicBool::new(true);
+        let mut answers = vec![
+            Err("os error 33".to_owned()),
+            Ok(vec![envelope(0)]),
+            Err("os error 33".to_owned()),
+            Err("os error 33".to_owned()),
+            Ok(vec![envelope(1), envelope(2)]),
+            Ok(Vec::new()),
+        ]
+        .into_iter();
+        let mut delivered = Vec::new();
+        drain(
+            || answers.next().expect("asked past its end"),
+            |envelope| {
+                delivered.push(envelope.seq);
+                Ok(())
+            },
+            &stop,
+            std::time::Duration::ZERO,
+        )
+        .expect("the relay ends cleanly");
+        assert_eq!(delivered, [0, 1, 2]);
+    }
+
+    /// A read that keeps failing still ends the relay, saying why, rather than
+    /// asking forever.
+    #[test]
+    fn a_read_that_keeps_failing_ends_the_relay_with_its_reason() {
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let mut asked = 0;
+        let ended = drain(
+            || {
+                asked += 1;
+                Err("event does not belong to its operation".to_owned())
+            },
+            |_| Ok(()),
+            &stop,
+            std::time::Duration::ZERO,
+        );
+        assert_eq!(
+            ended,
+            Err("event does not belong to its operation".to_owned())
+        );
+        assert_eq!(asked, RELAY_READ_ATTEMPTS);
     }
 
     fn words(args: &[&str]) -> Vec<OsString> {
