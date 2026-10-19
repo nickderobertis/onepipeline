@@ -1950,31 +1950,38 @@ const HANDOVER_READ_GATE_ENV: &str = "ONEPIPELINE_TEST_HANDOVER_READ_GATE";
 /// from and nothing else will ever read them out loud.
 fn confirm_driving(paths: &RunPaths, driver: &mut std::process::Child) -> Result<()> {
     let pid = driver.id();
-    // The driver's own start stamp, read while the child is unreaped and its pid
-    // therefore cannot have been handed on — through the child itself, so one
-    // that has already exited is still stamped. A pid alone is not the claim: the
-    // record this driver is taking over names the driver it displaces, and a host
-    // that hands a freed pid on within moments — Windows does — can give that
-    // very pid to this child, so the record would read as claimed before the
-    // child had done anything. Where the host will not stamp the child, the
-    // child cannot stamp its claim either, and the pid is all either side has.
-    //
-    // Test failpoints only, and nothing at all where their variables are unset:
-    // a journey holds this process before its first reading, or between that
-    // reading and its first look at whether the driver has exited, so what the
-    // driver does is placed on a chosen side of each. The first is met before
-    // the stamp, so `driver::a_detached_adoption_announces_its_driver_claiming_on_either_side_of_its_first_reading`
-    // stamps a driver that has already claimed the run and exited.
-    let _ = crate::ordering::meet(HANDOVER_UNREAD_GATE_ENV);
+    // The driver's own start stamp, read through the child itself: its pid while
+    // it is unreaped, which therefore cannot have been handed on, and its handle
+    // on Windows, which answers by pid for no process that has exited — and a
+    // driver that refused at once has. A pid alone is not the claim: the record
+    // this driver is taking over names the driver it displaces, and a host that
+    // hands a freed pid on within moments — Windows does — can give that very
+    // pid to this child, so the record would read as claimed before the child
+    // had done anything. Where the child's start cannot be read, only a record
+    // carrying no start either — what a host that stamps nothing has its driver
+    // write — is decided by the pid: one carrying a start is some process's, and
+    // nothing here can say it is this one's.
     let stamp = sys::child_start_token(driver);
+    // llmlint: ignore-block[changed_behavior_has_e2e] no journey through the binary
+    // reaches an unreadable start here: every launch reads it off a child it has not
+    // reaped, which Linux and macOS answer by pid and Windows through the child's
+    // handle. A reaped child is the one way Linux and macOS leave it unreadable, and
+    // `a_retained_driver_whose_start_cannot_be_read_is_not_confirmed_by_another_start`
+    // drives this wait over exactly that.
     let claimed = || {
         ledger::read_json_opt::<LaunchRecord>(&paths.launch()).is_some_and(|record| {
             record.pid == pid
-                && stamp
-                    .as_ref()
-                    .is_none_or(|stamp| stamp.matches(&record.started))
+                && stamp.as_ref().map_or(record.started.is_empty(), |stamp| {
+                    stamp.matches(&record.started)
+                })
         })
     };
+    // llmlint: ignore-end[changed_behavior_has_e2e]
+    // Test failpoints only, and nothing at all where their variables are unset:
+    // a journey holds this process before its first reading, or between that
+    // reading and its first look at whether the driver has exited, so what the
+    // driver does is placed on a chosen side of each.
+    let _ = crate::ordering::meet(HANDOVER_UNREAD_GATE_ENV);
     let mut first = true;
     let deadline = Instant::now() + DRIVER_HANDOVER;
     while Instant::now() < deadline {
@@ -4826,6 +4833,29 @@ mod tests {
             .to_string()
     }
 
+    /// Wait for `driver` to exit while leaving it what a launcher holds of a
+    /// child that has: on Unix an unreaped pid, on Windows an open handle.
+    fn exited_unreaped(driver: &mut std::process::Child) {
+        #[cfg(unix)]
+        {
+            // SAFETY: `info` is a `siginfo_t` this frame owns for the call, and
+            // `WNOWAIT` leaves the child unreaped for `driver` to reap.
+            let waited = unsafe {
+                let mut info: libc::siginfo_t = std::mem::zeroed();
+                libc::waitid(
+                    libc::P_PID,
+                    driver.id(),
+                    &raw mut info,
+                    libc::WEXITED | libc::WNOWAIT,
+                )
+            };
+            assert_eq!(waited, 0, "{}", std::io::Error::last_os_error());
+        }
+        // A Windows child's handle stays open across `wait`, until it drops.
+        #[cfg(windows)]
+        driver.wait().expect("the retained driver exits");
+    }
+
     /// The first driver `retained` starts whose own start does not read as
     /// `displaced`. A start token is only as fine as its host keeps it — one
     /// second for macOS's `ps lstart`, one clock tick for Linux's procfs — so a
@@ -4840,7 +4870,11 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let mut driver = retained();
-            if start_of(driver.id()) != displaced {
+            if sys::child_start_token(&driver)
+                .expect("the retained child has a start")
+                .recorded()
+                != displaced
+            {
                 return driver;
             }
             driver.wait().expect("a set-aside driver exits");
@@ -4867,8 +4901,18 @@ mod tests {
         let root = scratch("confirm-equal");
         let paths = RunPaths::under(&root, "retained");
         paths.create().expect("the run directory");
-        let first = retained_driver();
-        let displaced = start_of(first.id());
+        let mut first = retained_driver();
+        let displaced = sys::child_start_token(&first)
+            .expect("the retained child has a start")
+            .recorded()
+            .to_string();
+        ledger::write_json(
+            &paths.launch(),
+            &launched_by(first.id(), &sys::hostname(), &displaced),
+        )
+        .expect("the equal-start launch record is written");
+        confirm_driving(&paths, &mut first)
+            .expect("an equal start under the child's pid is its own claim");
         let mut first = Some(first);
 
         let mut driver =
@@ -4882,6 +4926,38 @@ mod tests {
             .expect("the driver's log is written");
         let refused = confirm_driving(&paths, &mut driver)
             .expect_err("a record naming the displaced start was read as this driver's claim")
+            .to_string();
+        assert!(refused.contains("did not claim it"), "{refused}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A retained driver whose start cannot be read is not confirmed by a record
+    /// naming its pid under another process's start.
+    ///
+    /// Windows answers a process's start by pid only while it runs, so a driver
+    /// that refused at once left nothing to compare a record against, and a
+    /// record naming its pid under the displaced driver's start read as its
+    /// claim. Driven by reaping the driver first, which leaves Linux and macOS
+    /// no start to give for it, so a record carrying none is all its pid can
+    /// decide; Windows reads the reaped child's start through its handle, which
+    /// is not the displaced one's either.
+    #[test]
+    fn a_retained_driver_whose_start_cannot_be_read_is_not_confirmed_by_another_start() {
+        let root = scratch("confirm-unread");
+        let paths = RunPaths::under(&root, "retained");
+        paths.create().expect("the run directory");
+        let displaced = start_of(sys::pid());
+        let mut driver = retained_apart_from(&displaced, retained_driver);
+        driver.wait().expect("the retained driver exits");
+        ledger::write_json(
+            &paths.launch(),
+            &launched_by(driver.id(), &sys::hostname(), &displaced),
+        )
+        .expect("the launch record is written");
+        std::fs::write(paths.driver_log(), "onepipeline: an unreadable lock\n")
+            .expect("the driver's log is written");
+        let refused = confirm_driving(&paths, &mut driver)
+            .expect_err("a record naming another process's start was read as this driver's claim")
             .to_string();
         assert!(refused.contains("did not claim it"), "{refused}");
         let _ = std::fs::remove_dir_all(&root);
@@ -4927,12 +5003,14 @@ mod tests {
         // Its own start is its claim, and stays one after it has exited: a
         // driver that took the run and settled at once did take it.
         let mut driver = retained_driver();
-        let own = sys::child_start_token(&driver)
-            .expect("this host says when its child started")
-            .recorded()
-            .to_string();
-        recorded(&launched_by(driver.id(), &here, &own));
-        driver.wait().expect("the retained driver exits");
+        recorded(&launched_by(
+            driver.id(),
+            &here,
+            sys::child_start_token(&driver)
+                .expect("the retained child has a start")
+                .recorded(),
+        ));
+        exited_unreaped(&mut driver);
         confirm_driving(&paths, &mut driver).expect("a driver that claimed the run is confirmed");
 
         // And one that wrote nothing at all leaves the record naming the driver

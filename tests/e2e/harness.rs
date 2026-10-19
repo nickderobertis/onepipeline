@@ -7102,7 +7102,7 @@ fn dump_into(out: &mut String, dir: &Path, indent: &str) {
 /// may be an append still in flight and is skipped; a torn line with another
 /// line after it cannot be, so it is a record the writer lost, and reading past
 /// it would let a test assert against a gap and call it a pass.
-fn read_jsonl(path: &Path) -> Vec<Value> {
+pub(crate) fn read_jsonl(path: &Path) -> Vec<Value> {
     let text = std::fs::read_to_string(path).unwrap_or_default();
     let lines: Vec<&str> = text
         .lines()

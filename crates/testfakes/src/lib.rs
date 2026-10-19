@@ -20,6 +20,8 @@
 
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
+pub mod codex_app_server;
 pub mod containment;
 pub mod hosted;
 pub mod yaml;

@@ -1338,55 +1338,6 @@ pub fn process_start_token(pid: u32) -> Option<StartToken> {
     platform_process_start_token(pid)
 }
 
-/// When a child this process spawned and has not reaped started, as the same
-/// token [`process_start_token`] gives while it runs — and still once it has
-/// exited.
-///
-/// A start token is a liveness proof as well as an identity, so a process that
-/// has ended has none; but a caller holding the child asks who it **is**, and
-/// an unreaped child still is the process its pid names. On Unix that pid is
-/// not handed on until the child is reaped, so its start is read by pid. On
-/// Windows the exited process has no token by pid at all, and a caller that
-/// read that absence as "this host will not say" compared the pid alone — so a
-/// retained driver that exited at once read as claiming a record naming the
-/// driver it displaced. The child's own handle still answers when it was
-/// created, whether or not it has exited.
-#[cfg(unix)]
-pub fn child_start_token(child: &std::process::Child) -> Option<StartToken> {
-    process_start_token(child.id())
-}
-
-/// See the Unix arm: the creation time read through the handle the child is
-/// held by, which outlives the process.
-#[cfg(windows)]
-pub fn child_start_token(child: &std::process::Child) -> Option<StartToken> {
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Foundation::FILETIME;
-    use windows_sys::Win32::System::Threading::GetProcessTimes;
-
-    let mut created = FILETIME {
-        dwLowDateTime: 0,
-        dwHighDateTime: 0,
-    };
-    let mut exited = created;
-    let mut kernel = created;
-    let mut user = created;
-    // SAFETY: the handle is the child's own, open for as long as `child` is
-    // borrowed, and every out-parameter is a `FILETIME` this frame owns.
-    let read = unsafe {
-        GetProcessTimes(
-            child.as_raw_handle(),
-            &raw mut created,
-            &raw mut exited,
-            &raw mut kernel,
-            &raw mut user,
-        )
-    };
-    (read != 0).then(|| StartToken {
-        recorded: format!("{}:{}", created.dwHighDateTime, created.dwLowDateTime),
-    })
-}
-
 /// What one record says about one pid on this host.
 ///
 /// Shared by everything that acts on a recorded pid — a stop aiming a teardown,
@@ -1675,9 +1626,66 @@ fn platform_process_start_token(pid: u32) -> Option<StartToken> {
     // report. `WAIT_OBJECT_0` is a process that has exited, and `WAIT_FAILED` is
     // a question this host would not take; neither is a proof of a live process,
     // and both resolve to "this host will not say".
-    (read != 0 && waited == WAIT_TIMEOUT).then(|| StartToken {
+    (read != 0 && waited == WAIT_TIMEOUT).then(|| filetime_token(&created))
+}
+
+/// A Windows creation time as a token records it.
+#[cfg(windows)]
+fn filetime_token(created: &windows_sys::Win32::Foundation::FILETIME) -> StartToken {
+    StartToken {
         recorded: format!("{}:{}", created.dwHighDateTime, created.dwLowDateTime),
-    })
+    }
+}
+
+/// When `child` started, read through the child this process spawned rather
+/// than looked up by its pid — the reading a launcher compares the claim its
+/// child writes against.
+///
+/// An unreaped child's pid names that child and nothing else, so on Unix the
+/// pid is asked as any other is: a child that has exited and not been reaped
+/// still answers with its start.
+#[cfg(unix)]
+pub(crate) fn child_start_token(child: &std::process::Child) -> Option<StartToken> {
+    process_start_token(child.id())
+}
+
+/// When `child` started, read through the handle the child holds.
+///
+/// [`process_start_token`] answers nothing for a process that has exited, for
+/// the liveness reason on its Windows reading. A launcher asks something else:
+/// not whether its child still runs, but when it started, so that a record
+/// naming the child's pid under some *other* start is not read as the child's
+/// claim. A child that exits at once — one that refused, or one that claimed
+/// and settled — has exited by the time its launcher looks, and a reading by pid
+/// would leave that comparison with nothing to compare. The child's own handle
+/// pins the process object, so its creation time is still that process's, and
+/// is asked with no exit check.
+#[cfg(windows)]
+pub(crate) fn child_start_token(child: &std::process::Child) -> Option<StartToken> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::GetProcessTimes;
+
+    let mut created = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let mut exited = created;
+    let mut kernel = created;
+    let mut user = created;
+    // SAFETY: the handle is the child's own, open for as long as `child` is
+    // borrowed, and every out-parameter is a `FILETIME` this frame owns for the
+    // duration of the call.
+    let read = unsafe {
+        GetProcessTimes(
+            child.as_raw_handle(),
+            &raw mut created,
+            &raw mut exited,
+            &raw mut kernel,
+            &raw mut user,
+        )
+    };
+    (read != 0).then(|| filetime_token(&created))
 }
 
 /// Open an append-only file so this process is its **only** appender until the
