@@ -57,8 +57,8 @@ budgets:
       20-core dispatch host at load1 46: 321.8 ms, the owed scenario's maximum (median
       129.4 ms), over this threshold on that host. On onevcs 0.47.0 the same journey
       recorded 169.7 ms and on 0.46.0 110.5 ms. Each carries the scoped launcher-filtered
-      decision read (onevcs #356, first released in 0.45.0). This build links onevcs 0.56.1;
-      the threshold was not re-measured on it.
+      decision read (onevcs #356, first released in 0.45.0). The threshold has not
+      been re-measured on any later onevcs.
   - id: stop-guard-unpublished-latency-cold
     measure: reported
     command: [node, scripts/stop-guard-unpublished-budget.mjs, --cold]
@@ -73,8 +73,8 @@ budgets:
       20-core dispatch host at load1 46: 647.5 ms, the none scenario's maximum (median
       361.8 ms), over this threshold on that host. On onevcs 0.47.0 the same journey
       recorded 555.3 ms and on 0.46.0 299.1 ms. Each carries the scoped launcher-filtered
-      decision read (onevcs #356, first released in 0.45.0). This build links onevcs 0.56.1;
-      the threshold was not re-measured on it.
+      decision read (onevcs #356, first released in 0.45.0). The threshold has not
+      been re-measured on any later onevcs.
   - id: stop-guard-unpublished-latency-10x
     measure: reported
     command: [node, scripts/stop-guard-unpublished-budget.mjs, --scale, '10']
@@ -90,8 +90,8 @@ budgets:
       on a shared 20-core dispatch host at load1 50: 707.1 ms, the none scenario's maximum. On
       onevcs 0.47.0 the same journey recorded 724.2 ms (load1 66) and on 0.46.0 1,209.2 ms
       (owed, load1 31). Each carries the scoped launcher-filtered decision read (onevcs #356,
-      first released in 0.45.0). This build links onevcs 0.56.1;
-      the threshold was not re-measured on it.
+      first released in 0.45.0). The threshold has not
+      been re-measured on any later onevcs.
   - id: stop-guard-unpublished-journey-time
     measure: reported
     command: [node, scripts/stop-guard-unpublished-budget.mjs, --journey-time]
