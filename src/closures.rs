@@ -19,7 +19,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use onetaskgraph_core::config::Layer;
-use onetaskgraph_core::{CompleteAction, IssuesCompleted};
+use onetaskgraph_core::{CompleteAction, DeliveryOutcome, IssuesCompleted};
 use onetaskgraph_plugin_api::IssueRef;
 use serde_json::Value;
 
@@ -214,10 +214,10 @@ pub(crate) fn complete(store: &Store, landing: &Landing, within: Duration) -> An
 /// The record a finished call's answer makes, or the retry a transient item's failure asks
 /// for.
 ///
-/// Failed where an item failed — its task could not be written, or its source read — with the
-/// class and words of those items' own failures. What the store did with the tickets an
-/// updated task delivers rides in that item's `delivered`, verbatim, as it does in every
-/// projection record.
+/// Failed wherever the store says the answer failed ([`IssuesCompleted::failed`]): an item that
+/// could not be written or whose source could not be read, and a ticket an updated item delivers
+/// that the store could not keep in step with it — with the class and words of every one of those
+/// failures, a transient one deciding the class. The items stay the store's, verbatim.
 fn of_completed(landing: &Landing, completed: &IssuesCompleted) -> Answer {
     let verbatim = LandingClosures {
         items: completed
@@ -232,15 +232,29 @@ fn of_completed(landing: &Landing, completed: &IssuesCompleted) -> Answer {
             .collect(),
         ..record(landing)
     };
+    if !completed.failed() {
+        return Answer::Finished(verbatim);
+    }
     let failures: Vec<&onetaskgraph_core::Failure> = completed
         .items
         .iter()
-        .filter(|item| item.action == CompleteAction::Failed)
-        .filter_map(|item| item.error.as_ref())
+        .flat_map(|item| {
+            let own = item
+                .error
+                .as_ref()
+                .filter(|_| item.action == CompleteAction::Failed);
+            let delivered = item
+                .delivered
+                .iter()
+                .filter_map(|entry| match &entry.outcome {
+                    DeliveryOutcome::Failed { failure, .. } => Some(failure),
+                    DeliveryOutcome::Written { .. }
+                    | DeliveryOutcome::Unchanged { .. }
+                    | DeliveryOutcome::Left { .. } => None,
+                });
+            own.into_iter().chain(delivered)
+        })
         .collect();
-    if failures.is_empty() {
-        return Answer::Finished(verbatim);
-    }
     let transient = failures
         .iter()
         .any(|failure| failure.class() == onetaskgraph_core::FailureClass::Transient);
@@ -264,6 +278,34 @@ fn of_completed(landing: &Landing, completed: &IssuesCompleted) -> Answer {
         Answer::Transient(failed)
     } else {
         Answer::Finished(failed)
+    }
+}
+
+/// Whether a record carries a ticket an updated item delivers that the store could not keep in
+/// step: the one failure a retry cannot answer, since `complete_issues` re-evaluates delivered
+/// tickets only as it writes their deliverer, and a retry reads that item back `unchanged`.
+pub(crate) fn carries_delivered_failure(record: &LandingClosures) -> bool {
+    record.items.iter().any(|item| {
+        item.get("delivered")
+            .and_then(Value::as_array)
+            .is_some_and(|delivered| {
+                delivered
+                    .iter()
+                    .any(|entry| entry.get("outcome").and_then(Value::as_str) == Some("failed"))
+            })
+    })
+}
+
+/// The record a retried closure ends in: what the last call answered — unless that finished
+/// with nothing failed after an earlier attempt carried a delivered ticket's failure, which the
+/// last call gave no word on. That earlier attempt is kept, failed, its items verbatim.
+pub(crate) fn kept_after_retry(
+    carried: Option<LandingClosures>,
+    finished: LandingClosures,
+) -> LandingClosures {
+    match carried {
+        Some(carried) if finished.outcome == ClosureOutcome::Projected => carried,
+        _ => finished,
     }
 }
 

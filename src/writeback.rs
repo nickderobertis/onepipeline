@@ -2077,6 +2077,8 @@ fn closer(store: &Store, per_item: NonZeroU64, pending: &(Mutex<Pending>, Condva
             landing
         };
         let mut failures: u32 = 0;
+        // The attempt that carried a delivered ticket's failure, which a retry cannot answer.
+        let mut carried: Option<crate::payload::LandingClosures> = None;
         let finished = loop {
             let within = Deadline::Write {
                 per_item,
@@ -2099,8 +2101,13 @@ fn closer(store: &Store, per_item: NonZeroU64, pending: &(Mutex<Pending>, Condva
                     break None;
                 }
                 // llmlint: ignore-end[changed_behavior_has_e2e]
-                crate::closures::Answer::Finished(record) => break Some(record),
+                crate::closures::Answer::Finished(record) => {
+                    break Some(crate::closures::kept_after_retry(carried.take(), record))
+                }
                 crate::closures::Answer::Transient(record) => {
+                    if crate::closures::carries_delivered_failure(&record) {
+                        carried = Some(record.clone());
+                    }
                     failures = failures.saturating_add(1);
                     if failures == 1 {
                         eprintln!(

@@ -11841,7 +11841,9 @@ source and issue what to write — `updated`, `unchanged`, `skipped` for an issu
 planned or duplicate, `absent`, `failed` — and lists the sources it sent nothing `unsupported`.
 In a run, the call is made on the write-back's own closure thread, off the reconcile loop and
 best effort like every write-back: a transient failure is asked again on the worker's existing
-retry schedule; a refusal, or an answer with an item `failed`,
+retry schedule; a refusal, or an answer the store says failed — an item `failed`, or a ticket
+an `updated` item delivers that the store could not keep in step, which that item's `delivered`
+carries verbatim —
 is the record's `failed` outcome and a **non-blocking** planner surface; none of it changes a
 node's settlement, an edit ruling or a scheduling decision. `publish-branch`, `repo-recover`
 and `integrate` load the store configuration from the directory they run in, as `Store::at`
@@ -11858,7 +11860,11 @@ declared once in the event vocabulary, beside `node-settled`. A run whose every 
 settled waits for its closures still owed up to thirty seconds past the projection's close-out
 window, since a board paces its writes and nothing adopts a finished run again; a run stopped
 before then gets the projection's window. A landing whose call never finished — the driver
-stopped while it was being asked again — has no record, so the next adoption makes the call.
+stopped while it was being asked again — has no record, so the next adoption makes the call. A
+delivered ticket failing for now is asked again like any transient failure, but the store
+re-evaluates delivered tickets only as it writes their deliverer, so a retry reads that item
+back `unchanged` and says nothing of the ticket: where it finishes with nothing failed, the
+record kept is the attempt that carried the ticket's failure.
 
 Driven end to end by `tests/e2e/closures.rs`: a run on a real `local-direct` landing over two
 loopback boards, a `local-md` source and a Linear source; a change request's

@@ -1666,3 +1666,114 @@ fn a_settled_run_records_a_closure_the_board_answers_past_the_projection_window(
         (json!("Done"), issue("CLOSED", Some("COMPLETED")))
     );
 }
+
+/// A world whose landing closes issue 7, which board A holds open at `Todo` and whose item
+/// delivers `ticket`.
+fn closing_seven_delivering(name: &str, ticket: &str) -> (World, GitHubEndpoint, PathBuf) {
+    let issues = json!({
+        "repository": REPOSITORY,
+        "issues": {"7": {"state": "OPEN", "reason": null, "delivers": [ticket]}},
+        "boards": {"1": {"7": "Todo"}},
+    });
+    let (world, served) = world_with(name, "local-direct", &issues);
+    let launch = one_board_launch(&world, &served);
+    world.script("service.work", "the worker wrote this\n");
+    world.script(
+        "service.commit-saying",
+        "feat: ship the service\n\nCloses #7",
+    );
+    (world, served, launch)
+}
+
+/// The item the store wrote for issue 7, as the run's one record carries it verbatim — `updated`,
+/// with the delivered ticket it could not keep in step `failed` — and the record itself.
+fn delivered_failure_recorded(world: &World, run: &str, ticket: &str) -> Value {
+    let records = closures_of(world, run);
+    assert_eq!(records.len(), 1, "{records:#?}");
+    let payload = records[0]["payload"].clone();
+    let item = &payload["items"][0];
+    assert_eq!(item["action"], "updated", "{payload}");
+    assert_eq!(item["delivered"][0]["ticket"], ticket, "{payload}");
+    assert_eq!(item["delivered"][0]["outcome"], "failed", "{payload}");
+    assert_eq!(payload["outcome"], "failed", "{payload}");
+    let surfaced = |world: &World| -> Vec<Value> {
+        world
+            .events_of(run, "planner-surface-queued")
+            .into_iter()
+            .map(|event| event["payload"].clone())
+            .filter(|surface| {
+                surface["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("owner/service#7"))
+            })
+            .collect()
+    };
+    // The loop journals the record and then raises the surface.
+    world.until("the failed closure to be surfaced", |world| {
+        !surfaced(world).is_empty()
+    });
+    let surfaced = surfaced(world);
+    assert_eq!(surfaced.len(), 1, "{surfaced:#?}");
+    assert_eq!(surfaced[0]["blocking"], false);
+    assert_eq!(settled(world, run, "service")["status"], "done");
+    payload
+}
+
+/// A landing whose item the store writes `done` but one of whose delivered tickets it cannot
+/// keep in step — a ticket no source holds — is recorded `failed`, refused, with the store's
+/// items verbatim, and surfaced; the node's settlement is untouched, and the card it wrote stays
+/// `Done`.
+#[test]
+fn a_delivered_ticket_the_store_cannot_keep_in_step_fails_the_closure_for_good() {
+    let ticket = "plans:no-such-ticket";
+    let (world, served, launch) = closing_seven_delivering("closures-delivered-refused", ticket);
+    let run = "delivered-refused";
+    let project = world.plan(run, &plan_of(run, vec![lifecycle("service", &[])]));
+    start_from(&world, &launch, &project);
+    world.until("the landing's closures to be recorded", |world| {
+        !closures_of(world, run).is_empty() && world.run_file(run, "result.json").is_file()
+    });
+    let payload = delivered_failure_recorded(&world, run, ticket);
+    assert_eq!(payload["class"], "refused", "{payload}");
+    assert_eq!(
+        card(&served, "1", "7"),
+        (json!("Done"), issue("CLOSED", Some("COMPLETED")))
+    );
+}
+
+/// A delivered ticket whose read fails for now makes the closure transient, so it is asked
+/// again on the worker's schedule; the retry reads the item it wrote as `unchanged` and carries
+/// no word on the ticket, so the record kept is the attempt that wrote the item — `failed`,
+/// transient, its items verbatim — and it is surfaced.
+#[test]
+fn a_delivered_ticket_failing_for_now_is_asked_again_and_its_failure_kept() {
+    let ticket = "board:ISSUE-77";
+    let (world, served, launch) = closing_seven_delivering("closures-delivered-transient", ticket);
+    world.script("hold.wait", "hold");
+    let run = "delivered-transient";
+    let project = world.plan(
+        run,
+        &plan_of(run, vec![lifecycle("service", &[]), agent("hold", &[])]),
+    );
+    start_from(&world, &launch, &project);
+    world.until("the landing's closures to be recorded", |world| {
+        !closures_of(world, run).is_empty()
+    });
+    let payload = delivered_failure_recorded(&world, run, ticket);
+    assert_eq!(payload["class"], "transient", "{payload}");
+    let reads = log_of(&served)
+        .iter()
+        .filter(|request| {
+            request["query"]
+                .as_str()
+                .is_some_and(|query| query.contains("r0:repository(owner:$owner0"))
+        })
+        .count();
+    assert!(reads >= 2, "the transient closure was not asked again");
+    assert_eq!(
+        card(&served, "1", "7"),
+        (json!("Done"), issue("CLOSED", Some("COMPLETED")))
+    );
+    read_no_board_whole(&served);
+    finished(&world, run);
+}

@@ -7,7 +7,9 @@ second argument names a JSON file of caller metadata to seed onto issues by name
 
 `GITHUB_LOOPBACK_ISSUES` names a JSON file of numbered issues and the boards that hold them,
 for the journeys about the issues a landing closes: `{"repository": "owner/name", "issues":
-{"7": {"state": "OPEN", "reason": null}, ...}, "boards": {"1": {"7": "Todo"}, ...}}`. Those
+{"7": {"state": "OPEN", "reason": null, "delivers": ["source:ticket"]}, ...}, "boards": {"1":
+{"7": "Todo"}, ...}}`, `delivers` optional and written into the issue's metadata slot. A read
+of an `ISSUE-<n>` this endpoint holds no issue for fails with an HTTP 502. Those
 issues are read by repository and number, as `task status complete` reads them, and a board's
 source names its board in its endpoint, `/board/<number>/graphql`, so every request is logged
 under the board that sent it. POST `/fault` with `{"status": FAULT}`, or a list of them for
@@ -100,9 +102,12 @@ def numbered_fixture(document):
         raise SystemExit("numbered issues must name a repository, its issues and its boards")
     for number, held in document["issues"].items():
         if (not NUMBER.match(number) or not isinstance(held, dict)
-                or set(held) != {"state", "reason"}
-                or held["reason"] not in STATES.get(held["state"], [])):
-            raise SystemExit("issue %r is not a number with a state and the reason it fits" % number)
+                or not {"state", "reason"} <= set(held) <= {"state", "reason", "delivers"}
+                or held["reason"] not in STATES.get(held["state"], [])
+                or not all(isinstance(ticket, str) and ":" in ticket
+                           for ticket in held.get("delivers", []))):
+            raise SystemExit("issue %r is not a number with a state, the reason it fits and the "
+                             "tickets it delivers" % number)
     for board, cards in document["boards"].items():
         if (not NUMBER.match(board) or not isinstance(cards, dict)
                 or any(number not in document["issues"] or card not in options
@@ -149,7 +154,9 @@ def numbered_issue(number):
          "status": {"name": cards[number], "field": numbered_status_field(board)}}
         for board, cards in sorted(numbered["boards"].items()) if number in cards]
     return {"__typename": "Issue", "id": "ISSUE-" + number, "number": int(number),
-            "title": "issue " + number, "body": "Issue " + number + ".",
+            "title": "issue " + number,
+            "body": ("Issue " + number + "." if not held.get("delivers") else
+                     described("Issue " + number + ".", {"onetaskgraph.delivers": held["delivers"]})),
             "url": "https://github.com/" + numbered["repository"] + "/issues/" + number,
             "createdAt": "2026-10-01T00:00:00Z", "updatedAt": "2026-10-01T00:00:00Z",
             "state": held["state"], "stateReason": held["reason"],
@@ -340,6 +347,11 @@ class Handler(BaseHTTPRequestHandler):
         """The numbered issues' operations, or `None` for one about the named ones."""
         if "r0:repository(owner:$owner0" in query:
             return issues_by_reference(variables), 200
+        if ("node(id:" in query and str(variables.get("id", "")).startswith("ISSUE-")
+                and variables["id"].removeprefix("ISSUE-") not in numbered["issues"]):
+            # An issue this endpoint holds no record of: a ticket a seeded issue delivers,
+            # whose read GitHub is failing to answer for now.
+            return {"errors": [{"message": "the loopback cannot read this issue for now"}]}, 502
         supplied = variables.get("input") if isinstance(variables.get("input"), dict) else {}
         if "updateProjectV2ItemFieldValue(" in query and NUMBERED_ITEM.match(str(supplied.get("itemId", ""))):
             return self.held_write(request)
