@@ -33,9 +33,9 @@
 //!   left it nowhere to go — so the caller chooses relaunch, tweak, or follow-up
 //!   rather than settling quietly into a record nobody reads.
 //!
-//! The field set, each field's default, the four combinations of `deliver` and
-//! `persist`, and the six dispositions are declared **once**, on
-//! [`Command::Note`]. Nothing here restates them.
+//! The field set, each field's default, the combinations of `deliver` and
+//! `persist`, a note's deadline, and the six dispositions are declared **once**,
+//! on [`Command::Note`]. Nothing here restates them.
 //!
 //! # What a note does *not* do
 //!
@@ -311,10 +311,9 @@ pub fn deliver(run: &RunPaths, node: &str, note: &Note) -> Result<Delivered> {
 
 /// The same delivery, naming both axes explicitly.
 ///
-/// `deliver` decides whether the running turn is attempted and `persist` whether
-/// the note is composed into the node's next dispatch; what each of their four
-/// combinations means is declared once, on
-/// [`Command::Note`].
+/// `deliver` decides whether the running turn is attempted, and how, and `persist`
+/// whether the note is composed into the node's next dispatch; what each of their
+/// combinations means is declared once, on [`Command::Note`].
 ///
 /// # Errors
 ///
@@ -323,7 +322,7 @@ pub fn deliver(run: &RunPaths, node: &str, note: &Note) -> Result<Delivered> {
 // llmlint: ignore[invalid_states_unrepresentable] the two axes stay two bare wire
 // values here on purpose: this call *is* the envelope's `note` op on this crate's
 // own surface, so a Rust caller and a JSON caller must be able to say the same
-// four combinations and get the same answer to each. Narrowing the pair to
+// combinations and get the same answer to each. Narrowing the pair to
 // [`Reach`] at this boundary would make the combination that reaches nobody
 // inexpressible in Rust and expressible in JSON, which is the two spellings
 // meaning different things — the one thing publishing this call exists to
@@ -359,9 +358,11 @@ pub fn deliver_with(
 /// `deliver` and `persist` are two independent fields on the wire and stay two —
 /// [`Command::Note`] is where what each of them decides is declared, and neither
 /// decides the other's question. Past the envelope they are only ever read
-/// together, and one of their four combinations reaches nobody by construction:
-/// this is that pair with the fourth removed, so nothing downstream of the
-/// boundary that refuses it can be handed it.
+/// together, and one of their combinations reaches nobody by construction: this
+/// is that pair with that one removed — and `live` and `turn-end` read as one
+/// here, since they differ only in how the running turn is reached, which the
+/// composed note carries — so nothing downstream of the boundary that refuses it
+/// can be handed it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Reach {
     /// `deliver: live` or `turn-end` with `persist: false`: the running turn and

@@ -494,7 +494,12 @@ pub enum Command {
     /// is composed into the node's next dispatch**. Neither decides the other's
     /// question, and saying so is load-bearing: `deliver: next` and
     /// `persist: true` both read as "on the next dispatch", and a reader who
-    /// conflates them gets this contract wrong. Their four combinations:
+    /// conflates them gets this contract wrong. `live` and `turn-end` both
+    /// attempt the running turn and differ only in how: `live` interrupts it and
+    /// opens its replacement on the note, falling back to the turn's end where
+    /// that turn cannot be interrupted, and `turn-end` waits for it to end and
+    /// never interrupts. Each combines with `persist` as `live` does below. The
+    /// combinations:
     ///
     /// * `live` with `persist: false` — the running turn is attempted; where it
     ///   took the note that is the whole of the delivery, and where it did not
@@ -548,8 +553,9 @@ pub enum Command {
     /// `reached` word the run records, and [`Delivered`](crate::note::Delivered)
     /// for a caller on this crate's own surface:
     ///
-    /// * `worker` — the worker's live turn took it.
-    /// * `supervisor` — the supervisor's live turn took it.
+    /// * `worker` — the worker's live turn took it, with a `turn` saying whether
+    ///   that turn was `interrupted` or reached at its end (`turn-end`).
+    /// * `supervisor` — the supervisor's live turn took it, with the same `turn`.
     /// * `judged-with` — the supervisor's decision was re-taken with it in hand
     ///   and completed, carrying that completion reason, so no further worker
     ///   turn took it.
@@ -607,10 +613,12 @@ pub enum Command {
         /// Whether live delivery is attempted, and **only** that.
         ///
         /// Optional, defaulting to [`Deliver::Live`], and omitted from a
-        /// serialized note that carries the default. `live` attempts to reach
-        /// the node's running turn; `next` attempts no live delivery at all.
-        /// Whether the note is composed into a later dispatch is
-        /// [`persist`](Self::Note::persist)'s question alone.
+        /// serialized note that carries the default. `live` interrupts the
+        /// node's running turn with it, or reaches that turn as it ends where it
+        /// cannot be interrupted; `turn-end` reaches the running turn only as it
+        /// ends; `next` attempts no live delivery at all. Whether the note is
+        /// composed into a later dispatch is [`persist`](Self::Note::persist)'s
+        /// question alone.
         #[serde(default, skip_serializing_if = "Deliver::is_default")]
         deliver: Deliver,
         /// Whether the note is composed into the node's next dispatch, and
@@ -2385,8 +2393,7 @@ impl ChannelState {
             .ok()?
             .into_iter()
             .filter_map(|(record, _)| serde_json::from_value::<CommandOutcome>(record).ok())
-            .filter(|outcome| outcome.id == id)
-            .last()
+            .rfind(|outcome| outcome.id == id)
     }
 
     /// The commands envelope `id` was sent with, as the command queue holds it,

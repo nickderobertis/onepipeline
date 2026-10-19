@@ -982,8 +982,7 @@ fn outcome_of(world: &World, run: &str, id: u64) -> Option<Value> {
     world
         .command_outcomes(run)
         .into_iter()
-        .filter(|outcome| outcome["id"] == id)
-        .last()
+        .rfind(|outcome| outcome["id"] == id)
 }
 
 /// How many answers the reconciler wrote for envelope `id`.
@@ -5313,7 +5312,7 @@ fn a_live_note_interrupts_the_held_worker_turn_and_its_replacement_opens_on_it()
 
     assert_eq!(
         aborted(&world),
-        [held.clone()],
+        std::slice::from_ref(&held),
         "the held worker turn was not aborted by the note"
     );
     assert!(
@@ -5475,7 +5474,7 @@ fn a_note_to_the_supervisor_interrupts_the_held_judge_turn_and_its_replacement_d
 
     assert_eq!(
         aborted(&world),
-        [held.clone()],
+        std::slice::from_ref(&held),
         "the held judge turn was not aborted by the note"
     );
     assert!(

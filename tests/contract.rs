@@ -11120,7 +11120,7 @@ fn the_manager_landing_contract_is_what_the_divergence_record_names() {
 /// and both bundles are at its versions and carry the op and the kinds.
 #[test]
 fn the_review_reply_surface_is_what_the_divergence_record_names() {
-    use onepipeline::channel::layout::{CommandOutcome, Op, DOCUMENT_VERSION};
+    use onepipeline::channel::layout::{CommandOutcome, Op};
     use onepipeline::channel::{Author, Command, CommandResult, CommandVerdict, Refusal};
     use onepipeline::payload::{registry, schema_of};
     let block = divergence_block("130.");
