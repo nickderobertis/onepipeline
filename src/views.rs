@@ -1021,6 +1021,14 @@ pub(crate) fn landings_the_run_re_read(state: &mut RunState, paths: &RunPaths) {
 /// are exactly `not landed` and `could not be decided`, and a view that reused
 /// yesterday's would be the stale claim this exists to stop making.
 ///
+/// **One exception: an attach stream**, which renders after every batch of
+/// records for as long as the run goes. There a node's read is carried across
+/// that stream's consecutive renders for at most [`STREAM_READ_REUSE`] — see
+/// [`StreamReads`] — and is taken again at once after the stream records a
+/// settlement, publication or landing for that node, and on the stream's final
+/// render, which reports the run as it settled. `status`, `results` and `watch`
+/// carry nothing and read on every render.
+///
 /// Nested scopes are one render: `status` prints [`RunView::summary`] inside
 /// itself, and a second scope there would empty the memo half-way through and
 /// ask every node twice.
@@ -1045,6 +1053,83 @@ thread_local! {
     // llmlint: ignore[invalid_states_unrepresentable] a run id and a node id are the plain strings this whole crate spells them as — `RunPaths.run`, `RunState::landings`, `RunState::branches` — for the reason `src/ledger.rs`'s file-level suppression records, and `src/AGENTS.md` names a `RunId` newtype as interface drift. Newtypes at these two sites alone would disagree with every neighbour and convert at every boundary. Neither value is unchecked: the run id crossed `ledger::is_valid_run_id` when the run was launched, and the node id is one the run's own journal projected into its graph.
     static READ_THIS_RENDER: std::cell::RefCell<BTreeMap<(String, String), std::rc::Rc<LandingRead>>> =
         const { std::cell::RefCell::new(BTreeMap::new()) };
+
+    /// The reads an attach stream on this thread carries across its renders, and
+    /// when each was taken. `None` outside one, which is every other view.
+    //
+    // llmlint: ignore[invalid_states_unrepresentable] keyed by run and node as `READ_THIS_RENDER` above is, for the reason recorded there.
+    static STREAM_READS: std::cell::RefCell<Option<BTreeMap<(String, String), (std::rc::Rc<LandingRead>, std::time::Instant)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// How long an attach stream carries a node's landing read across its renders.
+///
+/// The stream renders after every batch of records, which on a busy run is
+/// back to back, and each render took every unlanded node's landing from
+/// scratch — `onevcs` resolving the repository and running `git` some forty
+/// times a node. On a host where starting a process is slow that was most of
+/// what an attached command spent, and a tail after its run had finished. Ten
+/// seconds is a merge somebody else performs going unreported for no longer than
+/// a person takes to look up from it; the stream's own records end the reuse
+/// sooner, and its last render reads afresh.
+pub(crate) const STREAM_READ_REUSE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// An attach stream's reads, carried across its renders while this is held.
+///
+/// Held by [`crate::driver`]'s attach loop on the thread that renders, and by
+/// nothing else, so no other view ever reuses a read.
+pub(crate) struct StreamReads(());
+
+impl StreamReads {
+    /// Begin carrying reads across this thread's renders.
+    pub(crate) fn begin() -> Self {
+        STREAM_READS.with_borrow_mut(|reads| *reads = Some(BTreeMap::new()));
+        Self(())
+    }
+
+    /// Take every node's landing afresh on the next render, which is the one
+    /// reporting the run as it settled.
+    pub(crate) fn forget_all(&self) {
+        STREAM_READS.with_borrow_mut(|reads| {
+            if let Some(reads) = reads {
+                reads.clear();
+            }
+        });
+    }
+
+    /// Take a node's landing afresh where the stream just recorded something that
+    /// can move it: a settlement or restack of the node, or any record of its
+    /// session — the push, the change request, the merge.
+    pub(crate) fn forget_moved(&self, run: &str, events: &[&Envelope]) {
+        STREAM_READS.with_borrow_mut(|reads| {
+            let Some(reads) = reads else {
+                return;
+            };
+            for event in events {
+                let moves = event.source == Source::Vcs
+                    || event.kind.0 == PipelineKind::NodeSettled.as_str()
+                    || event.kind.0 == PipelineKind::NodeRestacked.as_str();
+                if let (true, Some(node)) = (moves, event.labels.node.as_deref()) {
+                    reads.remove(&(run.to_owned(), node.to_owned()));
+                }
+            }
+        });
+    }
+}
+
+impl Drop for StreamReads {
+    fn drop(&mut self) {
+        STREAM_READS.with_borrow_mut(|reads| *reads = None);
+    }
+}
+
+/// The read an attach stream already holds for one node, where it is still
+/// within [`STREAM_READ_REUSE`].
+fn carried(key: &(String, String)) -> Option<std::rc::Rc<LandingRead>> {
+    STREAM_READS.with_borrow(|reads| {
+        let (read, taken) = reads.as_ref()?.get(key)?;
+        (taken.elapsed() < STREAM_READ_REUSE).then(|| std::rc::Rc::clone(read))
+    })
 }
 
 /// Begin rendering `view` over `run`.
@@ -1208,10 +1293,16 @@ fn reported_landing_of(
 }
 
 /// One node's landing, read now — or handed back from the read this render
-/// already took of it.
+/// already took of it, or, inside an attach stream, the one it carries.
 fn read_now(run: &str, node: &str, branch: &str, repo: &str) -> std::rc::Rc<LandingRead> {
     let key = (run.to_owned(), node.to_owned());
     if let Some(read) = READ_THIS_RENDER.with_borrow(|reads| reads.get(&key).cloned()) {
+        return read;
+    }
+    if let Some(read) = carried(&key) {
+        READ_THIS_RENDER.with_borrow_mut(|reads| {
+            reads.insert(key, std::rc::Rc::clone(&read));
+        });
         return read;
     }
     // Everything the decision costs is counted against this node, which is what
@@ -1220,6 +1311,14 @@ fn read_now(run: &str, node: &str, branch: &str, repo: &str) -> std::rc::Rc<Land
         let _deciding = crate::rendercost::deciding(node);
         std::rc::Rc::new(crate::vcs::landing_now(branch, Some(repo)))
     };
+    STREAM_READS.with_borrow_mut(|reads| {
+        if let Some(reads) = reads {
+            reads.insert(
+                key.clone(),
+                (std::rc::Rc::clone(&read), std::time::Instant::now()),
+            );
+        }
+    });
     READ_THIS_RENDER.with_borrow_mut(|reads| {
         reads.insert(key, std::rc::Rc::clone(&read));
     });

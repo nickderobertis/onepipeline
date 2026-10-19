@@ -107,6 +107,13 @@ path = "src/bin/fake-oneagentgraph.rs"
 name = "fake-gh"
 path = "src/bin/fake-gh.rs"
 
+# Not a double: the real `git`, with each start counted first, for the journey
+# that bounds how many processes its work costs — the figure that sets how long
+# it takes on a host where starting one is slow.
+[[bin]]
+name = "counted-git"
+path = "src/bin/counted-git.rs"
+
 # One layer further out than the other two: this stands in for the paid model
 # turn only, for the journeys that drive the real `oneagentgraph` binary. It is
 # the *harness* rather than `oneharness`, because a single-sided member's turn is

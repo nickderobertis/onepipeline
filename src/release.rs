@@ -977,13 +977,17 @@ impl Watch {
     /// a node with nothing to wait on. Nothing else holds anything: a `fast` node
     /// launches on branch readiness alone, and a node whose every dependency
     /// resolved to nothing outside its repository is never held.
+    ///
+    /// The rung is asked last, of a node something would hold: it resolves the
+    /// node's repository through `onevcs`, git processes and all, and this is
+    /// asked of every watched node on every pass.
     pub(crate) fn held(&self, watching: &[Node]) -> BTreeSet<String> {
         watching
             .iter()
-            .filter(|node| adoption_of(node) == Adoption::Published)
             .filter(|node| {
                 self.unresolved.contains_key(&node.id) || self.awaits_a_release(&node.id)
             })
+            .filter(|node| adoption_of(node) == Adoption::Published)
             .map(|node| node.id.clone())
             .collect()
     }
@@ -1362,11 +1366,13 @@ impl Watch {
     /// which is where it does more than inform — the note is what puts a worker
     /// back on that branch to move the pin, and lifting the draft is what that
     /// worker's own publication then does.
+    ///
+    /// The rung is asked last, for [`held`](Self::held)'s reason.
     pub(crate) fn ready_to_adopt(&self, told: &[Node]) -> Vec<(String, Vec<Released>)> {
         told.iter()
-            .filter(|node| adoption_of(node) == Adoption::Fast)
             .filter(|node| !self.adopted.contains(&node.id))
             .filter(|node| self.all_released(&node.id))
+            .filter(|node| adoption_of(node) == Adoption::Fast)
             .map(|node| (node.id.clone(), self.released(&node.id)))
             .collect()
     }

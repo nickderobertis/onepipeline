@@ -434,6 +434,8 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
         .through_scripted_source();
     team_repository(&world);
     world.script("gh.checks", GREEN);
+    #[cfg(unix)]
+    let world = world.counting_git();
     let graph = world.review_reply_graph();
     let run = "round";
     let nodes: Vec<Value> = STACK
@@ -547,6 +549,8 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
     timed(&world, &host, run, "pass-2", &mut phases, || {
         passed(&world.run(&["review", run]), "the second pass");
     });
+    #[cfg(unix)]
+    the_round_started_few_enough_gits(&world);
 
     // Every comment answered or declined exactly once.
     for comment in on_b.iter().chain(&on_h) {
@@ -754,6 +758,29 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
     ] {
         assert!(detail.contains(part), "the detail lacks {part:?}: {detail}");
     }
+}
+
+/// The most `git` processes the round's commands may start, from the launch through
+/// the second pass.
+///
+/// The figure that sets how long this journey takes where starting a process is slow:
+/// on the Windows runner a `git` start costs some twenty times what it does on Linux,
+/// and this round ran 420–540 seconds there against its 540-second bound while starting
+/// 18,300–19,200 of them. Nearly half were the attach stream reading every unlanded
+/// draft's landing afresh on each of its renders, about forty `git` a read. Now it takes
+/// about 9,700 here, and 13,400 with every start slowed by sixty milliseconds of CPU — a
+/// slower host renders and asks on a timer more often over a longer run — so the bound
+/// sits above the second and well below what the round cost before.
+const GIT_STARTS: usize = 15_000;
+
+/// Hold the round to [`GIT_STARTS`].
+#[cfg(unix)]
+fn the_round_started_few_enough_gits(world: &World) {
+    let started = world.git_starts().len();
+    assert!(
+        started <= GIT_STARTS,
+        "the round started {started} git processes, over its {GIT_STARTS}"
+    );
 }
 
 /// A whole round's record, as the journey writes one, with `replies` reply posts on its

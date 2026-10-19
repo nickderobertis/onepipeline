@@ -840,6 +840,15 @@ pub(crate) enum LandingRead {
 // by `usable`, which is what wrote every value that reaches this.
 pub(crate) fn landing_now(branch: &str, repo: Option<&str>) -> LandingRead {
     crate::rendercost::landing_read_taken(branch, repo);
+    if let Some(log) = std::env::var_os("RR_LANDING_LOG") {
+        use std::io::Write;
+        let a: Vec<String> = std::env::args().skip(1).take(1).collect();
+        let bt = std::backtrace::Backtrace::force_capture().to_string();
+        let caller: Vec<&str> = bt.lines().filter(|l| l.contains("onepipeline::") && !l.contains("landing_now") && !l.contains("backtrace")).take(9).collect();
+        if let Ok(mut f) = std::fs::OpenOptions::new().append(true).create(true).open(log) {
+            let _ = writeln!(f, "{}\t{}\t{}\t{}", a.join(" "), std::thread::current().name().unwrap_or("?"), branch, caller.join(" | ").replace(char::is_whitespace, ""));
+        }
+    }
     let answered = read_of(onevcs::landing_status(branch, repo));
     // One per read, because the read takes one from scratch. Recorded after it
     // rather than inferred from it, so a build that asked about a repository
@@ -1892,6 +1901,17 @@ fn kind_of(kind: onevcs::EventKind) -> crate::event::EventKind {
 /// How often a follow asks the stream for what has been appended since.
 const FOLLOW_POLL: Duration = Duration::from_millis(20);
 
+/// How often a follow asks whether its session has closed.
+///
+/// Far less often than it reads the stream, because the two cost different
+/// things: a read of the stream is a file read, and the question is
+/// [`onevcs::session`], which runs `git` about ten times in the session's
+/// clone to answer it. What ends a follow is [`Follower::finish`], called before
+/// the close; this is only what ends one whose session something else closed,
+/// so asking it every pass bought nothing but those processes — on a host where
+/// starting one is slow, a core's worth for every session open.
+const FOLLOW_CLOSED_ASK: Duration = Duration::from_secs(1);
+
 /// A session's own event stream, followed as `onevcs` writes it.
 ///
 /// Read *once at settlement*, a lifecycle node's push, change request, check
@@ -1918,20 +1938,29 @@ pub fn follow(
     let followed = token.clone();
     let reader = std::thread::Builder::new()
         .name(format!("onevcs-{}-events", token.0))
-        .spawn(move || loop {
-            // Read *before* asking whether the session closed, so a record
-            // written between the two is relayed on the next pass rather than
-            // lost to a follow that stopped one read early.
-            for envelope in next_batch(&mut stream, &followed) {
-                if let Ok(mut reached) = reached.lock() {
-                    reached.reached(&envelope);
+        .spawn(move || {
+            let mut asked = std::time::Instant::now();
+            loop {
+                // Read *before* asking whether the session closed, so a record
+                // written between the two is relayed on the next pass rather than
+                // lost to a follow that stopped one read early.
+                for envelope in next_batch(&mut stream, &followed) {
+                    if let Ok(mut reached) = reached.lock() {
+                        reached.reached(&envelope);
+                    }
+                    sink(envelope);
                 }
-                sink(envelope);
+                if stopping.load(Ordering::SeqCst) {
+                    return;
+                }
+                if asked.elapsed() >= FOLLOW_CLOSED_ASK {
+                    if settled(&followed) {
+                        return;
+                    }
+                    asked = std::time::Instant::now();
+                }
+                std::thread::sleep(FOLLOW_POLL);
             }
-            if stopping.load(Ordering::SeqCst) || settled(&followed) {
-                return;
-            }
-            std::thread::sleep(FOLLOW_POLL);
         });
     match reader {
         Ok(reader) => Some(Follower {

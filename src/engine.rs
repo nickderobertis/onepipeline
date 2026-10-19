@@ -10945,29 +10945,63 @@ fn record_result(paths: &RunPaths, state: &RunState, settled: GraphState) -> Res
 /// **Asked only of the changes that had not landed**, and only where the run
 /// recorded the branch to ask about, so a run whose every change merged asks
 /// nothing.
+///
+/// The reads are asked **side by side**, a few at a time. Each is `onevcs`
+/// taking the repository from scratch and running `git` tens of times, none
+/// depends on another, and this is the run's close-out — nothing else is left
+/// running beside it, so one after another they were a tail every closing
+/// command waited out, longest where starting a process is slowest.
 fn landings_after_asking_again(state: &RunState) -> BTreeMap<String, Landing> {
     let mut landings = state.landings.clone();
     // A draft merged into another node's branch lands only with that node: its own
     // merged change request says nothing about the root.
-    let unlanded: Vec<String> = landings
+    let asked: Vec<(String, &str, Option<&str>)> = landings
         .iter()
         .filter(|(_, landing)| **landing == Landing::Unlanded)
         .map(|(node, _)| node.clone())
         .filter(|node| !state.absorbed.contains_key(node))
+        .filter_map(|node| {
+            let branch = state.branches.get(&node)?;
+            // The node's own repository, so a branch name two identities both hold
+            // is asked about the one this run's work is in rather than refused as
+            // an ambiguity the run has already resolved.
+            let repo = state.graph.get(&node).and_then(|node| node.repo.as_deref());
+            Some((node, branch.as_str(), repo))
+        })
         .collect();
-    for node in unlanded {
-        let Some(branch) = state.branches.get(&node) else {
-            continue;
-        };
-        // The node's own repository, so a branch name two identities both hold
-        // is asked about the one this run's work is in rather than refused as
-        // an ambiguity the run has already resolved.
-        let repo = state.graph.get(&node).and_then(|node| node.repo.as_deref());
-        if crate::vcs::proved_landed(branch, repo) {
-            landings.insert(node, Landing::Landed);
-        }
+    for node in proved_landed_of(&asked) {
+        landings.insert(node, Landing::Landed);
     }
     landings
+}
+
+/// Which of `asked` [`crate::vcs::proved_landed`] shows reached its base, asked on
+/// as many threads as the host has cores and never more than there are reads.
+fn proved_landed_of(asked: &[(String, &str, Option<&str>)]) -> Vec<String> {
+    let workers = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(asked.len());
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let proved = std::sync::Mutex::new(Vec::new());
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| loop {
+                let at = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some((node, branch, repo)) = asked.get(at) else {
+                    return;
+                };
+                if crate::vcs::proved_landed(branch, *repo) {
+                    proved
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(node.clone());
+                }
+            });
+        }
+    });
+    proved
+        .into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// The nodes a `retry` replaced, as the run's own result records them.
