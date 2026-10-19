@@ -4826,9 +4826,21 @@ mod tests {
 
         // The retained driver's pid under another process's start — this one's,
         // as the displaced driver's would be — is not its claim, and what it
-        // said comes back with the refusal.
+        // said comes back with the refusal. Outside Linux a Unix start token is
+        // `ps lstart`, one second fine, and this test process was itself started
+        // moments ago, so a child spawned in the same second would carry this
+        // very token: the wait puts the child's start in a later second, and the
+        // assertion says the case is the one it claims to be.
+        let displaced = start_of(sys::pid());
+        #[cfg(all(unix, not(target_os = "linux")))]
+        std::thread::sleep(Duration::from_millis(1_100));
         let mut driver = retained();
-        recorded(&launched_by(driver.id(), &here, &start_of(sys::pid())));
+        assert_ne!(
+            start_of(driver.id()),
+            displaced,
+            "the retained driver started under this process's own token"
+        );
+        recorded(&launched_by(driver.id(), &here, &displaced));
         std::fs::write(paths.driver_log(), "onepipeline: an unreadable lock\n")
             .expect("the driver's log is written");
         let refused = confirm_driving(&paths, &mut driver)
