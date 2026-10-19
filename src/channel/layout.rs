@@ -417,6 +417,8 @@ pub enum CommandVerdict {
     Delivered,
     /// It refused, and [`reason`](CommandResult::reason) is what it said.
     Refused,
+    /// SPIKE MOCK (spike-visual): a `note` handed to its receiver's inbox.
+    Queued,
 }
 
 /// What became of **one** command of an envelope.

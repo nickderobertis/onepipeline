@@ -943,6 +943,9 @@ pub struct Receipt {
     /// What the person who sent it should know beside the receipt, each a
     /// sentence of its own, in the order the binary says them.
     pub advice: Vec<String>,
+    /// SPIKE MOCK (spike-visual): the receivers whose note the run answered as
+    /// `queued` in their inbox.
+    pub queued_notes: Vec<String>,
 }
 
 impl Receipt {
@@ -1012,6 +1015,14 @@ impl serde::Serialize for Receipt {
         }
         if let Some(commands) = self.commands() {
             receipt.serialize_entry("commands", commands)?;
+        }
+        if !self.queued_notes.is_empty() {
+            let notes: serde_json::Map<String, serde_json::Value> = self
+                .queued_notes
+                .iter()
+                .map(|node| (node.clone(), json!("queued")))
+                .collect();
+            receipt.serialize_entry("notes", &notes)?;
         }
         receipt.end()
     }
@@ -1157,7 +1168,34 @@ fn submit(
             )),
         } // llmlint: ignore-end[changed_behavior_has_e2e]
     }
-    Ok(Receipt { outcome, advice })
+    // SPIKE MOCK (spike-visual): an envelope the run answered with its note
+    // `queued` says so on the receipt.
+    let mut queued_notes = Vec::new();
+    if let ReplyOutcome::AppliedByRun { reply, .. } = outcome {
+        let outcomes = std::fs::read_to_string(paths.channel_dir().join("command-outcomes.jsonl"))
+            .unwrap_or_default();
+        for line in outcomes.lines() {
+            let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            if record["id"].as_u64() != Some(reply) {
+                continue;
+            }
+            for result in record["results"].as_array().into_iter().flatten() {
+                if result["outcome"] == "queued" {
+                    let index = result["index"].as_u64().unwrap_or(0) as usize;
+                    if let Some(Command::Note { id, .. }) = envelope.commands.get(index) {
+                        queued_notes.push(id.clone());
+                    }
+                }
+            }
+        }
+    }
+    Ok(Receipt {
+        outcome,
+        advice,
+        queued_notes,
+    })
 }
 
 /// What `onepipeline surface` queued.

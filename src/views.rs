@@ -2561,6 +2561,8 @@ pub(crate) fn status_reporting(view: &RunView, providers: Providers) -> String {
             out.push_str(&shutdown.line(&view.paths.run));
         }
         out.push_str(&driver_exit_lines(view));
+        out.push_str(&spike_claim_line(view));
+        out.push_str(&spike_inbox_lines(view));
         // What this run carried on from its project's store rather than ran, and where each
         // node it continued stands: a reader of a run launched on a host that never ran
         // them would otherwise find drafts with no dispatch behind them.
@@ -4284,9 +4286,109 @@ fn driver_exit_lines(view: &RunView) -> String {
     out
 }
 
+// SPIKE MOCK (spike-visual, throwaway; never lands). The claim state the planned
+// `op-claim-unconfirmed` driver change records, read here from a fixture sidecar
+// `claim-confirmation.json` in the run directory, and the queued-note inbox
+// `op-envelope-outcome` adds, read from a `queued` entry in `deliveries.json`.
+#[derive(serde::Deserialize)]
+struct SpikeClaim {
+    last_confirmed_at: String,
+    reason: String,
+    detail: String,
+    lease_seconds: u64,
+}
+
+fn spike_claim(view: &RunView) -> Option<(SpikeClaim, u64)> {
+    if view.liveness().is_undriven() {
+        return None;
+    }
+    let text = std::fs::read_to_string(view.paths.dir.join("claim-confirmation.json")).ok()?;
+    let claim: SpikeClaim = serde_json::from_str(&text).ok()?;
+    let at = crate::projection::millis_of(&claim.last_confirmed_at)?;
+    let unconfirmed = sys::now_millis().saturating_sub(at) / 1_000;
+    (unconfirmed > claim.lease_seconds).then_some((claim, unconfirmed))
+}
+
+fn spike_minutes(seconds: u64) -> String {
+    format!("{} min", seconds / 60)
+}
+
+fn spike_reason(claim: &SpikeClaim) -> String {
+    match claim.reason.as_str() {
+        "late" => format!("the last claim read was late: {}", claim.detail),
+        "failed" => format!("the last claim read failed: {}", claim.detail),
+        _ => format!(
+            "the last claim read was declined for the host's rate limit: {}",
+            claim.detail
+        ),
+    }
+}
+
+fn spike_claim_line(view: &RunView) -> String {
+    let Some((claim, unconfirmed)) = spike_claim(view) else {
+        return String::new();
+    };
+    format!(
+        "  claim UNCONFIRMED: no read has confirmed this driver's claim for {} (lease {}) — {}\n    \
+         its {} in-flight dispatch(es) keep running; it starts no new dispatch and opens no new \
+         publication until a read confirms the claim\n",
+        spike_minutes(unconfirmed),
+        spike_minutes(claim.lease_seconds),
+        spike_reason(&claim),
+        view.state
+            .statuses()
+            .values()
+            .filter(|status| **status == NodeStatus::Running)
+            .count(),
+    )
+}
+
+/// The watch's heartbeat and ending lines' claim segment, or nothing.
+pub(crate) fn spike_claim_phrase(view: &RunView) -> String {
+    let Some((claim, unconfirmed)) = spike_claim(view) else {
+        return String::new();
+    };
+    let why = match claim.reason.as_str() {
+        "late" => "read late",
+        "failed" => "read failed",
+        _ => "read declined: host rate limit",
+    };
+    format!(
+        "  CLAIM UNCONFIRMED {} ({why}; lease {})",
+        spike_minutes(unconfirmed),
+        spike_minutes(claim.lease_seconds)
+    )
+}
+
+fn spike_inbox_lines(view: &RunView) -> String {
+    if view.liveness().is_undriven() {
+        return String::new();
+    }
+    let Some(live) = crate::channel::deliveries::LiveDeliveries::read(&view.paths) else {
+        return String::new();
+    };
+    let mut out = String::new();
+    for entry in &live.deliveries {
+        if let Delivery::Queued { node, since } = &entry.delivery {
+            out.push_str(&format!(
+                "  inbox: {node} holds 1 note, queued {} from envelope {} (answered: note queued) — \
+                 its worker is mid-turn and takes it when that turn ends\n",
+                sys::rfc3339_from_millis(*since),
+                entry.envelope
+            ));
+        }
+    }
+    out
+}
+// SPIKE MOCK end.
+
 /// What `status` says of one claimed envelope's live note.
 fn delivery_phrase(delivery: &Delivery) -> String {
     match delivery {
+        Delivery::Queued { node, since } => format!(
+            "note queued in {node}'s inbox since {}",
+            sys::rfc3339_from_millis(*since)
+        ),
         Delivery::Delivering { node, since } => format!(
             "delivering a live note to {node} since {}",
             sys::rfc3339_from_millis(*since)

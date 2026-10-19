@@ -51,6 +51,17 @@ pub enum Delivery {
         #[schemars(with = "String")]
         since: u64,
     },
+    /// SPIKE MOCK (spike-visual): a note handed to its receiver's inbox, its
+    /// envelope already answered.
+    Queued {
+        /// The receiving node.
+        #[serde(deserialize_with = "node_id")]
+        node: String,
+        /// When it was queued.
+        #[serde(with = "instant")]
+        #[schemars(with = "String")]
+        since: u64,
+    },
     /// The driver holds the envelope unjudged behind `behind_envelope`'s live
     /// note to `node`, so that no later edit to that node overtakes it.
     Held {
