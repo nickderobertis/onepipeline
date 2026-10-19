@@ -120,7 +120,10 @@ use crate::projection::{self, RunState};
 /// that holds one still carries the wait, and resumed from it would offer the
 /// approval for attestation ahead of the prerequisites it was reparented onto.
 /// Version 12 restores a continued lineage's rework provenance; an older fold
-/// would forget which comments that lineage is already reworking.
+/// would forget which comments that lineage is already reworking. Version 13
+/// carries that provenance's reason, instruction and superseded head (entry 130):
+/// a version-12 fold holds none of them, and resumed from it a host would draft a
+/// lineage's replies with no reason and none of the commits its rework added.
 // llmlint: ignore[changed_behavior_has_e2e] a version-1 document is one the build before
 // this one wrote, which no invocation of this build can produce: what a user can reach —
 // a checkpoint at this version being resumed from, and one at a version this build does
@@ -128,7 +131,7 @@ use crate::projection::{self, RunState};
 // refusal of the checked-in version-1 document itself is held by
 // `the_document_the_build_before_this_one_wrote_is_refused_rather_than_read` below, over
 // the real reader and the real file.
-pub(crate) const CHECKPOINT_SCHEMA_VERSION: u32 = 12;
+pub(crate) const CHECKPOINT_SCHEMA_VERSION: u32 = 13;
 
 /// Read the version, refusing a document this build cannot honestly read.
 fn this_version<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<u32, D::Error> {
@@ -933,6 +936,7 @@ mod tests {
             observer_ending: String::new(),
             node_graph: "graph".into(),
             pr_author_graph: String::new(),
+            review_reply_graph: String::new(),
             node_validator: String::new(),
             envelope_reviewer: String::new(),
             launcher: "checkpoint-journey".into(),
@@ -1646,7 +1650,7 @@ mod tests {
     /// later build of this crate parses, and the only thing that stops a marker
     /// field being renamed, an absence becoming a zero, the digest turning back
     /// into a number, or the version moving without anyone deciding to move it.
-    const GOLDEN: &str = include_str!("../tests/golden/checkpoint-v12.json");
+    const GOLDEN: &str = include_str!("../tests/golden/checkpoint-v13.json");
 
     /// The digest of the journal bytes the golden's marker covers.
     const GOLDEN_BYTES_DIGESTED: u128 = 0x1234_5678_9abc_def0_1234_5678_9abc_def0;
@@ -1735,7 +1739,7 @@ mod tests {
     /// is a real document, byte-for-byte the shape this build writes, and the
     /// reader has to refuse it rather than resume from a fold it would not have
     /// computed.
-    const GOLDEN_EARLIER: [(u32, &str); 11] = [
+    const GOLDEN_EARLIER: [(u32, &str); 12] = [
         (1, include_str!("../tests/golden/checkpoint-v1.json")),
         (2, include_str!("../tests/golden/checkpoint-v2.json")),
         (3, include_str!("../tests/golden/checkpoint-v3.json")),
@@ -1747,6 +1751,7 @@ mod tests {
         (9, include_str!("../tests/golden/checkpoint-v9.json")),
         (10, include_str!("../tests/golden/checkpoint-v10.json")),
         (11, include_str!("../tests/golden/checkpoint-v11.json")),
+        (12, include_str!("../tests/golden/checkpoint-v12.json")),
     ];
 
     #[test]
@@ -1763,13 +1768,13 @@ mod tests {
     }
 
     #[test]
-    fn a_schema_12_document_is_the_shape_the_golden_pins() {
+    fn a_schema_13_document_is_the_shape_the_golden_pins() {
         let rendered = serde_json::to_string_pretty(&a_checkpoint()).expect("it serialises");
         if std::env::var_os("ONEPIPELINE_WRITE_CHECKPOINT_GOLDEN").is_some() {
             std::fs::write(
                 concat!(
                     env!("CARGO_MANIFEST_DIR"),
-                    "/tests/golden/checkpoint-v12.json"
+                    "/tests/golden/checkpoint-v13.json"
                 ),
                 format!("{rendered}\n"),
             )
@@ -1779,12 +1784,12 @@ mod tests {
             rendered.trim(),
             GOLDEN.trim(),
             "the checkpoint document changed shape. If that was deliberate, bump \
-             CHECKPOINT_SCHEMA_VERSION and update tests/golden/checkpoint-v12.json together"
+             CHECKPOINT_SCHEMA_VERSION and update tests/golden/checkpoint-v13.json together"
         );
     }
 
     #[test]
-    fn a_schema_12_document_round_trips_and_a_version_this_build_does_not_read_is_refused() {
+    fn a_schema_13_document_round_trips_and_a_version_this_build_does_not_read_is_refused() {
         let read: Checkpoint =
             serde_json::from_str(GOLDEN).expect("the golden reads back into the types");
         // Compared through the wire rather than through `PartialEq`, which the

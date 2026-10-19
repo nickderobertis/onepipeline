@@ -1147,6 +1147,9 @@ fn restack_open(
         ));
     }; // llmlint: ignore-end[changed_behavior_has_e2e]
     request.branch_name = None;
+    // The restack merges a cleanly merging base in itself, below, so the open need not
+    // ask the host whether the base requires an up-to-date branch.
+    request.caller_merges_base = true;
     let graph = engine::node_graph(
         step.agent_graph.as_ref().or(node.agent_graph.as_ref()),
         &launch.node_graph,
@@ -1200,9 +1203,9 @@ fn restack_open(
     let mut session = crate::executor::open_session(&request, &labels)
         .map_err(|error| failed(error.to_string()))?;
     // A restack brings its base in whatever the identity's base-merge policy says: a
-    // session that opened clean on a base whose head its branch does not carry — the
-    // policy merges only on a conflict or a host requiring up-to-date branches — has
-    // that head merged here, its conflict handed on exactly as one the open stopped on.
+    // session that opened clean on a base whose head its branch does not carry — an open
+    // told the restack merges a clean base itself merges only on a conflict — has that
+    // head merged here, its conflict handed on exactly as one the open stopped on.
     if session.conflict.is_none() {
         session.conflict = crate::vcs::bring_base_in(&session).map_err(failed)?;
     }
@@ -1257,7 +1260,8 @@ fn with_stack(task: String, stack: Option<&crate::stack::Stack>) -> String {
 
 /// Write `stack`'s block onto the change request the session holds: appended
 /// where its description holds none, in place of the one it holds otherwise, and
-/// nothing else in the description touched.
+/// nothing else in the description touched. `known` is that change request as the
+/// closeout already read or wrote it; only where it holds none is the host asked.
 ///
 /// Through `onevcs`'s `describe_change` with no title, so the title stands as the
 /// publication left it. A session holding no change request — a publication that
@@ -1268,6 +1272,7 @@ fn with_stack(task: String, stack: Option<&crate::stack::Stack>) -> String {
 fn write_stack_block(
     node: &Node,
     token: &onevcs::SessionToken,
+    known: Option<onevcs::SessionChange>,
     stack: &crate::stack::Stack,
     term_scope: &onevcs::TermScope,
 ) {
@@ -1278,7 +1283,10 @@ fn write_stack_block(
     // fail this one call and answer the publication just before it, and the fake host's
     // outage counts calls from the run's start. The write's refusal beside it is driven by
     // `a_stack_block_the_host_will_not_take_leaves_the_publication_as_it_settled`.
-    let change = match crate::vcs::session_change(token) {
+    let change = match known.map_or_else(
+        || crate::vcs::session_change(token),
+        |known| Ok(Some(known)),
+    ) {
         Ok(Some(change)) => change,
         Ok(None) => return,
         Err(error) => {
@@ -1969,10 +1977,17 @@ fn publish(
         (Some(change), None, Some(Titled::Changed { .. })) => Some((change, change.body.as_str())),
         _ => None,
     };
+    // The change request as this closeout last read or wrote it, which the Stack block
+    // below is spliced into rather than read a third time: a publication adopting a change
+    // request it did not open writes nothing onto its description.
+    let mut known = held.clone();
     let (described, undescribed) = match rewritten {
         Some((change, written)) => {
             match crate::vcs::describe_change(token, title, written, &launch.boundary.term_scope) {
-                Ok(_) => (body.is_some(), None),
+                Ok(after) => {
+                    known = Some(after);
+                    (body.is_some(), None)
+                }
                 Err(error) => {
                     let why = format!(
                         "the drafted description was not written onto {}: {error}",
@@ -2045,7 +2060,7 @@ fn publish(
     // change request outlives the attempt and a re-dispatch publishes onto it.
     if publication.answered.is_ok() && !clean_republication {
         if let Some(stack) = stack {
-            write_stack_block(node, token, stack, &launch.boundary.term_scope);
+            write_stack_block(node, token, known, stack, &launch.boundary.term_scope);
         }
     }
     match publication.answered {

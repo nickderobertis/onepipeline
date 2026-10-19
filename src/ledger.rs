@@ -774,6 +774,16 @@ pub struct LaunchRecord {
     /// reads what it wrote.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub pr_author_graph: String,
+    /// The agent-graph config a review comment's reply is drafted by, when the
+    /// launch named one.
+    ///
+    /// Absent when it named none, which is the shipped default: every reply a
+    /// rework owes then stays owed and surfaced, and a `decline` is refused. Read
+    /// it through [`review_reply_graph`](Self::review_reply_graph). Omitted when
+    /// empty, like every other field added to this record after it shipped, so a
+    /// build that predates it still reads what it wrote.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub review_reply_graph: String,
     /// The command every op that introduces or changes a node's task is offered
     /// to before it is applied, when the launch named one.
     ///
@@ -1130,6 +1140,11 @@ impl LaunchRecord {
     /// this is the one place that absence becomes "there is none" again.
     pub fn pr_author_graph(&self) -> Option<&str> {
         (!self.pr_author_graph.is_empty()).then_some(self.pr_author_graph.as_str())
+    }
+
+    /// The reply drafter's graph this launch named, or `None` when it named none.
+    pub fn review_reply_graph(&self) -> Option<&str> {
+        (!self.review_reply_graph.is_empty()).then_some(self.review_reply_graph.as_str())
     }
 
     /// The node validator this run was launched with, when it was launched with
@@ -2303,6 +2318,20 @@ fn read_lock_file(path: &Path) -> Result<LockFile> {
                 })
             }
         }
+    }
+}
+
+/// Whether the run's ownership lock may still be held by `pid` on `host`.
+///
+/// Every uncertainty answers `true`, because what this decides is whether that
+/// process has released the run: a lock this build cannot read, and one the
+/// filesystem will not open, are each a claim it cannot rule out. Only a lock
+/// that is gone, or one naming another holder, says the process holds nothing.
+pub(crate) fn lock_may_be_held_by(paths: &RunPaths, host: &str, pid: u32) -> bool {
+    match read_lock_file(&paths.lock()) {
+        Ok(LockFile::Absent) => false,
+        Ok(LockFile::Record(held)) => held.host == host && held.pid == pid,
+        Ok(LockFile::Unreadable) | Err(_) => true,
     }
 }
 
@@ -3624,6 +3653,7 @@ mod tests {
             observer_ending: String::new(),
             node_graph: "graphs/node-scope.yaml".into(),
             pr_author_graph: String::new(),
+            review_reply_graph: String::new(),
             node_validator: String::new(),
             envelope_reviewer: String::new(),
             launcher: "claude-code".into(),
@@ -4566,6 +4596,7 @@ mod tests {
             observer_ending: String::new(),
             node_graph: String::new(),
             pr_author_graph: String::new(),
+            review_reply_graph: String::new(),
             node_validator: String::new(),
             envelope_reviewer: String::new(),
             launcher: sys::UNKNOWN_LAUNCHER.into(),
@@ -4610,6 +4641,7 @@ mod tests {
             observer_ending: String::new(),
             node_graph: String::new(),
             pr_author_graph: String::new(),
+            review_reply_graph: String::new(),
             node_validator: String::new(),
             envelope_reviewer: String::new(),
             launcher: "claude-code".into(),

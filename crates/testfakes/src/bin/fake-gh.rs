@@ -147,6 +147,9 @@ fn main() -> ExitCode {
         args.get(1).map(String::as_str),
     ) {
         (Some("api"), Some("user")) => user(&args),
+        (Some("api"), Some(path)) if reply_route(path) => {
+            holding_the_records(&dir, || post_reply(&args, &dir, path))
+        }
         (Some("api"), Some(path))
             if path.starts_with("repos/")
                 && path.contains("/pulls/")
@@ -2398,6 +2401,37 @@ fn standings_read(query: &str, owner: &str, name: &str, dir: &Path) -> ExitCode 
         Ok(host) => host,
         Err(error) => return fake::refuse(&error.to_string()),
     };
+    // `gh.standings-own`: where each change stands is this host's own record of it — the
+    // change requests `pr create` opened, the commits a person's merge wrote onto the origin
+    // — while the remote double answers the feedback read with it and charges the read on
+    // its ledger, as one aliased query of the real host is one call with one charge.
+    if dir.join("gh.standings-own").exists() {
+        let charged = if query.contains("reviewThreads(") {
+            host.review_standings(
+                "main",
+                &changes
+                    .iter()
+                    .cloned()
+                    .map(|change| (change, None))
+                    .collect::<Vec<_>>(),
+            )
+            .map(|answer| (answer.reads, answer.cost))
+        } else {
+            host.change_standings("main", &changes)
+                .map(|answer| (Vec::new(), answer.cost))
+        };
+        let (reads, cost) = match charged {
+            Ok(charged) => charged,
+            Err(error) => return fake::refuse(&error.to_string()),
+        };
+        return match own_standing_list(owner, name, &changes, dir) {
+            Ok(standings) => {
+                println!("{}", standings_wire(&standings, &reads, cost));
+                ExitCode::SUCCESS
+            }
+            Err(refused) => refused,
+        };
+    }
     // The root is used only to classify landings in the double. GitHub's wire
     // carries the merged base and the real reader classifies against its request.
     let answer = if query.contains("reviewThreads(") {
@@ -2498,6 +2532,208 @@ fn standings_wire(
     }
     repository["branchProtectionRules"] = page(protections);
     json!({"data": {"rateLimit": {"cost": cost.graphql_points}, "repository": repository}})
+}
+
+/// Whether `path` is one of the two routes `onevcs` posts a review reply to: a review
+/// thread's `pulls/<n>/comments/<id>/replies`, or the conversation's
+/// `issues/<n>/comments`.
+fn reply_route(path: &str) -> bool {
+    let parts: Vec<&str> = path.split('/').collect();
+    matches!(
+        parts.as_slice(),
+        ["repos", _, _, "pulls", _, "comments", _, "replies"]
+            | ["repos", _, _, "issues", _, "comments"]
+    )
+}
+
+/// Which of GitHub's three comment objects a node id names, by its prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NodeKind {
+    /// `PRRC_`: a comment in a review thread.
+    Thread,
+    /// `IC_`: a comment on the pull request's conversation.
+    Issue,
+    /// `PRR_`: a review, whose summary is the comment.
+    Review,
+}
+
+/// The kind and database id a GitHub comment node id names, as GitHub hands one out:
+/// `PRRC_`, `IC_` or `PRR_` and the URL-safe base64 of the MessagePack array
+/// `[0, repository, object]`.
+fn comment_node(id: &str) -> Option<(NodeKind, u64)> {
+    let (prefix, payload) = id.split_once('_')?;
+    let kind = match prefix {
+        "PRRC" => NodeKind::Thread,
+        "IC" => NodeKind::Issue,
+        "PRR" => NodeKind::Review,
+        _ => return None,
+    };
+    let (mut word, mut held, mut bytes) = (0u32, 0, Vec::new());
+    for symbol in payload.trim_end_matches('=').bytes() {
+        let value = match symbol {
+            b'A'..=b'Z' => symbol - b'A',
+            b'a'..=b'z' => symbol - b'a' + 26,
+            b'0'..=b'9' => symbol - b'0' + 52,
+            b'-' | b'+' => 62,
+            b'_' | b'/' => 63,
+            _ => return None,
+        };
+        word = (word << 6) | u32::from(value);
+        held += 6;
+        if held >= 8 {
+            held -= 8;
+            bytes.push(u8::try_from((word >> held) & 0xff).ok()?);
+        }
+    }
+    let (&marker, mut rest) = bytes.split_first()?;
+    if marker != 0x93 {
+        return None;
+    }
+    let mut numbers = Vec::new();
+    while let Some((&first, tail)) = rest.split_first() {
+        let width = match first {
+            small @ 0x00..=0x7f => {
+                numbers.push(u64::from(small));
+                rest = tail;
+                continue;
+            }
+            0xcc => 1,
+            0xcd => 2,
+            0xce => 4,
+            0xcf => 8,
+            _ => return None,
+        };
+        let number = tail.get(..width)?;
+        numbers.push(
+            number
+                .iter()
+                .fold(0u64, |acc, byte| (acc << 8) | u64::from(*byte)),
+        );
+        rest = tail.get(width..)?;
+    }
+    match numbers.as_slice() {
+        [0, _repository, object] => Some((kind, *object)),
+        _ => None,
+    }
+}
+
+/// `gh api <route> --method POST -f body=<text>`: one reply, posted through the
+/// sibling's remote double so its ledger records the call and its state holds the
+/// reply — in the comment's thread where it has one, and as a conversation comment
+/// linking it otherwise, exactly as `onevcs` addresses the two.
+///
+/// `gh.reply.fail` refuses every post with what it holds, and `gh.reply.fail-after`
+/// holding a count refuses every post after that many were accepted.
+fn post_reply(args: &[String], dir: &Path, path: &str) -> ExitCode {
+    use onevcs::RemoteHost;
+    let [_, _, method, post, field, body] = args else {
+        return fake::refuse(&format!(
+            "gh api {path} was not given exactly --method POST -f body=…"
+        ));
+    };
+    if method != "--method" || post != "POST" || field != "-f" {
+        return fake::refuse(&format!("gh api {path} was not a POST of one field"));
+    }
+    let Some(text) = body.strip_prefix("body=") else {
+        return fake::refuse(&format!("gh api {path} posted no body field"));
+    };
+    if let Some(said) = fake::node_script(dir, "gh", "reply.fail") {
+        eprintln!("{said}");
+        return ExitCode::from(1);
+    }
+    if let Some(after) = fake::node_script(dir, "gh", "reply.fail-after") {
+        let Ok(after) = after.parse::<usize>() else {
+            return fake::refuse("gh.reply.fail-after is not a count");
+        };
+        let accepted = std::fs::read_to_string(dir.join("gh.reply.accepted.calls"))
+            .ok()
+            .and_then(|count| count.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        if accepted >= after {
+            eprintln!("HTTP 502: the host would not take the reply");
+            return ExitCode::from(1);
+        }
+    }
+    let parts: Vec<&str> = path.split('/').collect();
+    let (owner, name, number) = (parts[1], parts[2], parts[4]);
+    let (wanted, database, text) = if parts[3] == "pulls" {
+        let Ok(database) = parts[6].parse::<u64>() else {
+            return fake::refuse("a thread reply's route names no comment");
+        };
+        (NodeKind::Thread, database, text.to_owned())
+    } else {
+        let Some((first, rest)) = text.split_once("\n\n") else {
+            return fake::refuse("a conversation reply carries no `Re:` line");
+        };
+        let Some((kind, database)) = first
+            .rsplit_once("#issuecomment-")
+            .map(|(_, id)| (NodeKind::Issue, id))
+            .or_else(|| {
+                first
+                    .rsplit_once("#pullrequestreview-")
+                    .map(|(_, id)| (NodeKind::Review, id))
+            })
+        else {
+            return fake::refuse("a conversation reply's `Re:` line links no comment");
+        };
+        let Ok(database) = database.parse::<u64>() else {
+            return fake::refuse("a conversation reply's `Re:` line links no comment id");
+        };
+        (kind, database, rest.to_owned())
+    };
+    let Some(key) = text
+        .rsplit_once("<!-- onevcs:reply ")
+        .and_then(|(_, marker)| {
+            marker
+                .split_whitespace()
+                .find_map(|word| word.strip_prefix("key="))
+        })
+        .map(str::to_owned)
+    else {
+        return fake::refuse("a reply carries no onevcs reply marker");
+    };
+    let repository_host = dir.join(format!(
+        "review-host.{}.{}.json",
+        fake::segment(owner),
+        fake::segment(name)
+    ));
+    let at = if repository_host.is_file() {
+        repository_host
+    } else {
+        dir.join("review-host.json")
+    };
+    let host = match onevcs_testing::FileHost::create(&at) {
+        Ok(host) => host,
+        Err(error) => return fake::refuse(&error.to_string()),
+    };
+    let change = onevcs::ChangeId(number.to_owned());
+    let held = match host.state() {
+        Ok(state) => state
+            .review_comments
+            .get(&change)
+            .cloned()
+            .unwrap_or_default(),
+        Err(error) => return fake::refuse(&error.to_string()),
+    };
+    let Some(comment) = held
+        .iter()
+        .find(|comment| comment_node(&comment.id.0) == Some((wanted, database)))
+        .map(|comment| comment.id.clone())
+    else {
+        eprintln!("HTTP 404: no comment {database} on pull request {number}");
+        return ExitCode::from(1);
+    };
+    match host.reply_to_comment(&change, &comment, &text, &key) {
+        Ok(posted) => {
+            fake::count(dir, "gh.reply.accepted");
+            println!(
+                "{}",
+                serde_json::json!({"node_id": posted.id.0, "html_url": posted.url})
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => fake::refuse(&error.to_string()),
+    }
 }
 
 /// The hidden first argument that makes an invocation a person's move on the host.
@@ -2677,6 +2913,39 @@ fn own_standings(
             "the standings of {owner}/{name} could not be read"
         ));
     }
+    let standings = match own_standing_list(owner, name, changes, dir) {
+        Ok(standings) => standings,
+        Err(refused) => return refused,
+    };
+    let reads: Vec<onevcs::ReviewRead> = if query.contains("reviewThreads(") {
+        standings
+            .iter()
+            .map(|standing| onevcs::ReviewRead {
+                change_url: standing.url.to_string(),
+                comments: Vec::new(),
+                marker: onevcs::ReadMarker(WRITTEN_AT.to_owned()),
+                unchanged: false,
+                cost: onevcs::ReadCost::default(),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let cost = onevcs::ReadCost {
+        graphql_points: 1,
+        rest_requests: 0,
+    };
+    println!("{}", standings_wire(&standings, &reads, cost));
+    ExitCode::SUCCESS
+}
+
+/// Where each of `changes` stands, by this host's own records of them.
+fn own_standing_list(
+    owner: &str,
+    name: &str,
+    changes: &[onevcs::ChangeId],
+    dir: &Path,
+) -> Result<Vec<onevcs::ChangeStanding>, ExitCode> {
     let repo = format!("{owner}/{name}");
     let opened = opened_changes(dir);
     let mut standings = Vec::new();
@@ -2685,7 +2954,10 @@ fn own_standings(
             .iter()
             .find(|held| held.repo == repo && held.number.to_string() == change.0)
         else {
-            return fake::refuse(&format!("no pull request {} in {repo}", change.0));
+            return Err(fake::refuse(&format!(
+                "no pull request {} in {repo}",
+                change.0
+            )));
         };
         let id = change_key(dir, held);
         let state = state_of_opened(dir, held);
@@ -2729,26 +3001,7 @@ fn own_standings(
             checks: head_verdict(dir, &head),
         });
     }
-    let reads: Vec<onevcs::ReviewRead> = if query.contains("reviewThreads(") {
-        standings
-            .iter()
-            .map(|standing| onevcs::ReviewRead {
-                change_url: standing.url.to_string(),
-                comments: Vec::new(),
-                marker: onevcs::ReadMarker(WRITTEN_AT.to_owned()),
-                unchanged: false,
-                cost: onevcs::ReadCost::default(),
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
-    let cost = onevcs::ReadCost {
-        graphql_points: 1,
-        rest_requests: 0,
-    };
-    println!("{}", standings_wire(&standings, &reads, cost));
-    ExitCode::SUCCESS
+    Ok(standings)
 }
 
 /// `gh api repos/O/N/pulls/<n> --method PATCH -f base=B [-f body=…]` and
@@ -2825,6 +3078,24 @@ fn patch_pull(args: &[String], dir: &Path, path: &str) -> ExitCode {
         .into_iter()
         .find(|held| held.repo == repo && held.number == number)
         .unwrap_or_else(|| fake::fail("the record just written is gone"));
+    // In `gh.standings-own` the remote double keeps the ledger of every call it would
+    // answer, so the write is put to it too: its state follows, and its ledger charges it.
+    if dir.join("gh.standings-own").exists() && dir.join("review-host.json").is_file() {
+        use onevcs::RemoteHost;
+        let change = onevcs::ChangeId(number.to_string());
+        let mirrored =
+            onevcs_testing::FileHost::create(dir.join("review-host.json")).and_then(|host| {
+                match fields.get("state") {
+                    Some(_) => host.reopen_change(&change).map(|_| ()),
+                    None => host
+                        .retarget_change(&change, &now.base, fields.get("body").copied())
+                        .map(|_| ()),
+                }
+            });
+        if let Err(error) = mirrored {
+            return fake::refuse(&format!("the remote double refused the write: {error}"));
+        }
+    }
     let state = state_of_opened(dir, &now);
     println!(
         "{}",

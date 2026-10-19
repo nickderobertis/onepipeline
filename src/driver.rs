@@ -1294,6 +1294,19 @@ fn start(args: &StartArgs) -> Result<i32> {
         Some(reference) => Some(resolve_graph(reference, &launch_dir)?),
         None => None,
     }; // llmlint: ignore-end[invalid_states_unrepresentable]
+       // The reply drafter's graph, read on exactly the drafting graph's terms: the flag over
+       // the config, a blank rung naming none, and the reference resolved against the launch
+       // directory so a driver started anywhere else replays what this launch named.
+       // llmlint: ignore-block[invalid_states_unrepresentable] the `String` `LaunchRecord`'s schema declares, for the reason `pr_author_graph_ref` above gives.
+    let review_reply_graph_ref: Option<String> = match args
+        .review_reply_graph
+        .as_deref()
+        .or(declared.review_reply_graph.as_deref())
+        .filter(|reference| !reference.trim().is_empty())
+    {
+        Some(reference) => Some(resolve_graph(reference, &launch_dir)?),
+        None => None,
+    }; // llmlint: ignore-end[invalid_states_unrepresentable]
 
     // llmlint: ignore-block[invalid_states_unrepresentable] the resolved command stays the
     // `String` `LaunchRecord`'s schema declares, exactly as `pr_author_graph_ref` above
@@ -1614,6 +1627,7 @@ fn start(args: &StartArgs) -> Result<i32> {
         observer_ending: String::new(),
         node_graph: node_graph_ref,
         pr_author_graph: pr_author_graph_ref.unwrap_or_default(),
+        review_reply_graph: review_reply_graph_ref.unwrap_or_default(),
         node_validator: node_validator.unwrap_or_default(),
         envelope_reviewer: envelope_reviewer.unwrap_or_default(),
         envelope_reviewer_bar: envelope_reviewer_bar.unwrap_or_default(),
@@ -1903,6 +1917,14 @@ fn observe(
     Ok(Some(launched))
 }
 
+/// The test failpoint a detached launch meets before its first reading of the
+/// launch record.
+const HANDOVER_UNREAD_GATE_ENV: &str = "ONEPIPELINE_TEST_HANDOVER_UNREAD_GATE";
+
+/// The test failpoint a detached launch meets once its first reading found no
+/// claim, before it asks whether the driver has exited.
+const HANDOVER_READ_GATE_ENV: &str = "ONEPIPELINE_TEST_HANDOVER_READ_GATE";
+
 /// Wait for a retained driver to claim the run, or report that it never did.
 ///
 /// A detached launch is the one caller that never waits for what it started, so
@@ -1913,17 +1935,48 @@ fn observe(
 /// from and nothing else will ever read them out loud.
 fn confirm_driving(paths: &RunPaths, driver: &mut std::process::Child) -> Result<()> {
     let pid = driver.id();
+    // The driver's own start stamp, read while the child is unreaped and its pid
+    // therefore cannot have been handed on. A pid alone is not the claim: the
+    // record this driver is taking over names the driver it displaces, and a host
+    // that hands a freed pid on within moments — Windows does — can give that
+    // very pid to this child, so the record would read as claimed before the
+    // child had done anything. Where the host will not stamp the child, the
+    // child cannot stamp its claim either, and the pid is all either side has.
+    let stamp = sys::process_start_token(pid);
+    let claimed = || {
+        ledger::read_json_opt::<LaunchRecord>(&paths.launch()).is_some_and(|record| {
+            record.pid == pid
+                && stamp
+                    .as_ref()
+                    .is_none_or(|stamp| stamp.matches(&record.started))
+        })
+    };
+    // Test failpoints only, and nothing at all where their variables are unset:
+    // a journey holds this process before its first reading, or between that
+    // reading and its first look at whether the driver has exited, so what the
+    // driver does is placed on a chosen side of each.
+    let _ = crate::ordering::meet(HANDOVER_UNREAD_GATE_ENV);
+    let mut first = true;
     let deadline = Instant::now() + DRIVER_HANDOVER;
     while Instant::now() < deadline {
-        let recorded: Option<LaunchRecord> = ledger::read_json_opt(&paths.launch());
-        if recorded.is_some_and(|record| record.pid == pid) {
+        if claimed() {
             return Ok(());
+        }
+        if std::mem::take(&mut first) {
+            let _ = crate::ordering::meet(HANDOVER_READ_GATE_ENV);
         }
         // `try_wait` rather than a pid probe, and reaping is the point: a child
         // nobody waits on stays a zombie, and a zombie answers a liveness probe
         // as alive — so a driver that died on its way up would be waited out to
         // the whole backstop instead of reported at once.
         if matches!(driver.try_wait(), Ok(Some(_)) | Err(_)) {
+            // Read once more, now that it can write nothing else: a driver that
+            // claimed the run between the read above and its exit — one that
+            // settled at once — did claim it, and is not a driver that died on
+            // its way up.
+            if claimed() {
+                return Ok(());
+            }
             break;
         }
         std::thread::sleep(ATTACH_POLL);
@@ -2984,6 +3037,7 @@ fn validate_and_displace_for_adoption(paths: &RunPaths) -> Result<(LaunchRecord,
         record.recorded_host(),
         record.driver_pid(),
         view.state.let_go_by.as_ref(),
+        paths,
     ) {
         displace_the_undriven_driver(&record);
     }
@@ -4103,7 +4157,7 @@ pub(crate) fn submit_envelope(
                             return Err(error);
                         }
                     };
-                    edits::advance(&mut frontier, step.staged());
+                    edits::advance(&mut frontier, &step.staged());
                     staged.push(step);
                 }
                 // Then deliver, which is the first thing here that reaches outside
@@ -4452,6 +4506,10 @@ fn validate_here(
             scope,
         ));
     }
+    if let Command::Decline { .. } = command {
+        let launch: crate::ledger::LaunchRecord = crate::ledger::read_json(&paths.launch())?;
+        return crate::reply::staged_decline(paths, state, launch.review_reply_graph(), operations);
+    }
     let Command::Note {
         id,
         addressee,
@@ -4699,6 +4757,7 @@ mod tests {
             observer_ending: String::new(),
             node_graph: "graphs/node-scope.yaml".into(),
             pr_author_graph: String::new(),
+            review_reply_graph: String::new(),
             node_validator: String::new(),
             envelope_reviewer: String::new(),
             launcher: "e2e".into(),
@@ -4727,6 +4786,74 @@ mod tests {
             flow: String::new(),
             envelope_reviewer_bar: Default::default(),
         }
+    }
+
+    /// A detached launch's wait reads a claim as the retained driver's own — its
+    /// pid **and** its start — and reports a driver that made none with what it
+    /// said.
+    ///
+    /// The record a retained adopting driver is about to take over names the
+    /// driver it displaces, and a host that hands a freed pid on within moments
+    /// can give that very pid to the retained one: by pid alone, the run reads
+    /// as claimed before the retained driver has done anything, and a driver
+    /// that then refuses is announced as running. Each retained driver here is a
+    /// real child process — this test binary, asked for a test it does not
+    /// have, so it exits at once — and the record is written before the wait
+    /// starts, so each case is decided by what the record says and not by when.
+    #[test]
+    fn a_retained_driver_s_claim_is_its_pid_under_its_own_start() {
+        let root = scratch("confirm");
+        let paths = RunPaths::under(&root, "retained");
+        paths.create().expect("the run directory");
+        let here = sys::hostname();
+        let retained = || {
+            std::process::Command::new(std::env::current_exe().expect("this test binary"))
+                .args(["--exact", "no-test-is-named-this"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("a retained driver starts")
+        };
+        let start_of = |pid: u32| {
+            sys::process_start_token(pid)
+                .expect("this host says when a process started")
+                .recorded()
+                .to_string()
+        };
+        let recorded = |record: &LaunchRecord| {
+            ledger::write_json(&paths.launch(), record).expect("the launch record is written");
+        };
+
+        // The retained driver's pid under another process's start — this one's,
+        // as the displaced driver's would be — is not its claim, and what it
+        // said comes back with the refusal.
+        let mut driver = retained();
+        recorded(&launched_by(driver.id(), &here, &start_of(sys::pid())));
+        std::fs::write(paths.driver_log(), "onepipeline: an unreadable lock\n")
+            .expect("the driver's log is written");
+        let refused = confirm_driving(&paths, &mut driver)
+            .expect_err("a record naming another process's start was read as this driver's claim");
+        let refused = refused.to_string();
+        assert!(refused.contains("did not claim it"), "{refused}");
+        assert!(refused.contains("an unreadable lock"), "{refused}");
+
+        // Its own start is its claim, and stays one after it has exited: a
+        // driver that took the run and settled at once did take it.
+        let mut driver = retained();
+        recorded(&launched_by(driver.id(), &here, &start_of(driver.id())));
+        driver.wait().expect("the retained driver exits");
+        confirm_driving(&paths, &mut driver).expect("a driver that claimed the run is confirmed");
+
+        // And one that wrote nothing at all leaves the record naming the driver
+        // it was to displace, and is reported as having said nothing.
+        let mut driver = retained();
+        recorded(&launched_by(sys::reaped_pid(), &here, ""));
+        std::fs::write(paths.driver_log(), "").expect("the driver's log is emptied");
+        let refused = confirm_driving(&paths, &mut driver)
+            .expect_err("a driver that claimed nothing was confirmed")
+            .to_string();
+        assert!(refused.contains("it said nothing"), "{refused}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// What a stop aims at is every claim the run holds and can prove — and

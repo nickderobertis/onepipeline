@@ -2257,6 +2257,43 @@ impl World {
         graph.display().to_string()
     }
 
+    /// A reply-drafter graph, `--review-reply-graph`'s document: one single-sided
+    /// member asked for the reply result's shape, which the double answers.
+    ///
+    /// The schema holds the shape and nothing the engine's own rules decide — no
+    /// length, no link — so a result breaking one of those rules reaches the engine.
+    pub fn review_reply_graph(&self) -> String {
+        let dir = self.graphs();
+        std::fs::create_dir_all(&dir).expect("a directory for the graph configs");
+        std::fs::write(
+            dir.join("review-reply.schema.json"),
+            r#"{"type":"object","properties":{
+                 "replies":{"type":"array","items":{"type":"object","properties":{
+                   "comment":{"type":"string"},
+                   "disposition":{"type":"string","enum":["answered","declined"]},
+                   "body":{"type":"string"}},
+                   "required":["comment","disposition","body"],"additionalProperties":false}}},
+               "required":["replies"],"additionalProperties":false}"#,
+        )
+        .expect("the reply result's schema is written");
+        std::fs::write(
+            dir.join("oneharness.review-reply.toml"),
+            "run_mode = \"fallback\"\nharnesses = [\"claude-code\"]\n\
+             schema_file = \"./review-reply.schema.json\"\n",
+        )
+        .expect("the reply drafter's harness config is written");
+        let graph = dir.join("review-reply.yaml");
+        std::fs::write(
+            &graph,
+            format!(
+                "version: {CONSUMER_GRAPH_SCHEMA}\nname: review-reply\nmembers:\n  replier:\n    \
+                 kind: oneharness\n    oneharness_config: ./oneharness.review-reply.toml\n"
+            ),
+        )
+        .expect("the review-reply graph is written");
+        graph.display().to_string()
+    }
+
     fn write_graphs_with(&self, dag_extra: Option<&str>, version: u32) {
         let dir = self.graphs();
         std::fs::create_dir_all(&dir).expect("a directory for the graph configs");
@@ -5081,6 +5118,19 @@ pub fn oneagentgraph_binary() -> PathBuf {
     held_alias(held, "oneagentgraph")
 }
 
+/// The **real** `oneharness` binary, built from the release `crates/testfakes`
+/// names as a normal dependency, over the one `oneharness-core` this lock resolves.
+///
+/// For the journeys whose claim is about the process a two-party member's
+/// onejudge spawns for each turn rather than about what this suite's double
+/// answers, the way [`oneagentgraph_binary`] is for the graph.
+pub fn oneharness_binary() -> PathBuf {
+    static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    let held = BUILT
+        .get_or_init(|| build(&["--package", "oneharness", "--bin", "oneharness", "--locked"]));
+    held_alias(held, "oneharness")
+}
+
 /// The project every store fixture here holds beside the plan under test.
 pub const DECOY_PROJECT: &str = "not-this-runs-board";
 
@@ -5405,7 +5455,7 @@ pub fn process_ended(pid: u32) -> bool {
 /// The wait is what makes this usable as a precondition. `kill` returns when the
 /// signal is queued, not when the process has exited, so a journey that went
 /// straight on from here would be asserting against a host that had not caught
-/// up with it yet.
+/// up with it yet. Gone means ended, not reaped — see [`process_ended`].
 #[cfg(unix)]
 pub fn end_process(pid: u32) {
     std::process::Command::new("kill")
@@ -5414,15 +5464,10 @@ pub fn end_process(pid: u32) {
         .expect("this host ends a process it owns");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     while std::time::Instant::now() < deadline {
-        // `kill -0` is the existence check: it delivers nothing and fails once
-        // there is no such process.
-        let still_there = std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .stderr(Stdio::null())
-            .status()
-            .expect("this host answers about a process it owns")
-            .success();
-        if !still_there {
+        // Ended rather than reaped: a process this suite did not start is reaped
+        // by its own parent, which a journey may be holding at a failpoint, and
+        // a zombie writes and holds nothing.
+        if process_ended(pid) {
             return;
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
@@ -5469,6 +5514,33 @@ pub fn end_driver(world: &World, run: &str) -> u32 {
         start_stamp(pid).as_deref(),
         Some(started),
         "pid {pid} is not the process {run}'s launch record started; refusing to end it"
+    );
+    end_driver_process(pid);
+    pid
+}
+
+/// End the process holding a run's ownership lock, and wait until it is gone.
+///
+/// For the driver a detached adoption retained, between its taking the lock and
+/// its claiming the run in the launch record: the one moment the lock names a
+/// driver the record does not yet. The same proof [`end_driver`] asks of its
+/// target, read off the lock — the pid it names, started at the very moment
+/// the lock was stamped with — so a pid the host has handed on is refused rather
+/// than signalled.
+pub fn end_lock_holder(world: &World, run: &str) -> u32 {
+    let lock = world.run_json(run, "owner.lock");
+    let pid = lock["pid"]
+        .as_u64()
+        .and_then(|pid| u32::try_from(pid).ok())
+        .unwrap_or_else(|| panic!("the ownership lock of {run} names no holder"));
+    let started = lock["started"]
+        .as_str()
+        .filter(|started| !started.is_empty())
+        .unwrap_or_else(|| panic!("the ownership lock of {run} stamps no start for pid {pid}"));
+    assert_eq!(
+        start_stamp(pid).as_deref(),
+        Some(started),
+        "pid {pid} is not the process holding {run}'s lock; refusing to end it"
     );
     end_driver_process(pid);
     pid
