@@ -71,3 +71,61 @@ fn the_codex_double_answers_its_version_probe() {
     );
     assert!(output.stderr.is_empty());
 }
+
+#[test]
+fn codex_server_double_refuses_incomplete_duplicate_and_unsupported_listeners() {
+    let root = std::env::temp_dir().join(format!("codex-listen-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let first = format!("unix://{}", root.join("missing/first.sock").display());
+    let second = format!("unix://{}", root.join("missing/second.sock").display());
+    let duplicate = ["app-server", "--listen", &first, "--listen", &second];
+    let missing_parent = ["app-server", "--listen", &first];
+    let wrong_scheme = ["app-server", "--listen", "tcp://127.0.0.1:1234"];
+    let unavailable = if cfg!(unix) {
+        78
+    } else {
+        onepipeline_testfakes::USAGE
+    };
+    let cases = [
+        (
+            &["app-server", "--listen"][..],
+            "no argument \"--listen\"",
+            onepipeline_testfakes::USAGE,
+        ),
+        (
+            &duplicate[..],
+            "no argument \"--listen\"",
+            onepipeline_testfakes::USAGE,
+        ),
+        (
+            &missing_parent[..],
+            if cfg!(unix) {
+                "cannot "
+            } else {
+                "on unix only"
+            },
+            unavailable,
+        ),
+        (
+            &wrong_scheme[..],
+            if cfg!(unix) {
+                "must name a unix://"
+            } else {
+                "on unix only"
+            },
+            unavailable,
+        ),
+    ];
+    for (args, reason, code) in cases {
+        let output = Command::new(double())
+            .args(args)
+            .env(onepipeline_testfakes::SCRIPT_DIR_ENV, &root)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(i32::from(code)));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(reason), "{args:?}: {stderr}");
+        assert!(output.stdout.is_empty());
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}

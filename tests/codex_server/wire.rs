@@ -150,9 +150,12 @@ fn frame(opcode: u8, bytes: &[u8]) -> Vec<u8> {
     let mut frame = vec![opcode];
     if bytes.len() < 126 {
         frame.push(0x80 | bytes.len() as u8);
-    } else {
+    } else if bytes.len() <= usize::from(u16::MAX) {
         frame.push(0x80 | 126);
         frame.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
+    } else {
+        frame.push(0x80 | 127);
+        frame.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
     }
     frame.extend_from_slice(&[0; 4]);
     frame.extend_from_slice(bytes);
@@ -165,26 +168,46 @@ fn send(stream: &mut UnixStream, message: Value) {
         .unwrap();
 }
 
-fn received(stream: &mut UnixStream) -> (u8, Vec<u8>) {
+fn received_frame(stream: &mut UnixStream) -> (u8, u8, Vec<u8>) {
     let mut header = [0; 2];
     stream.read_exact(&mut header).unwrap();
     assert_eq!(header[1] & 0x80, 0);
-    let len = if header[1] == 126 {
-        let mut extended = [0; 2];
-        stream.read_exact(&mut extended).unwrap();
-        usize::from(u16::from_be_bytes(extended))
-    } else {
-        usize::from(header[1])
+    let len = match header[1] {
+        126 => {
+            let mut extended = [0; 2];
+            stream.read_exact(&mut extended).unwrap();
+            usize::from(u16::from_be_bytes(extended))
+        }
+        127 => {
+            let mut extended = [0; 8];
+            stream.read_exact(&mut extended).unwrap();
+            usize::try_from(u64::from_be_bytes(extended)).unwrap()
+        }
+        short => usize::from(short),
     };
+    assert!(len <= 1024 * 1024, "unexpectedly large server reply: {len}");
     let mut bytes = vec![0; len];
     stream.read_exact(&mut bytes).unwrap();
-    (header[0] & 15, bytes)
+    (header[0] & 15, header[1], bytes)
+}
+
+fn received(stream: &mut UnixStream) -> (u8, Vec<u8>) {
+    let (opcode, _, bytes) = received_frame(stream);
+    (opcode, bytes)
 }
 
 #[test]
 fn codex_server_double_refuses_malformed_upgrades_frames_and_envelopes() {
     let world = World::new("codex-server-refusals");
     for (index, (request, reason)) in [
+        (
+            UPGRADE.replace("Connection: Upgrade", "Connection: keep-alive"),
+            "missing a required header",
+        ),
+        (
+            UPGRADE.replace("Sec-WebSocket-Version: 13", "Sec-WebSocket-Version: 12"),
+            "missing a required header",
+        ),
         (
             UPGRADE.replace("GET /", "POST /"),
             "not a WebSocket upgrade",
@@ -211,6 +234,15 @@ fn codex_server_double_refuses_malformed_upgrades_frames_and_envelopes() {
         server.exited(Duration::from_secs(5), Some(reason));
     }
     for (index, (bytes, reason)) in [
+        (frame(0x81, br#"{"jsonrpc":"2.0","id":1,"method":"turn/start","params":{"threadId":"unopened","cwd":"/","approvalPolicy":"never","sandboxPolicy":{"type":"workspaceWrite","writableRoots":[],"networkAccess":false},"input":[{"type":"text","text":"hello"}]}}"#), "unknown variant"),
+        (vec![0x81, 0xff, 0x80, 0, 0, 0, 0, 0, 0, 0], "top bit"),
+        ([frame(0x01, b"{"), frame(0x81, b"text")].concat(), "inside a fragmented message"),
+        ({
+            let mut fragments = frame(0x01, &vec![b'x'; 9 * 1024 * 1024]);
+            fragments.extend_from_slice(&[0x80, 0xff]);
+            fragments.extend_from_slice(&(8 * 1024 * 1024u64).to_be_bytes());
+            fragments
+        }, "message past"),
         (frame(0x81, br#"{"jsonrpc":"2.0","id":1,"method":"thread/resume","params":{"threadId":"unloaded","cwd":"/","approvalPolicy":"never","typo":true}}"#), "unknown field"),
         (frame(0x81, br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{},"typo":"wire-secret-canary"}"#), "unknown field"),
         (frame(0x81, br#"{"jsonrpc":"2.0","id":1,"method":"thread/unsubscribe","params":{"threadId":""}}"#), "empty thread identity"),
@@ -310,6 +342,20 @@ fn codex_server_double_supports_fragmentation_ping_long_paths_and_idle_shutdown(
             .unwrap()
             .contains("wire-test")
     );
+    for (size, encoding) in [(256, 126), (70_000, 127)] {
+        let model = "m".repeat(size);
+        send(
+            &mut stream,
+            json!({"jsonrpc":"2.0","id":4,"method":"thread/start","params":{"cwd":"/","approvalPolicy":"never","model":model}}),
+        );
+        let (opcode, length_encoding, body) = received_frame(&mut stream);
+        assert_eq!(opcode, 1);
+        assert_eq!(length_encoding, encoding);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap()["result"]["model"],
+            model
+        );
+    }
     // No await script means the first turn completes without a second caller.
     let thread = open_thread(&mut stream);
     send(
@@ -382,6 +428,15 @@ fn codex_server_double_resumes_an_unloaded_thread_on_another_connection() {
     assert_eq!(
         serde_json::from_slice::<Value>(&reply).unwrap()["result"]["status"],
         "unsubscribed"
+    );
+    send(
+        &mut first,
+        json!({"jsonrpc":"2.0","id":3,"method":"thread/unsubscribe","params":{"threadId":thread}}),
+    );
+    let (_, reply) = received(&mut first);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&reply).unwrap()["result"]["status"],
+        "notLoaded"
     );
     first.write_all(&frame(0x88, &[])).unwrap();
     drop(first);

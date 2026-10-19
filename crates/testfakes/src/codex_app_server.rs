@@ -560,19 +560,12 @@ enum InputItem {
     },
 }
 
-/// The sandbox each permission mode maps onto, in Codex's own spelling.
+/// The sandboxes the linked journeys request, in Codex's own spelling.
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
 enum SandboxPolicy {
     DangerFullAccess,
     ReadOnly,
-    #[serde(rename_all = "camelCase")]
-    WorkspaceWrite {
-        #[serde(rename = "writableRoots")]
-        _writable_roots: Vec<String>,
-        #[serde(rename = "networkAccess")]
-        _network_access: bool,
-    },
 }
 
 /// An opaque protocol identity. Membership, rather than its spelling, decides
