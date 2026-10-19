@@ -794,6 +794,81 @@ fn a_draft_whose_head_has_a_check_suite_in_progress_is_held_until_it_is_green() 
     assert!(suites >= 1, "{:?}", gh_calls(&world));
 }
 
+/// The work on a held draft's head finishes on what the host has said, never on a
+/// clock. Until a read has reported it running, it runs however many reads and however
+/// long pass — longer than the one second a slow Windows runner once spent before the
+/// read that decided its hold. The first rollup read, however late, still meets it
+/// running and holds the draft, and the next settles it green.
+#[test]
+fn a_held_draft_s_work_finishes_once_reported_running_and_never_on_a_clock() {
+    let world = World::new("draft-reported");
+    world.repository("change-open", &[]);
+    world.script("service.work", "the worker wrote this\n");
+    world.script("gh.checks", GREEN);
+    let mut node = lifecycle("service", &[]);
+    node["draft"] = json!(true);
+    let plan = world.plan("reported", &plan_of("reported", vec![node]));
+    world
+        .run_from(&world.project, &["start", &plan, "--attach"])
+        .exited(0)
+        .settled();
+
+    world.script("gh.draft.finishes-once-reported", "");
+    world.script("gh.checks.draft", "build in_progress - advisory");
+    world.script(
+        "gh.checks",
+        "build completed success advisory\nlint completed success required",
+    );
+    let view = |fields: &str| {
+        let output = std::process::Command::new(crate::harness::double("fake-gh"))
+            .args([
+                "pr",
+                "view",
+                "1",
+                "--repo",
+                "owner/service",
+                "--json",
+                fields,
+            ])
+            .env("ONEPIPELINE_FAKE_DIR", &world.fakes)
+            .output()
+            .expect("fake-gh starts");
+        assert!(output.status.success(), "{output:?}");
+        serde_json::from_slice::<Value>(&output.stdout).expect("GitHub JSON")
+    };
+    let rollup = "number,state,mergeStateStatus,headRefOid,mergeCommit,statusCheckRollup";
+    let names = |view: &Value| -> Vec<(String, String)> {
+        view["statusCheckRollup"]
+            .as_array()
+            .expect("a rollup")
+            .iter()
+            .map(|check| {
+                (
+                    check["name"].as_str().unwrap_or_default().to_owned(),
+                    check["status"].as_str().unwrap_or_default().to_owned(),
+                )
+            })
+            .collect()
+    };
+    let running = vec![("build".to_owned(), "in_progress".to_owned())];
+
+    // Nothing has been told the work is running: reads that did not ask for the
+    // rollup, spread past a second, leave it running.
+    for _ in 0..3 {
+        assert_eq!(view("isDraft")["isDraft"], true);
+        std::thread::sleep(std::time::Duration::from_millis(600));
+    }
+    let late = view(rollup);
+    assert_eq!(names(&late), running, "{late}");
+
+    // That late read reported it running, so the next one meets it finished.
+    let green = view(rollup);
+    assert!(
+        names(&green).contains(&("lint".to_owned(), "completed".to_owned())),
+        "{green}"
+    );
+}
+
 /// A poll must not mix absent required checks with activity from the next phase.
 #[test]
 fn a_drafts_activity_finishes_only_after_its_next_check_read() {
