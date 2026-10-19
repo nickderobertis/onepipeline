@@ -915,12 +915,11 @@ struct Pending {
     /// One entry per outage rather than one per retry: the worker retries until
     /// the store returns, and a surface for every attempt would bury the first.
     unprojected: Vec<Unprojected>,
-    /// The landings whose closures are owed, oldest first: what the closure thread takes,
-    /// one at a time, leaving each here until its call has finished.
+    /// The landings whose closures are owed and not yet taken up, oldest first.
     closures: std::collections::VecDeque<crate::closures::Landing>,
-    /// Whether the closure thread is inside the call for the oldest of [`Self::closures`], or
-    /// waiting out its retry.
-    closing: bool,
+    /// The landing the closure thread took up and is calling the store for, or waiting out the
+    /// retry of — until its call has finished.
+    closing: Option<crate::closures::Landing>,
     /// The records of closure calls that finished, for the reconcile loop to journal.
     closed: Vec<crate::payload::LandingClosures>,
 }
@@ -934,7 +933,7 @@ impl Pending {
 
     /// Whether a landing's closures are still owed: queued, or being called.
     fn closing_owed(&self) -> bool {
-        !self.closures.is_empty() || self.closing
+        !self.closures.is_empty() || self.closing.is_some()
     }
 
     fn queue(&mut self, snapshot: Snapshot) -> bool {
@@ -2071,10 +2070,10 @@ fn closer(store: &Store, per_item: NonZeroU64, pending: &(Mutex<Pending>, Condva
                     Err(_) => return,
                 };
             }
-            let Some(landing) = state.closures.front().cloned() else {
+            let Some(landing) = state.closures.pop_front() else {
                 return;
             };
-            state.closing = true;
+            state.closing = Some(landing.clone());
             landing
         };
         let mut failures: u32 = 0;
@@ -2124,8 +2123,7 @@ fn closer(store: &Store, per_item: NonZeroU64, pending: &(Mutex<Pending>, Condva
         };
         let (lock, ready) = pending;
         let Ok(mut state) = lock.lock() else { return };
-        state.closures.pop_front();
-        state.closing = false;
+        state.closing = None;
         if let Some(record) = finished {
             state.closed.push(record);
         }

@@ -326,16 +326,26 @@ fn unsupervised<T>(
     // llmlint: ignore-end[changed_behavior_has_e2e]
     let out = call(Some(&handle));
     let mut landings = Vec::new();
-    if let Ok(mut reader) = onevcs::OperationEvents::open(&handle) {
-        while let Ok(batch) = reader.read() {
-            if batch.is_empty() {
-                break;
-            }
-            for envelope in &batch {
-                gather(&mut landings, envelope);
-            }
+    let read = onevcs::OperationEvents::open(&handle).and_then(|mut reader| loop {
+        let batch = reader.read()?;
+        if batch.is_empty() {
+            return Ok(());
         }
+        for envelope in &batch {
+            gather(&mut landings, envelope);
+        }
+    });
+    // llmlint: ignore-block[changed_behavior_has_e2e] the stream read is one this process's own
+    // operation wrote an instant before, under the state root it prepared that operation in;
+    // failing to read it back is host I/O failing mid-command, which no journey through either
+    // CLI can stage. What it costs is said, and the landing stands.
+    if let Err(error) = read {
+        eprintln!(
+            "onepipeline: the landing's own operation record could not be read back ({error}), \
+             so the issues it closed were not handed to the store"
+        );
     }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
     (out, landings)
 }
 
