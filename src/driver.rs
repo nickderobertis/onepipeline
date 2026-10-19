@@ -1539,6 +1539,10 @@ fn start(args: &StartArgs) -> Result<i32> {
     if args.fresh {
         crate::continuation::refuse_fresh_over_unlanded(project.as_str(), &read)?;
     }
+    let source_holds = crate::unanswered::launched(&plan, &read.unanswered);
+    if let Some(notice) = crate::unanswered::notice(&source_holds) {
+        eprintln!("{notice}");
+    }
     let holdings = concurrency::holders(&plan)?;
     let holders = &holdings.holders;
     // Every stale holder the sibling still has anybody to answer for. Since
@@ -1790,6 +1794,17 @@ fn start(args: &StartArgs) -> Result<i32> {
             (journal::OWED_UNTIL_CLOSED, json!(true)),
         ]),
     )?;
+    // Each node the read could not ask a private source about is held from the run's first
+    // records, before anything could dispatch it: the driver takes the holds up from here,
+    // because no driver repeats this read, and lifts each once a read of its edges asks
+    // every source.
+    for (node, hold) in &source_holds {
+        open.emit(
+            journal::PipelineKind::NodeHeld,
+            journal::labels(&run, Some(node)),
+            journal::payload(&[("reasons", json!([hold.payload()]))]),
+        )?;
+    }
     // The claim this launch passed, before anything this run does: the run it names stops
     // at its next check, and this driver's own check reads past it until its first
     // projection replaces it.
@@ -4788,6 +4803,86 @@ mod tests {
         }
     }
 
+    /// A real child process standing for a retained driver: this test binary,
+    /// asked for a test it does not have, so it exits at once.
+    fn retained_driver() -> std::process::Child {
+        std::process::Command::new(std::env::current_exe().expect("this test binary"))
+            .args(["--exact", "no-test-is-named-this"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("a retained driver starts")
+    }
+
+    /// What this host records as `pid`'s start.
+    fn start_of(pid: u32) -> String {
+        sys::process_start_token(pid)
+            .expect("this host says when a process started")
+            .recorded()
+            .to_string()
+    }
+
+    /// The first driver `retained` starts whose own start does not read as
+    /// `displaced`. A start token is only as fine as its host keeps it — one
+    /// second for macOS's `ps lstart`, one clock tick for Linux's procfs — so a
+    /// child spawned inside the displaced process's unit carries its very token,
+    /// and a record naming that child under it is the child's own claim. Such a
+    /// child is set aside and another spawned, until one's start is not
+    /// `displaced`.
+    fn retained_apart_from(
+        displaced: &str,
+        mut retained: impl FnMut() -> std::process::Child,
+    ) -> std::process::Child {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let mut driver = retained();
+            if start_of(driver.id()) != displaced {
+                return driver;
+            }
+            driver.wait().expect("a set-aside driver exits");
+            assert!(
+                Instant::now() < deadline,
+                "every retained driver started under the displaced driver's token"
+            );
+            std::thread::sleep(ATTACH_POLL);
+        }
+    }
+
+    /// The retained-driver refusal holds where the displaced and retained
+    /// processes report one start token, as macOS's one-second stamp gives a
+    /// test process and the child it spawns within that second.
+    ///
+    /// Driven on every host by making the equality real rather than waiting for
+    /// a coarse clock: the displaced token is read off the first retained child
+    /// itself, so that child's pid under it *is* its claim, and
+    /// [`confirm_driving`] — the driver's own claim reading — would confirm it.
+    /// Only a driver whose start reads apart makes the record another
+    /// process's, and that one is refused.
+    #[test]
+    fn a_retained_driver_sharing_the_displaced_start_token_is_set_aside() {
+        let root = scratch("confirm-equal");
+        let paths = RunPaths::under(&root, "retained");
+        paths.create().expect("the run directory");
+        let first = retained_driver();
+        let displaced = start_of(first.id());
+        let mut first = Some(first);
+
+        let mut driver =
+            retained_apart_from(&displaced, || first.take().unwrap_or_else(retained_driver));
+        ledger::write_json(
+            &paths.launch(),
+            &launched_by(driver.id(), &sys::hostname(), &displaced),
+        )
+        .expect("the launch record is written");
+        std::fs::write(paths.driver_log(), "onepipeline: an unreadable lock\n")
+            .expect("the driver's log is written");
+        let refused = confirm_driving(&paths, &mut driver)
+            .expect_err("a record naming the displaced start was read as this driver's claim")
+            .to_string();
+        assert!(refused.contains("did not claim it"), "{refused}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// A detached launch's wait reads a claim as the retained driver's own — its
     /// pid **and** its start — and reports a driver that made none with what it
     /// said.
@@ -4806,41 +4901,16 @@ mod tests {
         let paths = RunPaths::under(&root, "retained");
         paths.create().expect("the run directory");
         let here = sys::hostname();
-        let retained = || {
-            std::process::Command::new(std::env::current_exe().expect("this test binary"))
-                .args(["--exact", "no-test-is-named-this"])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-                .expect("a retained driver starts")
-        };
-        let start_of = |pid: u32| {
-            sys::process_start_token(pid)
-                .expect("this host says when a process started")
-                .recorded()
-                .to_string()
-        };
         let recorded = |record: &LaunchRecord| {
             ledger::write_json(&paths.launch(), record).expect("the launch record is written");
         };
 
         // The retained driver's pid under another process's start — this one's,
         // as the displaced driver's would be — is not its claim, and what it
-        // said comes back with the refusal. "Another" is read off the host rather
-        // than assumed: macOS stamps a start to the second, and a test process
-        // that spawns its child within the second it started gives the two one
-        // stamp, so a child is taken only once its own reads differently.
+        // said comes back with the refusal. This test process was itself started
+        // moments ago, so the child is one whose start reads apart from it.
         let displaced = start_of(sys::pid());
-        let mut driver = loop {
-            let mut driver = retained();
-            if start_of(driver.id()) != displaced {
-                break driver;
-            }
-            driver
-                .wait()
-                .expect("a child sharing this process's stamp is reaped");
-            std::thread::sleep(ATTACH_POLL);
-        };
+        let mut driver = retained_apart_from(&displaced, retained_driver);
         recorded(&launched_by(driver.id(), &here, &displaced));
         std::fs::write(paths.driver_log(), "onepipeline: an unreadable lock\n")
             .expect("the driver's log is written");
@@ -4852,14 +4922,14 @@ mod tests {
 
         // Its own start is its claim, and stays one after it has exited: a
         // driver that took the run and settled at once did take it.
-        let mut driver = retained();
+        let mut driver = retained_driver();
         recorded(&launched_by(driver.id(), &here, &start_of(driver.id())));
         driver.wait().expect("the retained driver exits");
         confirm_driving(&paths, &mut driver).expect("a driver that claimed the run is confirmed");
 
         // And one that wrote nothing at all leaves the record naming the driver
         // it was to displace, and is reported as having said nothing.
-        let mut driver = retained();
+        let mut driver = retained_driver();
         recorded(&launched_by(sys::reaped_pid(), &here, ""));
         std::fs::write(paths.driver_log(), "").expect("the driver's log is emptied");
         let refused = confirm_driving(&paths, &mut driver)

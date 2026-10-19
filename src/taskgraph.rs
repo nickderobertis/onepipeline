@@ -32,16 +32,16 @@
 //! [`crate::destination`] asks it, here, after the graph's own rules and before
 //! anything is dispatched.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 
 use onetaskgraph_core::config::{self, Layer};
 use onetaskgraph_core::{
-    ConfigError, DependencyRequest, Engine, EngineError, Environment, Filters, GlobalId, Loaded,
-    PageToken, Paging, ProjectSelector, Qualified, QualifiedEdge, QueryResponse, SourceFailure,
-    TaskRequest,
+    Completeness, ConfigError, DependencyRequest, Engine, EngineError, Environment, Filters,
+    GlobalId, Loaded, PageToken, Paging, ProjectSelector, Qualified, QualifiedEdge, QueryResponse,
+    SourceFailure, TaskRequest,
 };
 use onetaskgraph_plugin_api::{
     Classification, DependencyKind, Direction, ItemKind, MetadataKey, NativeId, Project,
@@ -232,6 +232,22 @@ impl Store {
         }
     }
 
+    /// The store a configuration discovered from `dir` describes, read with no user layer
+    /// but the empty one under `dir`: for a test whose claim is about every source the
+    /// store builds, which the host's own `~/.config/onetaskgraph` would otherwise add to.
+    #[cfg(test)]
+    pub(crate) fn isolated(dir: impl Into<PathBuf>) -> Self {
+        let dir = dir.into();
+        let home = dir.to_string_lossy().into_owned();
+        Self {
+            environment: Environment::from_pairs([
+                ("HOME", home.clone()),
+                ("XDG_CONFIG_HOME", format!("{home}/xdg")),
+            ]),
+            dir,
+        }
+    }
+
     /// Load this store's configuration, `flags` layered last, and build the engine it
     /// describes — afresh, every time.
     ///
@@ -415,6 +431,60 @@ impl Store {
         Ok(())
     }
 
+    /// Read again the dependency edges of each node `asked` names, of the graph `nodes` that
+    /// was launched from `project`: what a run holding a node its launch could not read whole
+    /// asks, to learn whether every source now answers and what the node's edges then say.
+    ///
+    /// A node is found by the task its `task_record` names — in its own `source`, or the
+    /// project's where it names none — and an edge's far end is resolved against every node
+    /// of `nodes` the same way, so a prerequisite reads back as the node id the run knows it
+    /// by. A node carrying no task record is no task of the store and is not read.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Sibling`] for a configuration that does not load or a read the store fails
+    /// outright, and a refusal for an edge whose far end this graph cannot name.
+    pub(crate) fn reread(
+        &self,
+        project: &QualifiedId,
+        nodes: &[Node],
+        asked: &BTreeSet<String>,
+    ) -> Result<BTreeMap<String, Reread>> {
+        let built = self
+            .engine(&Layer::default())
+            .map_err(|error| Error::Sibling {
+                tool: STORE,
+                message: format!(
+                    "the configuration discovered from {} cannot be read: {error}",
+                    self.dir.display()
+                ),
+            })?;
+        let reader = Reader::over(built)?;
+        let task_of = |node: &Node| -> Option<GlobalId> {
+            let record = node.task_record.as_ref()?;
+            let source = record
+                .source
+                .as_ref()
+                .map_or(project.source(), SourceName::as_str);
+            QualifiedId::try_from(format!("{source}:{}", record.id))
+                .ok()
+                .map(|id| id.global())
+        };
+        let ids: Ids = nodes
+            .iter()
+            .filter_map(|node| Some((task_of(node)?.to_string(), node.id.clone())))
+            .collect();
+        let mut read = BTreeMap::new();
+        for node in nodes.iter().filter(|node| asked.contains(&node.id)) {
+            let Some(task) = task_of(node) else {
+                continue;
+            };
+            let (deps, unanswered) = reader.deps(&task, &ids).map_err(Error::from)?;
+            read.insert(node.id.clone(), Reread { deps, unanswered });
+        }
+        Ok(read)
+    }
+
     fn load(&self, project: &QualifiedId) -> std::result::Result<Read, Load> {
         let built = self
             .engine(&Layer::default())
@@ -557,8 +627,13 @@ impl Reader {
         }
 
         let mut nodes = Vec::with_capacity(tasks.len());
+        let mut unanswered: BTreeMap<String, Vec<Unanswered>> = BTreeMap::new();
         for task in &tasks {
-            nodes.push(self.node(task, project, held.item.classification, &ids)?);
+            let (node, unasked) = self.node(task, project, held.item.classification, &ids)?;
+            if !unasked.is_empty() {
+                unanswered.insert(ids[&task.id.to_string()].clone(), unasked);
+            }
+            nodes.push(node);
         }
         document.insert("tasks".to_owned(), Value::Array(nodes));
 
@@ -672,18 +747,19 @@ impl Reader {
             stored,
             tasks,
             project_metadata,
+            unanswered,
         })
     }
 
     /// One node, assembled out of its task — a task of the home project `home`, or of one of
-    /// its members.
+    /// its members — beside each source its dependency read could not ask.
     fn node(
         &self,
         task: &Qualified<Task>,
         home: &QualifiedId,
         project_classification: Classification,
         ids: &Ids,
-    ) -> std::result::Result<Value, Load> {
+    ) -> std::result::Result<(Value, Vec<Unanswered>), Load> {
         let whole = task.id.to_string();
         let mut node = Map::new();
         for (key, value) in &task.item.metadata {
@@ -802,7 +878,7 @@ impl Reader {
             (None, _) => {}
         }
 
-        let mut deps = self.deps(task, ids)?;
+        let (mut deps, unanswered) = self.deps(&task.id, ids)?;
         // A cross-DAG reference names another run's DAG, which is an item of no
         // source at all, so it is the one dependency that cannot be an edge.
         if let Some(carried) = node.remove("deps") {
@@ -831,21 +907,31 @@ impl Reader {
                 Value::Array(deps.into_iter().map(Value::String).collect()),
             );
         }
-        Ok(Value::Object(node))
+        Ok((Value::Object(node), unanswered))
     }
 
-    /// The node ids this task's own dependency edges point at.
-    fn deps(&self, task: &Qualified<Task>, ids: &Ids) -> std::result::Result<Vec<String>, Load> {
-        let whole = task.id.to_string();
+    /// The node ids this task's own dependency edges point at, and each source declared
+    /// private the read could not ask what it records of the task.
+    ///
+    /// Such a source may record a prerequisite of this task that no other source holds, so
+    /// the ids are every edge this reader can be shown and not necessarily every edge there
+    /// is: what the run does with a node read that way is [`crate::unanswered`]'s to decide.
+    fn deps(
+        &self,
+        task: &GlobalId,
+        ids: &Ids,
+    ) -> std::result::Result<(Vec<String>, Vec<Unanswered>), Load> {
+        let whole = task.to_string();
         let mut deps = Vec::new();
-        for edge in self.edges(&task.id)? {
+        let (edges, unasked) = self.edges(task)?;
+        for edge in edges {
             if edge.from.kind != ItemKind::Task {
                 return Err(Error::Sibling {
                     tool: STORE,
                     message: format!(
                         "asked for the dependencies of task '{}' and answered with an edge from \
                          a {}",
-                        task.id,
+                        task,
                         kind(edge.from.kind)
                     ),
                 }
@@ -855,13 +941,13 @@ impl Reader {
             // edge answering about a different one would put another task's
             // prerequisites on this node, which is a graph nobody wrote and a
             // run nothing could explain afterwards.
-            if edge.from.id != task.id {
+            if edge.from.id != *task {
                 return Err(Error::Sibling {
                     tool: STORE,
                     message: format!(
                         "asked for the dependencies of '{}' and answered with an edge from \
                          '{}'",
-                        task.id, edge.from.id
+                        task, edge.from.id
                     ),
                 }
                 .into());
@@ -872,7 +958,7 @@ impl Reader {
                 continue;
             }
             let far = &edge.to;
-            let both = format!("'{}' depends on '{}'", task.id, far.id);
+            let both = format!("'{}' depends on '{}'", task, far.id);
             // A plan node is a task, so a `project` end — which the store's edges may
             // carry, at either level — is refused rather than read as a node.
             if far.kind != ItemKind::Task {
@@ -905,7 +991,7 @@ impl Reader {
             };
             deps.push(resolved);
         }
-        Ok(deps)
+        Ok((deps, Unanswered::of(&unasked)))
     }
 
     fn project(&self, project: &QualifiedId) -> Result<Qualified<Project>> {
@@ -974,11 +1060,14 @@ impl Reader {
         Ok(tasks)
     }
 
-    fn edges(&self, task: &GlobalId) -> Result<Vec<QualifiedEdge>> {
-        self.paged("task deps", &task.to_string(), |token| {
+    /// One task's dependency edges, and the sources declared private that could not be asked
+    /// what they record of it.
+    fn edges(&self, task: &GlobalId) -> Result<(Vec<QualifiedEdge>, Vec<SourceFailure>)> {
+        self.walk("task deps", &task.to_string(), |token| {
             let request = DependencyRequest {
                 id: task.clone(),
                 direction: Direction::DependsOn,
+                completeness: Completeness::NamingUnasked,
                 paging: Paging {
                     limit: self.page,
                     token,
@@ -1002,7 +1091,26 @@ impl Reader {
         F: Fn(Option<PageToken>) -> Fut,
         Fut: Future<Output = std::result::Result<QueryResponse<T>, EngineError>>,
     {
+        let (all, unasked) = self.walk(query, about, page)?;
+        partial(query, about, &unasked)?;
+        Ok(all)
+    }
+
+    /// [`paged`](Self::paged), keeping each source the store reports in `unanswered` — a
+    /// source declared private a dependency read could not ask — beside the items rather
+    /// than refusing them. A failure in `errors` is refused as it is there.
+    fn walk<T, F, Fut>(
+        &self,
+        query: &str,
+        about: &str,
+        page: F,
+    ) -> Result<(Vec<T>, Vec<SourceFailure>)>
+    where
+        F: Fn(Option<PageToken>) -> Fut,
+        Fut: Future<Output = std::result::Result<QueryResponse<T>, EngineError>>,
+    {
         let mut all = Vec::new();
+        let mut unasked = Vec::new();
         let mut token: Option<PageToken> = None;
         let mut walked: std::collections::HashSet<PageToken> = std::collections::HashSet::new();
         loop {
@@ -1011,8 +1119,9 @@ impl Reader {
                 .map_err(|error| failed(query, about, &error))?;
             partial(query, about, &response.errors)?;
             all.extend(response.items);
+            unasked.extend(response.unanswered);
             let Some(next) = response.next else {
-                return Ok(all);
+                return Ok((all, unasked));
             };
             // A walk ends because a page says it is the last one. A token this walk
             // has already been handed ends nothing: it revisits a page, for ever, and a
@@ -1212,6 +1321,50 @@ pub(crate) struct Read {
     /// Each task's qualified id and its content exactly as stored, by node id: what a
     /// rendered-only check digests, before the mapping trims it into a node's `task`.
     pub stored: BTreeMap<String, StoredTask>,
+    /// Each node whose dependency read could not ask a source declared private what it
+    /// records of the node's task, by node id, with those sources. Absent for every node
+    /// read whole.
+    pub unanswered: BTreeMap<String, Vec<Unanswered>>,
+}
+
+/// A source declared private that a dependency read could not ask, and why.
+///
+/// The store's own [`SourceFailure`], reduced to what a run records and says: the source's
+/// name and the store's own account of why it did not answer — a credential absent or
+/// refused, a source unreachable or rate-limited.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct Unanswered {
+    /// The source's name, as its configuration spells it.
+    pub source: SourceName,
+    /// Why it did not answer, in the store's own words.
+    pub reason: String,
+}
+
+impl Unanswered {
+    /// Each source the failures name, once, in name order: a read that walked several pages
+    /// meets the same source on each.
+    fn of(failures: &[SourceFailure]) -> Vec<Self> {
+        let mut named: BTreeMap<SourceName, String> = BTreeMap::new();
+        for failure in failures {
+            named
+                .entry(failure.source.clone())
+                .or_insert_with(|| failure.error.to_string());
+        }
+        named
+            .into_iter()
+            .map(|(source, reason)| Self { source, reason })
+            .collect()
+    }
+}
+
+/// One node's dependency edges, read again: the node ids they point at, and the sources
+/// declared private that still could not be asked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Reread {
+    /// The node ids this read resolved the task's edges to.
+    pub deps: Vec<String>,
+    /// The sources it could not ask; empty for a read that asked every one.
+    pub unanswered: Vec<Unanswered>,
 }
 
 pub(crate) struct StoredTask {
@@ -2502,5 +2655,40 @@ mod tests {
             "a later read answered from the store an earlier read built"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A source the store names more than once across a walk's pages is one source of the
+    /// hold, with the reason it was first given. Asserted here and not end to end: the
+    /// linked store stops asking a source on the page it refuses, so no journey through it
+    /// meets one twice, and nothing in its contract promises it never will.
+    #[test]
+    fn a_source_named_on_several_pages_is_one_unanswered_source() {
+        let failure = |source: &str, message: &str| SourceFailure {
+            source: SourceName::new(source).expect("a source name"),
+            error: onetaskgraph_plugin_api::SourceError::Auth {
+                message: message.to_owned(),
+            },
+        };
+        let named: Vec<(String, String)> = Unanswered::of(&[
+            failure("vault", "first page"),
+            failure("archive", "first page"),
+            failure("vault", "second page"),
+        ])
+        .into_iter()
+        .map(|unanswered| (unanswered.source.to_string(), unanswered.reason))
+        .collect();
+        assert_eq!(
+            named,
+            [
+                (
+                    "archive".to_owned(),
+                    "authentication for this source failed: first page".to_owned()
+                ),
+                (
+                    "vault".to_owned(),
+                    "authentication for this source failed: first page".to_owned()
+                ),
+            ]
+        );
     }
 }

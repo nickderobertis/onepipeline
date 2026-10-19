@@ -1076,9 +1076,14 @@ onevcs-testing = "0.19.4"
 # 0.7.1 is also the release onetaskgraph's move onto `serde-saphyr` published; its
 # local-md source is what reads back and edits the run's write-back shadow documents
 # (`src/writeback.rs`).
-onetaskgraph-core = "=0.7.1"
-onetaskgraph-plugin-api = "=0.7.1"
-onetaskgraph-local-md = "=0.7.1"
+#
+# **0.7.3 is the floor.** It leaves a source a layer refines but no layer defines
+# unconfigured rather than failing every load, so a host's user layer may route to
+# sources only one checkout defines; and it answers a dependency read a private source
+# cannot without failing it. `tests/e2e/store.rs` drives both.
+onetaskgraph-core = "=0.7.3"
+onetaskgraph-plugin-api = "=0.7.3"
+onetaskgraph-local-md = "=0.7.3"
 # Test-support only: the budget checker's own library, at exactly the release `justfile`'s
 # `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
 onebudgetspec-core = "=0.1.5"
@@ -1095,7 +1100,7 @@ windows-sys = "0.61"
 
 [package]
 name = "onepipeline"
-version = "0.76.0"
+version = "0.78.0"
 edition = "2021"
 rust-version.workspace = true
 description = "Execute a task DAG over oneagentgraph and onevcs, merging their event streams into one."
