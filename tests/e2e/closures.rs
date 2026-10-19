@@ -877,16 +877,54 @@ struct Landed {
     stderr: String,
 }
 
-/// Run `verb` over its branch in a world of its own, from a directory whose store
-/// configuration declares the loopback board — or, where `configured` is false, declares
-/// nothing at all — with `fault` answering the closure's Status write where one is given.
-fn landed_by(verb: Verb, configured: bool, fault: Option<&str>) -> Landed {
+/// What the directory a landing verb runs from configures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Configured {
+    /// Nothing at all.
+    Nothing,
+    /// The loopback board.
+    Board,
+    /// A document the store cannot load.
+    Unloadable,
+}
+
+/// How one landing verb journey is set up.
+#[derive(Debug, Clone, Copy)]
+struct Setup<'a> {
+    configured: Configured,
+    /// What answers the closure's Status write, where something other than the board does.
+    fault: Option<&'a str>,
+    /// Whether a manager session owns the landing, as every world's command says by default.
+    owned: bool,
+}
+
+impl Setup<'_> {
+    const BOARD: Self = Self {
+        configured: Configured::Board,
+        fault: None,
+        owned: true,
+    };
+    const BARE: Self = Self {
+        configured: Configured::Nothing,
+        fault: None,
+        owned: true,
+    };
+}
+
+/// Run `verb` over its branch in a world of its own, from a directory configured as `setup`
+/// says.
+fn landed_by(verb: Verb, setup: Setup<'_>) -> Landed {
     let name = format!(
-        "closures-{}-{}{}",
+        "closures-{}-{:?}{}{}",
         verb.name(),
-        if configured { "board" } else { "bare" },
-        fault.map(|fault| format!("-{fault}")).unwrap_or_default()
-    );
+        setup.configured,
+        setup
+            .fault
+            .map(|fault| format!("-{fault}"))
+            .unwrap_or_default(),
+        if setup.owned { "" } else { "-unowned" }
+    )
+    .to_lowercase();
     let world = World::new(&name).with_env(TOKEN_ENV, "loopback-token");
     // A recovery attests the repository's bar, so its repository has one: a `pre-push` hook
     // that passes.
@@ -896,22 +934,26 @@ fn landed_by(verb: Verb, configured: bool, fault: Option<&str>) -> Landed {
     };
     let repository = world.repository("local-direct", bar);
     let served = GitHubEndpoint::serve_issues(&world, &one_board());
-    if let Some(fault) = fault {
+    if let Some(fault) = setup.fault {
         served.fault(fault);
     }
     let args = verb.prepare(&world, &repository);
     let dir = verb.dir(&world, &repository);
-    if configured {
-        std::fs::write(
-            verb.configuration(&world, &repository),
-            format!("sources:\n{}", board_source("board", &served, 1)),
-        )
-        .expect("the store configuration");
+    let document = match setup.configured {
+        Configured::Nothing => None,
+        Configured::Board => Some(format!("sources:\n{}", board_source("board", &served, 1))),
+        Configured::Unloadable => Some("sources:\n  board:\n    plugin: nonesuch\n".to_owned()),
+    };
+    if let Some(document) = document {
+        std::fs::write(verb.configuration(&world, &repository), document)
+            .expect("the store configuration");
     }
     // Only the directory's own configuration: none of this world's environment layer.
-    let output = from_the_launch_directory(&world, &dir, &args)
-        .output()
-        .expect("the landing verb runs");
+    let mut command = from_the_launch_directory(&world, &dir, &args);
+    if !setup.owned {
+        command.env_remove("ONEPIPELINE_LAUNCHER_SESSION");
+    }
+    let output = command.output().expect("the landing verb runs");
     Landed {
         world,
         repository,
@@ -991,7 +1033,7 @@ fn the_record(landed: &Landed) -> Value {
 /// to `Done`, prints what the store answered, exits as it does from a directory declaring
 /// nothing — where it asks nothing and says so — and journals one projected record.
 fn a_landing_verb_closes_the_issues_its_landing_closes(verb: Verb) {
-    let bare = landed_by(verb, false, None);
+    let bare = landed_by(verb, Setup::BARE);
     landed_widget(&bare);
     assert!(
         bare.stderr
@@ -1006,7 +1048,7 @@ fn a_landing_verb_closes_the_issues_its_landing_closes(verb: Verb) {
     );
     assert!(landing_records(&bare.world).is_empty());
 
-    let landed = landed_by(verb, true, None);
+    let landed = landed_by(verb, Setup::BOARD);
     landed_widget(&landed);
     assert_eq!(landed.code, bare.code, "{}", landed.stderr);
     assert_eq!(landed.code, 0, "{}", landed.stderr);
@@ -1034,8 +1076,14 @@ fn a_landing_verb_closes_the_issues_its_landing_closes(verb: Verb) {
 /// does from a directory declaring nothing, and records the closure `failed` with the store's
 /// class and reason.
 fn a_landing_verb_lands_whatever_the_board_answers(verb: Verb) {
-    let bare = landed_by(verb, false, None);
-    let landed = landed_by(verb, true, Some("refuse"));
+    let bare = landed_by(verb, Setup::BARE);
+    let landed = landed_by(
+        verb,
+        Setup {
+            fault: Some("refuse"),
+            ..Setup::BOARD
+        },
+    );
     landed_widget(&landed);
     assert_eq!(landed.code, bare.code, "{}", landed.stderr);
     assert_eq!(
@@ -1084,4 +1132,106 @@ fn repo_recover_lands_whatever_the_board_answers() {
 #[test]
 fn integrate_closes_the_issues_its_train_lands() {
     a_landing_verb_closes_the_issues_its_landing_closes(Verb::Integrate);
+}
+
+/// A directory whose store configuration does not load lands the branch all the same, exits as
+/// it does from one declaring nothing, and records the closure `failed`, refused, saying the
+/// configuration did not load.
+#[test]
+fn a_landing_verb_lands_where_the_store_configuration_does_not_load() {
+    let bare = landed_by(Verb::PublishBranch, Setup::BARE);
+    let landed = landed_by(
+        Verb::PublishBranch,
+        Setup {
+            configured: Configured::Unloadable,
+            ..Setup::BOARD
+        },
+    );
+    landed_widget(&landed);
+    assert_eq!(landed.code, bare.code, "{}", landed.stderr);
+    let record = the_record(&landed);
+    assert_eq!(record["outcome"], "failed", "{record}");
+    assert_eq!(record["class"], "refused", "{record}");
+    assert!(
+        record["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("the store configuration does not load")),
+        "{record}"
+    );
+    assert!(log_of(&landed.served).is_empty());
+}
+
+/// A board that never answers the closure's Status write holds the landing verb no longer than
+/// the call's deadline: the branch lands, the verb exits as it does from a directory declaring
+/// nothing, and the closure is recorded `failed`, transient, saying the call ran out of time —
+/// and is not asked again.
+#[test]
+fn a_landing_verb_ends_a_closure_the_board_never_answers_at_its_deadline() {
+    let bare = landed_by(Verb::PublishBranch, Setup::BARE);
+    let landed = landed_by(
+        Verb::PublishBranch,
+        Setup {
+            fault: Some("hold"),
+            ..Setup::BOARD
+        },
+    );
+    landed_widget(&landed);
+    assert_eq!(landed.code, bare.code, "{}", landed.stderr);
+    let record = the_record(&landed);
+    assert_eq!(record["outcome"], "failed", "{record}");
+    assert_eq!(record["class"], "transient", "{record}");
+    assert!(
+        record["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("task status complete exceeded")),
+        "{record}"
+    );
+    assert!(
+        landed.stderr.contains("failed (transient)"),
+        "{}",
+        landed.stderr
+    );
+    let statuses = log_of(&landed.served)
+        .iter()
+        .filter(|request| {
+            request["query"]
+                .as_str()
+                .is_some_and(|query| query.contains("updateProjectV2ItemFieldValue("))
+        })
+        .count();
+    assert_eq!(statuses, 1, "the verb asked the board again");
+    landed.served.release();
+}
+
+/// A landing no manager session owns lands unowned, as it always did, and still hands the
+/// store the issues it closed: issue 7's card reaches `Done` and the verb prints what the store
+/// answered, with no landing journal to record it in.
+#[test]
+fn an_unowned_landing_closes_the_issues_it_closes() {
+    let landed = landed_by(
+        Verb::PublishBranch,
+        Setup {
+            owned: false,
+            ..Setup::BOARD
+        },
+    );
+    landed_widget(&landed);
+    assert_eq!(landed.code, 0, "{}", landed.stderr);
+    assert!(
+        landed
+            .stderr
+            .contains("no manager session owns this landing"),
+        "{}",
+        landed.stderr
+    );
+    assert!(
+        landed.stderr.contains("owner/service#7 on board: updated"),
+        "{}",
+        landed.stderr
+    );
+    assert_eq!(
+        card(&landed.served, "1", "7"),
+        (json!("Done"), issue("CLOSED", Some("COMPLETED")))
+    );
+    assert!(landing_records(&landed.world).is_empty());
 }

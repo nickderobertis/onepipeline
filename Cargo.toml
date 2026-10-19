@@ -721,9 +721,9 @@ resolver = "2"
 # `closes` — the GitHub issues the landing closes, as `owner/name#N` — on the
 # `merge-completed` and `change-merged` of a change request, a `local-direct`
 # squash and the integrate train alike, read here through
-# `onevcs::landing_closes`. `src/closures.rs` hands those issues to the store
-# (entry 132 of `docs/contract-divergences.md`); `tests/e2e/closures.rs` drives
-# it. A **requirement**, because `^0.52` admits no 0.56.x; `onevcs-testing`
+# `onevcs::landing_closes` in `closures::Landing::of`. `src/closures.rs` hands
+# those issues to the store (entry 132 of `docs/contract-divergences.md`);
+# `tests/e2e/closures.rs` drives it. A **requirement**, because `^0.52` admits no 0.56.x; `onevcs-testing`
 # 0.19.12 requires exactly `=0.56.2`, so the pair moves as one.
 #
 # `onevcs` 0.52.0 was the floor before that because it is the release the declared-maintenance

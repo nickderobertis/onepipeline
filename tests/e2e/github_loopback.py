@@ -83,7 +83,34 @@ def issue(name):
     return value
 
 
-numbered = (json.loads(pathlib.Path(os.environ["GITHUB_LOOPBACK_ISSUES"]).read_text())
+STATES = {"OPEN": [None], "CLOSED": ["COMPLETED", "NOT_PLANNED", "DUPLICATE"]}
+NUMBER = re.compile(r"^[1-9]\d*$")
+REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+
+
+def numbered_fixture(document):
+    """The numbered issues and boards a journey seeds, refused unless every part is one this
+    endpoint can answer as GitHub would."""
+    if (not isinstance(document, dict) or set(document) != {"repository", "issues", "boards"}
+            or not isinstance(document["repository"], str)
+            or not REPOSITORY.match(document["repository"])
+            or not isinstance(document["issues"], dict)
+            or not isinstance(document["boards"], dict)):
+        raise SystemExit("numbered issues must name a repository, its issues and its boards")
+    for number, held in document["issues"].items():
+        if (not NUMBER.match(number) or not isinstance(held, dict)
+                or set(held) != {"state", "reason"}
+                or held["reason"] not in STATES.get(held["state"], [])):
+            raise SystemExit("issue %r is not a number with a state and the reason it fits" % number)
+    for board, cards in document["boards"].items():
+        if (not NUMBER.match(board) or not isinstance(cards, dict)
+                or any(number not in document["issues"] or card not in options
+                       for number, card in cards.items())):
+            raise SystemExit("board %r must hold seeded issues at Status options" % board)
+    return document
+
+
+numbered = (numbered_fixture(json.loads(pathlib.Path(os.environ["GITHUB_LOOPBACK_ISSUES"]).read_text()))
             if os.environ.get("GITHUB_LOOPBACK_ISSUES") else
             {"repository": None, "issues": {}, "boards": {}})
 state["numbered"] = numbered
@@ -127,8 +154,13 @@ def issues_by_reference(variables):
     data, errors = {}, []
     slot = 0
     while "owner%d" % slot in variables:
-        repository = "%s/%s" % (variables["owner%d" % slot], variables["name%d" % slot])
-        number = str(variables["number%d" % slot])
+        owner, name = variables["owner%d" % slot], variables.get("name%d" % slot)
+        number = variables.get("number%d" % slot)
+        if (not isinstance(owner, str) or not isinstance(name, str)
+                or not isinstance(number, int) or isinstance(number, bool) or number < 1):
+            raise ValueError("slot %d of a read by reference names no owner, name and number" % slot)
+        repository = "%s/%s" % (owner, name)
+        number = str(number)
         if repository != numbered["repository"]:
             data["r%d" % slot] = None
             errors.append({"type": "NOT_FOUND", "path": ["r%d" % slot],
@@ -298,8 +330,8 @@ class Handler(BaseHTTPRequestHandler):
             movement = supplied.get("stateInput")
             if (number not in numbered["issues"] or set(supplied) != {"id", "stateInput"}
                     or not isinstance(movement, dict)
-                    or movement.get("value") not in ["OPEN", "CLOSED"]
-                    or set(movement) - {"value", "stateReason"}):
+                    or set(movement) - {"value", "stateReason"}
+                    or movement.get("stateReason") not in STATES.get(movement.get("value"), [])):
                 raise ValueError("invalid numbered issue mutation input")
             numbered["issues"][number] = {"state": movement["value"],
                                           "reason": movement.get("stateReason")}

@@ -1462,7 +1462,7 @@ impl Writeback {
         let fresh = self
             .closures_owed
             .lock()
-            .is_ok_and(|mut owed| owed.insert(landing.commit.clone()));
+            .is_ok_and(|mut owed| owed.insert(landing.commit().to_owned()));
         if !fresh {
             return false;
         }
@@ -2082,40 +2082,39 @@ fn closer(
             }
             let within = Deadline::Write {
                 per_item,
-                items: landing.closes.len(),
+                items: landing.issue_count(),
             }
             .within();
             match crate::closures::complete(store, &landing, within) {
+                // llmlint: ignore-block[changed_behavior_has_e2e] unreachable in a run: a run's
+                // launch directory configures at least the source its plan was read from, so the
+                // store a run's closures load always declares one. A landing verb run from a
+                // directory declaring none is where this answer is reached, and
+                // `tests/e2e/closures.rs`'s landing-verb journeys drive it there.
                 crate::closures::Answer::Unconfigured => {
                     eprintln!(
                         "onetaskgraph closures for the landing at {}: no store configuration \
                          declares a source, so nothing was asked about {}",
-                        landing.commit,
-                        landing.closes.join(", ")
+                        landing.commit(),
+                        landing.closes().join(", ")
                     );
                     break None;
                 }
+                // llmlint: ignore-end[changed_behavior_has_e2e]
                 crate::closures::Answer::Finished(record) => break Some(record),
-                crate::closures::Answer::Transient { record, wait } => {
+                crate::closures::Answer::Transient(record) => {
                     failures = failures.saturating_add(1);
                     if failures == 1 {
                         eprintln!(
                             "onetaskgraph closures for the landing at {} failed: {}; retrying, \
                              spacing further attempts out to {} seconds apart while it keeps \
                              failing",
-                            landing.commit,
+                            landing.commit(),
                             record.reason.as_deref().unwrap_or_default(),
                             RETRY_CEILING.as_secs()
                         );
                     }
-                    if let Some(wait) = wait {
-                        AskedWait::record(run_dir, wait);
-                    }
-                    let interval = wait.map_or_else(
-                        || Interval::Scheduled(retry_after(failures)),
-                        Interval::Asked,
-                    );
-                    if !should_retry_after(pending, interval) {
+                    if !should_retry_after(pending, Interval::Scheduled(retry_after(failures))) {
                         return;
                     }
                 }

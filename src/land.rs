@@ -315,9 +315,15 @@ fn unsupervised<T>(
 ) -> (T, Vec<crate::closures::Landing>) {
     let Some(handle) =
         selector.and_then(|selector| onevcs::OperationHandle::prepare(&selector).ok())
+    // llmlint: ignore-block[changed_behavior_has_e2e] reached only where the subjects resolve to
+    // no identity or `onevcs` will not prepare an operation under its own state root — the
+    // first is the verb's own refusal, which `onevcs` then makes in its words, and the second a
+    // state root this process cannot write, where the landing itself fails before it lands.
+    // Either way nothing landed, so there is no issue to close.
     else {
         return (call(None), Vec::new());
     };
+    // llmlint: ignore-end[changed_behavior_has_e2e]
     let out = call(Some(&handle));
     let mut landings = Vec::new();
     if let Ok(mut reader) = onevcs::OperationEvents::open(&handle) {
@@ -336,7 +342,10 @@ fn unsupervised<T>(
 /// Keep the landing one operation record reports, once per landing commit.
 fn gather(landings: &mut Vec<crate::closures::Landing>, envelope: &onevcs::Envelope) {
     if let Some(landing) = crate::closures::Landing::of_operation(envelope) {
-        if !landings.iter().any(|held| held.commit == landing.commit) {
+        if !landings
+            .iter()
+            .any(|held| held.commit() == landing.commit())
+        {
             landings.push(landing);
         }
     }
@@ -375,7 +384,7 @@ fn close_issues(
         let within = std::time::Duration::from_secs(
             crate::cli::DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS
                 .get()
-                .saturating_mul(u64::try_from(landing.closes.len()).unwrap_or(u64::MAX))
+                .saturating_mul(u64::try_from(landing.issue_count()).unwrap_or(u64::MAX))
                 .max(crate::cli::DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS.get()),
         );
         let record = match crate::closures::complete(&store, landing, within) {
@@ -383,13 +392,13 @@ fn close_issues(
                 eprintln!(
                     "onepipeline: no store configuration here declares a source, so no closure \
                      request was made for {}, which the landing at {} closes",
-                    landing.closes.join(", "),
-                    landing.commit
+                    landing.closes().join(", "),
+                    landing.commit()
                 );
                 return;
             }
             crate::closures::Answer::Finished(record)
-            | crate::closures::Answer::Transient { record, .. } => record,
+            | crate::closures::Answer::Transient(record) => record,
         };
         eprintln!("{}", crate::closures::said(&record));
         recorded(&record);
@@ -1632,6 +1641,9 @@ impl Supervision {
 
     /// Hand the store the issues the landings this operation relayed closed, journalling each
     /// call's `landing-closures` record beside the landing's own progress.
+    ///
+    /// Journalled through the landing's own [`Relay::transition`], so the record reaches the
+    /// landing's journal and every associated run's exactly as each of its transitions does.
     fn close_issues(&mut self) {
         let landings = std::mem::take(&mut lock_relay(&self.relay).landings);
         let relay = Arc::clone(&self.relay);
@@ -1639,6 +1651,11 @@ impl Supervision {
             let journalled = crate::journal::object(record).and_then(|payload| {
                 lock_relay(&relay).transition(PipelineKind::LandingClosures, payload)
             });
+            // llmlint: ignore[changed_behavior_has_e2e] the fan-out into associated runs'
+            // journals is `Relay::transition`'s, unchanged, and driven by
+            // `manager_landings::a_landing_from_a_live_run_reaches_that_runs_observer`; a
+            // journal refusing an append is the failpoint `Supervision::register` documents no
+            // journey can stage.
             if let Err(error) = journalled {
                 eprintln!(
                     "onepipeline: the record of the closures of the landing at {} could not be \

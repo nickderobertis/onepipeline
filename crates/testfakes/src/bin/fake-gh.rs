@@ -1193,13 +1193,22 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
 /// `gh.closes`, whitespace-separated, and none where it scripted nothing.
 fn closing_issues(dir: &Path) -> Vec<serde_json::Value> {
     let scripted = read_if_present(&dir.join("gh.closes")).unwrap_or_default();
+    // A login or repository name GitHub could hold: letters, digits, `-`, `_` and `.`.
+    let named = |part: &str| {
+        !part.is_empty()
+            && part
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    };
     scripted
         .split_whitespace()
         .map(|issue| {
             let read = issue.split_once('#').and_then(|(repository, number)| {
-                Some((repository.split_once('/')?, number.parse::<u64>().ok()?))
+                let (owner, name) = repository.split_once('/')?;
+                let number = number.parse::<u64>().ok().filter(|number| *number > 0)?;
+                (named(owner) && named(name)).then_some((owner, name, number))
             });
-            let Some(((owner, name), number)) = read else {
+            let Some((owner, name, number)) = read else {
                 fake::fail(&format!(
                     "gh.closes holds {issue:?}, which is not owner/name#N"
                 ))
