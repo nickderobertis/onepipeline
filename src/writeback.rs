@@ -626,10 +626,10 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
     let decided = |kind: &str| (kind.to_owned(), None);
     match error {
         EngineError::UnknownSource { .. } => decided("unknown-source"),
-        // llmlint: ignore[changed_behavior_has_e2e] reached as an engine error only by a write-back naming its plan's own source, which the launch already read through this configuration; a delivered ticket's incomplete source is classed by the store itself, as `delivers::a_ticket_in_a_source_no_layer_declares_a_plugin_for_is_refused_as_an_incomplete_source` drives, and `writeback::tests` holds the word.
-        EngineError::IncompleteSource { .. } => decided("incomplete-source"),
         EngineError::Token { .. } => decided("page-token"),
         EngineError::NoSources => decided("no-sources"),
+        // llmlint: ignore[changed_behavior_has_e2e] reached only by a write-back whose launch directory's layers stop declaring the plan source's plugin between the launch's read and an attempt; the classification is the store's own word, which `writeback::tests::every_engine_failure_is_named_as_the_store_names_it` holds against `onetaskgraph_core::Failure`.
+        EngineError::IncompleteSource { .. } => decided("incomplete-source"),
         // llmlint: ignore-block[changed_behavior_has_e2e] These store refusals are
         // unreachable from settlement writes: copies use project members, carry no
         // comments, set no expected version, and read immutable local shadow tasks.
@@ -5740,11 +5740,11 @@ mod tests {
                 name: "x".into(),
                 configured: "plans".into(),
             },
+            EngineError::Token { message: words() },
+            EngineError::NoSources,
             EngineError::IncompleteSource {
                 name: onetaskgraph_plugin_api::SourceName::new("plans").expect("a source name"),
             },
-            EngineError::Token { message: words() },
-            EngineError::NoSources,
             EngineError::ExpectOneTask,
             EngineError::NotCached {
                 name: "plans".into(),
@@ -6998,7 +6998,9 @@ mod tests {
             ),
         )
         .expect("the run's store configuration is written");
-        let store = crate::taskgraph::Store::at(fixture.dir.to_path_buf());
+        // Isolated from the host's user layer: a source it declares that cannot be built here
+        // is a source this store holds unavailable, which is the one thing this test counts.
+        let store = crate::taskgraph::Store::isolated(fixture.dir.to_path_buf());
         let mut baseline = super::Baseline::load(
             &fixture.dir,
             &fixture.snapshot.project,

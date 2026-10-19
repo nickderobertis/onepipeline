@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.77.0](https://github.com/nickderobertis/onepipeline/compare/v0.76.0...v0.77.0) - 2026-10-19
+
+### Added
+
+- *(review)* reply on review comments and decline them by replying, from any host ([#935](https://github.com/nickderobertis/onepipeline/pull/935))
+
+### Fixed
+
+- *(deps)* link the harness core that launches Codex with plugins off ([#904](https://github.com/nickderobertis/onepipeline/pull/904))
+- *(driver)* report a detached adoption's refusal on every platform ([#1001](https://github.com/nickderobertis/onepipeline/pull/1001))
+- *(tests)* keep the debuginfo build check within its bound beside the rest of its tier ([#1021](https://github.com/nickderobertis/onepipeline/pull/1021))
+- *(e2e)* publish the GitHub loopback endpoint's URL atomically ([#986](https://github.com/nickderobertis/onepipeline/pull/986))
+- *(e2e)* settle a two-source run within its documented bound on every platform ([#1016](https://github.com/nickderobertis/onepipeline/pull/1016))
+- *(continuation)* never dispatch a node the displaced driver settled ([#1014](https://github.com/nickderobertis/onepipeline/pull/1014))
+- *(scratch)* record a retained dispatch's scratch path as the dispatch was given it on Windows ([#969](https://github.com/nickderobertis/onepipeline/pull/969))
+- *(e2e)* accept a cut-short sweep's record in the maintenance journey and hold the cut with failpoints ([#999](https://github.com/nickderobertis/onepipeline/pull/999))
+- *(readjust)* hold a deferred republication's outstanding check verdict until the views read it ([#1013](https://github.com/nickderobertis/onepipeline/pull/1013))
+
 ## [0.76.0](https://github.com/nickderobertis/onepipeline/compare/v0.75.0...v0.76.0) - 2026-10-18
 
 ### Fixed

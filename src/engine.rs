@@ -1573,6 +1573,11 @@ fn converge(
     // fresh driver reads rather than inherits, and `report_holds` diffs the
     // answer against what the record already says.
     let mut workspaces = crate::pool::Workspaces::new();
+    // The nodes the launch's read could not ask a private source about, seeded from the
+    // record because no driver repeats that read, and re-read on a paced timer until the
+    // source answers.
+    let mut sources =
+        crate::unanswered::SourceHolds::of_run(&state.holds, &launch.dir, &launch.project);
     let mut stacking = StackingPlacement::of(&state.graph);
     // The pool-maintenance schedule the launch named, if it named one: what
     // this driver sweeps on an idle pass, paced in memory and decided on disk by
@@ -1716,6 +1721,28 @@ fn converge(
         let decisions = decisions_now(state, &statuses, &channel);
         report_decisions(paths, journal, &decisions, &mut held)?;
         let mut paused = paused_by(&decisions);
+        // The nodes held for a private source that did not answer, beside the decision
+        // points as a release hold is: a node no longer waiting to start is forgotten, what a
+        // finished re-read answered is taken up against the graph as it stands — so an edit
+        // that gave a node the prerequisite a read found clears it — and the next re-read is
+        // started where one is due. None of it asks the store on this thread.
+        sources.retain(|node| {
+            !in_flight.contains_key(node)
+                && statuses.get(node).is_some_and(|status| {
+                    matches!(
+                        status,
+                        NodeStatus::Pending
+                            | NodeStatus::Ready
+                            | NodeStatus::Blocked
+                            | NodeStatus::CompleteDraft
+                    )
+                })
+        });
+        if sources.take_up(|node| state.graph.get(node).map(|node| node.deps.clone())) {
+            moved = true;
+        }
+        sources.read_again(|| state.graph.iter().cloned().collect());
+        paused.extend(sources.held().keys().cloned());
 
         // The releases this pass cares about: every node ready to start, where a
         // `published` hold applies and where a `fast` node's reference block is
@@ -2040,12 +2067,14 @@ fn converge(
                 &decisions,
                 &awaiting_release,
                 workspaces.held(),
+                sources.held(),
             ),
             &mut holding,
         )?;
         // The record first and the surface second, so a reader holding the
         // surface finds the hold it reports already on the record.
         workspaces.surface_waits(paths, journal)?;
+        sources.surface_waits(paths, journal)?;
 
         if let Some(writeback) = &writeback {
             report_unprojected(paths, journal, writeback)?;
@@ -2180,6 +2209,9 @@ fn converge(
             // A held identity is re-read on a clock as well as on every pass: a
             // session another run closes is not an event this run sees.
             workspaces.next_read(),
+            // And a node held for a source that did not answer, whose answering is
+            // not an event this run sees either.
+            sources.next_read(),
             // The pace at which an idle driver next asks the schedule.
             maintenance.next_due(),
             // And when it next reads who claims its project.
@@ -2975,6 +3007,13 @@ enum HoldReason {
     /// it: `workspace-wait` is the surface beside this, not a record this
     /// restates. Beside the executor's host-wide capacity, never inside it.
     Workspace(crate::pool::WorkspaceHold),
+    /// A source declared private could not be asked what it records of its task, so it
+    /// may have a prerequisite this run cannot see.
+    ///
+    /// The whole account rides the entry — the sources and why each did not answer, and
+    /// any prerequisite a later read found that the graph does not give it — because
+    /// `source-wait` is the surface beside this, not a record this restates.
+    Source(crate::unanswered::SourceHold),
 }
 
 impl HoldReason {
@@ -2991,6 +3030,7 @@ impl HoldReason {
             }
             Self::Release { awaiting } => json!({ "kind": "release", "awaiting": awaiting }),
             Self::Workspace(hold) => hold.payload(),
+            Self::Source(hold) => hold.payload(),
         }
     }
 
@@ -3027,6 +3067,9 @@ impl HoldReason {
             crate::pool::HOLD_KIND => {
                 crate::pool::WorkspaceHold::of_payload(entry).map(Self::Workspace)
             }
+            crate::unanswered::HOLD_KIND => {
+                crate::unanswered::SourceHold::of_payload(entry).map(Self::Source)
+            }
             _ => None,
         }
     }
@@ -3042,6 +3085,7 @@ pub(crate) fn hold_kind(entry: &Value) -> Option<crate::views::HoldKind> {
         HoldReason::Decision { .. } => HoldKind::Decision,
         HoldReason::Release { .. } => HoldKind::Release,
         HoldReason::Workspace(_) => HoldKind::Workspace,
+        HoldReason::Source(_) => HoldKind::Source,
     })
 }
 
@@ -3051,6 +3095,16 @@ pub(crate) fn hold_kind(entry: &Value) -> Option<crate::views::HoldKind> {
 pub(crate) fn workspace_held(entry: &Value) -> Option<crate::pool::WorkspaceHold> {
     match HoldReason::of_payload(entry)? {
         HoldReason::Workspace(hold) => Some(hold),
+        _ => None,
+    }
+}
+
+/// The source hold one `node-held` entry carries, read by the same reader a driver
+/// restores its holds with: `None` for an entry that is not one, and for one this build
+/// cannot read whole.
+pub(crate) fn source_held(entry: &Value) -> Option<crate::unanswered::SourceHold> {
+    match HoldReason::of_payload(entry)? {
+        HoldReason::Source(hold) => Some(hold),
         _ => None,
     }
 }
@@ -3088,6 +3142,7 @@ fn holds_now(
     decisions: &BTreeMap<DecisionRef, Decision>,
     awaiting_release: &BTreeMap<String, Vec<String>>,
     awaiting_workspace: &BTreeMap<String, crate::pool::WorkspaceHold>,
+    awaiting_source: &BTreeMap<String, crate::unanswered::SourceHold>,
 ) -> BTreeMap<String, Vec<HoldReason>> {
     let concurrency = state.graph.concurrency as usize;
     let ahead: Vec<String> = in_flight.keys().cloned().collect();
@@ -3143,6 +3198,9 @@ fn holds_now(
         }
         if let Some(hold) = awaiting_workspace.get(&node.id) {
             reasons.push(HoldReason::Workspace(hold.clone()));
+        }
+        if let Some(hold) = awaiting_source.get(&node.id) {
+            reasons.push(HoldReason::Source(hold.clone()));
         }
         if !reasons.is_empty() {
             holds.insert(node.id.clone(), reasons);
@@ -13246,6 +13304,7 @@ mod tests {
             &decisions,
             &awaiting,
             &held_workspace,
+            &BTreeMap::new(),
         );
 
         // The node in flight is what the loop *is* running, and the human action
@@ -13303,6 +13362,7 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
+            &BTreeMap::new(),
         );
         assert_eq!(
             holds.get("ship"),
@@ -13322,6 +13382,7 @@ mod tests {
             holds_now(
                 &state,
                 &statuses,
+                &BTreeMap::new(),
                 &BTreeMap::new(),
                 &BTreeMap::new(),
                 &BTreeMap::new(),

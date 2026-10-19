@@ -1072,13 +1072,13 @@ onevcs-testing = "0.19.11"
 # `a_create_the_destination_stored_and_answered_malformed_names_the_destination_and_its_residue`
 # drives it. The variant is new, so a lower pin does not compile.
 #
-# **0.7.3 is the release named as carrying that fix**, and it moves two shapes this
-# crate names. A dependency read now says what it owes when a source declared
-# private cannot be asked: `src/taskgraph.rs` asks `Completeness::Required`, because a
-# plan short of one source's edges is a graph a launch would run wrong. A layer may now
-# refine a source no layer declares a plugin for, refused as
-# `EngineError::IncompleteSource`, which write-back names `incomplete-source` as the
-# store does. Both are new, so a lower pin does not compile.
+# **0.7.3 is the floor**, and the release named as carrying that fix. It leaves a source
+# a layer refines but no layer defines unconfigured rather than failing every load, so a
+# host's user layer may route to sources only one checkout defines, and names a ticket in
+# such a source `EngineError::IncompleteSource`, which write-back names
+# `incomplete-source` as the store does. It answers a dependency read a private source
+# cannot without failing it: `src/taskgraph.rs` asks `Completeness::NamingUnasked` and
+# holds each node the read could not ask about. `tests/e2e/store.rs` drives both.
 onetaskgraph-core = "=0.7.3"
 onetaskgraph-plugin-api = "=0.7.3"
 onetaskgraph-local-md = "=0.7.3"
@@ -1098,7 +1098,7 @@ windows-sys = "0.61"
 
 [package]
 name = "onepipeline"
-version = "0.76.0"
+version = "0.77.0"
 edition = "2021"
 rust-version.workspace = true
 description = "Execute a task DAG over oneagentgraph and onevcs, merging their event streams into one."

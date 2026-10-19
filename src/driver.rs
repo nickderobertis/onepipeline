@@ -1539,6 +1539,10 @@ fn start(args: &StartArgs) -> Result<i32> {
     if args.fresh {
         crate::continuation::refuse_fresh_over_unlanded(project.as_str(), &read)?;
     }
+    let source_holds = crate::unanswered::launched(&plan, &read.unanswered);
+    if let Some(notice) = crate::unanswered::notice(&source_holds) {
+        eprintln!("{notice}");
+    }
     let holdings = concurrency::holders(&plan)?;
     let holders = &holdings.holders;
     // Every stale holder the sibling still has anybody to answer for. Since
@@ -1790,6 +1794,17 @@ fn start(args: &StartArgs) -> Result<i32> {
             (journal::OWED_UNTIL_CLOSED, json!(true)),
         ]),
     )?;
+    // Each node the read could not ask a private source about is held from the run's first
+    // records, before anything could dispatch it: the driver takes the holds up from here,
+    // because no driver repeats this read, and lifts each once a read of its edges asks
+    // every source.
+    for (node, hold) in &source_holds {
+        open.emit(
+            journal::PipelineKind::NodeHeld,
+            journal::labels(&run, Some(node)),
+            journal::payload(&[("reasons", json!([hold.payload()]))]),
+        )?;
+    }
     // The claim this launch passed, before anything this run does: the run it names stops
     // at its next check, and this driver's own check reads past it until its first
     // projection replaces it.

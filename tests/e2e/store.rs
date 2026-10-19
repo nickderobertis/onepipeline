@@ -431,6 +431,553 @@ fn a_sources_credential_is_read_from_the_engines_environment_or_its_secrets_file
     );
 }
 
+/// A host's user layer refining a source no layer read here defines leaves that source
+/// unconfigured, and every plan of the sources that are configured still loads.
+///
+/// The shape a host keeps an organization's routing in: its user layer carries only the
+/// `routes` of a source whose `plugin` one checkout's tracked `onetaskgraph.yaml` declares.
+/// Anywhere else nothing declares it, and the store reads that entry as a refinement with
+/// nothing to refine — so `plan check` and `start` of a project in this world's own source
+/// go ahead, and only a project id naming the refined source is refused, saying it is not
+/// configured here.
+#[test]
+fn a_user_layer_refining_a_source_no_layer_defines_leaves_it_unconfigured_and_plans_load() {
+    let world = World::new("store-refined-undefined");
+    let layer = world
+        .root
+        .join("xdg")
+        .join("onetaskgraph")
+        .join("config.yaml");
+    std::fs::create_dir_all(layer.parent().expect("a directory")).expect("the user layer's home");
+    std::fs::write(
+        &layer,
+        format!(
+            "sources:\n  partner:\n    routes:\n      - repositories: [\"github.com/example-org/*\"]\n        \
+             to: {}\n",
+            crate::harness::STORE_SOURCE
+        ),
+    )
+    .expect("a user layer refining a source it does not declare");
+    let name = "refined";
+    let project = world.plan(
+        name,
+        &plan_of(
+            name,
+            vec![agent("design", &[]), agent("build", &["design"])],
+        ),
+    );
+
+    world.run(&["plan", "check", &project]).exited(0);
+    world
+        .run(&["plan", "check", "partner:board"])
+        .exited(REFUSED)
+        .err_has("source \"partner\" is not configured here")
+        .err_has("no configuration layer declares its plugin");
+
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the run to settle", |world| {
+        world.run_file(name, "result.json").is_file()
+    });
+    assert_eq!(
+        world.run_json(name, "result.json")["state"],
+        "complete",
+        "the plan read beside the refined source did not run to completion"
+    );
+}
+
+/// A plan whose tasks are all in a public source loads while a source declared private
+/// cannot be authenticated, and no node is dispatched as if that source held no prerequisite
+/// of it: each is held under `source`, naming the source and why it did not answer, until a
+/// read of its edges asks every source — and then the run goes on with no relaunch.
+///
+/// The private source is a real `scripted-source` serving an empty folder through the real
+/// `local-md` plugin, declared `visibility: private`, answering every task query with the
+/// authentication failure a hosted tracker answers a reader without its credential with.
+/// The store asks it what it records of each public task, so every node's read names it.
+///
+/// While the holds stand: an unchanged wait is surfaced again on its cadence; a held node an
+/// edit drops holds nothing and is surfaced no more; a re-read the store fails outright is
+/// said on the driver's log and leaves every hold standing; and a driver stopped and adopted
+/// takes the holds up from the record rather than dispatching what the launch held.
+#[test]
+fn a_private_source_that_cannot_authenticate_holds_each_node_until_it_answers() {
+    let world = with_private_vault(World::new("store-private-unanswered"))
+        .with_env("ONEPIPELINE_RELEASE_SURFACE_SECONDS", "1");
+    let refusal = "vault.query_tasks.refuse";
+    world.script(
+        refusal,
+        &json!({"kind": "auth", "message": "VAULT_TOKEN is missing or empty"}).to_string(),
+    );
+    let name = "unanswered";
+    let project = world.plan(
+        name,
+        &plan_of(
+            name,
+            vec![
+                agent("design", &[]),
+                agent("build", &["design"]),
+                agent("spare", &[]),
+            ],
+        ),
+    );
+
+    world
+        .run(&["plan", "check", &project])
+        .exited(0)
+        .err_has("source 'vault', declared private, could not be asked")
+        .err_has("VAULT_TOKEN is missing or empty")
+        .err_has("'build', 'design', 'spare'");
+
+    world
+        .run(&["start", &project, "--detach"])
+        .exited(0)
+        .err_has("source 'vault', declared private");
+    world.until("the held design node's wait to be surfaced", |world| {
+        world
+            .events_of(name, "planner-surface-queued")
+            .iter()
+            .any(|event| {
+                event["payload"]["kind"] == "source-wait"
+                    && event["labels"]["node"] == "design"
+                    && event["payload"]["message"]
+                        .as_str()
+                        .is_some_and(|said| said.contains("source 'vault'"))
+            })
+    });
+    // Read again on its pace, and held across every read while the source refuses.
+    let vault_asked = |world: &World| {
+        world
+            .invocations()
+            .iter()
+            .filter(|call| call["tool"] == "vault" && call["args"][0] == "query_tasks")
+            .count()
+    };
+    let asked = vault_asked(&world);
+    world.until("the held nodes' edges to be read again twice", |world| {
+        vault_asked(world) >= asked + 4
+    });
+    assert!(
+        world.events_of(name, "node-dispatched").is_empty(),
+        "a node was dispatched while the private source could not be asked about it"
+    );
+    let held = world.events_of(name, "node-held");
+    assert!(
+        held.iter().any(|event| {
+            event["labels"]["node"] == "design"
+                && event["payload"]["reasons"]
+                    .as_array()
+                    .is_some_and(|reasons| {
+                        reasons.iter().any(|reason| {
+                            reason["kind"] == "source"
+                                && reason["unanswered"][0]["source"] == "vault"
+                        })
+                    })
+        }),
+        "design was not held naming the source: {held:?}"
+    );
+    world
+        .run(&["status", name])
+        .exited(0)
+        .out_has("design: held — source 'vault', declared private");
+
+    // An unchanged wait is said again on the release wait's cadence, once the planner has
+    // read the last one.
+    let waits = |world: &World, node: &str| {
+        world
+            .events_of(name, "planner-surface-queued")
+            .into_iter()
+            .filter(|event| {
+                event["payload"]["kind"] == "source-wait" && event["labels"]["node"] == node
+            })
+            .count()
+    };
+    world.until("design's unchanged wait to be surfaced again", |world| {
+        world.run(&["next", name]);
+        waits(world, "design") >= 2
+    });
+
+    // A held node an edit drops holds nothing, and its wait is not said again.
+    world
+        .run_with_stdin(
+            &["reply", name],
+            &json!({
+                "version": 2,
+                "commands": [{"op": "drop", "id": "spare", "dependents": "detach"}]
+            })
+            .to_string(),
+        )
+        .exited(0)
+        .out_has("\"applied\"");
+    world.until("the dropped node's hold to clear", |world| {
+        world
+            .events_of(name, "node-unheld")
+            .iter()
+            .any(|event| event["labels"]["node"] == "spare")
+    });
+    let spare_waits = waits(&world, "spare");
+
+    // A read the store fails outright says so and changes no hold.
+    world.script(
+        refusal,
+        &json!({"kind": "refused", "message": "the vault refused this read"}).to_string(),
+    );
+    world.until("the failed re-read to be said", |world| {
+        std::fs::read_to_string(world.run_file(name, "driver.log")).is_ok_and(|log| {
+            log.contains("cannot read again the dependencies")
+                && log.contains("the vault refused this read")
+        })
+    });
+    assert!(
+        world.events_of(name, "node-dispatched").is_empty(),
+        "a node was dispatched on a read the store failed"
+    );
+
+    // A driver stopped and adopted holds what the record says is held.
+    world.script(
+        refusal,
+        &json!({"kind": "auth", "message": "VAULT_TOKEN is missing or empty"}).to_string(),
+    );
+    world.run(&["stop", name]).exited(0);
+    world.run(&["adopt", name, "--detach"]).exited(0);
+    let asked = vault_asked(&world);
+    world.until("the adopted driver to read the held edges again", |world| {
+        vault_asked(world) >= asked + 4
+    });
+    assert!(
+        world.events_of(name, "node-dispatched").is_empty(),
+        "the adopted driver dispatched a node the launch held"
+    );
+    assert_eq!(
+        waits(&world, "spare"),
+        spare_waits,
+        "the dropped node's wait was said again"
+    );
+
+    // The credential arrives: the next read asks every source, the holds lift, and the run
+    // completes in the order its edges give.
+    world.unscript(refusal);
+    world.until("the run to settle", |world| {
+        world.run_file(name, "result.json").is_file()
+    });
+    let result = world.run_json(name, "result.json");
+    assert_eq!(result["state"], "complete", "{result}");
+    let dispatched: Vec<String> = world
+        .events_of(name, "node-dispatched")
+        .into_iter()
+        .filter_map(|event| event["labels"]["node"].as_str().map(ToOwned::to_owned))
+        .collect();
+    assert_eq!(dispatched, ["design", "build"]);
+    assert!(
+        world
+            .events_of(name, "node-unheld")
+            .iter()
+            .any(|event| event["labels"]["node"] == "design"),
+        "design's hold never cleared on the record"
+    );
+}
+
+/// A held node the private source, once it answers, records a prerequisite of that the run's
+/// graph does not give it stays held, naming that prerequisite — and is dispatched once an
+/// edit gives it the edge, after the prerequisite.
+///
+/// The private source's own task is a copy of the plan's `review` node — it carries that
+/// node id — and records `build` as depending on it, which is how a private task holds its
+/// edges into a public source. Nothing in the public source draws that edge, so a dispatch
+/// on the edges it holds would start `build` before `review`.
+#[test]
+fn a_prerequisite_the_private_source_records_holds_its_node_until_the_graph_has_it() {
+    let world = with_private_vault(World::new("store-private-prerequisite"));
+    world.script("review.wait", "hold");
+    let refusal = "vault.query_tasks.refuse";
+    world.script(
+        refusal,
+        &json!({"kind": "auth", "message": "VAULT_TOKEN is missing or empty"}).to_string(),
+    );
+    let name = "prerequisite";
+    let project = world.plan(
+        name,
+        &plan_of(
+            name,
+            vec![
+                agent("design", &[]),
+                agent("review", &[]),
+                agent("build", &["design"]),
+            ],
+        ),
+    );
+    let build = world
+        .store_tasks(&project)
+        .into_iter()
+        .find(|task| task["item"]["metadata"]["onepipeline.id"] == "build")
+        .and_then(|task| task["id"].as_str().map(ToOwned::to_owned))
+        .expect("the build task's qualified id");
+    world.write_item(
+        &world
+            .root
+            .join("vault")
+            .join("tasks")
+            .join("copy-of-review.md"),
+        &[
+            ("title", json!("chore: review, kept privately")),
+            (
+                "metadata",
+                json!({
+                    "onepipeline.id": "review",
+                    "onetaskgraph.depended_on_by": {build.as_str(): {"id": build, "kind": "task"}},
+                }),
+            ),
+        ],
+        "",
+    );
+
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("build to be held", |world| {
+        held_for_source(world, name, "build").is_some()
+    });
+    // A watch that runs out says what holds each node, in the hold's own word.
+    let watched = world.run(&[
+        "watch",
+        name,
+        "--until",
+        "node=build",
+        "--timeout",
+        "3",
+        "--tick-interval",
+        "1",
+    ]);
+    watched
+        .exited(crate::harness::WATCH_ELAPSED)
+        .err_has("design on source")
+        .out_has("\"reason\":\"source\"");
+    // The source answers: what it records is read, and `build` is held for it while the
+    // nodes it does not hold anything of start.
+    world.unscript(refusal);
+    world.until(
+        "build to be held for the prerequisite the store records",
+        |world| {
+            held_for_source(world, name, "build")
+                .is_some_and(|reason| reason["missing"] == json!(["review"]))
+        },
+    );
+    world.until("design to settle", |world| {
+        world
+            .events_of(name, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "design")
+    });
+    assert!(
+        dispatched(&world, name).iter().all(|node| node != "build"),
+        "build was dispatched without the prerequisite the private source records"
+    );
+    world.until("build's wait to name the prerequisite", |world| {
+        world
+            .events_of(name, "planner-surface-queued")
+            .iter()
+            .any(|event| {
+                event["payload"]["kind"] == "source-wait"
+                    && event["labels"]["node"] == "build"
+                    && event["payload"]["message"]
+                        .as_str()
+                        .is_some_and(|said| said.contains("depending on 'review'"))
+            })
+    });
+
+    // The planner gives build the edge: the next read finds nothing missing, and build
+    // starts once review has settled.
+    world
+        .run_with_stdin(
+            &["reply", name],
+            &json!({
+                "version": 2,
+                "commands": [{"op": "reparent", "id": "build", "deps": ["design", "review"]}]
+            })
+            .to_string(),
+        )
+        .exited(0)
+        .out_has("\"applied\"");
+    // Still held by `review` itself, which has not settled, and no longer by the source.
+    world.until("build's source hold to clear", |world| {
+        held_for_source(world, name, "build").is_none()
+    });
+    world.release("review.go");
+    world.until("the run to settle", |world| {
+        world.run_file(name, "result.json").is_file()
+    });
+    assert_eq!(world.run_json(name, "result.json")["state"], "complete");
+    let journal = world.journal(name);
+    let at = |kind: &str, node: &str| {
+        journal
+            .iter()
+            .position(|event| event["kind"] == kind && event["labels"]["node"] == node)
+    };
+    let (settled, started) = (at("node-settled", "review"), at("node-dispatched", "build"));
+    assert!(
+        settled.is_some() && started > settled,
+        "build did not wait for the prerequisite the private source records: review settled \
+         at {settled:?}, build dispatched at {started:?}"
+    );
+}
+
+/// A private source slow to answer a re-read holds nothing else up: the re-read runs off the
+/// driver's loop, so an edit the planner sends while it is held open is applied, and the
+/// held node dispatches once the read answers.
+#[test]
+fn a_reread_the_private_source_is_slow_to_answer_leaves_the_driver_answering() {
+    let world = with_private_vault(World::new("store-private-slow"));
+    let refusal = "vault.query_tasks.refuse";
+    world.script(
+        refusal,
+        &json!({"kind": "auth", "message": "VAULT_TOKEN is missing or empty"}).to_string(),
+    );
+    let name = "slow";
+    let project = world.plan(
+        name,
+        &plan_of(name, vec![agent("design", &[]), agent("spare", &[])]),
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("both nodes to be held", |world| {
+        held_for_source(world, name, "design").is_some()
+            && held_for_source(world, name, "spare").is_some()
+    });
+
+    // The source answers, slowly: the next re-read is held inside its first task query.
+    let slow = world.rendezvous("vault.query_tasks");
+    world.unscript(refusal);
+    let inside = slow.arrived();
+    world.unscript("vault.query_tasks.rendezvous");
+    world
+        .run_with_stdin(
+            &["reply", name],
+            &json!({
+                "version": 2,
+                "commands": [{"op": "drop", "id": "spare", "dependents": "detach"}]
+            })
+            .to_string(),
+        )
+        .exited(0)
+        .out_has("\"applied\"");
+    world.until("the drop to be taken up while the read is held", |world| {
+        world
+            .events_of(name, "node-unheld")
+            .iter()
+            .any(|event| event["labels"]["node"] == "spare")
+    });
+    assert!(
+        world.events_of(name, "node-dispatched").is_empty(),
+        "a node was dispatched while its re-read was still under way"
+    );
+
+    inside.release();
+    world.until("the run to settle", |world| {
+        world.run_file(name, "result.json").is_file()
+    });
+    assert_eq!(world.run_json(name, "result.json")["state"], "complete");
+    assert_eq!(dispatched(&world, name), ["design"]);
+}
+
+/// A node whose dependency read walks several pages, while two sources declared private
+/// refuse it, is held naming each of them once, in name order rather than the order the
+/// store reported them in.
+///
+/// The store's page size is turned down to one, so the edges of `build` — two of them —
+/// really are read a page at a time.
+#[test]
+fn a_dependency_read_across_pages_names_each_unanswering_private_source_once_in_name_order() {
+    let world = with_private_source(
+        with_private_source(World::new("store-private-paged"), "vault"),
+        "archive",
+    )
+    .with_env("ONETASKGRAPH_PAGE_SIZE", "1");
+    for source in ["vault", "archive"] {
+        world.script(
+            &format!("{source}.query_tasks.refuse"),
+            &json!({"kind": "auth", "message": format!("{source} credential is missing")})
+                .to_string(),
+        );
+    }
+    let name = "paged-unanswered";
+    let project = world.plan(
+        name,
+        &plan_of(
+            name,
+            vec![
+                agent("design", &[]),
+                agent("review", &[]),
+                agent("build", &["design", "review"]),
+            ],
+        ),
+    );
+
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("build to be held under its sources", |world| {
+        held_for_source(world, name, "build").is_some()
+    });
+    let held = held_for_source(&world, name, "build").expect("build is held");
+    let sources: Vec<&str> = held["unanswered"]
+        .as_array()
+        .expect("a source hold names what did not answer")
+        .iter()
+        .filter_map(|source| source["source"].as_str())
+        .collect();
+    assert_eq!(sources, ["archive", "vault"], "{held}");
+    assert!(
+        world.events_of(name, "node-dispatched").is_empty(),
+        "a node was dispatched while the private sources could not be asked about it"
+    );
+    world.run(&["stop", name]).exited(0);
+}
+
+/// This world, with a second source `vault`: a real `scripted-source` serving its own
+/// folder of Markdown through `local-md`, declared `visibility: private`, and every held
+/// node's edges read again each second.
+fn with_private_vault(world: World) -> World {
+    with_private_source(world, "vault").with_env("ONEPIPELINE_SOURCE_POLL_SECONDS", "1")
+}
+
+/// This world, with a source `name` declared `visibility: private`: a real
+/// `scripted-source` serving its own folder through `local-md`, scripted under `name`.
+fn with_private_source(world: World, name: &str) -> World {
+    let root = world.root.join(name);
+    std::fs::create_dir_all(&root).expect("the private source's folder");
+    let fakes = world.fakes.display().to_string();
+    let prefix = format!("ONETASKGRAPH_SOURCES__{}", name.to_uppercase());
+    world
+        .with_env(&format!("{prefix}__PLUGIN"), "subprocess")
+        .with_env(&format!("{prefix}__VISIBILITY"), "private")
+        .with_env(
+            &format!("{prefix}__CONFIG__COMMAND"),
+            &double("scripted-source").display().to_string(),
+        )
+        .with_env(
+            &format!("{prefix}__CONFIG__SETTINGS__ROOT"),
+            &root.display().to_string(),
+        )
+        .with_env(&format!("{prefix}__CONFIG__SETTINGS__SCRIPT"), &fakes)
+        .with_env(&format!("{prefix}__CONFIG__SETTINGS__KEY"), name)
+}
+
+/// The `source` reason `node` of `run` is held under now, on the run's own record.
+fn held_for_source(world: &World, run: &str, node: &str) -> Option<Value> {
+    let mut held = None;
+    for event in world
+        .journal(run)
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == node)
+    {
+        match event["kind"].as_str() {
+            Some("node-held") => {
+                held = event["payload"]["reasons"]
+                    .as_array()
+                    .and_then(|reasons| reasons.iter().find(|reason| reason["kind"] == "source"))
+                    .cloned();
+            }
+            Some("node-unheld" | "node-dispatched") => held = None,
+            _ => {}
+        }
+    }
+    held
+}
+
 /// Write-back owns exactly what the plan document declares, and preserves everything the
 /// plan does not model. Drive that rule through the installed CLI and a real local-md
 /// store: a settlement must arrive without renaming the project, without changing a
@@ -3644,76 +4191,6 @@ fn a_launch_whose_dependency_query_came_back_partial_is_refused_naming_the_query
         "the two pages were not one task's dependencies: {asked:?}"
     );
     refused_before_dispatch(&world, "partial");
-}
-
-/// A launch whose task's dependencies a source declared private could not be asked about is
-/// refused before anything is dispatched, naming that source's failure.
-///
-/// A source declared private records the edges its tasks draw onto tasks elsewhere, so a
-/// task's dependency read asks it as well as the task's own source. Here it could not be
-/// reached: the store would answer every other edge and name that source as unasked, and a
-/// launch that took that answer would run a node before a prerequisite only the private
-/// source holds. The plan read asks for every source's part, so the read fails instead.
-#[test]
-fn a_launch_whose_private_recording_source_could_not_be_asked_is_refused_naming_it() {
-    const RECORDER: &str = "recorder";
-    let world = World::new("store-private-recorder");
-    let root = world.root.join("recorder-store");
-    std::fs::create_dir_all(&root).expect("the recorder's root");
-    let prefix = format!("ONETASKGRAPH_SOURCES__{}", RECORDER.to_uppercase());
-    let script = world.fakes.to_string_lossy().into_owned();
-    let world = world
-        .with_env(&format!("{prefix}__PLUGIN"), "subprocess")
-        .with_env(
-            &format!("{prefix}__CONFIG__COMMAND"),
-            &double("scripted-source").to_string_lossy(),
-        )
-        .with_env(
-            &format!("{prefix}__CONFIG__SETTINGS__ROOT"),
-            &root.to_string_lossy(),
-        )
-        .with_env(&format!("{prefix}__CONFIG__SETTINGS__SCRIPT"), &script)
-        .with_env(&format!("{prefix}__CONFIG__SETTINGS__KEY"), RECORDER)
-        .with_env(&format!("{prefix}__VISIBILITY"), "private");
-    let project = world.plan(
-        "private-recorder",
-        &plan_of(
-            "private-recorder",
-            vec![agent("first", &["second"]), agent("second", &[])],
-        ),
-    );
-    world.script(
-        &format!("{RECORDER}.query_tasks.refuse"),
-        &source_unreachable().to_string(),
-    );
-
-    world
-        .run(&["start", &project, "--detach"])
-        .exited(REFUSED)
-        .err_has(RECORDER)
-        .err_has(UNREACHABLE);
-    let asked: Vec<Value> = world
-        .invocations()
-        .into_iter()
-        .filter(|call| call["tool"] == RECORDER && call["args"][0] == "query_tasks")
-        .collect();
-    assert!(
-        !asked.is_empty(),
-        "the private source was never asked, so its failure refused nothing"
-    );
-    assert!(
-        !world.runs.join("private-recorder").exists(),
-        "a launch whose plan could not be read left a run behind"
-    );
-    let dispatched: Vec<Value> = world
-        .invocations()
-        .into_iter()
-        .filter(|call| call["tool"] != crate::harness::SCRIPTED_KEY && call["tool"] != RECORDER)
-        .collect();
-    assert!(
-        dispatched.is_empty(),
-        "a launch whose plan could not be read dispatched work: {dispatched:?}"
-    );
 }
 
 /// A refused launch left nothing behind: no run, and no dispatch of any node.
