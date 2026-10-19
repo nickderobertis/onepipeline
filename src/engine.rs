@@ -6777,7 +6777,8 @@ impl ValidatedNote {
             .live()
             .and_then(|live| live.deadline)
             .map(|deadline| {
-                offered_at.saturating_add(u64::try_from(deadline.as_millis()).unwrap_or(u64::MAX))
+                let bounded = crate::note::bounded_deadline(deadline, offered_at);
+                offered_at.saturating_add(u64::try_from(bounded.as_millis()).unwrap_or(u64::MAX))
             })
     }
 }
@@ -6983,9 +6984,13 @@ pub(crate) fn deliver_manager_note(validated: &ValidatedNote) -> Result<Vec<edit
     // conversation to make it to is the one that validation resolved. So the
     // whole of what is left here is what that conversation says. A deadline is
     // measured from the offer, so it is fixed before the note is offered.
-    // Bounded at the envelope by `MAX_DELIVERY_TIMEOUT_SECONDS`, so the instant
-    // always forms.
-    let until = deadline.map(|deadline| Instant::now() + deadline);
+    let offered_at = sys::now_millis();
+    let until = deadline.map(|deadline| {
+        crate::note::deadline_instant(
+            Instant::now(),
+            crate::note::bounded_deadline(deadline, offered_at),
+        )
+    });
     let offer = match agentgraph::offer_note(address, composed) {
         Ok(offer) => offer,
         Err(why) => return untaken(&why.to_string(), None),

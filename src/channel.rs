@@ -647,9 +647,10 @@ pub enum Command {
         /// reached no running turn, and `false` refuses it, naming the deadline.
         /// That holds for a `live` note whose turn could not be interrupted as
         /// much as for a `turn-end` one. Refused at the envelope when it is `0`,
-        /// which no note can meet; past thirty days (2592000), the longest a
-        /// note may wait on a deadline; and beside `deliver: next`, which waits
-        /// on no turn for it to bound.
+        /// which no note can meet, and beside `deliver: next`, which waits on no
+        /// turn for it to bound. Every other value is accepted; one past the
+        /// latest instant the run can name — `9999-12-31T23:59:59.999Z`, or the
+        /// host clock's own limit — waits until that instant.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         delivery_timeout_seconds: Option<u64>,
     },

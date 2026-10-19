@@ -5158,10 +5158,6 @@ fn a_note_the_envelope_cannot_carry_is_refused_at_the_wire_and_nothing_is_queued
             "`deliver: next` waits on none",
         ),
         (
-            timed_note("build", NOTE, "turn-end", true, u64::MAX),
-            "past the longest a note may wait",
-        ),
-        (
             json!({"op": "note", "id": "build", "addressee": "worker", "text": NOTE,
                    "deliver": "turn_end"}),
             "unknown variant `turn_end`",
@@ -5771,7 +5767,8 @@ fn status_shows_a_pending_notes_deadline_beside_its_delivering_state() {
     let timed = submitted(
         &world,
         run,
-        &envelope(timed_note("build", BUILD_NOTE, "turn-end", true, 600)),
+        // The largest deadline the field carries: accepted, and still shown as one.
+        &envelope(timed_note("build", BUILD_NOTE, "turn-end", true, u64::MAX)),
     );
     let untimed = submitted(
         &world,
@@ -5813,6 +5810,10 @@ fn status_shows_a_pending_notes_deadline_beside_its_delivering_state() {
         .as_str()
         .map(str::to_owned)
         .unwrap_or_else(|| panic!("the timed note's reading carries no deadline: {reading}"));
+    assert_eq!(
+        deadline, "9999-12-31T23:59:59.999Z",
+        "the largest deadline is not held at the latest instant the run can name"
+    );
     let timed_line = line(&status.stdout, timed_id).expect("the timed note's line");
     assert!(
         timed_line.contains("delivering a live note to build since ")

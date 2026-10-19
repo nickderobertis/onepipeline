@@ -485,10 +485,6 @@ mod tests {
             reason,
             crate::note::expired(std::time::Duration::from_secs(2))
         );
-        assert_eq!(
-            block["max_delivery_timeout_seconds"],
-            serde_json::json!(crate::note::MAX_DELIVERY_TIMEOUT_SECONDS)
-        );
     }
 
     /// A commit whose operations this build cannot read is refused by name when a
@@ -524,6 +520,43 @@ mod tests {
             "the refusal does not name the record: {said}"
         );
         assert!(readable(&[unreadable]).is_empty());
+    }
+
+    /// A deadline the clock can name is that instant; the largest a note may
+    /// carry still forms one — the furthest the clock can name — without the
+    /// overflow panicking, and never earlier than one it could name.
+    #[test]
+    fn every_accepted_deadline_forms_an_instant_without_overflow() {
+        // The latest instant the run names is the latest RFC 3339 writes, and
+        // reads back; a deadline past it is held there.
+        assert_eq!(
+            crate::sys::rfc3339_from_millis(crate::note::LATEST_NAMEABLE_MILLIS),
+            "9999-12-31T23:59:59.999Z"
+        );
+        assert_eq!(
+            crate::projection::millis_of("9999-12-31T23:59:59.999Z"),
+            Some(crate::note::LATEST_NAMEABLE_MILLIS)
+        );
+        let at = crate::sys::now_millis();
+        assert_eq!(
+            at + u64::try_from(
+                crate::note::bounded_deadline(std::time::Duration::from_secs(u64::MAX), at)
+                    .as_millis()
+            )
+            .expect("bounded"),
+            crate::note::LATEST_NAMEABLE_MILLIS
+        );
+        assert_eq!(
+            crate::note::bounded_deadline(std::time::Duration::from_secs(2), at),
+            std::time::Duration::from_secs(2)
+        );
+        use std::time::{Duration, Instant};
+        let now = Instant::now();
+        let near = Duration::from_secs(2);
+        assert_eq!(crate::note::deadline_instant(now, near), now + near);
+        let furthest = crate::note::deadline_instant(now, Duration::from_secs(u64::MAX));
+        assert!(furthest >= now + Duration::from_secs(365 * 24 * 60 * 60));
+        assert!(furthest.checked_add(Duration::from_secs(2)).is_none());
     }
 
     /// Carried notes accumulate on a node's context, and withdrawing one takes

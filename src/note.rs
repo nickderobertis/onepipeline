@@ -455,7 +455,8 @@ impl Reach {
 ///
 /// Decided at the envelope, by [`Reach::of`]: a deadline of `0` is one no note
 /// can meet, and one beside `deliver: next` bounds a wait that note never makes,
-/// so neither reaches a run at all.
+/// so neither reaches a run at all. Every other value is accepted, however large
+/// — see [`deadline_instant`] for one past what the clock can name.
 ///
 /// # Errors
 ///
@@ -467,13 +468,6 @@ fn deadline_of(
 ) -> Result<Option<std::time::Duration>> {
     match (seconds, deliver) {
         (None, _) => Ok(None),
-        (Some(seconds), _) if seconds > MAX_DELIVERY_TIMEOUT_SECONDS => {
-            Err(Error::Refused(format!(
-                "note: node '{node}': `delivery_timeout_seconds` is {seconds}, past the longest \
-                 a note may wait, {MAX_DELIVERY_TIMEOUT_SECONDS} (thirty days); omit it to wait \
-                 for as long as the dispatch runs"
-            )))
-        }
         (Some(0), _) => Err(Error::Refused(format!(
             "note: node '{node}': `delivery_timeout_seconds` is 0, which no turn can meet; \
              omit it to wait for as long as the dispatch runs, or give at least one second"
@@ -489,10 +483,54 @@ fn deadline_of(
     }
 }
 
-/// The longest `delivery_timeout_seconds` a note may carry: thirty days. Bounded
-/// so the deadline is always an instant this host's clock can name; a note that
-/// should wait longer waits for as long as its dispatch runs, by omitting it.
-pub(crate) const MAX_DELIVERY_TIMEOUT_SECONDS: u64 = 30 * 24 * 60 * 60;
+/// The latest instant this run can name, in epoch milliseconds:
+/// `9999-12-31T23:59:59.999Z`, past which RFC 3339 — what `status` and the
+/// live-delivery reading write a deadline as — has no year to write.
+pub(crate) const LATEST_NAMEABLE_MILLIS: u64 = 253_402_300_799_999;
+
+/// How long a note offered at `offered_at`, in epoch milliseconds, waits under a
+/// `delivery_timeout_seconds` of `deadline`: that long, or — for one that would
+/// run past the latest instant this run can name — until that instant.
+///
+/// Every positive value is accepted, so this is what keeps the wait the run
+/// performs and the deadline it reports one instant: bounded either way, never
+/// an unbounded wait, and never a deadline the run's own reading cannot read
+/// back.
+pub(crate) fn bounded_deadline(
+    deadline: std::time::Duration,
+    offered_at: u64,
+) -> std::time::Duration {
+    deadline.min(std::time::Duration::from_millis(
+        LATEST_NAMEABLE_MILLIS.saturating_sub(offered_at),
+    ))
+}
+
+/// The instant a deadline of `deadline` from `from` falls at, or — where this
+/// host's monotonic clock cannot name one that far ahead — the furthest instant it
+/// can name.
+///
+/// Every positive `delivery_timeout_seconds` is a deadline the envelope accepts,
+/// and the largest are further ahead than a clock represents. Such a wait stays
+/// bounded, at the latest instant there is, rather than becoming one with no
+/// deadline at all or panicking on the overflow.
+pub(crate) fn deadline_instant(
+    from: std::time::Instant,
+    deadline: std::time::Duration,
+) -> std::time::Instant {
+    if let Some(at) = from.checked_add(deadline) {
+        return at;
+    }
+    let (mut reachable, mut beyond) = (std::time::Duration::ZERO, deadline);
+    while beyond - reachable > std::time::Duration::from_secs(1) {
+        let middle = reachable + (beyond - reachable) / 2;
+        if from.checked_add(middle).is_some() {
+            reachable = middle;
+        } else {
+            beyond = middle;
+        }
+    }
+    from.checked_add(reachable).unwrap_or(from)
+}
 
 /// The reason a note whose deadline passed untaken is recorded with, carried or
 /// refused alike.

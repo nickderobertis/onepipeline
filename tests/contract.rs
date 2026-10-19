@@ -11393,6 +11393,19 @@ fn the_interrupting_note_surface_is_what_entry_133_names() {
         (Deliver::TurnEnd, Some(2))
     );
     assert_eq!(serde_json::to_value(&note).unwrap(), block["note"]);
+    // The largest value the field can carry is a deadline the surface accepts.
+    let largest: Edit =
+        serde_json::from_value(block["accepted_largest"].clone()).expect("the largest reads");
+    assert!(
+        matches!(
+            &largest,
+            Edit::Note {
+                delivery_timeout_seconds: Some(u64::MAX),
+                ..
+            }
+        ),
+        "{largest:?}"
+    );
     // Each envelope-time refusal is a command the wire reads, so it is the
     // reconciler's rule that refuses it, naming the field.
     for refused in block["refused_at_the_envelope"].as_array().unwrap() {
