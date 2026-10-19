@@ -77,16 +77,6 @@ pub(crate) fn push_received(node: &str) -> Result<bool> {
     Ok(false)
 }
 
-/// Hold the target node's dispatch once its publication has answered with a failure the
-/// node could be dispatched again for, before it reads whether the run is being stopped:
-/// a cancel released here meets a failure that is already the node's.
-pub(crate) fn publication_answered(node: &str) -> Result<()> {
-    if settlement_target(node) {
-        meet("ONEPIPELINE_TEST_PUBLICATION_ANSWERED_GATE")?;
-    }
-    Ok(())
-}
-
 pub(crate) fn settlement_before_queue(node: &str) -> Result<()> {
     if settlement_target(node) {
         meet("ONEPIPELINE_TEST_SETTLEMENT_BEFORE_QUEUE_GATE")?;

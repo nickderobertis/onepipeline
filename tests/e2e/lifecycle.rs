@@ -113,6 +113,66 @@ fn held_merge_path(world: &World, rendezvous: &std::path::Path) -> crate::harnes
     crate::harness::held_publication(world, rendezvous)
 }
 
+/// Hold the publishing push **after** origin took it: a `reference-transaction` hook in the
+/// world's hooks directory that, the first time git moves `origin/<branch>` — the
+/// remote-tracking ref of the branch the publication pushes, which a push moves once origin has
+/// accepted the update, and a fetch of a base nothing moved does not — marks
+/// `<rendezvous>.holding` and waits for `rendezvous` to exist.
+///
+/// It is that one ref and not any of origin's: git 2.48 and later have `fetch` create
+/// `origin/HEAD` where it is missing, so on such a git (git for Windows' runners carry one) a
+/// session's own fetch moves a remote-tracking ref mid-dispatch, and a hook watching all of
+/// them holds there — letting a cancel in while the dispatch still runs.
+///
+/// The moment a cancel is too late to stop anything: since `onevcs` 0.56.1 a cancellation
+/// stops a push that is still running, its `pre-push` hook included, so a journey about a
+/// cancel arriving once the work has reached origin holds here rather than in that hook. The
+/// world's repository must carry a hook of its own, so git reads this directory at all.
+fn held_after_the_push(world: &World, rendezvous: &std::path::Path, branch: &str) -> HeldAfterPush {
+    let hook = world.root.join("hooks").join("reference-transaction");
+    std::fs::create_dir_all(hook.parent().expect("hooks has a directory")).expect("hooks");
+    let go = rendezvous.to_string_lossy().replace('\'', r"'\''");
+    onepipeline_testfakes::executable(
+        &hook,
+        format!(
+            "#!/bin/sh\n\
+             [ \"$1\" = committed ] || exit 0\n\
+             moved=$(awk -v ref='refs/remotes/origin/{branch}' '$1 != $2 && $3 == ref {{ print }}')\n\
+             [ -n \"$moved\" ] || exit 0\n\
+             [ -e '{go}.holding' ] && exit 0\n\
+             : > '{go}.holding'\n\
+             while [ ! -e '{go}' ]; do sleep 0.05; done\n"
+        ),
+    );
+    HeldAfterPush {
+        rendezvous: rendezvous.to_path_buf(),
+    }
+}
+
+/// A push [`held_after_the_push`] holds once origin has taken it; let through on drop, so a
+/// journey that ends early leaves no hook waiting.
+struct HeldAfterPush {
+    rendezvous: PathBuf,
+}
+
+impl HeldAfterPush {
+    fn holding(&self) -> bool {
+        let mut marker = self.rendezvous.clone().into_os_string();
+        marker.push(".holding");
+        PathBuf::from(marker).is_file()
+    }
+
+    fn release(&self) {
+        std::fs::write(&self.rendezvous, "go").expect("the held push is released");
+    }
+}
+
+impl Drop for HeldAfterPush {
+    fn drop(&mut self) {
+        let _ = std::fs::write(&self.rendezvous, "go");
+    }
+}
+
 /// The commit `onevcs` last recorded preserving on `branch` in one run — where it
 /// left that branch. Read from its record rather than from the branch, because
 /// `onevcs` retires a landed session's branch when it closes it. The newest record
@@ -2443,16 +2503,18 @@ fn an_unusable_read_budget_falls_back_rather_than_disabling_the_recovery() {
 /// The bound is not the only thing that ends these reads. A cancelled run must
 /// not be held open polling somebody else's API — the teardown is on its way to
 /// reap this dispatch — and since `onevcs` 0.38.0 the cancellation reaches the
-/// publication itself: a push whose update origin already took is kept, and the
-/// host is never asked about it, so there is no unread path to re-read and the
-/// node settles `cancelled` with the work on the origin.
+/// publication itself: a push origin has already taken is kept and reported as
+/// the accepted push it was, and the host is never asked about it, so there is no
+/// unread path to re-read and the node settles `cancelled` with the work on the
+/// origin.
 ///
-/// The window is held open rather than raced for: origin's own `post-receive` hook
-/// blocks until this test releases it, so the update is already on origin while the
-/// push is still running and the cancel lands there. Since `onevcs` 0.56 a cancel
-/// stops the push it reaches and keeps only an update origin took first, which this
-/// one is — held at the repository's `pre-push` instead, the cancel would prevent
-/// the push rather than meet one that landed.
+/// The window is held open rather than raced for: a `reference-transaction` hook
+/// blocks the push once origin has taken it, until this test releases it, so the
+/// cancel lands after the push landed and before the publication could ask the
+/// host anything. Held at the `pre-push` hook instead, the cancel would stop the
+/// push — `onevcs` 0.56.1 does — which
+/// `a_cancel_while_the_merge_path_holds_the_push_stops_it_and_settles_cancelled`
+/// holds.
 #[test]
 fn a_cancelled_run_reads_no_merge_path_once_its_push_has_landed() {
     let world = World::new("lifecycle-rereadcancelled")
@@ -2460,9 +2522,8 @@ fn a_cancelled_run_reads_no_merge_path_once_its_push_has_landed() {
         // obvious: three reads a minute apart rather than one and done.
         .with_env("ONEPIPELINE_MERGE_PATH_BACKOFF_SECONDS", "60");
     let go = world.fakes.join("push.go");
-    let held = held_merge_path(&world, &go);
-    let repo = world.repository("change-auto", &[]);
-    crate::harness::hold_landings_at(&repo.origin, &held);
+    let held = held_after_the_push(&world, &go, "rereadcancelled/service");
+    let repo = world.repository("change-auto", &["true"]);
     // The service's visibility is declared, so the publication's write boundary
     // takes the rule's word and asks the host nothing: the one read left to
     // count is the closeout's.
@@ -2490,9 +2551,18 @@ fn a_cancelled_run_reads_no_merge_path_once_its_push_has_landed() {
     world.run(&["start", &path, "--detach"]).exited(0);
     let run = "rereadcancelled".to_string();
 
-    // The publication's push has reached origin and is held there before it
-    // returns, which is before any read of the host.
-    world.until("origin to be holding the landed push", |_| held.holding());
+    // Origin has taken the push, which is held before the publication could ask
+    // the host anything.
+    world.until("the landed push to be held", |world| {
+        held.holding()
+            && !git(
+                world,
+                &repo.origin,
+                &["branch", "--list", "rereadcancelled/service"],
+            )
+            .trim()
+            .is_empty()
+    });
     world
         .run_with_stdin(
             &["reply", &run],
@@ -2571,16 +2641,16 @@ fn a_cancelled_run_reads_no_merge_path_once_its_push_has_landed() {
 /// holds that half — so what this journey holds is the other one: a publication
 /// the cancel arrived too late to stop is the node's answer, and a node with an
 /// answer is idle by nobody's decision.
+///
+/// The cancel lands once origin has taken the push — held there by a
+/// `reference-transaction` hook — because one landing while the `pre-push` hook
+/// still held it would stop it, which `onevcs` 0.56.1 does.
 #[test]
 fn a_node_cancelled_during_its_publication_settles_on_it_and_is_no_longer_parked() {
     let world = World::new("lifecycle-cancelparked");
     let go = world.fakes.join("push.go");
-    let held = held_merge_path(&world, &go);
-    let repo = world.repository("local-direct", &[]);
-    // Held in origin's `post-receive`, once the squash is on the base: the one point
-    // of a push a cancel is too late for, since `onevcs` 0.56 stops one it reaches
-    // earlier and keeps only an update origin already took.
-    crate::harness::hold_landings_at(&repo.origin, &held);
+    let held = held_after_the_push(&world, &go, "main");
+    world.repository("local-direct", &["true"]);
     world.script("service.work", "the worker wrote this\n");
 
     let path = world.plan(
@@ -2590,9 +2660,9 @@ fn a_node_cancelled_during_its_publication_settles_on_it_and_is_no_longer_parked
     world.run(&["start", &path, "--detach"]).exited(0);
     let run = "cancelparked".to_string();
 
-    // The dispatch is over and the publication's squash is on origin's base, held
-    // before the push returns: the moment a cancel is too late to stop anything.
-    world.until("origin to be holding the landed push", |_| held.holding());
+    // The dispatch is over and origin has taken the publication's push: the
+    // moment a cancel is too late to stop anything.
+    world.until("the landed push to be held", |_| held.holding());
     world
         .run_with_stdin(
             &["reply", &run],
@@ -3434,33 +3504,26 @@ fn work_a_worker_committed_on_a_branch_of_its_own_outlives_the_session() {
     );
 }
 
-/// A run cancelled between a preserving failure and the attempt that would
-/// answer it settles on the failure, not on the cancellation.
+/// A cancel that lands while the repository's `pre-push` hook holds the publishing
+/// push stops that push: since `onevcs` 0.56.1 the caller's cancellation is asked as
+/// long as the push runs, its hook included, and the push, the hook and every process
+/// the hook started are stopped. Nothing reaches origin — here an origin that would
+/// refuse the branch anyway, so a push that got through would read `push-rejected`
+/// instead — the node settles `cancelled` saying so, and it is not dispatched again
+/// though its budget had an attempt left.
 ///
-/// The window is held open rather than raced for: the node's dispatch is held at the
-/// engine's ordering gate once the push and its refusal are over and before it decides
-/// whether to dispatch again, so the cancel lands exactly between the two. Dispatched
-/// again into a run whose teardown is on its way to reap it, the node would settle as
-/// the cancellation and lose the publication failure, which is the useful half of what
-/// happened. Not held at the repository's `pre-push`, as it was: since `onevcs` 0.56 a
-/// cancel stops the push it reaches there, so there would be no refusal to settle on.
+/// The window is held open rather than raced for: the hook blocks until this test
+/// releases it, so the cancel lands while the push is running. A cancel landing once
+/// origin has taken the push is too late to stop anything, which
+/// `a_node_cancelled_during_its_publication_settles_on_it_and_is_no_longer_parked`
+/// and `a_cancelled_run_reads_no_merge_path_once_its_push_has_landed` hold.
 #[test]
-fn a_cancel_that_lands_before_the_next_attempt_settles_on_the_publication_failure() {
-    // llmlint: ignore-block[tests_mirror_real_usage] the window is the instant between a
-    // publication's refusal and the retry decision, which no hook, host read or input a
-    // user has can be placed in since the push became cancellable; the gate only orders
-    // the real binary over a real origin whose own `pre-receive` refuses the push, and
-    // every outcome is asserted on the binary's own records.
-    let answered = crate::harness::Rendezvous::failpoint();
-    let world = World::new("lifecycle-cancelledretry")
-        .with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "2")
-        .with_env("ONEPIPELINE_TEST_SETTLEMENT_NODE", "service")
-        .with_env(
-            "ONEPIPELINE_TEST_PUBLICATION_ANSWERED_GATE",
-            &answered.address(),
-        );
-    // llmlint: ignore-end[tests_mirror_real_usage]
-    let repo = world.repository("change-auto", &[]);
+fn a_cancel_while_the_merge_path_holds_the_push_stops_it_and_settles_cancelled() {
+    let world =
+        World::new("lifecycle-cancelledretry").with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "2");
+    let go = world.fakes.join("push.go");
+    let held = held_merge_path(&world, &go);
+    let repo = world.repository("change-auto", &held.argv());
     world.script("service.work", "the worker wrote this\n");
     refuse_pushed_branches(&world, &repo);
 
@@ -3471,66 +3534,57 @@ fn a_cancel_that_lands_before_the_next_attempt_settles_on_the_publication_failur
     world.run(&["start", &path, "--detach"]).exited(0);
     let run = "cancelledretry".to_string();
 
-    // The refused push is behind the dispatch, which cannot decide anything about
-    // it until this test releases the gate, so there is no race left to lose.
-    let held = answered.arrived();
+    world.until("the merge path to be holding the push", |_| held.holding());
     world
         .run_with_stdin(
             &["reply", &run],
             &json!({"version": 2, "commands": [{"op": "cancel", "id": "service"}]}).to_string(),
         )
         .exited(0);
-    world.until("the cancel to be committed", |world| {
-        !world.events_of(&run, "edit-committed").is_empty()
-    });
-    held.release();
-
     world.until("the run to settle", |world| {
         world.run_file(&run, "result.json").is_file()
     });
-    // The settlement the loop reached is the publication's, under its own word:
-    // that is what an operator has to act on, and it is the half a node
-    // dispatched again into a cancelled run would have lost.
+    // Released only once the run has settled, so nothing but the cancel can have
+    // ended the hook.
+    held.release();
+
     let settled = &world.events_of(&run, "node-settled")[0]["payload"];
     assert_eq!(
         settled["status"],
-        "failed",
+        "cancelled",
         "{settled}\n{}",
         why(&world, &run)
     );
-    assert_eq!(settled["outcome"], "push-rejected", "{settled}");
     let detail = settled["detail"]
         .as_str()
         .expect("the settlement says why")
         .to_string();
     assert!(
-        detail.contains("1 publication attempt on"),
-        "the settlement does not name the one attempt that was made: {detail}"
+        detail.contains(
+            "the push, its pre-push hook and every process the hook started were stopped"
+        ),
+        "the settlement does not say the push was stopped: {detail}"
     );
-    // And no second attempt, though the budget had one left.
     assert_eq!(
         dispatches_of(&world, &run, "service").len(),
         1,
         "a cancelled run was dispatched again\n{}",
         why(&world, &run)
     );
-
-    // The run's own document reports it `failed`, and not the `parked` the
-    // cancel made it: the publication's failure is a settled outcome, and a
-    // settled outcome ends the park — left on, the node read parked and failed
-    // at once and the run counted it unfinished for as long as it lasted. The
-    // failure is what a planner acts on, and the outcome beside it is the
-    // publication's.
-    let node = world.run_json(&run, "result.json")["nodes"][0].clone();
-    assert_eq!(node["status"], "failed", "{node}\n{}", why(&world, &run));
-    assert_eq!(node["outcome"], "push-rejected", "{node}");
-    assert_eq!(world.run_json(&run, "result.json")["state"], "failed");
-    // And the work is on the branch the one attempt was made on, which is what
-    // a `retry` continues.
-    let branch = node["branch"].as_str().expect("the node names its branch");
+    let branch = settled["branch"]
+        .as_str()
+        .expect("the node names its branch");
+    assert!(
+        git(&world, &repo.origin, &["branch", "--list", branch])
+            .trim()
+            .is_empty(),
+        "the stopped push reached the origin"
+    );
+    // And the work is on the branch it was made on, which is what a `retry`
+    // continues.
     assert!(
         repo.has_branch(&world, branch),
-        "the branch the cancelled attempt was made on was not handed back"
+        "the branch the stopped attempt was made on was not handed back"
     );
 }
 

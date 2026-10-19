@@ -1102,6 +1102,14 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
         Some("state,mergeCommit") => "state,mergeCommit",
         // Retirement reads the merged head in the same host response as the merge.
         Some("state,mergeCommit,headRefOid") => "state,mergeCommit,headRefOid",
+        // `onevcs` 0.56 reads the issues a merged change request closes in the same view
+        // as the merge, for the `closes` its landing reports.
+        Some("state,mergeCommit,closingIssuesReferences") => {
+            "state,mergeCommit,closingIssuesReferences"
+        }
+        Some("state,mergeCommit,headRefOid,closingIssuesReferences") => {
+            "state,mergeCommit,headRefOid,closingIssuesReferences"
+        }
         Some("statusCheckRollup") => "statusCheckRollup",
         // The rollup *and* the commit it was reported against, in one read.
         // `onevcs` 0.15.0 asks for the pair because a rollup read on its own
@@ -1203,6 +1211,7 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
             "isDraft": state == Change::Draft,
             "mergeCommit": merged.then(|| serde_json::json!({"oid": merge_commit.as_str()})),
             "mergedAt": merged.then(|| read_if_present(&merged_at(dir, &id))).flatten(),
+            "closingIssuesReferences": closing_issues(dir),
             // What this host reports about the change request's checks, which is
             // the scripted part: unscripted it reports none, which is the
             // repository whose only bar is the `command:` gate its rules name.
@@ -1213,6 +1222,38 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
         })
     );
     ExitCode::SUCCESS
+}
+
+/// The issues every change request on this host closes, as GitHub answers
+/// `closingIssuesReferences`: one node per `owner/name#N` a journey scripted in
+/// `gh.closes`, whitespace-separated, and none where it scripted nothing.
+fn closing_issues(dir: &Path) -> Vec<serde_json::Value> {
+    let scripted = read_if_present(&dir.join("gh.closes")).unwrap_or_default();
+    let named = |part: &str| {
+        !part.is_empty()
+            && part
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    };
+    scripted
+        .split_whitespace()
+        .map(|issue| {
+            let read = issue.split_once('#').and_then(|(repository, number)| {
+                let (owner, name) = repository.split_once('/')?;
+                let number = number.parse::<u64>().ok().filter(|number| *number > 0)?;
+                (named(owner) && named(name)).then_some((owner, name, number))
+            });
+            let Some((owner, name, number)) = read else {
+                fake::fail(&format!(
+                    "gh.closes holds {issue:?}, which is not owner/name#N"
+                ))
+            };
+            serde_json::json!({
+                "number": number,
+                "repository": {"name": name, "owner": {"login": owner}},
+            })
+        })
+        .collect()
 }
 
 /// Where a check is, and — once it has finished — how it ended.
@@ -2437,7 +2478,7 @@ fn standings_read(query: &str, owner: &str, name: &str, dir: &Path) -> ExitCode 
         };
         return match own_standing_list(owner, name, &changes, dir) {
             Ok(standings) => {
-                println!("{}", standings_wire(&standings, &reads, cost));
+                println!("{}", standings_wire(&standings, &reads, cost, dir));
                 ExitCode::SUCCESS
             }
             Err(refused) => refused,
@@ -2461,7 +2502,7 @@ fn standings_read(query: &str, owner: &str, name: &str, dir: &Path) -> ExitCode 
     };
     match answer {
         Ok((standings, reads, cost)) => {
-            println!("{}", standings_wire(&standings, &reads, cost));
+            println!("{}", standings_wire(&standings, &reads, cost, dir));
             ExitCode::SUCCESS
         }
         Err(error) => fake::refuse(&error.to_string()),
@@ -2473,6 +2514,7 @@ fn standings_wire(
     standings: &[onevcs::ChangeStanding],
     reads: &[onevcs::ReviewRead],
     cost: onevcs::ReadCost,
+    dir: &Path,
 ) -> serde_json::Value {
     use onevcs::{ChangeState, ChecksVerdict};
     use serde_json::{json, Value};
@@ -2532,6 +2574,7 @@ fn standings_wire(
             "mergedAt": merged_at, "mergeCommit": commit.map(|commit| json!({"oid": commit})),
             "baseRef": if deleted { Value::Null } else { json!({"name": standing.base}) },
             "headRef": {"target": {"statusCheckRollup": {"contexts": {"nodes": contexts}}}},
+            "closingIssuesReferences": {"nodes": closing_issues(dir)},
         });
         if let Some(read) = reads.get(at) {
             let wire = review_wire(read);
@@ -2946,7 +2989,7 @@ fn own_standings(
         graphql_points: 1,
         rest_requests: 0,
     };
-    println!("{}", standings_wire(&standings, &reads, cost));
+    println!("{}", standings_wire(&standings, &reads, cost, dir));
     ExitCode::SUCCESS
 }
 

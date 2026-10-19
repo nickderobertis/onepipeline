@@ -358,12 +358,6 @@ fn execute_placed(
             crate::vcs::SessionTip::Unknown => None,
         };
         on_remote = on_remote.after(preserved.outcome, published.as_deref());
-        // A private ordering gate, for the one window between a publication's failure
-        // and this decision: since `onevcs` 0.56 a cancel stops a push it reaches, so no
-        // hook or host read is left after the refusal to hold a journey's cancel in.
-        if let Err(error) = crate::ordering::publication_answered(&node.id) {
-            eprintln!("{error}");
-        }
         // Two reasons to stop, and one settlement for both: the budget is spent,
         // or the run is being stopped. A cancelled run must not be given another
         // dispatch — the teardown is on its way to reap it, and the node would

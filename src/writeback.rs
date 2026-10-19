@@ -159,6 +159,12 @@ const RETRY_CEILING: Duration = Duration::from_secs(60);
 // Closeout never inherits the duration of a store call. A slow store may keep working in
 // the worker, but it still cannot turn a completed graph into run settlement.
 const CLOSEOUT_WAIT: Duration = Duration::from_millis(2_250);
+// How long a settled run's close-out waits for the closures of its landings still owed: past
+// the projection's window because a GitHub board spaces its writes (`onetaskgraph`'s
+// `MIN_MUTATION_INTERVAL_MS`, 750 ms), and two of them close each issue, so ten issues are
+// fifteen seconds of pacing alone; bounded because a board that never answers holds the run's
+// settlement no longer than this.
+const CLOSURES_CLOSEOUT_WAIT: Duration = Duration::from_secs(30);
 // The store calls an attempt makes, by the name each one's refusals carry. Each one's failure
 // is classified by its own type.
 const PROJECT_SHOW: &str = WRITEBACK_CLASSIFIED_COMMANDS[0];
@@ -489,7 +495,7 @@ pub(crate) struct Unprojected {
 /// reader of it names, so it is converted from the store's by an exhaustive match: a class
 /// the store adds is a compile error here rather than a line this build writes and cannot
 /// read back.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum FailureClass {
     /// A failure no retry can change.
@@ -614,6 +620,12 @@ impl Classified {
     }
 }
 
+/// The class of an engine error, as every failure this worker reports is classed: by the
+/// source error it wraps, or refused where the engine decided it on its own.
+pub(crate) fn class_of_engine(error: &EngineError) -> FailureClass {
+    Classified::of_engine(error).class
+}
+
 /// The kind an engine error amounts to, and the source error that caused it, if one did.
 ///
 /// A failure that wraps another — a destination that could not be built, a source that
@@ -639,6 +651,7 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         EngineError::CommentlessDestination { .. } => decided("no-comments"),
         EngineError::QueryNotTasks => decided("query-not-tasks"),
         EngineError::CommentsNotDocuments => decided("comments-not-documents"),
+        EngineError::StatusesNotTasks => decided("statuses-not-tasks"),
         EngineError::ChangedWhileCopied { .. } => decided("changed-while-copied"),
         // llmlint: ignore-end[changed_behavior_has_e2e]
         EngineError::NotWritable { .. }
@@ -905,6 +918,13 @@ struct Pending {
     /// One entry per outage rather than one per retry: the worker retries until
     /// the store returns, and a surface for every attempt would bury the first.
     unprojected: Vec<Unprojected>,
+    /// The landings whose closures are owed and not yet taken up, oldest first.
+    closures: std::collections::VecDeque<crate::closures::Landing>,
+    /// The landing the closure thread took up and is calling the store for, or waiting out the
+    /// retry of — until its call has finished.
+    closing: Option<crate::closures::Landing>,
+    /// The records of closure calls that finished, for the reconcile loop to journal.
+    closed: Vec<crate::payload::LandingClosures>,
 }
 
 impl Pending {
@@ -912,6 +932,11 @@ impl Pending {
     /// taken, or the attempt it is making.
     fn unlanded(&self) -> bool {
         self.latest.is_some() || self.worker == WorkerState::Working
+    }
+
+    /// Whether a landing's closures are still owed: queued, or being called.
+    fn closing_owed(&self) -> bool {
+        !self.closures.is_empty() || self.closing.is_some()
     }
 
     fn queue(&mut self, snapshot: Snapshot) -> bool {
@@ -941,6 +966,10 @@ pub struct Writeback {
     /// Whose board the project is: this driver's, or — once another run has taken it over —
     /// that run's, while this one hands it over and then for good.
     board: Mutex<Board>,
+    /// Every landing commit this driver has handed the closure thread, so one landing —
+    /// a `change-merged` and the `merge-completed` beside it, or a landing a catch-up finds
+    /// again — is one call.
+    closures_owed: Mutex<BTreeSet<String>>,
 }
 
 /// Whose board a driver's projections write to.
@@ -969,6 +998,8 @@ impl Writeback {
         let run_dir = paths.dir.clone();
         let store = Store::at(launch_dir(launch));
         let per_item = per_item_budget(launch);
+        let closer_pending = Arc::clone(&pending);
+        let closer_store = store.clone();
         // llmlint: ignore-block[changed_behavior_has_e2e] A host refusing one thread while
         // continuing to run this process is resource exhaustion no real CLI journey can
         // arrange at this boundary. Every reachable worker failure is covered against the
@@ -978,12 +1009,19 @@ impl Writeback {
             .name(format!("writeback-{}", paths.run))
             .spawn(move || worker(store, run_dir, per_item, worker_pending))
             .ok()?;
+        // The landings' closures on a thread of their own, so a closure the store is slow to
+        // take holds no projection back, and a projection holds back no closure.
+        std::thread::Builder::new()
+            .name(format!("closures-{}", paths.run))
+            .spawn(move || closer(&closer_store, per_item, &closer_pending))
+            .ok()?;
         // llmlint: ignore-end[changed_behavior_has_e2e]
         let writer = Self {
             pending,
             per_item,
             held: Mutex::new(None),
             board: Mutex::new(Board::Driving),
+            closures_owed: Mutex::new(BTreeSet::new()),
         };
         // The project is retained in each snapshot rather than in the worker so a malformed
         // old launch record disables projection without weakening LaunchRecord's compatibility.
@@ -1147,7 +1185,9 @@ impl Writeback {
         let (lock, ready) = &*self.pending;
         if let Ok(mut pending) = lock.lock() {
             if pending.queue(snapshot) {
-                ready.notify_one();
+                // Every waiter: the closure thread waits on this condition too, and a
+                // snapshot it was woken for instead of the worker would sit unprojected.
+                ready.notify_all();
             }
         }
     }
@@ -1405,18 +1445,64 @@ impl Writeback {
         state: &RunState,
         statuses: &BTreeMap<String, NodeStatus>,
     ) {
-        if self.is_retired() {
-            return;
-        }
         let deadline = Instant::now() + CLOSEOUT_WAIT;
-        self.closing_out_until(deadline, |pending| {
-            pending.latest.is_some() && pending.worker == WorkerState::Idle
-        });
-        self.publish_closeout(paths, launch, state, statuses);
-        // Let one already-running real copy reach its own deadline before the process
-        // exits. This keeps a completed run from racing a person's next store call,
-        // while the hard call limit preserves write-back's latency boundary.
-        self.closing_out_until(deadline, Pending::unlanded);
+        if !self.is_retired() {
+            self.closing_out_until(deadline, |pending| {
+                pending.latest.is_some() && pending.worker == WorkerState::Idle
+            });
+            self.publish_closeout(paths, launch, state, statuses);
+            // Let one already-running real copy reach its own deadline before the process
+            // exits. This keeps a completed run from racing a person's next store call,
+            // while the hard call limit preserves write-back's latency boundary.
+            self.closing_out_until(deadline, Pending::unlanded);
+        }
+        // And the closures still owed — whoever holds the project's board, the issues this
+        // run's own landings closed are this run's. A run every node of which has settled has
+        // nothing to adopt it again, so its closures get a window of their own, bounded by
+        // [`CLOSURES_CLOSEOUT_WAIT`]: a board paces its writes, and a landing closing a few
+        // issues outlasts the projection's window by that alone. A run stopped before it
+        // settled gets the shared window; one still being called when its window ends has no
+        // record, so the next adoption makes it.
+        let closures = if crate::graph::is_terminal(statuses) {
+            deadline.max(Instant::now() + CLOSURES_CLOSEOUT_WAIT)
+        } else {
+            deadline
+        };
+        self.closing_out_until(closures, Pending::closing_owed);
+    }
+
+    /// Owe the closures of one landing, unless this driver already owes or has made them.
+    ///
+    /// Answers whether it was queued. Never waits: the call is the closure thread's.
+    pub(crate) fn close_landing(&self, landing: crate::closures::Landing) -> bool {
+        let fresh = self
+            .closures_owed
+            .lock()
+            .is_ok_and(|mut owed| owed.insert(landing.commit().to_owned()));
+        if !fresh {
+            return false;
+        }
+        let (lock, ready) = &*self.pending;
+        if let Ok(mut pending) = lock.lock() {
+            pending.closures.push_back(landing);
+            ready.notify_all();
+        }
+        true
+    }
+
+    /// Whether a closure call has finished whose record the loop has not journalled: what
+    /// the reconcile loop's wait is woken by, as it is by a failed projection.
+    pub(crate) fn has_closed(&self) -> bool {
+        let (lock, _) = &*self.pending;
+        lock.lock().is_ok_and(|pending| !pending.closed.is_empty())
+    }
+
+    /// Take the records of the closure calls that finished since this was last asked.
+    pub(crate) fn take_closed(&self) -> Vec<crate::payload::LandingClosures> {
+        let (lock, _) = &*self.pending;
+        lock.lock()
+            .map(|mut pending| std::mem::take(&mut pending.closed))
+            .unwrap_or_default()
     }
 
     /// Enter the closeout phase, and wait until `busy` no longer holds or `deadline` passes.
@@ -1951,7 +2037,7 @@ fn worker(
                 }
                 if state.latest.is_none() {
                     state.latest = Some(snapshot);
-                    ready.notify_one();
+                    ready.notify_all();
                 }
             }
         }
@@ -1965,6 +2051,93 @@ fn worker(
             }
             ready.notify_all();
         }
+    }
+}
+
+/// The closure thread: each owed landing's closures, oldest first, through
+/// [`crate::closures::complete`], a transient failure asked again on the projection worker's
+/// own retry schedule — [`retry_after`], kept through a close-out and ended by a stop. A
+/// refusal, and a call that finished with an item failed, are records like any other, which
+/// the reconcile loop journals and raises.
+///
+/// A landing still being asked about when the run stops is left with no record, so the next
+/// adoption's catch-up makes its call.
+fn closer(store: &Store, per_item: NonZeroU64, pending: &(Mutex<Pending>, Condvar)) {
+    loop {
+        let landing = {
+            let (lock, ready) = pending;
+            let Ok(mut state) = lock.lock() else { return };
+            while state.closures.is_empty() && state.phase != RunPhase::Stopping {
+                state = match ready.wait(state) {
+                    Ok(state) => state,
+                    Err(_) => return,
+                };
+            }
+            let Some(landing) = state.closures.pop_front() else {
+                return;
+            };
+            state.closing = Some(landing.clone());
+            landing
+        };
+        let mut failures: u32 = 0;
+        // The attempt that carried a delivered ticket's failure, which a retry cannot answer.
+        let mut carried: Option<crate::payload::LandingClosures> = None;
+        let finished = loop {
+            let within = Deadline::Write {
+                per_item,
+                items: landing.issue_count(),
+            }
+            .within();
+            match crate::closures::complete(store, &landing, within) {
+                // llmlint: ignore-block[changed_behavior_has_e2e] unreachable in a run: a run's
+                // launch directory configures at least the source its plan was read from, so the
+                // store a run's closures load always declares one. A landing verb run from a
+                // directory declaring none is where this answer is reached, and
+                // `tests/e2e/closures.rs`'s landing-verb journeys drive it there.
+                crate::closures::Answer::Unconfigured => {
+                    eprintln!(
+                        "onetaskgraph closures for the landing at {}: no store configuration \
+                         declares a source, so nothing was asked about {}",
+                        landing.commit(),
+                        landing.closes().join(", ")
+                    );
+                    break None;
+                }
+                // llmlint: ignore-end[changed_behavior_has_e2e]
+                crate::closures::Answer::Finished(record) => {
+                    break Some(crate::closures::kept_after_retry(carried.take(), record))
+                }
+                crate::closures::Answer::Transient(record) => {
+                    if crate::closures::carries_delivered_failure(&record) {
+                        carried = Some(record.clone());
+                    }
+                    failures = failures.saturating_add(1);
+                    if failures == 1 {
+                        eprintln!(
+                            "onetaskgraph closures for the landing at {} failed: {}; retrying, \
+                             spacing further attempts out to {} seconds apart while it keeps \
+                             failing",
+                            landing.commit(),
+                            record.reason.as_deref().unwrap_or_default(),
+                            RETRY_CEILING.as_secs()
+                        );
+                    }
+                    // Binding, so a close-out does not lift it: a closure has a window of its
+                    // own there, which a board failing at once would otherwise spend asked as
+                    // fast as it can refuse.
+                    if !should_retry_after(pending, Interval::Asked(retry_after(failures))) {
+                        return;
+                    }
+                }
+            }
+        };
+        let (lock, ready) = pending;
+        let Ok(mut state) = lock.lock() else { return };
+        state.closing = None;
+        if let Some(record) = finished {
+            state.closed.push(record);
+        }
+        ready.notify_all();
     }
 }
 
@@ -2931,6 +3104,9 @@ fn create(
         comments: false,
         no_link: false,
         expect: None,
+        // No narrowing: every member is copied whatever its status, as before the store
+        // could narrow a copy by it.
+        statuses: Vec::new(),
     };
     // The one call that is linear in what it carries, so the one whose deadline is.
     let deadline = Deadline::Write {
@@ -4448,15 +4624,17 @@ fn actions(report: &CopyReport) -> ProjectionActions {
             CopyAction::Created { .. }
             | CopyAction::Unchanged { .. }
             | CopyAction::Orphaned { .. }
-            | CopyAction::Failed { .. } => None,
+            | CopyAction::Failed { .. }
+            | CopyAction::Skipped { .. } => None,
         })
         .collect();
     let mut actions = ProjectionActions::default();
     for item in &report.items {
         let count = match &item.action {
             CopyAction::Orphaned { destination } if rewritten.contains(destination) => continue,
-            // Failed items made no mutation and are not successful projections.
-            CopyAction::Failed { .. } => continue,
+            // Failed items made no mutation and are not successful projections, and a copy
+            // that narrows by no status skips none.
+            CopyAction::Failed { .. } | CopyAction::Skipped { .. } => continue,
             CopyAction::Created { .. } => &mut actions.created,
             CopyAction::Updated { .. } => &mut actions.updated,
             CopyAction::Unchanged { .. } => &mut actions.unchanged,
@@ -6059,6 +6237,7 @@ mod tests {
             worker: WorkerState::Working,
             phase: super::RunPhase::Running,
             unprojected: Vec::new(),
+            ..Pending::default()
         };
 
         assert!(pending.queue(first.clone()));
@@ -6080,6 +6259,7 @@ mod tests {
             per_item: DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS,
             held: Mutex::new(None),
             board: Mutex::new(super::Board::Driving),
+            closures_owed: Mutex::new(std::collections::BTreeSet::new()),
         };
         writeback.closing_out_until(Instant::now() + super::CLOSEOUT_WAIT, Pending::unlanded);
         assert!(

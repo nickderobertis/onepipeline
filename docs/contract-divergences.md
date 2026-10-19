@@ -11914,3 +11914,120 @@ a `reparent` gives it the edge, after which it starts only once the prerequisite
   "surface_cadence_env": "ONEPIPELINE_RELEASE_SURFACE_SECONDS"
 }
 ```
+
+## 132. The issues a landing closed stayed open work on every board the store configures — OPEN
+
+**Proposal, for the planner who owns the contract: one narrowing of "onepipeline writes no
+ticket itself", and one record kind, `landing-closures`.** The "Status writes back" text of
+`docs/contract.md` — and entries 50 and 73 beside it — says the engine writes no ticket: the
+tickets a node's `delivers` names move by the store's own relation. That still holds. What
+this adds is narrower: the engine hands the plan store the GitHub issues a landing *reports
+closed*, and the **store** decides which items of which of its configured sources those
+issues move to `done`. A follow-up ticket whose issue the stack's own landing closed no longer
+reads as open work on the board a person chooses work from, and no recurring scan of a whole
+board spends shared GitHub allowance rediscovering closures the stack performed itself.
+
+What this build does is the block below, and the block is the source.
+
+**No setting.** The engine gains no option, no launch-record field and no flag for this, and
+an adoption replays nothing new. The store configuration is the one the write-back already
+loads for every other store read of the run — `Store::at` over the launch record's directory,
+with every source it declares. The store asks each configured source able to hold an item for
+a GitHub issue and sends every other source — a `local-md` folder, a Linear workspace — no
+request, listing it `unsupported`.
+
+**When, while a run relays a landing.** Once per landing commit: the first relayed `onevcs`
+`merge-completed` or `change-merged` labelled for one of the run's nodes whose `closes` is
+non-empty — the `change-merged` and `merge-completed` of one change request are one landing,
+told apart by nothing but read as one by their commit. And once for each landing the engine's
+own landing verbs perform: `publish-branch`, `repo-recover`, and `integrate`, whose linked
+`onevcs` integrate train reports as `closes` the closing lines its squash carries — one per
+branch the train lands. An event whose `closes` is missing or `[]` causes nothing, so a
+landing that closes no issue costs no request at all.
+
+**When, catching up a landing the run missed.** On a driver's first pass — after
+`driver-adopted` and the adoption-time standings read, `readjust::run` — and whenever the run
+meets a landing recorded for one of its nodes since that node settled — a `node-landed` a
+readjustment journals, or a landing event on a settled node's session stream, which the
+per-pass session read `release::Watch::relay_releases` reads — for a settled draft whose change
+has not landed, whether or not its repository declares a release target, relaying nothing of a
+repository that releases nothing — the driver reads, for every
+node of the run with a recorded landing, that node's own `onevcs` session stream, and hands
+over each landing commit whose `merge-completed` or `change-merged` carries a non-empty
+`closes` and which no `landing-closures` record of the run's journal names yet. It reads only
+the run's own sessions and journal: never a board, never another run. A landing no event of
+the node's session carries with `closes` — an operator `settle` naming a landing, an event an
+older `onevcs` wrote — causes nothing.
+
+**What.** One `onetaskgraph_core::Engine::complete_issues(closes, &[], false)` call per
+landing, naming no source, the landing's `closes` parsed as `IssueRef`s; the store decides per
+source and issue what to write — `updated`, `unchanged`, `skipped` for an issue closed as not
+planned or duplicate, `absent`, `failed` — and lists the sources it sent nothing `unsupported`.
+In a run, the call is made on the write-back's own closure thread, off the reconcile loop and
+best effort like every write-back: a transient failure is asked again on the worker's existing
+retry schedule; a refusal, or an answer the store says failed — an item `failed`, or a ticket
+an `updated` item delivers that the store could not keep in step, which that item's `delivered`
+carries verbatim —
+is the record's `failed` outcome and a **non-blocking** planner surface; none of it changes a
+node's settlement, an edit ruling or a scheduling decision. `publish-branch`, `repo-recover`
+and `integrate` load the store configuration from the directory they run in, as `Store::at`
+does for a launch directory, make the call before they exit and print what the store answered
+on standard error; a directory whose configuration declares no source is asked nothing, and
+the verb says so. Neither changes the verb's exit status.
+
+**The record.** One journal record per landing, kind `landing-closures`, written once the call
+has finished — projected, or failed for good — in the shape below: `node` is `null` for a
+landing a landing verb made outside a run, `items` and `unsupported` are the store's own,
+verbatim, and `class` and `reason` are `null` unless `outcome` is `failed`. A run writes it to
+its own journal; a landing verb to the landing's journal and every associated run's. It is
+declared once in the event vocabulary, beside `node-settled`. A run whose every node has
+settled waits for its closures still owed up to thirty seconds past the projection's close-out
+window, since a board paces its writes and nothing adopts a finished run again; a run stopped
+before then gets the projection's window. A landing whose call never finished — the driver
+stopped while it was being asked again — has no record, so the next adoption makes the call. A
+delivered ticket failing for now is asked again like any transient failure, but the store
+re-evaluates delivered tickets only as it writes their deliverer, so a retry reads that item
+back `unchanged` and says nothing of the ticket: where it finishes with nothing failed, the
+record kept is the attempt that carried the ticket's failure.
+
+Driven end to end by `tests/e2e/closures.rs`: a run on a real `local-direct` landing over two
+loopback boards, a `local-md` source and a Linear source; a change request's
+`change-merged`/`merge-completed` pair; a landing that closes nothing; catch-up after `stop` and
+`adopt`, after a readjustment and after a late landing on a settled node's session stream while
+the driver runs, and after a call the stopped driver never finished; a permanent
+and a transient refusal; and `publish-branch`, `repo-recover` and `integrate` from a directory
+declaring the board and from one declaring nothing. `tests/contract.rs` holds the block's
+`record` and `failed` to the vocabulary's declaration of `landing-closures`, and the events
+bundle `schemas/events.json` publishes at the next minor, `1.8.0`, which adds that one
+document: a stream this build writes is one an earlier reader reads, less the new kind.
+
+```json
+{
+  "kind": "landing-closures",
+  "event_kinds": ["landing-closures"],
+  "record": {
+    "node": "service",
+    "commit": "0123456789abcdef0123456789abcdef01234567",
+    "closes": ["owner/service#7", "owner/service#8"],
+    "outcome": "projected",
+    "items": [
+      {"issue": "owner/service#7", "source": "board", "task": "board:ISSUE-7", "from": "Todo", "to": {"category": "done", "name": "Done"}, "action": "updated"},
+      {"issue": "owner/service#8", "source": "board", "task": "board:ISSUE-8", "from": "Todo", "to": null, "action": "skipped", "reason": "closed as not planned"}
+    ],
+    "unsupported": ["plans", "linear"],
+    "class": null,
+    "reason": null
+  },
+  "failed": {
+    "node": null,
+    "commit": "0123456789abcdef0123456789abcdef01234567",
+    "closes": ["owner/service#7"],
+    "outcome": "failed",
+    "items": [],
+    "unsupported": [],
+    "class": "refused",
+    "reason": "the source refused the write"
+  },
+  "bundle_versions": {"events": "1.8.0"}
+}
+```

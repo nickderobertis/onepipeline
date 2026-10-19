@@ -198,10 +198,8 @@ case "${1-}" in
     fi
     wait_ceiling
     # Said before the wait, so a journey can tell a push the merge path is
-    # holding from one that has not reached it yet. Since `onevcs` 0.56 a
-    # caller's cancellation stops a push this holds — the hook and all — and
-    # keeps only an update origin took first, which is why a journey about a
-    # cancel that comes too late holds origin's `post-receive` instead.
+    # holding from one that has not reached it yet: `onevcs` never interrupts a
+    # push that is running, and asks its caller's cancellation before one starts.
     if ! : >"$2.holding"; then
       echo "pre-push: cannot write $2.holding, the marker that says this push is held" >&2
       echo "pre-push: wait-for writes beside the path it waits for; check that $(dirname "$2") exists and is writable" >&2

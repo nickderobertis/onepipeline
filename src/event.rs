@@ -121,6 +121,15 @@ pub enum PipelineKind {
     NodeDispatched,
     /// A node reached a terminal status.
     NodeSettled,
+    /// What the store did with the GitHub issues one landing closed: entry 132 of
+    /// `docs/contract-divergences.md`.
+    ///
+    /// One per landing commit, once the store's `complete_issues` call for it has
+    /// finished — projected, or failed for good — and never for a landing whose
+    /// `closes` is empty. Carries the landed `node` (null outside a run), the
+    /// `commit`, the `closes` it was handed, the `outcome`, the store's `items` and
+    /// `unsupported` sources verbatim, and the failure's `class` and `reason`.
+    LandingClosures,
     /// A dispatched node was handed back to the queue **without a settlement**.
     ///
     /// Written where a dispatch ended before any work began for a reason that
@@ -414,6 +423,7 @@ impl PipelineKind {
             Self::NodeReady => "node-ready",
             Self::NodeDispatched => "node-dispatched",
             Self::NodeSettled => "node-settled",
+            Self::LandingClosures => "landing-closures",
             Self::NodeRequeued => "node-requeued",
             Self::EditCommitted => "edit-committed",
             Self::CommandAccepted => "command-accepted",
@@ -507,6 +517,7 @@ pub const PIPELINE_KINDS: &[PipelineKind] = &[
     PipelineKind::NodeReady,
     PipelineKind::NodeDispatched,
     PipelineKind::NodeSettled,
+    PipelineKind::LandingClosures,
     PipelineKind::NodeRequeued,
     PipelineKind::EditCommitted,
     PipelineKind::CommandAccepted,
