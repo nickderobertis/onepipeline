@@ -630,3 +630,133 @@ fn a_closure_a_stopped_driver_never_finished_is_made_by_the_adoption() {
     closed_once(&world, &served, run);
     finished(&world, run);
 }
+
+/// A `local-direct` world whose one node, `service`, lands a commit closing issue 7.
+fn landing_closing_seven(name: &str) -> (World, GitHubEndpoint, PathBuf) {
+    let (world, served) = world_with(name, "local-direct", &one_board());
+    let launch = one_board_launch(&world, &served);
+    world.script("service.work", "the worker wrote this\n");
+    world.script("service.commit-saying", "feat: ship the service\n\nCloses #7");
+    (world, served, launch)
+}
+
+/// Where in `run`'s journal the first record of `kind` for `node` (any node, for `None`) sits.
+fn position(world: &World, run: &str, kind: &str, node: Option<&str>) -> usize {
+    world
+        .journal(run)
+        .iter()
+        .position(|event| {
+            event["kind"] == kind && node.is_none_or(|node| event["labels"]["node"] == node)
+        })
+        .unwrap_or_else(|| panic!("{run} journalled no {kind} for {node:?}"))
+}
+
+/// A board that refuses the closure's Status write for good changes nothing about the run: the
+/// node still settles `done`, the run's one `landing-closures` record says `failed` with the
+/// store's class `refused` and its reason, and a non-blocking planner surface reports it.
+#[test]
+fn a_refused_closure_is_recorded_failed_and_surfaced_without_touching_the_settlement() {
+    let (world, served, launch) = landing_closing_seven("closures-refused");
+    served.fault("refuse");
+    let run = "refused";
+    let project = world.plan(run, &plan_of(run, vec![lifecycle("service", &[])]));
+    start_from(&world, &launch, &project);
+    world.until("the refused closure to be recorded", |world| {
+        !closures_of(world, run).is_empty() && world.run_file(run, "result.json").is_file()
+    });
+
+    let service = settled(&world, run, "service");
+    assert_eq!(service["status"], "done", "{service}");
+    assert_eq!(service["outcome"], "merged", "{service}");
+    let records = closures_of(&world, run);
+    assert_eq!(records.len(), 1, "{records:#?}");
+    let payload = &records[0]["payload"];
+    assert_eq!(payload["outcome"], "failed", "{payload}");
+    assert_eq!(payload["class"], "refused", "{payload}");
+    assert!(
+        payload["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("the loopback refuses this Status write")),
+        "{payload}"
+    );
+    assert_eq!(payload["items"][0]["action"], "failed", "{payload}");
+    let surfaced: Vec<Value> = world
+        .events_of(run, "planner-surface-queued")
+        .into_iter()
+        .map(|event| event["payload"].clone())
+        .filter(|surface| {
+            surface["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("owner/service#7"))
+        })
+        .collect();
+    assert_eq!(surfaced.len(), 1, "{surfaced:#?}");
+    assert_eq!(surfaced[0]["blocking"], false, "{surfaced:#?}");
+    assert!(
+        surfaced[0]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("refused")
+                && message.contains("the loopback refuses this Status write")),
+        "{surfaced:#?}"
+    );
+    assert_eq!(card(&served, "1", "7"), (json!("Todo"), issue("OPEN", None)));
+    read_no_board_whole(&served);
+}
+
+/// A board that fails the closure's Status write once and then holds the retry holds nothing
+/// of the run back: the node that depends on the landed one is dispatched and settles `done`
+/// while the board still holds the retried write, and once it is let go issue 7's card reaches
+/// `Done` and the run's one record says `projected` — after that settlement in the journal.
+#[test]
+fn a_closure_being_retried_holds_back_no_dependent_of_the_landed_node() {
+    let (world, served, launch) = landing_closing_seven("closures-retried");
+    served.fault("transient");
+    world.script("hold.wait", "hold");
+    let run = "retried";
+    let project = world.plan(
+        run,
+        &plan_of(
+            run,
+            vec![
+                lifecycle("service", &[]),
+                agent("after", &["service"]),
+                agent("hold", &[]),
+            ],
+        ),
+    );
+    start_from(&world, &launch, &project);
+    world.until(
+        "the dependent to settle while the board holds the retried write",
+        |world| {
+            served.state()["holding"] == true
+                && world
+                    .events_of(run, "node-settled")
+                    .iter()
+                    .any(|event| event["labels"]["node"] == "after")
+        },
+    );
+    assert_eq!(settled(&world, run, "after")["status"], "done");
+    assert!(
+        closures_of(&world, run).is_empty(),
+        "the closure was recorded while its write was held"
+    );
+    served.release();
+    world.until("the retried closure to be recorded", |world| {
+        !closures_of(world, run).is_empty()
+    });
+
+    assert_eq!(
+        card(&served, "1", "7"),
+        (json!("Done"), issue("CLOSED", Some("COMPLETED")))
+    );
+    let records = closures_of(&world, run);
+    assert_eq!(records.len(), 1, "{records:#?}");
+    assert_eq!(records[0]["payload"]["outcome"], "projected");
+    assert!(
+        position(&world, run, "node-settled", Some("after"))
+            < position(&world, run, "landing-closures", None),
+        "the dependent did not settle before the closure finished"
+    );
+    read_no_board_whole(&served);
+    finished(&world, run);
+}
