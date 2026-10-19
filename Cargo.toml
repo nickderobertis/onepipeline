@@ -1019,11 +1019,14 @@ onejudge = "0.19.5"
 # #1495): concurrent controlled Codex turns under one configuration share one
 # pooled `codex app-server`, which starts on macOS too and reports why one exits
 # early. The pool lives in the `oneharness` process a two-party member's
-# onejudge spawns, which hosts its sweeper. The `onepipeline` binary — the only
-# one this repository ships — runs no turn itself: it spawns `oneagentgraph`,
-# whose single-sided turn is an uncontrolled `codex exec`, so it leases no pooled
-# server and hosts no sweeper. `tests/e2e/dispatch.rs`'s
-# `two_concurrent_judged_codex_turns_share_one_app_server` holds it. A
+# onejudge spawns — `oneagentgraph` installs a spawn hook on every judged member,
+# which selects onejudge's spawning seam — and that process hosts its sweeper.
+# The `onepipeline` binary, the only one this repository ships, drives the graph
+# in process, but the one turn it runs there is a single-sided member's, an
+# uncontrolled `oneharness_core` call that runs `codex exec`; so it leases no
+# pooled server and hosts no sweeper. `tests/e2e/dispatch.rs`'s
+# `two_concurrent_judged_codex_turns_share_one_app_server` holds both: one server
+# for two concurrent judged turns, and a sweeper started beside it. A
 # **requirement** and not only a lock floor, so a build that admits 0.28.2 cannot
 # be the one a host adopts for it; `oneagentgraph` 0.5.14 and `onejudge` 0.19.5
 # each require `^0.28.1`, which admits it, so the lock resolves the core once.
