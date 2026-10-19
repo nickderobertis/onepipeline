@@ -44,7 +44,7 @@ use onemessagebus::{Config, Layouts, LocalTransport, Transport, TransportKinds};
 use onepipeline::channel::layout::{PlannerChannel, COMMANDS, PLANNER_CHANNEL, REPLIES};
 use onepipeline::channel::Command;
 use onepipeline::channel::Deliver;
-use onepipeline::note::{deliver, deliver_with, Addressee, Delivered, Note, Reached};
+use onepipeline::note::{deliver, deliver_with, Addressee, Delivered, Note, NoteTurn, Reached};
 use onepipeline::views::RunPaths;
 use serde_json::{json, Value};
 
@@ -504,6 +504,18 @@ fn a_note_into_a_live_dispatch_reaches_both_parties_before_the_judges_verdict() 
         operation["reached"],
         json!("worker"),
         "the note reached a party the note was not delivered to first: {operation}"
+    );
+    // The harness under this conversation offers no control, so the default
+    // `live` note could not interrupt the turn and reached it as it ended.
+    assert_eq!(
+        operation["turn"],
+        json!("turn-end"),
+        "a note to a turn that cannot be interrupted is not recorded as reaching it at its \
+         end: {operation}"
+    );
+    assert!(
+        aborted(&world).is_empty(),
+        "a turn that offers no control was aborted"
     );
     // The acknowledgement confirms nothing: the conversation acknowledges a
     // reopened worker turn before that turn opens, so the record says where it
@@ -3838,7 +3850,9 @@ fn the_note_seam_answers_a_delivery_and_a_non_delivery_through_this_crates_own_a
     releasing.join().expect("the releasing thread finishes");
     assert_eq!(
         delivered.expect("the live conversation took the note"),
-        Delivered::To(Reached::Worker { turn: None })
+        Delivered::To(Reached::Worker {
+            turn: Some(NoteTurn::TurnEnd)
+        })
     );
 
     world.until("the run's driver to release it", |world| {
@@ -5201,5 +5215,284 @@ fn a_note_the_envelope_cannot_carry_is_refused_at_the_wire_and_nothing_is_queued
     assert!(
         worked(&world).iter().all(|prompt| !prompt.contains(NOTE)),
         "a note the wire refused was handed to the worker anyway"
+    );
+}
+
+/// The prompt of the worker turn being held, once the double has recorded it:
+/// a turn opens on the run's stream before its harness has read its prompt.
+fn held_worker_prompt(world: &World) -> String {
+    world.until("the held worker turn to record its prompt", |world| {
+        !worker_turns(world).is_empty()
+    });
+    worker_turns(world)
+        .last()
+        .cloned()
+        .expect("a worker prompt")
+}
+
+/// The prompt of the judge turn being held, once the double has recorded it.
+fn held_judge_prompt(world: &World) -> String {
+    world.until("the held judge turn to record its prompt", |world| {
+        !judged(world).is_empty()
+    });
+    judged(world).last().cloned().expect("a judge prompt")
+}
+
+/// Every prompt the **worker** was handed: [`worked`] without the judge side's
+/// other two questions — a decision re-taken on a redirect, and the evaluator's
+/// verdict — neither of which opens on the supervisor's brief.
+fn worker_turns(world: &World) -> Vec<String> {
+    worked(world)
+        .into_iter()
+        .filter(|prompt| {
+            !prompt.contains(REDIRECTED_DECISION)
+                && !prompt.contains(onepipeline_testfakes::EVALUATOR_OPENING)
+        })
+        .collect()
+}
+
+/// How onejudge opens a supervisor decision re-taken on a redirect.
+const REDIRECTED_DECISION: &str = "A correction delivered into your turn";
+
+/// The prompt of every turn the harness double recorded as **aborted** by a
+/// redirect, in the order it aborted them.
+fn aborted(world: &World) -> Vec<String> {
+    recorded_turns(world, "oneharness-turn-aborted")
+}
+
+/// The prompt of every turn the harness double recorded as running to its own
+/// end — a replacement turn's being the redirect it opened on.
+fn ended(world: &World) -> Vec<String> {
+    recorded_turns(world, "oneharness-turn-ended")
+}
+
+fn recorded_turns(world: &World, tool: &str) -> Vec<String> {
+    world
+        .invocations()
+        .into_iter()
+        .filter(|call| call["tool"] == tool)
+        .filter_map(|call| call["args"][0].as_str().map(str::to_string))
+        .collect()
+}
+
+/// How many notes the run's stream shows admitted into a conversation's inbox,
+/// as the member published it: `oneagentgraph`'s `note-admitted`, relayed.
+fn admitted(world: &World, run: &str) -> usize {
+    world.events_of(run, "note-admitted").len()
+}
+
+/// The channel outcome's result for command `index` of envelope `id`.
+fn result_of(world: &World, run: &str, id: u64, index: usize) -> Value {
+    outcome_of(world, run, id).unwrap_or_else(|| panic!("envelope {id} was never answered"))
+        ["results"][index]
+        .clone()
+}
+
+/// A default `live` note into a held worker turn **interrupts** it: the double
+/// records that turn aborted and never ending, the replacement opens on the
+/// note — once — and the run records the delivery as having interrupted the
+/// worker's turn, in the journal and in the envelope's own outcome. The judge's
+/// next decision then judges against the note's criterion.
+///
+/// The held turn is never released: the redirect is what ends it, so a delivery
+/// that only waited for the turn to end could not pass.
+#[test]
+fn a_live_note_interrupts_the_held_worker_turn_and_its_replacement_opens_on_it() {
+    let world = World::new("note-interrupt");
+    let run = "interrupt";
+    world.script("harness.control", "serve");
+    held_conversation(&world, run, vec![agent("build", &[])]);
+    let held = held_worker_prompt(&world);
+
+    world
+        .run_with_stdin_on(
+            world.agentgraph_cmd(&["reply", run]),
+            &envelope(note_op("build", "worker", NOTE, Some(CRITERION))),
+        )
+        .exited(0)
+        .out_has("\"state\":\"applied\"");
+    let id = queued_id_of(&world, run, NOTE);
+
+    assert_eq!(
+        aborted(&world),
+        [held.clone()],
+        "the held worker turn was not aborted by the note"
+    );
+    assert!(
+        admitted(&world, run) >= 1,
+        "the run's stream never showed the note admitted"
+    );
+    let operation = recorded(&world, run);
+    assert_eq!(
+        [&operation["reached"], &operation["turn"]],
+        [&json!("worker"), &json!("interrupted")],
+        "{operation}"
+    );
+    assert_eq!(
+        result_of(&world, run, id, 0)["turn"],
+        json!("interrupted"),
+        "the note's channel outcome does not say its turn was interrupted"
+    );
+    world.until("the judge to decide on the replacement turn", |world| {
+        !judged(world).is_empty()
+    });
+    let worker = worker_turns(&world);
+    let at = worker
+        .iter()
+        .position(|prompt| *prompt == held)
+        .expect("the held turn's prompt");
+    let replacement = worker
+        .get(at + 1)
+        .unwrap_or_else(|| panic!("no turn opened after the held one:\n{worker:#?}"));
+    assert_eq!(
+        replacement.matches(NOTE).count(),
+        1,
+        "the replacement turn did not open on the note exactly once:\n{replacement}"
+    );
+    assert!(
+        judged(&world)[0].contains(CRITERION),
+        "the judge's next decision did not judge against the note's criterion:\n{}",
+        judged(&world)[0]
+    );
+
+    // The supervisor asks once more, and that turn is held on the same gates.
+    release(&world.fakes, "turn.go");
+    release(&world.fakes, "turn.settle");
+    world.until("the run to settle", |world| {
+        !world.events_of(run, "node-settled").is_empty()
+    });
+    assert!(
+        !ended(&world).contains(&held),
+        "the aborted turn was recorded as running to its end:\n{:#?}",
+        ended(&world)
+    );
+}
+
+/// A `turn-end` note never interrupts, even a turn that could be: it waits in the
+/// conversation's inbox for as long as the held worker turn runs, reaches the
+/// worker only once that turn is released, and is recorded as reaching it at its
+/// end. The double records no turn aborted.
+#[test]
+fn a_turn_end_note_waits_for_the_held_turn_to_end_and_never_interrupts_it() {
+    let world = World::new("note-turn-end");
+    let run = "turnend";
+    world.script("harness.control", "serve");
+    held_conversation(&world, run, vec![agent("build", &[])]);
+    let held = held_worker_prompt(&world);
+
+    let before = admitted(&world, run);
+    let mut note = submitted(
+        &world,
+        run,
+        &envelope(note_op_with("build", NOTE, "turn-end", true)),
+    );
+    world.until("the note to be admitted to the conversation", |world| {
+        admitted(world, run) > before
+    });
+    assert!(
+        note.try_wait().expect("the reply is readable").is_none(),
+        "a turn-end note was answered while the turn it waits for was still held"
+    );
+    assert!(
+        worked(&world).iter().all(|prompt| !prompt.contains(NOTE)),
+        "the worker was handed a turn-end note before its turn ended"
+    );
+
+    release(&world.fakes, "turn.go");
+    release(&world.fakes, "turn.settle");
+    assert!(answered(note).contains("\"state\":\"applied\""));
+    world.until("the run to settle", |world| {
+        !world.events_of(run, "node-settled").is_empty()
+    });
+    let operation = recorded(&world, run);
+    assert_eq!(
+        [&operation["reached"], &operation["turn"]],
+        [&json!("worker"), &json!("turn-end")],
+        "{operation}"
+    );
+    let id = queued_id_of(&world, run, NOTE);
+    assert_eq!(result_of(&world, run, id, 0)["turn"], json!("turn-end"));
+    assert!(
+        aborted(&world).is_empty(),
+        "a turn-end note aborted the turn it was told to wait for"
+    );
+    assert!(
+        ended(&world).contains(&held),
+        "the held turn did not run to its end"
+    );
+    let worker = worked(&world);
+    let at = worker
+        .iter()
+        .position(|prompt| *prompt == held)
+        .expect("held");
+    assert!(
+        worker[at + 1..].iter().any(|prompt| prompt.contains(NOTE)),
+        "no turn after the held one opened on the note:\n{worker:#?}"
+    );
+}
+
+/// A binding note to the **supervisor**, sent while the judge's turn is held,
+/// interrupts that turn: the double records it aborted and never ending, and the
+/// decision is re-taken on a replacement turn that opens on the note — once — and
+/// judges against its criterion. That decision completes the work, so the note is
+/// recorded `judged-with`, and no later worker turn is handed it.
+#[test]
+fn a_note_to_the_supervisor_interrupts_the_held_judge_turn_and_its_replacement_decides_with_it() {
+    let world = World::new("note-judge-interrupt");
+    let run = "judgeinterrupt";
+    world.script("harness.control", "serve");
+    held_judge(&world, run, vec![agent("build", &[])]);
+    let held = held_judge_prompt(&world);
+
+    world
+        .run_with_stdin_on(
+            world.agentgraph_cmd(&["reply", run]),
+            &envelope(note_op("build", "supervisor", NOTE, Some(CRITERION))),
+        )
+        .exited(0)
+        .out_has("\"state\":\"applied\"");
+    world.until("the run to settle", |world| {
+        !world.events_of(run, "node-settled").is_empty()
+    });
+
+    assert_eq!(
+        aborted(&world),
+        [held.clone()],
+        "the held judge turn was not aborted by the note"
+    );
+    assert!(
+        !ended(&world).contains(&held),
+        "the aborted judge turn was recorded as running to its end"
+    );
+    let replacement = prompts(&world)
+        .into_iter()
+        .find(|prompt| prompt.contains(REDIRECTED_DECISION))
+        .expect("the judge's decision was re-taken on a replacement turn");
+    assert_eq!(
+        replacement.matches(NOTE).count(),
+        1,
+        "the replacement judge turn did not open on the note exactly once:\n{replacement}"
+    );
+    assert!(
+        replacement.contains(CRITERION),
+        "the replacement judge turn was not handed the note's criterion:\n{replacement}"
+    );
+    let operation = recorded(&world, run);
+    let completed = operation["reached"] == json!("judged-with");
+    assert!(
+        completed
+            || [&operation["reached"], &operation["turn"]]
+                == [&json!("supervisor"), &json!("interrupted")],
+        "the note is recorded neither as interrupting the judge nor as judged with: {operation}"
+    );
+    assert!(
+        completed,
+        "the replacement decision did not complete the work: {operation}"
+    );
+    assert!(
+        worker_turns(&world)
+            .iter()
+            .all(|prompt| !prompt.contains(NOTE)),
+        "a worker turn was handed a note the judge completed the work with"
     );
 }
