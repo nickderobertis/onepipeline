@@ -1025,9 +1025,10 @@ pub(crate) fn landings_the_run_re_read(state: &mut RunState, paths: &RunPaths) {
 /// records for as long as the run goes. There a node's read is carried across
 /// that stream's consecutive renders for at most [`STREAM_READ_REUSE`] — see
 /// [`StreamReads`] — and is taken again at once after the stream records a
-/// settlement, publication or landing for that node, and on the stream's final
-/// render, which reports the run as it settled. `status`, `results` and `watch`
-/// carry nothing and read on every render.
+/// settlement or restack of that node or a publication or landing of its session
+/// ([`MOVES_A_LANDING`]), and on the stream's final render, which reports the run
+/// as it settled and carries nothing. `status`, `results` and `watch` carry
+/// nothing and read on every render.
 ///
 /// Nested scopes are one render: `status` prints [`RunView::summary`] inside
 /// itself, and a second scope there would empty the memo half-way through and
@@ -1067,8 +1068,8 @@ thread_local! {
 /// The stream renders after every batch of records, which on a busy run is
 /// back to back, and each render took every unlanded node's landing from
 /// scratch — `onevcs` resolving the repository and running `git` some forty
-/// times a node. On a host where starting a process is slow that was most of
-/// what an attached command spent, and a tail after its run had finished. Ten
+/// times a node. That was nearly half the processes a busy attached command
+/// started, and, one read after another, a tail after its run had finished. Ten
 /// seconds is a merge somebody else performs going unreported for no longer than
 /// a person takes to look up from it; the stream's own records end the reuse
 /// sooner, and its last render reads afresh.
