@@ -717,8 +717,9 @@ resolver = "2"
 # `src/maintenance.rs` matches `IdentityOutcome::MaintenanceUnreadable` and reads
 # `SlotOutcome::Ran`'s `disk`, neither of which an earlier release defines.
 #
-# `onevcs` 0.56.1 is the floor because `onevcs-testing` 0.19.11 requires exactly it,
-# and it is the release whose two new shapes this crate reads: a publication held on
+# `onevcs` 0.56.2 is the floor because `onevcs-testing` 0.19.12, the test-support
+# release named as carrying this batch's onevcs fixes, requires exactly it. 0.56.1
+# below it is the release whose two new shapes this crate reads: a publication held on
 # `boundary::Unavailability::HostVisibility` settles as that unavailable check, and
 # `WorkspaceCapacity::ineligible` is named in a held node's `workspace-wait`
 # (`src/pool.rs`). It asks visibility with `gh api --include`, which `fake-gh` answers
@@ -796,7 +797,7 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 oneagentgraph = "0.5.13"
-onevcs = "0.56.1"
+onevcs = "0.56.2"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is
@@ -1027,7 +1028,7 @@ oneharness-core = "0.28.2"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.19.11"
+onevcs-testing = "0.19.12"
 # The store, linked: `src/taskgraph.rs` says how the engine calls it. `-plugin-api` is
 # named for the values the store answers with, and `-local-md` for the plugin
 # `crates/testfakes` hosts in process.
@@ -1072,16 +1073,23 @@ onevcs-testing = "0.19.11"
 # `a_create_the_destination_stored_and_answered_malformed_names_the_destination_and_its_residue`
 # drives it. The variant is new, so a lower pin does not compile.
 #
-# **0.7.3 is the floor**, and the release named as carrying that fix. It leaves a source
+# 0.7.3 below it is the release first named as carrying that fix. It leaves a source
 # a layer refines but no layer defines unconfigured rather than failing every load, so a
 # host's user layer may route to sources only one checkout defines, and names a ticket in
 # such a source `EngineError::IncompleteSource`, which write-back names
 # `incomplete-source` as the store does. It answers a dependency read a private source
 # cannot without failing it: `src/taskgraph.rs` asks `Completeness::NamingUnasked` and
 # holds each node the read could not ask about. `tests/e2e/store.rs` drives both.
-onetaskgraph-core = "=0.7.3"
-onetaskgraph-plugin-api = "=0.7.3"
-onetaskgraph-local-md = "=0.7.3"
+#
+# **0.8.0 is the floor**: the release named as carrying the uncertain-copy fix this batch
+# adopts, so the engine this host installs links it. Its copy takes `CopyRequest::statuses`, which
+# write-back leaves empty so every status is kept, and so never meets the new
+# `CopyAction::Skipped`; `src/writeback.rs` counts one as no mutation all the same, and names
+# `EngineError::StatusesNotTasks` `statuses-not-tasks` as the store does. The field and both
+# variants are new, so a lower pin does not compile.
+onetaskgraph-core = "=0.8.0"
+onetaskgraph-plugin-api = "=0.8.0"
+onetaskgraph-local-md = "=0.8.0"
 # Test-support only: the budget checker's own library, at exactly the release `justfile`'s
 # `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
 onebudgetspec-core = "=0.1.5"
