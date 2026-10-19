@@ -5154,6 +5154,19 @@ pub fn oneagentgraph_binary() -> PathBuf {
     held_alias(held, "oneagentgraph")
 }
 
+/// The **real** `oneharness` binary, built from the release `crates/testfakes`
+/// names as a normal dependency, over the one `oneharness-core` this lock resolves.
+///
+/// For the journeys whose claim is about the process a two-party member's
+/// onejudge spawns for each turn rather than about what this suite's double
+/// answers, the way [`oneagentgraph_binary`] is for the graph.
+pub fn oneharness_binary() -> PathBuf {
+    static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    let held = BUILT
+        .get_or_init(|| build(&["--package", "oneharness", "--bin", "oneharness", "--locked"]));
+    held_alias(held, "oneharness")
+}
+
 /// The project every store fixture here holds beside the plan under test.
 pub const DECOY_PROJECT: &str = "not-this-runs-board";
 

@@ -3824,6 +3824,192 @@ fn a_codex_server_overload_that_outlasts_its_retries_is_stepped_past_as_server_o
     );
 }
 
+/// A dispatched Codex turn starts with plugins **off** unless its config opts
+/// in, so a host's dispatches stop downloading Codex's remote plugin catalog
+/// with no configuration of their own.
+///
+/// What decides it is **this build's lock**: the `oneharness_core` the real
+/// graph links builds the `codex` argv, and from 0.26.0 that argv carries `-c
+/// features.plugins=false` unless the resolved config says `plugins = true`
+/// (nickderobertis/oneharness#1457). Driven through the real graph and the real
+/// core, as the overload journey above is, with `fake-codex` the one stand-in —
+/// it records the argv it was started with, which is the whole of the evidence.
+#[test]
+fn a_dispatched_codex_turn_starts_with_plugins_off_unless_its_config_opts_in() {
+    let started = |name: &str, config: &str| -> Vec<String> {
+        let world = World::new(name);
+        world.write_graphs();
+        std::fs::write(world.graphs().join("codex.toml"), config)
+            .expect("the codex candidate's config is written");
+        let path = world.plan(name, &plan_of(name, vec![agent("build", &[])]));
+        let mut launch = world.agentgraph_cmd(&[
+            "start",
+            &path,
+            "--attach",
+            "--node-set",
+            "members.worker.oneharness_config=./codex.toml",
+        ]);
+        launch.env("ONEHARNESS_BIN_CODEX", crate::harness::double("fake-codex"));
+        world.run_on(launch, "start --attach").settled();
+        world.until("the codex node to settle", |world| {
+            world.run_file(name, "result.json").is_file()
+        });
+        let calls: Vec<Value> = world
+            .invocations()
+            .into_iter()
+            .filter(|call| call["tool"] == "codex")
+            .collect();
+        assert_eq!(calls.len(), 1, "codex was not started once: {calls:#?}");
+        serde_json::from_value(calls[0]["args"].clone()).expect("an argv is strings")
+    };
+    let base =
+        "run_mode = \"fallback\"\nharnesses = [\"codex\"]\nserver_overloaded_max_retries = 0\n";
+    let reenabled = |argv: &[String], from: usize| {
+        argv.windows(2).skip(from).any(|pair| {
+            (pair[0] == "-c"
+                && pair[1].starts_with("features.plugins=")
+                && pair[1] != "features.plugins=false")
+                || (pair[0] == "--enable" && pair[1] == "plugins")
+        })
+    };
+
+    let unstated = started("codex-plugins-unstated", base);
+    let off = unstated
+        .windows(2)
+        .rposition(|pair| pair == ["-c", "features.plugins=false"])
+        .unwrap_or_else(|| {
+            panic!("a config with no `plugins` key started codex with plugins on: {unstated:?}")
+        });
+    assert!(
+        !reenabled(&unstated, off + 2),
+        "a later flag turned plugins back on after they were disabled: {unstated:?}"
+    );
+
+    let opted_in = started(
+        "codex-plugins-opted-in",
+        &format!("{base}\n[harness.codex]\nplugins = true\n"),
+    );
+    assert!(
+        !opted_in.iter().any(|arg| arg.contains("plugins")),
+        "a config that opts into plugins still started codex with a plugins flag: {opted_in:?}"
+    );
+}
+
+/// A judged Codex turn starts with plugins **off** unless its config opts in.
+///
+/// The same claim as the journey above, through the path a supervised node
+/// takes: the engine dispatches a `kind: onejudge` member, the real graph drives
+/// onejudge in process, and onejudge spawns the **real** `oneharness` CLI — built
+/// from this lock, over its one `oneharness-core` — for each turn, which starts
+/// the harness. Nothing above `codex` is stood in for: the graph's
+/// `fake-oneharness` override and its `ONEHARNESS_BIN_CODEX` seam are both
+/// removed, and `codex` is resolved by name off a `PATH` whose first entry holds
+/// `fake-codex` under that name, which records the argv it was started with.
+/// The real CLI starts the agent side as one shared `codex app-server` (oneharness
+/// 0.25, core 0.28), under an environment cleared to its base and `CODEX_*`
+/// variables, so the double reads its world from the file written beside it. It
+/// records that line and then refuses it, which ends the turn: the argv is the
+/// whole of the evidence, so the member's settlement is not read.
+#[test]
+fn a_judged_codex_turn_starts_with_plugins_off_unless_its_config_opts_in() {
+    let started = |name: &str, config: &str| -> Vec<Vec<String>> {
+        let world = World::new(name);
+        world.write_graphs();
+        world.write_supervised_node_graph();
+        std::fs::write(world.graphs().join("oneharness.toml"), config)
+            .expect("both sides' codex config is written");
+        let path = world.plan(name, &plan_of(name, vec![agent("build", &[])]));
+
+        let on_path = world.root.join("codex-on-path");
+        std::fs::create_dir_all(&on_path).expect("a directory for codex");
+        std::fs::copy(
+            crate::harness::double("fake-codex"),
+            on_path.join(format!("codex{}", std::env::consts::EXE_SUFFIX)),
+        )
+        .expect("the codex double is placed under codex's own name");
+        // The shared app-server the real CLI starts runs under an environment
+        // cleared to its base variables, so the double finds its world here.
+        std::fs::write(
+            on_path.join("onepipeline-fake-dir"),
+            world.fakes.to_string_lossy().as_bytes(),
+        )
+        .expect("the codex double is told where its world is");
+        let mut launch = world.agentgraph_cmd(&["start", &path, "--attach"]);
+        let inherited = launch
+            .get_envs()
+            .find(|(key, _)| *key == "PATH")
+            .and_then(|(_, value)| value.map(std::ffi::OsStr::to_os_string))
+            .expect("the graph's launch names a PATH");
+        launch
+            .env(
+                "PATH",
+                std::env::join_paths(
+                    std::iter::once(on_path).chain(std::env::split_paths(&inherited)),
+                )
+                .expect("a PATH"),
+            )
+            .env(
+                "ONEAGENTGRAPH_ONEHARNESS_BIN",
+                crate::harness::oneharness_binary(),
+            )
+            .env_remove("ONEHARNESS_BIN_CODEX");
+        world.run_on(launch, "start --attach").settled();
+        world.until("the judged node to settle", |world| {
+            world.run_file(name, "result.json").is_file()
+        });
+
+        let invocations = world.invocations();
+        assert!(
+            !invocations.iter().any(|call| call["tool"] == "oneharness"),
+            "a turn reached the oneharness double rather than the real CLI: {invocations:#?}"
+        );
+        let launches: Vec<Vec<String>> = invocations
+            .iter()
+            .filter(|call| call["tool"] == "codex")
+            .map(|call| serde_json::from_value(call["args"].clone()).expect("an argv is strings"))
+            .filter(|argv: &Vec<String>| argv.as_slice() != ["--version"])
+            .collect();
+        assert!(
+            !launches.is_empty(),
+            "the real oneharness never started codex off the PATH: {invocations:#?}"
+        );
+        launches
+    };
+    let base =
+        "run_mode = \"fallback\"\nharnesses = [\"codex\"]\nserver_overloaded_max_retries = 0\n";
+    let reenabled = |argv: &[String], from: usize| {
+        argv.windows(2).skip(from).any(|pair| {
+            (pair[0] == "-c"
+                && pair[1].starts_with("features.plugins=")
+                && pair[1] != "features.plugins=false")
+                || (pair[0] == "--enable" && pair[1] == "plugins")
+        })
+    };
+
+    for argv in started("judged-codex-plugins-unstated", base) {
+        let off = argv
+            .windows(2)
+            .rposition(|pair| pair == ["-c", "features.plugins=false"])
+            .unwrap_or_else(|| {
+                panic!("a config with no `plugins` key started codex with plugins on: {argv:?}")
+            });
+        assert!(
+            !reenabled(&argv, off + 2),
+            "a later flag turned plugins back on after they were disabled: {argv:?}"
+        );
+    }
+
+    for argv in started(
+        "judged-codex-plugins-opted-in",
+        &format!("{base}\n[harness.codex]\nplugins = true\n"),
+    ) {
+        assert!(
+            !argv.iter().any(|arg| arg.contains("plugins")),
+            "a config that opts into plugins still started codex with a plugins flag: {argv:?}"
+        );
+    }
+}
+
 /// The line `fake-codex` answers with is one the **linked** classifier reads as
 /// a server overload.
 ///
@@ -3880,7 +4066,8 @@ fn the_codex_doubles_overload_answer_is_the_one_the_linked_classifier_reads() {
 /// The half no passing journey can show, as for `fake-claude` above: the
 /// overload journey proves the real `oneharness` drives this binary on the one
 /// argv it built there, and this proves each other form it may build is
-/// answered — a resumed thread, a sandbox, a model, a prompt on stdin — and that
+/// answered — a resumed thread, a sandbox, a model, a config override, a prompt
+/// on stdin — and that
 /// an argv it does not build is refused rather than answered: a verb other
 /// than `exec`, a `resume` with no thread, an option with no value or an
 /// unknown one, a flag Codex does not take, two prompts, none, and the probe's
