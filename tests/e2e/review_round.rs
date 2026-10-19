@@ -495,6 +495,8 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
     let mut phases = Vec::new();
     let round_from = projection_lines(&world, run).len();
     let mut reworked = Vec::new();
+    // Each rework's attach stream, as it printed and recorded its renders.
+    let mut streamed = Vec::new();
     timed(&world, &host, run, "pass-1", &mut phases, || {
         passed(&world.run(&["review", run]), "the first pass");
     });
@@ -533,7 +535,7 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
             let record = world.root.join(format!("{name}.reads"));
             let adopted = world.run_recording_renders(&record, &["adopt", run]);
             passed(&adopted, name);
-            moved_drafts_were_read_again(&world, &record, &adopted.stderr, run);
+            streamed.push((record, adopted.stderr.clone()));
         });
         reworked.push((node, from, projection_lines(&world, run).len()));
     }
@@ -563,6 +565,11 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
     });
     #[cfg(unix)]
     the_round_started_few_enough_gits(&world);
+    // After the bound, so a round that costs too much is told so before anything about
+    // how its streams spent it.
+    for (record, stderr) in &streamed {
+        moved_drafts_were_read_again(&world, record, stderr, run);
+    }
 
     // Every comment answered or declined exactly once.
     for comment in on_b.iter().chain(&on_h) {
