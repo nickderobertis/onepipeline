@@ -91,9 +91,9 @@ fn dispatched(world: &World, node: &str) -> usize {
 }
 
 /// Wait until the write-back is at rest: every command the write-back's store was handed has
-/// ended and its attempt is recorded, the last attempt landed, and the store has been asked
-/// nothing for a while. Nothing here times a single attempt; a step waits for the graph it
-/// caused, and then for this.
+/// ended and its attempt is recorded, and the last attempt landed. Nothing here times a single
+/// attempt, and nothing here can tell an attempt still to come from none: a step first waits
+/// for its own projection to have landed — see [`landed`] — and then for this.
 fn at_rest(world: &World, what: &str) {
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {
@@ -111,11 +111,7 @@ fn at_rest(world: &World, what: &str) {
             .count();
         let between_commands = asked.last().is_some_and(|call| call[0] == END);
         if landed && between_commands && called_by_attempts == ended {
-            std::thread::sleep(Duration::from_millis(1_500));
-            if world.store_calls().len() == asked.len() && records(world).len() == recorded.len() {
-                return;
-            }
-            continue;
+            return;
         }
         assert!(
             Instant::now() < deadline,
@@ -126,9 +122,38 @@ fn at_rest(world: &World, what: &str) {
     }
 }
 
+/// Wait for a step's graph and its projection, then for the write-back to be at rest.
+///
+/// `ready` names what the step's last projection landed, and not only the graph it moved: the
+/// driver journals a dispatch or a settlement *before* it hands the write-back the snapshot
+/// carrying it, so a step that waited on the journal alone could find the write-back at rest
+/// on the previous step's attempt, the step's own not yet begun.
 fn then_at_rest(world: &World, what: &str, ready: impl Fn(&World) -> bool) {
     world.until(what, &ready);
     at_rest(world, what);
+}
+
+/// What the write-back last landed on the project, as the run's landed baseline keeps it
+/// (`docs/contract-divergences.md` entry 93): each lineage's item by its root, and the
+/// project's engine-owned keys. `Null` until there is one to read.
+fn landed(world: &World) -> Value {
+    std::fs::read_to_string(world.run_file(RUN, "writeback-landed.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or(Value::Null)
+}
+
+/// Whether each lineage's item last landed under its word.
+fn landed_as(world: &World, words: &[(&str, &str)]) -> bool {
+    let landed = landed(world);
+    words
+        .iter()
+        .all(|(root, word)| landed["items"][root]["status"] == *word)
+}
+
+/// The driver claim the write-back last landed on the project: `Null` where none stands.
+fn landed_claim(world: &World) -> Value {
+    landed(world)["project_metadata"]["onepipeline.driver"].clone()
 }
 
 fn by_method<'a>(calls: impl Iterator<Item = &'a Vec<String>>) -> BTreeMap<String, u64> {
@@ -184,16 +209,32 @@ fn the_comparable_plan() -> (Value, Vec<Value>, Vec<Vec<Vec<String>>>) {
         ["a", "d", "e"]
             .iter()
             .all(|node| dispatched(world, node) == 1)
+            && landed_as(
+                world,
+                &[
+                    ("a", "in progress"),
+                    ("b", "queued"),
+                    ("c", "queued"),
+                    ("d", "in progress"),
+                    ("e", "in progress"),
+                ],
+            )
     });
 
     go("d");
-    then_at_rest(&world, "the failure", |world| settled(world, "d", "failed"));
+    then_at_rest(&world, "the failure", |world| {
+        settled(world, "d", "failed") && landed_as(world, &[("d", "failed")])
+    });
     let mark = records(&world).len();
     reply(
         &world,
         json!({"op": "retry", "id": "d", "node": node("d-2", &[])}),
     );
-    then_at_rest(&world, "the retry", |world| dispatched(world, "d-2") == 1);
+    then_at_rest(&world, "the retry", |world| {
+        dispatched(world, "d-2") == 1
+            && landed_as(world, &[("d", "in progress")])
+            && landed(world)["items"]["d"]["metadata"]["onepipeline.node"] == "d-2"
+    });
     // A retry is a targeted update of the root's item: the head's word and lineage keys, the
     // old head's settlement taken off, and the body the replacement restates.
     let retry = the_update_of(&world, mark, "d");
@@ -219,6 +260,9 @@ fn the_comparable_plan() -> (Value, Vec<Value>, Vec<Vec<Vec<String>>>) {
     );
     then_at_rest(&world, "the amend", |world| {
         !world.events_of(RUN, "edit-committed").is_empty()
+            && landed(world)["items"]["c"]["metadata"]["onepipeline.amendment"]
+                .as_str()
+                .is_some_and(|text| text.contains("as amended"))
     });
     // An amendment is recorded beside the task on its own engine-owned key, so it is that key
     // alone: the body a retry restates is the one it rewrites.
@@ -237,6 +281,8 @@ fn the_comparable_plan() -> (Value, Vec<Value>, Vec<Vec<Vec<String>>>) {
     reply(&world, json!({"op": "add", "node": node("f", &["e"])}));
     then_at_rest(&world, "the add", |world| {
         world.events_of(RUN, "edit-committed").len() > edits
+            && landed_as(world, &[("f", "queued")])
+            && landed(world)["items"]["f"]["depends_on"] == json!(["e"])
     });
     // An `add` is the one copy, naming the node it creates alone, beside the one project read
     // that lets the copy land the project item unwritten.
@@ -254,6 +300,7 @@ fn the_comparable_plan() -> (Value, Vec<Value>, Vec<Vec<Vec<String>>>) {
     reply(&world, json!({"op": "reparent", "id": "f", "deps": ["b"]}));
     then_at_rest(&world, "the reparent", |world| {
         world.events_of(RUN, "edit-committed").len() > edits
+            && landed(world)["items"]["f"]["depends_on"] == json!(["b"])
     });
     // A reparent is the edges alone.
     assert_eq!(
@@ -274,7 +321,7 @@ fn the_comparable_plan() -> (Value, Vec<Value>, Vec<Vec<Vec<String>>>) {
     });
     world.store_stops_refusing("update_task");
     then_at_rest(&world, "the outage to recover", |world| {
-        settled(world, "e", "done")
+        settled(world, "e", "done") && landed_as(world, &[("e", "done")])
     });
     assert_eq!(
         failures(&world),
@@ -289,7 +336,9 @@ fn the_comparable_plan() -> (Value, Vec<Value>, Vec<Vec<Vec<String>>>) {
     );
     go("a");
     then_at_rest(&world, "the rate limit to be waited out", |world| {
-        settled(world, "a", "done") && dispatched(world, "b") == 1
+        settled(world, "a", "done")
+            && dispatched(world, "b") == 1
+            && landed_as(world, &[("a", "done"), ("b", "in progress")])
     });
     assert_eq!(
         failures(&world),
@@ -297,30 +346,55 @@ fn the_comparable_plan() -> (Value, Vec<Value>, Vec<Vec<Vec<String>>>) {
         "the rate limit was not one failure"
     );
 
+    let stopped = landed_claim(&world);
     world.run(&["stop", RUN]).exited(0);
     let recorded = records(&world).len();
     world.run(&["adopt", RUN, "--detach"]).exited(0);
+    // The adopting driver's claim, and the two dispatches it made again in progress under it.
     then_at_rest(&world, "the adoption", |world| {
+        let claim = landed_claim(world);
         records(world).len() > recorded
             && dispatched(world, "b") == 2
             && dispatched(world, "d-2") == 2
+            && claim.is_object()
+            && claim != stopped
+            && landed_as(
+                world,
+                &[
+                    ("b", "in progress"),
+                    ("c", "queued"),
+                    ("d", "in progress"),
+                    ("f", "queued"),
+                ],
+            )
     });
 
     go("b");
     then_at_rest(&world, "b", |world| {
-        settled(world, "b", "done") && dispatched(world, "c") == 1
+        settled(world, "b", "done")
+            && dispatched(world, "c") == 1
+            && landed_as(
+                world,
+                &[("b", "done"), ("c", "in progress"), ("f", "in progress")],
+            )
     });
     go("d-2");
-    then_at_rest(&world, "d-2", |world| settled(world, "d-2", "done"));
+    then_at_rest(&world, "d-2", |world| {
+        settled(world, "d-2", "done") && landed_as(world, &[("d", "done")])
+    });
     go("c");
     then_at_rest(&world, "c", |world| {
-        settled(world, "c", "done") && dispatched(world, "f") == 1
+        settled(world, "c", "done")
+            && dispatched(world, "f") == 1
+            && landed_as(world, &[("c", "done")])
     });
     go("f");
-    world.until("the run to settle", |world| {
+    // The closeout's own attempt is the one that releases the run's driver claim.
+    then_at_rest(&world, "closeout", |world| {
         world.run_file(RUN, "result.json").is_file()
+            && landed_as(world, &[("f", "done")])
+            && landed_claim(world).is_null()
     });
-    at_rest(&world, "closeout");
     assert_eq!(world.run_json(RUN, "result.json")["state"], "complete");
 
     // The launch's own read is the first connection the store was handed, up to the next.
