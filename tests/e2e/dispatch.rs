@@ -4176,10 +4176,24 @@ fn two_concurrent_judged_codex_turns_share_one_app_server() {
             })
             .collect();
     assert_eq!(entries.len(), 1, "{entries:#?}");
+    // The sweeper's record lasts only as long as the server: the double exits
+    // once it has been idle a few seconds, and the sweeper's next pass then
+    // forgets the dead server and removes both records — under a loaded runner,
+    // before this reads them. So either record standing is the evidence: a
+    // sweeper still watching the server, or the server's record already
+    // reconciled away with no dispatch left to do it but a sweeper. The log
+    // beside them is opened only by a process that hosts one, just before it
+    // starts it, and nothing removes it.
+    let entry = &entries[0];
+    let swept = !entry.join("server.json").exists();
     assert!(
-        entries[0].join("sweeper.json").is_file(),
-        "the process that started the shared app-server started no sweeper beside it: {}",
-        entries[0].display()
+        entry.join("sweeper.log").is_file() && (entry.join("sweeper.json").is_file() || swept),
+        "the process that started the shared app-server started no sweeper beside it: {}: {:#?}",
+        entry.display(),
+        std::fs::read_dir(entry).map(|listing| listing
+            .flatten()
+            .map(|item| item.file_name())
+            .collect::<Vec<_>>())
     );
 }
 
