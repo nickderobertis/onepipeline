@@ -165,7 +165,8 @@
     "codexServerSource": [
       "{workspaceRoot}/tests/codex_server/**/*",
       "{workspaceRoot}/crates/testfakes/Cargo.toml",
-      "{workspaceRoot}/crates/testfakes/src/*.rs",
+      "{workspaceRoot}/crates/testfakes/src/lib.rs",
+      "{workspaceRoot}/crates/testfakes/src/codex_app_server.rs",
       "{workspaceRoot}/crates/testfakes/src/bin/fake-codex.rs",
       "{workspaceRoot}/Cargo.toml",
       "{workspaceRoot}/Cargo.lock",
