@@ -5546,6 +5546,30 @@ pub fn end_lock_holder(world: &World, run: &str) -> u32 {
     pid
 }
 
+/// The `bash` this repository's shell scripts run under, found on `PATH`.
+///
+/// Never the bare name: Windows looks a bare `bash` up in its system directory
+/// before `PATH`, and the `bash.exe` there is the WSL launcher, which on a host
+/// with no distribution writes its complaint to stdout and exits 1 — a script
+/// that never ran, reported with an empty stderr. The system directory is
+/// skipped for that reason, as `tests/linked_engines.rs`'s `bash_on` skips it;
+/// where `SystemRoot` is unset nothing is skipped.
+pub fn bash() -> PathBuf {
+    let system_root =
+        std::env::var_os("SystemRoot").map(|root| root.to_string_lossy().to_lowercase());
+    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .filter(|dir| {
+            system_root.as_ref().is_none_or(|root| {
+                !dir.to_string_lossy()
+                    .to_lowercase()
+                    .starts_with(root.as_str())
+            })
+        })
+        .flat_map(|dir| ["bash", "bash.exe"].map(|name| dir.join(name)))
+        .find(|candidate| candidate.is_file())
+        .expect("a bash on PATH outside the Windows system directory runs the shell scripts")
+}
+
 /// When the process at `pid` started, spelled the way the engine stamps a launch
 /// record, or nothing for no such process.
 ///

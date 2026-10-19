@@ -380,7 +380,7 @@ fn passed(output: &crate::harness::Run, what: &str) {
 
 /// What `scripts/review-round-quota-budget.sh` reports over `record`, run from `cwd`.
 pub(crate) fn budget_report(cwd: &Path, result: &Path) -> std::process::Output {
-    std::process::Command::new("bash")
+    std::process::Command::new(crate::harness::bash())
         .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/review-round-quota-budget.sh"))
         .current_dir(cwd)
         .env("ONEBUDGETSPEC_RESULT", result)
@@ -813,7 +813,7 @@ fn the_round_quota_reporter_refuses_missing_and_malformed_records() {
     );
     let reported: Value = serde_json::from_slice(&std::fs::read(&result).unwrap()).unwrap();
     assert_eq!(reported["value"], json!(6 + 1 + 6 + 2 + 1));
-    let missing_env = std::process::Command::new("bash")
+    let missing_env = std::process::Command::new(crate::harness::bash())
         .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/review-round-quota-budget.sh"))
         .current_dir(&world.root)
         .env_remove("ONEBUDGETSPEC_RESULT")
