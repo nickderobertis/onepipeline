@@ -10970,7 +10970,11 @@ fn landings_after_asking_again(state: &RunState) -> BTreeMap<String, Landing> {
     let read = crate::vcs::landings_now(
         &asked
             .iter()
-            .map(|(node, branch, repo)| (node.as_str(), *branch, *repo))
+            .map(|(node, branch, repo)| crate::vcs::LandingAsk {
+                node,
+                branch,
+                repo: *repo,
+            })
             .collect::<Vec<_>>(),
     );
     for ((node, _, _), read) in asked.into_iter().zip(read) {

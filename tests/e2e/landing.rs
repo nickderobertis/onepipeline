@@ -933,10 +933,11 @@ impl StreamRender {
         })
     }
 
-    /// Whether this render printed anything that can move `node`'s landing: a record
-    /// of its own, or any session's, whose lines name the session's stream rather than
-    /// the node it is working for.
-    fn printed_a_move_of(&self, node: &str) -> bool {
+    /// Whether this render printed anything that *may* have moved `node`'s landing — a
+    /// superset, deliberately: any record of its own, and any session's at all, whose
+    /// lines name the session's stream rather than the node it is working for. What it
+    /// rules out is a render that printed neither, which nothing moved.
+    fn printed_what_may_move(&self, node: &str) -> bool {
         self.printed.iter().any(|line| {
             line.split_whitespace()
                 .nth(1)
@@ -1053,7 +1054,7 @@ fn an_attach_stream_carries_a_landing_read_until_something_moves_it_and_reads_af
                 continue;
             };
             let since = previous.map(|before| read - before);
-            if !render.printed_a_move_of(node) {
+            if !render.printed_what_may_move(node) {
                 let since = since.unwrap_or_else(|| {
                     panic!(
                         "render {at} read {node} with nothing it printed moving it and no \

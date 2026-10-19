@@ -212,6 +212,7 @@ impl Drop for Render {
 
 /// The render a thread is inside, taken so that work it hands to other threads is
 /// counted against that render as if it had done the work itself.
+// llmlint: ignore[invalid_states_unrepresentable] the run id is the plain string `Inside` carries, for the reason recorded on it.
 pub(crate) struct Within(Option<(Rendered, String)>);
 
 /// The render this thread is inside, if any — see [`Within::adopted`].

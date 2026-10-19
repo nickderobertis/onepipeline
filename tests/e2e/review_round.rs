@@ -524,7 +524,7 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
             let record = world.root.join(format!("{name}.reads"));
             let adopted = world.run_recording_renders(&record, &["adopt", run]);
             passed(&adopted, name);
-            restacked_drafts_were_read_again(&world, &record, &adopted.stderr, run);
+            moved_drafts_were_read_again(&world, &record, &adopted.stderr, run);
         });
         reworked.push((node, from, projection_lines(&world, run).len()));
     }
@@ -844,8 +844,8 @@ fn the_counted_git_counts_each_start_and_is_the_real_git_for_it() {
         ]
     );
 
-    // Refused, counting nothing, without a git to run, a file to count into, or a git
-    // that runs at all.
+    // Refused without a git to run or a file to count into, which counts nothing; and
+    // refused when the git it names will not run, which counts the start it tried.
     for (real, log, says) in [
         (
             None,
@@ -874,37 +874,83 @@ fn the_counted_git_counts_each_start_and_is_the_real_git_for_it() {
     assert_eq!(
         std::fs::read_to_string(&log).unwrap().lines().count(),
         3,
-        "only the start whose real git could not run is counted, before it was tried"
+        "a refused start was counted, or the one whose git would not run was not"
     );
 }
 
-/// Every draft a rework restacked had its landing read again in the render that printed
-/// it restacking, whatever read of it the attach stream that render was part of already
-/// held: the base under the draft moved, which is the one move of an already-settled
-/// node a run makes on its own.
+/// Every draft a rework moved had its landing read again in the render that printed the
+/// move, whatever read of it the attach stream that render was part of already held: its
+/// `node-restacked`, or a push, a merge of its base or a change request opened from its
+/// session — the one move of an already-settled node a run makes on its own, recorded
+/// once by the engine and once by `onevcs` as the session does it.
 ///
-/// What [`crate::landing::stream_renders`] splits the stream into. Where the restack
-/// lands inside the window the stream carries a read for — every one of them, on a host
-/// as quick as this suite's Linux runners — it is the restack alone that asks again.
-fn restacked_drafts_were_read_again(world: &World, record: &Path, stderr: &str, run: &str) {
+/// What [`crate::landing::stream_renders`] splits the stream into. A session's line names
+/// its stream rather than its node, so each is read back to its node through the run's
+/// own merged store. Where the move lands inside the window the stream carries a read for
+/// — every one of them, on a host as quick as this suite's Linux runners — it is the move
+/// alone that asks again, and a session's records arrive renders ahead of the engine's,
+/// so some render is moved by those alone.
+fn moved_drafts_were_read_again(world: &World, record: &Path, stderr: &str, run: &str) {
     let renders = crate::landing::stream_renders(world, record, stderr, run);
+    let store = std::fs::read_to_string(world.run_file(run, "events.jsonl"))
+        .expect("the run's merged store");
+    let node_of: std::collections::BTreeMap<String, String> = store
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|event| event["source"] == "vcs")
+        .filter_map(|event| {
+            Some((
+                format!("vcs:{}", event["stream"].as_str()?),
+                event["labels"]["node"].as_str()?.to_owned(),
+            ))
+        })
+        .collect();
+    let moves: Vec<String> = [
+        onevcs::EventKind::Push,
+        onevcs::EventKind::BaseMerge,
+        onevcs::EventKind::ChangeOpened,
+    ]
+    .into_iter()
+    .map(|kind| {
+        serde_json::to_value(kind)
+            .ok()
+            .and_then(|kind| kind.as_str().map(str::to_owned))
+            .expect("an onevcs kind is its wire word")
+    })
+    .collect();
     let last = renders.len() - 1;
-    let mut restacked = 0;
+    let (mut restacked, mut by_its_session) = (0, 0);
     for (at, render) in renders.iter().enumerate().take(last) {
         for (node, _) in STACK {
-            if render.printed_of(node, "node-restacked") {
-                restacked += 1;
-                assert!(
-                    render.read_at().contains_key(node),
-                    "render {at} printed {node} restacking and did not read its landing \
-                     again:\n{stderr}"
-                );
+            let by_engine = render.printed_of(node, "node-restacked");
+            let by_session = render.printed.iter().any(|line| {
+                let mut words = line.split_whitespace().skip(1);
+                let (Some(id), Some(kind)) = (words.next(), words.next()) else {
+                    return false;
+                };
+                node_of.get(id).map(String::as_str) == Some(node) && moves.iter().any(|m| m == kind)
+            });
+            // Only of a draft the render reports on: a reworked one is counted under its
+            // replacement, and its own old records are not a move of anything reported.
+            if !(by_engine || by_session) || !render.reported(node) {
+                continue;
             }
+            restacked += usize::from(by_engine);
+            by_its_session += usize::from(by_session && !render.printed_of(node, ""));
+            assert!(
+                render.read_at().contains_key(node),
+                "render {at} printed {node} moving and did not read its landing again:\n{stderr}"
+            );
         }
     }
     assert!(
         restacked > 0,
         "the rework's stream printed no restack before its last render:\n{stderr}"
+    );
+    assert!(
+        by_its_session > 0,
+        "no render printed a draft's session moving it without the engine's own record \
+         beside it, so nothing here shows a session's record ending a carried read:\n{stderr}"
     );
 }
 

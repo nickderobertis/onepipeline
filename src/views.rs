@@ -3521,7 +3521,11 @@ fn read_side_by_side(view: &RunView, nodes: &[&String]) {
     let read = crate::vcs::landings_now(
         &wanted
             .iter()
-            .map(|(node, branch, repo)| (node.as_str(), *branch, Some(*repo)))
+            .map(|(node, branch, repo)| crate::vcs::LandingAsk {
+                node,
+                branch,
+                repo: Some(*repo),
+            })
             .collect::<Vec<_>>(),
     );
     for ((node, _, _), read) in wanted.into_iter().zip(read) {

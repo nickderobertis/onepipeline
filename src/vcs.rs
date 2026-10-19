@@ -883,8 +883,23 @@ pub(crate) fn proved_landed(branch: &str, repo: Option<&str>) -> bool {
     landing_now(branch, repo).proves_landed()
 }
 
-/// [`landing_now`] of each of `asked` — a node, its branch, and its repository —
-/// in order, taken side by side on as many threads as the host has cores and
+/// One landing [`landings_now`] is asked for.
+//
+// llmlint: ignore[invalid_states_unrepresentable] the node, the branch and the repository are
+// the plain strings this whole crate spells each of them as — `RunState::branches` keyed by
+// node, `Node::repo` — for the reasons `crate::ledger`'s file-level suppression and
+// `landing_now`'s own record; named fields are what keep the three apart at this one boundary,
+// and each came off the run's own journal, which is where it was checked.
+pub(crate) struct LandingAsk<'a> {
+    /// The node the read is counted against.
+    pub(crate) node: &'a str,
+    /// The branch its work is on.
+    pub(crate) branch: &'a str,
+    /// The repository that narrows the branch to the one this run's work is in.
+    pub(crate) repo: Option<&'a str>,
+}
+
+/// [`landing_now`] of each of `asked`, in order, taken side by side on as many threads as the host has cores and
 /// never more than there are reads.
 ///
 /// For the places that take every read at once and wait on all of them: each
@@ -897,7 +912,7 @@ pub(crate) fn proved_landed(branch: &str, repo: Option<&str>) -> bool {
 /// taken on another thread costs the render exactly what one taken in it would.
 /// The calling thread reads too, so a thread the host will not start leaves the
 /// reads fewer hands rather than unread.
-pub(crate) fn landings_now(asked: &[(&str, &str, Option<&str>)]) -> Vec<LandingRead> {
+pub(crate) fn landings_now(asked: &[LandingAsk<'_>]) -> Vec<LandingRead> {
     let helpers = std::thread::available_parallelism()
         .map_or(1, std::num::NonZeroUsize::get)
         .min(asked.len())
@@ -909,12 +924,12 @@ pub(crate) fn landings_now(asked: &[(&str, &str, Option<&str>)]) -> Vec<LandingR
         let _adopted = within.adopted();
         loop {
             let at = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let Some((node, branch, repo)) = asked.get(at) else {
+            let Some(ask) = asked.get(at) else {
                 return;
             };
             let answer = {
-                let _deciding = crate::rendercost::deciding(node);
-                landing_now(branch, *repo)
+                let _deciding = crate::rendercost::deciding(ask.node);
+                landing_now(ask.branch, ask.repo)
             };
             read.lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -4660,6 +4675,41 @@ mod tests {
             "the follow did not relay its stream, before and after it started, before it ended"
         );
         let _ = follower.finish();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Every read [`landings_now`] is asked for is answered, once, in the order it
+    /// was asked — however many threads took them, and on the calling thread alone
+    /// where there is one read and so no other thread is started.
+    #[test]
+    fn landings_asked_side_by_side_are_each_answered_in_the_order_asked() {
+        let _home = super::scratch_home_held();
+        let root =
+            std::env::temp_dir().join(format!("onepipeline-side-by-side-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a scratch state root");
+        std::env::set_var(onevcs_home(), &root);
+
+        let repos: Vec<String> = (0..9).map(|at| format!("nowhere-{at}")).collect();
+        for count in [0, 1, repos.len()] {
+            let asked: Vec<LandingAsk<'_>> = repos[..count]
+                .iter()
+                .map(|repo| LandingAsk {
+                    node: repo,
+                    branch: "me/branch",
+                    repo: Some(repo),
+                })
+                .collect();
+            let read = landings_now(&asked);
+            assert_eq!(read.len(), count, "a read asked for went unanswered");
+            for (at, read) in read.iter().enumerate() {
+                assert_eq!(
+                    read,
+                    &landing_now("me/branch", Some(&repos[at])),
+                    "read {at} was not the answer to what was asked at {at}"
+                );
+            }
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 
