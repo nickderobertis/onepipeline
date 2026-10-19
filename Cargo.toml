@@ -723,16 +723,15 @@ resolver = "2"
 # squash and the integrate train alike, read here through
 # `onevcs::landing_closes` in `closures::Landing::of`. `src/closures.rs` hands
 # those issues to the store (entry 132 of `docs/contract-divergences.md`);
-# `tests/e2e/closures.rs` drives it. A **requirement**, because `^0.52` admits no 0.56.x; `onevcs-testing`
-# 0.19.12 requires exactly `=0.56.2`, so the pair moves as one.
+# `tests/e2e/closures.rs` drives it. A **requirement**, because `^0.52` admits no
+# 0.56.x; `onevcs-testing` 0.19.12 requires exactly `=0.56.2`, so the pair moves
+# as one.
 #
-# `onevcs` 0.52.0 was the floor before that because it is the release the declared-maintenance
+# The floor may not fall below `onevcs` 0.52.0, the release the declared-maintenance
 # producer supplied for this crate's idle pool maintenance, the `onevcs.toml`
 # reading 0.50.0 brought. It also adds `SessionRequest::caller_merges_base`
 # (onevcs #434), which every request this crate builds sets `false`, so a
-# session open still runs onevcs's rules probe as before. A **requirement**,
-# because `^0.51` admits no 0.52.x; `onevcs-testing` 0.19.4 requires exactly
-# `=0.52.0`, so the pair moves as one. 0.51.3 below it carried the same
+# session open still runs onevcs's rules probe as before. 0.51.3 below it carried the same
 # declared-maintenance reading, released again with no change to the library's
 # source. 0.51.2 below that is the release the operation-progress producer
 # supplied for this crate's manager landings; it carries the
@@ -1071,7 +1070,7 @@ onevcs-testing = "0.19.12"
 # takes `statuses` and may report an item `skipped`, a store failure gains
 # `statuses-not-tasks`, and a closed item's status name follows its closure.
 #
-# **0.7.3 was the floor before that.** It leaves a source a layer refines but no layer defines
+# **No earlier release than 0.7.3**: it leaves a source a layer refines but no layer defines
 # unconfigured rather than failing every load, so a host's user layer may route to
 # sources only one checkout defines; and it answers a dependency read a private source
 # cannot without failing it. `tests/e2e/store.rs` drives both.

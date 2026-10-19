@@ -2054,7 +2054,7 @@ fn worker(
 
 /// The closure thread: each owed landing's closures, oldest first, through
 /// [`crate::closures::complete`], a transient failure asked again on the projection worker's
-/// own retry schedule — [`retry_after`], suspended by a close-out and ended by a stop. A
+/// own retry schedule — [`retry_after`], kept through a close-out and ended by a stop. A
 /// refusal, and a call that finished with an item failed, are records like any other, which
 /// the reconcile loop journals and raises.
 ///
