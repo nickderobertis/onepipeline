@@ -876,6 +876,7 @@ pub fn liveness(launch: &LaunchRecord, state: &RunState, paths: &RunPaths) -> Dr
                 launch.recorded_host(),
                 launch.driver_pid(),
                 state.let_go_by.as_ref(),
+                paths,
             ),
         launch.recorded_host(),
         launch.driver_pid(),
@@ -887,19 +888,34 @@ pub fn liveness(launch: &LaunchRecord, state: &RunState, paths: &RunPaths) -> Dr
 }
 
 /// Whether the driver a record names is the one a run's journal records letting
-/// go of the run to fire its run-end hook.
+/// go of the run, and that driver has released it.
 ///
-/// That driver is still a live process while it awaits the hook, and it holds
-/// nothing: the ownership lock is released before the hook starts. So it is
+/// That driver can still be a live process once it has let go — awaiting its
+/// run-end hook, or finishing its watch — and it holds nothing then. So it is
 /// matched by what the journal stamped — the host and pid of the stream that
-/// wrote the firing — against the claim the record makes, and a driver that
+/// wrote the record — against the claim the record makes, and a driver that
 /// adopted the run since is a different claim.
+///
+/// **And by the lock.** A driver journals its scratch record inside its final
+/// handover, *before* it releases the ownership lock, so the record alone names
+/// a driver that still holds the run: read as let go there, the run reads as
+/// nothing driving it, and an adoption made on that word is refused by the lock
+/// it cannot take — or a fault arranged on the lock is removed by the release
+/// that follows. Only once the lock no longer names that driver has it let go.
 pub(crate) fn let_go(
     recorded_host: Option<&str>,
     pid: Option<std::num::NonZeroU32>,
     let_go_by: Option<&crate::projection::DriverClaim>,
+    paths: &RunPaths,
 ) -> bool {
-    let_go_by.is_some_and(|claim| claim.is(recorded_host, pid))
+    match (recorded_host, pid) {
+        (Some(host), Some(pid))
+            if let_go_by.is_some_and(|claim| claim.is(Some(host), Some(pid))) =>
+        {
+            !ledger::lock_may_be_held_by(paths, host, pid.get())
+        }
+        _ => false,
+    }
 }
 
 /// The same verdict, over the six things a record says and the run's own
@@ -1987,6 +2003,7 @@ impl<'a> Row<'a> {
                     self.summary.host.as_deref(),
                     self.summary.pid,
                     self.summary.let_go_by.as_ref(),
+                    &self.paths,
                 ),
             self.summary.host.as_deref(),
             self.summary.pid,

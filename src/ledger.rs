@@ -2321,6 +2321,20 @@ fn read_lock_file(path: &Path) -> Result<LockFile> {
     }
 }
 
+/// Whether the run's ownership lock may still be held by `pid` on `host`.
+///
+/// Every uncertainty answers `true`, because what this decides is whether that
+/// process has released the run: a lock this build cannot read, and one the
+/// filesystem will not open, are each a claim it cannot rule out. Only a lock
+/// that is gone, or one naming another holder, says the process holds nothing.
+pub(crate) fn lock_may_be_held_by(paths: &RunPaths, host: &str, pid: u32) -> bool {
+    match read_lock_file(&paths.lock()) {
+        Ok(LockFile::Absent) => false,
+        Ok(LockFile::Record(held)) => held.host == host && held.pid == pid,
+        Ok(LockFile::Unreadable) | Err(_) => true,
+    }
+}
+
 /// Put this process's record where a dead holder's is, or say who got there
 /// first.
 ///

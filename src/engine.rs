@@ -1238,6 +1238,12 @@ fn driving(
             letting_go();
             crate::scratch::at_writer_ending(paths, &state);
             record_exit(paths, settlement.into(), None, answered_from);
+            // Test failpoint only, and nothing at all where its variable is
+            // unset: a journey holds this driver with its last word written and
+            // the run's lock not yet released, to read the run in that window.
+            if let Err(error) = crate::ordering::meet("ONEPIPELINE_TEST_RELEASE_GATE") {
+                eprintln!("onepipeline: {error}");
+            }
         };
         match let_go_of_saying(paths, lock, exiting) {
             LettingGo::Released => break (settlement, Departure::Released),
