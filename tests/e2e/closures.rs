@@ -13,7 +13,9 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use crate::harness::{agent, lifecycle, plan_of, World};
+use crate::draft_lifecycle::{team_repository, GREEN};
+use crate::harness::{agent, double, lifecycle, plan_of, World};
+use crate::stacked_drafts::{change_from, settled};
 use crate::linear_loopback::Linear;
 use crate::linear_writeback::GitHubEndpoint;
 
@@ -430,4 +432,201 @@ fn a_landing_that_closes_no_issue_sends_the_board_no_request() {
         log_of(&served)
     );
     assert!(closures_of(&world, run).is_empty());
+}
+
+/// A team world — `change-open`, approvals required, every required check green — whose
+/// loopback GitHub serves the one board, so a node settles as a review draft a person merges
+/// later.
+fn team(name: &str) -> (World, GitHubEndpoint) {
+    let world = World::new(name)
+        .with_env(TOKEN_ENV, "loopback-token")
+        .with_env("ONEVCS_BRANCH_PREFIX", "me/");
+    team_repository(&world);
+    world.script("gh.checks", GREEN);
+    let served = GitHubEndpoint::serve_issues(&world, &one_board());
+    (world, served)
+}
+
+/// Launch `service` — whose change request GitHub says closes issue 7 — beside `hold`, an
+/// agent node held until the journey lets it go, so the run stays open; and wait for `service`
+/// to settle `done` as a review draft.
+fn drafted(world: &World, served: &GitHubEndpoint, run: &str) {
+    let launch = one_board_launch(world, served);
+    world.script("service.work", "the worker wrote this\n");
+    world.script("gh.closes", "owner/service#7");
+    world.script("hold.wait", "hold");
+    let project = world.plan(
+        run,
+        &plan_of(run, vec![lifecycle("service", &[]), agent("hold", &[])]),
+    );
+    start_from(world, &launch, &project);
+    world.until("service to settle as a review draft", |world| {
+        world
+            .events_of(run, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "service")
+    });
+    let service = settled(world, run, "service");
+    assert_eq!(service["status"], "done", "{service}");
+    assert_eq!(service["outcome"], "change-review-draft", "{service}");
+    assert!(closures_of(world, run).is_empty());
+    assert!(log_of(served).is_empty(), "{:#?}", log_of(served));
+}
+
+/// A person merges `service`'s change request on the host, squashing it and keeping its head.
+fn merged_by_a_person(world: &World, run: &str) {
+    let branch = settled(world, run, "service")["branch"]
+        .as_str()
+        .expect("service names its branch")
+        .to_owned();
+    let number = change_from(world, &branch)["number"].to_string();
+    let output = std::process::Command::new(double("fake-gh"))
+        .args(["__person", "merge", REPOSITORY, &number, "squash", "kept"])
+        .env(onepipeline_testfakes::SCRIPT_DIR_ENV, &world.fakes)
+        .output()
+        .expect("the host double runs");
+    assert!(
+        output.status.success(),
+        "the person's merge was refused: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// How many times `node` was dispatched in `run`.
+fn dispatches(world: &World, run: &str, node: &str) -> usize {
+    world
+        .events_of(run, "node-dispatched")
+        .iter()
+        .filter(|event| event["labels"]["node"] == node)
+        .count()
+}
+
+/// The landing the readjustment found for `service`, by the commit it recorded.
+fn found_landed(world: &World, run: &str) -> String {
+    world
+        .events_of(run, "node-landed")
+        .into_iter()
+        .find(|event| event["labels"]["node"] == "service")
+        .and_then(|event| event["payload"]["commit"].as_str().map(str::to_owned))
+        .expect("a readjustment found service landed")
+}
+
+/// Issue 7's card is `Done` and its issue closed as completed, by exactly one Status write and
+/// one close, and `run` holds exactly one `landing-closures` record, for the landing the
+/// readjustment found, projected; no request read a board whole.
+fn closed_once(world: &World, served: &GitHubEndpoint, run: &str) {
+    assert_eq!(
+        card(served, "1", "7"),
+        (json!("Done"), issue("CLOSED", Some("COMPLETED")))
+    );
+    assert_eq!(card(served, "1", "9"), (json!("Todo"), issue("OPEN", None)));
+    assert_eq!(
+        writes_of(served),
+        [
+            json!({"board": 1, "issue": 7, "field": "Status", "value": "Done"}),
+            json!({"issue": 7, "state": "CLOSED", "reason": "COMPLETED"}),
+        ]
+    );
+    let records = closures_of(world, run);
+    assert_eq!(records.len(), 1, "{records:#?}");
+    assert_eq!(records[0]["payload"]["commit"], found_landed(world, run));
+    assert_eq!(records[0]["payload"]["node"], "service");
+    assert_eq!(records[0]["payload"]["closes"], json!(["owner/service#7"]));
+    assert_eq!(records[0]["payload"]["outcome"], "projected");
+    read_no_board_whole(served);
+}
+
+/// Let `hold` finish and the run settle.
+fn finished(world: &World, run: &str) {
+    world.release("hold.go");
+    world.until("the run to settle", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+}
+
+/// A review draft a person merges while nothing drives its run is closed by the driver that
+/// adopts the run: once the adopted driver has read the landing, issue 7's card is `Done` and
+/// its issue closed, by one Status write and one close, with one record — and stopping and
+/// adopting the run again asks the board nothing more and leaves that one record.
+#[test]
+fn an_adoption_closes_the_issues_of_a_landing_made_while_nothing_drove_the_run() {
+    let (world, served) = team("closures-adopted");
+    let run = "adopted";
+    drafted(&world, &served, run);
+    world.run(&["stop", run]).exited(0);
+    merged_by_a_person(&world, run);
+    assert!(log_of(&served).is_empty());
+
+    world.run(&["adopt", run, "--detach"]).exited(0);
+    world.until("the adopted driver to close the landing's issues", |world| {
+        !closures_of(world, run).is_empty()
+    });
+    closed_once(&world, &served, run);
+
+    let asked = log_of(&served).len();
+    let held = dispatches(&world, run, "hold");
+    world.run(&["stop", run]).exited(0);
+    world.run(&["adopt", run, "--detach"]).exited(0);
+    world.until("the second adopted driver to pass its catch-up", |world| {
+        dispatches(world, run, "hold") > held
+    });
+    assert_eq!(
+        log_of(&served).len(),
+        asked,
+        "a second adoption asked the board again: {:#?}",
+        log_of(&served)
+    );
+    closed_once(&world, &served, run);
+    finished(&world, run);
+}
+
+/// A review draft a person merges while its run's driver still runs is closed once the driver
+/// reads the landing — here, the `readjust` a person asks of the live driver.
+#[test]
+fn a_landing_found_while_the_driver_runs_closes_its_issues_once() {
+    let (world, served) = team("closures-live");
+    let run = "live";
+    drafted(&world, &served, run);
+    merged_by_a_person(&world, run);
+    world.run(&["readjust", run]).exited(0);
+    world.until("the driver to close the landing's issues", |world| {
+        !closures_of(world, run).is_empty()
+    });
+    closed_once(&world, &served, run);
+    finished(&world, run);
+    closed_once(&world, &served, run);
+}
+
+/// A closure the driver never saw answered — the board held its Status write until the run was
+/// stopped — has no record, so the driver that adopts the run makes the call again and records
+/// it once.
+#[test]
+fn a_closure_a_stopped_driver_never_finished_is_made_by_the_adoption() {
+    let (world, served) = team("closures-unfinished");
+    let run = "unfinished";
+    drafted(&world, &served, run);
+    served.fault("hold");
+    merged_by_a_person(&world, run);
+    world.run(&["readjust", run]).exited(0);
+    world.until("the board to hold the closure's Status write", |_| {
+        served.state()["holding"] == true
+    });
+    world.run(&["stop", run]).exited(0);
+    assert!(
+        closures_of(&world, run).is_empty(),
+        "a call that never finished was recorded: {:#?}",
+        closures_of(&world, run)
+    );
+    served.release();
+    world.until("the held write to be let go", |_| {
+        served.state()["holding"] == false
+    });
+    assert!(writes_of(&served).is_empty(), "{:#?}", writes_of(&served));
+
+    world.run(&["adopt", run, "--detach"]).exited(0);
+    world.until("the adopted driver to close the landing's issues", |world| {
+        !closures_of(world, run).is_empty()
+    });
+    closed_once(&world, &served, run);
+    finished(&world, run);
 }
