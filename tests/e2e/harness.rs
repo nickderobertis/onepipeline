@@ -5587,7 +5587,7 @@ fn start_stamp(pid: u32) -> Option<String> {
 /// read in UTC under the C locale so the spelling does not follow the reader's —
 /// on macOS followed by ` +0.` and the kernel's microseconds of that start.
 #[cfg(all(unix, not(target_os = "linux")))]
-fn start_stamp(pid: u32) -> Option<String> {
+pub(crate) fn start_stamp(pid: u32) -> Option<String> {
     let listed = Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "lstart="])
         .env("TZ", "UTC")

@@ -3618,7 +3618,8 @@ fn started_at_of(pid: u32) -> String {
 /// through the crate, which is the reader under test. Compared against the
 /// `lstart` rendering instead, no stamp could ever match and a stand-in started
 /// in the dispatch's own tick would pass for a stranger. Elsewhere a record
-/// carries `lstart`, so that is what is compared.
+/// carries `lstart` — on macOS followed by the kernel's microseconds of it — and
+/// that is what is compared.
 #[cfg(target_os = "linux")]
 fn recorded_start_of(pid: u32) -> String {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))
@@ -3632,7 +3633,7 @@ fn recorded_start_of(pid: u32) -> String {
 
 #[cfg(all(unix, not(target_os = "linux")))]
 fn recorded_start_of(pid: u32) -> String {
-    started_at_of(pid)
+    crate::harness::start_stamp(pid).expect("this host describes a process it just started")
 }
 
 /// The Windows stand-in for the stranger below.
@@ -4308,6 +4309,47 @@ fn a_linux_stop_accepts_an_active_runs_legacy_ps_identity() {
     let record = world.run_file(&run, "launch.json");
     let mut launch = world.run_json(&run, "launch.json");
     launch["started"] = json!(started_at_of(driver));
+    std::fs::write(record, launch.to_string()).expect("the legacy launch record is installed");
+
+    world
+        .run(&["stop", &run])
+        .exited(0)
+        .out_has("\"stopped\":true")
+        .out_has("\"teardown\":\"signalled\"");
+    world.until("the legacy-recorded driver to end", |_| {
+        !still_listed(driver)
+    });
+    world.release("build.go");
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// A macOS run launched by a build whose start tokens were `ps lstart` alone,
+/// spelled to the second, remains stoppable once tokens carry the kernel's
+/// microseconds after that second.
+// llmlint: ignore-block[tests_mirror_real_usage] installing an older binary merely to
+// create its launch record would test packaging rather than this compatibility boundary;
+// replacing only the serialized token with the exact value that binary wrote is the
+// persisted pre-upgrade input the current public `stop` command must accept.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_macos_stop_accepts_an_active_runs_lstart_identity() {
+    let world = World::new("driver-stop-lstart-start-token");
+    world.script("build.wait", "hold");
+    let (run, driver) = start_detached_announcing(&world, "lstart", vec![agent("build", &[])]);
+    world.until("a node to be in flight", |world| {
+        !world.events_of(&run, "node-dispatched").is_empty()
+    });
+
+    let record = world.run_file(&run, "launch.json");
+    let mut launch = world.run_json(&run, "launch.json");
+    let legacy = started_at_of(driver);
+    assert_eq!(
+        launch["started"].as_str(),
+        Some(recorded_start_of(driver).as_str()),
+        "this build's launch record carries the second and its microseconds"
+    );
+    assert_ne!(launch["started"].as_str(), Some(legacy.as_str()));
+    launch["started"] = json!(legacy);
     std::fs::write(record, launch.to_string()).expect("the legacy launch record is installed");
 
     world
