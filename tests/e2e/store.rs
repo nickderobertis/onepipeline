@@ -5221,15 +5221,6 @@ fn a_cache_enabled_github_store_reads_and_writes_like_an_uncached_store() {
         let result = world.run_json(run, "result.json");
         assert_eq!(result["state"], "complete", "{result}");
         let state = served.state();
-        if let Ok(dir) = std::env::var("DEBUG_REQS_DIR") {
-            let lines: Vec<String> = state["requests"].as_array().unwrap().iter().map(|r| {
-                let q = r["query"].as_str().unwrap_or("").replace('\n', " ");
-                let rest: serde_json::Map<String, Value> = r.as_object().unwrap().iter().filter(|(k, _)| k.as_str() != "query").map(|(k, v)| (k.clone(), v.clone())).collect();
-                format!("{} || {}", &q[..q.len().min(70)], Value::Object(rest).to_string().chars().take(600).collect::<String>())
-            }).collect();
-            let windows: Vec<usize> = costs.iter().map(Vec::len).collect();
-            std::fs::write(format!("{dir}/reqs-{enabled}-{}.txt", std::process::id()), format!("windows {windows:?}\n{}", lines.join("\n"))).unwrap();
-        }
         (
             project_reads,
             state["issues"].clone(),
