@@ -265,6 +265,15 @@ fn load_and_check(args: &PlanCheckArgs) -> Result<Answered> {
         Err(Load::Unreadable(error)) => return Err(error),
         Err(Load::Refused(refusal)) => refusal,
         Ok(read) => {
+            // A node the read could not ask a private source about loads, and `start` holds
+            // it: said here as `start` says it, on stderr, so this verb's stdout stays the one
+            // document a consumer parses.
+            if let Some(notice) = crate::unanswered::notice(&crate::unanswered::launched(
+                &read.plan,
+                &read.unanswered,
+            )) {
+                eprintln!("{notice}");
+            }
             match crate::graph::check(&read.plan)
                 .and_then(|()| check_node_sets(&read.plan))
                 .and_then(|()| crate::templates::check_plan(&templates, &read, &working_dir))

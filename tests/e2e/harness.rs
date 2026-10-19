@@ -186,6 +186,78 @@ fn the_harness_double_draws_its_stream_as_the_released_cli_does() {
     let _ = std::fs::remove_dir_all(&fakes);
 }
 
+/// The harness double refuses a held turn whose `turn.gates` script holds a line
+/// that is not `<marker> <name>` with a name of letters, digits, `-` and `_`,
+/// naming the line, rather than skipping it and running the turn unheld — which
+/// would let a journey that meant to hold a turn race it instead — and does so
+/// wherever the line stands, after a line the prompt matches too. A well-formed
+/// script naming no marker the prompt carries runs the turn unheld, so the
+/// refusal is the malformed line's and not the script's. Driven as the process
+/// onejudge spawns, against the compiled double.
+#[test]
+fn the_harness_double_refuses_a_malformed_turn_gates_line() {
+    let fakes = std::env::temp_dir().join(format!("onepipeline-gates-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&fakes);
+    let worktree = fakes.join("worktree");
+    std::fs::create_dir_all(&worktree).expect("a scratch directory for the double");
+    let config = fakes.join("role.toml");
+    std::fs::write(&config, "harnesses = [\"claude-code\"]\n").expect("the config is written");
+    std::fs::write(fakes.join("turn.hold"), "hold").expect("the hold is written");
+    let run = |gates: &str| -> Output {
+        std::fs::write(fakes.join("turn.gates"), gates).expect("the gates are written");
+        Command::new(double("fake-oneharness"))
+            .args(["run", "--events", "--stream", "--format", "json"])
+            .args(["--cwd", worktree.to_str().expect("a UTF-8 scratch path")])
+            .args(["--prompt", "do the work"])
+            .args([
+                "--config",
+                config.to_string_lossy().as_ref(),
+                "--no-history",
+            ])
+            .env(SCRIPT_DIR_ENV, &fakes)
+            .stdin(Stdio::null())
+            .output()
+            .expect("the compiled double runs")
+    };
+
+    // The gates a matching line names are already open, so a double that took
+    // the match and never read on would run the turn through them and exit
+    // cleanly rather than wait.
+    for gate in ["work.go", "work.settle"] {
+        std::fs::write(fakes.join(gate), "").expect("the gate is open");
+    }
+    // A line with no marker, one whose name is not one file name, and a
+    // malformed line after one this prompt matches.
+    for (script, line) in [
+        ("lonely", "lonely"),
+        ("do the work held/apart", "do the work held/apart"),
+        ("do the work work\nlonely", "lonely"),
+    ] {
+        let refused = run(script);
+        let stderr = String::from_utf8_lossy(&refused.stderr);
+        assert_eq!(
+            refused.status.code(),
+            Some(i32::from(onepipeline_testfakes::USAGE)),
+            "turn.gates holding {script:?} was not refused:\n{stderr}"
+        );
+        assert!(
+            stderr.contains(&format!("turn.gates holds {line:?}"))
+                && stderr.contains("which is not `<marker> <name>`"),
+            "the refusal of {line:?} does not name it:\n{stderr}"
+        );
+    }
+
+    // Well formed, naming a marker this prompt does not carry: not held.
+    let unheld = run("another prompt gate");
+    assert_eq!(
+        unheld.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&unheld.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&fakes);
+}
+
 /// The harness double takes `--config` **repeated**, and layers the files in the
 /// order given — each later one over the ones before it — as the released CLI's
 /// loader does.
@@ -1286,6 +1358,7 @@ impl World {
                 let request = onetaskgraph_core::DependencyRequest {
                     id: id.clone(),
                     direction: onetaskgraph_plugin_api::Direction::DependsOn,
+                    completeness: onetaskgraph_core::Completeness::Required,
                     paging: onetaskgraph_core::Paging {
                         limit: std::num::NonZeroU32::new(500).expect("not zero"),
                         token,

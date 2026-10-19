@@ -628,6 +628,8 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         EngineError::UnknownSource { .. } => decided("unknown-source"),
         EngineError::Token { .. } => decided("page-token"),
         EngineError::NoSources => decided("no-sources"),
+        // llmlint: ignore[changed_behavior_has_e2e] reached only by a write-back whose launch directory's layers stop declaring the plan source's plugin between the launch's read and an attempt; the classification is the store's own word, which `writeback::tests::every_engine_failure_is_named_as_the_store_names_it` holds against `onetaskgraph_core::Failure`.
+        EngineError::IncompleteSource { .. } => decided("incomplete-source"),
         // llmlint: ignore-block[changed_behavior_has_e2e] These store refusals are
         // unreachable from settlement writes: copies use project members, carry no
         // comments, set no expected version, and read immutable local shadow tasks.
@@ -718,6 +720,8 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         | EngineError::SourceUnavailable { error, .. }
         | EngineError::SourceFailed { error, .. } => (source_kind(error).to_owned(), Some(error)),
         EngineError::CopyNotUndone { error, .. } => cause_of(error),
+        // llmlint: ignore[changed_behavior_has_e2e] raised only for a destination plugin whose create answer is malformed, which neither `local-md` nor any source this crate's journeys reach answers; it takes the kind of the refusal it wraps, as the store's `Failure` does, which `writeback::tests::every_engine_failure_is_named_as_the_store_names_it` holds.
+        EngineError::CopyDestinationUncertain { error, .. } => cause_of(error),
     }
 }
 
@@ -5735,6 +5739,9 @@ mod tests {
             },
             EngineError::Token { message: words() },
             EngineError::NoSources,
+            EngineError::IncompleteSource {
+                name: onetaskgraph_plugin_api::SourceName::new("plans").expect("a source name"),
+            },
             EngineError::ExpectOneTask,
             EngineError::NotCached {
                 name: "plans".into(),
@@ -5983,6 +5990,15 @@ mod tests {
                 }),
                 left_behind: onetaskgraph_core::LeftBehind::new(id()),
                 refusal: source.clone(),
+            },
+            // So does a create whose answer the destination malformed.
+            EngineError::CopyDestinationUncertain {
+                error: Box::new(EngineError::SourceRefused {
+                    name: "plans".into(),
+                    error: SourceError::Refused { message: words() },
+                }),
+                destination: "plans".into(),
+                operation: "write_task".into(),
             },
         ];
         for failure in &failures {
@@ -6979,7 +6995,9 @@ mod tests {
             ),
         )
         .expect("the run's store configuration is written");
-        let store = crate::taskgraph::Store::at(fixture.dir.to_path_buf());
+        // Isolated from the host's user layer: a source it declares that cannot be built here
+        // is a source this store holds unavailable, which is the one thing this test counts.
+        let store = crate::taskgraph::Store::isolated(fixture.dir.to_path_buf());
         let mut baseline = super::Baseline::load(
             &fixture.dir,
             &fixture.snapshot.project,

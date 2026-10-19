@@ -292,6 +292,53 @@ pub struct RunReading {
     /// The decision the run is paused on, or `null` for a run that is not.
     pub paused: Option<Paused>,
     // llmlint: ignore-end[invalid_states_unrepresentable]
+    /// Every command envelope claimed off the run's queue and not answered yet,
+    /// in claim order — omitted when there is none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unanswered: Vec<UnansweredEnvelope>,
+}
+
+/// One command envelope claimed off a run's queue with no outcome yet, as
+/// `status <RUN> --json` reads it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
+pub struct UnansweredEnvelope {
+    /// The channel envelope id — a decimal string in the document.
+    #[serde(with = "crate::channel::deliveries::envelope_id")]
+    #[schemars(with = "String")]
+    pub envelope: u64,
+    /// Where its live note stands, as the run's live driver last wrote it —
+    /// omitted where no driver is live, which leaves the envelope to be answered
+    /// by the run's next driver, and where the live driver holds no live note of
+    /// it or behind one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<Delivery>,
+}
+
+/// Where one claimed envelope's live note stands — the one type the run's
+/// live-delivery sidecar and this reading both carry.
+pub use crate::channel::deliveries::Delivery;
+
+/// Each envelope claimed off the run's queue with no outcome, in claim order,
+/// with where its live note stands when a driver is live.
+///
+/// Read together with the driver's liveness, because the sidecar is the live
+/// driver's own account: a driver that is gone delivers nothing, so whatever it
+/// left behind says nothing, and every such envelope is the next driver's to
+/// answer. Of an envelope with several receivers still delivering, the earliest
+/// is the one named.
+fn unanswered_of(view: &RunView, liveness: DriverLiveness) -> Vec<UnansweredEnvelope> {
+    let ids = crate::channel::ChannelState::new(&view.paths).claimed_unanswered();
+    let live = (!liveness.is_undriven())
+        .then(|| crate::channel::deliveries::LiveDeliveries::read(&view.paths))
+        .flatten();
+    ids.into_iter()
+        .map(|envelope| UnansweredEnvelope {
+            envelope,
+            delivery: live
+                .as_ref()
+                .and_then(|live| live.of_envelope(envelope).next().cloned()),
+        })
+        .collect()
 }
 
 /// Read one run's ending, its pause, or neither, off its fold.
@@ -322,6 +369,7 @@ pub fn reading(view: &RunView) -> RunReading {
         driven: !liveness.is_undriven(),
         ending,
         paused,
+        unanswered: unanswered_of(view, liveness),
     }
 }
 
@@ -2607,7 +2655,10 @@ pub(crate) fn status_reporting(view: &RunView, providers: Providers) -> String {
             if *node_status != NodeStatus::Ready {
                 continue;
             }
-            match held_for_release(view, id).or_else(|| held_for_workspace(view, id)) {
+            match held_for_release(view, id)
+                .or_else(|| held_for_workspace(view, id))
+                .or_else(|| held_for_source(view, id))
+            {
                 Some(held) => out.push_str(&format!("  {id}: {held}\n")),
                 None => out.push_str(&format!(
                     "  {id}: ready — {}\n",
@@ -3394,6 +3445,21 @@ fn held_for_workspace(view: &RunView, id: &str) -> Option<String> {
     ))
 }
 
+/// What a ready node reads as while the driver holds it for a source declared private that
+/// could not be asked about it, or `None` for a node no such hold holds.
+///
+/// Off the run's own record, on [`held_for_release`]'s terms: the hold is the `node-held`
+/// with a `source` reason, read through the engine's own reader of one.
+fn held_for_source(view: &RunView, id: &str) -> Option<String> {
+    let hold = view
+        .state
+        .holds
+        .get(id)?
+        .iter()
+        .find_map(crate::engine::source_held)?;
+    Some(format!("held — {}", one_line(&hold.describe())))
+}
+
 /// The kinds of hold a run records a node under, in the words its `node-held`
 /// records and an elapsed watch's summary both spell them with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
@@ -3409,6 +3475,8 @@ pub(crate) enum HoldKind {
     Release,
     /// Held for room in its repository identity's workspace.
     Workspace,
+    /// Held for a source declared private that could not be asked about it.
+    Source,
 }
 
 impl HoldKind {
@@ -3420,6 +3488,7 @@ impl HoldKind {
             Self::Decision => "decision",
             Self::Release => "release",
             Self::Workspace => "workspace",
+            Self::Source => "source",
         }
     }
 }
@@ -4176,20 +4245,61 @@ fn driver_exit_lines(view: &RunView) -> String {
             )),
         }
     }
-    let unanswered = crate::channel::ChannelState::new(&view.paths).claimed_unanswered();
-    if !unanswered.is_empty() {
+    let liveness = view.liveness();
+    let unanswered = unanswered_of(view, liveness);
+    if unanswered.is_empty() {
+        return out;
+    }
+    let ids = unanswered
+        .iter()
+        .map(|envelope| envelope.envelope.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    if liveness.is_undriven() {
         out.push_str(&format!(
-            "  claimed with no outcome: command envelope(s) {} — taken off the queue and not \
+            "  claimed with no outcome: command envelope(s) {ids} — taken off the queue and not \
              answered yet, so their submitters have been told nothing; the run's next driver \
-             answers each before anything it claims itself\n",
-            unanswered
-                .iter()
-                .map(u64::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
+             answers each before anything it claims itself\n"
         ));
+        return out;
+    }
+    out.push_str(&format!(
+        "  claimed with no outcome: command envelope(s) {ids} — taken off the queue and not \
+         answered yet; the run's live driver answers each\n"
+    ));
+    let live = crate::channel::deliveries::LiveDeliveries::read(&view.paths);
+    for envelope in &unanswered {
+        let said: Vec<String> = live
+            .iter()
+            .flat_map(|live| live.of_envelope(envelope.envelope))
+            .map(delivery_phrase)
+            .collect();
+        let said = if said.is_empty() {
+            "claimed by the live driver, which has not said where it stands".to_string()
+        } else {
+            said.join("; ")
+        };
+        out.push_str(&format!("    envelope {}: {said}\n", envelope.envelope));
     }
     out
+}
+
+/// What `status` says of one claimed envelope's live note.
+fn delivery_phrase(delivery: &Delivery) -> String {
+    match delivery {
+        Delivery::Delivering { node, since } => format!(
+            "delivering a live note to {node} since {}",
+            sys::rfc3339_from_millis(*since)
+        ),
+        Delivery::Held {
+            node,
+            since,
+            behind_envelope,
+        } => format!(
+            "held behind envelope {behind_envelope}'s note to {node} since {}",
+            sys::rfc3339_from_millis(*since)
+        ),
+    }
 }
 
 /// What a view says about the records the run's own store does not hold whole,

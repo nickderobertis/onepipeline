@@ -138,9 +138,13 @@ await_served() {
   done
 }
 
+# The archive goes to tar on stdin, never by name: GNU tar reads a name whose
+# first colon precedes any slash as `host:path` on a remote machine, so a Windows
+# runner's `D:\a\...\x.tgz` was dialled as a host called `D`. Stdin rather than
+# `--force-local`, which is GNU's flag and not one macOS's bsdtar documents.
 manifest_of() {
   case "$1" in
-    *.tgz | *.tar.gz) tar -xzOf "$1" package/package.json ;;
+    *.tgz | *.tar.gz) tar -xzOf - package/package.json <"$1" ;;
     *) cat "$1/package.json" ;;
   esac
 }
