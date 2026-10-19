@@ -210,12 +210,10 @@ fn a_landing_moves_exactly_the_cards_of_the_issues_it_closes_on_every_configured
         !closures_of(world, run).is_empty() && world.run_file(run, "result.json").is_file()
     });
 
-    // Board A's card for the closed issue reads `Done`, and the issue is closed as completed.
     assert_eq!(
         card(&served, "1", "7"),
         (json!("Done"), issue("CLOSED", Some("COMPLETED")))
     );
-    // Every other card and issue is exactly as it was.
     let after = served.state();
     for number in ["8", "9", "10"] {
         assert_eq!(
@@ -231,7 +229,6 @@ fn a_landing_moves_exactly_the_cards_of_the_issues_it_closes_on_every_configured
         after["numbered"]["boards"]["2"], before["numbered"]["boards"]["2"],
         "board B moved"
     );
-    // Board B was asked once, about the named issues, and written nothing.
     let board_b: Vec<Value> = log_of(&served)
         .into_iter()
         .filter(|request| request["path"] == "/board/2/graphql")
@@ -258,7 +255,6 @@ fn a_landing_moves_exactly_the_cards_of_the_issues_it_closes_on_every_configured
         [(json!("service"), json!(7)), (json!("service"), json!(8))]
     );
     read_no_board_whole(&served);
-    // The writes the store made are the card and the issue of issue 7, on board A.
     assert_eq!(
         writes_of(&served),
         [
@@ -266,7 +262,6 @@ fn a_landing_moves_exactly_the_cards_of_the_issues_it_closes_on_every_configured
             json!({"issue": 7, "state": "CLOSED", "reason": "COMPLETED"}),
         ]
     );
-    // The Linear workspace and the `local-md` folder were sent nothing.
     assert!(
         linear.log().is_empty(),
         "the Linear source was asked something"
@@ -283,7 +278,6 @@ fn a_landing_moves_exactly_the_cards_of_the_issues_it_closes_on_every_configured
         "notes nobody writes\n"
     );
 
-    // One record, naming the landing commit and what the store did.
     let records = closures_of(&world, run);
     assert_eq!(records.len(), 1, "{records:#?}");
     let record = &records[0];
@@ -1548,4 +1542,69 @@ fn a_landing_verb_s_closure_record_reaches_the_runs_its_landing_is_associated_wi
         (json!("Done"), issue("CLOSED", Some("COMPLETED")))
     );
     world.release("service.go");
+}
+
+/// What a landing verb prints is what the store answered, item by item: an issue closed as not
+/// planned is reported skipped with the store's reason, and every source holding no item by
+/// issue — here a `local-md` folder — is named as sent no request.
+#[test]
+fn a_landing_verb_prints_each_item_the_store_answered_and_every_source_it_sent_nothing() {
+    let issues = json!({
+        "repository": REPOSITORY,
+        "issues": {"7": issue("OPEN", None), "8": issue("CLOSED", Some("NOT_PLANNED"))},
+        "boards": {"1": {"7": "Todo", "8": "Todo"}},
+    });
+    let world = World::new("closures-printed").with_env(TOKEN_ENV, "loopback-token");
+    let repository = world.repository("local-direct", &[]);
+    let served = GitHubEndpoint::serve_issues(&world, &issues);
+    let checkout = &repository.checkout;
+    git(&world, checkout, &["checkout", "-b", "widget"]);
+    std::fs::write(checkout.join("widget.txt"), "a widget\n").expect("the work is written");
+    git(&world, checkout, &["add", "-A"]);
+    git(
+        &world,
+        checkout,
+        &[
+            "commit",
+            "-m",
+            "feat: add the widget\n\nCloses #7\nFixes #8",
+        ],
+    );
+    git(&world, checkout, &["checkout", "main"]);
+    let notes = world.root.join("notes");
+    std::fs::create_dir_all(&notes).expect("the notes source's root");
+    let dir = launch_dir(
+        &world,
+        &format!(
+            "{}  notes:\n    plugin: local-md\n    config:\n      root: {}\n",
+            board_source("board", &served, 1),
+            notes.display()
+        ),
+    );
+    let output = from_the_launch_directory(
+        &world,
+        &dir,
+        &["publish-branch", "widget", "--repo", "service"],
+    )
+    .output()
+    .expect("publish-branch runs");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+    for said in [
+        "closes owner/service#7, owner/service#8; the store answered:",
+        "owner/service#7 on board: updated",
+        "owner/service#8 on board: skipped",
+        "closed as not planned",
+        "sent no request (no item by issue): notes",
+        "  projected",
+    ] {
+        assert!(
+            stderr.contains(said),
+            "the verb did not print {said:?}:\n{stderr}"
+        );
+    }
+    assert_eq!(
+        card(&served, "1", "8"),
+        (json!("Todo"), issue("CLOSED", Some("NOT_PLANNED")))
+    );
 }
