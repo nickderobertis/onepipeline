@@ -4809,7 +4809,8 @@ pub fn is_visibility_probe(call: &Value) -> bool {
         .as_array()
         .map(|args| args.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
-    matches!(args.as_slice(), ["api", path]
+    // `onevcs` 0.56 asks it with `--include`, to tell a host that did not answer apart.
+    matches!(args.as_slice(), ["api", path] | ["api", path, "--include"]
         if path.split('/').count() == 3 && path.starts_with("repos/"))
 }
 
