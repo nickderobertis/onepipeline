@@ -4870,7 +4870,11 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let mut driver = retained();
-            if start_of(driver.id()) != displaced {
+            if sys::child_start_token(&driver)
+                .expect("the retained child has a start")
+                .recorded()
+                != displaced
+            {
                 return driver;
             }
             driver.wait().expect("a set-aside driver exits");
@@ -4897,8 +4901,18 @@ mod tests {
         let root = scratch("confirm-equal");
         let paths = RunPaths::under(&root, "retained");
         paths.create().expect("the run directory");
-        let first = retained_driver();
-        let displaced = start_of(first.id());
+        let mut first = retained_driver();
+        let displaced = sys::child_start_token(&first)
+            .expect("the retained child has a start")
+            .recorded()
+            .to_string();
+        ledger::write_json(
+            &paths.launch(),
+            &launched_by(first.id(), &sys::hostname(), &displaced),
+        )
+        .expect("the equal-start launch record is written");
+        confirm_driving(&paths, &mut first)
+            .expect("an equal start under the child's pid is its own claim");
         let mut first = Some(first);
 
         let mut driver =
@@ -4989,7 +5003,13 @@ mod tests {
         // Its own start is its claim, and stays one after it has exited: a
         // driver that took the run and settled at once did take it.
         let mut driver = retained_driver();
-        recorded(&launched_by(driver.id(), &here, &start_of(driver.id())));
+        recorded(&launched_by(
+            driver.id(),
+            &here,
+            sys::child_start_token(&driver)
+                .expect("the retained child has a start")
+                .recorded(),
+        ));
         exited_unreaped(&mut driver);
         confirm_driving(&paths, &mut driver).expect("a driver that claimed the run is confirmed");
 
