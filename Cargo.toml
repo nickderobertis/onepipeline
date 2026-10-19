@@ -1042,13 +1042,13 @@ onevcs-testing = "0.19.4"
 # local-md source is what reads back and edits the run's write-back shadow documents
 # (`src/writeback.rs`).
 #
-# **0.7.2 is the release the patch below declares.** Its revision leaves a source a layer
-# refines but no layer defines unconfigured rather than failing every load, so a host's
-# user layer may route to sources only one checkout defines; and it answers a dependency
-# read a private source cannot without failing it. `tests/e2e/store.rs` drives both.
-onetaskgraph-core = "=0.7.2"
-onetaskgraph-plugin-api = "=0.7.2"
-onetaskgraph-local-md = "=0.7.2"
+# **0.7.3 is the floor.** It leaves a source a layer refines but no layer defines
+# unconfigured rather than failing every load, so a host's user layer may route to
+# sources only one checkout defines; and it answers a dependency read a private source
+# cannot without failing it. `tests/e2e/store.rs` drives both.
+onetaskgraph-core = "=0.7.3"
+onetaskgraph-plugin-api = "=0.7.3"
+onetaskgraph-local-md = "=0.7.3"
 # Test-support only: the budget checker's own library, at exactly the release `justfile`'s
 # `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
 onebudgetspec-core = "=0.1.5"
@@ -1349,23 +1349,3 @@ path = "tests/scratch_workload/main.rs"
 strip = true
 lto = "thin"
 codegen-units = 1
-
-# The two store fixes `src/taskgraph.rs` reads plans through — a layer refining a source
-# no layer defines leaves that source unconfigured instead of failing every load, and a
-# dependency read that a source declared private cannot answer names that source in
-# `unanswered` instead of failing — have landed in `onetaskgraph` and are in no
-# release, so this build links the commit. A **patch** rather than a git requirement
-# above, so the requirement still states the newest release the registry carries (the
-# revision declares it) and the lock records what is linked, `source = "git+…?rev=…"`.
-# All three come from the one revision: the family is lock-step.
-#
-# `cargo publish` ignores `[patch]`, so a package cut from this tree would resolve the
-# 0.7.2 release, which carries neither fix nor the fields `src/taskgraph.rs` reads: it
-# must not be published while this block stands. Delete
-# this block when the release carrying `ed797894` is out and move the three
-# requirements to it; `deny.toml`'s `allow-git` entry names the same revision and goes
-# with it, which `tests/patch_pin.rs` is what insists on.
-[patch.crates-io]
-onetaskgraph-core = { git = "https://github.com/nickderobertis/onetaskgraph", rev = "ed79789488c62bbec4af948dde85951e788f6c6e" }
-onetaskgraph-plugin-api = { git = "https://github.com/nickderobertis/onetaskgraph", rev = "ed79789488c62bbec4af948dde85951e788f6c6e" }
-onetaskgraph-local-md = { git = "https://github.com/nickderobertis/onetaskgraph", rev = "ed79789488c62bbec4af948dde85951e788f6c6e" }
