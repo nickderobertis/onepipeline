@@ -431,6 +431,60 @@ fn a_sources_credential_is_read_from_the_engines_environment_or_its_secrets_file
     );
 }
 
+/// A host's user layer refining a source no layer read here defines leaves that source
+/// unconfigured, and every plan of the sources that are configured still loads.
+///
+/// The shape a host keeps an organization's routing in: its user layer carries only the
+/// `routes` of a source whose `plugin` one checkout's tracked `onetaskgraph.yaml` declares.
+/// Anywhere else nothing declares it, and the store reads that entry as a refinement with
+/// nothing to refine — so `plan check` and `start` of a project in this world's own source
+/// go ahead, and only a project id naming the refined source is refused, saying it is not
+/// configured here.
+#[test]
+fn a_user_layer_refining_a_source_no_layer_defines_leaves_it_unconfigured_and_plans_load() {
+    let world = World::new("store-refined-undefined");
+    let layer = world
+        .root
+        .join("xdg")
+        .join("onetaskgraph")
+        .join("config.yaml");
+    std::fs::create_dir_all(layer.parent().expect("a directory")).expect("the user layer's home");
+    std::fs::write(
+        &layer,
+        format!(
+            "sources:\n  partner:\n    routes:\n      - repositories: [\"github.com/example-org/*\"]\n        \
+             to: {}\n",
+            crate::harness::STORE_SOURCE
+        ),
+    )
+    .expect("a user layer refining a source it does not declare");
+    let name = "refined";
+    let project = world.plan(
+        name,
+        &plan_of(
+            name,
+            vec![agent("design", &[]), agent("build", &["design"])],
+        ),
+    );
+
+    world.run(&["plan", "check", &project]).exited(0);
+    world
+        .run(&["plan", "check", "partner:board"])
+        .exited(REFUSED)
+        .err_has("source \"partner\" is not configured here")
+        .err_has("no configuration layer declares its plugin");
+
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the run to settle", |world| {
+        world.run_file(name, "result.json").is_file()
+    });
+    assert_eq!(
+        world.run_json(name, "result.json")["state"],
+        "complete",
+        "the plan read beside the refined source did not run to completion"
+    );
+}
+
 /// Write-back owns exactly what the plan document declares, and preserves everything the
 /// plan does not model. Drive that rule through the installed CLI and a real local-md
 /// store: a settlement must arrive without renaming the project, without changing a
