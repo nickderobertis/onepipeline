@@ -1307,6 +1307,7 @@ Five other journeys in `tests/e2e/maintenance.rs` assert an empty journal after 
 - With `ONETASKGRAPH_*` unset, `cargo nextest run --locked --no-fail-fast --test e2e -E 'test(/plugins_off_unless/) or test(/^profiling::/) or test(/^dispatch::/)'` passed **95 of 95**, at load 18-35. That covers both of #904's new journeys and the 22 `profiling::` journeys.
 - `cargo fmt --check` and `cargo clippy --locked --all-targets -- -D warnings`: clean.
 - `just engines-current`: passed. oneagentgraph 0.5.14, onevcs 0.52.1, onevcs-testing 0.19.5, onejudge 0.19.5 and oneharness-core 0.28.3 are each the newest their own requirement permits. onevcs-testing 0.19.11 is held back by `onevcs = "0.52.0"`, which the check names and passes.
+- On c8a0f9e, the commit that added this entry: `just lint-llm-diff origin/main`, against e788a5c, gave 39 rules, 21 passed, 0 failed. `LLMLINT_ONEHARNESS_BIN` was unset because it names a missing wrapper. The commit after it adds only this line, so that run did not judge this line.
 - Not re-run on 059dfb4: the full e2e tier and the hosted CI.
 
 **On ff19d5c** (the merge of main at 645ca97, whose conflict was `tests/e2e/harness.rs`):
