@@ -1475,6 +1475,9 @@ pub(crate) fn reconcile_queued(paths: &RunPaths) -> Result<()> {
         envelopes,
         mut evidence,
     } = recover_claimed(paths, &mut journal, &channel)?;
+    // And what a withdrawal its driver committed still owes the envelope it took
+    // a note of.
+    crate::withdrawal::answer_owed(paths)?;
     for envelope in envelopes {
         match evidence.remove(&envelope.id) {
             Some(effect) => {
@@ -1561,6 +1564,7 @@ fn converge(
     // What a driver before this one claimed and never answered, ahead of
     // anything this one claims: held envelopes are judged first on every pass.
     let recovered = recover_claimed(paths, journal, &channel)?;
+    crate::withdrawal::answer_owed(paths)?;
     deliveries.behind = recovered.envelopes;
     deliveries.recovered = recovered.evidence;
     let mut in_flight: BTreeMap<String, Dispatch> = BTreeMap::new();
@@ -6381,9 +6385,7 @@ fn validate_command(
         addressee: *addressee,
         text,
         criterion: criterion.as_ref(),
-        reach: crate::note::Reach::of(id, *deliver, *persist)?,
-        deliver: *deliver,
-        deadline: crate::note::deadline_of(id, *deliver, *delivery_timeout_seconds)?,
+        reach: crate::note::Reach::of(id, *deliver, *persist, *delivery_timeout_seconds)?,
         dispatchable: frontier.recorded.get(id) != Some(&NodeStatus::Done),
         // Resolved here, in the pass that offers nothing to anybody: the live
         // turn of a dispatch this process is running, and otherwise the member
@@ -6437,7 +6439,15 @@ fn commit_command(
     )?;
     record_operation_facts(paths, journal, author.clone(), operations)?;
     // A note withdrawn after its own envelope was answered is that envelope's to
-    // answer again: its command is refused now, carrying why.
+    // answer again: its command is refused now, carrying why. Written after the
+    // withdrawal is on the record, so a driver that dies between the two leaves
+    // its successor the answer to write — see `withdrawal::answer_owed`.
+    if operations
+        .iter()
+        .any(|operation| matches!(operation, edits::Operation::NoteWithdrawn { .. }))
+    {
+        crate::review::failpoint("after-note-withdrawn")?;
+    }
     for operation in operations {
         if let edits::Operation::NoteWithdrawn {
             envelope: sent,
@@ -6694,15 +6704,10 @@ pub(crate) struct Offered<'a> {
     pub addressee: crate::note::Addressee,
     pub text: &'a crate::note::NoteText,
     pub criterion: Option<&'a crate::note::Criterion>,
-    /// Where it may land: whether the running turn is attempted, and whether a
-    /// note no turn took is composed into the node's next dispatch.
+    /// Where it may land: whether the running turn is attempted, and how — by
+    /// interrupting it or at its end, and for how long — and whether a note no
+    /// turn took is composed into the node's next dispatch.
     pub reach: crate::note::Reach,
-    /// How a live attempt reaches the running turn: by interrupting it, or at its
-    /// end.
-    pub deliver: crate::channel::Deliver,
-    /// How long a live attempt may wait for a turn to take it, measured from the
-    /// offer, where the envelope bounded it.
-    pub deadline: Option<Duration>,
     /// Whether the node has a next dispatch at all. A node that has settled `done`
     /// does not, which is what turns a carry into the reach-nobody refusal.
     // llmlint: ignore[invalid_states_unrepresentable] this is a predicate about
@@ -6752,10 +6757,8 @@ pub(crate) struct ValidatedNote {
     text: crate::note::NoteText,
     /// The criterion it binds, where it binds one.
     criterion: Option<crate::note::Criterion>,
-    /// Where it may land.
+    /// Where it may land, and how long it may wait for a turn to take it.
     reach: crate::note::Reach,
-    /// How long it may wait for a turn to take it, from the moment it is offered.
-    deadline: Option<Duration>,
     /// The conversation the delivery offers it to, resolved by the validation
     /// that produced this value. Delivery resolves nothing: a note that reaches
     /// this type has somewhere to be offered, and the only thing left to decide
@@ -6776,9 +6779,12 @@ impl ValidatedNote {
     /// When this note, offered at `offered_at` in epoch milliseconds, stops
     /// waiting for a turn to take it, where it carries a deadline.
     fn deadline_at(&self, offered_at: u64) -> Option<u64> {
-        self.deadline.map(|deadline| {
-            offered_at.saturating_add(u64::try_from(deadline.as_millis()).unwrap_or(u64::MAX))
-        })
+        self.reach
+            .live()
+            .and_then(|live| live.deadline)
+            .map(|deadline| {
+                offered_at.saturating_add(u64::try_from(deadline.as_millis()).unwrap_or(u64::MAX))
+            })
     }
 }
 
@@ -6811,13 +6817,14 @@ pub(crate) fn validate_manager_note(offered: &Offered<'_>) -> Result<Staged> {
         text,
         criterion,
         reach,
-        deliver,
-        deadline,
         dispatchable,
         address,
     } = offered;
     let (addressee, reach, dispatchable) = (*addressee, *reach, *dispatchable);
-    let composed = crate::note::of(addressee, text, *criterion, *deliver)
+    let delivery = reach
+        .live()
+        .map_or_else(crate::note::Delivery::default, |live| live.delivery);
+    let composed = crate::note::of(addressee, text, *criterion, delivery)
         .map_err(|refused| Error::Refused(format!("note: node '{id}': {refused}")))?;
     // A live attempt takes both a reach that asks for one and a conversation to
     // make it to. Where either is missing there is nothing to offer anybody, so
@@ -6845,7 +6852,6 @@ pub(crate) fn validate_manager_note(offered: &Offered<'_>) -> Result<Staged> {
         text: (*text).clone(),
         criterion: criterion.cloned(),
         reach,
-        deadline: *deadline,
         address,
         dispatchable,
         composed,
@@ -6955,11 +6961,11 @@ pub(crate) fn deliver_manager_note(validated: &ValidatedNote) -> Result<Vec<edit
         text,
         criterion,
         reach,
-        deadline,
         address,
         dispatchable,
         composed,
     } = validated;
+    let deadline = reach.live().and_then(|live| live.deadline);
     let (addressee, reach, dispatchable) = (*addressee, *reach, *dispatchable);
     let recorded = |reached| {
         Ok(note_record(

@@ -367,24 +367,37 @@ pub fn deliver_with(
 pub(crate) enum Reach {
     /// `deliver: live` or `turn-end` with `persist: false`: the running turn and
     /// nothing else, so a note no turn took is refused.
-    LiveOnly,
+    LiveOnly(Live),
     /// `deliver: live` or `turn-end` with `persist: true`: the running turn, and
     /// the node's next dispatch where there was no running turn. The op's
     /// default, with `live`.
-    LiveThenNext,
+    LiveThenNext(Live),
     /// `deliver: next` with `persist: true`: no live attempt, so the note never
-    /// reaches a running turn and is always composed forward.
+    /// reaches a running turn and is always composed forward — and has no
+    /// delivery mode or deadline to carry, since it waits on no turn.
     NextOnly,
+}
+
+/// How a live attempt reaches the running turn: the delivery mode the composed
+/// note is offered with, and how long it may wait for a turn to take it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Live {
+    /// Interrupt the running turn, or wait for it to end.
+    pub(crate) delivery: Delivery,
+    /// How long the note may wait for a turn to take it, measured from the
+    /// offer; `None` for as long as the dispatch runs.
+    pub(crate) deadline: Option<std::time::Duration>,
 }
 
 impl Reach {
     // llmlint: ignore[invalid_states_unrepresentable] this constructor is what
-    // makes the invalid state unrepresentable: it takes the envelope's two bare
+    // makes the invalid state unrepresentable: it takes the envelope's bare
     // fields exactly as the wire carries them and returns the three-variant enum
-    // the rule asks for, refusing the fourth. A parser of external input has to
-    // accept the shape that input can have, or there is nothing left to refuse.
-    /// The pair as the envelope carries it, or the one refusal the two fields
-    /// decide between them.
+    // the rule asks for, refusing the fourth and every deadline no live attempt
+    // carries. A parser of external input has to accept the shape that input can
+    // have, or there is nothing left to refuse.
+    /// The note's `deliver`, `persist` and `delivery_timeout_seconds` as the
+    /// envelope carries them, or the refusal they earn between them.
     ///
     /// This is the envelope-time half of the reach-nobody rule, and it is composed
     /// here — beside [`reaches_nobody`] and the delivery-time half — so the two
@@ -393,11 +406,21 @@ impl Reach {
     /// # Errors
     ///
     /// [`Error::Refused`] for `deliver: next` with `persist: false`, which
-    /// attempts no live delivery and composes the note into no dispatch.
-    pub(crate) fn of(node: &str, deliver: Deliver, persist: bool) -> Result<Self> {
+    /// attempts no live delivery and composes the note into no dispatch, and for
+    /// a deadline [`deadline_of`] refuses.
+    pub(crate) fn of(
+        node: &str,
+        deliver: Deliver,
+        persist: bool,
+        delivery_timeout_seconds: Option<u64>,
+    ) -> Result<Self> {
+        let deadline = deadline_of(node, deliver, delivery_timeout_seconds)?;
+        let live = |delivery| Live { delivery, deadline };
         match (deliver, persist) {
-            (Deliver::Live | Deliver::TurnEnd, false) => Ok(Self::LiveOnly),
-            (Deliver::Live | Deliver::TurnEnd, true) => Ok(Self::LiveThenNext),
+            (Deliver::Live, false) => Ok(Self::LiveOnly(live(Delivery::Interrupt))),
+            (Deliver::Live, true) => Ok(Self::LiveThenNext(live(Delivery::Interrupt))),
+            (Deliver::TurnEnd, false) => Ok(Self::LiveOnly(live(Delivery::TurnEnd))),
+            (Deliver::TurnEnd, true) => Ok(Self::LiveThenNext(live(Delivery::TurnEnd))),
             (Deliver::Next, true) => Ok(Self::NextOnly),
             (Deliver::Next, false) => Err(reaches_nobody(
                 node,
@@ -407,29 +430,37 @@ impl Reach {
         }
     }
 
+    /// How the running turn is attempted, where it is.
+    pub(crate) fn live(self) -> Option<Live> {
+        match self {
+            Self::LiveOnly(live) | Self::LiveThenNext(live) => Some(live),
+            Self::NextOnly => None,
+        }
+    }
+
     /// Whether the node's running turn is attempted at all.
     pub(crate) fn attempts_a_live_turn(self) -> bool {
-        !matches!(self, Self::NextOnly)
+        self.live().is_some()
     }
 
     /// Whether a note no running turn took is composed into the node's next
     /// dispatch.
     pub(crate) fn composes_forward(self) -> bool {
-        !matches!(self, Self::LiveOnly)
+        !matches!(self, Self::LiveOnly(_))
     }
 }
 
 /// How long a note may wait for a turn to take it, as its envelope's
 /// `delivery_timeout_seconds` states it, or the refusal that field earns.
 ///
-/// Decided at the envelope, beside [`Reach::of`]: a deadline of `0` is one no
-/// note can meet, and one beside `deliver: next` bounds a wait that note never
-/// makes, so neither reaches a run at all.
+/// Decided at the envelope, by [`Reach::of`]: a deadline of `0` is one no note
+/// can meet, and one beside `deliver: next` bounds a wait that note never makes,
+/// so neither reaches a run at all.
 ///
 /// # Errors
 ///
 /// [`Error::Refused`] for either, naming the field and what about it.
-pub(crate) fn deadline_of(
+fn deadline_of(
     node: &str,
     deliver: Deliver,
     seconds: Option<u64>,
@@ -472,14 +503,18 @@ pub(crate) fn with_carried(context: Option<&str>, text: &str) -> String {
     }
 }
 
-/// The planner context left once the carried note `text` is withdrawn from it:
-/// that note's text taken out, and every other note's left where it was.
+/// The planner context left once the carried note reading `text` is withdrawn
+/// from it: the latest entry reading exactly `text` taken out, and every other
+/// entry left where it was.
 ///
-/// The note is matched **whole**, between the separators [`with_carried`] put
-/// around it — never as one paragraph of a split — so a note whose own text
-/// holds a blank line is taken out entire. Where the same text was carried more
-/// than once, the latest is the one taken out. `None` where nothing is left; a
-/// context that does not hold `text` as one of its notes is returned unchanged.
+/// Carried notes are joined into one prose context by [`with_carried`], so a
+/// note is found there **by its text**, as a whole entry: bounded by the
+/// separator on both sides, or by the context's start or end — never as one
+/// paragraph of a split, so a note whose own text holds a blank line is taken out
+/// entire. The one shape text alone cannot tell apart is a note whose text is
+/// exactly a run of the entries other notes' paragraphs make; there the latest
+/// such run is the one taken out. `None` where nothing is left; a context holding
+/// no entry reading `text` is returned unchanged.
 pub(crate) fn without_carried(context: &str, text: &str) -> Option<String> {
     if context == text {
         return None;
@@ -555,12 +590,8 @@ pub(crate) fn of(
     addressee: Addressee,
     text: &NoteText,
     criterion: Option<&Criterion>,
-    deliver: Deliver,
+    delivery: Delivery,
 ) -> std::result::Result<Note, NoteRefused> {
-    let delivery = match deliver {
-        Deliver::TurnEnd => Delivery::TurnEnd,
-        Deliver::Live | Deliver::Next => Delivery::Interrupt,
-    };
     let note = Note::new(addressee, text.as_str())?.with_delivery(delivery);
     match criterion {
         None => Ok(note),
@@ -886,7 +917,7 @@ pub(crate) fn carry(
     let store = carry_store(paths, node);
     let dir = paths.dir.join(CARRY_DIR);
     std::fs::create_dir_all(&dir).map_err(|source| Error::Ledger { path: dir, source })?;
-    of(addressee, text, criterion, Deliver::Next)
+    of(addressee, text, criterion, Delivery::default())
         .map_err(|why| why.to_string())
         .and_then(|note| {
             onemessagebus::Carry::sender::<Note, Accepted>(&store)

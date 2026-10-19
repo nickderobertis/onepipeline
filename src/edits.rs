@@ -20,7 +20,7 @@ use onevcs::releases::TargetName;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::channel::{Author, Command, Deliver, Dependents, SettleOutcome};
+use crate::channel::{Author, Command, Dependents, SettleOutcome};
 use crate::error::{Error, Result};
 use crate::graph::{self, Graph, NodeStatus};
 use crate::plan::Node;
@@ -1578,10 +1578,12 @@ fn compile_into(
             persist,
             delivery_timeout_seconds,
             ..
-        } => {
-            crate::note::deadline_of(id, *deliver, *delivery_timeout_seconds)?;
-            compile_note(graph, frontier, id, *deliver, *persist)
-        }
+        } => compile_note(
+            graph,
+            frontier,
+            id,
+            crate::note::Reach::of(id, *deliver, *persist, *delivery_timeout_seconds),
+        ),
         // What it takes back is a record of the run's, which a graph cannot
         // judge, so every refusal it earns is the reconciler's to journal:
         // `withdrawal::validate` decides it against that record.
@@ -2559,13 +2561,12 @@ fn compile_note(
     graph: &mut Graph,
     frontier: &Frontier,
     id: &str,
-    deliver: Deliver,
-    persist: bool,
+    reach: Result<crate::note::Reach>,
 ) -> Result<Vec<Operation>> {
     if !graph.contains(id) {
         return Err(refuse(format!("note: no node '{id}'")));
     }
-    let reach = crate::note::Reach::of(id, deliver, persist)?;
+    let reach = reach?;
     // A note that can only be carried has to have somewhere to be carried to. A
     // node that settled `done` will never be dispatched again, so `deliver: next`
     // to one is the same reach-nobody rule with the run's own record deciding it
@@ -3188,6 +3189,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::channel::Deliver;
     use crate::plan::{NodeKind, Plan, Resume, PLAN_SCHEMA_VERSION};
 
     /// [`every_operation_kind`] is every kind the enum carries, and no others.

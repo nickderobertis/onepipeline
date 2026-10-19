@@ -5839,6 +5839,11 @@ fn status_shows_a_pending_notes_deadline_beside_its_delivering_state() {
 /// leaves where it was.
 const SECOND_CARRIED: &str = "and keep the fixture loader's public signature";
 
+/// A carried note whose own text holds a blank line — the separator carried
+/// notes are joined by — so its withdrawal has to take it out whole.
+const MULTILINE_CARRIED: &str =
+    "the fixture moved to fixtures/v3\n\nand the loader that reads it moved with it";
+
 /// Why the manager takes a note back.
 const WITHDRAWN_BECAUSE: &str = "the fixture moved back before anyone read this";
 
@@ -5863,7 +5868,8 @@ fn withdrawals(world: &World, run: &str) -> Vec<Value> {
 }
 
 /// A carried note withdrawn before its node's next dispatch is composed into none
-/// of it, and the note carried beside it still is: the run commits
+/// of it — whole, though its own text holds a blank line — and the note carried
+/// beside it still is: the run commits
 /// `note-withdrawn` naming where it was, and the envelope that sent it is
 /// answered again with that note refused, carrying the withdrawal's reason.
 /// Withdrawing the other note once a dispatch has been composed with it is
@@ -5878,7 +5884,7 @@ fn a_carried_note_withdrawn_before_its_nodes_next_dispatch_is_composed_into_none
         vec![agent("build", &[]), agent("later", &["build"])],
     );
     // `later` has no dispatch yet, so each note to it is carried to its first.
-    for text in [NOTE, SECOND_CARRIED] {
+    for text in [MULTILINE_CARRIED, SECOND_CARRIED] {
         world
             .run_with_stdin_on(
                 world.agentgraph_cmd(&["reply", run]),
@@ -5887,10 +5893,10 @@ fn a_carried_note_withdrawn_before_its_nodes_next_dispatch_is_composed_into_none
             .exited(0)
             .out_has("\"state\":\"applied\"");
     }
-    let first = queued_id_of(&world, run, NOTE);
+    let first = queued_id_of(&world, run, "fixtures/v3");
     let second = queued_id_of(&world, run, SECOND_CARRIED);
     assert_eq!(
-        recorded_note(&world, run, NOTE)["reached"],
+        recorded_note(&world, run, MULTILINE_CARRIED)["reached"],
         json!("carried")
     );
 
@@ -5910,7 +5916,7 @@ fn a_carried_note_withdrawn_before_its_nodes_next_dispatch_is_composed_into_none
             "index": 0,
             "reason": WITHDRAWN_BECAUSE,
             "from": "carried",
-            "text": NOTE,
+            "text": MULTILINE_CARRIED,
         })],
         "the withdrawal was not recorded as the note it took back"
     );
@@ -5943,7 +5949,10 @@ fn a_carried_note_withdrawn_before_its_nodes_next_dispatch_is_composed_into_none
         .map(|(_, context)| context)
         .unwrap_or_else(|| panic!("later's dispatch has no planner context:\n{task}"));
     assert!(
-        context.contains(SECOND_CARRIED) && !task.contains(NOTE),
+        context.contains(SECOND_CARRIED)
+            && MULTILINE_CARRIED
+                .split("\n\n")
+                .all(|paragraph| !task.contains(paragraph)),
         "later's dispatch was not composed with the remaining carried note alone:\n{task}"
     );
 
@@ -6189,4 +6198,94 @@ fn a_note_that_interrupts_the_held_judge_turn_rides_its_re_taken_decision_to_the
         !ended(&world).contains(&held),
         "the aborted judge turn was recorded as running to its end"
     );
+}
+
+/// A driver that dies after committing a withdrawal and before answering again
+/// the envelope it took the note of leaves that answer to the driver that takes
+/// the run over, which writes it exactly once and commits nothing a second time.
+///
+/// The driver is held between the two writes by the debug build's own crash
+/// seam, and ended there.
+#[cfg(unix)]
+#[test]
+fn a_withdrawal_its_driver_died_before_answering_is_answered_by_the_next_driver() {
+    let world = World::new("note-withdraw-died");
+    let run = "withdrawdied";
+    let seam = world.root.join("withdraw-seam");
+    std::fs::create_dir_all(&seam).expect("the seam's directory");
+    std::fs::write(seam.join("after-note-withdrawn"), "").expect("the seam is armed");
+    world.script(
+        "judge.asks-again",
+        "Run the check again and report what it said.",
+    );
+    world.script("turn.hold", "hold");
+    world.write_graphs();
+    world.write_supervised_node_graph();
+    let path = world.plan(
+        run,
+        &plan_of(run, vec![agent("build", &[]), agent("later", &["build"])]),
+    );
+    let mut start = world.agentgraph_cmd(&["start", &path, "--detach"]);
+    start.env("ONEPIPELINE_REVIEW_FAILPOINT", &seam);
+    world.run_on(start, "start --detach").exited(0);
+    world.until("build's worker turn to open", |world| {
+        !openings_of(world, run, "build").is_empty()
+    });
+
+    world
+        .run_with_stdin_on(
+            world.agentgraph_cmd(&["reply", run]),
+            &envelope(note_op("later", "worker", NOTE, None)),
+        )
+        .exited(0)
+        .out_has("\"state\":\"applied\"");
+    let sent = queued_id_of(&world, run, NOTE);
+    let withdrawing = submitted(
+        &world,
+        run,
+        &envelope(withdraw_op(sent, 0, WITHDRAWN_BECAUSE)),
+    );
+    world.until("the withdrawal to be committed and its driver held", |_| {
+        seam.join("after-note-withdrawn.reached").is_file()
+    });
+    assert_eq!(withdrawals(&world, run).len(), 1);
+    assert_eq!(
+        result_of(&world, run, sent, 0)["outcome"],
+        json!("applied"),
+        "the envelope was answered again before its driver died"
+    );
+
+    harness::end_driver(&world, run);
+    world
+        .run_on(
+            world.agentgraph_cmd(&["adopt", run, "--detach"]),
+            "adopt --detach",
+        )
+        .exited(0);
+    assert!(answered(withdrawing).contains("\"state\":\"applied\""));
+    world.until("the next driver to answer the envelope again", |world| {
+        result_of(world, run, sent, 0)["outcome"] == json!("refused")
+    });
+    assert!(
+        result_of(&world, run, sent, 0)["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains(WITHDRAWN_BECAUSE)),
+        "the answer the next driver wrote does not carry the withdrawal's reason"
+    );
+    assert_eq!(
+        outcomes_for(&world, run, sent),
+        2,
+        "the envelope was not answered again exactly once"
+    );
+    assert_eq!(
+        withdrawals(&world, run).len(),
+        1,
+        "the next driver committed the withdrawal a second time"
+    );
+    release(&world.fakes, "turn.go");
+    release(&world.fakes, "turn.settle");
+    world.until("the run to settle", |world| {
+        world.events_of(run, "node-settled").len() >= 2
+    });
+    assert_eq!(outcomes_for(&world, run, sent), 2);
 }

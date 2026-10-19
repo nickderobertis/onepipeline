@@ -455,6 +455,7 @@ pub struct CommandResult {
     /// `turn-end`. Present exactly where an applied note reached the worker or
     /// the supervisor, as that note's `note-delivered` record says, and omitted
     /// otherwise — so every outcome written before it existed reads unchanged.
+    // llmlint: ignore[invalid_states_unrepresentable] the plan node `op-interrupting-notes` fixes this wire shape: an optional `turn` beside `outcome`, omitted where absent so every outcome written before it reads unchanged, as `reason` and `refusal` beside it are. Folding it into the verdict would change the bytes `command-outcomes.jsonl` holds; the reconciler writes it only from an applied note's own `note-delivered` record (`engine::turn_of`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn: Option<crate::note::NoteTurn>,
 }

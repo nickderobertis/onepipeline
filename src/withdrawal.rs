@@ -68,12 +68,13 @@ pub(crate) fn validate(
     };
     let named = format!("note {index} of envelope {id}, to node '{node}'");
     let journal = crate::journal::read(&paths.journal());
-    if let Some(by) = withdrawn_by(&journal, id, index) {
+    let records = committed(&journal)?;
+    if let Some(by) = withdrawn_by(&records, id, index) {
         return Err(refuse(format!(
             "{named} was already withdrawn by envelope {by}"
         )));
     }
-    match delivered(&journal, id, index) {
+    match delivered(&records, id, index) {
         Some(Reached::Carried { .. }) => {
             let standing = crate::note::standing(&journal, &node)?;
             let owed = standing.held.iter().any(|held| {
@@ -149,7 +150,7 @@ pub(crate) fn answer_withdrawn(
     let Some(result) = outcome.results.get_mut(position) else {
         return Ok(());
     };
-    let why = format!("withdrawn by envelope {by}: {}", reason.as_str());
+    let why = format!("{} {}", withdrawn_by_words(by), reason.as_str());
     result.outcome = CommandVerdict::Refused;
     result.reason = Some(why.clone());
     result.refusal = None;
@@ -161,59 +162,116 @@ pub(crate) fn answer_withdrawn(
     channel.answer_commands(&outcome)
 }
 
+/// Answer again every envelope a committed withdrawal took a note of that is not
+/// yet answered that way.
+///
+/// The withdrawal is committed before its envelope is answered again, so a driver
+/// that dies between the two writes leaves the second owed; a driver taking the
+/// run over writes it, and one that finds it written writes nothing.
+///
+/// # Errors
+///
+/// [`committed`]'s, and the channel's where an answer cannot be written.
+pub(crate) fn answer_owed(paths: &RunPaths) -> Result<()> {
+    let channel = ChannelState::new(paths);
+    for (by, operation) in committed(&crate::journal::read(&paths.journal()))? {
+        let (
+            Some(by),
+            Operation::NoteWithdrawn {
+                envelope: sent,
+                index,
+                reason,
+                ..
+            },
+        ) = (by, operation)
+        else {
+            continue;
+        };
+        let answered = channel.outcome_of(sent).is_some_and(|outcome| {
+            outcome
+                .results
+                .get(usize::try_from(index).unwrap_or(usize::MAX))
+                .and_then(|result| result.reason.as_deref())
+                .is_some_and(|said| said.starts_with(&withdrawn_by_words(by)))
+        });
+        if !answered {
+            answer_withdrawn(paths, sent, index, &reason, by)?;
+        }
+    }
+    Ok(())
+}
+
+/// How an answer names the withdrawal that refused a note.
+fn withdrawn_by_words(by: u64) -> String {
+    format!("withdrawn by envelope {by}:")
+}
+
 /// The envelope that already withdrew note `index` of envelope `sent`, if one did.
-fn withdrawn_by(journal: &[Envelope], sent: u64, index: u32) -> Option<u64> {
-    committed(journal).find_map(|(envelope, operation)| match operation {
-        Operation::NoteWithdrawn {
-            envelope: from,
-            index: at,
-            ..
-        } if from == sent && at == index => envelope,
-        _ => None,
-    })
+fn withdrawn_by(records: &[(Option<u64>, Operation)], sent: u64, index: u32) -> Option<u64> {
+    records
+        .iter()
+        .find_map(|(envelope, operation)| match operation {
+            Operation::NoteWithdrawn {
+                envelope: from,
+                index: at,
+                ..
+            } if *from == sent && *at == index => *envelope,
+            _ => None,
+        })
 }
 
 /// What the delivery of note `index` of envelope `sent` recorded, if it recorded
 /// anything.
-fn delivered(journal: &[Envelope], sent: u64, index: u32) -> Option<Reached> {
-    committed(journal).find_map(|(_, operation)| match operation {
+fn delivered(records: &[(Option<u64>, Operation)], sent: u64, index: u32) -> Option<Reached> {
+    records.iter().find_map(|(_, operation)| match operation {
         Operation::NoteDelivered {
             envelope: Some(from),
             index: Some(at),
             reached,
             ..
-        } if from == sent && at == index => Some(reached),
+        } if *from == sent && *at == index => Some(reached.clone()),
         _ => None,
     })
 }
 
 /// Every operation the run committed, with the envelope that committed it.
 ///
-/// A record this build cannot read is passed over: it is folded nowhere else
-/// either, and a withdrawal it hid is refused as one the record does not show.
-fn committed(journal: &[Envelope]) -> impl Iterator<Item = (Option<u64>, Operation)> + '_ {
-    journal
-        .iter()
-        .filter(|envelope| {
-            envelope.source == crate::event::Source::Pipeline
-                && envelope.kind.0 == crate::event::PipelineKind::EditCommitted.as_str()
-        })
-        .flat_map(|envelope| {
-            let by = envelope
+/// Refused rather than read past where a commit of this crate's own cannot be
+/// read, exactly as [`crate::note::standing`] refuses it: a withdrawal hidden in
+/// an unreadable record would let the same note be withdrawn twice, or be
+/// answered as a disposition it no longer has.
+///
+/// # Errors
+///
+/// [`Error::Invalid`] naming the record whose operations this build cannot read.
+fn committed(journal: &[Envelope]) -> Result<Vec<(Option<u64>, Operation)>> {
+    let mut records = Vec::new();
+    for envelope in journal.iter().filter(|envelope| {
+        envelope.source == crate::event::Source::Pipeline
+            && envelope.kind.0 == crate::event::PipelineKind::EditCommitted.as_str()
+    }) {
+        let by = envelope
+            .payload
+            .get("envelope")
+            .and_then(serde_json::Value::as_u64);
+        let operations: Vec<Operation> = serde_json::from_value(
+            envelope
                 .payload
-                .get("envelope")
-                .and_then(serde_json::Value::as_u64);
-            serde_json::from_value::<Vec<Operation>>(
-                envelope
-                    .payload
-                    .get("operations")
-                    .cloned()
-                    .unwrap_or_default(),
-            )
-            .unwrap_or_default()
-            .into_iter()
-            .map(move |operation| (by, operation))
-        })
+                .get("operations")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+        )
+        .map_err(|error| {
+            Error::Invalid(format!(
+                "withdraw-note: the run's record of its committed edits cannot be read: \
+                 `edit-committed` record {}/{} carries operations this build cannot read \
+                 ({error}), so what became of the note cannot be decided from it",
+                envelope.stream, envelope.seq
+            ))
+        })?;
+        records.extend(operations.into_iter().map(|operation| (by, operation)));
+    }
+    Ok(records)
 }
 
 /// How a delivered note's record words its disposition, for a refusal.
