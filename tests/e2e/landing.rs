@@ -919,6 +919,27 @@ impl StreamRender {
             .collect()
     }
 
+    /// When each landing read this render took began and returned, in the order the
+    /// record holds them: a read's own act opens its span and the repository it asked
+    /// closes it, both written on the thread that took it.
+    pub(crate) fn read_spans(&self) -> Vec<(u64, u64)> {
+        let mut open: BTreeMap<String, u64> = BTreeMap::new();
+        let mut spans = Vec::new();
+        for act in &self.acts {
+            let (Some(node), Some(at)) = (act["node"].as_str(), act["at_ms"].as_u64()) else {
+                continue;
+            };
+            if act["act"] == "landing-read" {
+                open.insert(node.to_owned(), at);
+            } else if act["act"] == "repository-asked" {
+                if let Some(began) = open.remove(node) {
+                    spans.push((began, at));
+                }
+            }
+        }
+        spans
+    }
+
     /// Whether this render reported on `node`'s landing.
     pub(crate) fn reported(&self, node: &str) -> bool {
         self.acts
@@ -934,14 +955,16 @@ impl StreamRender {
     }
 
     /// Whether this render printed anything that *may* have moved `node`'s landing — a
-    /// superset, deliberately: any record of its own, and any session's at all, whose
-    /// lines name the session's stream rather than the node it is working for. What it
-    /// rules out is a render that printed neither, which nothing moved.
+    /// superset, deliberately: any record of its own, any session's at all, whose lines
+    /// name the session's stream rather than the node it is working for, and the
+    /// driver's exit, after which the stream reads every landing afresh. What it rules
+    /// out is a render that printed none of these, which nothing moved.
     fn printed_what_may_move(&self, node: &str) -> bool {
         self.printed.iter().any(|line| {
-            line.split_whitespace()
-                .nth(1)
-                .is_some_and(|id| id == format!("graph:{node}") || id.starts_with("vcs:"))
+            let mut words = line.split_whitespace().skip(1);
+            let (id, kind) = (words.next(), words.next());
+            id.is_some_and(|id| id == format!("graph:{node}") || id.starts_with("vcs:"))
+                || (id == Some("graph:-") && kind == Some("driver-exited"))
         })
     }
 }
@@ -1041,6 +1064,20 @@ fn an_attach_stream_carries_a_landing_read_until_something_moves_it_and_reads_af
         "the stream's final render did not read every landing afresh:\n{}",
         streamed.stderr
     );
+    // And takes those reads side by side: on a host with a second core to take one on,
+    // two of them were under way at once.
+    if std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get) > 1 {
+        let spans = renders[last].read_spans();
+        let overlapped = spans.iter().enumerate().any(|(at, (began, ended))| {
+            spans[at + 1..]
+                .iter()
+                .any(|(other_began, other_ended)| other_began < ended && began < other_ended)
+        });
+        assert!(
+            overlapped,
+            "the final render took its reads one after another: {spans:?}"
+        );
+    }
 
     for node in STREAMED {
         let mut previous: Option<u64> = None;

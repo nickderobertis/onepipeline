@@ -300,8 +300,15 @@ impl Drop for Deciding {
 /// repository from scratch every time, and whether it got as far as resolving or
 /// opening one is inside an answer this does not read. What it counts is
 /// therefore exactly the cost [`crate::vcs::landing_now`] cannot collapse.
+///
+/// Stamped, as [`landing_read_taken`] is, because it is written as the read it closes
+/// returns: the two stamps are the span one read took, and spans of one render that
+/// overlap are reads that were taken side by side.
 pub(crate) fn repository_asked(repo: Option<&str>) {
-    record(Act::RepositoryAsked, json!({ "repo": repo }));
+    record(
+        Act::RepositoryAsked,
+        json!({ "repo": repo, "at_ms": crate::sys::now_millis() }),
+    );
 }
 
 /// Record that one landing decision began a read, and when.

@@ -1026,9 +1026,10 @@ pub(crate) fn landings_the_run_re_read(state: &mut RunState, paths: &RunPaths) {
 /// that stream's consecutive renders for at most [`STREAM_READ_REUSE`] — see
 /// [`StreamReads`] — and is taken again at once after the stream records a
 /// settlement or restack of that node or a publication or landing of its session
-/// ([`moves_a_landing`]), and on the stream's final render, which reports the run
-/// as it settled and carries nothing. `status`, `results` and `watch` carry
-/// nothing and read on every render.
+/// ([`moves_a_landing`]), and on the stream's final render — the one made once the
+/// run's loop has finished, or the one printing the driver's exit where that came
+/// first — which reports the run as it settled and carries nothing. `status`,
+/// `results` and `watch` carry nothing and read on every render.
 ///
 /// Nested scopes are one render: `status` prints [`RunView::summary`] inside
 /// itself, and a second scope there would empty the memo half-way through and
@@ -1115,7 +1116,19 @@ impl StreamReads {
     /// can move it: a settlement or restack of the node, or a record of its
     /// session that moves the branch the read compares or the base it compares
     /// it against — see [`moves_a_landing`].
+    ///
+    /// And every node's, where the stream just recorded the driver exiting: the
+    /// render printing that reports the run as it settled, and the stream's last
+    /// pass renders only what it has not printed yet — so where the exit was
+    /// printed before the run's loop was seen to finish, that render is the
+    /// stream's final one.
     pub(crate) fn forget_moved(&self, run: &str, events: &[&Envelope]) {
+        if events.iter().any(|event| {
+            event.source == Source::Pipeline && event.kind.0 == PipelineKind::DriverExited.as_str()
+        }) {
+            self.forget_all();
+            return;
+        }
         STREAM_READS.with_borrow_mut(|reads| {
             let Some(reads) = reads else {
                 return;
@@ -1145,6 +1158,17 @@ impl StreamReads {
 ///
 /// A `match` with no catch-all arm, so a kind `onevcs` adds is a build that fails here
 /// until somebody says which it is, rather than one carried past silently.
+//
+// llmlint: ignore[changed_behavior_has_e2e] the journeys hold every move an offline run makes
+// of a node already read inside one attach stream — its settlement and restack, and its
+// session's push, base merge and change request — in
+// `review_round::moved_drafts_were_read_again`. The other moving kinds reach an attach stream
+// for an already-read node only through what no offline journey stages there: a merge,
+// retarget, reopen or retirement somebody else makes while the stream runs, a draft lifted
+// after its settlement, a stack base assembled for a later dispatch. Each is decided by this
+// exhaustive match, and `an_attach_stream_lets_go_of_a_read_where_a_record_moves_its_landing`
+// drives every kind it answers `true` for, and the common ones it answers `false` for,
+// through the stream's own `forget_moved` over real envelopes.
 fn moves_a_landing(kind: onevcs::EventKind) -> bool {
     use onevcs::EventKind as Kind;
     match kind {
@@ -5477,6 +5501,19 @@ mod tests {
         assert!(
             !held("a") && !held("b"),
             "the final render carried a read into it"
+        );
+        carry(&["a", "b"]);
+        stream.forget_moved(
+            "demo",
+            &[&event(
+                crate::journal::PipelineKind::DriverExited,
+                None,
+                &[],
+            )],
+        );
+        assert!(
+            !held("a") && !held("b"),
+            "the render printing the driver's exit carried a read into it"
         );
         drop(stream);
         assert!(

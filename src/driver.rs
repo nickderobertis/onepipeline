@@ -2861,8 +2861,9 @@ fn attach(
             })
             .collect();
         // The stream's last render reports the run as it settled, so it reads every
-        // landing afresh; before it, a node's read is carried only until the stream
-        // records something that moves it.
+        // landing afresh — as does the render printing the driver's exit, which is the
+        // last one where nothing is left to print after it; before them, a node's read
+        // is carried only until the stream records something that moves it.
         if concluded {
             carried.forget_all();
         } else {
