@@ -777,12 +777,13 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
 ///
 /// The figure that sets how long this journey takes where starting a process is slow:
 /// on the Windows runner a `git` start costs some twenty times what it does on Linux,
-/// and this round ran 420–540 seconds there against its 540-second bound while starting
-/// 18,300–19,200 of them. Nearly half were the attach stream reading every unlanded
-/// draft's landing afresh on each of its renders, about forty `git` a read. Now it takes
-/// about 9,700 here, and 13,400 with every start slowed by sixty milliseconds of CPU — a
-/// slower host renders and asks on a timer more often over a longer run — so the bound
-/// sits above the second and well below what the round cost before.
+/// and this round ran 420–540 seconds there against its 540-second bound. Counted on
+/// Linux it started 18,300–19,500 of them, nearly half the attach stream reading every
+/// unlanded draft's landing afresh on each of its renders, about forty `git` a read. Now
+/// it starts about 10,000, and 12,000–13,500 with every start slowed by sixty
+/// milliseconds of CPU — a slower host renders and asks on a timer more often over a
+/// longer run — so the bound sits above the second and below anything the round cost
+/// before.
 const GIT_STARTS: usize = 15_000;
 
 /// Hold the round to [`GIT_STARTS`].
