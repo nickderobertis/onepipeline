@@ -12086,6 +12086,15 @@ retire this interim. The manager approved the record's `text` under correlation
 `c-6e20576dba29b78e543c876cbb9a85c8`: replay takes a withdrawn note's text off the node it
 was carried onto, and nothing else.
 
+**Carried notes accumulate, ruled.** Before this entry each note carried to a node replaced
+the one before it as the node's planner context, so a second carried note dropped the first
+from the next dispatch's `## Planner context` and from the store's `onepipeline.context`.
+The manager ruled under correlation `c-58311ba08bfab18210df2fcd2dd40dab` that this was a
+bug: every carried note is now composed into the next dispatch's planner context, and
+projected into `onepipeline.context`, in carry order, one paragraph each, and a withdrawal
+removes exactly its own. The store journeys that drive repeated `deliver: next` notes read
+the latest note as the context's last entry (`tests/e2e/harness.rs`'s `carries_latest`).
+
 **Carried over.** `cancel`'s preemption of a note still being delivered to its node is
 unchanged: the cancel answers that note refused, and ends the conversation that would have
 read it. **onepipeline#512**: v0.63.6 already answers a claimed envelope a dead driver left

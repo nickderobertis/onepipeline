@@ -317,7 +317,10 @@ fn the_store_is_discovered_from_the_launch_directory_by_the_read_and_by_every_wr
         world.until_store("the change after the repair to reach the board", |world| {
             world.store_tasks(&project).iter().any(|task| {
                 task["item"]["metadata"]["onepipeline.id"] == "later"
-                    && task["item"]["metadata"]["onepipeline.context"] == repaired.as_str()
+                    && crate::harness::carries_latest(
+                        &task["item"]["metadata"]["onepipeline.context"],
+                        repaired.as_str(),
+                    )
             })
         });
     }
@@ -1534,8 +1537,10 @@ fn an_unreachable_store_is_reported_and_attempted_again_on_the_next_change_while
     world.until("the next edit to reach the store", |world| {
         world.store_tasks(&project).iter().any(|task| {
             task["item"]["metadata"]["onepipeline.id"] == "later"
-                && task["item"]["metadata"]["onepipeline.context"]
-                    == "project this now the store is back"
+                && crate::harness::carries_latest(
+                    &task["item"]["metadata"]["onepipeline.context"],
+                    "project this now the store is back",
+                )
         })
     });
 
@@ -1890,8 +1895,10 @@ fn a_projection_the_store_refuses_is_reported_once_and_attempted_again_when_the_
     world.until_store("the changed graph to reach the board", |world| {
         world.store_tasks(&project).iter().any(|task| {
             task["item"]["metadata"]["onepipeline.id"] == "later"
-                && task["item"]["metadata"]["onepipeline.context"]
-                    == "project this onto the board that came back"
+                && crate::harness::carries_latest(
+                    &task["item"]["metadata"]["onepipeline.context"],
+                    "project this onto the board that came back",
+                )
         })
     });
     assert_eq!(
@@ -2635,8 +2642,10 @@ fn a_projection_the_real_store_refuses_is_not_asked_again_until_the_graph_change
     world.until_store("the changed graph to reach the board", |world| {
         world.store_tasks(&project).iter().any(|task| {
             task["item"]["metadata"]["onepipeline.id"] == "later"
-                && task["item"]["metadata"]["onepipeline.context"]
-                    == "project this onto the board that came back"
+                && crate::harness::carries_latest(
+                    &task["item"]["metadata"]["onepipeline.context"],
+                    "project this onto the board that came back",
+                )
         })
     });
 
@@ -3068,7 +3077,10 @@ fn a_projection_that_recovered_is_retried_as_promptly_as_ever_when_it_next_fails
     world.until_store("the projection to catch the board up", |world| {
         world.store_tasks(&project).iter().any(|task| {
             task["item"]["metadata"]["onepipeline.id"] == "later"
-                && task["item"]["metadata"]["onepipeline.context"] == "the first outage"
+                && crate::harness::carries_latest(
+                    &task["item"]["metadata"]["onepipeline.context"],
+                    "the first outage",
+                )
         })
     });
 
@@ -3312,7 +3324,10 @@ fn an_unwritable_shadow_store_is_reported_retried_and_recovered() {
     world.until_store("the committed edit to reach the recovered store", |world| {
         world.store_tasks(&project).iter().any(|task| {
             task["item"]["metadata"]["onepipeline.id"] == "later"
-                && task["item"]["metadata"]["onepipeline.context"] == "capture recovered"
+                && crate::harness::carries_latest(
+                    &task["item"]["metadata"]["onepipeline.context"],
+                    "capture recovered",
+                )
         })
     });
 
@@ -3822,7 +3837,10 @@ fn derived_waiting_failed_and_parked_states_reach_the_board_under_their_own_word
                         .is_some_and(|body| body.contains("Keep this body."))
                     && task["item"]["metadata"]["onepipeline.persona"] == "engineer"
                     && task["item"]["metadata"]["onepipeline.max_turns"] == 7
-                    && task["item"]["metadata"]["onepipeline.context"] == "carry this note"
+                    && crate::harness::carries_latest(
+                        &task["item"]["metadata"]["onepipeline.context"],
+                        "carry this note",
+                    )
             })
             && tasks.iter().any(|task| {
                 task["item"]["metadata"]["onepipeline.id"] == "local"

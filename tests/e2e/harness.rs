@@ -3537,6 +3537,18 @@ fn a_dispatch_that_met_the_test_holds_until_it_is_released() {
     });
 } // llmlint: ignore-end[tests_mirror_real_usage]
 
+/// Whether a node's projected planner context carries `text` as its **latest**
+/// carried note.
+///
+/// Notes carried to one node accumulate in carry order, one paragraph each, so
+/// the next dispatch is composed with every one of them; the latest is the
+/// context's last entry, and a context holding only one note is exactly it.
+pub fn carries_latest(context: &Value, text: &str) -> bool {
+    context
+        .as_str()
+        .is_some_and(|context| context == text || context.ends_with(&format!("\n\n{text}")))
+}
+
 /// Wait for a child this journey spawned with piped streams to end, draining
 /// them as it goes.
 ///
