@@ -62,6 +62,13 @@
         }
       ],
       "description": "The decision the run is paused on, or `null` for a run that is not."
+    },
+    "unanswered": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/UnansweredEnvelope"
+      },
+      "description": "Every command envelope claimed off the run's queue and not answered yet,\nin claim order — omitted when there is none."
     }
   },
   "required": [
@@ -220,6 +227,86 @@
         "blocking_surface"
       ],
       "description": "The decision a run nothing is driving is paused on."
+    },
+    "UnansweredEnvelope": {
+      "type": "object",
+      "properties": {
+        "envelope": {
+          "type": "string",
+          "description": "The channel envelope id — a decimal string in the document."
+        },
+        "delivery": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Delivery"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Where its live note stands, as the run's live driver last wrote it —\nomitted where no driver is live, which leaves the envelope to be answered\nby the run's next driver, and where the live driver holds no live note of\nit or behind one."
+        }
+      },
+      "required": [
+        "envelope"
+      ],
+      "description": "One command envelope claimed off a run's queue with no outcome yet, as\n`status <RUN> --json` reads it."
+    },
+    "Delivery": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "node": {
+              "type": "string",
+              "description": "The node whose conversation the note was offered to."
+            },
+            "since": {
+              "type": "string",
+              "description": "When it was offered, in epoch milliseconds — RFC 3339 on the wire."
+            },
+            "state": {
+              "type": "string",
+              "const": "delivering"
+            }
+          },
+          "required": [
+            "state",
+            "node",
+            "since"
+          ],
+          "description": "The driver is waiting on `node`'s conversation to answer the envelope's\nlive note."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "node": {
+              "type": "string",
+              "description": "The node whose outstanding note it waits behind."
+            },
+            "since": {
+              "type": "string",
+              "description": "When it was first held, in epoch milliseconds — RFC 3339 on the wire."
+            },
+            "behind_envelope": {
+              "type": "string",
+              "description": "The channel envelope id of the envelope whose note it waits behind —\na decimal string on the wire."
+            },
+            "state": {
+              "type": "string",
+              "const": "held"
+            }
+          },
+          "required": [
+            "state",
+            "node",
+            "since",
+            "behind_envelope"
+          ],
+          "description": "The driver holds the envelope unjudged behind `behind_envelope`'s live\nnote to `node`, so that no later edit to that node overtakes it."
+        }
+      ],
+      "description": "Where one claimed, unanswered envelope's live note stands, as the run's live\ndriver last wrote it.\n\nEnvelope ids and instants are carried as numbers and written as the strings\nthe document states — a channel envelope id in decimal, an instant in RFC\n3339 — so a value read back that is neither is refused where it is read\nrather than shown."
     }
   }
 }

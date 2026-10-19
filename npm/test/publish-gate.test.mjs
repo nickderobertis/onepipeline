@@ -566,6 +566,47 @@ describe("the npm publish order", () => {
     );
   });
 
+  it("reads the manifest of a package handed to it by a Windows drive-letter path", async () => {
+    const reg = await freshRegistry();
+    // The path a Windows release job hands this, which GNU tar read as
+    // `host:path` and dialled a host called `D` — every release cut after the
+    // per-platform publish, until the manifest went to tar on stdin. Here it is
+    // a relative name with that shape, reached from a directory of its own:
+    // npm reads it as the file it is, and GNU tar on this host reads the colon
+    // exactly as Git Bash's did.
+    const drive = mkdtempSync(join(work, "drive-"));
+    const windows = platforms.get("x86_64-pc-windows-msvc");
+    const windowsTgz = `D:\\a\\onepipeline\\npm-artifacts\\${windows.name}-${version}.tgz`;
+    const launcher = `D:\\a\\onepipeline\\npm-artifacts\\onepipeline-cli-${version}.tgz`;
+    copyFileSync(windows.tgz, join(drive, windowsTgz));
+    copyFileSync(launcherTgz, join(drive, launcher));
+
+    // Everything else the launcher pins is already served, but one of them only
+    // from the second read: the launcher's run waiting on it is the evidence the
+    // pins came out of the manifest rather than being skipped.
+    const others = [...platforms.values()].filter(({ name }) => name !== windows.name);
+    const held = others[0].name;
+    reg.holdUntilRead(held, 1);
+    for (const { tgz } of others) await run("npm", ["publish", tgz, "--access", "public"], { env });
+
+    const script = join(REPO_ROOT, "scripts", "publish-npm.sh");
+    for (const archive of [windowsTgz, launcher]) {
+      const published = await attempt("bash", [script, archive], { cwd: drive, env });
+      assert.equal(published.code, 0, published.stderr);
+      assert.doesNotMatch(published.stderr, /cannot read the manifest/);
+    }
+    assert.ok(
+      reg.acceptedAt(`${windows.name}@${version}`),
+      `${windows.name} never reached the registry`,
+    );
+    const offered = reg.acceptedAt(`onepipeline-cli@${version}`);
+    assert.ok(offered, "the launcher never reached the registry");
+    assert.ok(
+      reg.visibleAt(`${held}@${version}`) <= offered,
+      `the launcher was offered before ${held}, which its manifest pins, was resolvable`,
+    );
+  });
+
   it("refuses after publishing when the registry will not serve what it took", async () => {
     const reg = await freshRegistry();
     const host = platforms.get(hostTarget());
