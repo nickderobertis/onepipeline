@@ -1715,6 +1715,14 @@ fn delivered_failure_recorded(world: &World, run: &str, ticket: &str) -> Value {
     let surfaced = surfaced(world);
     assert_eq!(surfaced.len(), 1, "{surfaced:#?}");
     assert_eq!(surfaced[0]["blocking"], false);
+    // The relayed `merge-completed` starts the write while the node's publication is still
+    // closing out, so the record can be journaled before the settlement it does not change.
+    world.until("service to settle", |world| {
+        world
+            .events_of(run, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "service")
+    });
     assert_eq!(settled(world, run, "service")["status"], "done");
     payload
 }

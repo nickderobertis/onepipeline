@@ -114,15 +114,21 @@ fn held_merge_path(world: &World, rendezvous: &std::path::Path) -> crate::harnes
 }
 
 /// Hold the publishing push **after** origin took it: a `reference-transaction` hook in the
-/// world's hooks directory that, the first time git moves one of origin's remote-tracking refs
-/// — which a push does once origin has accepted the update, and a fetch of a base nothing moved
-/// does not — marks `<rendezvous>.holding` and waits for `rendezvous` to exist.
+/// world's hooks directory that, the first time git moves `origin/<branch>` — the
+/// remote-tracking ref of the branch the publication pushes, which a push moves once origin has
+/// accepted the update, and a fetch of a base nothing moved does not — marks
+/// `<rendezvous>.holding` and waits for `rendezvous` to exist.
+///
+/// It is that one ref and not any of origin's: git 2.48 and later have `fetch` create
+/// `origin/HEAD` where it is missing, so on such a git (git for Windows' runners carry one) a
+/// session's own fetch moves a remote-tracking ref mid-dispatch, and a hook watching all of
+/// them holds there — letting a cancel in while the dispatch still runs.
 ///
 /// The moment a cancel is too late to stop anything: since `onevcs` 0.56.1 a cancellation
 /// stops a push that is still running, its `pre-push` hook included, so a journey about a
 /// cancel arriving once the work has reached origin holds here rather than in that hook. The
 /// world's repository must carry a hook of its own, so git reads this directory at all.
-fn held_after_the_push(world: &World, rendezvous: &std::path::Path) -> HeldAfterPush {
+fn held_after_the_push(world: &World, rendezvous: &std::path::Path, branch: &str) -> HeldAfterPush {
     let hook = world.root.join("hooks").join("reference-transaction");
     std::fs::create_dir_all(hook.parent().expect("hooks has a directory")).expect("hooks");
     let go = rendezvous.to_string_lossy().replace('\'', r"'\''");
@@ -131,7 +137,7 @@ fn held_after_the_push(world: &World, rendezvous: &std::path::Path) -> HeldAfter
         format!(
             "#!/bin/sh\n\
              [ \"$1\" = committed ] || exit 0\n\
-             moved=$(awk '$1 != $2 && $3 ~ /^refs\\/remotes\\/origin\\// {{ print }}')\n\
+             moved=$(awk -v ref='refs/remotes/origin/{branch}' '$1 != $2 && $3 == ref {{ print }}')\n\
              [ -n \"$moved\" ] || exit 0\n\
              [ -e '{go}.holding' ] && exit 0\n\
              : > '{go}.holding'\n\
@@ -2516,7 +2522,7 @@ fn a_cancelled_run_reads_no_merge_path_once_its_push_has_landed() {
         // obvious: three reads a minute apart rather than one and done.
         .with_env("ONEPIPELINE_MERGE_PATH_BACKOFF_SECONDS", "60");
     let go = world.fakes.join("push.go");
-    let held = held_after_the_push(&world, &go);
+    let held = held_after_the_push(&world, &go, "rereadcancelled/service");
     let repo = world.repository("change-auto", &["true"]);
     // The service's visibility is declared, so the publication's write boundary
     // takes the rule's word and asks the host nothing: the one read left to
@@ -2547,7 +2553,16 @@ fn a_cancelled_run_reads_no_merge_path_once_its_push_has_landed() {
 
     // Origin has taken the push, which is held before the publication could ask
     // the host anything.
-    world.until("the landed push to be held", |_| held.holding());
+    world.until("the landed push to be held", |world| {
+        held.holding()
+            && !git(
+                world,
+                &repo.origin,
+                &["branch", "--list", "rereadcancelled/service"],
+            )
+            .trim()
+            .is_empty()
+    });
     world
         .run_with_stdin(
             &["reply", &run],
@@ -2634,7 +2649,7 @@ fn a_cancelled_run_reads_no_merge_path_once_its_push_has_landed() {
 fn a_node_cancelled_during_its_publication_settles_on_it_and_is_no_longer_parked() {
     let world = World::new("lifecycle-cancelparked");
     let go = world.fakes.join("push.go");
-    let held = held_after_the_push(&world, &go);
+    let held = held_after_the_push(&world, &go, "main");
     world.repository("local-direct", &["true"]);
     world.script("service.work", "the worker wrote this\n");
 
