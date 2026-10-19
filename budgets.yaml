@@ -132,7 +132,8 @@ budgets:
       the spikes measured on GitHub, each store task written 2 points, and each store read 1.
       The threshold is this journey's measured round, 152 to 162 over eight runs on 2026-10-18
       and 2026-10-19 (CI 156 at #935's head, 160 on main at 645ca97f and 162 at #1015; locally
-      152, 152, 154, 158, 162), with a little room. The gh token is 54 in every run: 30 GraphQL
+      152, 152, 154, 158, 162), plus a margin: 175 is the measured upper bound 162 plus 13 units,
+      about 8% of it. The gh token is 54 in every run: 30 GraphQL
       points (both passes' review reads 11, the decline's comment read 1, sixteen standings
       reads — the reworks' and the readjustment's placement reads and one per retarget — 16, two
       open-change lookups 2) and 24
