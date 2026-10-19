@@ -44,7 +44,9 @@ pub(crate) const HOLD_KIND: &str = "source";
 pub const POLL_ENV: &str = "ONEPIPELINE_SOURCE_POLL_SECONDS";
 
 /// How often a held node's edges are read again when nothing overrides it: a minute, the
-/// bound every other answer the loop owes on a clock is held to.
+/// interval every other paced read of the loop ships with. A host wanting its store asked
+/// less often lengthens [`POLL_ENV`]; a value that is not a positive whole number of
+/// seconds is no setting at all, and this stands.
 pub const DEFAULT_POLL_SECONDS: u64 = 60;
 
 /// How soon the loop looks again for a re-read it has under way.
@@ -53,22 +55,31 @@ const TICK: Duration = Duration::from_millis(200);
 /// What a `source` hold carries: each source the node's last dependency read could not ask
 /// and why, and each prerequisite that read found which the run's graph does not give the
 /// node.
+///
+/// Never neither: a hold names what holds the node, so the one constructor, [`new`](Self::new),
+/// answers no hold at all for a read that asked every source and found nothing missing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SourceHold {
     /// The sources not asked, in name order; empty only where `missing` is not.
-    pub unanswered: Vec<Unanswered>,
+    unanswered: Vec<Unanswered>,
     /// The node ids the read resolved a prerequisite to that the node does not depend on in
     /// the run's graph.
-    pub missing: Vec<String>,
+    missing: Vec<String>,
 }
 
 impl SourceHold {
-    /// The hold a launch's read of one node stands for.
-    pub(crate) fn unasked(unanswered: Vec<Unanswered>) -> Self {
-        Self {
+    /// The hold these sources and prerequisites stand for, or `None` where both are empty
+    /// and nothing holds the node.
+    pub(crate) fn new(unanswered: Vec<Unanswered>, missing: Vec<String>) -> Option<Self> {
+        (!unanswered.is_empty() || !missing.is_empty()).then_some(Self {
             unanswered,
-            missing: Vec::new(),
-        }
+            missing,
+        })
+    }
+
+    /// The sources not asked, in name order.
+    pub(crate) fn unanswered(&self) -> &[Unanswered] {
+        &self.unanswered
     }
 
     /// The `node-held` entry: `missing` only where the read found one.
@@ -112,10 +123,7 @@ impl SourceHold {
                 .map(|id| id.as_str().map(str::to_owned))
                 .collect::<Option<Vec<_>>>()?,
         };
-        Some(Self {
-            unanswered,
-            missing,
-        })
+        Self::new(unanswered, missing)
     }
 
     /// What holds the node, on one line, as a view and the surface both say it.
@@ -162,7 +170,10 @@ pub(crate) fn launched(
         .iter()
         .filter_map(|node| {
             let unasked = unanswered.get(&node.id)?;
-            Some((node.id.clone(), SourceHold::unasked(unasked.clone())))
+            Some((
+                node.id.clone(),
+                SourceHold::new(unasked.clone(), Vec::new())?,
+            ))
         })
         .collect()
 }
@@ -173,7 +184,7 @@ pub(crate) fn launched(
 pub(crate) fn notice(held: &BTreeMap<String, SourceHold>) -> Option<String> {
     let mut by_source: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
     for (node, hold) in held {
-        for unasked in &hold.unanswered {
+        for unasked in hold.unanswered() {
             by_source
                 .entry((unasked.source.to_string(), unasked.reason.clone()))
                 .or_default()
@@ -209,13 +220,7 @@ pub(crate) fn hold_after(deps: &[String], reread: &Reread) -> Option<SourceHold>
         .collect();
     missing.sort();
     missing.dedup();
-    if reread.unanswered.is_empty() && missing.is_empty() {
-        return None;
-    }
-    Some(SourceHold {
-        unanswered: reread.unanswered.clone(),
-        missing,
-    })
+    SourceHold::new(reread.unanswered.clone(), missing)
 }
 
 /// A re-read under way, on its own thread.
@@ -372,9 +377,10 @@ impl SourceHolds {
     /// How long the loop may wait before it next has a re-read to start or take up.
     ///
     /// `Duration::MAX` where nothing is held, so a run whose plan was read whole waits on
-    /// the channel alone.
+    /// the channel alone — and where there is no store to read, which only a launch record
+    /// naming no qualified project leaves.
     pub(crate) fn next_read(&self) -> Duration {
-        if self.held.is_empty() {
+        if self.held.is_empty() || self.store.is_none() {
             return Duration::MAX;
         }
         if self.reading.is_some() {
@@ -423,9 +429,11 @@ fn wait_surface(node: &str, hold: &SourceHold) -> Surface {
         (
             "so it may have a prerequisite this run cannot see",
             format!(
-                "Supply the credential {} needs in this host's environment or its secrets file, \
-                 or correct its configuration, and it dispatches the pass a read of its edges \
-                 asks every source and finds nothing missing; they are read again every {}s.",
+                "Supply the credential {} needs in the secrets file the store reads, or \
+                 correct its configuration — both are read again for every read, while a \
+                 variable exported now never reaches a driver already running — and it \
+                 dispatches the pass a read of its edges asks every source and finds nothing \
+                 missing; they are read again every {}s.",
                 hold.sources(),
                 poll_seconds()
             ),
@@ -480,7 +488,7 @@ mod tests {
     /// The hold's entry reads back whole, with `missing` left out where the read found none.
     #[test]
     fn the_hold_entry_round_trips_and_omits_an_empty_missing() {
-        let unasked = SourceHold::unasked(vec![vault("auth: no token")]);
+        let unasked = SourceHold::new(vec![vault("auth: no token")], Vec::new()).expect("a hold");
         let entry = unasked.payload();
         assert_eq!(
             entry,
@@ -488,10 +496,7 @@ mod tests {
         );
         assert_eq!(SourceHold::of_payload(&entry), Some(unasked));
 
-        let found = SourceHold {
-            unanswered: Vec::new(),
-            missing: vec!["design".to_owned()],
-        };
+        let found = SourceHold::new(Vec::new(), vec!["design".to_owned()]).expect("a hold");
         assert_eq!(SourceHold::of_payload(&found.payload()), Some(found));
         // Another hold, and one this build cannot read whole, are not this one.
         assert_eq!(
@@ -500,6 +505,11 @@ mod tests {
         );
         assert_eq!(
             SourceHold::of_payload(&json!({"kind": "source", "unanswered": [{"source": 7}]})),
+            None
+        );
+        // Nor is one naming nothing that holds the node.
+        assert_eq!(
+            SourceHold::of_payload(&json!({"kind": "source", "unanswered": []})),
             None
         );
     }
@@ -532,6 +542,7 @@ mod tests {
         }
         assert_eq!(block["surface_kind"], WAIT_SURFACE_KIND);
         assert_eq!(block["poll_env"], POLL_ENV);
+        assert_eq!(block["default_poll_seconds"], DEFAULT_POLL_SECONDS);
         assert_eq!(block["surface_cadence_env"], crate::release::SURFACE_ENV);
         let surface = wait_surface(
             "build",
@@ -560,7 +571,7 @@ mod tests {
         };
         assert_eq!(
             hold_after(&deps, &still),
-            Some(SourceHold::unasked(vec![vault("unavailable: down")]))
+            SourceHold::new(vec![vault("unavailable: down")], Vec::new())
         );
 
         let found = Reread {
@@ -574,5 +585,24 @@ mod tests {
         let held = hold_after(&deps, &found).expect("a prerequisite the graph lacks holds");
         assert_eq!(held.missing, ["review"]);
         assert!(held.describe().contains("'review'"), "{}", held.describe());
+    }
+
+    /// The pace is the variable where it is a positive whole number of seconds, and the
+    /// default for anything else, unset included.
+    #[test]
+    fn the_pace_is_a_positive_whole_number_of_seconds_or_the_default() {
+        let _held = crate::vcs::scratch_home_held();
+        for unusable in ["", "0", "-5", "soon", "1.5"] {
+            std::env::set_var(POLL_ENV, unusable);
+            assert_eq!(
+                poll_seconds(),
+                DEFAULT_POLL_SECONDS,
+                "{POLL_ENV}={unusable:?}"
+            );
+        }
+        std::env::set_var(POLL_ENV, "7200");
+        assert_eq!(poll_seconds(), 7200);
+        std::env::remove_var(POLL_ENV);
+        assert_eq!(poll_seconds(), DEFAULT_POLL_SECONDS);
     }
 }

@@ -494,9 +494,15 @@ fn a_user_layer_refining_a_source_no_layer_defines_leaves_it_unconfigured_and_pl
 /// `local-md` plugin, declared `visibility: private`, answering every task query with the
 /// authentication failure a hosted tracker answers a reader without its credential with.
 /// The store asks it what it records of each public task, so every node's read names it.
+///
+/// While the holds stand: an unchanged wait is surfaced again on its cadence; a held node an
+/// edit drops holds nothing and is surfaced no more; a re-read the store fails outright is
+/// said on the driver's log and leaves every hold standing; and a driver stopped and adopted
+/// takes the holds up from the record rather than dispatching what the launch held.
 #[test]
 fn a_private_source_that_cannot_authenticate_holds_each_node_until_it_answers() {
-    let world = with_private_vault(World::new("store-private-unanswered"));
+    let world = with_private_vault(World::new("store-private-unanswered"))
+        .with_env("ONEPIPELINE_RELEASE_SURFACE_SECONDS", "1");
     let refusal = "vault.query_tasks.refuse";
     world.script(
         refusal,
@@ -507,7 +513,11 @@ fn a_private_source_that_cannot_authenticate_holds_each_node_until_it_answers() 
         name,
         &plan_of(
             name,
-            vec![agent("design", &[]), agent("build", &["design"])],
+            vec![
+                agent("design", &[]),
+                agent("build", &["design"]),
+                agent("spare", &[]),
+            ],
         ),
     );
 
@@ -517,7 +527,7 @@ fn a_private_source_that_cannot_authenticate_holds_each_node_until_it_answers() 
         .exited(0)
         .err_has("source 'vault', declared private, could not be asked")
         .err_has("VAULT_TOKEN is missing or empty")
-        .err_has("'build', 'design'");
+        .err_has("'build', 'design', 'spare'");
 
     world
         .run(&["start", &project, "--detach"])
@@ -570,6 +580,79 @@ fn a_private_source_that_cannot_authenticate_holds_each_node_until_it_answers() 
         .run(&["status", name])
         .exited(0)
         .out_has("design: held — source 'vault', declared private");
+
+    // An unchanged wait is said again on the release wait's cadence, once the planner has
+    // read the last one.
+    let waits = |world: &World, node: &str| {
+        world
+            .events_of(name, "planner-surface-queued")
+            .into_iter()
+            .filter(|event| {
+                event["payload"]["kind"] == "source-wait" && event["labels"]["node"] == node
+            })
+            .count()
+    };
+    world.until("design's unchanged wait to be surfaced again", |world| {
+        world.run(&["next", name]);
+        waits(world, "design") >= 2
+    });
+
+    // A held node an edit drops holds nothing, and its wait is not said again.
+    world
+        .run_with_stdin(
+            &["reply", name],
+            &json!({
+                "version": 2,
+                "commands": [{"op": "drop", "id": "spare", "dependents": "detach"}]
+            })
+            .to_string(),
+        )
+        .exited(0)
+        .out_has("\"applied\"");
+    world.until("the dropped node's hold to clear", |world| {
+        world
+            .events_of(name, "node-unheld")
+            .iter()
+            .any(|event| event["labels"]["node"] == "spare")
+    });
+    let spare_waits = waits(&world, "spare");
+
+    // A read the store fails outright says so and changes no hold.
+    world.script(
+        refusal,
+        &json!({"kind": "refused", "message": "the vault refused this read"}).to_string(),
+    );
+    world.until("the failed re-read to be said", |world| {
+        std::fs::read_to_string(world.run_file(name, "driver.log")).is_ok_and(|log| {
+            log.contains("cannot read again the dependencies")
+                && log.contains("the vault refused this read")
+        })
+    });
+    assert!(
+        world.events_of(name, "node-dispatched").is_empty(),
+        "a node was dispatched on a read the store failed"
+    );
+
+    // A driver stopped and adopted holds what the record says is held.
+    world.script(
+        refusal,
+        &json!({"kind": "auth", "message": "VAULT_TOKEN is missing or empty"}).to_string(),
+    );
+    world.run(&["stop", name]).exited(0);
+    world.run(&["adopt", name, "--detach"]).exited(0);
+    let asked = vault_asked(&world);
+    world.until("the adopted driver to read the held edges again", |world| {
+        vault_asked(world) >= asked + 4
+    });
+    assert!(
+        world.events_of(name, "node-dispatched").is_empty(),
+        "the adopted driver dispatched a node the launch held"
+    );
+    assert_eq!(
+        waits(&world, "spare"),
+        spare_waits,
+        "the dropped node's wait was said again"
+    );
 
     // The credential arrives: the next read asks every source, the holds lift, and the run
     // completes in the order its edges give.

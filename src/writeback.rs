@@ -628,6 +628,7 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         EngineError::UnknownSource { .. } => decided("unknown-source"),
         EngineError::Token { .. } => decided("page-token"),
         EngineError::NoSources => decided("no-sources"),
+        // llmlint: ignore[changed_behavior_has_e2e] reached only by a write-back whose launch directory's layers stop declaring the plan source's plugin between the launch's read and an attempt; the classification is the store's own word, which `writeback::tests::every_engine_failure_is_named_as_the_store_names_it` holds against `onetaskgraph_core::Failure`.
         EngineError::IncompleteSource { .. } => decided("incomplete-source"),
         // llmlint: ignore-block[changed_behavior_has_e2e] These store refusals are
         // unreachable from settlement writes: copies use project members, carry no
@@ -718,8 +719,9 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         | EngineError::SourceRefused { error, .. }
         | EngineError::SourceUnavailable { error, .. }
         | EngineError::SourceFailed { error, .. } => (source_kind(error).to_owned(), Some(error)),
-        EngineError::CopyNotUndone { error, .. }
-        | EngineError::CopyDestinationUncertain { error, .. } => cause_of(error),
+        EngineError::CopyNotUndone { error, .. } => cause_of(error),
+        // llmlint: ignore[changed_behavior_has_e2e] raised only for a destination plugin whose create answer is malformed, which neither `local-md` nor any source this crate's journeys reach answers; it takes the kind of the refusal it wraps, as the store's `Failure` does, which `writeback::tests::every_engine_failure_is_named_as_the_store_names_it` holds.
+        EngineError::CopyDestinationUncertain { error, .. } => cause_of(error),
     }
 }
 

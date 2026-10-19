@@ -11748,7 +11748,8 @@ nodes it holds; `plan check` says the same on stderr and keeps its stdout and ex
 The driver seeds the holds from the record — no driver repeats the launch's read — keeps
 each node out of `start_ready` as it does a release hold, and re-reads the held nodes'
 edges through the store configured from the launch directory, off the loop's thread, every
-`ONEPIPELINE_SOURCE_POLL_SECONDS` (a minute, and never longer). A re-read that asks every
+`ONEPIPELINE_SOURCE_POLL_SECONDS` — sixty seconds where it is unset or is not a positive
+whole number of seconds, and longer only where a host sets it longer. A re-read that asks every
 source and resolves no prerequisite the run's graph does not already give the node clears
 the hold. One that resolves such a prerequisite keeps the node held with it in `missing`,
 because starting the node then would start it before that prerequisite; an edit giving the
@@ -11785,6 +11786,7 @@ a `reparent` gives it the edge, after which it starts only once the prerequisite
   "surface_kind": "source-wait",
   "surface": {"blocking": false, "source": "proposal", "workstream": "the held node"},
   "poll_env": "ONEPIPELINE_SOURCE_POLL_SECONDS",
+  "default_poll_seconds": 60,
   "surface_cadence_env": "ONEPIPELINE_RELEASE_SURFACE_SECONDS"
 }
 ```
