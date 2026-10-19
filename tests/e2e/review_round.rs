@@ -18,6 +18,15 @@
 // task states this budget's workload over onevcs-testing's remote double, fake agents and
 // a local Markdown store: no check may spend the shared account's quota.
 
+// llmlint: ignore-file[expensive_tests_stay_behind_their_own_edge] measured rather than
+// assumed: the busy round runs in about 25–30 seconds on an idle Linux host, its other
+// journeys in under two, and it was in this target before it counted its git starts or
+// read its attach streams' renders. What it exercises is the whole of an attached command —
+// `driver`, `engine`, `views`, `vcs` and `rendercost` over the real linked `onevcs` — which
+// any change under `src/` can move, so a project edged narrower than the crate could not
+// honestly run it: it would drop out of `nx affected` for the very changes it exists to
+// catch, among them the cost on a slow host this module now bounds.
+
 use crate::draft_lifecycle::{team_repository, GREEN};
 use crate::harness::{lifecycle, plan_of, World};
 use crate::review_reply::{conversation, drafter_tasks, key, named, the_reply_to};

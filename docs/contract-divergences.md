@@ -1158,7 +1158,7 @@ starting a process is slow that round ran past its journey's bound. So within
 one attach stream a node's read is carried across the stream's consecutive
 renders for at most ten seconds (`views::STREAM_READ_REUSE`), and is taken again
 at once after the stream records a settlement or restack of that node, or a
-publication or landing record of its session (`views::MOVES_A_LANDING`). The stream's final render — the one
+publication or landing record of its session (`views::moves_a_landing`). The stream's final render — the one
 reporting the run as it settled — carries nothing and reads every landing it
 reports afresh. `status`, `results` and `watch` carry nothing and read on every
 render. Whichever view it is, the summary takes the reads it needs side by side

@@ -1026,7 +1026,7 @@ pub(crate) fn landings_the_run_re_read(state: &mut RunState, paths: &RunPaths) {
 /// that stream's consecutive renders for at most [`STREAM_READ_REUSE`] — see
 /// [`StreamReads`] — and is taken again at once after the stream records a
 /// settlement or restack of that node or a publication or landing of its session
-/// ([`MOVES_A_LANDING`]), and on the stream's final render, which reports the run
+/// ([`moves_a_landing`]), and on the stream's final render, which reports the run
 /// as it settled and carries nothing. `status`, `results` and `watch` carry
 /// nothing and read on every render.
 ///
@@ -1114,7 +1114,7 @@ impl StreamReads {
     /// Take a node's landing afresh where the stream just recorded something that
     /// can move it: a settlement or restack of the node, or a record of its
     /// session that moves the branch the read compares or the base it compares
-    /// it against — see [`MOVES_A_LANDING`].
+    /// it against — see [`moves_a_landing`].
     pub(crate) fn forget_moved(&self, run: &str, events: &[&Envelope]) {
         STREAM_READS.with_borrow_mut(|reads| {
             let Some(reads) = reads else {
@@ -1122,9 +1122,7 @@ impl StreamReads {
             };
             for event in events {
                 let moves = match event.source {
-                    Source::Vcs => MOVES_A_LANDING
-                        .into_iter()
-                        .any(|kind| crate::vcs::kind_of(kind) == event.kind),
+                    Source::Vcs => onevcs_kind(event).is_some_and(moves_a_landing),
                     Source::Pipeline => {
                         event.kind.0 == PipelineKind::NodeSettled.as_str()
                             || event.kind.0 == PipelineKind::NodeRestacked.as_str()
@@ -1139,28 +1137,63 @@ impl StreamReads {
     }
 }
 
-/// The `onevcs` records after which an attach stream reads the node's landing
-/// again rather than carrying the read it holds: its publication, its landing,
-/// and every other record of the branch or its base moving. The rest — a fetch,
-/// a lock, a check, a description, the session opening or closing — leave both
-/// where the last read found them.
-const MOVES_A_LANDING: [onevcs::EventKind; 15] = [
-    onevcs::EventKind::Push,
-    onevcs::EventKind::ChangeOpened,
-    onevcs::EventKind::ChangeDrafted,
-    onevcs::EventKind::DraftLifted,
-    onevcs::EventKind::ChangeReopened,
-    onevcs::EventKind::ChangeRetargeted,
-    onevcs::EventKind::ChangeMerged,
-    onevcs::EventKind::MergeCompleted,
-    onevcs::EventKind::BaseArrived,
-    onevcs::EventKind::BaseMerge,
-    onevcs::EventKind::CommitPreserved,
-    onevcs::EventKind::BranchPreserved,
-    onevcs::EventKind::BranchSuperseded,
-    onevcs::EventKind::BranchRetired,
-    onevcs::EventKind::StackBaseAssembled,
-];
+/// Whether an `onevcs` record of a node's session moves its landing, so an attach
+/// stream reads it again rather than carrying the read it holds: its publication, its
+/// landing, and every other record of the branch or its base moving. The rest — a
+/// fetch, a lock, a check, a description, a release, the session opening or closing —
+/// leave both where the last read found them.
+///
+/// A `match` with no catch-all arm, so a kind `onevcs` adds is a build that fails here
+/// until somebody says which it is, rather than one carried past silently.
+fn moves_a_landing(kind: onevcs::EventKind) -> bool {
+    use onevcs::EventKind as Kind;
+    match kind {
+        Kind::Push
+        | Kind::ChangeOpened
+        | Kind::ChangeDrafted
+        | Kind::DraftLifted
+        | Kind::ChangeReopened
+        | Kind::ChangeRetargeted
+        | Kind::ChangeMerged
+        | Kind::MergeCompleted
+        | Kind::BaseArrived
+        | Kind::BaseMerge
+        | Kind::CommitPreserved
+        | Kind::BranchPreserved
+        | Kind::BranchSuperseded
+        | Kind::BranchRetired
+        | Kind::StackBaseAssembled => true,
+        Kind::SessionOpened
+        | Kind::Fetch
+        | Kind::LockWait
+        | Kind::LockAcquired
+        | Kind::DraftLiftedEarly
+        | Kind::DraftKeptForReview
+        | Kind::ChecksSettled
+        | Kind::ChangeDescribed
+        | Kind::ChangeCheck
+        | Kind::MergeQueued
+        | Kind::RecoveryAttested
+        | Kind::SyncConflict
+        | Kind::SessionClosed
+        | Kind::ReleaseProbed
+        | Kind::ReleaseAcknowledged
+        | Kind::ReleaseObserved
+        | Kind::GateRun
+        | Kind::ReviewCommentsRead
+        | Kind::ReviewReplyPosted
+        | Kind::ChangeStandingsRead
+        | Kind::MergeArmed => false,
+    }
+}
+
+/// The `onevcs` kind a record of [`Source::Vcs`] carries, where it is one: `published`
+/// is this crate's own, and a kind a later `onevcs` wrote is one this build cannot
+/// place — neither is a move [`moves_a_landing`] can name, and the node's settlement
+/// that follows either is.
+fn onevcs_kind(event: &Envelope) -> Option<onevcs::EventKind> {
+    serde_json::from_value(serde_json::Value::String(event.kind.0.clone())).ok()
+}
 
 impl Drop for StreamReads {
     fn drop(&mut self) {
@@ -5342,6 +5375,90 @@ fn review_lines(view: &RunView) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// What an attach stream lets go of, over the records it is handed: a node's read
+    /// goes where the stream records it settling or restacking, or where its session
+    /// records a kind that moves a landing; it stays through any other record — a
+    /// session's that moves nothing, an agent's, another node's — and every read goes
+    /// before the final render.
+    #[test]
+    fn an_attach_stream_lets_go_of_a_read_where_a_record_moves_its_landing() {
+        let held = |key: &str| {
+            STREAM_READS.with_borrow(|reads| {
+                reads
+                    .as_ref()
+                    .is_some_and(|reads| reads.contains_key(&("demo".to_owned(), key.to_owned())))
+            })
+        };
+        let carry = |nodes: &[&str]| {
+            for node in nodes {
+                hold(
+                    "demo",
+                    node,
+                    std::rc::Rc::new(crate::vcs::LandingRead::Refused {
+                        because: "unread".into(),
+                    }),
+                );
+            }
+        };
+        let vcs = |kind: onevcs::EventKind, node: &str| {
+            let wire = serde_json::to_value(kind).expect("a kind is its wire word");
+            relayed(
+                EventKind(wire.as_str().expect("a word").into()),
+                Source::Vcs,
+                Some(node),
+                &[],
+            )
+        };
+        let stream = StreamReads::begin();
+        for (moving, kind) in [
+            (true, onevcs::EventKind::Push),
+            (true, onevcs::EventKind::ChangeMerged),
+            (true, onevcs::EventKind::BaseMerge),
+            (false, onevcs::EventKind::Fetch),
+            (false, onevcs::EventKind::ChecksSettled),
+            (false, onevcs::EventKind::SessionClosed),
+        ] {
+            carry(&["a", "b"]);
+            stream.forget_moved("demo", &[&vcs(kind, "a")]);
+            assert_eq!(held("a"), !moving, "{kind:?} of a's session");
+            assert!(held("b"), "{kind:?} of a's session let go of b's read");
+        }
+        for kind in [
+            crate::journal::PipelineKind::NodeSettled,
+            crate::journal::PipelineKind::NodeRestacked,
+        ] {
+            carry(&["a", "b"]);
+            stream.forget_moved("demo", &[&event(kind, Some("a"), &[])]);
+            assert!(!held("a") && held("b"), "{kind:?} of a");
+        }
+        carry(&["a"]);
+        stream.forget_moved(
+            "demo",
+            &[
+                &event(crate::journal::PipelineKind::NodeDispatched, Some("a"), &[]),
+                &relayed(
+                    EventKind("turn-message".into()),
+                    Source::Agentgraph,
+                    Some("a"),
+                    &[],
+                ),
+                &relayed(EventKind("published".into()), Source::Vcs, Some("a"), &[]),
+            ],
+        );
+        assert!(held("a"), "a record that moves nothing let go of a's read");
+        carry(&["a", "b"]);
+        stream.forget_all();
+        assert!(
+            !held("a") && !held("b"),
+            "the final render carried a read into it"
+        );
+        drop(stream);
+        assert!(
+            STREAM_READS.with_borrow(Option::is_none),
+            "a stream that ended left its reads for the next view on this thread"
+        );
+    }
+
     /// An attach stream's read is carried inside its window and taken again once the
     /// window has passed, measured from when the read was taken.
     #[test]
