@@ -32,6 +32,7 @@ Commits after dd2e5d6:
 - **9809e12** links oneharness-core 0.28.3 (from 0.28.2), the newest its requirement permits, which `just engines-current` asked for after the merge. Only that entry's version and checksum move.
 - **875a01c** merges main at 589d81b (#935). `src/continuation.rs` takes main's fence retry, which holds every refused fence to its retry, an empty one included; this branch's c93fa56 had exempted clearing. Its `continuation::a_pass_inside_a_refused_fences_retry_does_not_write_it_early` still holds under main's form. `tests/e2e/project.json` keeps both main's review-round quota record and this branch's `target/test-profile/e2e`. #935's new `review_reply` and `review_round` journeys spawn and sleep through `profile::process` and `profile::thread` like the rest of the suite. Main now links oneagentgraph 0.5.14, onevcs 0.52.1 and onevcs-testing 0.19.5 itself, so `Cargo.lock` differs from main only in oneharness-core.
 - **ff19d5c** merges main at 645ca97 (#1001, #1021). `tests/e2e/harness.rs`'s `end_process` takes main's `process_ended` wait in place of `kill -0`, inside this branch's profiled spawn and sleep.
+- **059dfb4** merges main at e788a5c (#904), with no conflict. #904 links oneharness-core 0.28.2, onejudge 0.19.5 and oneagentgraph 0.5.14 and adds two `dispatch` journeys, `a_dispatched_codex_turn_starts_with_plugins_off_unless_its_config_opts_in` and `a_judged_codex_turn_starts_with_plugins_off_unless_its_config_opts_in`. They spawn through `profile::process` like the rest of the suite, and `harness::oneharness_binary` builds through the harness's profiled `build`. `Cargo.lock` keeps this branch's oneharness-core 0.28.3, so it still differs from main only in that entry.
 - **6c4a488** runs one maintenance journey at a three-second pace (see **maintenance on Windows, run 39129002719**). Its test-s move by a few seconds, which the figures below do not include.
 
 The hosted dd2e5d6 records therefore predate the lock refresh and the fence fix. The local runs show neither moved the harness. The c551671 counts match the a94701b run: spawn 13,686 vs 13,575, git 9,048 vs 9,048, build 3,261 vs 3,259, fixture 7,766 vs 7,765. The 7574f2f counts are spawn 13,822, git 9,055, build 3,263 and fixture 7,773. The difference from c551671 is mostly the one added test and run-to-run variation in retries and polls.
@@ -42,6 +43,25 @@ The local 4b94e43 run (`9b7d3bb7`, on the tree after every commit above, includi
 - **Two tests hit nextest's 360 s timeout:** `adoption::a_held_release_is_asked_about_on_its_own_interval_however_fast_the_loop_runs` and `loopcost::an_idle_pass_does_not_grow_with_the_run_it_is_idling_on`. They were tests 1 and 5 of the run, started while the load average was 34-59. Neither is a known failure. They passed in the 7574f2f run (129.5 s and 209.7 s). Re-run together on 4b94e43 at load 10, both passed (130.1 s and 235.0 s). Their two records in this set are the runner-ended ones, cut at 355.2 s, and they are labelled unfinished below.
 
 The new counts are spawn 13,605, git 9,063, build 3,270 and fixture 7,793, close to 7574f2f's. Test-seconds rose 32% (13,874.8 to 18,295.1), which is the load: the categories' shares moved by a few points, and the CI Linux run on the same commit (run 39138389849, 10,347.9 test-s) is within 1% of dd2e5d6's 10,407.2. #982, #994 and #1000, merged from main, change four journeys' timing, so test-level differences from 7574f2f are not all load.
+
+### The local profile is a snapshot at 4b94e43
+
+Every local Linux figure in this document comes from run `9b7d3bb7` on **4b94e43**. It is a snapshot of that commit. It makes no claim that those timings hold for the final head. These are the first-parent commits after 4b94e43:
+
+| commit | what it is |
+| --- | --- |
+| 7996923 | this document only |
+| a07bbdd | merge of main at 1e18274 (conflict: `tests/e2e/harness.rs`) |
+| 9809e12 | `Cargo.lock` only: oneharness-core 0.28.2 to 0.28.3, the refresh `just engines-current` asked for after a07bbdd |
+| 6aee778 | this document only |
+| 875a01c | merge of main at 589d81b (conflicts: `src/continuation.rs`, `tests/e2e/project.json`) |
+| 570c8b7 | this document only |
+| ff19d5c | merge of main at 645ca97 (conflict: `tests/e2e/harness.rs`) |
+| 41000a7, 55717cb | this document only |
+| 059dfb4 | merge of main at e788a5c, no conflict |
+| (the commit reporting 059dfb4) | this document only |
+
+None of them changes this branch's recording (`crates/testfakes/src/profile.rs`), the analysis scripts (`scripts/test-profile-report.mjs`, `scripts/crate-split-replay.mjs`, `scripts/crate-split/`) or their tests. `git diff --stat 4b94e43 HEAD` over those paths and `tests/e2e/profiling.rs` is empty. The merges do bring main's own changes to tests the profile timed, listed above, so test-level figures for those journeys may differ on the head. 9809e12 is a lock refresh rather than a merge. It is listed because the amendment requires the engines-current check to pass, and it touches nothing the profile records or reads.
 
 ## Linux breakdown on 4b94e43 (local)
 
@@ -1282,6 +1302,12 @@ The `cross (windows-latest)` carrier failed because shard 1 did. That flake is d
 Five other journeys in `tests/e2e/maintenance.rs` assert an empty journal after a `release` under the same pace. None of them is named here, so they are left as a follow-up.
 
 ## Checks
+
+**On 059dfb4** (the merge of main at e788a5c, with no conflict):
+- With `ONETASKGRAPH_*` unset, `cargo nextest run --locked --no-fail-fast --test e2e -E 'test(/plugins_off_unless/) or test(/^profiling::/) or test(/^dispatch::/)'` passed **95 of 95**, at load 18-35. That covers both of #904's new journeys and the 22 `profiling::` journeys.
+- `cargo fmt --check` and `cargo clippy --locked --all-targets -- -D warnings`: clean.
+- `just engines-current`: passed. oneagentgraph 0.5.14, onevcs 0.52.1, onevcs-testing 0.19.5, onejudge 0.19.5 and oneharness-core 0.28.3 are each the newest their own requirement permits. onevcs-testing 0.19.11 is held back by `onevcs = "0.52.0"`, which the check names and passes.
+- Not re-run on 059dfb4: the full e2e tier and the hosted CI.
 
 **On ff19d5c** (the merge of main at 645ca97, whose conflict was `tests/e2e/harness.rs`):
 - `cargo nextest run --locked --no-fail-fast` over `build_config`, the e2e `driver::`, `harness::` and `profiling::` modules, and the 18 e2e tests elsewhere that reach `end_process`: 174 of 175 passed, at load 31-37.
