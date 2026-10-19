@@ -398,7 +398,11 @@ fn repository(args: &[String], dir: &Path, path: &str) -> ExitCode {
     let include = match &args[2..] {
         [] => false,
         [flag] if flag == "--include" => true,
-        _ => return fake::refuse(&format!("gh api {path} takes only --include here: {args:?}")),
+        _ => {
+            return fake::refuse(&format!(
+                "gh api {path} takes only --include here: {args:?}"
+            ))
+        }
     };
     if path.split('/').any(str::is_empty) {
         return fake::refuse(&format!("gh api path '{path}' has an empty segment"));
@@ -1196,7 +1200,9 @@ fn closing_issues(dir: &Path) -> Vec<serde_json::Value> {
                 Some((repository.split_once('/')?, number.parse::<u64>().ok()?))
             });
             let Some(((owner, name), number)) = read else {
-                fake::fail(&format!("gh.closes holds {issue:?}, which is not owner/name#N"))
+                fake::fail(&format!(
+                    "gh.closes holds {issue:?}, which is not owner/name#N"
+                ))
             };
             serde_json::json!({
                 "number": number,

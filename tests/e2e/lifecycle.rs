@@ -3545,7 +3545,9 @@ fn a_cancel_while_the_merge_path_holds_the_push_stops_it_and_settles_cancelled()
         .expect("the settlement says why")
         .to_string();
     assert!(
-        detail.contains("the push, its pre-push hook and every process the hook started were stopped"),
+        detail.contains(
+            "the push, its pre-push hook and every process the hook started were stopped"
+        ),
         "the settlement does not say the push was stopped: {detail}"
     );
     assert_eq!(

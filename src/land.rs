@@ -267,7 +267,8 @@ fn forward(
         return Ok(match supervision {
             Some(supervision) => {
                 let selector = request.selector(supervision.identity());
-                let status = report(supervision.operate(selector, |handle| request.land_in(handle))?);
+                let status =
+                    report(supervision.operate(selector, |handle| request.land_in(handle))?);
                 supervision.close_issues();
                 status
             }
@@ -312,7 +313,8 @@ fn unsupervised<T>(
     selector: Option<onevcs::DirectOperation>,
     call: impl FnOnce(Option<&onevcs::OperationHandle>) -> T,
 ) -> (T, Vec<crate::closures::Landing>) {
-    let Some(handle) = selector.and_then(|selector| onevcs::OperationHandle::prepare(&selector).ok())
+    let Some(handle) =
+        selector.and_then(|selector| onevcs::OperationHandle::prepare(&selector).ok())
     else {
         return (call(None), Vec::new());
     };

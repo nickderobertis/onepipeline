@@ -15,9 +15,9 @@ use serde_json::{json, Value};
 
 use crate::draft_lifecycle::{team_repository, GREEN};
 use crate::harness::{agent, double, git, lifecycle, onevcs_binary, plan_of, Repository, World};
-use crate::stacked_drafts::{change_from, settled};
 use crate::linear_loopback::Linear;
 use crate::linear_writeback::{from_the_launch_directory, GitHubEndpoint};
+use crate::stacked_drafts::{change_from, settled};
 
 /// The variable every loopback board's source reads its token from.
 const TOKEN_ENV: &str = "ONEPIPELINE_LOOPBACK_BOARD_TOKEN";
@@ -389,7 +389,10 @@ fn a_merged_change_request_closes_its_issues_once_for_both_of_its_landing_record
         card(&served, "1", "7"),
         (json!("Done"), issue("CLOSED", Some("COMPLETED")))
     );
-    assert_eq!(card(&served, "1", "9"), (json!("Todo"), issue("OPEN", None)));
+    assert_eq!(
+        card(&served, "1", "9"),
+        (json!("Todo"), issue("OPEN", None))
+    );
     assert_eq!(
         writes_of(&served),
         [
@@ -411,7 +414,10 @@ fn a_landing_that_closes_no_issue_sends_the_board_no_request() {
     let (world, served) = world_with("closures-none", "local-direct", &one_board());
     let launch = one_board_launch(&world, &served);
     world.script("service.work", "the worker wrote this\n");
-    world.script("service.commit-saying", "feat: ship the service\n\nNo issue is closed here.");
+    world.script(
+        "service.commit-saying",
+        "feat: ship the service\n\nNo issue is closed here.",
+    );
     let run = "none";
     let project = world.plan(run, &plan_of(run, vec![lifecycle("service", &[])]));
     start_from(&world, &launch, &project);
@@ -558,9 +564,10 @@ fn an_adoption_closes_the_issues_of_a_landing_made_while_nothing_drove_the_run()
     assert!(log_of(&served).is_empty());
 
     world.run(&["adopt", run, "--detach"]).exited(0);
-    world.until("the adopted driver to close the landing's issues", |world| {
-        !closures_of(world, run).is_empty()
-    });
+    world.until(
+        "the adopted driver to close the landing's issues",
+        |world| !closures_of(world, run).is_empty(),
+    );
     closed_once(&world, &served, run);
 
     let asked = log_of(&served).len();
@@ -624,9 +631,10 @@ fn a_closure_a_stopped_driver_never_finished_is_made_by_the_adoption() {
     assert!(writes_of(&served).is_empty(), "{:#?}", writes_of(&served));
 
     world.run(&["adopt", run, "--detach"]).exited(0);
-    world.until("the adopted driver to close the landing's issues", |world| {
-        !closures_of(world, run).is_empty()
-    });
+    world.until(
+        "the adopted driver to close the landing's issues",
+        |world| !closures_of(world, run).is_empty(),
+    );
     closed_once(&world, &served, run);
     finished(&world, run);
 }
@@ -636,7 +644,10 @@ fn landing_closing_seven(name: &str) -> (World, GitHubEndpoint, PathBuf) {
     let (world, served) = world_with(name, "local-direct", &one_board());
     let launch = one_board_launch(&world, &served);
     world.script("service.work", "the worker wrote this\n");
-    world.script("service.commit-saying", "feat: ship the service\n\nCloses #7");
+    world.script(
+        "service.commit-saying",
+        "feat: ship the service\n\nCloses #7",
+    );
     (world, served, launch)
 }
 
@@ -699,7 +710,10 @@ fn a_refused_closure_is_recorded_failed_and_surfaced_without_touching_the_settle
                 && message.contains("the loopback refuses this Status write")),
         "{surfaced:#?}"
     );
-    assert_eq!(card(&served, "1", "7"), (json!("Todo"), issue("OPEN", None)));
+    assert_eq!(
+        card(&served, "1", "7"),
+        (json!("Todo"), issue("OPEN", None))
+    );
     read_no_board_whole(&served);
 }
 
@@ -801,7 +815,10 @@ impl Verb {
             Self::PublishBranch => vec!["publish-branch", "widget", "--repo", "service"],
             Self::RepoRecover => {
                 let preserved = world
-                    .cmd_on(&onevcs_binary(), &["preserve", "widget", "--repo", "service"])
+                    .cmd_on(
+                        &onevcs_binary(),
+                        &["preserve", "widget", "--repo", "service"],
+                    )
                     .output()
                     .expect("onevcs runs");
                 assert!(
@@ -982,7 +999,11 @@ fn a_landing_verb_closes_the_issues_its_landing_closes(verb: Verb) {
         "{}",
         bare.stderr
     );
-    assert!(log_of(&bare.served).is_empty(), "{:#?}", log_of(&bare.served));
+    assert!(
+        log_of(&bare.served).is_empty(),
+        "{:#?}",
+        log_of(&bare.served)
+    );
     assert!(landing_records(&bare.world).is_empty());
 
     let landed = landed_by(verb, true, None);
@@ -1017,7 +1038,10 @@ fn a_landing_verb_lands_whatever_the_board_answers(verb: Verb) {
     let landed = landed_by(verb, true, Some("refuse"));
     landed_widget(&landed);
     assert_eq!(landed.code, bare.code, "{}", landed.stderr);
-    assert_eq!(card(&landed.served, "1", "7"), (json!("Todo"), issue("OPEN", None)));
+    assert_eq!(
+        card(&landed.served, "1", "7"),
+        (json!("Todo"), issue("OPEN", None))
+    );
     let record = the_record(&landed);
     assert_eq!(record["outcome"], "failed", "{record}");
     assert_eq!(record["class"], "refused", "{record}");

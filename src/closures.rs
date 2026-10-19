@@ -184,10 +184,7 @@ pub(crate) fn complete(store: &Store, landing: &Landing, within: Duration) -> An
         Err(_) => Answer::Transient {
             record: failed(
                 FailureClass::Transient,
-                format!(
-                    "task status complete exceeded {} seconds",
-                    within.as_secs()
-                ),
+                format!("task status complete exceeded {} seconds", within.as_secs()),
             ),
             wait: None,
         },
@@ -232,12 +229,15 @@ fn of_completed(landing: &Landing, completed: &IssuesCompleted) -> Answer {
                 .error
                 .as_ref()
                 .filter(|_| item.action == CompleteAction::Failed);
-            let delivered = item.delivered.iter().filter_map(|entry| match &entry.outcome {
-                DeliveryOutcome::Failed { failure, .. } => Some(failure),
-                DeliveryOutcome::Written { .. }
-                | DeliveryOutcome::Unchanged { .. }
-                | DeliveryOutcome::Left { .. } => None,
-            });
+            let delivered = item
+                .delivered
+                .iter()
+                .filter_map(|entry| match &entry.outcome {
+                    DeliveryOutcome::Failed { failure, .. } => Some(failure),
+                    DeliveryOutcome::Written { .. }
+                    | DeliveryOutcome::Unchanged { .. }
+                    | DeliveryOutcome::Left { .. } => None,
+                });
             own.into_iter().chain(delivered)
         })
         .collect();
@@ -395,8 +395,7 @@ impl Watch {
             if record.source == Source::Pipeline {
                 match PipelineKind::from_wire(&record.kind) {
                     Some(PipelineKind::LandingClosures) => {
-                        if let Some(commit) = record.payload.get("commit").and_then(Value::as_str)
-                        {
+                        if let Some(commit) = record.payload.get("commit").and_then(Value::as_str) {
                             self.recorded.insert(commit.to_owned());
                         }
                     }
@@ -473,8 +472,14 @@ mod tests {
     fn a_closes_that_is_not_every_issue_reference_is_refused_whole() {
         assert_eq!(closes_of(None), Ok(Vec::new()));
         assert_eq!(
-            closes_of(Some(&serde_json::json!(["owner/service#7", "owner/service#8"]))),
-            Ok(vec!["owner/service#7".to_owned(), "owner/service#8".to_owned()])
+            closes_of(Some(&serde_json::json!([
+                "owner/service#7",
+                "owner/service#8"
+            ]))),
+            Ok(vec![
+                "owner/service#7".to_owned(),
+                "owner/service#8".to_owned()
+            ])
         );
         assert!(closes_of(Some(&serde_json::json!(["owner/service#7", "#8"]))).is_err());
         assert!(closes_of(Some(&serde_json::json!("owner/service#7"))).is_err());

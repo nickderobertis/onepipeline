@@ -2254,9 +2254,10 @@ fn converge(
                 if releases.take_up_answers() {
                     return true;
                 }
-                if writeback.as_ref().is_some_and(|writeback| {
-                    writeback.has_unprojected() || writeback.has_closed()
-                }) {
+                if writeback
+                    .as_ref()
+                    .is_some_and(|writeback| writeback.has_unprojected() || writeback.has_closed())
+                {
                     return true;
                 }
                 // A settlement the fence still names has landed, so the fence can let it go.
