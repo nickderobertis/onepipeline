@@ -4061,6 +4061,12 @@ fn two_concurrent_judged_codex_turns_share_one_app_server() {
     )
     .expect("the codex double is told where its world is");
     let daemon_dir = world.root.join("codex-daemon");
+    // The state directory both sockets live under — the turn's control socket in
+    // the session store and the pooled server's in the pool — kept short: on
+    // macOS the world's temp root alone leaves the session store's `control/`
+    // past the 104-byte `sun_path` budget, so oneharness refuses `--control`,
+    // onejudge retries the turn without it, and Codex runs as `codex exec`.
+    let state = ShortDir::new("op-sas");
     let mut launch = world.agentgraph_cmd(&["start", &path, "--attach"]);
     let inherited = launch
         .get_envs()
@@ -4080,6 +4086,7 @@ fn two_concurrent_judged_codex_turns_share_one_app_server() {
         // Codex's socket rendezvous directory, which a launch prepares: the
         // world's own rather than the host's, which every Codex on it shares.
         .env(oneharness_core::io::app_server::DAEMON_DIR_ENV, &daemon_dir)
+        .env(crate::harness::STATE_HOME_ENV, &state.0)
         .env_remove("ONEHARNESS_BIN_CODEX");
     world.run_on(launch, "start --attach").settled();
     world.until("both judged nodes to settle", |world| {
@@ -4126,6 +4133,45 @@ fn two_concurrent_judged_codex_turns_share_one_app_server() {
         "a turn completed before a second had started on its server, so the two did not \
          run on it concurrently: {turns:#?}"
     );
+    // The pool's sweeper — what stops a server whose last caller has gone with
+    // no later pool operation — is started only by a process that hosts one, so
+    // its record in the one pool entry says the process that started the server
+    // was such a process: the `oneharness` a member's onejudge spawns, never
+    // this engine, which runs no controlled turn of its own.
+    let entries: Vec<std::path::PathBuf> =
+        std::fs::read_dir(state.0.join("oneharness").join("servers"))
+            .expect("the pool root holds the shared server's entry")
+            .map(|entry| entry.expect("a pool entry").path())
+            .collect();
+    assert_eq!(entries.len(), 1, "{entries:#?}");
+    assert!(
+        entries[0].join("sweeper.json").is_file(),
+        "the process that started the shared app-server started no sweeper beside it: {}",
+        entries[0].display()
+    );
+}
+
+/// A directory directly under `/tmp`, removed when dropped: a world's root sits
+/// under the platform temp directory, which on macOS is long enough to put a
+/// socket the journey above needs past that platform's `sun_path` budget.
+#[cfg(unix)]
+struct ShortDir(std::path::PathBuf);
+
+#[cfg(unix)]
+impl ShortDir {
+    fn new(tag: &str) -> Self {
+        let dir = std::path::Path::new("/tmp").join(format!("{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a short scratch directory");
+        Self(dir)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ShortDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 /// The line `fake-codex` answers with is one the **linked** classifier reads as
