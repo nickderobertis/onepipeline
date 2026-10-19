@@ -345,6 +345,9 @@ pub(crate) struct Watch {
     catch_up: bool,
     /// The nodes whose session a catch-up of this driver has read since they landed.
     scanned: BTreeSet<String>,
+    /// The settled nodes whose session streams carry a landing the run had not seen, whose
+    /// streams the next pass reads whatever was read of them before.
+    met: BTreeSet<String>,
 }
 
 impl Default for Watch {
@@ -361,12 +364,14 @@ impl Watch {
             recorded: BTreeSet::new(),
             catch_up: true,
             scanned: BTreeSet::new(),
+            met: BTreeSet::new(),
         }
     }
 
-    /// The run met a landing it did not watch happen: catch up on the next pass.
-    pub(crate) fn met_a_landing(&mut self) {
-        self.catch_up = true;
+    /// The settled `nodes` whose session streams carry a landing the run did not watch happen:
+    /// read each of them on the next pass.
+    pub(crate) fn met_landings(&mut self, nodes: BTreeSet<String>) {
+        self.met.extend(nodes);
     }
 
     /// One pass: hand `writeback` every landing of the run the journal or a catch-up shows
@@ -411,13 +416,15 @@ impl Watch {
         for landing in relayed {
             self.owe(landing, writeback);
         }
-        if !std::mem::take(&mut self.catch_up) {
-            return;
+        let mut due = std::mem::take(&mut self.met);
+        if std::mem::take(&mut self.catch_up) {
+            due.extend(
+                landed_nodes(state)
+                    .into_iter()
+                    .filter(|node| !self.scanned.contains(node)),
+            );
         }
-        for node in landed_nodes(state) {
-            if self.scanned.contains(&node) {
-                continue;
-            }
+        for node in due {
             let Some(session) = state
                 .sessions
                 .get(&node)

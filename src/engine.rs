@@ -1763,15 +1763,13 @@ fn converge(
         // landed work. Not part of the wait: a release is reported whether or
         // not anything is waiting on it, because the node whose work it carries
         // has settled and its own follow ended with the session it watched.
-        if releases.relay_releases(
+        closures.met_landings(releases.relay_releases(
             paths,
             journal,
             state,
             &statuses,
             launch.filters.vcs.as_ref(),
-        )? {
-            closures.met_a_landing();
-        }
+        )?);
         took_up_releases = Some(Instant::now());
         // Every landing the journal relayed, a readjustment found, or a catch-up reads off the
         // run's sessions, handed to the write-back's closure thread: none of it waits here.

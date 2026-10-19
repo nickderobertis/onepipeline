@@ -11839,7 +11839,7 @@ source and issue what to write — `updated`, `unchanged`, `skipped` for an issu
 planned or duplicate, `absent`, `failed` — and lists the sources it sent nothing `unsupported`.
 In a run, the call is made on the write-back's own closure thread, off the reconcile loop and
 best effort like every write-back: a transient failure is asked again on the worker's existing
-schedule, honouring a wait the store asked for; a refusal, or an answer with an item `failed`,
+retry schedule; a refusal, or an answer with an item `failed`,
 is the record's `failed` outcome and a **non-blocking** planner surface; none of it changes a
 node's settlement, an edit ruling or a scheduling decision. `publish-branch`, `repo-recover`
 and `integrate` load the store configuration from the directory they run in, as `Store::at`
@@ -11859,7 +11859,8 @@ adoption makes the call.
 Driven end to end by `tests/e2e/closures.rs`: a run on a real `local-direct` landing over two
 loopback boards, a `local-md` source and a Linear source; a change request's
 `change-merged`/`merge-completed` pair; a landing that closes nothing; catch-up after `stop` and
-`adopt`, while the driver runs, and after a call the stopped driver never finished; a permanent
+`adopt`, after a readjustment and after a late landing on a settled node's session stream while
+the driver runs, and after a call the stopped driver never finished; a permanent
 and a transient refusal; and `publish-branch`, `repo-recover` and `integrate` from a directory
 declaring the board and from one declaring nothing. `tests/contract.rs` holds the block's
 `record` and `failed` to the vocabulary's declaration of `landing-closures`, and the events

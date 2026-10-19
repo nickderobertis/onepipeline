@@ -992,7 +992,6 @@ impl Writeback {
         let per_item = per_item_budget(launch);
         let closer_pending = Arc::clone(&pending);
         let closer_store = store.clone();
-        let closer_dir = run_dir.clone();
         // llmlint: ignore-block[changed_behavior_has_e2e] A host refusing one thread while
         // continuing to run this process is resource exhaustion no real CLI journey can
         // arrange at this boundary. Every reachable worker failure is covered against the
@@ -1006,7 +1005,7 @@ impl Writeback {
         // take holds no projection back, and a projection holds back no closure.
         std::thread::Builder::new()
             .name(format!("closures-{}", paths.run))
-            .spawn(move || closer(&closer_store, &closer_dir, per_item, &closer_pending))
+            .spawn(move || closer(&closer_store, per_item, &closer_pending))
             .ok()?;
         // llmlint: ignore-end[changed_behavior_has_e2e]
         let writer = Self {
@@ -1833,19 +1832,26 @@ fn worker(
         // and asks the store nothing on a kept wait it cannot read, which may be one that has
         // not passed: it says so once, and looks again until the file reads or is repaired.
         let mut said_unreadable = false;
-        let waited = waited_out_kept(&run_dir, &pending, |why| {
-            if !said_unreadable {
-                eprintln!(
-                    "onetaskgraph write-back for '{}': {why}; it may hold a wait the store \
-                     asked for that has not passed, so no store call is made until it can be \
-                     read or is repaired",
-                    snapshot.project
-                );
-                said_unreadable = true;
+        loop {
+            let interval = match AskedWait::kept(&run_dir) {
+                Kept::Nothing => break,
+                Kept::Left(left) => left,
+                Kept::Unreadable(why) => {
+                    if !said_unreadable {
+                        eprintln!(
+                            "onetaskgraph write-back for '{}': {why}; it may hold a wait the \
+                             store asked for that has not passed, so no store call is made \
+                             until it can be read or is repaired",
+                            snapshot.project
+                        );
+                        said_unreadable = true;
+                    }
+                    UNREADABLE_WAIT_RECHECK
+                }
+            };
+            if !should_retry_after(&pending, Interval::Asked(interval)) {
+                return;
             }
-        });
-        if !waited {
-            return;
         }
         let baseline = baseline.get_or_insert_with(|| {
             Baseline::load(
@@ -2032,19 +2038,14 @@ fn worker(
 }
 
 /// The closure thread: each owed landing's closures, oldest first, through
-/// [`crate::closures::complete`], with the worker's own wait handling — a wait the store asked
-/// for honoured and recorded for every process that projects the run, and a transient failure
-/// asked again on the worker's schedule. A refusal, and a call that finished with an item
-/// failed, are records like any other, which the reconcile loop journals and raises.
+/// [`crate::closures::complete`], a transient failure asked again on the projection worker's
+/// own retry schedule — [`retry_after`], suspended by a close-out and ended by a stop. A
+/// refusal, and a call that finished with an item failed, are records like any other, which
+/// the reconcile loop journals and raises.
 ///
 /// A landing still being asked about when the run stops is left with no record, so the next
 /// adoption's catch-up makes its call.
-fn closer(
-    store: &Store,
-    run_dir: &Path,
-    per_item: NonZeroU64,
-    pending: &(Mutex<Pending>, Condvar),
-) {
+fn closer(store: &Store, per_item: NonZeroU64, pending: &(Mutex<Pending>, Condvar)) {
     loop {
         let landing = {
             let (lock, ready) = pending;
@@ -2063,11 +2064,6 @@ fn closer(
         };
         let mut failures: u32 = 0;
         let finished = loop {
-            // The waits the run's store asked for, honoured as the projection worker honours
-            // them — which is what says an unreadable one.
-            if !waited_out_kept(run_dir, pending, |_| {}) {
-                return;
-            }
             let within = Deadline::Write {
                 per_item,
                 items: landing.issue_count(),
@@ -2116,30 +2112,6 @@ fn closer(
             state.closed.push(record);
         }
         ready.notify_all();
-    }
-}
-
-/// Wait out every wait the run's directory keeps — one an earlier process recorded, the
-/// driver an adoption displaced or a stop's release, as well as this one's — rechecking a kept
-/// wait this build cannot read, which may be one that has not passed, and handing its reason to
-/// `unreadable` each time. Answers `false` where the run stopped during it.
-fn waited_out_kept(
-    run_dir: &Path,
-    pending: &(Mutex<Pending>, Condvar),
-    mut unreadable: impl FnMut(&str),
-) -> bool {
-    loop {
-        let interval = match AskedWait::kept(run_dir) {
-            Kept::Nothing => return true,
-            Kept::Left(left) => left,
-            Kept::Unreadable(why) => {
-                unreadable(&why);
-                UNREADABLE_WAIT_RECHECK
-            }
-        };
-        if !should_retry_after(pending, Interval::Asked(interval)) {
-            return false;
-        }
     }
 }
 

@@ -1235,3 +1235,81 @@ fn an_unowned_landing_closes_the_issues_it_closes() {
     );
     assert!(landing_records(&landed.world).is_empty());
 }
+
+/// This host's release-targets document for the repository under test: one human-step target,
+/// which executes nothing, so the run reads its settled nodes' session streams on its release
+/// pass.
+const RELEASES: &str = "version: 1\n\
+     repositories:\n\
+     \x20 - match: {host: github.com, owner: owner, name: service}\n\
+     \x20   default_target: wheel\n\
+     \x20   targets:\n\
+     \x20   - name: wheel\n\
+     \x20     style: human-step\n\
+     \x20     action: \"cut the release by hand\"\n\
+     default:\n\
+     \x20 adoption: fast\n";
+
+/// A landing recorded on a settled node's own session stream while its run's driver still
+/// runs — here by a person's own `onevcs change standings` read of the merged change request,
+/// which nothing of the run asked for — is met on the driver's next pass over that stream and
+/// closes issue 7 once, with no readjustment and no adoption.
+#[test]
+fn a_late_landing_on_a_settled_node_s_session_stream_closes_its_issues_while_the_driver_runs() {
+    let (world, served) = team("closures-stream");
+    let world = world.with_env("ONEPIPELINE_RELEASE_POLL_SECONDS", "1");
+    world.releases(RELEASES);
+    let run = "stream";
+    drafted(&world, &served, run);
+    merged_by_a_person(&world, run);
+    let change = settled(&world, run, "service")["change_url"]
+        .as_str()
+        .expect("service names its change request")
+        .to_owned();
+    let read = world
+        .cmd_on(
+            &onevcs_binary(),
+            &[
+                "change",
+                "standings",
+                "service",
+                "--root",
+                "main",
+                "--change",
+                &change,
+                "--json",
+            ],
+        )
+        .output()
+        .expect("onevcs runs");
+    assert!(
+        read.status.success(),
+        "{}",
+        String::from_utf8_lossy(&read.stderr)
+    );
+    world.until("the driver to close the landing's issues", |world| {
+        !closures_of(world, run).is_empty()
+    });
+    assert!(
+        world.events_of(run, "node-landed").is_empty(),
+        "a readjustment found the landing, not the session stream"
+    );
+    assert_eq!(world.events_of(run, "driver-adopted").len(), 0);
+    assert_eq!(
+        card(&served, "1", "7"),
+        (json!("Done"), issue("CLOSED", Some("COMPLETED")))
+    );
+    assert_eq!(
+        writes_of(&served),
+        [
+            json!({"board": 1, "issue": 7, "field": "Status", "value": "Done"}),
+            json!({"issue": 7, "state": "CLOSED", "reason": "COMPLETED"}),
+        ]
+    );
+    let records = closures_of(&world, run);
+    assert_eq!(records.len(), 1, "{records:#?}");
+    assert_eq!(records[0]["payload"]["node"], "service");
+    assert_eq!(records[0]["payload"]["outcome"], "projected");
+    read_no_board_whole(&served);
+    finished(&world, run);
+}

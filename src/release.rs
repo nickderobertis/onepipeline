@@ -1135,17 +1135,17 @@ impl Watch {
         state: &RunState,
         statuses: &BTreeMap<String, NodeStatus>,
         filter: Option<&crate::filter::EventFilter>,
-    ) -> Result<bool> {
+    ) -> Result<BTreeSet<String>> {
+        // The settled nodes whose streams carry a landing recorded since this run last relayed
+        // them — a merge found after its publication ended — which the closures owe a catch-up
+        // (entry 132). Not relayed: the session's own records were the follow's.
+        let mut met_landings = BTreeSet::new();
         if !self
             .relayed
             .is_none_or(|last| last.elapsed() >= self.relay_every)
         {
-            return Ok(false);
+            return Ok(met_landings);
         }
-        // Whether a settled node's stream carries a landing recorded since this run last
-        // relayed it — a merge found after its publication ended — which the closures owe a
-        // catch-up (entry 132). Not relayed: the session's own records were the follow's.
-        let mut met_a_landing = false;
         self.relayed = Some(Instant::now());
         let mut relayed = crate::vcs::Watermarks::of_relayed(&journal::read(&paths.journal()));
         for (node, session) in &state.sessions {
@@ -1181,9 +1181,12 @@ impl Watch {
             );
             for mut envelope in crate::vcs::events(session.token(), filter) {
                 if envelope.dimensions.phase != Some(crate::event::Phase::Release) {
-                    met_a_landing |= envelope.source == crate::event::Source::Vcs
+                    if envelope.source == crate::event::Source::Vcs
                         && crate::vcs::is_landing(&envelope.kind)
-                        && relayed.beyond(&envelope);
+                        && relayed.beyond(&envelope)
+                    {
+                        met_landings.insert(node.clone());
+                    }
                     continue;
                 }
                 if !relayed.beyond(&envelope) {
@@ -1197,7 +1200,7 @@ impl Watch {
                 relayed.reached(&envelope);
             }
         }
-        Ok(met_a_landing)
+        Ok(met_landings)
     } // llmlint: ignore-end[changed_behavior_has_e2e]
 
     /// The word a payload and a surface name one awaited release's last answer
