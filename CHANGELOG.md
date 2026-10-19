@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.79.0](https://github.com/nickderobertis/onepipeline/compare/v0.78.0...v0.79.0) - 2026-10-19
+
+### Added
+
+- *(writeback)* [**breaking**] move the issues a landing closes to done ([#1036](https://github.com/nickderobertis/onepipeline/pull/1036))
+
+### Fixed
+
+- *(deps)* link the harness core that shares one Codex app-server across dispatches ([#1028](https://github.com/nickderobertis/onepipeline/pull/1028))
+- *(review)* bring the review-round quota budget and its Windows reporter test back to green ([#1031](https://github.com/nickderobertis/onepipeline/pull/1031))
+
 ## [0.78.0](https://github.com/nickderobertis/onepipeline/compare/v0.77.0...v0.78.0) - 2026-10-19
 
 ### Fixed
