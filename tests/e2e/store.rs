@@ -875,14 +875,72 @@ fn a_reread_the_private_source_is_slow_to_answer_leaves_the_driver_answering() {
     assert_eq!(dispatched(&world, name), ["design"]);
 }
 
+/// A node whose dependency read walks several pages, while two sources declared private
+/// refuse it, is held naming each of them once, in name order rather than the order the
+/// store reported them in.
+///
+/// The store's page size is turned down to one, so the edges of `build` — two of them —
+/// really are read a page at a time.
+#[test]
+fn a_dependency_read_across_pages_names_each_unanswering_private_source_once_in_name_order() {
+    let world = with_private_source(
+        with_private_source(World::new("store-private-paged"), "vault"),
+        "archive",
+    )
+    .with_env("ONETASKGRAPH_PAGE_SIZE", "1");
+    for source in ["vault", "archive"] {
+        world.script(
+            &format!("{source}.query_tasks.refuse"),
+            &json!({"kind": "auth", "message": format!("{source} credential is missing")})
+                .to_string(),
+        );
+    }
+    let name = "paged-unanswered";
+    let project = world.plan(
+        name,
+        &plan_of(
+            name,
+            vec![
+                agent("design", &[]),
+                agent("review", &[]),
+                agent("build", &["design", "review"]),
+            ],
+        ),
+    );
+
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("build to be held under its sources", |world| {
+        held_for_source(world, name, "build").is_some()
+    });
+    let held = held_for_source(&world, name, "build").expect("build is held");
+    let sources: Vec<&str> = held["unanswered"]
+        .as_array()
+        .expect("a source hold names what did not answer")
+        .iter()
+        .filter_map(|source| source["source"].as_str())
+        .collect();
+    assert_eq!(sources, ["archive", "vault"], "{held}");
+    assert!(
+        world.events_of(name, "node-dispatched").is_empty(),
+        "a node was dispatched while the private sources could not be asked about it"
+    );
+    world.run(&["stop", name]).exited(0);
+}
+
 /// This world, with a second source `vault`: a real `scripted-source` serving its own
 /// folder of Markdown through `local-md`, declared `visibility: private`, and every held
 /// node's edges read again each second.
 fn with_private_vault(world: World) -> World {
-    let vault = world.root.join("vault");
-    std::fs::create_dir_all(&vault).expect("the private source's folder");
+    with_private_source(world, "vault").with_env("ONEPIPELINE_SOURCE_POLL_SECONDS", "1")
+}
+
+/// This world, with a source `name` declared `visibility: private`: a real
+/// `scripted-source` serving its own folder through `local-md`, scripted under `name`.
+fn with_private_source(world: World, name: &str) -> World {
+    let root = world.root.join(name);
+    std::fs::create_dir_all(&root).expect("the private source's folder");
     let fakes = world.fakes.display().to_string();
-    let prefix = "ONETASKGRAPH_SOURCES__VAULT";
+    let prefix = format!("ONETASKGRAPH_SOURCES__{}", name.to_uppercase());
     world
         .with_env(&format!("{prefix}__PLUGIN"), "subprocess")
         .with_env(&format!("{prefix}__VISIBILITY"), "private")
@@ -892,11 +950,10 @@ fn with_private_vault(world: World) -> World {
         )
         .with_env(
             &format!("{prefix}__CONFIG__SETTINGS__ROOT"),
-            &vault.display().to_string(),
+            &root.display().to_string(),
         )
         .with_env(&format!("{prefix}__CONFIG__SETTINGS__SCRIPT"), &fakes)
-        .with_env(&format!("{prefix}__CONFIG__SETTINGS__KEY"), "vault")
-        .with_env("ONEPIPELINE_SOURCE_POLL_SECONDS", "1")
+        .with_env(&format!("{prefix}__CONFIG__SETTINGS__KEY"), name)
 }
 
 /// The `source` reason `node` of `run` is held under now, on the run's own record.

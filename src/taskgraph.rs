@@ -2656,4 +2656,39 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// A source the store names more than once across a walk's pages is one source of the
+    /// hold, with the reason it was first given. Asserted here and not end to end: the
+    /// linked store stops asking a source on the page it refuses, so no journey through it
+    /// meets one twice, and nothing in its contract promises it never will.
+    #[test]
+    fn a_source_named_on_several_pages_is_one_unanswered_source() {
+        let failure = |source: &str, message: &str| SourceFailure {
+            source: SourceName::new(source).expect("a source name"),
+            error: onetaskgraph_plugin_api::SourceError::Auth {
+                message: message.to_owned(),
+            },
+        };
+        let named: Vec<(String, String)> = Unanswered::of(&[
+            failure("vault", "first page"),
+            failure("archive", "first page"),
+            failure("vault", "second page"),
+        ])
+        .into_iter()
+        .map(|unanswered| (unanswered.source.to_string(), unanswered.reason))
+        .collect();
+        assert_eq!(
+            named,
+            [
+                (
+                    "archive".to_owned(),
+                    "authentication for this source failed: first page".to_owned()
+                ),
+                (
+                    "vault".to_owned(),
+                    "authentication for this source failed: first page".to_owned()
+                ),
+            ]
+        );
+    }
 }
