@@ -1524,6 +1524,9 @@ fn converge(
     // arrange; the compatibility behaviour there is intentionally the absence of a writer.
     let writeback = crate::writeback::Writeback::start(paths, launch);
     // llmlint: ignore-end[changed_behavior_has_e2e]
+    // The landings whose closed issues the store is owed, read off this run's own journal and
+    // sessions: entry 132 of `docs/contract-divergences.md`.
+    let mut closures = crate::closures::Watch::new();
     // Who the project's store says drives it, read once per claim interval whatever the
     // driver is doing — an adoption's first pass included — and never more often. Each
     // start of a dispatch or a publication asks the lease that read gave, not the store.
@@ -1762,14 +1765,19 @@ fn converge(
         // landed work. Not part of the wait: a release is reported whether or
         // not anything is waiting on it, because the node whose work it carries
         // has settled and its own follow ended with the session it watched.
-        releases.relay_releases(
+        closures.met_landings(releases.relay_releases(
             paths,
             journal,
             state,
             &statuses,
             launch.filters.vcs.as_ref(),
-        )?;
+        )?);
         took_up_releases = Some(Instant::now());
+        // Every landing the journal relayed, a readjustment found, or a catch-up reads off the
+        // run's sessions, handed to the write-back's closure thread: none of it waits here.
+        if let Some(writeback) = &writeback {
+            closures.pass(paths, state, writeback);
+        }
         // One hold, beside the decision points rather than in place of them: a
         // node a person is holding and a node a release is holding are both nodes
         // this pass does not start, and neither shortens the other's wait. Read
@@ -2080,6 +2088,7 @@ fn converge(
 
         if let Some(writeback) = &writeback {
             report_unprojected(paths, journal, writeback)?;
+            report_closures(paths, journal, writeback)?;
         }
 
         // A superseded driver ends once what it had in flight has settled: what is left of
@@ -2247,7 +2256,7 @@ fn converge(
                 }
                 if writeback
                     .as_ref()
-                    .is_some_and(crate::writeback::Writeback::has_unprojected)
+                    .is_some_and(|writeback| writeback.has_unprojected() || writeback.has_closed())
                 {
                     return true;
                 }
@@ -2784,6 +2793,9 @@ fn close_out_and_drain(
         // the run that settles and is read as the record of what happened, so
         // the failure has to reach the planner before this driver stops.
         report_unprojected(paths, journal, writeback)?;
+        // And the closures the close-out's window saw finish: one still being asked about has
+        // no record, so the next adoption asks it again.
+        report_closures(paths, journal, writeback)?;
     }
     // llmlint: ignore-end[changed_behavior_has_e2e]
 
@@ -10854,6 +10866,62 @@ fn report_unprojected(
         raise(paths, journal, unprojected_surface(&failure))?;
     }
     Ok(())
+}
+
+/// Journal the `landing-closures` record of every closure call that finished since this was
+/// last asked, and raise a non-blocking surface for each that failed.
+///
+/// What a failure raises blocks nothing, exactly as a failed projection does: the issues a
+/// landing closed are the store's to move, and a store that refused to move them settles no
+/// node, rules on no edit and schedules nothing.
+fn report_closures(
+    paths: &RunPaths,
+    journal: &mut Journal,
+    writeback: &crate::writeback::Writeback,
+) -> Result<()> {
+    for record in writeback.take_closed() {
+        journal.emit(
+            journal::PipelineKind::LandingClosures,
+            journal::labels(&paths.run, record.node.as_deref()),
+            journal::object(&record)?,
+        )?;
+        if record.outcome == crate::payload::ClosureOutcome::Failed {
+            raise(paths, journal, closure_surface(&record))?;
+        }
+    }
+    Ok(())
+}
+
+/// The finding one failed closure call raises.
+fn closure_surface(record: &crate::payload::LandingClosures) -> Surface {
+    let class = record
+        .class
+        .and_then(|class| serde_json::to_value(class).ok())
+        .and_then(|class| class.as_str().map(str::to_owned))
+        .unwrap_or_default();
+    Surface {
+        id: 0,
+        kind: crate::channel::SurfaceKind::FINDING.into(),
+        message: format!(
+            "the plan store did not move to done the items of the issues the landing at              {commit} closed.\n\
+             closes: {closes}\n\
+             class: {class}\n\
+             reason: {reason}\n\
+             The run itself is unaffected — nothing was settled, scheduled or failed on \
+             this — but the board may still show those issues' items as open work; move them \
+             by hand, or with `onetaskgraph task status complete`.",
+            commit = bounded(&record.commit),
+            closes = bounded(&record.closes.join(", ")),
+            reason = bounded(&one_line(record.reason.as_deref().unwrap_or_default())),
+        ),
+        source: crate::channel::source::PROPOSAL.into(),
+        blocking: false,
+        queued_at: sys::now_millis(),
+        abandoned: false,
+        asker: None,
+        workstream: record.node.clone(),
+        correlation: None,
+    }
 }
 
 /// One line of whatever a producer said, with its own runs of whitespace closed

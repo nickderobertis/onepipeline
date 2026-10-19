@@ -191,7 +191,7 @@ const SIGNIFICANCE: [&str; 2] = [
 
 /// The other: onejudge 0.20.0's note carries an optional `delivery` — interrupt
 /// the live turn, or wait for its end — defaulted to the interrupt, so a note the
-/// capture admitted is still admitted. Entry 132 of `docs/contract-divergences.md`
+/// capture admitted is still admitted. Entry 133 of `docs/contract-divergences.md`
 /// records it.
 const NOTE_DELIVERY: [&str; 2] = ["/properties/delivery", "/$defs/Delivery"];
 
@@ -292,7 +292,7 @@ fn what_moved_since_the_capture_is_the_phase_prose_the_significance_matcher_and_
             "agent.note@1/properties/delivery",
         ],
         "what moved since the capture is not only `onevcs`'s `Phase` prose, the \
-         `significance` matcher field entry 123 adds, and the note's `delivery` entry 132 \
+         `significance` matcher field entry 123 adds, and the note's `delivery` entry 133 \
          adds"
     );
     // It is that producer's own words, not a third wording invented here.

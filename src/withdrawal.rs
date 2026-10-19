@@ -258,13 +258,13 @@ mod tests {
             .unwrap_or_else(|| panic!("entry {number} carries the json block this test drives"))
     }
 
-    /// The records entry 132 names are the operations this build commits, field
+    /// The records entry 133 names are the operations this build commits, field
     /// for field: a delivery naming how its turn took the note and where it was
     /// sent, one written before either, an expired carry naming its deadline, and
     /// a withdrawal.
     #[test]
-    fn the_records_entry_132_names_are_the_operations_this_build_commits() {
-        let block = divergence_block("132.");
+    fn the_records_entry_133_names_are_the_operations_this_build_commits() {
+        let block = divergence_block("133.");
         for name in [
             "delivered",
             "delivered_before",
@@ -272,17 +272,17 @@ mod tests {
             "withdrawn",
         ] {
             let operation: Operation = serde_json::from_value(block[name].clone())
-                .unwrap_or_else(|why| panic!("entry 132's `{name}` is not an operation: {why}"));
+                .unwrap_or_else(|why| panic!("entry 133's `{name}` is not an operation: {why}"));
             assert_eq!(
                 serde_json::to_value(&operation).expect("it writes"),
                 block[name],
-                "entry 132's `{name}` does not write back as it reads"
+                "entry 133's `{name}` does not write back as it reads"
             );
         }
         let Ok(Operation::NoteWithdrawn { from, .. }) =
             serde_json::from_value::<Operation>(block["withdrawn"].clone())
         else {
-            panic!("entry 132's `withdrawn` is not a withdrawal");
+            panic!("entry 133's `withdrawn` is not a withdrawal");
         };
         assert_eq!(from, WithdrawnFrom::Carried);
         assert_eq!(
@@ -296,7 +296,7 @@ mod tests {
             ..
         }) = serde_json::from_value::<Operation>(block["carried_expired"].clone())
         else {
-            panic!("entry 132's `carried_expired` is not an expired carry");
+            panic!("entry 133's `carried_expired` is not an expired carry");
         };
         assert_eq!(
             reason,

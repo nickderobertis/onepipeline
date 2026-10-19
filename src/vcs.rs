@@ -2655,6 +2655,13 @@ pub fn is_merge_completed(kind: &crate::event::EventKind) -> bool {
     *kind == kind_of(onevcs::EventKind::MergeCompleted)
 }
 
+/// Whether an envelope is one of the two records `onevcs` writes for a landing — a
+/// `merge-completed`, or the `change-merged` beside it on the change-request path — each of
+/// which reports the issues the landing closes.
+pub(crate) fn is_landing(kind: &crate::event::EventKind) -> bool {
+    is_merge_completed(kind) || *kind == kind_of(onevcs::EventKind::ChangeMerged)
+}
+
 /// The commit one publication reached its base at, off the sibling's own record.
 ///
 /// The whole boundary read in one named place rather than a validator handed back

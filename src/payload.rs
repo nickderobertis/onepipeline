@@ -1776,6 +1776,45 @@ pub(crate) struct NodeLanded {
     pub(crate) via: Option<String>,
 }
 
+/// `landing-closures`: what the store did with the GitHub issues one landing closed —
+/// entry 132 of `docs/contract-divergences.md`, whose fenced example `tests/contract.rs`
+/// holds to this type.
+///
+/// Every member is always written, `node`, `class` and `reason` as `null` when they have
+/// nothing to say, so a reader reads one fixed shape.
+// llmlint: ignore[invalid_states_unrepresentable] Entry 132 fixes this record's flat shape for its consumers — `class` and `reason` beside `outcome` rather than inside a tagged variant — and `closures::record` is its one constructor, which fills both exactly when the outcome is `failed`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LandingClosures {
+    /// The node whose landing it is, or `null` for a `publish-branch`, `repo-recover` or
+    /// `integrate` landing outside a run.
+    pub(crate) node: Option<String>,
+    /// The commit the landing reached its base at.
+    pub(crate) commit: String,
+    /// The issues the landing reported closing, as `owner/name#N`, as it reported them.
+    pub(crate) closes: Vec<String>,
+    /// Whether the store's call finished with every item written, or failed for good.
+    pub(crate) outcome: ClosureOutcome,
+    /// The store's `items`, verbatim: one per issue and source asked.
+    pub(crate) items: Vec<Value>,
+    /// The store's `unsupported` sources, verbatim: each was sent no request.
+    pub(crate) unsupported: Vec<String>,
+    /// The failure's class, as the store decided it — `null` unless `outcome` is `failed`.
+    pub(crate) class: Option<crate::writeback::FailureClass>,
+    /// Why it failed, in the store's words — `null` unless `outcome` is `failed`.
+    pub(crate) reason: Option<String>,
+}
+
+/// What one landing's closure call came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ClosureOutcome {
+    /// The call finished and no item it reports failed.
+    Projected,
+    /// The call, or an item it reports, failed, and is not asked again.
+    Failed,
+}
+
 /// `node-absorbed`: a draft's change request was merged into another node's branch, so
 /// its work reaches the root only with that node's.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -2241,6 +2280,7 @@ payload_messages! {
     NodeReady => "node-ready";
     NodeDispatched => "node-dispatched";
     NodeSettled => "node-settled";
+    LandingClosures => "landing-closures";
     NodeRequeued => "node-requeued";
     EditCommitted => "edit-committed";
     CommandAccepted => "command-accepted";
@@ -2353,7 +2393,7 @@ mod tests {
             let mut held = held.clone();
             // And onejudge 0.20.0's optional note `delivery`, defaulted to the
             // interrupt, which admits every note the capture admitted —
-            // entry 132 of `docs/contract-divergences.md`.
+            // entry 133 of `docs/contract-divergences.md`.
             if text == "agent.note@1" {
                 if let Some(properties) = held
                     .pointer_mut("/properties")
