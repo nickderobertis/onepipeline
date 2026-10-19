@@ -1833,26 +1833,19 @@ fn worker(
         // and asks the store nothing on a kept wait it cannot read, which may be one that has
         // not passed: it says so once, and looks again until the file reads or is repaired.
         let mut said_unreadable = false;
-        loop {
-            let interval = match AskedWait::kept(&run_dir) {
-                Kept::Nothing => break,
-                Kept::Left(left) => left,
-                Kept::Unreadable(why) => {
-                    if !said_unreadable {
-                        eprintln!(
-                            "onetaskgraph write-back for '{}': {why}; it may hold a wait the \
-                             store asked for that has not passed, so no store call is made \
-                             until it can be read or is repaired",
-                            snapshot.project
-                        );
-                        said_unreadable = true;
-                    }
-                    UNREADABLE_WAIT_RECHECK
-                }
-            };
-            if !should_retry_after(&pending, Interval::Asked(interval)) {
-                return;
+        let waited = waited_out_kept(&run_dir, &pending, |why| {
+            if !said_unreadable {
+                eprintln!(
+                    "onetaskgraph write-back for '{}': {why}; it may hold a wait the store \
+                     asked for that has not passed, so no store call is made until it can be \
+                     read or is repaired",
+                    snapshot.project
+                );
+                said_unreadable = true;
             }
+        });
+        if !waited {
+            return;
         }
         let baseline = baseline.get_or_insert_with(|| {
             Baseline::load(
@@ -2070,15 +2063,10 @@ fn closer(
         };
         let mut failures: u32 = 0;
         let finished = loop {
-            loop {
-                let interval = match AskedWait::kept(run_dir) {
-                    Kept::Nothing => break,
-                    Kept::Left(left) => left,
-                    Kept::Unreadable(_) => UNREADABLE_WAIT_RECHECK,
-                };
-                if !should_retry_after(pending, Interval::Asked(interval)) {
-                    return;
-                }
+            // The waits the run's store asked for, honoured as the projection worker honours
+            // them — which is what says an unreadable one.
+            if !waited_out_kept(run_dir, pending, |_| {}) {
+                return;
             }
             let within = Deadline::Write {
                 per_item,
@@ -2128,6 +2116,30 @@ fn closer(
             state.closed.push(record);
         }
         ready.notify_all();
+    }
+}
+
+/// Wait out every wait the run's directory keeps — one an earlier process recorded, the
+/// driver an adoption displaced or a stop's release, as well as this one's — rechecking a kept
+/// wait this build cannot read, which may be one that has not passed, and handing its reason to
+/// `unreadable` each time. Answers `false` where the run stopped during it.
+fn waited_out_kept(
+    run_dir: &Path,
+    pending: &(Mutex<Pending>, Condvar),
+    mut unreadable: impl FnMut(&str),
+) -> bool {
+    loop {
+        let interval = match AskedWait::kept(run_dir) {
+            Kept::Nothing => return true,
+            Kept::Left(left) => left,
+            Kept::Unreadable(why) => {
+                unreadable(&why);
+                UNREADABLE_WAIT_RECHECK
+            }
+        };
+        if !should_retry_after(pending, Interval::Asked(interval)) {
+            return false;
+        }
     }
 }
 

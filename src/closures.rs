@@ -216,9 +216,10 @@ pub(crate) fn complete(store: &Store, landing: &Landing, within: Duration) -> An
 /// The record a finished call's answer makes, or the retry a transient item's failure asks
 /// for.
 ///
-/// Failed wherever the store says the answer failed — an item that could not be written or
-/// read, or a task one of them delivers that it could not keep in step — with the class and
-/// words of the items' own failures.
+/// Failed where an item failed — its task could not be written, or its source read — with the
+/// class and words of those items' own failures. What the store did with the tickets an
+/// updated task delivers rides in that item's `delivered`, verbatim, as it does in every
+/// projection record.
 fn of_completed(landing: &Landing, completed: &IssuesCompleted) -> Answer {
     let verbatim = LandingClosures {
         items: completed
@@ -233,23 +234,18 @@ fn of_completed(landing: &Landing, completed: &IssuesCompleted) -> Answer {
             .collect(),
         ..record(landing)
     };
-    if !completed.failed() {
-        return Answer::Finished(verbatim);
-    }
     let failures: Vec<&onetaskgraph_core::Failure> = completed
         .items
         .iter()
         .filter(|item| item.action == CompleteAction::Failed)
         .filter_map(|item| item.error.as_ref())
         .collect();
+    if failures.is_empty() {
+        return Answer::Finished(verbatim);
+    }
     let transient = failures
         .iter()
         .any(|failure| failure.class() == onetaskgraph_core::FailureClass::Transient);
-    let reason = failures
-        .iter()
-        .map(|failure| crate::views::one_line(failure.message()))
-        .collect::<Vec<_>>()
-        .join("; ");
     let failed = LandingClosures {
         outcome: ClosureOutcome::Failed,
         class: Some(if transient {
@@ -257,13 +253,13 @@ fn of_completed(landing: &Landing, completed: &IssuesCompleted) -> Answer {
         } else {
             FailureClass::Refused
         }),
-        reason: Some(if reason.is_empty() {
-            "a task an issue's item delivers could not be kept in step with it; its item's \
-             `delivered` says which"
-                .to_owned()
-        } else {
-            reason
-        }),
+        reason: Some(
+            failures
+                .iter()
+                .map(|failure| crate::views::one_line(failure.message()))
+                .collect::<Vec<_>>()
+                .join("; "),
+        ),
         ..verbatim
     };
     if transient {
