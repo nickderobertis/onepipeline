@@ -1207,7 +1207,10 @@ impl StartToken {
 /// were — is the same where its second is this process's, at the one-second
 /// resolution it was written to, so a run a previous build launched stays
 /// stoppable; anything else is another process.
-#[cfg(target_os = "macos")]
+///
+/// Pure, so it is compiled into every target's tests and held on hosts that are
+/// not macOS too.
+#[cfg(any(test, target_os = "macos"))]
 fn macos_reading(now: &str, recorded: &str) -> TokenReading {
     let legacy = !recorded.contains(START_MICROS);
     match now.split_once(START_MICROS) {
@@ -1535,13 +1538,21 @@ fn platform_process_start_token(pid: u32) -> Option<StartToken> {
 
 /// What a macOS start token carries between `lstart`'s second and the kernel's
 /// microseconds of it.
-#[cfg(target_os = "macos")]
+#[cfg(any(test, target_os = "macos"))]
 const START_MICROS: &str = " +0.";
 
 /// The microseconds of `pid`'s start the kernel recorded, or `None` where it
 /// will not say: no such process, or an answer that is not the whole record.
+///
+/// A non-zero `arg` is what asks this flavor to answer for a zombie as well:
+/// XNU's `proc_pidinfo` looks among exited, unreaped processes for
+/// `PROC_PIDTBSDINFO` only when it is set, and reads it for nothing else. With
+/// it zero, a child that had already exited — a dispatch or a retained driver
+/// that settled at once — had no token, so its claim was refused and a record
+/// naming another process read as its own.
 #[cfg(target_os = "macos")]
 fn kernel_start_micros(pid: u32) -> Option<u64> {
+    const FIND_ZOMBIE: u64 = 1;
     let pid = libc::c_int::try_from(pid).ok()?;
     let size = libc::c_int::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).ok()?;
     let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
@@ -1551,7 +1562,7 @@ fn kernel_start_micros(pid: u32) -> Option<u64> {
         libc::proc_pidinfo(
             pid,
             libc::PROC_PIDTBSDINFO,
-            0,
+            FIND_ZOMBIE,
             info.as_mut_ptr().cast(),
             size,
         )
@@ -2327,7 +2338,6 @@ mod tests {
     /// so two processes started within one second read as two. A record a build
     /// before the microseconds wrote is `lstart` alone, and is still this
     /// process's where its second is.
-    #[cfg(target_os = "macos")]
     #[test]
     fn a_macos_start_token_tells_apart_two_starts_in_one_second() {
         let now = "Sun Oct 11 19:23:36 2026 +0.004211";
@@ -2345,12 +2355,53 @@ mod tests {
         ] {
             assert_eq!(macos_reading(now, recorded), reading, "{recorded:?}");
         }
-        let token = process_start_token(pid()).expect("this host says when a process started");
+        #[cfg(target_os = "macos")]
+        {
+            let token = process_start_token(pid()).expect("this host says when a process started");
+            assert!(
+                token.recorded().contains(START_MICROS),
+                "{:?} carries no microseconds",
+                token.recorded()
+            );
+        }
+    }
+
+    /// A child that has exited and not been reaped still is the process its pid
+    /// names, and is asked for its start exactly as it was while it ran: a
+    /// dispatch or a retained driver that settles at once is claimed by that
+    /// token, and one with none is refused or read by its pid alone.
+    #[cfg(unix)]
+    #[test]
+    fn an_exited_unreaped_child_keeps_the_start_token_it_ran_under() {
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .expect("a child starts");
+        let running = child_start_token(&child);
+        let pid = libc::id_t::try_from(child.id()).expect("a pid fits an id_t");
+        // SAFETY: an all-zero `siginfo_t` is a valid out-parameter, and
+        // `WNOWAIT` leaves the child unreaped, so its pid is not handed on.
+        let exited = unsafe {
+            let mut info: libc::siginfo_t = std::mem::zeroed();
+            libc::waitid(
+                libc::P_PID,
+                pid,
+                &raw mut info,
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        assert_eq!(exited, 0, "the child is waited on without being reaped");
+        let zombie = child_start_token(&child).expect("an exited, unreaped child has a start");
+        if let Some(running) = running {
+            assert_eq!(zombie.recorded(), running.recorded());
+        }
+        #[cfg(target_os = "macos")]
         assert!(
-            token.recorded().contains(START_MICROS),
+            zombie.recorded().contains(START_MICROS),
             "{:?} carries no microseconds",
-            token.recorded()
+            zombie.recorded()
         );
+        child.wait().expect("the child is reaped");
     }
 
     /// The signals entry 88 of the divergence register says an interrupted
