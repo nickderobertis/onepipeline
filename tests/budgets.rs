@@ -285,7 +285,7 @@ fn the_budgets_file_registers_the_host_view_budget() {
 }
 
 /// The review round's quota budget, as `budgets.yaml` registers it: reported by its command off
-/// the record the e2e tier's busy-round journey writes, at most 45 quota units, and read by the
+/// the record the e2e tier's busy-round journey writes, at most 175 quota units, and read by the
 /// `budgets` target only after that tier has written the record — a record the tier declares
 /// among its outputs, so a cached replay of it restores the file the reporter reads.
 #[test]
@@ -302,7 +302,7 @@ fn the_budgets_file_registers_the_review_round_quota_budget() {
     assert_eq!(budget.unit, "quota-units");
     assert_eq!(budget.direction, Direction::Max);
     assert!(
-        (budget.threshold - 45.0).abs() < f64::EPSILON,
+        (budget.threshold - 175.0).abs() < f64::EPSILON,
         "{}",
         budget.threshold
     );

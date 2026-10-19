@@ -8887,6 +8887,11 @@ plan `accepted-follow-ups-1002-plan` (node `op-320`); the planner who owns the c
 ruled the one edge its wording left open on that node.** An envelope claimed behind one
 awaiting a live note's answer is held only when it names a node the awaiting envelope
 names, and every other envelope is judged and applied on the pass that claims it.
+**Amended per receiver** by the plan node `op-note-holds` (onepipeline#1011, #801, #803,
+#754), as [*Per receiver*](#per-receiver--ruled) below states: what holds a later envelope
+is now each node that receives a still-outstanding live note, or that an earlier envelope
+still held names, never every node an envelope named, and a `finding` holds nothing and
+is held by nothing.
 
 **What was wrong.** Since `a72e88e` a live note is offered off the run's single writer,
 so relay, settlement and heartbeats go on while a conversation decides. But the
@@ -8918,22 +8923,127 @@ no node — is never held. A held envelope is answered when it is applied, as be
 envelope that offers a note is handed to a delivery thread of its own, so a note to one
 conversation never waits on another conversation's turn.
 
-**What this build does.** `tests/note/main.rs`'s
-`only_an_envelope_naming_what_a_waiting_note_names_is_held_behind_it` holds a worker turn
-with a `[note build, amend docs]` envelope outstanding and drives four envelopes behind
-it through `reply`: an `amend` to `other` and a `finding` about no node are committed and
-answered while the note still waits, and a `finding` about `build`, a second `amend` to
-`docs`, an `add` and a `reparent` naming `build` only among their `deps`, and an `amend`
-naming only the node that held `add` creates — sent through the planner channel's bus,
-since `reply` checks it against the record before queueing it — stay unanswered until the
-note is, then commit after it in claim order; a record naming
-`build` that does not decode is refused as it is claimed, not held. `notes_to_two_conversations_wait_in_both_inboxes_at_once`
-holds two workers' turns and has a note to each waiting in both inboxes at once, with an
-envelope naming both nodes unanswered until both notes are recorded. Two notes answered
-one at a time is not a state the doubled turn can arrange — its hold is one pair of gates
-for every conversation — so `src/engine.rs`'s
-`an_envelope_naming_two_outstanding_notes_waits_for_both_answers` drives the real queue
-and the real reconciler with two deliveries outstanding and answers them in turn.
+**What this build did, until the per-receiver ruling below.** `tests/note/main.rs`'s
+`only_an_envelope_naming_what_a_waiting_note_names_is_held_behind_it` held a worker turn
+with a `[note build, amend docs]` envelope outstanding, and held a `finding` about `build`
+and a second `amend` to `docs` behind it beside the `add` and `reparent` naming `build`.
+That journey is updated to the per-receiver rule rather than removed. The `amend` to
+`docs` now commits as its envelope is handed, so the second one and the finding are
+applied while the note waits, and the `add`, the `reparent` and the `amend` of the node
+`add` creates are still held behind the note, in claim order. A record naming `build`
+that does not decode is still refused as it is claimed.
+`notes_to_two_conversations_wait_in_both_inboxes_at_once` holds two workers' turns, so a
+note to each waits in both inboxes at once, and an envelope naming both nodes (an `add`
+depending on both) stays unanswered until both notes are recorded.
+`an_envelope_naming_two_outstanding_notes_waits_for_both_answers` in `src/engine.rs`
+drives the real queue and the real reconciler with receivers outstanding and answers them
+in turn.
+
+### Per receiver — ruled
+
+**Ruling: the plan node `op-note-holds` states the rule below as its task, and the manager
+ruled its one open edge under correlation `c-b8edb4a54dbad328c59a3397e95b0251`.** It
+replaces the hold the paragraphs above describe wherever the two differ. The sentence of
+the Channel paragraph it amends is the one this entry's first ruling put there.
+
+**What was wrong.** One live note waiting on one busy worker held everything the hold above
+reached. That meant the envelope's other receivers, every edit to any node the envelope
+named, and every finding about those nodes. The hold could last hours, and `status` said
+the envelope would be answered by *the run's next driver*. That is what a manager reads
+just before resending an edit or adopting a run. In onepipeline#1011, #801, #803 and #754
+managers took a slow worker for a lost message and reached for destructive levers.
+
+**The rule this build applies.**
+
+1. **Fan-out.** The notes an envelope offers to several receivers are offered concurrently,
+   with one delivery per receiver. A receiver's notes keep the envelope's order among
+   themselves. Each receiver's `note-delivered` `edit-committed` record is written when
+   that receiver answers. A receiver with no live turn is answered without waiting for any
+   other receiver, whether its note is queued, carried or refused.
+2. **Everything else commits as the envelope is handed.** An envelope that offers a live
+   note commits its other commands in command order on the pass that hands the notes off,
+   before any note is offered. That is safe because a note stages nothing that the commands
+   after it are validated against. Only the notes stay outstanding. This closes the
+   `[note A, drop C]` edge above without holding `C`: the `drop` is in the record before
+   any later `[amend C]` is judged. A `retitle` among them
+   that the host refuses still refuses the envelope whole, with nothing offered.
+3. **The hold is per receiver.** A later envelope is held only while it names a node that
+   receives an outstanding live note, or a node named by an earlier envelope that is
+   itself still held. A node named only by an envelope's non-note commands holds nothing
+   once rule 2 has committed them. A receiver's hold is
+   released as soon as its own note is answered, whatever the envelope's other receivers
+   are doing. Order is still kept for each node. A later command naming a node waits for
+   that node's outstanding note, or for the held envelope naming it, in claim order. An
+   envelope naming neither is not held by notes to other nodes.
+4. **Findings are never held.** A `finding` names no node for this purpose, whether it is
+   blocking or not and whatever node it is about. It edits nothing that an edit to its node
+   could overtake, and what a monitor finds about a node is most worth reading while that
+   node's turn is still running. So a finding surfaces on the planner channel when it
+   arrives. An envelope that carries a finding beside a command that is held is still one
+   envelope, and it is judged in its turn.
+5. **One outcome, and it never claims less than happened.** The envelope keeps one
+   `CommandOutcome`, written once every receiver has answered. If every command committed,
+   it is `applied` as before. A receiver's conversation can still refuse its note after the
+   other commands committed: that is the reach-nobody refusal, or a `cancel` preempting it.
+   Then the outcome is `applied: false` with a `reason` opening `applied in part:`, which
+   names the commands that committed and those that refused. Each result says the same:
+   `applied` for a command that committed and is in the record, `refused` with its own
+   reason, and `validated` for a note never offered because an earlier note to the same
+   node refused. What committed is not undone, so only what refused is resent. No
+   `CommandVerdict` is added. The channel types' own docs are the published layout
+   document's text, whose version `docs/contract.md` fixes, so the shape is stated here and
+   in `engine::partly_applied`.
+6. **A driver that dies mid-delivery.** The successor answers each command with a record
+   from that record, and commits the rest from what the predecessor wrote down. It refuses
+   a live note that the predecessor was still delivering, with a reason saying whether it
+   was read is not known, and journals that refusal once. It does not offer that note a
+   second time. An envelope with no record at all is judged afresh, as before.
+7. **Truthful status.** The live driver keeps `channel/deliveries.json` beside the
+   channel's queues. It writes the file atomically whenever what it holds outstanding or
+   held changes, and empties it as it exits. The shape is
+   `{schema_version: 1, deliveries: [{envelope, node, state: "delivering" | "held", since,
+   behind_envelope}]}`, where `behind_envelope` is present only when held. It is declared
+   once, as `channel::deliveries::Delivery`, which both the writer and `status` import.
+   Old readers ignore the file, and its absence means no live delivery information. Read
+   together with driver liveness, `status` names each claimed, unanswered envelope in one
+   of three ways. It is *delivering a live note to `<node>` since `<time>`*, or *held
+   behind envelope `<id>`'s note to `<node>`*. When no driver is live it keeps the existing
+   *claimed with no outcome … the run's next driver answers each* line, because a driver
+   that is gone delivers nothing. `status --json` carries the same additively, as an
+   `unanswered` array of `{envelope, delivery?}` on `RunReading`, omitted when empty, where
+   `delivery` is `{state, node, since, behind_envelope?}`. `docs/contract.md` names
+   neither the field nor the file. Both are additive and omitted when empty, so the
+   reading's `schema_version` stays `1`. `schemas/run-reading.schema.json` is regenerated
+   from the type, and a test holds the sidecar's type to it.
+
+**What this build does.** `tests/note/main.rs` drives each rule through the binary, with
+each worker's turn held on its own gates (`turn.gates` in the doubled harness):
+
+- `a_note_to_each_of_two_receivers_is_recorded_as_each_answers` and
+  `each_of_three_receivers_of_one_envelope_is_recorded_as_it_answers` cover fan-out.
+- `a_note_held_on_one_receiver_holds_nothing_that_names_only_others` covers the
+  per-receiver hold.
+- `a_later_edit_to_a_node_a_held_envelope_names_waits_behind_that_envelope` covers a
+  later edit held behind a held envelope, then applied after it.
+- `only_an_envelope_naming_what_a_waiting_note_names_is_held_behind_it` covers commits at
+  hand and both findings and edits to the envelope's other nodes being unheld.
+- `a_finding_about_a_node_surfaces_while_its_note_waits` covers a finding, non-blocking and
+  blocking.
+- `a_note_refused_after_the_commands_beside_it_committed_is_answered_applied_in_part`
+  covers the partial outcome, read back.
+- `status_reads_a_held_delivery_as_delivering_and_what_waits_behind_it_as_held` covers
+  status, both forms, before and after the driver is killed, beside a docs-only `amend`
+  applied while the note waits.
+
+`src/engine.rs` covers the rest with unit tests:
+
+- `an_envelope_naming_two_outstanding_notes_waits_for_both_answers` covers one receiver
+  releasing its node and no other.
+- `a_handed_envelope_its_driver_died_delivering_is_answered_from_what_committed` covers
+  recovery.
+- `src/channel/deliveries.rs`'s
+  `the_sidecar_entry_is_the_delivery_the_run_reading_schema_states` reconciles the
+  sidecar's type with the schema.
 
 ### A `cancel` preempts the note its node never answers — proposal, open
 
@@ -8981,12 +9091,14 @@ held and answered as any envelope naming X is:
    **Its second instance**, ruled by the manager under correlation
    `c-5c26b236ce422980982aa3a1ed425a11`: an envelope already *outstanding* that names X
    while its delivery waits on another node Y's conversation — `[note Y, amend X]` — is
-   overtaken too, so a cancel of X never waits on Y's worker. Its delivery thread offers
-   no live note into X it has not offered yet, and refuses each as preempted, naming the
-   cancelling envelope. Once Y answers, every command of it but its notes is validated
-   again against X's cancelled state, so an `amend` of X commits after the cancel or is
-   refused on its merits, and the envelope gets exactly one answer with the existing
-   verdicts — `delivered` for the note Y read, should another command refuse.
+   overtaken too, so a cancel of X never waits on Y's worker. Under the per-receiver rule
+   above, nothing of it but its notes is outstanding — the `amend` of X committed as it was
+   handed, ahead of the cancel claimed after it — so what is left of this instance is its
+   notes: a receiver X whose conversation is being waited on is preempted as point 1 says,
+   one not yet offered is refused as preempted by its own delivery thread, and the
+   envelope's other receivers are left to their conversations. The envelope gets exactly
+   one answer once they have, **applied in part** where a note to X was preempted beside
+   commands that committed.
 5. **Everything else keeps the ordering above**: envelopes claimed after the cancel, and
    every envelope that cancels nothing.
 
@@ -8999,17 +9111,19 @@ these five points state it.
 **What this build does.** `tests/note/main.rs`'s
 `a_cancel_preempts_the_unanswered_note_to_its_node_and_what_waits_behind_it` holds
 `build`'s turn for the whole journey with a note to it unanswered — in an envelope also
-carrying a note to `lint` and an amend of it — and an `amend` of `build`, a second note
+carrying a note to `lint`, offered at once to `lint`'s own held turn, and an amend of
+`lint`, committed as the envelope was handed — and an `amend` of `build`, a second note
 to it beside a command that refuses on its own, a cancel of it in an envelope that
 refuses and one from an author the run never declared queued behind, and then cancels
 `build`: neither refused cancel preempts anything; within thirty seconds of the valid
-one the amend is applied ahead of it and both refused cancels refused ahead of it, both notes are answered `refused` naming the cancel and
-journalled once each, the first envelope's other commands are reported `validated` and
-never applied, the second's own refusal is kept and journalled, neither the second note
-nor the note to `lint` reaches a worker, the cancel is applied, `build` settles
-cancelled and `status`
-names no envelope claimed with no outcome — and the preempted delivery's late answer,
-read while another node's held turn keeps the run driven, records nothing a second time.
+one the amend is applied ahead of it and both refused cancels refused ahead of it, both
+notes to `build` are refused naming the cancel and journalled once each, the second
+envelope's own refusal is kept and journalled, the second note never reaches a worker,
+the cancel is applied and `build` settles cancelled — and the preempted delivery's late
+answer, read while `lint`'s held turn keeps the run driven, records nothing a second
+time. Once `lint` answers, the first envelope is answered once, applied in part — its
+note to `build` refused, its note to `lint` and its amend applied — and `status` names no
+envelope claimed with no outcome.
 `a_cancel_overtakes_an_envelope_also_waiting_on_another_nodes_note` is point 4: the
 cancel is applied while `lint`'s note still waits, a held live note to `build` that also
 names `lint` is preempted at once rather than overtaken, and the envelope naming both
@@ -9017,14 +9131,15 @@ nodes is judged after the cancel once `lint`'s note is answered.
 `a_cancel_overtakes_an_envelope_naming_its_node_and_delivering_elsewhere` is point 4's
 second instance, `[note lint, amend build]` waiting on `lint`: the cancel of `build` is
 applied within thirty seconds with `lint`'s turn still held, and once it is released the
-envelope is answered once, its note and its amend each recorded once, the amend after
-the cancel. `an_overtaken_delivery_offers_no_note_into_the_cancelled_node` holds
-`[note lint, note build]` the same way: the note to `build` is never offered, and is
-answered `refused` naming the cancel beside the note `lint` read, `delivered`.
-`an_overtaken_envelope_is_judged_again_against_the_cancelled_node` overtakes
-`[note lint, cancel build]` with a second cancel of `build`: once `lint` answers, that
-envelope's own cancel is refused for a node already parked, recorded once as
-`edit-rejected` and never committed, and the envelope is answered once.
+envelope is answered once, applied, its note and its amend each recorded once, the amend
+ahead of the cancel. `an_untaken_note_into_a_cancelled_node_is_preempted_beside_one_another_node_read`
+holds `[note lint, note build]` with both notes offered: the note to `build` is refused
+naming the cancel as soon as the cancel is claimed, and once `lint` answers the envelope
+is answered once, applied in part — `applied` for the note `lint` read, `refused` for the
+one the cancel preempted. `a_cancel_beside_a_live_note_is_applied_as_its_envelope_is_handed`
+holds `[note lint, cancel build]` on `lint`: its cancel is applied within thirty seconds
+with `lint` still held, a second cancel of `build` is refused for a node already parked,
+and once `lint` answers the envelope is answered once, applied, its cancel recorded once.
 `src/engine.rs`'s
 `a_cancel_preempts_its_nodes_note_and_overtakes_only_what_waits_elsewhere` drives the
 real reconciler with deliveries outstanding — one of them past a note another

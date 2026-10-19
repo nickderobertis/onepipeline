@@ -576,9 +576,10 @@ pub(crate) enum Message {
     /// That sweep's retirement pass has finished, which ends the sweep, and
     /// this is what it retired.
     Retired(Box<crate::maintenance::Retirements>),
-    /// The note-delivery thread's answer for the one envelope it was handed:
-    /// what each of its commands' conversations said. See [`NoteDeliveries`].
-    NoteAnswered(Box<NoteAnswer>),
+    /// One receiver's delivery thread's answer: what that receiver's
+    /// conversation said of each note the envelope offered it. See
+    /// [`NoteDeliveries`].
+    NoteAnswered(Box<LaneAnswer>),
     /// A lifecycle dispatch is ready to publish, and waits for a pass to say whether the
     /// driver's claim lease lets it. See [`publication_cleared`].
     PublicationDue(Box<PublicationDue>),
@@ -1556,7 +1557,7 @@ fn converge(
     // [`NoteDeliveries`]. What it holds outstanding is shared with every
     // dispatch this loop starts, which is what lets a re-dispatch wait for it.
     let notes_in_flight = DeliveriesInFlight::default();
-    let mut deliveries = NoteDeliveries::new(&tx, &notes_in_flight);
+    let mut deliveries = NoteDeliveries::new(&tx, &notes_in_flight, paths);
     // What a driver before this one claimed and never answered, ahead of
     // anything this one claims: held envelopes are judged first on every pass.
     let recovered = recover_claimed(paths, journal, &channel)?;
@@ -1688,6 +1689,7 @@ fn converge(
             unpublished = true;
             moved = true;
         }
+        deliveries.publish();
         // A trigger's readjustment owed on this pass — a continuing launch's or an
         // adoption's, before its first dispatch — reads where every draft stands now.
         if let Some(trigger) = state.readjust.due.take() {
@@ -2540,9 +2542,11 @@ fn converge(
                 Message::Retired(retirements) => {
                     maintenance.retired(paths, journal, &retirements)?;
                 }
-                // The conversation answered, so the envelope is journalled now —
-                // what it records is what an inline delivery would have — and the
-                // envelopes claimed behind it are judged on the next pass.
+                // A receiver's conversation answered, so its notes are journalled
+                // now — what they record is what an inline delivery would have —
+                // its node stops holding anything, and the envelope is answered
+                // once its last receiver has. What was held behind it is judged
+                // on the next pass.
                 Message::NoteAnswered(answer) => {
                     // llmlint: ignore-block[changed_behavior_has_e2e] what this closes is an ordering of two threads'
                     // scheduling, which no CLI journey can force. `tests/note`'s
@@ -2551,32 +2555,19 @@ fn converge(
                     // before this change;
                     // `a_delivery_stops_being_outstanding_once_recorded_or_abandoned` forces both
                     // endings of the hold by construction.
-                    // Held until the delivery is on the record — and released
-                    // however this arm ends — so a re-dispatch waiting on it
-                    // reads the record with the delivery in it.
-                    let answered = deliveries.answered(answer.envelope.id);
-                    // llmlint: ignore-end[changed_behavior_has_e2e]
-                    // A delivery a `cancel` preempted is already answered and
-                    // journalled as refused, so what its thread says now is
-                    // dropped rather than recorded a second time.
-                    if let Some((witnessed, _recording, recording)) = answered {
-                        let mut answer = *answer;
-                        if recording == Recording::JudgedAgain {
-                            rejudge_overtaken(paths, state, launch, &in_flight, &mut answer);
-                        }
-                        if record_delivered(
-                            paths,
-                            journal,
-                            state,
-                            &channel,
-                            answer,
-                            &mut in_flight,
-                            &witnessed,
-                        )? {
-                            derived = None;
-                            unpublished = true;
-                        }
+                    if deliveries.record_lane(
+                        paths,
+                        journal,
+                        state,
+                        &channel,
+                        &mut in_flight,
+                        *answer,
+                    )? {
+                        derived = None;
+                        unpublished = true;
                     }
+                    // llmlint: ignore-end[changed_behavior_has_e2e]
+                    deliveries.publish();
                 }
                 // Before the node's settlement, which the dispatch thread sends
                 // after these: the title the settlement's publication left is on the
@@ -3592,37 +3583,38 @@ fn any_node_can_still_move(statuses: &BTreeMap<String, NodeStatus>) -> bool {
 ///
 /// # Where phase 2 runs
 ///
-/// With `deliveries`, an envelope that offers a note to a conversation is handed
-/// to a delivery thread of its own: the loop goes on relaying and journalling
-/// everything else while the conversation decides, and phase 3 runs when
-/// [`Message::NoteAnswered`] reaches it. An envelope claimed behind one awaiting
-/// that answer is held, in claim order, only when it names a node the awaiting
-/// envelope names — see [`names_of`] — or a node an envelope already held this
-/// pass names; any other envelope is judged and applied on the pass that claims
-/// it, against the record as it stands. So no envelope's edit to a node overtakes
-/// an earlier one's, and a turn that runs for many minutes holds back only the
-/// commands about what it was asked to take. Without `deliveries` — a writer with
-/// no dispatch to relay, or a host that refused the thread — the phases run
-/// inline, as they always did.
+/// With `deliveries`, an envelope that offers a note to a conversation commits
+/// everything but its notes at once, and hands each receiver's notes to a
+/// delivery thread of its own — see [`hand_envelope`]: the loop goes on relaying
+/// and journalling everything else while each conversation decides, each
+/// receiver's notes are journalled when [`Message::NoteAnswered`] brings its
+/// answer, and the envelope is answered once its last receiver has. An envelope
+/// claimed later is held, in claim order, only while it names a node whose own
+/// note is still outstanding — see [`names_of`] and [`NoteDeliveries::holds`] —
+/// or a node an envelope already held this pass names; a receiver that answered
+/// releases its node whatever the envelope's other receivers are doing, and any
+/// other envelope is judged and applied on the pass that claims it, against the
+/// record as it stands. So no envelope's edit to a node overtakes an earlier
+/// one's, and a turn that runs for many minutes holds back only the commands
+/// about the node it was asked to take. Without `deliveries` — a writer with no
+/// dispatch to relay — the phases run inline, as they always did.
 ///
 /// # A `cancel` is not held behind its node's note
 ///
 /// A turn that never answers would hold a cancel of its own node for ever, and
 /// that cancel is the one lever for stopping it. So an envelope cancelling a node,
 /// where its own validation would apply it, first answers each outstanding
-/// delivery waiting on that node's conversation itself, `refused` and naming the
-/// cancel — see [`NoteDeliveries::preempt`] and [`refuse_preempted`]. Then every envelope
-/// held ahead of it is judged again, in claim order, as though nothing it names
-/// in the cancelled set were held: what that releases is judged ahead of the
-/// cancel, a live note into a cancelled node among them is refused the same way
-/// rather than delivered, and one still waiting on another node's note stays
+/// receiver waiting on that node's conversation itself, `refused` and naming the
+/// cancel — see [`NoteDeliveries::preempt`] — leaving the same envelopes' other
+/// receivers to their own conversations. Then every envelope held ahead of it is
+/// judged again, in claim order, as though nothing it names in the cancelled set
+/// were held: what that releases is judged ahead of the cancel, a live note into
+/// a cancelled node among them is refused the same way rather than delivered —
+/// see [`refuse_preempted`] — and one still waiting on another node's note stays
 /// held — an envelope the cancel overtakes, judged against the cancelled node
-/// once that note is answered. An outstanding delivery naming a cancelled node
-/// while waiting on another node's conversation is overtaken the same way: the
-/// cancel does not wait for it, and it is judged again before it is recorded —
-/// see [`rejudge_overtaken`]. An envelope claimed after the cancel waits behind
+/// once that note is answered. An envelope claimed after the cancel waits behind
 /// what the cancel overtook, as it would have. `docs/contract-divergences.md`
-/// entry 108 carries the rule as a proposal.
+/// entry 108 carries the rule.
 fn reconcile_edits(
     paths: &RunPaths,
     journal: &mut Journal,
@@ -3687,17 +3679,15 @@ fn reconcile_edits(
             // waits behind.
             let mut overtaken = BTreeSet::new();
             if preempts {
-                for (preempted, finished) in deliveries.preempt(&cancelled, envelope.id) {
-                    refuse_preempted(
-                        paths,
-                        journal,
-                        channel,
-                        preempted,
-                        Preempted::Delivering(finished),
-                        &cancelled,
-                        envelope.id,
-                    )?;
-                }
+                deliveries.preempt(
+                    paths,
+                    journal,
+                    state,
+                    channel,
+                    in_flight,
+                    &cancelled,
+                    envelope.id,
+                )?;
                 // The hold through a cancelled node is broken: each envelope
                 // held ahead of the cancel is judged again, in claim order, as
                 // though nothing it names in `cancelled` were held.
@@ -3729,7 +3719,7 @@ fn reconcile_edits(
                             journal,
                             channel,
                             earlier,
-                            Preempted::Held(staged),
+                            staged,
                             &cancelled,
                             envelope.id,
                         )?;
@@ -3791,7 +3781,7 @@ fn reconcile_edits(
         )?;
     }
     if let Some(deliveries) = deliveries {
-        deliveries.behind = held;
+        deliveries.hold(held);
     }
     Ok(changed)
 }
@@ -3815,10 +3805,11 @@ fn reconcile_edits(
 /// already carries a record of got as far as its effects and no further than
 /// its outcome line: in its turn it is answered from that record — `applied`
 /// for a commit, `refused` with the recorded reasons for a rejection — and
-/// nothing of it is judged or offered to a conversation again. Where only its
-/// first commands have their record, the rest are committed from what its
-/// writer wrote down before the first — see [`resume_committing`] — so every
-/// command of it is committed exactly once. An envelope with no such record had
+/// nothing of it is judged or offered to a conversation again. Where only some
+/// of its commands have their record, the rest are committed from what its
+/// writer wrote down before the first — see [`answer_recovered`] — so every
+/// command of it is committed exactly once, and a live note its writer was still
+/// delivering when it died is refused rather than offered a second time. An envelope with no such record had
 /// no effect, so judging it now is its first judgment. A record no build
 /// decodes is refused here, as it would be when claimed. A note a `cancel`
 /// preempted is not among these: its refusal is already its outcome line.
@@ -3890,9 +3881,15 @@ pub(crate) struct Recovered {
 }
 
 /// Answer, in its turn, a recovered envelope the journal already holds `effect`
-/// of: `applied`, after committing whatever of it was not journalled yet, or
-/// `refused` with the reasons recorded — or, where what the rest of it commits
-/// cannot be read, nothing, and surfaced (see [`unrecovered`]). `true` where it
+/// of: each command the journal holds a commit of is answered `applied`, and each
+/// it holds a refusal of `refused` with the reason recorded; every other one is
+/// committed now from what its writer wrote down before its first record — or,
+/// for a live note its writer handed to a receiver that had not answered when it
+/// died, refused, since whether that conversation read it is not known (see
+/// [`unanswered_note`]). Where what the rest commits cannot be read, nothing is
+/// answered, and it is surfaced (see [`unrecovered`]). An envelope whose only
+/// records are refusals, with nothing written down for it, was refused before
+/// anything of it was delivered, and is answered as it was then. `true` where it
 /// committed anything now.
 fn answer_recovered(
     paths: &RunPaths,
@@ -3902,33 +3899,106 @@ fn answer_recovered(
     envelope: &crate::channel::QueuedCommands,
     effect: Effect,
 ) -> Result<bool> {
-    match effect {
-        Effect::Applied(committed) => {
-            let resumed = committed < envelope.commands.len();
-            if resumed && !resume_committing(paths, journal, state, envelope, committed)? {
+    let Effect {
+        mut committed,
+        mut rejected,
+    } = effect;
+    let commands = &envelope.commands;
+    let path = committing_path(paths, envelope.id);
+    let written = read_committing(&path, envelope);
+    if committed.is_empty() && !rejected.is_empty() && written.is_err() {
+        channel.answer_commands(&refused_again(envelope.id, commands, rejected))?;
+        return Ok(false);
+    }
+    let mut answers: Vec<Option<Answered>> = commands
+        .iter()
+        .map(|command| {
+            let sent = json!(command);
+            if let Some(at) = committed.iter().position(|recorded| *recorded == sent) {
+                committed.remove(at);
+                Some(Answered::Committed)
+            } else {
+                rejected
+                    .iter()
+                    .position(|(recorded, _)| *recorded == sent)
+                    .map(|at| Answered::Refused(rejected.remove(at).1))
+            }
+        })
+        .collect();
+    let recorded = answers.iter().filter(|answer| answer.is_some()).count();
+    let mut changed = false;
+    if recorded < commands.len() {
+        let written = match written {
+            Ok(written) => written,
+            Err(why) => {
                 // Left unanswered: what the rest of it commits could not be read.
+                unrecovered(paths, journal, envelope, recorded, &path, &why)?;
                 return Ok(false);
             }
-            channel.answer_commands(&applied_envelope(envelope.id, &envelope.commands))?;
-            Ok(resumed)
-        }
-        Effect::Refused(rejections) => {
-            channel.answer_commands(&refused_again(envelope.id, &envelope.commands, rejections))?;
-            Ok(false)
+        };
+        for ((command, operations), answer) in commands
+            .iter()
+            .zip(&written.operations)
+            .zip(answers.iter_mut())
+            .filter(|(_, answer)| answer.is_none())
+        {
+            *answer = Some(match (operations, command) {
+                (Some(operations), _) => {
+                    commit_command(
+                        paths,
+                        journal,
+                        state,
+                        envelope.author.clone(),
+                        command,
+                        operations,
+                        &BTreeMap::new(),
+                        envelope.id,
+                    )?;
+                    changed = true;
+                    Answered::Committed
+                }
+                (None, Command::Note { id, .. }) => {
+                    let error = unanswered_note(id);
+                    record_rejection(
+                        paths,
+                        journal,
+                        envelope.author.clone(),
+                        command,
+                        &error,
+                        Some(envelope.id),
+                    )?;
+                    Answered::Refused(RecordedRefusal::of(&error))
+                }
+                // llmlint: ignore[changed_behavior_has_e2e] only a note is ever written down
+                // with no operations, so no write-ahead a build makes reaches this; it keeps a
+                // file edited into that shape from being read as a commit.
+                (None, _) => {
+                    unrecovered(
+                        paths,
+                        journal,
+                        envelope,
+                        recorded,
+                        &path,
+                        "it names no operations for a command that is not a note",
+                    )?;
+                    return Ok(false);
+                }
+            });
         }
     }
+    channel.answer_commands(&answered_envelope(envelope.id, commands, &answers))?;
+    Ok(changed)
 }
 
-/// What the journal says one command envelope's effects were.
-#[derive(Debug, Clone, PartialEq)]
-enum Effect {
-    /// A command of it committed, or a note of it was shown: it applied, and
-    /// this many of its commands — the first ones, since they are journalled in
-    /// command order — have their record.
-    Applied(usize),
-    /// Its commands were refused, each recorded as sent with the reason its
-    /// submitter was owed, in the order they were recorded.
-    Refused(Vec<(Value, RecordedRefusal)>),
+/// What the journal says one command envelope's effects were: each command it
+/// holds a commit or acceptance of, and each it holds a refusal of, as sent.
+#[derive(Debug, Clone, PartialEq, Default)]
+struct Effect {
+    /// Each command committed or accepted, as recorded, in record order.
+    committed: Vec<Value>,
+    /// Each command refused, as recorded with the reason its submitter was
+    /// owed, in record order.
+    rejected: Vec<(Value, RecordedRefusal)>,
 }
 
 /// Every record of the run's journal that names the command envelope it came
@@ -3940,25 +4010,21 @@ struct EnvelopeEffects(BTreeMap<u64, Effect>);
 
 impl EnvelopeEffects {
     fn of(paths: &RunPaths) -> Self {
-        let mut effects = BTreeMap::new();
+        let mut effects: BTreeMap<u64, Effect> = BTreeMap::new();
         for record in journal::read(&paths.journal()) {
             match Evidence::of(&record) {
                 Some(Evidence::Rejected {
                     envelope,
                     command,
                     reason,
-                }) => match effects
+                }) => effects
                     .entry(envelope)
-                    .or_insert_with(|| Effect::Refused(Vec::new()))
-                {
-                    Effect::Refused(rejections) => rejections.push((command, reason)),
-                    Effect::Applied(_) => {}
-                },
-                Some(Evidence::Applied { envelope, records }) => {
-                    match effects.entry(envelope).or_insert(Effect::Applied(0)) {
-                        Effect::Applied(committed) => *committed += records,
-                        refused @ Effect::Refused(_) => *refused = Effect::Applied(records),
-                    }
+                    .or_default()
+                    .rejected
+                    .push((command, reason)),
+                Some(Evidence::Applied { envelope, command }) => {
+                    let effect = effects.entry(envelope).or_default();
+                    effect.committed.extend(command);
                 }
                 None => {}
             }
@@ -3976,9 +4042,12 @@ impl EnvelopeEffects {
 /// one — a field missing or of the wrong kind — is no envelope's evidence, so an
 /// envelope it names is judged rather than answered from it.
 enum Evidence {
-    /// A commit or acceptance of one command — one record — or a presentation of
-    /// one of its notes, which is no command's record.
-    Applied { envelope: u64, records: usize },
+    /// A commit or acceptance of one command, as sent, or a presentation of one
+    /// of its notes, which is no command's record.
+    Applied {
+        envelope: u64,
+        command: Option<Value>,
+    },
     /// One command refused: the command as sent, and the reason recorded.
     Rejected {
         envelope: u64,
@@ -3993,22 +4062,23 @@ impl Evidence {
             return None;
         }
         let payload = Value::Object(record.payload.clone());
-        let applied = |envelope: Option<u64>, records| {
-            envelope.map(|envelope| Self::Applied { envelope, records })
+        let applied = |envelope: Option<u64>, command: Option<serde_json::Map<String, Value>>| {
+            envelope.map(|envelope| Self::Applied {
+                envelope,
+                command: command.map(Value::Object),
+            })
         };
         match journal::PipelineKind::from_wire(&record.kind)? {
-            journal::PipelineKind::EditCommitted => applied(
-                serde_json::from_value::<crate::payload::EditCommitted>(payload)
-                    .ok()?
-                    .envelope,
-                1,
-            ),
-            journal::PipelineKind::CommandAccepted => applied(
-                serde_json::from_value::<crate::payload::CommandAccepted>(payload)
-                    .ok()?
-                    .envelope,
-                1,
-            ),
+            journal::PipelineKind::EditCommitted => {
+                let committed =
+                    serde_json::from_value::<crate::payload::EditCommitted>(payload).ok()?;
+                applied(committed.envelope, Some(committed.command))
+            }
+            journal::PipelineKind::CommandAccepted => {
+                let accepted =
+                    serde_json::from_value::<crate::payload::CommandAccepted>(payload).ok()?;
+                applied(accepted.envelope, Some(accepted.command))
+            }
             // llmlint: ignore[changed_behavior_has_e2e] a `note-shown` is written only
             // after the `edit-committed` of the delivery it confirms, so no journal a
             // build writes holds one naming an envelope without that envelope's commit,
@@ -4019,7 +4089,7 @@ impl Evidence {
                 serde_json::from_value::<crate::payload::NoteShown>(payload)
                     .ok()?
                     .envelope,
-                0,
+                None,
             ),
             journal::PipelineKind::EditRejected => {
                 let rejected =
@@ -4179,13 +4249,13 @@ fn reconcile_envelope(
     // the stream is read afterwards: a turn that opened before it cannot be
     // the presentation of a note offered after it.
     let offered_at = sys::now_millis();
-    let (envelope, staged) = match deliveries {
-        Some(deliveries) => match deliveries.hand(envelope, staged, offered_at) {
-            Ok(()) => return Ok(false),
-            Err(kept) => *kept,
-        },
-        None => (envelope, staged),
-    };
+    if let Some(deliveries) =
+        deliveries.filter(|_| staged.iter().any(|step| matches!(step, Staged::Note(_))))
+    {
+        return hand_envelope(
+            paths, journal, state, channel, in_flight, deliveries, envelope, offered_at, staged,
+        );
+    }
     let delivered = deliver_envelope(staged, None);
     record_delivered(
         paths,
@@ -4200,6 +4270,146 @@ fn reconcile_envelope(
         in_flight,
         &[],
     )
+}
+
+/// Phases 2 and 3 of one envelope that offers a live note, with a loop to hand
+/// its notes to: everything but its notes is delivered and committed now, in
+/// command order, and its notes are handed to their receivers — see
+/// [`NoteDeliveries::hand`].
+///
+/// Committed now rather than once the notes are answered because nothing about
+/// them waits on a conversation: a note stages nothing the commands after it are
+/// validated against, so they were judged exactly as they commit. That is what
+/// lets an envelope claimed later, naming only what those commands name, be
+/// judged at once without overtaking them — the only thing of this envelope
+/// still outstanding is each receiver's note, and only those receivers hold
+/// anything. A retitle among them that the host refuses refuses the envelope
+/// whole, before any note is offered.
+///
+/// # The window this leaves
+///
+/// A note's conversation can refuse it — the reach-nobody refusal, for a note
+/// nothing took and nothing can carry — after the commands beside it committed
+/// and after another receiver took its own. What committed stays committed, and
+/// the envelope's one outcome says so command by command: `applied` for each that
+/// committed, `refused` for each that refused — see [`answered_envelope`].
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the run's record, journal, state and channel, the dispatches in flight, \
+              the delivery threads, the envelope with the instant it is offered at, and \
+              its validated commands"
+)]
+fn hand_envelope(
+    paths: &RunPaths,
+    journal: &mut Journal,
+    state: &mut Projected,
+    channel: &ChannelState,
+    in_flight: &mut BTreeMap<String, Dispatch>,
+    deliveries: &mut NoteDeliveries,
+    envelope: crate::channel::QueuedCommands,
+    offered_at: u64,
+    staged: Vec<Staged>,
+) -> Result<bool> {
+    let id = envelope.id;
+    let commands = &envelope.commands;
+    let mut notes = Vec::new();
+    let mut ruled: Vec<Option<std::result::Result<Delivery, Error>>> =
+        Vec::with_capacity(staged.len());
+    for (index, step) in staged.into_iter().enumerate() {
+        match step {
+            Staged::Note(note) => {
+                notes.push((index, note));
+                ruled.push(None);
+            }
+            // llmlint: ignore[changed_behavior_has_e2e] a command after a retitle the host
+            // refused, in an envelope that also offers a live note, needs a host refusing one
+            // retitle within a reply — the residue `commits_of` already declines to drive; the
+            // refusal itself is `tests/e2e/rework.rs`'s, through the same `refused_envelope`.
+            _ if ruled.iter().flatten().any(std::result::Result::is_err) => {
+                ruled.push(Some(Ok(Delivery::NotAttempted)));
+            }
+            other => ruled.push(Some(commits_of(other).map(Delivery::Committed))),
+        }
+    }
+    // llmlint: ignore-block[changed_behavior_has_e2e] a retitle the host refuses beside a live
+    // note is the same host refusal `tests/e2e/rework.rs` drives for a retitle on its own,
+    // answered through the same `refused_envelope`; arranging it beside a held note needs the
+    // fake host to refuse one call of a reply and not the next, which `commits_of` declines.
+    if ruled.iter().flatten().any(std::result::Result::is_err) {
+        // Nothing of it is journalled, and no note of it is offered.
+        let evaluated: Vec<std::result::Result<Delivery, Error>> = ruled
+            .into_iter()
+            .map(|ruling| ruling.unwrap_or(Ok(Delivery::NotAttempted)))
+            .collect();
+        for (command, ruling) in commands.iter().zip(&evaluated) {
+            if let Err(error) = ruling {
+                record_rejection(
+                    paths,
+                    journal,
+                    envelope.author.clone(),
+                    command,
+                    error,
+                    Some(id),
+                )?;
+            }
+        }
+        channel.answer_commands(&refused_envelope(id, commands, &evaluated))?;
+        return Ok(false);
+    }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
+    // Written down before its first record, with no operations for its notes:
+    // a driver that dies before a receiver answers leaves its successor what
+    // the rest committed, and which commands were notes still outstanding — see
+    // [`answer_recovered`].
+    let committing = Committing {
+        envelope: id,
+        operations: ruled
+            .iter()
+            .map(|ruling| match ruling {
+                Some(Ok(delivery)) => Some(from_envelope(delivery.committed(), id)),
+                _ => None,
+            })
+            .collect(),
+    };
+    if commands.len() > 1 {
+        ledger::write_json(&committing_path(paths, id), &committing)?;
+    }
+    let mut answers = vec![None; commands.len()];
+    let mut changed = false;
+    for ((command, operations), answer) in commands
+        .iter()
+        .zip(&committing.operations)
+        .zip(answers.iter_mut())
+    {
+        let Some(operations) = operations else {
+            continue;
+        };
+        commit_command(
+            paths,
+            journal,
+            state,
+            envelope.author.clone(),
+            command,
+            operations,
+            in_flight,
+            id,
+        )?;
+        watch_presentations(
+            paths,
+            journal,
+            operations,
+            in_flight,
+            Presented {
+                offered_at,
+                envelope: id,
+            },
+            &[],
+        )?;
+        *answer = Some(Answered::Committed);
+        changed = true;
+    }
+    deliveries.hand(envelope, notes, answers, offered_at);
+    Ok(changed)
 }
 
 /// The nodes an envelope's `cancel` commands park, which is what preempts a
@@ -4238,148 +4448,63 @@ fn preempted_note(id: &str, by: u64) -> Error {
     ))
 }
 
-/// Judge again, against the record as it stands, every command but the notes
-/// of an envelope a `cancel` overtook while its delivery was outstanding.
+/// Answer, in its conversation's place, a held envelope offering a live note
+/// into a node that envelope `by` cancels: refused, and journalled as any
+/// refused envelope is.
 ///
-/// It was validated before the cancel, and a command of it naming the cancelled
-/// node — an `amend` of it, say — commits after the cancel, so it is judged
-/// against the node as cancelled rather than as it was. Its notes are not judged
-/// again: each was offered, or refused as preempted, and what its conversation
-/// said is its answer. A command that now refuses refuses the envelope, which
-/// is answered once, with the verdicts any refused envelope gets.
-fn rejudge_overtaken(
-    paths: &RunPaths,
-    state: &Projected,
-    launch: &LaunchRecord,
-    in_flight: &BTreeMap<String, Dispatch>,
-    answer: &mut NoteAnswer,
-) {
-    let rejudged = validate_envelope(
-        paths,
-        state,
-        answer.envelope.author.clone(),
-        &answer.envelope.commands,
-        launch,
-        in_flight,
-    );
-    let delivered = std::mem::take(&mut answer.delivered);
-    answer.delivered = answer
-        .envelope
-        .commands
-        .iter()
-        .zip(delivered)
-        .zip(rejudged)
-        .map(|((command, delivered), rejudged)| match command {
-            Command::Note { .. } => delivered,
-            _ => rejudged.map(|step| Delivery::Committed(step.staged().to_vec())),
-        })
-        .collect();
-}
-
-/// How an answered delivery's envelope is recorded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Recording {
-    /// As its delivery answered: nothing it names changed under it.
-    AsDelivered,
-    /// After [`rejudge_overtaken`]: a `cancel` overtook it while it was
-    /// outstanding, so what it names may have changed under it.
-    JudgedAgain,
-}
-
-/// How far a preempted envelope got before a `cancel` answered it.
-enum Preempted {
-    /// Held, and never offered: its own validation, one ruling per command.
-    Held(Vec<std::result::Result<Staged, Error>>),
-    /// Its delivery thread was waiting on a cancelled node's conversation, after
-    /// finishing these commands — see [`Progress`].
-    Delivering(Vec<Vec<edits::Operation>>),
-}
-
-/// Answer, in its conversation's place, an envelope offering a live note into a
-/// node that envelope `by` cancels: refused, and journalled as any refused
-/// envelope is.
-///
-/// Each live note into a cancelled node that was not already taken is refused
-/// naming `by`, so a reader of the record can join the two. Every other command
-/// is answered for what it was: a held envelope's by its own validation, and a
-/// delivering one's by what its thread had finished — `delivered` for a note a
-/// conversation already read, as [`refused_envelope`] says of any — or, for a
-/// command the thread never reached, as one that validated and was not applied.
+/// Each live note into a cancelled node is refused naming `by`, so a reader of
+/// the record can join the two. Every other command is answered by its own
+/// validation: it was held, so nothing of it was offered or applied.
 fn refuse_preempted(
     paths: &RunPaths,
     journal: &mut Journal,
     channel: &ChannelState,
     preempted: crate::channel::QueuedCommands,
-    got: Preempted,
+    staged: Vec<std::result::Result<Staged, Error>>,
     cancelled: &BTreeSet<String>,
     by: u64,
 ) -> Result<()> {
-    let preempting = |command: &Command| match command {
-        Command::Note { id, .. } if is_a_live_note_into(command, cancelled) => {
-            Some(preempted_note(id, by))
-        }
-        _ => None,
-    };
     let author = preempted.author.clone();
     let commands = &preempted.commands;
-    let outcome = match got {
-        Preempted::Held(staged) => {
-            let evaluated: Vec<std::result::Result<Staged, Error>> = commands
-                .iter()
-                .zip(staged)
-                .map(|(command, ruling)| preempting(command).map_or(ruling, Err))
-                .collect();
-            for (command, ruling) in commands.iter().zip(&evaluated) {
-                if let Err(error) = ruling {
-                    record_rejection(
-                        paths,
-                        journal,
-                        author.clone(),
-                        command,
-                        error,
-                        Some(preempted.id),
-                    )?;
-                }
+    let evaluated: Vec<std::result::Result<Staged, Error>> = commands
+        .iter()
+        .zip(staged)
+        .map(|(command, ruling)| match command {
+            Command::Note { id, .. } if is_a_live_note_into(command, cancelled) => {
+                Err(preempted_note(id, by))
             }
-            refused_envelope(preempted.id, commands, &evaluated)
+            _ => ruling,
+        })
+        .collect();
+    for (command, ruling) in commands.iter().zip(&evaluated) {
+        if let Err(error) = ruling {
+            record_rejection(
+                paths,
+                journal,
+                author.clone(),
+                command,
+                error,
+                Some(preempted.id),
+            )?;
         }
-        Preempted::Delivering(finished) => {
-            let mut finished = finished.into_iter();
-            let evaluated: Vec<std::result::Result<Delivery, Error>> = commands
-                .iter()
-                .map(|command| match finished.next() {
-                    Some(operations) => Ok(Delivery::Committed(operations)),
-                    None => preempting(command).map_or(Ok(Delivery::NotAttempted), Err),
-                })
-                .collect();
-            for (command, ruling) in commands.iter().zip(&evaluated) {
-                if let Err(error) = ruling {
-                    record_rejection(
-                        paths,
-                        journal,
-                        author.clone(),
-                        command,
-                        error,
-                        Some(preempted.id),
-                    )?;
-                }
-            }
-            refused_envelope(preempted.id, commands, &evaluated)
-        }
-    };
-    channel.answer_commands(&outcome)
+    }
+    channel.answer_commands(&refused_envelope(preempted.id, commands, &evaluated))
 }
 
 /// Every node an envelope's commands name: the node each one's `id` names, and
 /// the nodes in its `deps` where it carries any.
 ///
-/// What decides whether an envelope waits behind one awaiting a note's answer —
-/// see [`reconcile_edits`]. A command naming no node, a `complete` or a `finding`
-/// about no node among them, adds nothing, so an envelope of only those is never
-/// held.
+/// What decides whether an envelope waits behind a receiver still to answer its
+/// note — see [`reconcile_edits`]. A command naming no node, a `complete` among
+/// them, adds nothing, and nor does a `finding`, blocking or not, whatever node
+/// it is about: a finding edits nothing, so no edit to its node can overtake
+/// another through it, and what is found about a node is most worth
+/// reading while that node's turn is still running. An envelope of only those
+/// is never held.
 fn names_of(commands: &[Command]) -> BTreeSet<String> {
     commands
         .iter()
+        .filter(|command| !matches!(command, Command::Finding { .. }))
         .flat_map(|command| {
             let deps: &[String] = match command {
                 // llmlint: ignore[changed_behavior_has_e2e] `retry` reads its replacement's
@@ -4450,19 +4575,20 @@ fn record_delivered(
     // Everything the envelope commits, written down before the first record of
     // it is: its commands are journalled one record each, and a driver that dies
     // between two of them leaves its successor the rest to commit from here —
-    // see [`resume_committing`]. One command is one record, which nothing can
+    // see [`answer_recovered`]. One command is one record, which nothing can
     // leave half written, so only an envelope of several is written down.
     let committing = Committing {
         envelope: envelope.id,
         operations: delivered
             .iter()
-            .map(|delivery| from_envelope(delivery.committed(), envelope.id))
+            .map(|delivery| Some(from_envelope(delivery.committed(), envelope.id)))
             .collect(),
     };
     if commands.len() > 1 {
         ledger::write_json(&committing_path(paths, envelope.id), &committing)?;
     }
     for (command, operations) in commands.iter().zip(&committing.operations) {
+        let operations = operations.as_deref().unwrap_or_default();
         commit_command(
             paths,
             journal,
@@ -4532,28 +4658,24 @@ fn prune_committing(paths: &RunPaths, channel: &ChannelState) {
 /// The operations each command of one envelope commits, in command order, as
 /// the delivery phase answered them — what a driver taking the run over commits
 /// the rest of an envelope from when its predecessor died part way through.
+///
+/// `null` for a live note handed to its receiver, whose operations are its
+/// conversation's answer and are not known when this is written: a driver that
+/// finds one with no record of its own knows it was still being delivered.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Committing {
     envelope: u64,
-    operations: Vec<Vec<edits::Operation>>,
+    operations: Vec<Option<Vec<edits::Operation>>>,
 }
 
-/// Commit the commands of `envelope` from the `committed`th on, from what its
-/// writer wrote down before journalling its first record: a driver that died
-/// between two of an envelope's records left the rest of it unjournalled, and
-/// these are exactly the operations it would have committed — each note among
-/// them already delivered, so nothing is offered to a conversation again and
-/// nothing is judged again.
-fn resume_committing(
-    paths: &RunPaths,
-    journal: &mut Journal,
-    state: &mut Projected,
+/// What `envelope`'s writer wrote down before journalling its first record, or
+/// why that cannot be read.
+fn read_committing(
+    path: &std::path::Path,
     envelope: &crate::channel::QueuedCommands,
-    committed: usize,
-) -> Result<bool> {
-    let path = committing_path(paths, envelope.id);
-    let written = std::fs::read_to_string(&path)
+) -> std::result::Result<Committing, String> {
+    std::fs::read_to_string(path)
         .map_err(|failure| failure.to_string())
         .and_then(|text| {
             serde_json::from_str::<Committing>(&text).map_err(|failure| failure.to_string())
@@ -4570,32 +4692,17 @@ fn resume_committing(
                     written.operations.len()
                 ))
             }
-        });
-    let written = match written {
-        Ok(written) => written,
-        Err(why) => {
-            unrecovered(paths, journal, envelope, committed, &path, &why)?;
-            return Ok(false);
-        }
-    };
-    for (command, operations) in envelope
-        .commands
-        .iter()
-        .zip(&written.operations)
-        .skip(committed)
-    {
-        commit_command(
-            paths,
-            journal,
-            state,
-            envelope.author.clone(),
-            command,
-            operations,
-            &BTreeMap::new(),
-            envelope.id,
-        )?;
-    }
-    Ok(true)
+        })
+}
+
+/// The refusal a recovered envelope's live note is answered with when the
+/// driver that handed it died before its receiver answered.
+fn unanswered_note(id: &str) -> Error {
+    Error::Refused(format!(
+        "the driver delivering this live note to node '{id}' exited before that node's \
+         conversation answered it, so whether it was read is not known and nothing of it is \
+         in the run's record; resend it if it is still wanted"
+    ))
 }
 
 /// Say that a recovered envelope could not be finished: only its first
@@ -4662,6 +4769,115 @@ fn applied_envelope(id: u64, commands: &[Command]) -> CommandOutcome {
     }
 }
 
+/// The one outcome of an envelope whose commands were answered one by one —
+/// a handed envelope's, each receiver answering on its own, or a recovered one's.
+///
+/// Every command committed: `applied`, as any envelope. None did: refused, as
+/// any refused envelope is, each command that refused `refused` and every other
+/// `validated` — nothing of it happened. Some did and some refused: **applied in
+/// part**, which no envelope applied all-or-nothing can be — see
+/// [`partly_applied`]. A command still unanswered reads as one never offered.
+fn answered_envelope(
+    id: u64,
+    commands: &[Command],
+    answers: &[Option<Answered>],
+) -> CommandOutcome {
+    let answer = |index: usize| {
+        answers
+            .get(index)
+            .cloned()
+            .flatten()
+            .unwrap_or(Answered::NotAttempted)
+    };
+    let answered: Vec<Answered> = (0..commands.len()).map(answer).collect();
+    if answered.iter().all(|answer| *answer == Answered::Committed) {
+        return applied_envelope(id, commands);
+    }
+    if !answered.contains(&Answered::Committed) {
+        let evaluated: Vec<std::result::Result<Delivery, RecordedRefusal>> = answered
+            .into_iter()
+            .map(|answer| match answer {
+                Answered::Refused(reason) => Err(reason),
+                Answered::Committed | Answered::NotAttempted => Ok(Delivery::NotAttempted),
+            })
+            .collect();
+        return refused_envelope(id, commands, &evaluated);
+    }
+    partly_applied(id, commands, &answered)
+}
+
+/// The outcome of an envelope **applied in part**: some of its commands are
+/// committed and in the run's record, and at least one refused after they were.
+///
+/// `applied` is `false`, because the envelope did not apply as sent, and the
+/// reason opens `applied in part:` and names which commands committed and which
+/// refused, so a reader of the outcome alone is never told nothing was applied
+/// when something was. Each command's own verdict says the same: `applied` for
+/// one that committed, `refused` with its reason for one that refused, and
+/// `validated` for a note never offered because an earlier note to the same
+/// node refused. What committed is not undone, so only what refused is resent.
+fn partly_applied(id: u64, commands: &[Command], answered: &[Answered]) -> CommandOutcome {
+    let listed = |which: fn(&Answered) -> bool| -> String {
+        commands
+            .iter()
+            .zip(answered)
+            .enumerate()
+            .filter(|(_, (_, answer))| which(answer))
+            .map(|(index, (command, _))| format!("{index} ('{}')", crate::channel::op_of(command)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let committed = listed(|answer| *answer == Answered::Committed);
+    let refused = listed(|answer| matches!(answer, Answered::Refused(_)));
+    let first = answered.iter().find_map(|answer| match answer {
+        Answered::Refused(reason) => Some(reason.to_string()),
+        _ => None,
+    });
+    CommandOutcome {
+        id,
+        applied: false,
+        reason: Some(format!(
+            "applied in part: command(s) {committed} committed and are in the run's record; \
+             command(s) {refused} refused — {}. What committed is not undone: resend only what \
+             refused",
+            first.as_deref().unwrap_or("no reason was recorded")
+        )),
+        results: commands
+            .iter()
+            .zip(answered)
+            .enumerate()
+            .map(|(index, (command, answer))| {
+                let refusal = match answer {
+                    Answered::Refused(reason) => reason.refusal(),
+                    Answered::Committed | Answered::NotAttempted => None,
+                };
+                let (outcome, reason) = match answer {
+                    Answered::Committed => (crate::channel::CommandVerdict::Applied, None),
+                    Answered::Refused(reason) => (
+                        crate::channel::CommandVerdict::Refused,
+                        Some(reason.to_string()),
+                    ),
+                    Answered::NotAttempted => (
+                        crate::channel::CommandVerdict::Validated,
+                        Some(format!(
+                            "not applied: an earlier note of this envelope to the same node \
+                             refused, so this one was never offered; the envelope's command(s) \
+                             {committed} committed — resend this one on its own"
+                        )),
+                    ),
+                };
+                crate::channel::CommandResult {
+                    index,
+                    op: crate::channel::op_of(command).to_string(),
+                    outcome,
+                    reason,
+                    refusal,
+                }
+            })
+            .collect(),
+    }
+}
+
 /// `operations`, with each note delivery among them naming `envelope`, the
 /// command envelope it came in: what a driver taking the run over reads to
 /// tell a note already delivered from one it still owes.
@@ -4706,6 +4922,16 @@ pub(crate) enum RecordedRefusal {
     Text(String),
     /// Refused for a reason the reconciler names by kind.
     Typed(crate::channel::Refusal),
+}
+
+impl RecordedRefusal {
+    /// `error` as its journalled refusal records it: by kind where it names one.
+    fn of(error: &Error) -> Self {
+        match error.refusal() {
+            Some(refusal) => Self::Typed(refusal),
+            None => Self::Text(error.to_string()),
+        }
+    }
 }
 
 impl From<String> for RecordedRefusal {
@@ -5064,6 +5290,12 @@ fn validate_envelope(
 /// refuse. A delivery a conversation refuses ends the phase: the deliveries after
 /// it would be side effects for an envelope nothing will journal.
 ///
+/// A writer with a loop runs this on a delivery thread over one receiver's notes
+/// only, each receiver on its own — see [`NoteDeliveries::hand`] — so a refusal
+/// ends that receiver's phase and no other's, and the window that leaves is
+/// [`hand_envelope`]'s. What follows is the window of the inline phase, which a
+/// writer with no loop runs over a whole envelope.
+///
 /// # The one window this cannot close
 ///
 /// A conversation has no undo, and whether a member will take a note is not
@@ -5104,11 +5336,11 @@ fn deliver_envelope(
         // llmlint: ignore-block[changed_behavior_has_e2e] the half of this record a CLI
         // journey can reach — which conversation the thread waits on — is what lets
         // `tests/note`'s `a_cancel_preempts_the_unanswered_note_to_its_node_and_what_waits_behind_it`
-        // preempt at all, through the binary. The other half, a note one conversation
-        // took before the thread blocked on another, needs two conversations answering
-        // one at a time, which the doubled turn's single pair of gates cannot arrange —
-        // `an_envelope_naming_two_outstanding_notes_waits_for_both_answers` declines it
-        // for that reason; `a_delivery_thread_records_each_command_it_finishes` and
+        // preempt at all, through the binary. The other half, one receiver's first note
+        // read before the thread blocked on its second, needs one conversation to take a
+        // note at a turn's end and then hold the very next turn before the second note is
+        // offered, which no gate the doubled turn reads can be timed into from outside;
+        // `a_delivery_thread_records_each_command_it_finishes` and
         // `a_cancel_preempts_its_nodes_note_and_overtakes_only_what_waits_elsewhere`
         // hold it against the real reconciler.
         if let (Some(progress), Staged::Note(note)) = (progress, &step) {
@@ -5140,24 +5372,24 @@ fn deliver_envelope(
     delivered
 }
 
-/// How far one delivery thread has got through its envelope, which is what a
-/// `cancel` that preempts it reads — see [`NoteDeliveries::preempt`].
+/// How far one receiver's delivery thread has got through that receiver's notes,
+/// which is what a `cancel` that preempts it reads — see
+/// [`NoteDeliveries::preempt`].
 ///
-/// Notes are offered in command order, one at a time, so this is the whole of
-/// what the writer cannot otherwise know: which commands are behind the thread,
-/// with what each committed — a note among them may already have been read —
-/// and which conversation it is waiting on now.
+/// A receiver's notes are offered in command order, one at a time, so this is
+/// the whole of what the writer cannot otherwise know: which notes are behind
+/// the thread, with what each committed — the conversation has read them — and
+/// whether it is waiting on its conversation now.
 #[derive(Debug, Default)]
 pub(crate) struct Progress {
-    /// What each command the thread has finished committed, in command order.
+    /// What each note the thread has finished committed, in command order.
     finished: Vec<Vec<edits::Operation>>,
     /// The node whose conversation the thread is waiting on now, if it is
     /// waiting on one.
     offering: Option<String>,
-    /// Each node a `cancel` parked while the thread was waiting on another
-    /// node's conversation, with the cancelling envelope's id: the thread
-    /// offers no note into one of them, and the envelope is judged again before
-    /// it is recorded — see [`rejudge_overtaken`].
+    /// The receiver, where a `cancel` parked it while the thread was not
+    /// waiting on its conversation, with the cancelling envelope's id: the
+    /// thread offers no further note into it, and refuses each as preempted.
     cancelled: BTreeMap<String, u64>,
 }
 
@@ -5205,8 +5437,9 @@ impl Delivery {
 
 /// One envelope's delivery phase, answered: what [`record_delivered`] journals.
 ///
-/// Built on the delivery thread and carried back to the writer as
-/// [`Message::NoteAnswered`], or built in place where the phase ran inline.
+/// Built in place where the phase ran inline — a writer with no loop. Where it
+/// runs on delivery threads, each receiver answers on its own as a
+/// [`LaneAnswer`] instead.
 pub(crate) struct NoteAnswer {
     envelope: crate::channel::QueuedCommands,
     /// The instant before its first note was offered — see [`reconcile_edits`].
@@ -5215,55 +5448,107 @@ pub(crate) struct NoteAnswer {
     delivered: Vec<std::result::Result<Delivery, Error>>,
 }
 
-struct Handed {
-    envelope: crate::channel::QueuedCommands,
-    staged: Vec<Staged>,
-    offered_at: u64,
+/// One receiver's notes of a handed envelope, answered by its conversation: what
+/// [`NoteDeliveries::record_lane`] journals, carried back to the writer as
+/// [`Message::NoteAnswered`].
+pub(crate) struct LaneAnswer {
+    /// The envelope the notes came in.
+    envelope: u64,
+    /// The receiver.
+    // llmlint: ignore[invalid_states_unrepresentable] the node id its notes' `ValidatedNote::node` carries — the plan's own `String` everywhere this crate holds a node id — and only ever one a validated note of this envelope named, since `hand` builds it from those alone.
+    node: String,
+    /// Each of its notes, by its index among the envelope's commands, with what
+    /// [`deliver_envelope`] answered for it.
+    delivered: Vec<(usize, std::result::Result<Delivery, Error>)>,
 }
 
-/// Live note delivery, kept off the run's single writer.
+/// What one delivery thread is handed: one receiver's notes, by command index.
+struct Handed {
+    notes: Vec<(usize, Box<ValidatedNote>)>,
+}
+
+/// Live note delivery, kept off the run's single writer, **one delivery per
+/// receiver**.
 ///
 /// A harness that takes a note only as its current turn ends answers when that
 /// turn ends, and a writer waiting on it journals nothing meanwhile. So each
-/// envelope that offers a note is handed to a thread that does nothing else,
-/// and its answer returns over the loop's own channel. One thread per envelope
-/// rather than one for all of them, so a note to one conversation never waits
-/// on another conversation's turn. Which envelopes behind an outstanding one
-/// wait unjudged is [`reconcile_edits`]'s to say.
+/// receiver an envelope offers a note to is handed to a thread that does nothing
+/// else, and its answer returns over the loop's own channel: notes to several
+/// receivers in one envelope are offered concurrently, each receiver's record is
+/// written when that receiver answers, and the envelope's one outcome once the
+/// last of them has. Everything else the envelope carries was committed before
+/// any note was offered — see [`reconcile_envelope`]. Which envelopes claimed
+/// later wait unjudged is [`reconcile_edits`]'s to say, from the receivers still
+/// outstanding here.
 pub(crate) struct NoteDeliveries {
     /// The loop's own channel, which each delivery thread answers on.
     answering: Sender<Message>,
     /// What every dispatch thread reads the outstanding deliveries' nodes from.
     in_flight: DeliveriesInFlight,
-    /// Each envelope a delivery thread holds, by its id, from the moment it is
-    /// handed until its answer is recorded.
+    /// Each envelope with a receiver still to answer, by its id, from the moment
+    /// it is handed until its outcome is written.
     outstanding: BTreeMap<u64, Outstanding>,
-    /// Claimed behind an outstanding envelope, naming a node it names, and not
+    /// Claimed behind an outstanding receiver, naming a node one names, and not
     /// judged yet.
     behind: std::collections::VecDeque<crate::channel::QueuedCommands>,
+    /// When each envelope among `behind` was first held, in epoch milliseconds.
+    held_since: BTreeMap<u64, u64>,
     /// What the journal holds of each envelope among `behind` a driver before
     /// this one claimed, got as far as its effects, and never answered: answered
     /// from it in its turn rather than judged — see [`Recovered`].
     recovered: BTreeMap<u64, Effect>,
+    /// Where the run's live-delivery sidecar is written, and what was last
+    /// written there — see [`crate::channel::deliveries`]. `None` for a
+    /// reconciler with no run of its own to report on.
+    sidecar: Option<Sidecar>,
 }
 
+/// The live-delivery sidecar one driver keeps current.
+struct Sidecar {
+    paths: RunPaths,
+    written: Option<crate::channel::deliveries::LiveDeliveries>,
+}
+
+/// One handed envelope, until its last receiver has answered.
 struct Outstanding {
-    /// The envelope itself, which a `cancel` of a node it offers a note into
-    /// answers in its place — see [`NoteDeliveries::preempt`].
+    /// The envelope itself, whose outcome is written once `lanes` is empty.
     envelope: crate::channel::QueuedCommands,
+    /// The instant before its first note was offered — see [`reconcile_edits`].
+    offered_at: u64,
+    /// One answer per command, in command order: everything but its notes was
+    /// committed when it was handed, and each note is answered with its
+    /// receiver.
+    answers: Vec<Option<Answered>>,
+    /// Each receiver whose conversation has not answered yet.
+    lanes: BTreeMap<String, Lane>,
+}
+
+/// What became of one command of a handed envelope.
+#[derive(Debug, Clone, PartialEq)]
+enum Answered {
+    /// Its record is in the journal.
+    Committed,
+    /// It refused, for this reason, and its refusal is in the journal.
+    Refused(RecordedRefusal),
+    /// Never offered, because an earlier note to the same receiver refused:
+    /// nothing of it happened.
+    NotAttempted,
+}
+
+/// One receiver of a handed envelope, until its conversation answers.
+struct Lane {
     /// How far its delivery thread has got.
     progress: std::sync::Arc<std::sync::Mutex<Progress>>,
-    /// Every node the envelope names, which is what an envelope claimed behind
-    /// it is held by — see [`names_of`].
-    named: BTreeSet<String>,
-    /// The nodes its notes were offered into.
-    nodes: BTreeSet<String>,
-    /// What the stream relayed of those nodes' addressed conversations meanwhile.
+    /// What the stream relayed of the receiver's addressed conversation meanwhile.
     witnessed: Vec<Envelope>,
-    /// Those nodes, as every dispatch thread sees them outstanding: released
-    /// when this is dropped, which is after the answer is recorded or when the
-    /// loop that owns it has gone.
+    /// The receiver, as every dispatch thread sees it outstanding: released when
+    /// this is dropped, which is after its answer is recorded or when the loop
+    /// that owns it has gone.
     pending: PendingDelivery,
+    /// When its first note was offered, in epoch milliseconds.
+    since: u64,
+    /// Its notes' indices among the envelope's commands, in command order.
+    notes: Vec<usize>,
 }
 
 /// How long a re-dispatch waits for a note delivery to its node to reach the
@@ -5357,13 +5642,18 @@ impl Drop for PendingDelivery {
 }
 
 impl NoteDeliveries {
-    fn new(tx: &Sender<Message>, in_flight: &DeliveriesInFlight) -> Self {
+    fn new(tx: &Sender<Message>, in_flight: &DeliveriesInFlight, paths: &RunPaths) -> Self {
         Self {
             answering: tx.clone(),
             in_flight: in_flight.clone(),
             outstanding: BTreeMap::new(),
             behind: std::collections::VecDeque::new(),
+            held_since: BTreeMap::new(),
             recovered: BTreeMap::new(),
+            sidecar: Some(Sidecar {
+                paths: paths.clone(),
+                written: None,
+            }),
         }
     }
 
@@ -5377,199 +5667,517 @@ impl NoteDeliveries {
         self.recovered.remove(&id)
     }
 
-    /// Whether an envelope naming `names` waits behind an outstanding one.
-    fn holds(&self, names: &BTreeSet<String>) -> bool {
-        self.outstanding
-            .values()
-            .any(|outstanding| !outstanding.named.is_disjoint(names))
+    /// The outstanding envelope and receiver an envelope naming `names` waits
+    /// behind, if it waits behind one: the earliest-handed receiver among them.
+    ///
+    /// Only receivers still waiting on their own conversation hold anything — a
+    /// receiver that answered releases its node, whatever the envelope's other
+    /// receivers are doing, and nothing else of a handed envelope is outstanding.
+    fn holder(&self, names: &BTreeSet<String>) -> Option<(u64, &str)> {
+        self.outstanding.iter().find_map(|(id, outstanding)| {
+            outstanding
+                .lanes
+                .keys()
+                .find(|node| names.contains(*node))
+                .map(|node| (*id, node.as_str()))
+        })
     }
 
-    /// Hand one validated envelope to a thread of its own, where it offers a
-    /// note.
+    /// Whether an envelope naming `names` waits behind an outstanding receiver.
+    fn holds(&self, names: &BTreeSet<String>) -> bool {
+        self.holder(names).is_some()
+    }
+
+    /// Keep `held` as the envelopes waiting behind outstanding receivers, in
+    /// claim order, noting when each was first held.
+    fn hold(&mut self, held: std::collections::VecDeque<crate::channel::QueuedCommands>) {
+        let now = sys::now_millis();
+        self.held_since
+            .retain(|id, _| held.iter().any(|envelope| envelope.id == *id));
+        for envelope in &held {
+            self.held_since.entry(envelope.id).or_insert(now);
+        }
+        self.behind = held;
+    }
+
+    /// Hand one validated envelope's notes to their receivers, one delivery
+    /// thread per receiver, each offering that receiver's notes in command order.
     ///
-    /// Handed back where it offers none — compiled commands commit at once, and
-    /// a thread round-trip would buy nothing — or where the host refuses the
-    /// thread, so the caller delivers it inline rather than losing it.
+    /// `answers` is what the envelope's other commands already came to — each
+    /// was committed before this — and the envelope's outcome is written once
+    /// the last receiver has answered. A receiver whose thread the host refuses
+    /// is delivered to here instead, and its answer is sent over the loop's own
+    /// channel exactly as a thread's would be, so nothing of it is lost.
     fn hand(
         &mut self,
         envelope: crate::channel::QueuedCommands,
-        staged: Vec<Staged>,
+        notes: Vec<(usize, Box<ValidatedNote>)>,
+        answers: Vec<Option<Answered>>,
         offered_at: u64,
-    ) -> std::result::Result<(), Box<(crate::channel::QueuedCommands, Vec<Staged>)>> {
-        let nodes: BTreeSet<String> = staged
-            .iter()
-            .filter_map(|step| match step {
-                Staged::Note(note) => Some(note.node.clone()),
-                Staged::Compiled(_) | Staged::Retitle(_) | Staged::Decline(_) => None,
-            })
-            .collect();
-        if nodes.is_empty() {
-            return Err(Box::new((envelope, staged)));
+    ) {
+        let mut by_receiver: BTreeMap<String, Vec<(usize, Box<ValidatedNote>)>> = BTreeMap::new();
+        for (index, note) in notes {
+            by_receiver
+                .entry(note.node.clone())
+                .or_default()
+                .push((index, note));
         }
-        let mut named = names_of(&envelope.commands);
-        named.extend(nodes.iter().cloned());
         let id = envelope.id;
-        let kept = envelope.clone();
-        let progress = std::sync::Arc::new(std::sync::Mutex::new(Progress::default()));
-        let reported = std::sync::Arc::clone(&progress);
-        // The thread is started before it is given the envelope, so a host that
-        // refuses it hands the envelope straight back rather than dropping it.
-        let (handing, handed) = mpsc::channel::<Handed>();
-        let tx = self.answering.clone();
-        let started = std::thread::Builder::new()
-            .name("note-delivery".to_string())
-            .spawn(move || {
-                let Ok(Handed {
-                    envelope,
-                    staged,
-                    offered_at,
-                }) = handed.recv()
-                else {
-                    return;
-                };
-                let delivered = deliver_envelope(staged, Some(&reported));
-                // A loop that has gone has nobody left to record the answer for.
-                let _ = tx.send(Message::NoteAnswered(Box::new(NoteAnswer {
-                    envelope,
-                    offered_at,
-                    delivered,
-                })));
-            });
-        // llmlint: ignore-block[changed_behavior_has_e2e] both arms below are a host refusing
-        // this process one thread, or a thread gone before its first instruction, which is
-        // resource exhaustion no CLI journey can arrange — `Writeback::start` declines the same
-        // proof for the same reason. What follows them is the inline delivery every writer
-        // without a loop still runs, driven by `tests/note`'s nothing-driving journey.
-        if started.is_err() {
-            return Err(Box::new((envelope, staged)));
+        let since = sys::now_millis();
+        let mut lanes = BTreeMap::new();
+        let mut inline = Vec::new();
+        for (node, notes) in by_receiver {
+            let progress = std::sync::Arc::new(std::sync::Mutex::new(Progress::default()));
+            // llmlint: ignore-block[changed_behavior_has_e2e] what this closes is an ordering of two threads'
+            // scheduling, which no CLI journey can force. `tests/note`'s
+            // `a_note_a_dispatch_read_survives_the_engines_own_redispatch_of_the_node` drives this
+            // path end to end through the binary, and failed through it under CPU contention
+            // before this change;
+            // `a_redispatch_waits_for_an_answered_delivery_to_reach_the_record` forces the
+            // answered-but-unrecorded delivery by construction.
+            let pending = self.in_flight.begin(&BTreeSet::from([node.clone()]));
+            // llmlint: ignore-end[changed_behavior_has_e2e]
+            let indices = notes.iter().map(|(index, _)| *index).collect();
+            if let Err(notes) = self.start_lane(id, &node, notes, &progress) {
+                inline.push((node.clone(), notes));
+            }
+            lanes.insert(
+                node,
+                Lane {
+                    progress,
+                    witnessed: Vec::new(),
+                    pending,
+                    since,
+                    notes: indices,
+                },
+            );
         }
-        if let Err(mpsc::SendError(Handed {
-            envelope, staged, ..
-        })) = handing.send(Handed {
-            envelope,
-            staged,
-            offered_at,
-        }) {
-            return Err(Box::new((envelope, staged)));
-        }
-        // llmlint: ignore-end[changed_behavior_has_e2e]
-        // llmlint: ignore-block[changed_behavior_has_e2e] what this closes is an ordering of two threads'
-        // scheduling, which no CLI journey can force. `tests/note`'s
-        // `a_note_a_dispatch_read_survives_the_engines_own_redispatch_of_the_node` drives this
-        // path end to end through the binary, and failed through it under CPU contention
-        // before this change;
-        // `a_redispatch_waits_for_an_answered_delivery_to_reach_the_record` forces the
-        // answered-but-unrecorded delivery by construction.
-        let pending = self.in_flight.begin(&nodes);
-        // llmlint: ignore-end[changed_behavior_has_e2e]
+        let progress: BTreeMap<String, _> = lanes
+            .iter()
+            .map(|(node, lane)| (node.clone(), std::sync::Arc::clone(&lane.progress)))
+            .collect();
         self.outstanding.insert(
             id,
             Outstanding {
-                envelope: kept,
-                progress,
-                named,
-                nodes,
-                witnessed: Vec::new(),
-                pending,
+                envelope,
+                offered_at,
+                answers,
+                lanes,
             },
         );
+        // llmlint: ignore-block[changed_behavior_has_e2e] a host refusing this process one
+        // thread, or a thread gone before its first instruction, is resource exhaustion no CLI
+        // journey can arrange — `Writeback::start` declines the same proof for the same reason.
+        // What runs here is the delivery every thread runs, and the answer is recorded by the
+        // same arm a thread's is.
+        for (node, notes) in inline {
+            let answer = lane_delivered(id, node.clone(), notes, &progress[&node]);
+            // A loop that has gone has nobody left to record the answer for.
+            let _ = self.answering.send(Message::NoteAnswered(Box::new(answer)));
+        }
+        // llmlint: ignore-end[changed_behavior_has_e2e]
+    }
+
+    /// Start one receiver's delivery thread, or hand its notes back where the
+    /// host refuses the thread.
+    fn start_lane(
+        &self,
+        id: u64,
+        node: &str,
+        notes: Vec<(usize, Box<ValidatedNote>)>,
+        progress: &std::sync::Arc<std::sync::Mutex<Progress>>,
+    ) -> std::result::Result<(), Vec<(usize, Box<ValidatedNote>)>> {
+        let reported = std::sync::Arc::clone(progress);
+        // The thread is started before it is given the notes, so a host that
+        // refuses it hands them straight back rather than dropping them.
+        let (handing, handed) = mpsc::channel::<Handed>();
+        let tx = self.answering.clone();
+        let receiver = node.to_owned();
+        let started = std::thread::Builder::new()
+            .name("note-delivery".to_string())
+            .spawn(move || {
+                let Ok(Handed { notes }) = handed.recv() else {
+                    return;
+                };
+                let answer = lane_delivered(id, receiver, notes, &reported);
+                // A loop that has gone has nobody left to record the answer for.
+                let _ = tx.send(Message::NoteAnswered(Box::new(answer)));
+            });
+        // llmlint: ignore-block[changed_behavior_has_e2e] both arms below are a host refusing
+        // this process one thread, or a thread gone before its first instruction, which is
+        // resource exhaustion no CLI journey can arrange — see `hand`.
+        if started.is_err() {
+            return Err(notes);
+        }
+        if let Err(mpsc::SendError(Handed { notes })) = handing.send(Handed { notes }) {
+            return Err(notes);
+        }
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         Ok(())
     }
 
     /// Keep one relayed envelope of a conversation a note is outstanding for.
     ///
     /// Only what could be a presentation of it — the addressed member's own
-    /// stream, of a node the outstanding envelope offered a note into — and only
-    /// until the answer is recorded, when [`watch_presentations`] reads it.
+    /// stream, of a receiver still waiting — and only until that receiver's
+    /// answer is recorded, when [`watch_presentations`] reads it.
     fn witnessed(&mut self, node: &str, envelope: &Envelope) {
         for outstanding in self.outstanding.values_mut() {
-            if outstanding.nodes.contains(node) {
-                outstanding.witnessed.push(envelope.clone());
+            if let Some(lane) = outstanding.lanes.get_mut(node) {
+                lane.witnessed.push(envelope.clone());
             }
         }
     }
 
-    /// What the stream relayed while envelope `id`'s answer was on its way, and
-    /// the delivery's nodes, still outstanding until the caller has recorded it.
+    /// Record one receiver's answer: each of its notes is journalled — committed
+    /// or refused — and its node stops being outstanding once that record is
+    /// written, whatever the envelope's other receivers are doing; the envelope's
+    /// outcome is written once its last receiver has answered.
     ///
-    /// `None` where `id` is not outstanding — a delivery a `cancel` preempted,
-    /// whose envelope is already answered and journalled — so a late answer
-    /// from its thread records nothing a second time.
-    ///
-    /// The [`Recording`] says whether a `cancel` overtook it while it was
-    /// outstanding.
-    fn answered(&mut self, id: u64) -> Option<(Vec<Envelope>, PendingDelivery, Recording)> {
-        self.outstanding.remove(&id).map(|outstanding| {
-            let recording = if outstanding
-                .progress
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .cancelled
-                .is_empty()
-            {
-                Recording::AsDelivered
-            } else {
-                Recording::JudgedAgain
-            };
-            (outstanding.witnessed, outstanding.pending, recording)
-        })
+    /// A receiver no longer outstanding — one a `cancel` preempted, already
+    /// answered and journalled — records nothing a second time. `true` where it
+    /// committed anything, which moves the run.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the run's record, journal, state and channel, the dispatches a note \
+                  is watched in, and the answer"
+    )]
+    fn record_lane(
+        &mut self,
+        paths: &RunPaths,
+        journal: &mut Journal,
+        state: &mut Projected,
+        channel: &ChannelState,
+        in_flight: &mut BTreeMap<String, Dispatch>,
+        answer: LaneAnswer,
+    ) -> Result<bool> {
+        let LaneAnswer {
+            envelope,
+            node,
+            delivered,
+        } = answer;
+        let Some(lane) = self.take_lane(envelope, &node) else {
+            return Ok(false);
+        };
+        let Some(outstanding) = self.outstanding.get_mut(&envelope) else {
+            return Ok(false);
+        };
+        let changed = settle_lane(
+            paths,
+            journal,
+            state,
+            in_flight,
+            outstanding,
+            delivered,
+            &lane.witnessed,
+        )?;
+        // Held until the delivery is on the record, so a re-dispatch waiting on
+        // it reads the record with the delivery in it.
+        drop(lane.pending);
+        self.finish(envelope, channel)?;
+        Ok(changed)
     }
 
-    /// Stop waiting on every outstanding delivery whose thread is waiting on a
-    /// conversation of one of `cancelled`, and hand back each one's envelope,
-    /// with what its thread had finished, for the caller to answer in its place.
+    /// Take receiver `node` of envelope `id` out of what is outstanding, with
+    /// its node still outstanding to every dispatch thread until the lane is
+    /// dropped.
+    fn take_lane(&mut self, id: u64, node: &str) -> Option<Lane> {
+        self.outstanding.get_mut(&id)?.lanes.remove(node)
+    }
+
+    /// Write envelope `id`'s one outcome once its last receiver has answered.
+    fn finish(&mut self, id: u64, channel: &ChannelState) -> Result<()> {
+        if !self
+            .outstanding
+            .get(&id)
+            .is_some_and(|outstanding| outstanding.lanes.is_empty())
+        {
+            return Ok(());
+        }
+        let Some(done) = self.outstanding.remove(&id) else {
+            return Ok(());
+        };
+        channel.answer_commands(&answered_envelope(
+            done.envelope.id,
+            &done.envelope.commands,
+            &done.answers,
+        ))
+    }
+
+    /// Stop waiting on every outstanding receiver among `cancelled` whose thread
+    /// is waiting on that receiver's conversation, and answer each in its
+    /// conversation's place: every note of it not yet taken `refused`, naming
+    /// cancelling envelope `by`, and journalled as any refusal is.
     ///
     /// A delivery thread blocks until its conversation answers, and nothing
     /// interrupts it: a worker inside a tool call that never returns never
     /// answers, and a `cancel` of that very node — the one lever for stopping
     /// it — would otherwise wait behind it for as long. So the cancel takes the
-    /// delivery's place: its nodes stop being outstanding here, and whatever the
-    /// thread answers later finds nothing to record — see
-    /// [`answered`](Self::answered). A thread waiting on another node's
-    /// conversation is left to it, as any envelope naming that node is.
+    /// delivery's place: that receiver stops being outstanding here, and whatever
+    /// its thread answers later finds nothing to record — see
+    /// [`record_lane`](Self::record_lane). The envelope's other receivers are left
+    /// to their own conversations, and its outcome is written once the last of
+    /// them has answered.
     ///
-    /// A delivery naming a cancelled node and waiting on another node's
-    /// conversation is **overtaken** instead: the cancel does not wait for it,
-    /// its thread offers no note into a cancelled node, and it is judged again
-    /// against the cancelled node once it is answered — see [`Progress`].
+    /// A cancelled receiver whose thread is not waiting on its conversation — not
+    /// started yet, or between two notes — is marked instead, so its thread offers
+    /// no further note into the cancelled node and refuses each as preempted.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the run's record, journal, state and channel, the dispatches a note \
+                  is watched in, the cancelled nodes and the cancelling envelope"
+    )]
     fn preempt(
         &mut self,
+        paths: &RunPaths,
+        journal: &mut Journal,
+        state: &mut Projected,
+        channel: &ChannelState,
+        in_flight: &mut BTreeMap<String, Dispatch>,
         cancelled: &BTreeSet<String>,
         by: u64,
-    ) -> Vec<(crate::channel::QueuedCommands, Vec<Vec<edits::Operation>>)> {
-        let mut preempted: Vec<u64> = Vec::new();
+    ) -> Result<()> {
+        let mut preempted: Vec<(u64, String)> = Vec::new();
         for (id, outstanding) in &self.outstanding {
-            let mut progress = outstanding
-                .progress
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if progress
-                .offering
-                .as_ref()
-                .is_some_and(|node| cancelled.contains(node))
-            {
-                preempted.push(*id);
-                continue;
-            }
-            for node in outstanding.named.intersection(cancelled) {
-                progress.cancelled.entry(node.clone()).or_insert(by);
+            for (node, lane) in &outstanding.lanes {
+                if !cancelled.contains(node) {
+                    continue;
+                }
+                let mut progress = lane
+                    .progress
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if progress.offering.as_ref() == Some(node) {
+                    preempted.push((*id, node.clone()));
+                } else {
+                    progress.cancelled.entry(node.clone()).or_insert(by);
+                }
             }
         }
-        preempted
-            .into_iter()
-            .filter_map(|id| self.outstanding.remove(&id))
-            .map(|outstanding| {
-                let finished = std::mem::take(
-                    &mut outstanding
-                        .progress
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .finished,
-                );
-                (outstanding.envelope, finished)
-            })
-            .collect()
+        for (id, node) in preempted {
+            let Some(lane) = self.take_lane(id, &node) else {
+                continue;
+            };
+            let Some(outstanding) = self.outstanding.get_mut(&id) else {
+                continue;
+            };
+            // What the thread had finished was taken by that conversation, so it
+            // is committed as delivered; the note it was waiting on, and any
+            // after it, never was.
+            let mut finished = std::mem::take(
+                &mut lane
+                    .progress
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .finished,
+            )
+            .into_iter();
+            let delivered = lane
+                .notes
+                .iter()
+                .map(|index| {
+                    let ruling = finished.next().map_or_else(
+                        || Err(preempted_note(&node, by)),
+                        |operations| Ok(Delivery::Committed(operations)),
+                    );
+                    (*index, ruling)
+                })
+                .collect();
+            settle_lane(
+                paths,
+                journal,
+                state,
+                in_flight,
+                outstanding,
+                delivered,
+                &lane.witnessed,
+            )?;
+            drop(lane.pending);
+            self.finish(id, channel)?;
+        }
+        Ok(())
     }
+
+    /// Write the run's live-delivery sidecar where what is outstanding or held
+    /// has changed since it was last written.
+    ///
+    /// A write that fails is tried again on the next call: the sidecar is what a
+    /// reader is told about the deliveries, and nothing the run decides reads it.
+    fn publish(&mut self) {
+        let now = self.snapshot();
+        let Some(sidecar) = self.sidecar.as_mut() else {
+            return;
+        };
+        if sidecar.written.as_ref() == Some(&now) {
+            return;
+        }
+        // llmlint: ignore[changed_behavior_has_e2e] a run directory this writer cannot
+        // write into is a host fault no verb makes; the sidecar is tried again on the
+        // next pass, and a reader without it reads no live delivery information.
+        if now.write(&sidecar.paths).is_ok() {
+            sidecar.written = Some(now);
+        }
+    }
+
+    /// Every receiver outstanding, then every envelope held, as the sidecar
+    /// states them.
+    ///
+    /// A held envelope names the outstanding note it waits behind; one held only
+    /// behind an earlier held envelope naming one of its nodes names what that
+    /// one waits behind, since that is what it is waiting for too.
+    fn snapshot(&self) -> crate::channel::deliveries::LiveDeliveries {
+        use crate::channel::deliveries::{Delivery as Live, LiveDeliveries, LiveDelivery};
+        let mut entries = Vec::new();
+        for (id, outstanding) in &self.outstanding {
+            for (node, lane) in &outstanding.lanes {
+                entries.push(LiveDelivery {
+                    envelope: *id,
+                    delivery: Live::Delivering {
+                        node: node.clone(),
+                        since: lane.since,
+                    },
+                });
+            }
+        }
+        let mut reasons: Vec<(BTreeSet<String>, (u64, String))> = Vec::new();
+        for envelope in &self.behind {
+            let names = names_of(&envelope.commands);
+            let reason = self
+                .holder(&names)
+                .map(|(id, node)| (id, node.to_owned()))
+                .or_else(|| {
+                    reasons
+                        .iter()
+                        .find(|(earlier, _)| !earlier.is_disjoint(&names))
+                        .map(|(_, reason)| reason.clone())
+                });
+            let Some((behind, node)) = reason else {
+                continue;
+            };
+            let since = self
+                .held_since
+                .get(&envelope.id)
+                .copied()
+                .unwrap_or_else(sys::now_millis);
+            entries.push(LiveDelivery {
+                envelope: envelope.id,
+                delivery: Live::Held {
+                    node: node.clone(),
+                    since,
+                    behind_envelope: behind,
+                },
+            });
+            reasons.push((names, (behind, node)));
+        }
+        LiveDeliveries::of(entries)
+    }
+}
+
+/// The sidecar is emptied as the driver lets go of the run, so what it says is
+/// only ever what a live driver holds — unless what the file holds is no longer
+/// what this driver wrote, which is a driver that superseded this one writing
+/// its own, and not this one's to empty.
+impl Drop for NoteDeliveries {
+    fn drop(&mut self) {
+        let Some(sidecar) = &self.sidecar else {
+            return;
+        };
+        let Some(written) = sidecar.written.as_ref() else {
+            return;
+        };
+        // llmlint: ignore-block[changed_behavior_has_e2e] a driver lets go with a delivery
+        // outstanding only when it is superseded or fails on its own store: `stop` and a host
+        // shutdown end it by signal, and a run that completes waits for its deliveries first —
+        // so no verb reaches this with entries to empty. Nothing reads what it would leave as
+        // a delivery either way: `status` reads the sidecar only beside a live driver, which
+        // `status_reads_a_held_delivery_as_delivering_and_what_waits_behind_it_as_held` drives
+        // through a killed one.
+        if written.deliveries.is_empty()
+            || crate::channel::deliveries::LiveDeliveries::read(&sidecar.paths).as_ref()
+                != Some(written)
+        {
+            return;
+        }
+        let _ = crate::channel::deliveries::LiveDeliveries::of(Vec::new()).write(&sidecar.paths);
+        // llmlint: ignore-end[changed_behavior_has_e2e]
+    }
+}
+
+/// Offer one receiver's notes, in command order, and answer what each came to.
+fn lane_delivered(
+    id: u64,
+    node: String,
+    notes: Vec<(usize, Box<ValidatedNote>)>,
+    progress: &std::sync::Mutex<Progress>,
+) -> LaneAnswer {
+    let (indices, staged): (Vec<usize>, Vec<Staged>) = notes
+        .into_iter()
+        .map(|(index, note)| (index, Staged::Note(note)))
+        .unzip();
+    let delivered = deliver_envelope(staged, Some(progress));
+    LaneAnswer {
+        envelope: id,
+        node,
+        delivered: indices.into_iter().zip(delivered).collect(),
+    }
+}
+
+/// Journal what one receiver's notes came to — each committed, refused, or never
+/// offered — into the envelope's answers. `true` where any was committed.
+fn settle_lane(
+    paths: &RunPaths,
+    journal: &mut Journal,
+    state: &mut Projected,
+    in_flight: &mut BTreeMap<String, Dispatch>,
+    outstanding: &mut Outstanding,
+    delivered: Vec<(usize, std::result::Result<Delivery, Error>)>,
+    witnessed: &[Envelope],
+) -> Result<bool> {
+    let id = outstanding.envelope.id;
+    let author = outstanding.envelope.author.clone();
+    let mut changed = false;
+    for (index, ruling) in delivered {
+        let Some(command) = outstanding.envelope.commands.get(index) else {
+            continue;
+        };
+        let answered = match ruling {
+            Ok(Delivery::Committed(operations)) => {
+                let operations = from_envelope(&operations, id);
+                commit_command(
+                    paths,
+                    journal,
+                    state,
+                    author.clone(),
+                    command,
+                    &operations,
+                    in_flight,
+                    id,
+                )?;
+                watch_presentations(
+                    paths,
+                    journal,
+                    &operations,
+                    in_flight,
+                    Presented {
+                        offered_at: outstanding.offered_at,
+                        envelope: id,
+                    },
+                    witnessed,
+                )?;
+                changed = true;
+                Answered::Committed
+            }
+            Ok(Delivery::NotAttempted) => Answered::NotAttempted,
+            Err(error) => {
+                record_rejection(paths, journal, author.clone(), command, &error, Some(id))?;
+                Answered::Refused(RecordedRefusal::of(&error))
+            }
+        };
+        if let Some(slot) = outstanding.answers.get_mut(index) {
+            *slot = Some(answered);
+        }
+    }
+    Ok(changed)
 }
 
 /// What one command that did **not** refuse is reported as, when something else
@@ -10688,8 +11296,127 @@ mod tests {
             [1],
             "{recovered:?}"
         );
-        assert_eq!(recovered.evidence[&1], Effect::Applied(1));
+        assert_eq!(
+            recovered.evidence[&1],
+            Effect {
+                committed: vec![json!(amend)],
+                rejected: Vec::new(),
+            }
+        );
         std::fs::remove_dir_all(&paths.dir).ok();
+    }
+
+    /// A driver that died with a handed envelope's receiver still outstanding
+    /// leaves the next driver what the rest of it committed: each command with a
+    /// record is answered from it, and the note its predecessor was still
+    /// delivering is refused — journalled once, naming why — rather than offered
+    /// a second time. The envelope is answered once, applied in part.
+    #[test]
+    fn a_handed_envelope_its_driver_died_delivering_is_answered_from_what_committed() {
+        let root = std::env::temp_dir().join(format!("onepipeline-died-handing-{}", sys::pid()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = RunPaths::under(&root, "demo");
+        paths.create().expect("the run directory");
+        let channel = ChannelState::new(&paths);
+        let amend: Command = serde_json::from_value(json!({
+            "op": "amend", "id": "docs", "text": "keep it short",
+        }))
+        .expect("an amend");
+        let commands = [amend.clone(), note_to("build"), note_to("lint")];
+        let id = channel
+            .submit(crate::channel::Author::planner(), &commands)
+            .expect("queued");
+        channel
+            .claim_commands_answering()
+            .expect("the queue is claimed");
+        // What its writer left: the amend committed as the envelope was handed,
+        // `lint`'s note answered, and `build`'s still being delivered.
+        ledger::write_json(
+            &committing_path(&paths, id),
+            &Committing {
+                envelope: id,
+                operations: vec![Some(Vec::new()), None, None],
+            },
+        )
+        .expect("written down");
+        let mut journal = Journal::open(&paths);
+        for command in [&amend, &note_to("lint")] {
+            let Value::Object(payload) = json!({
+                "author": "planner", "command": command, "operations": [],
+                "operation_kinds": [], "envelope": id,
+            }) else {
+                unreachable!("a payload is an object")
+            };
+            journal
+                .emit(
+                    journal::PipelineKind::EditCommitted,
+                    journal::labels(&paths.run, None),
+                    payload,
+                )
+                .expect("journalled");
+        }
+
+        let mut recovered = recover_claimed(&paths, &mut journal, &channel).expect("recovered");
+        let envelope = recovered
+            .envelopes
+            .pop_front()
+            .expect("claimed and unanswered");
+        let effect = recovered
+            .evidence
+            .remove(&id)
+            .expect("its records are evidence");
+        let mut state = Projected::open(&paths);
+        let committed = answer_recovered(
+            &paths,
+            &mut journal,
+            &mut state,
+            &channel,
+            &envelope,
+            effect,
+        )
+        .expect("answered");
+        assert!(
+            !committed,
+            "a command with its record was committed a second time"
+        );
+        let outcomes = channel.outcomes();
+        let [outcome] = &outcomes[..] else {
+            panic!("the envelope was not answered once: {outcomes:?}");
+        };
+        use crate::channel::CommandVerdict::{Applied, Refused};
+        assert_eq!(
+            outcome
+                .results
+                .iter()
+                .map(|result| result.outcome)
+                .collect::<Vec<_>>(),
+            [Applied, Refused, Applied],
+            "{outcome:?}"
+        );
+        assert!(
+            outcome
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.starts_with("applied in part:")),
+            "{outcome:?}"
+        );
+        let rejected: Vec<Value> = journal::read(&paths.journal())
+            .into_iter()
+            .filter(|event| event.kind.0 == journal::PipelineKind::EditRejected.as_str())
+            .map(|event| Value::Object(event.payload))
+            .collect();
+        let [rejected] = &rejected[..] else {
+            panic!("the note still being delivered was not journalled refused once: {rejected:?}");
+        };
+        assert_eq!(rejected["command"], json!(note_to("build")));
+        assert!(
+            rejected["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("exited before that node's conversation")),
+            "{rejected}"
+        );
+        assert!(channel.claimed_unanswered().is_empty());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A refusal rebuilt from the journal answers each command as the first answer
@@ -13706,27 +14433,25 @@ mod tests {
         );
     }
 
-    /// A delivery's nodes stop being outstanding on every path that ends it: once
-    /// its answer — a delivery or a refusal — has been recorded, and when the
+    /// A delivery's receiver stops being outstanding on every path that ends it:
+    /// once its answer — a delivery or a refusal — has been recorded, and when the
     /// loop that owned it has gone with the answer never recorded.
     ///
     /// Either way a re-dispatch waiting on its node is woken, rather than left to
     /// wait out its patience on an entry nothing will remove.
     #[test]
     fn a_delivery_stops_being_outstanding_once_recorded_or_abandoned() {
-        let held = |in_flight: &DeliveriesInFlight| NoteDeliveries {
-            answering: mpsc::channel().0,
-            in_flight: in_flight.clone(),
-            outstanding: BTreeMap::from([(1, outstanding_note(in_flight, 1, "build"))]),
-            behind: std::collections::VecDeque::new(),
-            recovered: BTreeMap::new(),
+        let held = |in_flight: &DeliveriesInFlight| {
+            deliveries_holding(in_flight, [(1, outstanding_note(in_flight, 1, "build"))])
         };
 
         // Answered: outstanding until the caller has recorded the answer, which
-        // is when it lets go of what `answered` handed it.
+        // is when it lets go of the lane it took.
         let in_flight = DeliveriesInFlight::default();
         let mut deliveries = held(&in_flight);
-        let (_, recording, _) = deliveries.answered(1).expect("the delivery is outstanding");
+        let lane = deliveries
+            .take_lane(1, "build")
+            .expect("the delivery is outstanding");
         assert!(
             in_flight.outstanding_since("build").is_some(),
             "the delivery stopped being outstanding before its answer was recorded"
@@ -13735,7 +14460,7 @@ mod tests {
             let waiting = scope.spawn(|| in_flight.recorded_for("build", Duration::from_secs(30)));
             std::thread::sleep(LONG_ENOUGH_TO_HAVE_RUN);
             assert!(!waiting.is_finished(), "the wait ended before the record");
-            drop(recording);
+            drop(lane);
             assert!(
                 waiting.join().expect("the wait returns"),
                 "the wait ran out rather than seeing the answer recorded"
@@ -13754,29 +14479,84 @@ mod tests {
         assert!(in_flight.recorded_for("build", Duration::ZERO));
     }
 
-    /// A delivery of a live note into `node`, outstanding as `hand` leaves one
-    /// once its thread is waiting on that node's conversation.
-    fn outstanding_note(in_flight: &DeliveriesInFlight, id: u64, node: &str) -> Outstanding {
-        let nodes = BTreeSet::from([node.to_owned()]);
-        Outstanding {
+    /// A reconciler's deliveries, holding `outstanding` and nothing behind it,
+    /// with no run to write a sidecar for.
+    fn deliveries_holding(
+        in_flight: &DeliveriesInFlight,
+        outstanding: impl IntoIterator<Item = (u64, Outstanding)>,
+    ) -> NoteDeliveries {
+        NoteDeliveries {
+            answering: mpsc::channel().0,
+            in_flight: in_flight.clone(),
+            outstanding: outstanding.into_iter().collect(),
+            behind: std::collections::VecDeque::new(),
+            held_since: BTreeMap::new(),
+            recovered: BTreeMap::new(),
+            sidecar: None,
+        }
+    }
+
+    /// One receiver of an envelope, outstanding as `hand` leaves it once its
+    /// thread is waiting on that node's conversation, for the notes at `notes`.
+    fn lane_offering(in_flight: &DeliveriesInFlight, node: &str, notes: Vec<usize>) -> Lane {
+        Lane {
             progress: std::sync::Arc::new(std::sync::Mutex::new(Progress {
                 finished: Vec::new(),
                 offering: Some(node.to_owned()),
                 cancelled: BTreeMap::new(),
             })),
+            witnessed: Vec::new(),
+            pending: in_flight.begin(&BTreeSet::from([node.to_owned()])),
+            since: 0,
+            notes,
+        }
+    }
+
+    /// A live note to `node` from the planner.
+    fn note_to(node: &str) -> Command {
+        serde_json::from_value(json!({
+            "op": "note", "id": node, "addressee": "worker",
+            "text": "stop editing src/old.rs",
+        }))
+        .expect("a note command")
+    }
+
+    /// An envelope of one live note into `node`, outstanding with its one
+    /// receiver waiting on that node's conversation.
+    fn outstanding_note(in_flight: &DeliveriesInFlight, id: u64, node: &str) -> Outstanding {
+        Outstanding {
             envelope: crate::channel::QueuedCommands {
                 id,
                 author: crate::channel::Author::planner(),
-                commands: vec![serde_json::from_value(json!({
-                    "op": "note", "id": node, "addressee": "worker",
-                    "text": "stop editing src/old.rs",
-                }))
-                .expect("a note command")],
+                commands: vec![note_to(node)],
             },
-            named: nodes.clone(),
-            nodes: nodes.clone(),
-            witnessed: Vec::new(),
-            pending: in_flight.begin(&nodes),
+            offered_at: 0,
+            answers: vec![None],
+            lanes: BTreeMap::from([(node.to_owned(), lane_offering(in_flight, node, vec![0]))]),
+        }
+    }
+
+    /// What `node`'s worker reading the note at `index` of envelope `id` answers.
+    fn read_by(id: u64, node: &str, index: usize) -> LaneAnswer {
+        let Command::Note {
+            addressee, text, ..
+        } = note_to(node)
+        else {
+            unreachable!("a note command");
+        };
+        LaneAnswer {
+            envelope: id,
+            node: node.to_owned(),
+            delivered: vec![(
+                index,
+                Ok(Delivery::Committed(note_record(
+                    node,
+                    addressee,
+                    &text,
+                    None,
+                    crate::note::Reached::Worker,
+                ))),
+            )],
         }
     }
 
@@ -13897,8 +14677,14 @@ mod tests {
                     blocking: false,
                     id: Some("other".into()),
                 },
+                Command::Finding {
+                    message: "m".into(),
+                    blocking: true,
+                    id: Some("build".into()),
+                },
             ]),
-            ["docs", "other"]
+            ["docs"],
+            "a finding, blocking or not, named the node it is about"
         );
         assert!(
             named(&[
@@ -13939,16 +14725,11 @@ mod tests {
         let second = channel
             .submit(crate::channel::Author::planner(), &[cancel("second")])
             .expect("the second envelope is queued");
-        let mut deliveries = NoteDeliveries {
-            answering: mpsc::channel().0,
-            in_flight: DeliveriesInFlight::default(),
-            outstanding: BTreeMap::new(),
-            behind: channel
-                .claim_commands()
-                .expect("both envelopes are claimed")
-                .into(),
-            recovered: BTreeMap::new(),
-        };
+        let mut deliveries = deliveries_holding(&DeliveriesInFlight::default(), []);
+        deliveries.behind = channel
+            .claim_commands()
+            .expect("both envelopes are claimed")
+            .into();
         let mut journal = Journal::open(&paths);
         let mut state = Projected::open(&paths);
 
@@ -14009,14 +14790,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// A `cancel` answers the outstanding note into its node in that note's
-    /// place, and judges what was held behind it ahead of itself — except an
-    /// envelope also waiting on another node's note, which it overtakes. A
-    /// cancel its own envelope refuses preempts nothing.
+    /// A `cancel` answers each outstanding receiver waiting on its node's
+    /// conversation in that conversation's place, leaves the same envelope's
+    /// other receivers to their own, and judges what was held behind it ahead of
+    /// itself — except an envelope also waiting on another node's note, which it
+    /// overtakes. A cancel its own envelope refuses preempts nothing.
     ///
-    /// Answering one of two outstanding notes and not the other is not a state
-    /// a CLI journey can arrange, for the reason the test below gives; so this
-    /// drives the real queue and the real reconciler with both outstanding.
+    /// This drives the real queue and the real reconciler with the receivers
+    /// outstanding and answers them one at a time, as the loop records them.
     #[test]
     fn a_cancel_preempts_its_nodes_note_and_overtakes_only_what_waits_elsewhere() {
         let root = std::env::temp_dir().join(format!("onepipeline-preempt-{}", sys::pid()));
@@ -14032,22 +14813,40 @@ mod tests {
         let requeue = |id: &str| command(json!({"op": "requeue", "id": id}));
         let cancel = |id: &str| command(json!({"op": "cancel", "id": id}));
         let amend_docs = || command(json!({"op": "amend", "id": "docs", "text": "keep it short"}));
-        let note = |id: &str| {
-            command(json!({
-                "op": "note", "id": id, "addressee": "worker", "text": "and the second fixture",
-            }))
-        };
         let mut journal = Journal::open(&paths);
+        // The plan the run launched with, for its concurrency: every record a
+        // pass folds in re-derives the graph from it.
+        journal
+            .emit(
+                journal::PipelineKind::RunStarted,
+                journal::labels(&paths.run, None),
+                journal::payload(&[(
+                    "plan",
+                    json!(crate::plan::Plan {
+                        schema_version: crate::plan::PLAN_SCHEMA_VERSION,
+                        goal: None,
+                        name: Some("demo".into()),
+                        concurrency: 4,
+                        tasks: Vec::new(),
+                        export_edges: Vec::new(),
+                    }),
+                )]),
+            )
+            .expect("the launch is journalled");
         let mut state = Projected::open(&paths);
-        let mut pass = |deliveries: Option<&mut NoteDeliveries>| {
-            // A run's concurrency comes from the plan it launched with, which
-            // this one, seeded by `add`s alone, has none of; every record the
-            // pass folds in re-derives it.
-            state.graph.concurrency = 4;
+        let seeded = submit(&["build", "lint", "other", "docs"].map(|id| {
+            command(
+                json!({"op": "add", "node": {"id": id, "persona": "engineer",
+                    "task": "## What\nDo it.\n\n## Why\nSo the run settles.\n\n## Acceptance criteria\n- It is done."}}),
+            )
+        }));
+        let pass = |journal: &mut Journal,
+                    state: &mut Projected,
+                    deliveries: Option<&mut NoteDeliveries>| {
             reconcile_edits(
                 &paths,
-                &mut journal,
-                &mut state,
+                journal,
+                state,
                 &channel,
                 &launch,
                 &mut BTreeMap::new(),
@@ -14056,13 +14855,7 @@ mod tests {
             .expect("the pass runs");
             channel.outcomes()
         };
-        let seeded = submit(&["build", "lint", "other", "docs"].map(|id| {
-            command(
-                json!({"op": "add", "node": {"id": id, "persona": "engineer",
-                    "task": "## What\nDo it.\n\n## Why\nSo the run settles.\n\n## Acceptance criteria\n- It is done."}}),
-            )
-        }));
-        let outcomes = pass(None);
+        let outcomes = pass(&mut journal, &mut state, None);
         assert!(
             outcomes
                 .iter()
@@ -14071,51 +14864,62 @@ mod tests {
         );
 
         let behind = submit(&[requeue("build")]);
-        let second_note = submit(&[note("build"), amend_docs()]);
+        let second_note = submit(&[note_to("build"), amend_docs()]);
         let overtaken = submit(&[requeue("build"), requeue("lint")]);
         let unrelated = submit(&[requeue("other")]);
         let refused_cancel = submit(&[cancel("build"), requeue("nothing-by-this-name")]);
         let in_flight = DeliveriesInFlight::default();
+        // A note to `build` beside an amend of `docs`, which committed when the
+        // envelope was handed.
         let mut on_build = outstanding_note(&in_flight, 100, "build");
         on_build.envelope.commands.push(amend_docs());
-        // A thread that had `docs`'s conversation read its first note, and is
-        // waiting on `build`'s for its second.
-        let mut read_then_build = outstanding_note(&in_flight, 300, "build");
-        let Command::Note {
-            addressee, text, ..
-        } = note("docs")
+        on_build.answers.push(Some(Answered::Committed));
+        // Notes to `docs` and `build`, each receiver waiting on its own turn.
+        let mut docs_and_build = outstanding_note(&in_flight, 300, "build");
+        docs_and_build.envelope.commands.insert(0, note_to("docs"));
+        docs_and_build.answers.insert(0, None);
+        docs_and_build
+            .lanes
+            .insert("build".into(), lane_offering(&in_flight, "build", vec![1]));
+        docs_and_build
+            .lanes
+            .insert("docs".into(), lane_offering(&in_flight, "docs", vec![0]));
+        // Two notes to `build`: its worker read the first, and the thread waits
+        // on it for the second.
+        let mut read_then_waiting = outstanding_note(&in_flight, 400, "build");
+        read_then_waiting.envelope.commands.push(note_to("build"));
+        read_then_waiting.answers.push(None);
+        read_then_waiting.lanes.insert(
+            "build".into(),
+            lane_offering(&in_flight, "build", vec![0, 1]),
+        );
+        let Some(Ok(Delivery::Committed(read))) = read_by(400, "build", 0)
+            .delivered
+            .pop()
+            .map(|(_, ruling)| ruling)
         else {
-            unreachable!("a note command");
+            unreachable!("a read note");
         };
-        read_then_build.envelope.commands.insert(0, note("docs"));
-        read_then_build
+        read_then_waiting.lanes["build"]
             .progress
             .lock()
             .expect("the progress is readable")
             .finished
-            .push(note_record(
-                "docs",
-                addressee,
-                &text,
-                None,
-                crate::note::Reached::Worker,
-            ));
-        let mut deliveries = NoteDeliveries {
-            answering: mpsc::channel().0,
-            in_flight: in_flight.clone(),
-            outstanding: BTreeMap::from([
+            .push(read);
+        let mut deliveries = deliveries_holding(
+            &in_flight,
+            [
                 (100, on_build),
                 (200, outstanding_note(&in_flight, 200, "lint")),
-                (300, read_then_build),
-            ]),
-            behind: std::collections::VecDeque::new(),
-            recovered: BTreeMap::new(),
-        };
+                (300, docs_and_build),
+                (400, read_then_waiting),
+            ],
+        );
         let answered = |outcomes: &[CommandOutcome]| -> Vec<u64> {
             outcomes.iter().map(|outcome| outcome.id).skip(1).collect()
         };
         assert_eq!(
-            answered(&pass(Some(&mut deliveries))),
+            answered(&pass(&mut journal, &mut state, Some(&mut deliveries))),
             [unrelated],
             "a cancel its own envelope refuses preempted the note, or what was held behind it"
         );
@@ -14123,78 +14927,112 @@ mod tests {
 
         let cancel = submit(&[cancel("build")]);
         let after = submit(&[requeue("build")]);
-        let outcomes = pass(Some(&mut deliveries));
+        let outcomes = pass(&mut journal, &mut state, Some(&mut deliveries));
         assert_eq!(
             answered(&outcomes),
             [
                 unrelated,
                 100,
-                300,
+                400,
                 behind,
                 second_note,
                 refused_cancel,
                 cancel
             ],
-            "the cancel did not answer its node's note, then what was held behind it in \
-             claim order, then itself"
+            "the cancel did not answer each envelope whose only receiver left was its node, \
+             then what was held behind it in claim order, then itself"
         );
-        let outcome_of = |id: u64| {
+        let outcome_of = |outcomes: &[CommandOutcome], id: u64| {
             outcomes
                 .iter()
                 .find(|outcome| outcome.id == id)
+                .cloned()
                 .expect("answered")
         };
-        for preempted in [100, second_note] {
-            let outcome = outcome_of(preempted);
+        let verdicts = |outcome: &CommandOutcome| {
+            outcome
+                .results
+                .iter()
+                .map(|result| result.outcome)
+                .collect::<Vec<_>>()
+        };
+        use crate::channel::CommandVerdict::{Applied, Refused, Validated};
+        for (preempted, besides) in [(100, Applied), (second_note, Validated)] {
+            let outcome = outcome_of(&outcomes, preempted);
             assert!(!outcome.applied, "{outcome:?}");
-            let [note, other] = &outcome.results[..] else {
-                panic!("{outcome:?}");
-            };
-            assert_eq!(note.outcome, crate::channel::CommandVerdict::Refused);
+            assert_eq!(verdicts(&outcome), [Refused, besides], "{outcome:?}");
             assert!(
-                note.reason
+                outcome.results[0]
+                    .reason
                     .as_deref()
                     .is_some_and(|reason| reason.contains(&format!("envelope {cancel}"))),
                 "{outcome:?}"
             );
-            assert_eq!(
-                other.outcome,
-                crate::channel::CommandVerdict::Validated,
-                "{outcome:?}"
-            );
         }
-        let read = outcome_of(300);
-        assert_eq!(
-            read.results
-                .iter()
-                .map(|result| result.outcome)
-                .collect::<Vec<_>>(),
-            [
-                crate::channel::CommandVerdict::Delivered,
-                crate::channel::CommandVerdict::Refused,
-            ],
-            "the note docs' conversation had already read was not reported delivered: {read:?}"
-        );
-        assert!(!outcome_of(refused_cancel).applied);
-        assert!(outcome_of(cancel).applied, "{:?}", outcome_of(cancel));
         assert!(
-            deliveries.answered(100).is_none() && deliveries.answered(300).is_none(),
+            outcome_of(&outcomes, 100)
+                .reason
+                .is_some_and(|reason| reason.starts_with("applied in part:")),
+            "an envelope whose amend committed reads as though nothing of it applied"
+        );
+        let read = outcome_of(&outcomes, 400);
+        assert_eq!(
+            verdicts(&read),
+            [Applied, Refused],
+            "the note build's worker had already read was not committed: {read:?}"
+        );
+        assert!(!outcome_of(&outcomes, refused_cancel).applied);
+        assert!(
+            outcome_of(&outcomes, cancel).applied,
+            "{:?}",
+            outcome_of(&outcomes, cancel)
+        );
+        assert!(
+            deliveries.take_lane(100, "build").is_none()
+                && deliveries.take_lane(300, "build").is_none(),
             "a late answer to a preempted delivery would be recorded"
         );
         assert!(in_flight.outstanding_since("build").is_none());
+        assert!(in_flight.outstanding_since("docs").is_some());
         assert!(in_flight.outstanding_since("lint").is_some());
 
-        drop(deliveries.answered(200).expect("outstanding"));
+        // The envelope's other receiver answers on its own, and its outcome
+        // follows: the note `docs` read applied, the preempted one refused.
+        deliveries
+            .record_lane(
+                &paths,
+                &mut journal,
+                &mut state,
+                &channel,
+                &mut BTreeMap::new(),
+                read_by(300, "docs", 0),
+            )
+            .expect("recorded");
+        let both = outcome_of(&channel.outcomes(), 300);
+        assert_eq!(verdicts(&both), [Applied, Refused], "{both:?}");
+
+        deliveries
+            .record_lane(
+                &paths,
+                &mut journal,
+                &mut state,
+                &channel,
+                &mut BTreeMap::new(),
+                read_by(200, "lint", 0),
+            )
+            .expect("recorded");
         assert_eq!(
-            answered(&pass(Some(&mut deliveries))),
+            answered(&pass(&mut journal, &mut state, Some(&mut deliveries))),
             [
                 unrelated,
                 100,
-                300,
+                400,
                 behind,
                 second_note,
                 refused_cancel,
                 cancel,
+                300,
+                200,
                 overtaken,
                 after
             ],
@@ -14205,15 +15043,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// An envelope naming a node of each of two outstanding notes waits for both
-    /// answers, one naming neither is judged at once, and one naming only what an
-    /// envelope already held names waits behind that one.
+    /// One receiver answering releases its node and no other: an envelope naming
+    /// it is judged at once, while one naming a receiver of the same envelope
+    /// that has not answered still waits — and one naming a node of each of two
+    /// outstanding envelopes waits for both, one naming neither is judged at
+    /// once, and one naming only what an envelope already held names waits
+    /// behind that one.
     ///
-    /// Two notes outstanding at once, each answered on its own, is not a state a
-    /// CLI journey can arrange: the doubled turn's hold is one pair of gates for
-    /// every conversation, so releasing one releases both. So this drives the
-    /// real queue and the real reconciler with the two deliveries outstanding,
-    /// and records each answer as the loop does.
+    /// This drives the real queue and the real reconciler with the receivers
+    /// outstanding, and records each answer as the loop does.
     #[test]
     fn an_envelope_naming_two_outstanding_notes_waits_for_both_answers() {
         let root = std::env::temp_dir().join(format!("onepipeline-two-notes-{}", sys::pid()));
@@ -14228,29 +15066,31 @@ mod tests {
             amend: None,
         };
         let channel = ChannelState::new(&paths);
-        let both = channel
-            .submit(
-                crate::channel::Author::planner(),
-                &[requeue("build"), requeue("docs"), requeue("lint")],
-            )
-            .expect("the envelope naming both is queued");
-        let after = channel
-            .submit(crate::channel::Author::planner(), &[requeue("lint")])
-            .expect("the envelope behind it is queued");
-        let neither = channel
-            .submit(crate::channel::Author::planner(), &[requeue("other")])
-            .expect("the envelope naming neither is queued");
-        let in_flight = DeliveriesInFlight::default();
-        let mut deliveries = NoteDeliveries {
-            answering: mpsc::channel().0,
-            in_flight: in_flight.clone(),
-            outstanding: BTreeMap::from([
-                (1, outstanding_note(&in_flight, 1, "build")),
-                (2, outstanding_note(&in_flight, 2, "docs")),
-            ]),
-            behind: std::collections::VecDeque::new(),
-            recovered: BTreeMap::new(),
+        let submit = |commands: &[Command]| {
+            channel
+                .submit(crate::channel::Author::planner(), commands)
+                .expect("queued")
         };
+        let both = submit(&[requeue("build"), requeue("docs"), requeue("lint")]);
+        let after = submit(&[requeue("lint")]);
+        let neither = submit(&[requeue("other")]);
+        let on_docs = submit(&[requeue("docs")]);
+        let on_test = submit(&[requeue("test")]);
+        let in_flight = DeliveriesInFlight::default();
+        // Envelope 2 offered notes to `docs` and `test`, each still waiting.
+        let mut docs_and_test = outstanding_note(&in_flight, 2, "docs");
+        docs_and_test.envelope.commands.push(note_to("test"));
+        docs_and_test.answers.push(None);
+        docs_and_test
+            .lanes
+            .insert("test".into(), lane_offering(&in_flight, "test", vec![1]));
+        let mut deliveries = deliveries_holding(
+            &in_flight,
+            [
+                (1, outstanding_note(&in_flight, 1, "build")),
+                (2, docs_and_test),
+            ],
+        );
         let mut journal = Journal::open(&paths);
         let mut state = Projected::open(&paths);
         let mut pass = |deliveries: &mut NoteDeliveries| {
@@ -14270,22 +15110,70 @@ mod tests {
                 .map(|outcome| outcome.id)
                 .collect::<Vec<u64>>()
         };
+        // A receiver's answer recorded, with the envelope it came in otherwise
+        // left to its other receivers.
+        let answer = |deliveries: &mut NoteDeliveries, id: u64, node: &str| {
+            drop(deliveries.take_lane(id, node).expect("outstanding"));
+            if deliveries.outstanding[&id].lanes.is_empty() {
+                deliveries.outstanding.remove(&id);
+            }
+        };
 
         assert_eq!(
             pass(&mut deliveries),
             [neither],
-            "only the envelope naming neither outstanding note is answered"
+            "only the envelope naming no outstanding receiver is answered"
         );
-        drop(deliveries.answered(1).expect("outstanding"));
+        // The sidecar names each receiver outstanding, then each envelope held
+        // and what it waits behind — `after`, naming only `lint`, through `both`,
+        // which it is held behind, so behind what `both` waits on.
+        let stated: Vec<(u64, String, Option<u64>)> = deliveries
+            .snapshot()
+            .deliveries
+            .into_iter()
+            .map(|entry| match entry.delivery {
+                crate::channel::deliveries::Delivery::Delivering { node, .. } => {
+                    (entry.envelope, node, None)
+                }
+                crate::channel::deliveries::Delivery::Held {
+                    node,
+                    behind_envelope,
+                    ..
+                } => (entry.envelope, node, Some(behind_envelope)),
+            })
+            .collect();
+        let entry =
+            |envelope: u64, node: &str, behind: Option<u64>| (envelope, node.to_owned(), behind);
+        assert_eq!(
+            stated,
+            [
+                entry(1, "build", None),
+                entry(2, "docs", None),
+                entry(2, "test", None),
+                entry(both, "build", Some(1)),
+                entry(after, "build", Some(1)),
+                entry(on_docs, "docs", Some(2)),
+                entry(on_test, "test", Some(2)),
+            ],
+            "the sidecar does not name each outstanding receiver and what each held \
+             envelope waits behind"
+        );
+        answer(&mut deliveries, 2, "docs");
         assert_eq!(
             pass(&mut deliveries),
             [neither],
-            "the envelope naming both was judged with one of its notes still outstanding"
+            "an envelope was judged with a node it names still outstanding"
         );
-        drop(deliveries.answered(2).expect("outstanding"));
+        answer(&mut deliveries, 2, "test");
         assert_eq!(
             pass(&mut deliveries),
-            [neither, both, after],
+            [neither, on_test],
+            "an envelope naming a receiver that answered waited on the envelope's other one"
+        );
+        answer(&mut deliveries, 1, "build");
+        assert_eq!(
+            pass(&mut deliveries),
+            [neither, on_test, both, after, on_docs],
             "the held envelopes were not each answered, in claim order, once both notes were"
         );
         assert!(deliveries.idle(), "an envelope is still held");
