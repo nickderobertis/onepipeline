@@ -159,12 +159,12 @@ pub(crate) fn answer_withdrawn(
 ///
 /// # Errors
 ///
-/// [`committed`]'s.
+/// None today; the `Result` is the room the channel write beside it leaves.
 pub(crate) fn as_withdrawn(
     paths: &RunPaths,
     mut outcome: CommandOutcome,
 ) -> Result<CommandOutcome> {
-    for (by, operation) in committed(&crate::journal::read(&paths.journal()))? {
+    for (by, operation) in readable(&crate::journal::read(&paths.journal())) {
         if let (
             Some(by),
             Operation::NoteWithdrawn {
@@ -216,10 +216,10 @@ fn refuse_withdrawn(
 ///
 /// # Errors
 ///
-/// [`committed`]'s, and the channel's where an answer cannot be written.
+/// The channel's, where an answer cannot be written.
 pub(crate) fn answer_owed(paths: &RunPaths) -> Result<()> {
     let channel = ChannelState::new(paths);
-    for (by, operation) in committed(&crate::journal::read(&paths.journal()))? {
+    for (by, operation) in readable(&crate::journal::read(&paths.journal())) {
         let (
             Some(by),
             Operation::NoteWithdrawn {
@@ -277,6 +277,42 @@ fn delivered(records: &[(Option<u64>, Operation)], sent: u64, index: u32) -> Opt
         } if *from == sent && *at == index => Some(reached.clone()),
         _ => None,
     })
+}
+
+/// Every operation the run committed that this build can read, with the envelope
+/// that committed it: what a driver's recovery and an envelope's answer read the
+/// run's withdrawals from.
+///
+/// Lenient where [`committed`] is strict, and on purpose: a run whose journal
+/// holds an edit this build cannot fold is still driven and adopted — the
+/// projection reads past it the same way — so neither a driver taking it over
+/// nor an answer it owes is refused for it. A withdrawal hidden in such a record
+/// is one this build cannot act on either way; the `withdraw-note` that would
+/// have to decide against it is what refuses.
+fn readable(journal: &[Envelope]) -> Vec<(Option<u64>, Operation)> {
+    journal
+        .iter()
+        .filter(|envelope| {
+            envelope.source == crate::event::Source::Pipeline
+                && envelope.kind.0 == crate::event::PipelineKind::EditCommitted.as_str()
+        })
+        .flat_map(|envelope| {
+            let by = envelope
+                .payload
+                .get("envelope")
+                .and_then(serde_json::Value::as_u64);
+            serde_json::from_value::<Vec<Operation>>(
+                envelope
+                    .payload
+                    .get("operations")
+                    .cloned()
+                    .unwrap_or_default(),
+            )
+            .unwrap_or_default()
+            .into_iter()
+            .map(move |operation| (by, operation))
+        })
+        .collect()
 }
 
 /// Every operation the run committed, with the envelope that committed it.
@@ -412,8 +448,10 @@ mod tests {
         );
     }
 
-    /// A commit whose operations this build cannot read is refused by name, never
-    /// read past: a withdrawal it hid would let the same note be withdrawn twice.
+    /// A commit whose operations this build cannot read is refused by name when a
+    /// `withdraw-note` is decided against it — a withdrawal it hid would let the
+    /// same note be withdrawn twice — and read past when a driver or an answer
+    /// reads the run's withdrawals, which neither may be refused for.
     #[test]
     fn a_commit_a_withdrawal_cannot_read_is_refused_by_name() {
         use crate::journal::{labels, payload, PipelineKind};
@@ -435,12 +473,14 @@ mod tests {
             ]),
             artifacts: Vec::new(),
         };
-        let refused = committed(&[unreadable]).expect_err("an unreadable commit is not read past");
+        let refused = committed(std::slice::from_ref(&unreadable))
+            .expect_err("an unreadable commit is not read past");
         let said = refused.to_string();
         assert!(
             said.contains("edit-committed") && said.contains("s/4"),
             "the refusal does not name the record: {said}"
         );
+        assert!(readable(&[unreadable]).is_empty());
     }
 
     /// Carried notes accumulate on a node's context, and withdrawing one takes
