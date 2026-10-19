@@ -626,6 +626,7 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
     let decided = |kind: &str| (kind.to_owned(), None);
     match error {
         EngineError::UnknownSource { .. } => decided("unknown-source"),
+        EngineError::IncompleteSource { .. } => decided("incomplete-source"),
         EngineError::Token { .. } => decided("page-token"),
         EngineError::NoSources => decided("no-sources"),
         // llmlint: ignore-block[changed_behavior_has_e2e] These store refusals are
@@ -5737,6 +5738,9 @@ mod tests {
             EngineError::UnknownSource {
                 name: "x".into(),
                 configured: "plans".into(),
+            },
+            EngineError::IncompleteSource {
+                name: onetaskgraph_plugin_api::SourceName::new("plans").expect("a source name"),
             },
             EngineError::Token { message: words() },
             EngineError::NoSources,

@@ -39,9 +39,9 @@ use std::path::PathBuf;
 
 use onetaskgraph_core::config::{self, Layer};
 use onetaskgraph_core::{
-    ConfigError, DependencyRequest, Engine, EngineError, Environment, Filters, GlobalId, Loaded,
-    PageToken, Paging, ProjectSelector, Qualified, QualifiedEdge, QueryResponse, SourceFailure,
-    TaskRequest,
+    Completeness, ConfigError, DependencyRequest, Engine, EngineError, Environment, Filters,
+    GlobalId, Loaded, PageToken, Paging, ProjectSelector, Qualified, QualifiedEdge, QueryResponse,
+    SourceFailure, TaskRequest,
 };
 use onetaskgraph_plugin_api::{
     Classification, DependencyKind, Direction, ItemKind, MetadataKey, NativeId, Project,
@@ -979,6 +979,9 @@ impl Reader {
             let request = DependencyRequest {
                 id: task.clone(),
                 direction: Direction::DependsOn,
+                // Every source's part or a failed read: a plan missing the edges a
+                // source could not be asked for is a graph this launch would run wrong.
+                completeness: Completeness::Required,
                 paging: Paging {
                     limit: self.page,
                     token,

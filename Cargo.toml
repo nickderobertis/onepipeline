@@ -1071,9 +1071,17 @@ onevcs-testing = "0.19.11"
 # words into the line and the surface; `tests/e2e/store.rs`'s
 # `a_create_the_destination_stored_and_answered_malformed_names_the_destination_and_its_residue`
 # drives it. The variant is new, so a lower pin does not compile.
-onetaskgraph-core = "=0.7.2"
-onetaskgraph-plugin-api = "=0.7.2"
-onetaskgraph-local-md = "=0.7.2"
+#
+# **0.7.3 is the release named as carrying that fix**, and it moves two shapes this
+# crate names. A dependency read now says what it owes when a source declared
+# private cannot be asked: `src/taskgraph.rs` asks `Completeness::Required`, because a
+# plan short of one source's edges is a graph a launch would run wrong. A layer may now
+# refine a source no layer declares a plugin for, refused as
+# `EngineError::IncompleteSource`, which write-back names `incomplete-source` as the
+# store does. Both are new, so a lower pin does not compile.
+onetaskgraph-core = "=0.7.3"
+onetaskgraph-plugin-api = "=0.7.3"
+onetaskgraph-local-md = "=0.7.3"
 # Test-support only: the budget checker's own library, at exactly the release `justfile`'s
 # `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
 onebudgetspec-core = "=0.1.5"
