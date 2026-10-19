@@ -1059,7 +1059,7 @@ thread_local! {
     /// when each was taken. `None` outside one, which is every other view.
     //
     // llmlint: ignore[invalid_states_unrepresentable] keyed by run and node as `READ_THIS_RENDER` above is, for the reason recorded there.
-    static STREAM_READS: std::cell::RefCell<Option<BTreeMap<(String, String), (std::rc::Rc<LandingRead>, std::time::Instant)>>> =
+    static STREAM_READS: std::cell::RefCell<Option<BTreeMap<(String, String), Carried>>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -1074,6 +1074,12 @@ thread_local! {
 /// a person takes to look up from it; the stream's own records end the reuse
 /// sooner, and its last render reads afresh.
 pub(crate) const STREAM_READ_REUSE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// One landing read an attach stream carries, and when it was taken.
+struct Carried {
+    read: std::rc::Rc<LandingRead>,
+    taken: std::time::Instant,
+}
 
 /// An attach stream's reads, carried across its renders while this is held.
 ///
@@ -1158,7 +1164,13 @@ impl StreamReads {
             if let Some(reads) = reads {
                 let taken = std::time::Instant::now();
                 for ((key, _, _), read) in wanted.into_iter().zip(read) {
-                    reads.insert(key, (std::rc::Rc::new(read), taken));
+                    reads.insert(
+                        key,
+                        Carried {
+                            read: std::rc::Rc::new(read),
+                            taken,
+                        },
+                    );
                 }
             }
         });
@@ -1199,8 +1211,8 @@ impl Drop for StreamReads {
 /// within [`STREAM_READ_REUSE`].
 fn carried(key: &(String, String)) -> Option<std::rc::Rc<LandingRead>> {
     STREAM_READS.with_borrow(|reads| {
-        let (read, taken) = reads.as_ref()?.get(key)?;
-        (taken.elapsed() < STREAM_READ_REUSE).then(|| std::rc::Rc::clone(read))
+        let carried = reads.as_ref()?.get(key)?;
+        (carried.taken.elapsed() < STREAM_READ_REUSE).then(|| std::rc::Rc::clone(&carried.read))
     })
 }
 
@@ -1387,7 +1399,10 @@ fn read_now(run: &str, node: &str, branch: &str, repo: &str) -> std::rc::Rc<Land
         if let Some(reads) = reads {
             reads.insert(
                 key.clone(),
-                (std::rc::Rc::clone(&read), std::time::Instant::now()),
+                Carried {
+                    read: std::rc::Rc::clone(&read),
+                    taken: std::time::Instant::now(),
+                },
             );
         }
     });
