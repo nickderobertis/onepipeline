@@ -1245,6 +1245,12 @@ impl GitHubEndpoint {
         self.post("/fault", &json!({"status": faults}));
     }
 
+    /// Answer the next reads of numbered issues by reference with `reads`, one each, in order:
+    /// `pass`, or `refuse`.
+    pub(super) fn reads(&self, reads: &[&str]) {
+        self.post("/reads", &json!({"reads": reads}));
+    }
+
     /// Let every held Status write go.
     pub(super) fn release(&self) {
         self.post("/release", &json!({}));

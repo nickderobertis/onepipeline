@@ -16,7 +16,8 @@ under the board that sent it. POST `/fault` with `{"status": FAULT}`, or a list 
 successive writes, answers the next Status write of a numbered card that way: `refuse`d for
 good, `fail-once` with an HTTP 502, `transient` — failed once with an HTTP 502 and the retry
 then held until POST `/release` — or `hold` until `/release` and then dropped unapplied, the
-request a stopped driver sent and never saw answered.
+request a stopped driver sent and never saw answered. POST `/reads` with `{"reads": ["pass" |
+"refuse", ...]}` answers the next reads of issues by reference that way, one each, in order.
 
 The URL is published to `<root>/endpoint` whole or not at all. For the regression journey that
 proves it, `GITHUB_LOOPBACK_PUBLISH_HOLD` names a directory: publication stops half-written,
@@ -126,6 +127,7 @@ state["writes"] = []
 state["fault"] = None
 state["holding"] = False
 state["queued"] = []
+state["reads"] = []
 FAULTS = ["refuse", "fail-once", "transient", "hold"]
 
 
@@ -297,7 +299,15 @@ class Handler(BaseHTTPRequestHandler):
             request = json.loads(self.rfile.read(length))
             if not isinstance(request, dict):
                 raise ValueError("request must be an object")
-            if self.path == "/fault":
+            if self.path == "/reads":
+                reads = request.get("reads") if set(request) == {"reads"} else None
+                if (not isinstance(reads, list)
+                        or any(read not in ["pass", "refuse"] for read in reads)):
+                    raise ValueError("reads name how the next reads by reference are answered")
+                with lock:
+                    state["reads"] = reads
+                answer = {"data": {}}
+            elif self.path == "/fault":
                 faults = request.get("status") if set(request) == {"status"} else None
                 faults = [faults] if isinstance(faults, str) else faults
                 if (not isinstance(faults, list) or not faults
@@ -347,6 +357,10 @@ class Handler(BaseHTTPRequestHandler):
     def numbered(self, query, variables, request):
         """The numbered issues' operations, or `None` for one about the named ones."""
         if "r0:repository(owner:$owner0" in query:
+            read = state["reads"].pop(0) if state["reads"] else "pass"
+            if read == "refuse":
+                return {"errors": [{"type": "FORBIDDEN",
+                                    "message": "the loopback refuses this read by reference"}]}, 200
             return issues_by_reference(variables), 200
         read = variables.get("id")
         if ("node(id:" in query and isinstance(read, str) and read.startswith("ISSUE-")

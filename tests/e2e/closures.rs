@@ -1777,3 +1777,42 @@ fn a_delivered_ticket_failing_for_now_is_asked_again_and_its_failure_kept() {
     read_no_board_whole(&served);
     finished(&world, run);
 }
+
+/// A retry is the last word on a closure whenever it says anything: a ticket failing for now
+/// sends the closure round again, and a retry the board refuses for good is what the record
+/// keeps — `failed`, refused, its items the retry's own — rather than the earlier attempt's,
+/// which is kept only over a retry that reads the item back `unchanged`.
+#[test]
+fn a_retry_refused_for_good_after_a_delivered_ticket_failed_is_the_record_kept() {
+    let (world, served, launch) =
+        closing_seven_delivering("closures-delivered-then-refused", "board:ISSUE-77");
+    served.reads(&["pass", "refuse"]);
+    world.script("hold.wait", "hold");
+    let run = "delivered-then-refused";
+    let project = world.plan(
+        run,
+        &plan_of(run, vec![lifecycle("service", &[]), agent("hold", &[])]),
+    );
+    start_from(&world, &launch, &project);
+    world.until("the landing's closures to be recorded", |world| {
+        !closures_of(world, run).is_empty()
+    });
+    let records = closures_of(&world, run);
+    assert_eq!(records.len(), 1, "{records:#?}");
+    let payload = &records[0]["payload"];
+    assert_eq!(payload["outcome"], "failed", "{payload}");
+    assert_eq!(payload["class"], "refused", "{payload}");
+    assert!(
+        payload["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("the loopback refuses this read by reference")),
+        "{payload}"
+    );
+    assert_eq!(payload["items"][0]["action"], "failed", "{payload}");
+    assert_eq!(payload["items"][0].get("delivered"), None, "{payload}");
+    assert_eq!(
+        card(&served, "1", "7"),
+        (json!("Done"), issue("CLOSED", Some("COMPLETED")))
+    );
+    finished(&world, run);
+}

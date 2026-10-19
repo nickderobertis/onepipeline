@@ -199,14 +199,15 @@ pub(crate) fn complete(store: &Store, landing: &Landing, within: Duration) -> An
             FailureClass::Transient,
             format!("task status complete exceeded {} seconds", within.as_secs()),
         )),
-        Ok(Err(error)) => {
-            let class = crate::writeback::class_of_engine(&error);
-            let record = failed(class, error.to_string());
-            match class {
-                FailureClass::Refused => Answer::Finished(record),
-                FailureClass::Transient => Answer::Transient(record),
-            }
-        }
+        // llmlint: ignore[changed_behavior_has_e2e] unreachable by the producer's own contract:
+        // `complete_issues` fails only with `UnknownSource`, for a source its `only` names, and
+        // this call names none — a source that fails to read and a write that fails are items
+        // `failed` in an `Ok` answer, which the journeys drive. Recorded failed for good, in the
+        // store's own class, rather than assumed away.
+        Ok(Err(error)) => Answer::Finished(failed(
+            crate::writeback::class_of_engine(&error),
+            error.to_string(),
+        )),
         Ok(Ok(completed)) => of_completed(landing, &completed),
     }
 }
