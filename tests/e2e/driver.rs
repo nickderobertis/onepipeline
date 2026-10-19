@@ -1656,7 +1656,10 @@ fn a_detached_adoption_reports_its_driver_dying_on_either_side_of_its_first_read
 /// exit alone reported as a driver that never claimed the run.
 ///
 /// The driver is told apart from the one it displaced by its pid **and** its
-/// start: a host may hand the displaced driver's freed pid straight on.
+/// start: a host may hand the displaced driver's freed pid straight on. Held
+/// before its first reading, the launcher reads that start only once the driver
+/// has exited, so it is stamped through the child it holds rather than by a pid
+/// a host may no longer describe.
 #[test]
 fn a_detached_adoption_announces_its_driver_claiming_on_either_side_of_its_first_reading() {
     for side in [Side::BeforeTheFirstReading, Side::AfterTheFirstReading] {

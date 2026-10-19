@@ -1958,6 +1958,14 @@ fn confirm_driving(paths: &RunPaths, driver: &mut std::process::Child) -> Result
     // very pid to this child, so the record would read as claimed before the
     // child had done anything. Where the host will not stamp the child, the
     // child cannot stamp its claim either, and the pid is all either side has.
+    //
+    // Test failpoints only, and nothing at all where their variables are unset:
+    // a journey holds this process before its first reading, or between that
+    // reading and its first look at whether the driver has exited, so what the
+    // driver does is placed on a chosen side of each. The first is met before
+    // the stamp, so `driver::a_detached_adoption_announces_its_driver_claiming_on_either_side_of_its_first_reading`
+    // stamps a driver that has already claimed the run and exited.
+    let _ = crate::ordering::meet(HANDOVER_UNREAD_GATE_ENV);
     let stamp = sys::child_start_token(driver);
     let claimed = || {
         ledger::read_json_opt::<LaunchRecord>(&paths.launch()).is_some_and(|record| {
@@ -1967,11 +1975,6 @@ fn confirm_driving(paths: &RunPaths, driver: &mut std::process::Child) -> Result
                     .is_none_or(|stamp| stamp.matches(&record.started))
         })
     };
-    // Test failpoints only, and nothing at all where their variables are unset:
-    // a journey holds this process before its first reading, or between that
-    // reading and its first look at whether the driver has exited, so what the
-    // driver does is placed on a chosen side of each.
-    let _ = crate::ordering::meet(HANDOVER_UNREAD_GATE_ENV);
     let mut first = true;
     let deadline = Instant::now() + DRIVER_HANDOVER;
     while Instant::now() < deadline {
