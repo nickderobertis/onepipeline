@@ -886,15 +886,8 @@ fn a_render_asks_the_landing_read_once_per_node_it_prints_and_does_nothing_else_
 const STREAMED: [&str; 3] = ["first", "second", "third"];
 
 /// How long the last of them works, so the stream goes quiet for longer than it carries
-/// a read and the reads before it lapse.
+/// a read — the ten seconds divergence 33 states — and the reads before it lapse.
 const QUIET_MS: u64 = 11_000;
-
-/// How long an attach stream carries a landing read across its renders: the ten seconds
-/// divergence 33 states, held here as the journeys that state it are — one requiring no
-/// read again inside it and the other requiring one again after [`QUIET_MS`]. The crate's
-/// own `views::STREAM_READ_REUSE` is private to it, so its unit test
-/// `a_carried_landing_read_lapses_at_the_end_of_its_window` pins it to this same figure.
-pub(crate) const STREAM_READ_REUSE_MS: u64 = 10_000;
 
 /// One render of an attach stream: the lines it printed above its trailer, and the acts
 /// the render-cost record holds for it.
@@ -940,6 +933,16 @@ impl StreamRender {
             }
         }
         spans
+    }
+
+    /// How long the stream this render is part of carries a landing read, in
+    /// milliseconds, as the render's own record states it.
+    pub(crate) fn carried_ms(&self) -> u64 {
+        self.acts
+            .iter()
+            .find(|act| act["act"] == "render")
+            .and_then(|act| act["carried_ms"].as_u64())
+            .unwrap_or_else(|| panic!("a stream's render did not say how long it carries a read"))
     }
 
     /// Whether this render reported on `node`'s landing.
@@ -1058,6 +1061,17 @@ fn an_attach_stream_carries_a_landing_read_until_something_moves_it_and_reads_af
     streamed.settled();
     let renders = stream_renders(&world, &record, &streamed.stderr, run);
     let last = renders.len() - 1;
+    // The window, as the stream's renders state it, and shorter than the quiet stretch
+    // that is to outlast it.
+    let window = renders[0].carried_ms();
+    assert!(
+        renders.iter().all(|render| render.carried_ms() == window),
+        "the stream's renders disagree about how long they carry a read"
+    );
+    assert!(
+        window < QUIET_MS,
+        "the stream carries a read for {window} ms, no shorter than its quiet stretch"
+    );
 
     // The final render reports the run as it settled, and carries nothing into it.
     assert_eq!(
@@ -1102,13 +1116,13 @@ fn an_attach_stream_carries_a_landing_read_until_something_moves_it_and_reads_af
                     )
                 });
                 assert!(
-                    since >= STREAM_READ_REUSE_MS,
+                    since >= window,
                     "render {at} read {node} again {since} ms after the read it carried, \
                      with nothing it printed moving it:\n{}",
                     streamed.stderr
                 );
             }
-            if since.is_some_and(|since| since >= STREAM_READ_REUSE_MS) {
+            if since.is_some_and(|since| since >= window) {
                 lapsed += 1;
             }
             previous = Some(read);

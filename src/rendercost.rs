@@ -165,6 +165,17 @@ pub(crate) struct Render {
 }
 
 pub(crate) fn rendering(view: Rendered, run: &str) -> Render {
+    rendering_carrying(view, run, None)
+}
+
+/// The same, for a render inside an attach stream, which carries a landing read across
+/// its renders for `carried_for`: the render's record says so, so a journey holding the
+/// stream to that window reads the window off the record rather than restating it.
+pub(crate) fn rendering_carrying(
+    view: Rendered,
+    run: &str,
+    carried_for: Option<std::time::Duration>,
+) -> Render {
     let outermost = INSIDE.with_borrow_mut(|inside| {
         if inside.is_some() {
             return false;
@@ -177,7 +188,13 @@ pub(crate) fn rendering(view: Rendered, run: &str) -> Render {
         true
     });
     if outermost {
-        record(Act::Began, json!({}));
+        record(
+            Act::Began,
+            carried_for.map_or_else(
+                || json!({}),
+                |carried| json!({ "carried_ms": carried.as_millis() }),
+            ),
+        );
     }
     Render { outermost }
 }

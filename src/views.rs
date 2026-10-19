@@ -1238,7 +1238,10 @@ fn carried(key: &(String, String)) -> Option<std::rc::Rc<LandingRead>> {
 
 /// Begin rendering `view` over `run`.
 fn rendering(view: Rendered, run: &str) -> Rendering {
-    let render = crate::rendercost::rendering(view, run);
+    let carried_for = STREAM_READS
+        .with_borrow(Option::is_some)
+        .then_some(STREAM_READ_REUSE);
+    let render = crate::rendercost::rendering_carrying(view, run, carried_for);
     if render.outermost() {
         READ_THIS_RENDER.with_borrow_mut(BTreeMap::clear);
     }
@@ -5526,10 +5529,9 @@ mod tests {
     /// window has passed, measured from when the read was taken.
     #[test]
     fn a_carried_landing_read_lapses_at_the_end_of_its_window() {
-        // The ten seconds divergence 33 states, pinned exactly: `tests/e2e/landing.rs`
-        // holds an attach stream to the same figure as `STREAM_READ_REUSE_MS`, which a
-        // test binary has no way to read from here, so this is the gate that keeps the
-        // two one number.
+        // The ten seconds divergence 33 states, pinned exactly, so the document and the
+        // window cannot part; `tests/e2e/landing.rs` reads the window off each stream
+        // render's own record rather than holding a copy of it.
         assert_eq!(super::STREAM_READ_REUSE, std::time::Duration::from_secs(10));
         let taken = std::time::Instant::now();
         let carried = super::Carried {
