@@ -2,15 +2,17 @@
 //! shared, multi-client server the linked `oneharness-core` runs every
 //! controlled Codex turn on, one per pool key (oneharness-core 0.28).
 //!
-//! Only as much of Codex's protocol as one turn needs: the WebSocket upgrade,
-//! then JSON-RPC — `initialize`, `thread/start` / `thread/resume`, `turn/start`
+//! Only as much of Codex's protocol as one turn needs, and only what this
+//! suite's journeys send — each method below is one the shared-server journey
+//! in `tests/e2e/dispatch.rs` fails without: the WebSocket upgrade, then
+//! JSON-RPC — `initialize`, `thread/start` / `thread/resume`, `turn/start`
 //! (answered with the turn, then `turn/started`, one `item/agentMessage/delta`
-//! carrying the reply and `turn/completed`), `thread/unsubscribe` and
-//! `thread/loaded/list`. Like the rest of the doubles it refuses what oneharness
-//! would never send — a malformed upgrade, frame, envelope or request, or a
-//! method outside that list — by exiting with the reason on stderr, which the
-//! engine reports as the server lost under the turn: loud, never a turn that
-//! quietly answered something else.
+//! carrying the reply and `turn/completed`) and `thread/unsubscribe`. Like the
+//! rest of the doubles it refuses everything else — a malformed upgrade, frame,
+//! envelope or request, or a method outside that list — by exiting with the
+//! reason on stderr, which the engine reports as the server lost under the
+//! turn: loud, never a turn that quietly answered something else. A journey
+//! that starts sending another method adds it here beside that journey.
 //!
 //! Scripted from the double's directory, as every double is:
 //!
@@ -429,8 +431,6 @@ enum Call {
     TurnStart(TurnParams),
     #[serde(rename = "thread/unsubscribe")]
     ThreadUnsubscribe(ThreadRef),
-    #[serde(rename = "thread/loaded/list")]
-    ThreadLoadedList(Empty),
 }
 
 impl TryFrom<RawEnvelope> for Message {
@@ -614,10 +614,6 @@ fn handle(server: &Server, writer: &Writer, message: Message) -> Result<(), Stri
         Call::ThreadUnsubscribe(ThreadRef { thread_id }) => {
             let held = threads(server).remove(&thread_id);
             reply(json!({"status": if held { "unsubscribed" } else { "notLoaded" }}));
-        }
-        Call::ThreadLoadedList(Empty {}) => {
-            let held: Vec<String> = threads(server).iter().cloned().collect();
-            reply(json!({"data": held, "nextCursor": null}));
         }
     }
     Ok(())
