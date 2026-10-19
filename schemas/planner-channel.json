@@ -1,5 +1,5 @@
 {
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "The planner-channel layout onepipeline publishes for a host's onemessagebus to link.",
   "schemas": [
     {
@@ -308,6 +308,17 @@
                   }
                 ],
                 "description": "The refusal by kind, where the reconciler refused this command for a\nreason it names as one — `reason` is then its text. Omitted otherwise, so\nevery outcome written before it existed reads unchanged."
+              },
+              "turn": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/NoteTurn"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "How the live turn that took a `note` took it: `interrupted`, or\n`turn-end`. Present exactly where an applied note reached the worker or\nthe supervisor, as that note's `note-delivered` record says, and omitted\notherwise — so every outcome written before it existed reads unchanged."
               }
             },
             "required": [
@@ -450,6 +461,21 @@
               }
             ],
             "description": "Why the reconciler refused a [`Command::Decline`], by kind.\n\nIts [`Display`](std::fmt::Display) is the refusal's `reason` on the command's\noutcome. The kinds are the ones a planner acts on differently: a comment no\nread of the node found is named again once `onepipeline review` has read it, a\nblank reason is restated, a comment a reply already answers needs nothing, and\na decline whose replies did not all reach the host is sent again, posting only\nthe ones still missing. See `docs/contract-divergences.md` entry 130."
+          },
+          "NoteTurn": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "interrupted",
+                "description": "The party's running turn was interrupted, and its replacement opened on\nthe note."
+              },
+              {
+                "type": "string",
+                "const": "turn-end",
+                "description": "The party's running turn was left to end, and the note reached it then."
+              }
+            ],
+            "description": "How a live turn took a note: the `turn` a `worker` or `supervisor`\ndisposition carries."
           }
         }
       }
@@ -746,6 +772,7 @@
         "finding",
         "amend",
         "note",
+        "withdraw-note",
         "settle",
         "rework",
         "retitle",

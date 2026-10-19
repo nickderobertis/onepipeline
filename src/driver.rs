@@ -4525,6 +4525,15 @@ fn validate_here(
         let launch: crate::ledger::LaunchRecord = crate::ledger::read_json(&paths.launch())?;
         return crate::reply::staged_decline(paths, state, launch.review_reply_graph(), operations);
     }
+    if let Command::WithdrawNote {
+        envelope,
+        index,
+        reason,
+    } = command
+    {
+        return crate::withdrawal::validate(paths, envelope, *index, reason)
+            .map(engine::Staged::Compiled);
+    }
     let Command::Note {
         id,
         addressee,
@@ -4532,6 +4541,7 @@ fn validate_here(
         criterion,
         deliver,
         persist,
+        delivery_timeout_seconds,
     } = command
     else {
         return Ok(engine::Staged::Compiled(operations));
@@ -4542,6 +4552,8 @@ fn validate_here(
         text,
         criterion: criterion.as_ref(),
         reach: crate::note::Reach::of(id, *deliver, *persist)?,
+        deliver: *deliver,
+        deadline: crate::note::deadline_of(id, *deliver, *delivery_timeout_seconds)?,
         // Nothing is driving the run, so the frontier this was validated
         // against is the whole of what says whether the node has a dispatch
         // left to carry the note to.

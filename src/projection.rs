@@ -2271,12 +2271,30 @@ pub(crate) fn fold_operations(state: &mut RunState, operations: &[Operation], at
             Operation::NoteDelivered {
                 node,
                 text,
-                reached: crate::note::Reached::Carried,
+                reached: crate::note::Reached::Carried { .. },
                 ..
             } => {
-                state
+                let carried = crate::note::with_carried(
+                    state.pending_context.get(node).map(String::as_str),
+                    text.as_str(),
+                );
+                state.pending_context.insert(node.clone(), carried);
+            }
+            // A carried note withdrawn before a dispatch took it is owed to
+            // nobody, and every other note carried beside it still is.
+            Operation::NoteWithdrawn { node, text, .. } => {
+                let left = state
                     .pending_context
-                    .insert(node.clone(), text.as_str().to_string());
+                    .get(node)
+                    .and_then(|context| crate::note::without_carried(context, text.as_str()));
+                match left {
+                    Some(left) => {
+                        state.pending_context.insert(node.clone(), left);
+                    }
+                    None => {
+                        state.pending_context.remove(node);
+                    }
+                }
             }
             _ => {}
         }
@@ -3174,12 +3192,16 @@ mod tests {
                         routed_to: Vec::new(),
                         reached,
                         envelope: None,
+                        index: None,
                     }]),
                 )],
             )
         };
 
-        let carried = fold(&[started.clone(), delivered(crate::note::Reached::Carried)]);
+        let carried = fold(&[
+            started.clone(),
+            delivered(crate::note::Reached::Carried { reason: None }),
+        ]);
         assert_eq!(carried.pending_context["build"], "the fixture moved");
         assert_eq!(
             carried
@@ -3192,7 +3214,10 @@ mod tests {
             "a note no turn took did not reach the node it is still owed to"
         );
 
-        let taken = fold(&[started, delivered(crate::note::Reached::Worker)]);
+        let taken = fold(&[
+            started,
+            delivered(crate::note::Reached::Worker { turn: None }),
+        ]);
         assert!(
             taken.pending_context.is_empty(),
             "a note a running turn read was also owed to the dispatch after it"

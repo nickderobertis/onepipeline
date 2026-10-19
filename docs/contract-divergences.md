@@ -11905,3 +11905,104 @@ a `reparent` gives it the edge, after which it starts only once the prerequisite
   "surface_cadence_env": "ONEPIPELINE_RELEASE_SURFACE_SECONDS"
 }
 ```
+
+## 132. A manager's note waited for the live turn to end, could not be bounded, and could not be taken back — OPEN
+
+**Proposal, for the planner who owns the contract: three `deliver` values, an optional
+`delivery_timeout_seconds`, a `withdraw-note` op, and a `turn` on a delivered note.** The
+plan node `op-interrupting-notes` (ai-orchestrator#1902, #1622, #1834 and onepipeline#512)
+states the surface as its task. The authority is `Command` in `src/channel.rs`, and the
+block below is reconciled with it by `tests/contract.rs`'s
+`the_interrupting_note_surface_is_what_entry_132_names`.
+
+**What was wrong.** A correction a manager sent reached the worker or supervisor only once
+the turn it was in ended, which can be hours. Nothing bounded that wait, and a note made
+obsolete by a later decision could not be taken back before anyone read it. The record said
+which party took a note, but not whether its turn was interrupted or only reached at its end.
+
+**The rule this build applies.**
+
+1. **`deliver` is `live` (the default), `turn-end` or `next`.** `live` offers the note with
+   onejudge's `Delivery::Interrupt`: the addressed party's live turn is interrupted and its
+   replacement opens on the note, or the note waits for the turn's end where that turn
+   cannot be interrupted. `turn-end` offers it with `Delivery::TurnEnd` and never
+   interrupts. `next` makes no live attempt. `persist` is unchanged, and `next` with
+   `persist: false` is still refused.
+2. **`delivery_timeout_seconds`** is optional, with no default; absent, a note waits for as
+   long as the dispatch runs. It is refused at the envelope when it is `0` or beside
+   `deliver: next`. It is measured from the offer: a note no turn took by then is withdrawn
+   whole (`NoteOffer::wait_until` answers `Expired`), and `persist` decides what follows.
+   `true` records it `carried`, with a `reason` naming the deadline, into the node's next
+   dispatch; `false` refuses it with an `edit-rejected` naming the deadline. That holds for
+   a `live` note whose turn could not be interrupted, or whose redirect was refused, as
+   much as for a `turn-end` one. `status` shows a pending note's deadline beside its
+   `delivering` state, and `status --json` carries it as the `delivering` reading's
+   `deadline`.
+3. **A `note-delivered` record, and the note's result in the channel outcome, carry `turn:
+   interrupted | turn-end`** exactly where `reached` is `worker` or `supervisor`, mapped
+   from onejudge's `Accepted::Interrupted` and `Accepted::AtTurnEnd`. A record or outcome
+   written before this has no `turn` and reads and renders as before. The record also
+   names the note's 0-based `index` in its envelope beside the `envelope` it already named.
+4. **`withdraw-note {envelope, index, reason}`** names the note at command position `index`
+   of envelope `envelope`, and is never held behind any note. A blank `reason`, no such
+   envelope or note, and a note already answered, already composed into a dispatch, or
+   already withdrawn are each refused with an `edit-rejected` naming why, and change
+   nothing. A carried note not yet composed into a dispatch is withdrawn: the run commits
+   `note-withdrawn {node, envelope, index, reason, from: carried, text}`, the next dispatch
+   is composed without it (every other note carried beside it stays in that dispatch's
+   `## Planner context`, and replay reaches the same context), and the original envelope
+   is answered again with that note's command `refused`, carrying the withdrawal's reason.
+   **A later outcome for an envelope id supersedes an earlier one**: `outcome_of` reads the
+   latest.
+
+**Interim, ruled.** The manager ruled under correlation
+`c-aa4f02b18fb1d83a1495c1b07c2a2d77` that this node withdraws carried notes only. A note
+still untaken in its live conversation's inbox cannot be withdrawn through
+`oneagentgraph` 0.6.0: its relay takes the in-process offer out of its book for as long as a
+wait blocks on it, and a delivery waits on every live note it offers, so a withdrawal then
+answers `taken`. Such a `withdraw-note` is refused with an `edit-rejected` whose reason
+says live withdrawal waits on `oneagentgraph` making an offer withdrawable while it is
+waited on, and the note's delivery and outcome are left untouched. `from: live` is
+declared and written by no build yet. An `oneagentgraph` node that makes an offer
+withdrawable while it is waited on, and a later onepipeline node that relinks onto it,
+retire this interim. The manager approved the record's `text` under correlation
+`c-6e20576dba29b78e543c876cbb9a85c8`: replay takes a withdrawn note's text off the node it
+was carried onto, and nothing else.
+
+**Carried over.** `cancel`'s preemption of a note still being delivered to its node is
+unchanged: the cancel answers that note refused, and ends the conversation that would have
+read it. **onepipeline#512**: v0.63.6 already answers a claimed envelope a dead driver left
+exactly once. What remained was an envelope with no outcome for as long as a held turn ran;
+an interrupt removes most of that, and `delivery_timeout_seconds` bounds the rest.
+
+**Beside it.** onejudge 0.20.0's `agent.note@1` gains an optional `delivery`, defaulted to
+the interrupt, which admits every note the 0.8.0 capture admitted; `tests/registry.rs`
+tolerates exactly `/properties/delivery` and `/$defs/Delivery` there. `docs/contract.md`'s
+marked copy of the bus contract is re-decided against `onemessagebus` 0.9.3, whose envelope,
+filter and parser are 0.9.1's. The planner-channel bundle rises to `1.6.0` for the
+outcome's `turn` and the `withdraw-note` op; the events bundle does not move.
+
+```json
+{
+  "deliver": ["live", "turn-end", "next"],
+  "default_deliver": "live",
+  "note": {"op": "note", "id": "build", "addressee": "worker", "text": "stop editing src/old.rs", "deliver": "turn-end", "delivery_timeout_seconds": 2},
+  "refused_at_the_envelope": [
+    {"command": {"op": "note", "id": "build", "addressee": "worker", "text": "stop editing src/old.rs", "delivery_timeout_seconds": 0}, "refused": "`delivery_timeout_seconds` is 0"},
+    {"command": {"op": "note", "id": "build", "addressee": "worker", "text": "stop editing src/old.rs", "deliver": "next", "delivery_timeout_seconds": 2}, "refused": "`deliver: next` waits on none"}
+  ],
+  "withdraw_note": {"op": "withdraw-note", "envelope": "3", "index": 0, "reason": "the fixture moved back"},
+  "turn": ["interrupted", "turn-end"],
+  "delivered": {"kind": "note-delivered", "node": "build", "addressee": "worker", "text": "stop editing src/old.rs", "reached": "worker", "turn": "interrupted", "envelope": 3, "index": 0},
+  "delivered_before": {"kind": "note-delivered", "node": "build", "addressee": "worker", "text": "stop editing src/old.rs", "reached": "worker", "envelope": 3},
+  "carried_expired": {"kind": "note-delivered", "node": "build", "addressee": "worker", "text": "stop editing src/old.rs", "reached": "carried", "reason": "no turn took it within its `delivery_timeout_seconds: 2`, so it was withdrawn untaken", "envelope": 3, "index": 0},
+  "withdrawn": {"kind": "note-withdrawn", "node": "build", "envelope": 3, "index": 0, "reason": "the fixture moved back", "from": "carried", "text": "stop editing src/old.rs"},
+  "withdrawn_from": ["live", "carried"],
+  "live_withdrawal_refused": "a live note cannot be withdrawn yet",
+  "result": {"index": 0, "op": "note", "outcome": "applied", "turn": "interrupted"},
+  "result_before": {"index": 0, "op": "note", "outcome": "applied"},
+  "delivering": {"envelope": "3", "state": "delivering", "node": "build", "since": "2026-10-19T09:00:00.000Z", "deadline": "2026-10-19T09:00:02.000Z"},
+  "note_delivery_tolerance": ["/properties/delivery", "/$defs/Delivery"],
+  "bundle_versions": {"events": "1.7.0", "planner_channel": "1.6.0"}
+}
+```

@@ -656,7 +656,8 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         None => PermissionMode::Bypass,
     };
 
-    match side {
+    control::open(args, dir);
+    let ended = match side {
         Side::Agent => match cwd {
             Some(cwd) => agent_turn(
                 &prompt,
@@ -679,6 +680,215 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
             mode,
             view,
         ),
+    };
+    control::close();
+    ended
+}
+
+/// What this double records when a held turn is **aborted** by a redirect: the
+/// held turn's own prompt. A turn aborted this way never records [`TURN_ENDED`].
+const TURN_ABORTED: &str = "oneharness-turn-aborted";
+
+/// What this double records when a turn runs to its own end: the prompt it ran
+/// on — the replacement's, for a turn a redirect replaced.
+const TURN_ENDED: &str = "oneharness-turn-ended";
+
+/// Out-of-band turn control, as `oneharness run --control` offers it: a unix
+/// socket at the address onejudge derives from the turn's `--session`, which
+/// answers a redirect by aborting the turn being held and opening its
+/// replacement on the redirect's input.
+///
+/// **Opt-in**, by `harness.control`: `serve` answers redirects for as long as a
+/// turn is held, and `unreachable` binds the address and answers nothing, so a
+/// redirect is refused and the held turn goes on. Absent, the turn offers no
+/// control at all — a harness with no control mechanism — and a note waits for
+/// the turn to end. Only a *held* turn is redirected: every other turn this
+/// double runs is over before a redirect could reach it, so one arriving then is
+/// refused as having no active turn, exactly as the real run refuses one between
+/// turns. The request and the answers are the core's own types, read and written
+/// through its `parse_request` and `ControlResponse::to_line`.
+mod control {
+    use onepipeline_testfakes as fake;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, OnceLock, PoisonError};
+
+    /// A redirect a held turn took: its input, and the answer the request that
+    /// carried it is waiting for.
+    pub(super) struct Redirect {
+        pub(super) input: String,
+        answer: std::sync::mpsc::Sender<()>,
+    }
+
+    impl Redirect {
+        /// The replacement turn has opened on it, so the request is answered
+        /// `redirected`.
+        pub(super) fn delivered(self) {
+            let _ = self.answer.send(());
+        }
+    }
+
+    #[derive(Default)]
+    struct State {
+        holding: bool,
+        taken: Option<Redirect>,
+    }
+
+    struct Bound {
+        socket: PathBuf,
+        /// Written once a redirect is taken, so a hold waiting on its gate wakes.
+        marker: PathBuf,
+        state: std::sync::Arc<Mutex<State>>,
+    }
+
+    static BOUND: OnceLock<Option<Bound>> = OnceLock::new();
+
+    /// Bind this turn's control socket, when the turn asked for control and the
+    /// journey scripted one.
+    pub(super) fn open(args: &[String], dir: &Path) {
+        let _ = BOUND.set(bind(args, dir));
+    }
+
+    /// Unbind it, so a later turn of the same session binds afresh.
+    pub(super) fn close() {
+        if let Some(Some(bound)) = BOUND.get() {
+            let _ = std::fs::remove_file(&bound.socket);
+            let _ = std::fs::remove_file(&bound.marker);
+        }
+    }
+
+    /// Hold the turn until `gate` is released, or until a redirect aborts it —
+    /// answering which.
+    pub(super) fn hold(gate: &Path) -> Option<Redirect> {
+        let Some(Some(bound)) = BOUND.get() else {
+            fake::wait_for(gate);
+            return None;
+        };
+        bound
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .holding = true;
+        fake::wait_for_any(&[gate.to_path_buf(), bound.marker.clone()]);
+        let mut state = bound.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.holding = false;
+        state.taken.take()
+    }
+
+    #[cfg(unix)]
+    fn bind(args: &[String], dir: &Path) -> Option<Bound> {
+        use oneharness_core::domain::control::socket_path;
+        use std::os::unix::net::UnixListener;
+        if !args.iter().any(|arg| arg == "--control") {
+            return None;
+        }
+        let serving = match fake::node_script(dir, "harness", "control")?.as_str() {
+            "serve" => true,
+            "unreachable" => false,
+            other => fake::fail(&format!(
+                "harness.control holds {other:?}; it is `serve` or `unreachable`"
+            )),
+        };
+        let session = fake::flag(args, "--session")
+            .unwrap_or_else(|| fake::fail("oneharness run --control requires --session"));
+        let store = oneharness_core::io::session::resolve_dir(None)
+            .unwrap_or_else(|| fake::fail("no session store to bind a control socket under"));
+        let socket = socket_path(&store, &session).unwrap_or_else(|too_long| {
+            fake::fail(&format!(
+                "the control socket {} is past this platform's address limit",
+                too_long.path().display()
+            ))
+        });
+        if let Some(parent) = socket.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::remove_file(&socket);
+        let listener = UnixListener::bind(&socket).unwrap_or_else(|error| {
+            fake::fail(&format!("cannot bind {}: {error}", socket.display()))
+        });
+        let marker = dir.join(format!("redirect.{}", std::process::id()));
+        let state = std::sync::Arc::new(Mutex::new(State::default()));
+        if serving {
+            let (state, marker) = (std::sync::Arc::clone(&state), marker.clone());
+            std::thread::spawn(move || {
+                for stream in listener.incoming().flatten() {
+                    serve(stream, &state, &marker);
+                }
+            });
+        } else {
+            // Bound and let go: the address exists and nothing answers it.
+            drop(listener);
+        }
+        Some(Bound {
+            socket,
+            marker,
+            state,
+        })
+    }
+
+    #[cfg(not(unix))]
+    fn bind(_: &[String], _: &Path) -> Option<Bound> {
+        None
+    }
+
+    /// Answer one request on the control socket.
+    #[cfg(unix)]
+    fn serve(stream: std::os::unix::net::UnixStream, state: &Mutex<State>, marker: &Path) {
+        use oneharness_core::domain::control::{
+            parse_request, ControlReason, ControlResponse, ControlShape,
+        };
+        use std::io::{BufRead, Write};
+        let mut line = String::new();
+        let Ok(reader) = stream.try_clone() else {
+            return;
+        };
+        if std::io::BufReader::new(reader)
+            .read_line(&mut line)
+            .is_err()
+        {
+            return;
+        }
+        let response = match parse_request(&line) {
+            Err(why) => ControlResponse::refused(why, ControlReason::Unsupported),
+            Ok(request) => match request.input() {
+                None => ControlResponse::refused(
+                    "this double redirects a held turn and does nothing else",
+                    ControlReason::Unsupported,
+                ),
+                Some(input) => {
+                    let (answer, answered) = std::sync::mpsc::channel();
+                    let taken = {
+                        let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
+                        if state.holding && state.taken.is_none() {
+                            state.taken = Some(Redirect {
+                                input: input.as_str().to_string(),
+                                answer,
+                            });
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    if taken && std::fs::write(marker, "redirected").is_ok() {
+                        match answered.recv() {
+                            Ok(()) => {
+                                ControlResponse::redirected(ControlShape::ClaudeControlRequest)
+                            }
+                            Err(_) => ControlResponse::refused(
+                                "the turn ended before its replacement opened",
+                                ControlReason::NoActiveTurn,
+                            ),
+                        }
+                    } else {
+                        ControlResponse::refused(
+                            "the run is alive but no turn is in flight",
+                            ControlReason::NoActiveTurn,
+                        )
+                    }
+                }
+            },
+        };
+        let mut stream = stream;
+        let _ = stream.write_all(response.to_line().as_bytes());
     }
 }
 
@@ -1074,8 +1284,23 @@ fn work(
     } else {
         None
     };
-    if let Some([go, settle]) = gates {
-        fake::wait_for(&dir.join(&go));
+    let mut ran_on = prompt.to_string();
+    let redirect = match &gates {
+        Some([go, _]) => control::hold(&dir.join(go)),
+        None => None,
+    };
+    if let Some(redirect) = redirect {
+        // Aborted: the held turn never ends on its own, and its replacement
+        // opens on the redirect's input — recorded as the prompt it is.
+        fake::record(dir, TURN_ABORTED, &[prompt.to_string()]);
+        let mut replacement = vec![redirect.input.clone()];
+        for config in configs {
+            replacement.push(std::fs::read_to_string(config).unwrap_or_default());
+        }
+        fake::record(dir, "oneharness-config", &replacement);
+        ran_on.clone_from(&redirect.input);
+        redirect.delivered();
+    } else if let Some([go, settle]) = gates {
         let held = [call(3, "cargo llvm-cov --workspace"), observation(4)];
         for event in &held {
             drew_any |= view.event(event)?;
@@ -1111,6 +1336,7 @@ fn work(
     drew_any |= view.event(&said)?;
     events.push(said);
 
+    fake::record(dir, TURN_ENDED, &[ran_on.clone()]);
     let mut report = report(outcome.text(), Some(events), outcome, &ran.identity, mode);
     report.results[0].observed_model = ran
         .observed_model
@@ -1145,7 +1371,7 @@ fn work(
     }
     if let Some(history) = history {
         report.history_file =
-            Some(history.write(std::path::Path::new(cwd), prompt, mode, &report.results)?);
+            Some(history.write(std::path::Path::new(cwd), &ran_on, mode, &report.results)?);
     }
     view.closing(report, drew_any)?;
     Ok(outcome)
@@ -1397,8 +1623,25 @@ fn judge_turn(
     mode: PermissionMode,
     view: View,
 ) -> ExitCode {
+    let mut ran_on = prompt.to_string();
     let answer = if prompt.contains(SUPERVISOR_OPENING) {
-        supervision(dir)
+        match hold_the_supervisor(dir) {
+            // Aborted, as a held worker turn is: the decision is re-taken on the
+            // redirect's input, which is the replacement turn's whole prompt.
+            Some(redirect) => {
+                fake::record(dir, TURN_ABORTED, &[prompt.to_string()]);
+                fake::record(
+                    dir,
+                    "oneharness-config",
+                    std::slice::from_ref(&redirect.input),
+                );
+                let decided = supervision(dir);
+                ran_on.clone_from(&redirect.input);
+                redirect.delivered();
+                decided
+            }
+            None => supervision(dir),
+        }
     } else if prompt.contains(fake::EVALUATOR_OPENING) {
         verdict(dir)
     } else {
@@ -1417,6 +1660,7 @@ fn judge_turn(
     // alone. The project is the worktree where the question was about one, and
     // this process's own directory otherwise, as the real CLI's `project_start`
     // is.
+    fake::record(dir, TURN_ENDED, &[ran_on]);
     let recorded = answer.and_then(|answer| {
         let mut report = report(&answer, None, Outcome::Answered, identity, mode);
         if let Some(history) = history {
@@ -1452,7 +1696,6 @@ fn judge_turn(
 /// that is still not the conversation's last, so the note rides a response that
 /// opens another worker turn rather than one that ends the work.
 fn supervision(dir: &std::path::Path) -> Result<String, String> {
-    hold_the_supervisor(dir);
     let asked_again = dir.join("judge.asked-again");
     let nth = fake::count(dir, "judge-supervision");
     let times = asks_again_times(dir)?;
@@ -1550,10 +1793,12 @@ fn turn_gates(dir: &std::path::Path, prompt: &str) -> Result<Option<[String; 2]>
 /// The gate is not consumed, so a decision re-taken *because* of what arrived
 /// runs straight through: what a journey holds is the turn it is delivering into,
 /// not every turn after it.
-fn hold_the_supervisor(dir: &std::path::Path) {
-    if fake::node_script(dir, "judge", "hold").is_none() {
-        return;
-    }
+///
+/// Under `harness.control` the hold can end the other way too: a redirect
+/// aborts it, and what comes back is that redirect, for the decision to be
+/// re-taken on.
+fn hold_the_supervisor(dir: &std::path::Path) -> Option<control::Redirect> {
+    fake::node_script(dir, "judge", "hold")?;
     let holding = dir.join("judge.holding");
     if let Err(error) = std::fs::write(&holding, "holding") {
         fake::fail(&format!(
@@ -1561,7 +1806,7 @@ fn hold_the_supervisor(dir: &std::path::Path) {
             holding.display()
         ));
     }
-    fake::wait_for(&dir.join("judge.go"));
+    control::hold(&dir.join("judge.go"))
 }
 
 /// How onejudge opens the prompt it hands its supervisor side.

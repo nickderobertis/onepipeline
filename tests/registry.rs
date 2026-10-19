@@ -180,14 +180,20 @@ fn differences(left: &Value, right: &Value, at: &str, found: &mut Vec<String>) {
 /// Each registry also registers ids of its own, which is why this checks
 /// containment rather than equality; `every_registered_id_is_listed_in_order`
 /// above pins the shared set exactly.
-/// The one constraining addition since the capture, and the only one tolerated:
-/// a matcher may name the producer's optional `significance` stamp, which admits
+/// One of the two constraining additions since the capture, and the only two
+/// tolerated: a matcher may name the producer's optional `significance` stamp, which admits
 /// filters the capture refused and refuses none it admitted. Entry 123 of
 /// `docs/contract-divergences.md` records it.
 const SIGNIFICANCE: [&str; 2] = [
     "/$defs/Matcher/properties/significance",
     "/$defs/Significance",
 ];
+
+/// The other: onejudge 0.20.0's note carries an optional `delivery` — interrupt
+/// the live turn, or wait for its end — defaulted to the interrupt, so a note the
+/// capture admitted is still admitted. Entry 132 of `docs/contract-divergences.md`
+/// records it.
+const NOTE_DELIVERY: [&str; 2] = ["/properties/delivery", "/$defs/Delivery"];
 
 #[test]
 fn both_registries_hold_every_captured_id_under_its_captured_document() {
@@ -212,6 +218,9 @@ fn both_registries_hold_every_captured_id_under_its_captured_document() {
                 .filter(|pointer| !pointer.ends_with("/description"))
                 .filter(|pointer| {
                     !(text == "agent.event-filter@1" && SIGNIFICANCE.contains(&pointer.as_str()))
+                })
+                .filter(|pointer| {
+                    !(text == "agent.note@1" && NOTE_DELIVERY.contains(&pointer.as_str()))
                 })
                 .collect();
             assert!(
@@ -254,12 +263,13 @@ fn the_document_reader_names_a_constraining_difference_and_a_prose_one_apart() {
     assert_eq!(found, ["/properties/extra"]);
 }
 
-/// And `Phase`'s prose and the `significance` matcher really are the only
-/// differences the assertion above tolerates — so a further one appearing is
+/// And `Phase`'s prose, the `significance` matcher and the note's `delivery`
+/// really are the only differences the assertion above tolerates — so a further one appearing is
 /// something somebody decided rather than something this reader was already
 /// letting through.
 #[test]
-fn what_moved_since_the_capture_is_the_phase_prose_and_the_significance_matcher() {
+fn what_moved_since_the_capture_is_the_phase_prose_the_significance_matcher_and_the_note_delivery()
+{
     let captured = captured();
     let registry = registry();
     let mut moved: Vec<String> = Vec::new();
@@ -278,9 +288,12 @@ fn what_moved_since_the_capture_is_the_phase_prose_and_the_significance_matcher(
             "agent.event-filter@1/$defs/Matcher/properties/significance",
             "agent.event-filter@1/$defs/Phase/description",
             "agent.event-filter@1/$defs/Significance",
+            "agent.note@1/$defs/Delivery",
+            "agent.note@1/properties/delivery",
         ],
-        "what moved since the capture is not only `onevcs`'s `Phase` prose and the \
-         `significance` matcher field entry 123 adds"
+        "what moved since the capture is not only `onevcs`'s `Phase` prose, the \
+         `significance` matcher field entry 123 adds, and the note's `delivery` entry 132 \
+         adds"
     );
     // It is that producer's own words, not a third wording invented here.
     let phase = registry

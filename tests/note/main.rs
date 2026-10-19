@@ -3838,7 +3838,7 @@ fn the_note_seam_answers_a_delivery_and_a_non_delivery_through_this_crates_own_a
     releasing.join().expect("the releasing thread finishes");
     assert_eq!(
         delivered.expect("the live conversation took the note"),
-        Delivered::To(Reached::Worker)
+        Delivered::To(Reached::Worker { turn: None })
     );
 
     world.until("the run's driver to release it", |world| {

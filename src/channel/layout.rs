@@ -451,6 +451,12 @@ pub struct CommandResult {
     // llmlint: ignore[invalid_states_unrepresentable] the manager's ruling on this node fixes the wire shape: an optional `refusal` beside `reason`, `reason` its display text, every existing outcome reading unchanged — so it cannot fold into the verdict or replace `reason` without changing bytes this layout reads and writes; the reconciler sets both from one refusal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refusal: Option<crate::channel::Refusal>,
+    /// How the live turn that took a `note` took it: `interrupted`, or
+    /// `turn-end`. Present exactly where an applied note reached the worker or
+    /// the supervisor, as that note's `note-delivered` record says, and omitted
+    /// otherwise — so every outcome written before it existed reads unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<crate::note::NoteTurn>,
 }
 
 /// The reconciler's answer to one submitted envelope, as
@@ -535,6 +541,8 @@ pub enum Op {
     Amend,
     /// Deliver a note into a node's dispatch.
     Note,
+    /// Take back a note no turn has read yet.
+    WithdrawNote,
     /// Settle a node from evidence.
     Settle,
     /// Rework a node settled as a review draft, on its own branch.
@@ -547,7 +555,7 @@ pub enum Op {
 
 impl Op {
     /// Every op, in the order the contract lists them.
-    pub const ALL: [Op; 19] = [
+    pub const ALL: [Op; 20] = [
         Op::SetNodeSets,
         Op::SetRunNodeSets,
         Op::Add,
@@ -561,6 +569,7 @@ impl Op {
         Op::Finding,
         Op::Amend,
         Op::Note,
+        Op::WithdrawNote,
         Op::Settle,
         Op::Rework,
         Op::Retitle,
@@ -586,6 +595,7 @@ impl Op {
             Op::Finding => "finding",
             Op::Amend => "amend",
             Op::Note => "note",
+            Op::WithdrawNote => "withdraw-note",
             Op::Settle => "settle",
             Op::Rework => "rework",
             Op::Retitle => "retitle",
@@ -1197,6 +1207,7 @@ impl Channel {
     /// could be this envelope's answer, and "not answered yet" would then be a
     /// wrong answer rather than an unknown one.
     pub fn outcome_of(&self, id: u64) -> Result<Option<CommandOutcome>, QueueError> {
+        let mut answered = None;
         for (record, _) in self.outcomes.raw().log(None)? {
             let outcome = serde_json::from_value::<CommandOutcome>(record).map_err(|failure| {
                 QueueError::Shape {
@@ -1204,11 +1215,13 @@ impl Channel {
                     why: failure.to_string(),
                 }
             })?;
+            // The latest answer stands: an envelope a later `withdraw-note` took a
+            // note of is answered again.
             if outcome.id == id {
-                return Ok(Some(outcome));
+                answered = Some(outcome);
             }
         }
-        Ok(None)
+        Ok(answered)
     }
 }
 

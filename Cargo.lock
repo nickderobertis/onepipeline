@@ -1464,9 +1464,9 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "oneagentgraph"
-version = "0.5.14"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "651ee28a05e418cb9843333eaf46d6b6474f906b221054452eaeaafd0bdb1ceb"
+checksum = "d01f9fc0ec58f7056fea7454554f442c9d96f165fbccf52457c703d5e02d9292"
 dependencies = [
  "clap",
  "libc",
@@ -1518,9 +1518,9 @@ dependencies = [
 
 [[package]]
 name = "oneharness-core"
-version = "0.28.2"
+version = "0.28.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12a22a5103816b9102f85eedab0c397a68591472074388919cd51c7d6ee9967e"
+checksum = "e9f9d1fe024b0e7eafae6564f1945640ec245a8c28b2051b02f06db217f8fea7"
 dependencies = [
  "fs2",
  "jsonschema 0.33.0",
@@ -1539,9 +1539,9 @@ dependencies = [
 
 [[package]]
 name = "onejudge"
-version = "0.19.5"
+version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "14b557991e27288656dbcb174b53d1719df475942baa909b1a4b332b5048fc50"
+checksum = "92b548adb9384026074ff201a3efbfa30f996b355b489e3f836e7ba2ca88a806"
 dependencies = [
  "clap",
  "oneharness-core",
@@ -1556,12 +1556,13 @@ dependencies = [
 
 [[package]]
 name = "onemessagebus"
-version = "0.9.1"
+version = "0.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ae7dfd47a38b52451c6b00288604d0c4c3f640a0192a302fd00732f805d3729"
+checksum = "1effacbb1c8759badd2a060053c4631bafef9a26dc910095f471fb0f429b5da5"
 dependencies = [
  "getrandom 0.3.4",
  "jsonschema 0.56.0",
+ "rustix",
  "rustls",
  "rustls-native-certs",
  "schemars",
