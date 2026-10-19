@@ -1045,7 +1045,7 @@ onevcs-testing = "0.19.4"
 # **0.7.2 is the release the patch below declares.** Its revision leaves a source a layer
 # refines but no layer defines unconfigured rather than failing every load, so a host's
 # user layer may route to sources only one checkout defines; and it answers a dependency
-# read a private source cannot without failing it. `src/taskgraph.rs`'s tests drive both.
+# read a private source cannot without failing it. `tests/e2e/store.rs` drives both.
 onetaskgraph-core = "=0.7.2"
 onetaskgraph-plugin-api = "=0.7.2"
 onetaskgraph-local-md = "=0.7.2"
