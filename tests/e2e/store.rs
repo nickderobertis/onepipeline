@@ -3646,6 +3646,76 @@ fn a_launch_whose_dependency_query_came_back_partial_is_refused_naming_the_query
     refused_before_dispatch(&world, "partial");
 }
 
+/// A launch whose task's dependencies a source declared private could not be asked about is
+/// refused before anything is dispatched, naming that source's failure.
+///
+/// A source declared private records the edges its tasks draw onto tasks elsewhere, so a
+/// task's dependency read asks it as well as the task's own source. Here it could not be
+/// reached: the store would answer every other edge and name that source as unasked, and a
+/// launch that took that answer would run a node before a prerequisite only the private
+/// source holds. The plan read asks for every source's part, so the read fails instead.
+#[test]
+fn a_launch_whose_private_recording_source_could_not_be_asked_is_refused_naming_it() {
+    const RECORDER: &str = "recorder";
+    let world = World::new("store-private-recorder");
+    let root = world.root.join("recorder-store");
+    std::fs::create_dir_all(&root).expect("the recorder's root");
+    let prefix = format!("ONETASKGRAPH_SOURCES__{}", RECORDER.to_uppercase());
+    let script = world.fakes.to_string_lossy().into_owned();
+    let world = world
+        .with_env(&format!("{prefix}__PLUGIN"), "subprocess")
+        .with_env(
+            &format!("{prefix}__CONFIG__COMMAND"),
+            &double("scripted-source").to_string_lossy(),
+        )
+        .with_env(
+            &format!("{prefix}__CONFIG__SETTINGS__ROOT"),
+            &root.to_string_lossy(),
+        )
+        .with_env(&format!("{prefix}__CONFIG__SETTINGS__SCRIPT"), &script)
+        .with_env(&format!("{prefix}__CONFIG__SETTINGS__KEY"), RECORDER)
+        .with_env(&format!("{prefix}__VISIBILITY"), "private");
+    let project = world.plan(
+        "private-recorder",
+        &plan_of(
+            "private-recorder",
+            vec![agent("first", &["second"]), agent("second", &[])],
+        ),
+    );
+    world.script(
+        &format!("{RECORDER}.query_tasks.refuse"),
+        &source_unreachable().to_string(),
+    );
+
+    world
+        .run(&["start", &project, "--detach"])
+        .exited(REFUSED)
+        .err_has(RECORDER)
+        .err_has(UNREACHABLE);
+    let asked: Vec<Value> = world
+        .invocations()
+        .into_iter()
+        .filter(|call| call["tool"] == RECORDER && call["args"][0] == "query_tasks")
+        .collect();
+    assert!(
+        !asked.is_empty(),
+        "the private source was never asked, so its failure refused nothing"
+    );
+    assert!(
+        !world.runs.join("private-recorder").exists(),
+        "a launch whose plan could not be read left a run behind"
+    );
+    let dispatched: Vec<Value> = world
+        .invocations()
+        .into_iter()
+        .filter(|call| call["tool"] != crate::harness::SCRIPTED_KEY && call["tool"] != RECORDER)
+        .collect();
+    assert!(
+        dispatched.is_empty(),
+        "a launch whose plan could not be read dispatched work: {dispatched:?}"
+    );
+}
+
 /// A refused launch left nothing behind: no run, and no dispatch of any node.
 fn refused_before_dispatch(world: &World, run: &str) {
     assert!(

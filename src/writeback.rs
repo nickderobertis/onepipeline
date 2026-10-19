@@ -626,6 +626,7 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
     let decided = |kind: &str| (kind.to_owned(), None);
     match error {
         EngineError::UnknownSource { .. } => decided("unknown-source"),
+        // llmlint: ignore[changed_behavior_has_e2e] reached as an engine error only by a write-back naming its plan's own source, which the launch already read through this configuration; a delivered ticket's incomplete source is classed by the store itself, as `delivers::a_ticket_in_a_source_no_layer_declares_a_plugin_for_is_refused_as_an_incomplete_source` drives, and `writeback::tests` holds the word.
         EngineError::IncompleteSource { .. } => decided("incomplete-source"),
         EngineError::Token { .. } => decided("page-token"),
         EngineError::NoSources => decided("no-sources"),
