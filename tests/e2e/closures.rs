@@ -342,5 +342,92 @@ fn a_landing_moves_exactly_the_cards_of_the_issues_it_closes_on_every_configured
         .map(str::to_owned)
         .collect()
     );
-    let _ = agent;
+}
+
+/// The one-board launch directory every later journey launches from.
+fn one_board_launch(world: &World, served: &GitHubEndpoint) -> PathBuf {
+    launch_dir(world, &board_source("board", served, 1))
+}
+
+/// The `onevcs` landing records relayed into `run`'s journal for `node`, by kind.
+fn relayed_landings(world: &World, run: &str, node: &str) -> Vec<String> {
+    world
+        .journal(run)
+        .into_iter()
+        .filter(|event| event["source"] == "vcs" && event["labels"]["node"] == node)
+        .filter_map(|event| event["kind"].as_str().map(str::to_owned))
+        .filter(|kind| kind == "change-merged" || kind == "merge-completed")
+        .collect()
+}
+
+/// A change request the host merged, which GitHub says closes issue 7, moves issue 7's card to
+/// `Done` and no other, in one closure call although the run relays both the `change-merged`
+/// and the `merge-completed` that report it.
+#[test]
+fn a_merged_change_request_closes_its_issues_once_for_both_of_its_landing_records() {
+    let (world, served) = world_with("closures-change", "change-auto", &one_board());
+    let launch = one_board_launch(&world, &served);
+    world.script("service.work", "the worker wrote this\n");
+    world.script("gh.merged", "");
+    world.script("gh.closes", "owner/service#7");
+    let run = "change";
+    let project = world.plan(run, &plan_of(run, vec![lifecycle("service", &[])]));
+    start_from(&world, &launch, &project);
+    world.until("the landing's closures to be recorded", |world| {
+        !closures_of(world, run).is_empty() && world.run_file(run, "result.json").is_file()
+    });
+
+    let relayed = relayed_landings(&world, run, "service");
+    assert!(
+        relayed.iter().any(|kind| kind == "change-merged")
+            && relayed.iter().any(|kind| kind == "merge-completed"),
+        "the run did not relay both landing records: {relayed:?}"
+    );
+    assert_eq!(
+        card(&served, "1", "7"),
+        (json!("Done"), issue("CLOSED", Some("COMPLETED")))
+    );
+    assert_eq!(card(&served, "1", "9"), (json!("Todo"), issue("OPEN", None)));
+    assert_eq!(
+        writes_of(&served),
+        [
+            json!({"board": 1, "issue": 7, "field": "Status", "value": "Done"}),
+            json!({"issue": 7, "state": "CLOSED", "reason": "COMPLETED"}),
+        ]
+    );
+    read_no_board_whole(&served);
+    let records = closures_of(&world, run);
+    assert_eq!(records.len(), 1, "{records:#?}");
+    assert_eq!(records[0]["payload"]["closes"], json!(["owner/service#7"]));
+    assert_eq!(records[0]["payload"]["outcome"], "projected");
+}
+
+/// A landing that closes no issue sends the store nothing: the board's request log is as empty
+/// after the run as before it, and the run journals no `landing-closures` record.
+#[test]
+fn a_landing_that_closes_no_issue_sends_the_board_no_request() {
+    let (world, served) = world_with("closures-none", "local-direct", &one_board());
+    let launch = one_board_launch(&world, &served);
+    world.script("service.work", "the worker wrote this\n");
+    world.script("service.commit-saying", "feat: ship the service\n\nNo issue is closed here.");
+    let run = "none";
+    let project = world.plan(run, &plan_of(run, vec![lifecycle("service", &[])]));
+    start_from(&world, &launch, &project);
+    world.until("the run to settle", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+
+    let landed: Vec<Value> = world
+        .journal(run)
+        .into_iter()
+        .filter(|event| event["source"] == "vcs" && event["kind"] == "merge-completed")
+        .collect();
+    assert_eq!(landed.len(), 1, "the node did not land: {landed:#?}");
+    assert_eq!(landed[0]["payload"]["closes"], json!([]), "{landed:#?}");
+    assert!(
+        log_of(&served).is_empty(),
+        "a landing that closes nothing sent the board a request: {:#?}",
+        log_of(&served)
+    );
+    assert!(closures_of(&world, run).is_empty());
 }
