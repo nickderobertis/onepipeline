@@ -85,9 +85,13 @@
         "tests/e2e/branch_template.rs",
         "tests/e2e/destination.rs",
         "tests/e2e/review.rs",
+        "tests/e2e/review_reply.rs",
+        "tests/e2e/review_round.rs",
         "docs/contract.md",
         "scripts/stacked-spikes-budget.mjs",
-        "tests/golden/review-results-v1.json",
+        "scripts/review-round-quota-budget.sh",
+        "scripts/review-round-quota-budget.mjs",
+        "tests/golden/review-results-v2.json",
         "tests/e2e/budget_result.rs",
         "tests/e2e/dispatch.rs",
         "tests/e2e/driver.rs",
@@ -122,7 +126,9 @@
         "session_reuse",
         "branch_template",
         "destination",
-        "review"
+        "review",
+        "review_reply",
+        "review_round"
       ]
     },
     "e2e-store": {
@@ -270,7 +276,12 @@
         "tests/e2e/driver.rs",
         "tests/e2e/run_end_hooks.rs",
         "tests/e2e/run_end_hook.sh",
-        "tests/e2e/run_end_hook.bat"
+        "tests/e2e/run_end_hook.bat",
+        "tests/e2e/stacked_drafts.rs",
+        "tests/e2e/review_reply.rs",
+        "tests/e2e/review.rs",
+        "tests/golden/review-results-v2.json",
+        "tests/e2e/draft_lifecycle.rs"
       ],
       "crates": [
         "onepipeline"
