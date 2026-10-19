@@ -1936,13 +1936,14 @@ const HANDOVER_READ_GATE_ENV: &str = "ONEPIPELINE_TEST_HANDOVER_READ_GATE";
 fn confirm_driving(paths: &RunPaths, driver: &mut std::process::Child) -> Result<()> {
     let pid = driver.id();
     // The driver's own start stamp, read while the child is unreaped and its pid
-    // therefore cannot have been handed on. A pid alone is not the claim: the
+    // therefore cannot have been handed on — through the child itself, so one
+    // that has already exited is still stamped. A pid alone is not the claim: the
     // record this driver is taking over names the driver it displaces, and a host
     // that hands a freed pid on within moments — Windows does — can give that
     // very pid to this child, so the record would read as claimed before the
     // child had done anything. Where the host will not stamp the child, the
     // child cannot stamp its claim either, and the pid is all either side has.
-    let stamp = sys::process_start_token(pid);
+    let stamp = sys::child_start_token(driver);
     let claimed = || {
         ledger::read_json_opt::<LaunchRecord>(&paths.launch()).is_some_and(|record| {
             record.pid == pid
@@ -4826,7 +4827,12 @@ mod tests {
 
         // The retained driver's pid under another process's start — this one's,
         // as the displaced driver's would be — is not its claim, and what it
-        // said comes back with the refusal.
+        // said comes back with the refusal. A displaced driver started before
+        // the one retained to replace it, and by more than a start token
+        // resolves — one clock tick on Linux, a microsecond on macOS — so this
+        // test process, started moments earlier, stands in for it only once
+        // that much time separates the two starts.
+        std::thread::sleep(Duration::from_millis(50));
         let mut driver = retained();
         recorded(&launched_by(driver.id(), &here, &start_of(sys::pid())));
         std::fs::write(paths.driver_log(), "onepipeline: an unreadable lock\n")
@@ -4840,7 +4846,11 @@ mod tests {
         // Its own start is its claim, and stays one after it has exited: a
         // driver that took the run and settled at once did take it.
         let mut driver = retained();
-        recorded(&launched_by(driver.id(), &here, &start_of(driver.id())));
+        let own = sys::child_start_token(&driver)
+            .expect("this host says when its child started")
+            .recorded()
+            .to_string();
+        recorded(&launched_by(driver.id(), &here, &own));
         driver.wait().expect("the retained driver exits");
         confirm_driving(&paths, &mut driver).expect("a driver that claimed the run is confirmed");
 

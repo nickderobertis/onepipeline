@@ -1335,6 +1335,55 @@ pub fn process_start_token(pid: u32) -> Option<StartToken> {
     platform_process_start_token(pid)
 }
 
+/// When a child this process spawned and has not reaped started, as the same
+/// token [`process_start_token`] gives while it runs — and still once it has
+/// exited.
+///
+/// A start token is a liveness proof as well as an identity, so a process that
+/// has ended has none; but a caller holding the child asks who it **is**, and
+/// an unreaped child still is the process its pid names. On Unix that pid is
+/// not handed on until the child is reaped, so its start is read by pid. On
+/// Windows the exited process has no token by pid at all, and a caller that
+/// read that absence as "this host will not say" compared the pid alone — so a
+/// retained driver that exited at once read as claiming a record naming the
+/// driver it displaced. The child's own handle still answers when it was
+/// created, whether or not it has exited.
+#[cfg(unix)]
+pub fn child_start_token(child: &std::process::Child) -> Option<StartToken> {
+    process_start_token(child.id())
+}
+
+/// See the Unix arm: the creation time read through the handle the child is
+/// held by, which outlives the process.
+#[cfg(windows)]
+pub fn child_start_token(child: &std::process::Child) -> Option<StartToken> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::GetProcessTimes;
+
+    let mut created = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let mut exited = created;
+    let mut kernel = created;
+    let mut user = created;
+    // SAFETY: the handle is the child's own, open for as long as `child` is
+    // borrowed, and every out-parameter is a `FILETIME` this frame owns.
+    let read = unsafe {
+        GetProcessTimes(
+            child.as_raw_handle(),
+            &raw mut created,
+            &raw mut exited,
+            &raw mut kernel,
+            &raw mut user,
+        )
+    };
+    (read != 0).then(|| StartToken {
+        recorded: format!("{}:{}", created.dwHighDateTime, created.dwLowDateTime),
+    })
+}
+
 /// What one record says about one pid on this host.
 ///
 /// Shared by everything that acts on a recorded pid — a stop aiming a teardown,
