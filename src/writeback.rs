@@ -639,6 +639,7 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         EngineError::CommentlessDestination { .. } => decided("no-comments"),
         EngineError::QueryNotTasks => decided("query-not-tasks"),
         EngineError::CommentsNotDocuments => decided("comments-not-documents"),
+        EngineError::StatusesNotTasks => decided("statuses-not-tasks"),
         EngineError::ChangedWhileCopied { .. } => decided("changed-while-copied"),
         // llmlint: ignore-end[changed_behavior_has_e2e]
         EngineError::NotWritable { .. }
@@ -2928,6 +2929,9 @@ fn create(
         comments: false,
         no_link: false,
         expect: None,
+        // No narrowing: every member is copied whatever its status, as before the store
+        // could narrow a copy by it.
+        statuses: Vec::new(),
     };
     // The one call that is linear in what it carries, so the one whose deadline is.
     let deadline = Deadline::Write {
@@ -4445,15 +4449,17 @@ fn actions(report: &CopyReport) -> ProjectionActions {
             CopyAction::Created { .. }
             | CopyAction::Unchanged { .. }
             | CopyAction::Orphaned { .. }
-            | CopyAction::Failed { .. } => None,
+            | CopyAction::Failed { .. }
+            | CopyAction::Skipped { .. } => None,
         })
         .collect();
     let mut actions = ProjectionActions::default();
     for item in &report.items {
         let count = match &item.action {
             CopyAction::Orphaned { destination } if rewritten.contains(destination) => continue,
-            // Failed items made no mutation and are not successful projections.
-            CopyAction::Failed { .. } => continue,
+            // Failed items made no mutation and are not successful projections, and a copy
+            // that narrows by no status skips none.
+            CopyAction::Failed { .. } | CopyAction::Skipped { .. } => continue,
             CopyAction::Created { .. } => &mut actions.created,
             CopyAction::Updated { .. } => &mut actions.updated,
             CopyAction::Unchanged { .. } => &mut actions.unchanged,
