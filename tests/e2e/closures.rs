@@ -897,6 +897,9 @@ struct Setup<'a> {
     fault: Option<&'a str>,
     /// Whether a manager session owns the landing, as every world's command says by default.
     owned: bool,
+    /// Whether the publishing push leaves the operation's stream unreadable for a moment, as
+    /// the lock git for Windows' writer holds over an append does.
+    unreadable: bool,
 }
 
 impl Setup<'_> {
@@ -904,11 +907,13 @@ impl Setup<'_> {
         configured: Configured::Board,
         fault: None,
         owned: true,
+        unreadable: false,
     };
     const BARE: Self = Self {
         configured: Configured::Nothing,
         fault: None,
         owned: true,
+        unreadable: false,
     };
 }
 
@@ -916,24 +921,39 @@ impl Setup<'_> {
 /// says.
 fn landed_by(verb: Verb, setup: Setup<'_>) -> Landed {
     let name = format!(
-        "closures-{}-{:?}{}{}",
+        "closures-{}-{:?}{}{}{}",
         verb.name(),
         setup.configured,
         setup
             .fault
             .map(|fault| format!("-{fault}"))
             .unwrap_or_default(),
-        if setup.owned { "" } else { "-unowned" }
+        if setup.owned { "" } else { "-unowned" },
+        if setup.unreadable { "-unreadable" } else { "" }
     )
     .to_lowercase();
     let world = World::new(&name).with_env(TOKEN_ENV, "loopback-token");
     // A recovery attests the repository's bar, so its repository has one: a `pre-push` hook
     // that passes.
-    let bar: &[&str] = match verb {
-        Verb::RepoRecover => &["true"],
-        Verb::PublishBranch | Verb::Integrate => &[],
+    let mut bar: Vec<String> = match verb {
+        Verb::RepoRecover => vec!["true".to_owned()],
+        Verb::PublishBranch | Verb::Integrate => Vec::new(),
     };
-    let repository = world.repository("local-direct", bar);
+    if setup.unreadable {
+        // The owner's read bit, off for long enough that the relay's reads meet it several
+        // times over, and back on before the push ends: the writer appends all the while.
+        let streams = format!(
+            "'{}'/operations/*/events.ndjson",
+            world.onevcs_home().display()
+        );
+        bar = vec![
+            "sh".to_owned(),
+            "-c".to_owned(),
+            format!("chmod u-r {streams} && sleep 0.3 && chmod u+r {streams}"),
+        ];
+    }
+    let bar: Vec<&str> = bar.iter().map(String::as_str).collect();
+    let repository = world.repository("local-direct", &bar);
     let served = GitHubEndpoint::serve_issues(&world, &one_board());
     if let Some(fault) = setup.fault {
         served.fault(fault);
@@ -1133,6 +1153,37 @@ fn repo_recover_lands_whatever_the_board_answers() {
 #[test]
 fn integrate_closes_the_issues_its_train_lands() {
     a_landing_verb_closes_the_issues_its_landing_closes(Verb::Integrate);
+}
+
+/// A read of the landing's operation stream that fails for a moment — on Windows, the lock
+/// `onevcs`'s writer holds over each append — is asked again: the relay still reads the
+/// `merge-completed` the push is followed by, so the closure is made and printed and the landing
+/// finishes rather than reading as unsupervised.
+// A permission bit is what stages the failed read here, and Windows has none that denies its
+// owner a read; there the lock itself is what this journey's verb meets in every landing.
+#[cfg(unix)]
+#[test]
+fn a_landing_verb_relays_past_a_read_of_its_stream_that_fails_for_now() {
+    let landed = landed_by(
+        Verb::PublishBranch,
+        Setup {
+            unreadable: true,
+            ..Setup::BOARD
+        },
+    );
+    landed_widget(&landed);
+    assert_eq!(landed.code, 0, "{}", landed.stderr);
+    assert!(
+        !landed.stderr.contains("could not be relayed"),
+        "{}",
+        landed.stderr
+    );
+    assert!(
+        landed.stderr.contains("owner/service#7 on board: updated"),
+        "{}",
+        landed.stderr
+    );
+    assert_eq!(the_record(&landed)["outcome"], "projected");
 }
 
 /// A directory whose store configuration does not load lands the branch all the same, exits as

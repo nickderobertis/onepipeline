@@ -2241,8 +2241,6 @@ mod tests {
         assert_eq!(delivered, [0, 1, 2]);
     }
 
-    /// A read that keeps failing still ends the relay, saying why, rather than
-    /// asking forever.
     #[test]
     fn a_read_that_keeps_failing_ends_the_relay_with_its_reason() {
         let stop = std::sync::atomic::AtomicBool::new(false);
