@@ -5440,8 +5440,10 @@ fn deliver_envelope(
                 delivered.push(Err(preempted_note(&note.node, *by)));
                 continue;
             }
-            now.offering = Some(note.node.clone());
-            now.deadline = note.deadline_at(sys::now_millis());
+            now.offering = Some(Offering {
+                node: note.node.clone(),
+                deadline: note.deadline_at(sys::now_millis()),
+            });
         }
         let committed = commits_of(step);
         if let Some(progress) = progress {
@@ -5449,7 +5451,6 @@ fn deliver_envelope(
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             now.offering = None;
-            now.deadline = None;
             if let Ok(operations) = &committed {
                 now.finished.push(operations.clone());
             }
@@ -5472,17 +5473,23 @@ fn deliver_envelope(
 pub(crate) struct Progress {
     /// What each note the thread has finished committed, in command order.
     finished: Vec<Vec<edits::Operation>>,
-    /// The node whose conversation the thread is waiting on now, if it is
+    /// The note the thread is waiting on its conversation for now, if it is
     /// waiting on one.
-    offering: Option<String>,
-    /// When the note it is offering now stops waiting for a turn, in epoch
-    /// milliseconds, where that note carries a deadline: what `status` shows
-    /// beside the delivery.
-    deadline: Option<u64>,
+    offering: Option<Offering>,
     /// The receiver, where a `cancel` parked it while the thread was not
     /// waiting on its conversation, with the cancelling envelope's id: the
     /// thread offers no further note into it, and refuses each as preempted.
     cancelled: BTreeMap<String, u64>,
+}
+
+/// The note a delivery thread is waiting on its conversation for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Offering {
+    /// The node whose conversation it was offered to.
+    node: String,
+    /// When it stops waiting for a turn, in epoch milliseconds, where it carries a
+    /// deadline: what `status` shows beside the delivery.
+    deadline: Option<u64>,
 }
 
 /// The word a `release-adopted` record names a release note's delivery with.
@@ -6041,7 +6048,11 @@ impl NoteDeliveries {
                     .progress
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if progress.offering.as_ref() == Some(node) {
+                if progress
+                    .offering
+                    .as_ref()
+                    .is_some_and(|offering| offering.node == *node)
+                {
                     preempted.push((*id, node.clone()));
                 } else {
                     progress.cancelled.entry(node.clone()).or_insert(by);
@@ -6128,7 +6139,9 @@ impl NoteDeliveries {
                     .progress
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .deadline;
+                    .offering
+                    .as_ref()
+                    .and_then(|offering| offering.deadline);
                 entries.push(LiveDelivery {
                     envelope: *id,
                     delivery: Live::Delivering {
@@ -14697,8 +14710,10 @@ mod tests {
         Lane {
             progress: std::sync::Arc::new(std::sync::Mutex::new(Progress {
                 finished: Vec::new(),
-                offering: Some(node.to_owned()),
-                deadline: None,
+                offering: Some(Offering {
+                    node: node.to_owned(),
+                    deadline: None,
+                }),
                 cancelled: BTreeMap::new(),
             })),
             witnessed: Vec::new(),

@@ -12053,7 +12053,8 @@ which party took a note, but not whether its turn was interrupted or only reache
    instant: still a deadline, shown as the one the wait ends at, never an unbounded wait
    and never a panic. The manager ruled under correlation
    `c-c8c3785c69589b340261d344cb3e5d0f` to keep that surface and drop the 30-day cap this
-   build first proposed. The RFC 3339 bound beside the clock's is this build's: a deadline
+   build first proposed. The RFC 3339 bound beside the clock's was this build's, and the
+   manager agreed it under correlation `c-b0dede45f189ee2daf2990d7ed3dedcf`: a deadline
    written past year 9999 could not be read back, and the run's whole live-delivery reading
    then read as none. It is measured from the offer: a note no turn took by then is withdrawn
    whole (`NoteOffer::wait_until` answers `Expired`), and `persist` decides what follows.
