@@ -1318,7 +1318,7 @@ Five other journeys in `tests/e2e/maintenance.rs` assert an empty journal after 
 - `node --test npm/test/crate-split-replay.test.mjs npm/test/test-profile-report.test.mjs`: 42 of 42 passed, the mapping test included.
 - `cargo nextest run --locked --test e2e -E 'test(/^layout_document::/)'`: 2 of 2 passed, with `node_modules/.bin/onemessagebus --version` answering `onemessagebus 0.9.2`. Taken on 3f29354; 4023bfb and 28a4ce2 move neither the pin nor the lock's bus entry.
 - `just engines-current` (`scripts/linked-engines.sh --format check`): passed. oneagentgraph 0.5.14, onevcs 0.52.1, onevcs-testing 0.19.5, onejudge 0.19.5, oneharness-core 0.28.4, onetaskgraph-core, -plugin-api and -local-md 0.7.3, onemessagebus 0.9.2 and onebudgetspec-core 0.1.5 are each the newest their own requirement permits. onevcs-testing 0.19.12 is held back by `onevcs = "0.52.0"`, which the check names and passes.
-- `cargo fmt --check` and `cargo clippy --locked --all-targets -- -D warnings`: clean. `npx biome check package.json`: clean.
+- `cargo fmt --check` and `cargo clippy --locked --all-targets -- -D warnings`: clean.
 - Not run on 28a4ce2: the hosted CI. Its last hosted evidence is run 39138389849, on 4b94e43.
 
 **On 059dfb4** (the merge of main at e788a5c, with no conflict):
