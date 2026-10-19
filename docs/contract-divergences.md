@@ -12051,7 +12051,11 @@ which party took a note, but not whether its turn was interrupted or only reache
    `9999-12-31T23:59:59.999Z` — the latest instant RFC 3339, which `status` writes it in,
    can name — or past what the host's monotonic clock can name waits until the latest such
    instant: still a deadline, shown as the one the wait ends at, never an unbounded wait
-   and never a panic. It is measured from the offer: a note no turn took by then is withdrawn
+   and never a panic. The manager ruled under correlation
+   `c-c8c3785c69589b340261d344cb3e5d0f` to keep that surface and drop the 30-day cap this
+   build first proposed. The RFC 3339 bound beside the clock's is this build's: a deadline
+   written past year 9999 could not be read back, and the run's whole live-delivery reading
+   then read as none. It is measured from the offer: a note no turn took by then is withdrawn
    whole (`NoteOffer::wait_until` answers `Expired`), and `persist` decides what follows.
    `true` records it `carried`, with a `reason` naming the deadline, into the node's next
    dispatch; `false` refuses it with an `edit-rejected` naming the deadline. That holds for
