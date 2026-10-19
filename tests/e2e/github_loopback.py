@@ -104,6 +104,7 @@ def numbered_fixture(document):
         if (not NUMBER.match(number) or not isinstance(held, dict)
                 or not {"state", "reason"} <= set(held) <= {"state", "reason", "delivers"}
                 or held["reason"] not in STATES.get(held["state"], [])
+                or not isinstance(held.get("delivers", []), list)
                 or not all(isinstance(ticket, str) and ":" in ticket
                            for ticket in held.get("delivers", []))):
             raise SystemExit("issue %r is not a number with a state, the reason it fits and the "
@@ -347,21 +348,25 @@ class Handler(BaseHTTPRequestHandler):
         """The numbered issues' operations, or `None` for one about the named ones."""
         if "r0:repository(owner:$owner0" in query:
             return issues_by_reference(variables), 200
-        if ("node(id:" in query and str(variables.get("id", "")).startswith("ISSUE-")
-                and variables["id"].removeprefix("ISSUE-") not in numbered["issues"]):
+        read = variables.get("id")
+        if ("node(id:" in query and isinstance(read, str) and read.startswith("ISSUE-")
+                and read.removeprefix("ISSUE-") not in numbered["issues"]):
             # An issue this endpoint holds no record of: a ticket a seeded issue delivers,
             # whose read GitHub is failing to answer for now.
             return {"errors": [{"message": "the loopback cannot read this issue for now"}]}, 502
         supplied = variables.get("input") if isinstance(variables.get("input"), dict) else {}
-        if "updateProjectV2ItemFieldValue(" in query and NUMBERED_ITEM.match(str(supplied.get("itemId", ""))):
+        item, issue_id = supplied.get("itemId"), supplied.get("id")
+        if ("updateProjectV2ItemFieldValue(" in query and isinstance(item, str)
+                and NUMBERED_ITEM.match(item)):
             return self.held_write(request)
-        if "updateIssue(" in query and str(supplied.get("id", "")).startswith("ISSUE-"):
+        if "updateIssue(" in query and isinstance(issue_id, str) and issue_id.startswith("ISSUE-"):
             number = supplied["id"].removeprefix("ISSUE-")
             movement = supplied.get("stateInput")
             if (number not in numbered["issues"] or set(supplied) != {"id", "stateInput"}
                     or not isinstance(movement, dict)
                     or set(movement) - {"value", "stateReason"}
-                    or movement.get("stateReason") not in STATES.get(movement.get("value"), [])):
+                    or movement.get("value") not in STATES
+                    or movement.get("stateReason") not in STATES[movement["value"]]):
                 raise ValueError("invalid numbered issue mutation input")
             numbered["issues"][number] = {"state": movement["value"],
                                           "reason": movement.get("stateReason")}
