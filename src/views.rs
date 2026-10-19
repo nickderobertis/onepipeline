@@ -3509,7 +3509,7 @@ fn read_side_by_side(view: &RunView, nodes: &[&String]) {
         })
         .filter_map(|node| {
             let branch = view.state.branches.get(*node)?;
-            let repo = view.state.graph.get(*node)?.repo.as_deref()?;
+            let repo = view.state.graph.get(node)?.repo.as_deref()?;
             Some((*node, branch.as_str(), repo))
         })
         .filter(|(node, _, _)| {

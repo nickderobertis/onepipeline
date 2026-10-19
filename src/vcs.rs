@@ -924,7 +924,7 @@ pub(crate) fn landings_now(asked: &[(&str, &str, Option<&str>)]) -> Vec<LandingR
     std::thread::scope(|scope| {
         for _ in 0..helpers {
             if std::thread::Builder::new()
-                .spawn_scoped(scope, &reading)
+                .spawn_scoped(scope, reading)
                 .is_err()
             {
                 break;
