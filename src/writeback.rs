@@ -489,7 +489,7 @@ pub(crate) struct Unprojected {
 /// reader of it names, so it is converted from the store's by an exhaustive match: a class
 /// the store adds is a compile error here rather than a line this build writes and cannot
 /// read back.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum FailureClass {
     /// A failure no retry can change.
@@ -612,6 +612,12 @@ impl Classified {
             kind: failure.kind().to_owned(),
         }
     }
+}
+
+/// The class of an engine error, as every failure this worker reports is classed: by the
+/// source error it wraps, or refused where the engine decided it on its own.
+pub(crate) fn class_of_engine(error: &EngineError) -> FailureClass {
+    Classified::of_engine(error).class
 }
 
 /// The kind an engine error amounts to, and the source error that caused it, if one did.
@@ -903,6 +909,14 @@ struct Pending {
     /// One entry per outage rather than one per retry: the worker retries until
     /// the store returns, and a surface for every attempt would bury the first.
     unprojected: Vec<Unprojected>,
+    /// The landings whose closures are owed, oldest first: what the closure thread takes,
+    /// one at a time, leaving each here until its call has finished.
+    closures: std::collections::VecDeque<crate::closures::Landing>,
+    /// Whether the closure thread is inside the call for the oldest of [`Self::closures`], or
+    /// waiting out its retry.
+    closing: bool,
+    /// The records of closure calls that finished, for the reconcile loop to journal.
+    closed: Vec<crate::payload::LandingClosures>,
 }
 
 impl Pending {
@@ -910,6 +924,11 @@ impl Pending {
     /// taken, or the attempt it is making.
     fn unlanded(&self) -> bool {
         self.latest.is_some() || self.worker == WorkerState::Working
+    }
+
+    /// Whether a landing's closures are still owed: queued, or being called.
+    fn closing_owed(&self) -> bool {
+        !self.closures.is_empty() || self.closing
     }
 
     fn queue(&mut self, snapshot: Snapshot) -> bool {
@@ -939,6 +958,10 @@ pub struct Writeback {
     /// Whose board the project is: this driver's, or — once another run has taken it over —
     /// that run's, while this one hands it over and then for good.
     board: Mutex<Board>,
+    /// Every landing commit this driver has handed the closure thread, so one landing —
+    /// a `change-merged` and the `merge-completed` beside it, or a landing a catch-up finds
+    /// again — is one call.
+    closures_owed: Mutex<BTreeSet<String>>,
 }
 
 /// Whose board a driver's projections write to.
@@ -967,6 +990,9 @@ impl Writeback {
         let run_dir = paths.dir.clone();
         let store = Store::at(launch_dir(launch));
         let per_item = per_item_budget(launch);
+        let closer_pending = Arc::clone(&pending);
+        let closer_store = store.clone();
+        let closer_dir = run_dir.clone();
         // llmlint: ignore-block[changed_behavior_has_e2e] A host refusing one thread while
         // continuing to run this process is resource exhaustion no real CLI journey can
         // arrange at this boundary. Every reachable worker failure is covered against the
@@ -976,12 +1002,19 @@ impl Writeback {
             .name(format!("writeback-{}", paths.run))
             .spawn(move || worker(store, run_dir, per_item, worker_pending))
             .ok()?;
+        // The landings' closures on a thread of their own, so a closure the store is slow to
+        // take holds no projection back, and a projection holds back no closure.
+        std::thread::Builder::new()
+            .name(format!("closures-{}", paths.run))
+            .spawn(move || closer(&closer_store, &closer_dir, per_item, &closer_pending))
+            .ok()?;
         // llmlint: ignore-end[changed_behavior_has_e2e]
         let writer = Self {
             pending,
             per_item,
             held: Mutex::new(None),
             board: Mutex::new(Board::Driving),
+            closures_owed: Mutex::new(BTreeSet::new()),
         };
         // The project is retained in each snapshot rather than in the worker so a malformed
         // old launch record disables projection without weakening LaunchRecord's compatibility.
@@ -1145,7 +1178,9 @@ impl Writeback {
         let (lock, ready) = &*self.pending;
         if let Ok(mut pending) = lock.lock() {
             if pending.queue(snapshot) {
-                ready.notify_one();
+                // Every waiter: the closure thread waits on this condition too, and a
+                // snapshot it was woken for instead of the worker would sit unprojected.
+                ready.notify_all();
             }
         }
     }
@@ -1403,18 +1438,55 @@ impl Writeback {
         state: &RunState,
         statuses: &BTreeMap<String, NodeStatus>,
     ) {
-        if self.is_retired() {
-            return;
-        }
         let deadline = Instant::now() + CLOSEOUT_WAIT;
-        self.closing_out_until(deadline, |pending| {
-            pending.latest.is_some() && pending.worker == WorkerState::Idle
-        });
-        self.publish_closeout(paths, launch, state, statuses);
-        // Let one already-running real copy reach its own deadline before the process
-        // exits. This keeps a completed run from racing a person's next store call,
-        // while the hard call limit preserves write-back's latency boundary.
-        self.closing_out_until(deadline, Pending::unlanded);
+        if !self.is_retired() {
+            self.closing_out_until(deadline, |pending| {
+                pending.latest.is_some() && pending.worker == WorkerState::Idle
+            });
+            self.publish_closeout(paths, launch, state, statuses);
+            // Let one already-running real copy reach its own deadline before the process
+            // exits. This keeps a completed run from racing a person's next store call,
+            // while the hard call limit preserves write-back's latency boundary.
+            self.closing_out_until(deadline, Pending::unlanded);
+        }
+        // And the closures still owed, inside the same window: a run that took the project
+        // over owns its board, not the issues this run's own landings closed. One still being
+        // called when the window ends has no record, so the next adoption makes it.
+        self.closing_out_until(deadline, Pending::closing_owed);
+    }
+
+    /// Owe the closures of one landing, unless this driver already owes or has made them.
+    ///
+    /// Answers whether it was queued. Never waits: the call is the closure thread's.
+    pub(crate) fn close_landing(&self, landing: crate::closures::Landing) -> bool {
+        let fresh = self
+            .closures_owed
+            .lock()
+            .is_ok_and(|mut owed| owed.insert(landing.commit.clone()));
+        if !fresh {
+            return false;
+        }
+        let (lock, ready) = &*self.pending;
+        if let Ok(mut pending) = lock.lock() {
+            pending.closures.push_back(landing);
+            ready.notify_all();
+        }
+        true
+    }
+
+    /// Whether a closure call has finished whose record the loop has not journalled: what
+    /// the reconcile loop's wait is woken by, as it is by a failed projection.
+    pub(crate) fn has_closed(&self) -> bool {
+        let (lock, _) = &*self.pending;
+        lock.lock().is_ok_and(|pending| !pending.closed.is_empty())
+    }
+
+    /// Take the records of the closure calls that finished since this was last asked.
+    pub(crate) fn take_closed(&self) -> Vec<crate::payload::LandingClosures> {
+        let (lock, _) = &*self.pending;
+        lock.lock()
+            .map(|mut pending| std::mem::take(&mut pending.closed))
+            .unwrap_or_default()
     }
 
     /// Enter the closeout phase, and wait until `busy` no longer holds or `deadline` passes.
@@ -1949,7 +2021,7 @@ fn worker(
                 }
                 if state.latest.is_none() {
                     state.latest = Some(snapshot);
-                    ready.notify_one();
+                    ready.notify_all();
                 }
             }
         }
@@ -1963,6 +2035,100 @@ fn worker(
             }
             ready.notify_all();
         }
+    }
+}
+
+/// The closure thread: each owed landing's closures, oldest first, through
+/// [`crate::closures::complete`], with the worker's own wait handling — a wait the store asked
+/// for honoured and recorded for every process that projects the run, and a transient failure
+/// asked again on the worker's schedule. A refusal, and a call that finished with an item
+/// failed, are records like any other, which the reconcile loop journals and raises.
+///
+/// A landing still being asked about when the run stops is left with no record, so the next
+/// adoption's catch-up makes its call.
+fn closer(
+    store: &Store,
+    run_dir: &Path,
+    per_item: NonZeroU64,
+    pending: &(Mutex<Pending>, Condvar),
+) {
+    loop {
+        let landing = {
+            let (lock, ready) = pending;
+            let Ok(mut state) = lock.lock() else { return };
+            while state.closures.is_empty() && state.phase != RunPhase::Stopping {
+                state = match ready.wait(state) {
+                    Ok(state) => state,
+                    Err(_) => return,
+                };
+            }
+            let Some(landing) = state.closures.front().cloned() else {
+                return;
+            };
+            state.closing = true;
+            landing
+        };
+        let mut failures: u32 = 0;
+        let finished = loop {
+            loop {
+                let interval = match AskedWait::kept(run_dir) {
+                    Kept::Nothing => break,
+                    Kept::Left(left) => left,
+                    Kept::Unreadable(_) => UNREADABLE_WAIT_RECHECK,
+                };
+                if !should_retry_after(pending, Interval::Asked(interval)) {
+                    return;
+                }
+            }
+            let within = Deadline::Write {
+                per_item,
+                items: landing.closes.len(),
+            }
+            .within();
+            match crate::closures::complete(store, &landing, within) {
+                crate::closures::Answer::Unconfigured => {
+                    eprintln!(
+                        "onetaskgraph closures for the landing at {}: no store configuration \
+                         declares a source, so nothing was asked about {}",
+                        landing.commit,
+                        landing.closes.join(", ")
+                    );
+                    break None;
+                }
+                crate::closures::Answer::Finished(record) => break Some(record),
+                crate::closures::Answer::Transient { record, wait } => {
+                    failures = failures.saturating_add(1);
+                    if failures == 1 {
+                        eprintln!(
+                            "onetaskgraph closures for the landing at {} failed: {}; retrying, \
+                             spacing further attempts out to {} seconds apart while it keeps \
+                             failing",
+                            landing.commit,
+                            record.reason.as_deref().unwrap_or_default(),
+                            RETRY_CEILING.as_secs()
+                        );
+                    }
+                    if let Some(wait) = wait {
+                        AskedWait::record(run_dir, wait);
+                    }
+                    let interval = wait.map_or_else(
+                        || Interval::Scheduled(retry_after(failures)),
+                        Interval::Asked,
+                    );
+                    if !should_retry_after(pending, interval) {
+                        return;
+                    }
+                }
+            }
+        };
+        let (lock, ready) = pending;
+        let Ok(mut state) = lock.lock() else { return };
+        state.closures.pop_front();
+        state.closing = false;
+        if let Some(record) = finished {
+            state.closed.push(record);
+        }
+        ready.notify_all();
     }
 }
 

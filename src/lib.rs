@@ -75,6 +75,7 @@ mod ask;
 mod boundary;
 mod changes;
 mod checkpoint;
+mod closures;
 mod concurrency;
 mod continuation;
 mod criteria;
