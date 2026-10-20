@@ -745,9 +745,14 @@ mod control {
     enum State {
         #[default]
         Idle,
-        InFlight {
-            taken: Option<Redirect>,
-        },
+        #[cfg_attr(
+            not(unix),
+            expect(
+                dead_code,
+                reason = "only the unix `bind` opens a control socket, so no other target puts a turn in flight"
+            )
+        )]
+        InFlight { taken: Option<Redirect> },
     }
 
     struct Bound {
