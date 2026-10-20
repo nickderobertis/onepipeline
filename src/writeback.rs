@@ -929,11 +929,11 @@ struct Pending {
     closing: Option<crate::closures::Landing>,
     /// The records of closure calls that finished, for the reconcile loop to journal.
     closed: Vec<crate::payload::LandingClosures>,
-    /// Where the run's home stands on the closure thread: entry 133.
+    /// Where the run's home stands on the closure thread: entry 134.
     home: HomeWork,
 }
 
-/// Where the run's home stands on the closure thread: entry 133.
+/// Where the run's home stands on the closure thread: entry 134.
 #[derive(Default)]
 enum HomeWork {
     /// Nothing owed: never, or its record has been handed to the reconcile loop, or this
@@ -1484,7 +1484,7 @@ impl Writeback {
             // while the hard call limit preserves write-back's latency boundary.
             self.closing_out_until(deadline, Pending::unlanded);
             // The run's home, marked `done` once the run has reached the success ending and
-            // never again once its journal records the call: entry 133. The closure thread
+            // never again once its journal records the call: entry 134. The closure thread
             // makes the call once this projection has landed, inside the closures' window below.
             if crate::hooks::succeeded(statuses) && !crate::home::recorded(paths) {
                 if let Ok(home) = launch.project.parse() {
@@ -2151,7 +2151,7 @@ fn worker(
 ///
 /// The run's home, once owed, is asked about on the same terms: a transient failure again on that schedule, a refusal a record, and
 /// a call still being asked about when the run stops no record, so the next driver to close the
-/// run out makes it — entry 133.
+/// run out makes it — entry 134.
 fn closer(
     store: &Store,
     run_dir: &Path,

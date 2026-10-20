@@ -226,10 +226,10 @@ impl From<&crate::note::Reached> for ReachedWord {
         use crate::note::Reached as R;
         match reached {
             R::Queued => Self::Queued,
-            R::Worker => Self::Worker,
-            R::Supervisor => Self::Supervisor,
+            R::Worker { .. } => Self::Worker,
+            R::Supervisor { .. } => Self::Supervisor,
             R::JudgedWith { .. } => Self::JudgedWith,
-            R::Carried => Self::Carried,
+            R::Carried { .. } => Self::Carried,
         }
     }
 }
@@ -1815,14 +1815,14 @@ pub(crate) enum ClosureOutcome {
     Failed,
 }
 
-/// `home-status`: what the store answered when the run's home was marked `done` — entry 133
+/// `home-status`: what the store answered when the run's home was marked `done` — entry 134
 /// of `docs/contract-divergences.md`, whose fenced examples `tests/contract.rs` holds to this
 /// type.
 ///
 /// One per run, written once the call has finished. Every member is always written, `status`,
 /// `class` and `reason` as `null` when they have nothing to say, so a reader reads one fixed
 /// shape.
-// llmlint: ignore[invalid_states_unrepresentable] Entry 133 fixes this record's flat shape for its consumers — `status`, `class` and `reason` beside `outcome` rather than inside a tagged variant, as `landing-closures` has them — and `home::record` is its one constructor, which fills `status` exactly when the outcome is `written` and the other two exactly when it is `failed`.
+// llmlint: ignore[invalid_states_unrepresentable] Entry 134 fixes this record's flat shape for its consumers — `status`, `class` and `reason` beside `outcome` rather than inside a tagged variant, as `landing-closures` has them — and `home::record` is its one constructor, which fills `status` exactly when the outcome is `written` and the other two exactly when it is `failed`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct HomeStatus {
@@ -2425,6 +2425,23 @@ mod tests {
             // one deliberate addition since the capture — the filter's optional
             // `significance` matcher field, which only admits more.
             let mut held = held.clone();
+            // And onejudge 0.20.0's optional note `delivery`, defaulted to the
+            // interrupt, which admits every note the capture admitted —
+            // entry 134 of `docs/contract-divergences.md`.
+            if text == "agent.note@1" {
+                if let Some(properties) = held
+                    .pointer_mut("/properties")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    properties.remove("delivery");
+                }
+                if let Some(definitions) = held
+                    .pointer_mut("/$defs")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    definitions.remove("Delivery");
+                }
+            }
             if text == "agent.event-filter@1" {
                 if let Some(properties) = held
                     .pointer_mut("/$defs/Matcher/properties")
@@ -2988,12 +3005,14 @@ mod tests {
         use crate::note::Reached as R;
         for reached in [
             R::Queued,
-            R::Worker,
-            R::Supervisor,
+            R::Worker { turn: None },
+            R::Supervisor {
+                turn: Some(crate::note::NoteTurn::Interrupted),
+            },
             R::JudgedWith {
                 completion_reason: String::new(),
             },
-            R::Carried,
+            R::carried(),
         ] {
             let tagged = serde_json::to_value(&reached).expect("a delivery serializes");
             assert_eq!(

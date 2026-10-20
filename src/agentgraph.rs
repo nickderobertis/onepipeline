@@ -2329,13 +2329,16 @@ pub fn interrupt(address: &TurnAddress, input: &str) -> Interrupt {
     }
 }
 
-/// Hand one note to the conversation a member is having, and answer what became
-/// of it.
+/// Offer one note to the conversation a member is having, and hand back the offer
+/// its sender waits on.
 ///
 /// The whole routing is `oneagentgraph`'s and `onejudge`'s: which side of a
-/// two-party member is live, what a live turn does with a note, and how the other
-/// party receives it with that party's response are all decided there. This
-/// composes [`oneagentgraph::control::note`] and hands back what it answered.
+/// two-party member is live, whether that turn is interrupted or reached at its
+/// end, and how the other party receives the note with that party's response are
+/// all decided there. This composes [`oneagentgraph::control::offer_note`]: what
+/// comes back is either the admitted note's [`NoteOffer`] — the note is then in
+/// the conversation's inbox, untaken — or the conversation's reason it never
+/// will be.
 ///
 /// It is a **library** entry point with no verb behind it, which is the one place
 /// [`BINARY_ENV`] cannot be honoured: the sibling publishes this seam as a call and
@@ -2343,13 +2346,15 @@ pub fn interrupt(address: &TurnAddress, input: &str) -> Interrupt {
 /// told that rather than being quietly served by a different mechanism. A note is
 /// never half-delivered on a fall-back nobody asked for.
 ///
+/// [`NoteOffer`]: oneagentgraph::note::NoteOffer
+///
 /// # Errors
 ///
 /// [`Undelivered`], in the conversation's own words, for a note it will never read.
-pub fn note(
+pub fn offer_note(
     address: &TurnAddress,
     note: &oneagentgraph::note::Note,
-) -> std::result::Result<oneagentgraph::note::Accepted, oneagentgraph::note::Undelivered> {
+) -> std::result::Result<oneagentgraph::note::NoteOffer, oneagentgraph::note::Undelivered> {
     if let Some(named) = std::env::var_os(BINARY_ENV) {
         return Err(oneagentgraph::note::Undelivered::NoConversation {
             reason: format!(
@@ -2379,15 +2384,15 @@ pub fn note(
             })
         }
     };
-    match oneagentgraph::control::note(
+    match oneagentgraph::control::offer_note(
         &state_dir(&env),
         &run_id,
         &member,
         note,
         &oneharness_bin(&env),
     ) {
-        Ok(oneagentgraph::control::NoteDelivery::Accepted(accepted)) => Ok(accepted),
-        Ok(oneagentgraph::control::NoteDelivery::Undelivered(undelivered)) => Err(undelivered),
+        Ok(oneagentgraph::note::NoteOffered::Admitted(offer)) => Ok(offer),
+        Ok(oneagentgraph::note::NoteOffered::Undelivered(undelivered)) => Err(undelivered),
         // A run the sibling cannot find, or a member it does not have. Not a
         // disposition of the conversation — there is none — so it is reported as
         // the channel nothing ever read, which is what it is.
@@ -2433,6 +2438,11 @@ fn published(
         input_bytes,
         reason,
         truncated: false,
+        // An interrupt offers no note, so there is no offer to name and no
+        // acceptance to report.
+        offer: None,
+        accepted: None,
+        party: None,
     };
     emitter.emit(
         oneagentgraph::event::EventKind::TurnInterrupted,

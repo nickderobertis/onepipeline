@@ -411,7 +411,7 @@ pub enum PipelineKind {
     ScratchRemoved,
     /// Dispatch scratch was measured and kept at a non-success ending or pause.
     ScratchRetained,
-    /// What the store answered when the run's home was marked `done`: entry 133 of
+    /// What the store answered when the run's home was marked `done`: entry 134 of
     /// `docs/contract-divergences.md`.
     ///
     /// At most one per run, once the store's `set_project_status` call for the run's

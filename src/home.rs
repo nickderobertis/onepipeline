@@ -1,5 +1,5 @@
 //! A run's home — the plan project it was launched from — marked `done` through the store once
-//! the run reaches the success ending: entry 133 of `docs/contract-divergences.md`.
+//! the run reaches the success ending: entry 134 of `docs/contract-divergences.md`.
 //!
 //! This crate writes no ticket a `delivers` names and no member project; the one item of its
 //! own it writes is the run's home, once, to `done`, in one [`Engine::set_project_status`] call.

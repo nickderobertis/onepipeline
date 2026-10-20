@@ -100,6 +100,7 @@ impl Act {
 }
 
 /// What a render is, while it renders.
+#[derive(Clone)]
 // llmlint: ignore[invalid_states_unrepresentable] a run id and a node id are the plain strings this whole crate spells them as — `RunPaths.run`, `RunState::landings`, `RunState::branches` — for the reason `src/ledger.rs`'s file-level suppression records, and `src/AGENTS.md` names a `RunId` newtype as interface drift. Newtypes at these two sites alone would disagree with every neighbour and convert at every boundary. Neither value is unchecked: the run id crossed `ledger::is_valid_run_id` when the run was launched, and the node id is one the run's own journal projected into its graph.
 struct Inside {
     /// Which view, so a reader of a file three renders appended to can tell them
@@ -146,7 +147,9 @@ fn record(act: Act, detail: serde_json::Value) {
         .append(true)
         .open(path)
     {
-        let _ = writeln!(file, "{line}");
+        // One write of the whole line, so a line recorded by a render's reads on
+        // other threads at the same moment cannot land inside this one.
+        let _ = file.write_all(format!("{line}\n").as_bytes());
     }
 }
 
@@ -203,6 +206,51 @@ impl Render {
 impl Drop for Render {
     fn drop(&mut self) {
         if self.outermost {
+            INSIDE.with_borrow_mut(|inside| *inside = None);
+        }
+    }
+}
+
+/// The render a thread is inside, taken so that work it hands to other threads is
+/// counted against that render as if it had done the work itself.
+pub(crate) struct Within(Option<Inside>);
+
+/// The render this thread is inside, if any — see [`Within::adopted`].
+pub(crate) fn within() -> Within {
+    Within(INSIDE.with_borrow(|inside| {
+        inside.as_ref().map(|inside| Inside {
+            node: None,
+            ..inside.clone()
+        })
+    }))
+}
+
+impl Within {
+    /// Count what this thread does next against the render [`within`] was taken
+    /// inside, until the scope is dropped. Nothing on a thread already inside a
+    /// render — the one that took it, among others — and nothing where it was
+    /// taken outside one, so a read nobody is rendering stays uncounted.
+    pub(crate) fn adopted(&self) -> Adopted {
+        let adopted = INSIDE.with_borrow_mut(|inside| match (&*inside, &self.0) {
+            (None, Some(within)) => {
+                *inside = Some(within.clone());
+                true
+            }
+            _ => false,
+        });
+        Adopted { adopted }
+    }
+}
+
+/// A thread counting against a render another thread is inside.
+pub(crate) struct Adopted {
+    /// Whether this scope set the render, so it is the one that clears it.
+    adopted: bool,
+}
+
+impl Drop for Adopted {
+    fn drop(&mut self) {
+        if self.adopted {
             INSIDE.with_borrow_mut(|inside| *inside = None);
         }
     }

@@ -1469,7 +1469,7 @@
           "project",
           "outcome"
         ],
-        "description": "`home-status`: what the store answered when the run's home was marked `done` — entry 133\nof `docs/contract-divergences.md`, whose fenced examples `tests/contract.rs` holds to this\ntype.\n\nOne per run, written once the call has finished. Every member is always written, `status`,\n`class` and `reason` as `null` when they have nothing to say, so a reader reads one fixed\nshape.",
+        "description": "`home-status`: what the store answered when the run's home was marked `done` — entry 134\nof `docs/contract-divergences.md`, whose fenced examples `tests/contract.rs` holds to this\ntype.\n\nOne per run, written once the call has finished. Every member is always written, `status`,\n`class` and `reason` as `null` when they have nothing to say, so a reader reads one fixed\nshape.",
         "title": "HomeStatus",
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$defs": {

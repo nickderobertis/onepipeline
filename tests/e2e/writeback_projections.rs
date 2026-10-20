@@ -766,11 +766,17 @@ fn the_landed_baseline_is_seeded_at_launch_and_advanced_only_by_what_landed() {
     world.until_store("the lost change to reach the board", |world| {
         world.store_tasks(&project).iter().any(|task| {
             task["item"]["metadata"]["onepipeline.id"] == "later"
-                && task["item"]["metadata"]["onepipeline.context"] == "not landed yet"
+                && crate::harness::carries_latest(
+                    &task["item"]["metadata"]["onepipeline.context"],
+                    "not landed yet",
+                )
         })
     });
     world.until("the baseline to record the lost change", |world| {
-        landed(world, run)["items"]["later"]["metadata"]["onepipeline.context"] == "not landed yet"
+        crate::harness::carries_latest(
+            &landed(world, run)["items"]["later"]["metadata"]["onepipeline.context"],
+            "not landed yet",
+        )
     });
     no_record_is_whole_or_reads_a_page_of_tasks(&world, run);
     world.release("work.go");
@@ -1074,7 +1080,10 @@ fn a_projection_after_a_failed_attempt_carries_what_had_not_landed() {
     let noted_on = |world: &World, node: &str, text: &str| {
         world.store_tasks(&project).iter().any(|task| {
             task["item"]["metadata"]["onepipeline.id"] == node
-                && task["item"]["metadata"]["onepipeline.context"] == text
+                && crate::harness::carries_latest(
+                    &task["item"]["metadata"]["onepipeline.context"],
+                    text,
+                )
         })
     };
 
@@ -1273,7 +1282,10 @@ fn the_record_carries_exactly_what_the_update_said_it_wrote_and_spent() {
     world.until_store("the metered update to land", |world| {
         world.store_tasks(&project).iter().any(|task| {
             task["item"]["metadata"]["onepipeline.id"] == "later"
-                && task["item"]["metadata"]["onepipeline.context"] == "counted"
+                && crate::harness::carries_latest(
+                    &task["item"]["metadata"]["onepipeline.context"],
+                    "counted",
+                )
         })
     });
 
@@ -1292,13 +1304,24 @@ fn the_record_carries_exactly_what_the_update_said_it_wrote_and_spent() {
     world.until_store("the unmetered update to land", |world| {
         world.store_tasks(&project).iter().any(|task| {
             task["item"]["metadata"]["onepipeline.id"] == "later"
-                && task["item"]["metadata"]["onepipeline.context"] == "reported as it was"
+                && crate::harness::carries_latest(
+                    &task["item"]["metadata"]["onepipeline.context"],
+                    "reported as it was",
+                )
         })
     });
 
     // A person has already put on the board what the next update names: the store is asked,
     // writes nothing, and says so — the item counted `unchanged`, and no field written.
     let later = board_task(&world.store_tasks(&project), "later").clone();
+    // Carried notes accumulate on the node, so what the next update names is the
+    // context the board holds with this note after it.
+    let named = format!(
+        "{}\n\nalready on the board",
+        later["item"]["metadata"]["onepipeline.context"]
+            .as_str()
+            .expect("the board holds later's context")
+    );
     // llmlint: ignore-block[tests_mirror_real_usage] a `local-md` destination *is* its folder of
     // Markdown, so a person editing the board edits that file.
     rewritten(
@@ -1309,10 +1332,7 @@ fn the_record_carries_exactly_what_the_update_said_it_wrote_and_spent() {
                 .get_mut("metadata")
                 .and_then(Value::as_object_mut)
                 .expect("metadata")
-                .insert(
-                    "onepipeline.context".to_owned(),
-                    json!("already on the board"),
-                );
+                .insert("onepipeline.context".to_owned(), json!(named));
         },
     );
     // llmlint: ignore-end[tests_mirror_real_usage]
@@ -1403,8 +1423,10 @@ fn a_run_directory_holding_an_older_engines_store_record_adopts_and_projects_by_
     world.until_store("the adopted driver's change to reach the board", |world| {
         world.store_tasks(&project).iter().any(|task| {
             task["item"]["metadata"]["onepipeline.id"] == "later"
-                && task["item"]["metadata"]["onepipeline.context"]
-                    == "a change for the adopted driver"
+                && crate::harness::carries_latest(
+                    &task["item"]["metadata"]["onepipeline.context"],
+                    "a change for the adopted driver",
+                )
         })
     });
 }

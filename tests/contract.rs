@@ -1020,7 +1020,7 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), EVENTS_BUNDLE_VERSION);
     assert_eq!(
-        divergence_block("133.")["bundle_versions"]["events"],
+        divergence_block("134.")["bundle_versions"]["events"],
         EVENTS_BUNDLE_VERSION,
         "the events bundle version must be the one the newest entry raising it records"
     );
@@ -1230,7 +1230,7 @@ fn the_contract_states_the_planner_channel_documents_path_version_and_source() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), DOCUMENT_VERSION);
     assert_eq!(
-        divergence_block("130.")["bundle_versions"]["planner_channel"],
+        divergence_block("133.")["bundle_versions"]["planner_channel"],
         DOCUMENT_VERSION,
         "the planner-channel version must be the one the newest entry raising it records"
     );
@@ -2196,6 +2196,7 @@ fn op_of(command: &Edit) -> &'static str {
         Edit::Complete { .. } => "complete",
         Edit::Amend { .. } => "amend",
         Edit::Note { .. } => "note",
+        Edit::WithdrawNote { .. } => "withdraw-note",
         Edit::Finding { .. } => "finding",
         Edit::Rework { .. } => "rework",
         Edit::Retitle { .. } => "retitle",
@@ -2380,7 +2381,7 @@ fn the_landing_closures_record_is_what_the_divergence_record_names() {
     }
 }
 
-/// The record entry 133 proposes is the one this build declares for `home-status`: both of its
+/// The record entry 134 proposes is the one this build declares for `home-status`: both of its
 /// examples — a home written and a home the store refused — are admitted by the published
 /// document, a record missing a member every writer writes with a value, or naming an outcome
 /// or class nobody declared, is refused, and the kind is the vocabulary's own.
@@ -2388,14 +2389,14 @@ fn the_landing_closures_record_is_what_the_divergence_record_names() {
 fn the_home_status_record_is_what_the_divergence_record_names() {
     use onepipeline::event::PipelineKind;
     use onepipeline::payload::{registry, schema_of};
-    let block = divergence_block("133.");
+    let block = divergence_block("134.");
     assert_eq!(block["kind"], PipelineKind::HomeStatus.as_str());
     let id = schema_of(PipelineKind::HomeStatus);
     let registry = registry();
     for example in ["record", "failed"] {
         registry
             .check(&id, &block[example])
-            .unwrap_or_else(|why| panic!("entry 133's {example} is refused: {why}"));
+            .unwrap_or_else(|why| panic!("entry 134's {example} is refused: {why}"));
     }
     for member in ["project", "outcome"] {
         let mut short = block["record"].clone();
@@ -6752,7 +6753,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // record proposes, and no others: a kind neither document names fails here.
     let proposed: BTreeSet<String> = [
         "40.", "47.", "55.", "65.", "70.", "92.", "119.", "121.", "122.", "123.", "126.", "127.",
-        "130.", "132.", "133.",
+        "130.", "132.", "134.",
     ]
     .into_iter()
     .flat_map(|entry| {
@@ -9091,12 +9092,12 @@ fn the_note_delivery_surface_is_what_the_divergence_record_names() {
         serde_json::from_value(block["reached"].clone()).expect("entry 60 names the dispositions");
     let carried = [
         Reached::Queued,
-        Reached::Worker,
-        Reached::Supervisor,
+        Reached::Worker { turn: None },
+        Reached::Supervisor { turn: None },
         Reached::JudgedWith {
             completion_reason: "the work is done".into(),
         },
-        Reached::Carried,
+        Reached::Carried { reason: None },
     ];
     assert_eq!(
         carried
@@ -9209,7 +9210,7 @@ fn the_note_delivery_surface_is_what_the_divergence_record_names() {
     let answers: Vec<String> =
         serde_json::from_value(api["answers"].clone()).expect("entry 60 names what it answers");
     let spelled = [
-        format!("{:?}", Delivered::To(Reached::Worker)),
+        format!("{:?}", Delivered::To(Reached::Worker { turn: None })),
         format!("{:?}", Delivered::Queued),
     ];
     for (answer, spelled) in answers.iter().zip(spelled.iter()) {
@@ -11197,7 +11198,7 @@ fn the_manager_landing_contract_is_what_the_divergence_record_names() {
 /// and both bundles are at its versions and carry the op and the kinds.
 #[test]
 fn the_review_reply_surface_is_what_the_divergence_record_names() {
-    use onepipeline::channel::layout::{CommandOutcome, Op, DOCUMENT_VERSION};
+    use onepipeline::channel::layout::{CommandOutcome, Op};
     use onepipeline::channel::{Author, Command, CommandResult, CommandVerdict, Refusal};
     use onepipeline::payload::{registry, schema_of};
     let block = divergence_block("130.");
@@ -11337,6 +11338,7 @@ fn the_review_reply_surface_is_what_the_divergence_record_names() {
             outcome: CommandVerdict::Refused,
             reason: Some(typed.to_string()),
             refusal: Some(typed.clone()),
+            turn: None,
         };
         let wire = serde_json::to_value(&result).unwrap();
         assert_eq!(&wire[field], refusal);
@@ -11360,6 +11362,7 @@ fn the_review_reply_surface_is_what_the_divergence_record_names() {
         outcome: CommandVerdict::Applied,
         reason: None,
         refusal: None,
+        turn: None,
     })
     .unwrap();
     assert!(bare.get(field).is_none(), "{bare}");
@@ -11371,10 +11374,11 @@ fn the_review_reply_surface_is_what_the_divergence_record_names() {
     .unwrap();
     assert_eq!(golden["schema_version"], block["results_schema_version"]);
     assert_eq!(block["store_review_keys"], json!([]));
+    // The versions this entry raised both bundles to; entry 132 raised the events
+    // bundle since, and entry 133 the planner channel's.
     assert_eq!(
         block["bundle_versions"],
-        // The events bundle this entry raised; entry 132 raised it again.
-        json!({"events": "1.7.0", "planner_channel": DOCUMENT_VERSION})
+        json!({"events": "1.7.0", "planner_channel": "1.5.0"})
     );
     assert!(onepipeline::channel::layout::bundle_json().contains("\"decline\""));
     let events = onepipeline::vocabulary::events_bundle_json();
@@ -11382,6 +11386,147 @@ fn the_review_reply_surface_is_what_the_divergence_record_names() {
         assert!(
             events.contains(&format!("agent.pipeline.{kind}@")),
             "{kind}"
+        );
+    }
+}
+
+/// The interrupting-note surface entry 133 proposes is what this build declares:
+/// `deliver`'s three values and default, a note carrying a deadline, a
+/// `withdraw-note` that refuses a field it does not declare, the `turn` a
+/// delivered note and its command result carry — and an outcome or record
+/// written before either had one still reads, and writes back without it.
+#[test]
+fn the_interrupting_note_surface_is_what_entry_133_names() {
+    use onepipeline::channel::{CommandResult, CommandVerdict, Deliver};
+    use onepipeline::note::NoteTurn;
+    let block = divergence_block("133.");
+    let values = |schema: Value| -> Vec<Value> {
+        schema["oneOf"]
+            .as_array()
+            .expect("one schema per value")
+            .iter()
+            .map(|value| value["const"].clone())
+            .collect()
+    };
+    assert_eq!(
+        values(serde_json::to_value(schemars::schema_for!(Deliver)).unwrap()),
+        block["deliver"].as_array().unwrap().clone(),
+        "`deliver`'s values are not the ones entry 133 names"
+    );
+    assert_eq!(json!(Deliver::default()), block["default_deliver"]);
+    assert_eq!(
+        values(serde_json::to_value(schemars::schema_for!(NoteTurn)).unwrap()),
+        block["turn"].as_array().unwrap().clone(),
+        "a delivered note's `turn` values are not the ones entry 133 names"
+    );
+
+    let note: Edit = serde_json::from_value(block["note"].clone()).expect("the note reads");
+    let Edit::Note {
+        deliver,
+        delivery_timeout_seconds,
+        ..
+    } = &note
+    else {
+        panic!("entry 133's note is not a note: {note:?}");
+    };
+    assert_eq!(
+        (*deliver, *delivery_timeout_seconds),
+        (Deliver::TurnEnd, Some(2))
+    );
+    assert_eq!(serde_json::to_value(&note).unwrap(), block["note"]);
+    // The largest value the field can carry is a deadline the surface accepts.
+    let largest: Edit =
+        serde_json::from_value(block["accepted_largest"].clone()).expect("the largest reads");
+    assert!(
+        matches!(
+            &largest,
+            Edit::Note {
+                delivery_timeout_seconds: Some(u64::MAX),
+                ..
+            }
+        ),
+        "{largest:?}"
+    );
+    // Each envelope-time refusal is a command the wire reads, so it is the
+    // reconciler's rule that refuses it, naming the field.
+    for refused in block["refused_at_the_envelope"].as_array().unwrap() {
+        let command: Edit =
+            serde_json::from_value(refused["command"].clone()).expect("the command reads");
+        assert!(matches!(command, Edit::Note { .. }), "{command:?}");
+    }
+
+    let withdraw: Edit =
+        serde_json::from_value(block["withdraw_note"].clone()).expect("the withdrawal reads");
+    assert_eq!(op_of(&withdraw), "withdraw-note");
+    assert_eq!(
+        serde_json::to_value(&withdraw).unwrap(),
+        block["withdraw_note"]
+    );
+    let mut stray = block["withdraw_note"].clone();
+    stray["text"] = json!("a field it does not declare");
+    assert!(
+        serde_json::from_value::<Edit>(stray)
+            .unwrap_err()
+            .to_string()
+            .contains("unknown field `text`"),
+        "a withdrawal carrying a field it does not declare was read"
+    );
+
+    let reached: Reached = serde_json::from_value(block["delivered"].clone()).expect("it reads");
+    assert_eq!(
+        reached,
+        Reached::Worker {
+            turn: Some(NoteTurn::Interrupted)
+        }
+    );
+    let before: Reached =
+        serde_json::from_value(block["delivered_before"].clone()).expect("a record before reads");
+    assert_eq!(before, Reached::Worker { turn: None });
+    assert!(serde_json::to_value(&before).unwrap().get("turn").is_none());
+    let carried: Reached =
+        serde_json::from_value(block["carried_expired"].clone()).expect("a carried note reads");
+    assert!(
+        matches!(&carried, Reached::Carried { reason: Some(reason) } if reason.contains("delivery_timeout_seconds")),
+        "{carried:?}"
+    );
+
+    let result: CommandResult = serde_json::from_value(block["result"].clone()).expect("reads");
+    assert_eq!(
+        (result.outcome, result.turn),
+        (CommandVerdict::Applied, Some(NoteTurn::Interrupted))
+    );
+    assert_eq!(serde_json::to_value(&result).unwrap(), block["result"]);
+    let earlier: CommandResult =
+        serde_json::from_value(block["result_before"].clone()).expect("an earlier result reads");
+    assert_eq!(earlier.turn, None);
+    assert_eq!(
+        serde_json::to_value(&earlier).unwrap(),
+        block["result_before"]
+    );
+
+    // The planner-channel document states both: the outcome's `turn`, and the op.
+    let bundle = onepipeline::channel::layout::bundle_json();
+    for word in ["\"withdraw-note\"", "\"NoteTurn\"", "\"turn-end\""] {
+        assert!(
+            bundle.contains(word),
+            "the planner-channel document does not state {word}"
+        );
+    }
+    // And the run reading states the `delivering` reading's `deadline`.
+    let reading: Value = serde_json::from_str(
+        &std::fs::read_to_string(repo_root().join("schemas/run-reading.schema.json")).unwrap(),
+    )
+    .unwrap();
+    let delivering = reading["$defs"]["Delivery"]["oneOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|variant| variant["properties"]["state"]["const"] == "delivering")
+        .expect("the reading states a delivering delivery");
+    for field in block["delivering"].as_object().unwrap().keys() {
+        assert!(
+            field == "envelope" || delivering["properties"].get(field).is_some(),
+            "the run reading's `delivering` does not state `{field}`"
         );
     }
 }

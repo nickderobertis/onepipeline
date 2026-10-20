@@ -110,7 +110,7 @@ fn at_rest(world: &World, what: &str) {
             .filter(|record| record["calls"] != json!({}))
             .count();
         // The run's home is the one call a settled run makes after its last attempt's command
-        // has ended, on a store of its own: entry 133.
+        // has ended, on a store of its own: entry 134.
         let between_commands = asked.last().is_some_and(|call| call[0] == END)
             || !world.events_of(RUN, "home-status").is_empty();
         if landed && between_commands && called_by_attempts == ended {
@@ -337,7 +337,7 @@ fn the_comparable_plan() -> (Value, Vec<Value>, Vec<Vec<Vec<String>>>) {
         .expect("the write-back opened the store");
     let (launch, writeback) = calls.split_at(second);
     // The run's home, marked `done` once the run has settled — the last calls the store is
-    // asked, on a store of their own after the write-back's last command ended: entry 133.
+    // asked, on a store of their own after the write-back's last command ended: entry 134.
     let last_end = writeback
         .iter()
         .rposition(|call| call[0] == END)

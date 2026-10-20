@@ -750,6 +750,26 @@ fn plain(path: &Path) -> PathBuf {
     }
 }
 
+/// Where every world's scratch root is made: the temporary directory, except on
+/// macOS, where it is `/tmp`.
+///
+/// A held turn's control socket is bound at
+/// `<state home>/oneharness/sessions/control/<session>.sock`, and a unix socket
+/// address is at most 104 bytes on macOS. The runner's temporary directory,
+/// resolved, is `/private/var/folders/<2>/<28>/T/`, and under it the control
+/// directory alone took 108: no session name fit, so no turn there could be
+/// interrupted, and the interrupt journeys in `tests/note` waited for an answer
+/// that never came. `/tmp` resolves to `/private/tmp`, which leaves the session
+/// name about 40 bytes. `a_worlds_control_socket_fits_this_platforms_address_limit`
+/// holds it.
+fn scratch_base() -> PathBuf {
+    if cfg!(target_os = "macos") {
+        PathBuf::from("/tmp")
+    } else {
+        std::env::temp_dir()
+    }
+}
+
 /// The environment variable the linked `oneharness-core` reads its per-user
 /// state directory from, by platform: `%LOCALAPPDATA%` on Windows and
 /// `$XDG_STATE_HOME` everywhere else — the library's own
@@ -819,7 +839,7 @@ impl World {
         // something its teardown can reach. See [`Drop for World`](World).
         onepipeline_testfakes::containment::enrol();
         LIVE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let root = std::env::temp_dir().join(format!(
+        let root = scratch_base().join(format!(
             "op-{}-{}",
             std::process::id(),
             NTH.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
@@ -935,6 +955,55 @@ impl World {
     pub fn through_scripted_source(mut self) -> Self {
         self.scripted = true;
         self
+    }
+
+    /// The same world, with every `git` its commands start counted first and then run as
+    /// the real one: see [`World::git_starts`].
+    ///
+    /// The count is a two-line shell program placed ahead of everything on the world's
+    /// `PATH`: it appends one line to the world's count, and then `exec`s the real `git`
+    /// with its argv, environment and directory untouched — so a start counted is still
+    /// one process, and one it could not count is one it does not run. Unix alone, where
+    /// that `exec` is a replacement rather than a second process, and where `/bin/sh`
+    /// runs it.
+    #[cfg(unix)]
+    pub fn counting_git(self) -> Self {
+        let real = Self::resolved_on(&Command::new("git"), "git").expect("the host has a git");
+        let counted = self.root.join("counted-git");
+        std::fs::create_dir_all(&counted).expect("a directory for the counted git");
+        let quoted = |path: &Path| format!("'{}'", path_text(path).replace('\'', "'\\''"));
+        onepipeline_testfakes::executable(
+            &counted.join("git"),
+            format!(
+                "#!/bin/sh\nprintf 'start\\n' >> {} || exit 70\nexec {} \"$@\"\n",
+                quoted(&self.git_starts_log()),
+                quoted(&real),
+            ),
+        );
+        let path = path_leading_with(&[
+            counted,
+            onevcs_binary()
+                .parent()
+                .expect("onevcs has a directory")
+                .to_path_buf(),
+        ]);
+        self.with_env("PATH", path.to_str().expect("a PATH this host can spell"))
+    }
+
+    /// The file [`counting_git`](World::counting_git) counts each start into.
+    #[cfg(unix)]
+    pub fn git_starts_log(&self) -> PathBuf {
+        self.root.join("git-starts.log")
+    }
+
+    /// How many `git` processes this world's commands have started so far, where it
+    /// was made with [`counting_git`](World::counting_git).
+    #[cfg(unix)]
+    pub fn git_starts(&self) -> usize {
+        std::fs::read_to_string(self.git_starts_log())
+            .unwrap_or_default()
+            .lines()
+            .count()
     }
 
     /// The settings that declare this world's plans source to the binary under test.
@@ -3536,6 +3605,18 @@ fn a_dispatch_that_met_the_test_holds_until_it_is_released() {
         world.run_file("met", "result.json").is_file()
     });
 } // llmlint: ignore-end[tests_mirror_real_usage]
+
+/// Whether a node's projected planner context carries `text` as its **latest**
+/// carried note.
+///
+/// Notes carried to one node accumulate in carry order, one paragraph each, so
+/// the next dispatch is composed with every one of them; the latest is the
+/// context's last entry, and a context holding only one note is exactly it.
+pub fn carries_latest(context: &Value, text: &str) -> bool {
+    context
+        .as_str()
+        .is_some_and(|context| context == text || context.ends_with(&format!("\n\n{text}")))
+}
 
 /// Wait for a child this journey spawned with piped streams to end, draining
 /// them as it goes.
@@ -7341,6 +7422,28 @@ fn a_runs_settling_patience_is_one_step_per_node_on_its_longest_chain() {
 /// privilege no CI account is guaranteed to hold. What `resolved` has to get
 /// right on Windows is [`plain`]'s rule, and the test below holds that one on
 /// every platform.
+/// A world's state home leaves a held turn room to bind its control socket on
+/// this platform, at the address onejudge dials for a session name of the length
+/// a graph mints. See [`scratch_base`]: on macOS the temporary directory left
+/// none.
+#[cfg(unix)]
+#[test]
+fn a_worlds_control_socket_fits_this_platforms_address_limit() {
+    use oneharness_core::domain::control::{socket_address_within_limit, socket_path};
+    let world = World::new("control-socket");
+    let store = world.state_home().join("oneharness").join("sessions");
+    let socket = socket_path(&store, "node-scope-1760000000000-123456-worker-skill")
+        .unwrap_or_else(|too_long| {
+            panic!(
+                "no control socket fits under a world's state home: {} is past the limit",
+                too_long.path().display()
+            )
+        });
+    if let Err(too_long) = socket_address_within_limit(&socket) {
+        panic!("{} is past the limit", too_long.path().display());
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn a_directory_reached_through_a_symlink_resolves_to_the_directory_itself() {
