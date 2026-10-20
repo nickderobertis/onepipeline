@@ -32,7 +32,7 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use onevcs::{
     DraftReason, EventStream, Lifecycle, MergePolicy, Providers, Publication, PublishOutcome,
@@ -2017,7 +2017,7 @@ pub fn follow(
     let reader = std::thread::Builder::new()
         .name(format!("onevcs-{}-events", token.0))
         .spawn(move || {
-            let mut asked = Instant::now();
+            let mut asked = std::time::Instant::now();
             loop {
                 // Read *before* asking whether the session closed, so a record
                 // written between the two is relayed on the next pass rather than
@@ -2035,7 +2035,7 @@ pub fn follow(
                     if settled(&followed) {
                         return;
                     }
-                    asked = Instant::now();
+                    asked = std::time::Instant::now();
                 }
                 std::thread::sleep(FOLLOW_POLL);
             }
