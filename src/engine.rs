@@ -2773,14 +2773,6 @@ fn close_out_and_drain(
     // answered has said nothing to report.
     crate::loopstats::flush(paths)?;
     if let Some(writeback) = writeback {
-        // The run's home, marked `done` once the run has reached the success ending and never
-        // again once its journal records the call: entry 133. Owed before the close-out, so
-        // the close-out's window for what the closure thread owes is the home's too.
-        if crate::hooks::succeeded(final_statuses) && !crate::home::recorded(paths) {
-            if let Ok(home) = launch.project.parse() {
-                writeback.settle_home(home);
-            }
-        }
         // A node that never started is released at closeout, so another reader may take up
         // what this run claimed and did not begin. A driver that goes on driving after an
         // edit found here publishes it `queued` again on its next pass.

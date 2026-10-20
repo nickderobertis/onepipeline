@@ -1462,6 +1462,14 @@ impl Writeback {
             // exits. This keeps a completed run from racing a person's next store call,
             // while the hard call limit preserves write-back's latency boundary.
             self.closing_out_until(deadline, Pending::unlanded);
+            // The run's home, marked `done` once the run has reached the success ending and
+            // never again once its journal records the call: entry 133. The closure thread
+            // makes the call once this projection has landed, inside the closures' window below.
+            if crate::hooks::succeeded(statuses) && !crate::home::recorded(paths) {
+                if let Ok(home) = launch.project.parse() {
+                    self.settle_home(home);
+                }
+            }
         }
         // And the closures still owed — whoever holds the project's board, the issues this
         // run's own landings closed are this run's. A run every node of which has settled has
@@ -2200,17 +2208,35 @@ fn closer(store: &Store, per_item: NonZeroU64, pending: &(Mutex<Pending>, Condva
     }
 }
 
-/// The run's home marked `done` through [`crate::home::set_done`], a transient failure asked
-/// again on the closures' schedule: the record the call finished in, or `None` where the run
-/// stopped while it was still being asked.
+/// The run's home marked `done` through [`crate::home::set_done`], once what the run projected
+/// last has landed, a transient failure asked again on the closures' schedule: the record the
+/// call finished in, or `None` where the run stopped before it was made or while it was still
+/// being asked.
 fn settle_home(
     store: &Store,
     per_item: NonZeroU64,
     pending: &(Mutex<Pending>, Condvar),
     home: &QualifiedId,
 ) -> Option<crate::payload::HomeStatus> {
+    // After the close-out's projection, which a board pacing its writes can keep landing past
+    // its own window: the two never write the run's items at once, and the close-out's wait for
+    // the home is time that projection lands in.
+    {
+        let (lock, ready) = pending;
+        let mut state = lock.lock().ok()?;
+        while state.unlanded() && state.phase != RunPhase::Stopping {
+            state = ready.wait(state).ok()?;
+        }
+        if state.phase == RunPhase::Stopping {
+            return None;
+        }
+    }
     let within = Deadline::Write { per_item, items: 1 }.within();
     let mut failures: u32 = 0;
+    // A failpoint, so a journey can read the home as it stood before the write.
+    if let Err(error) = crate::ordering::meet("ONEPIPELINE_TEST_HOME_GATE") {
+        eprintln!("onepipeline: {error}");
+    }
     loop {
         match crate::home::set_done(store, home, within) {
             crate::home::Answer::Finished(record) => return Some(record),
