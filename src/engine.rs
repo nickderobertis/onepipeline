@@ -4358,16 +4358,43 @@ fn seated(
 }
 
 /// The positions of envelope `id`'s notes a committed `withdraw-note` took back.
-/// Read off the journal only where the envelope carries a note at all.
+/// Read only where the envelope carries a note at all.
+///
+/// The journal's withdrawals, and those a write-ahead still names: a live note
+/// is taken back before its withdrawal is journalled, so a driver that died
+/// between the two left the withdrawal written down and not yet recorded, and a
+/// note it took back is never offered again while the driver taking the run
+/// over has still to commit it — see [`refused_keeping_withdrawals`].
 fn withdrawn_notes(paths: &RunPaths, id: u64, commands: &[Command]) -> BTreeSet<usize> {
-    if commands
+    if !commands
         .iter()
         .any(|command| matches!(command, Command::Note { .. }))
     {
-        crate::withdrawal::withdrawn_from(paths, id)
-    } else {
-        BTreeSet::new()
+        return BTreeSet::new();
     }
+    let mut withdrawn = crate::withdrawal::withdrawn_from(paths, id);
+    withdrawn.extend(written_down_withdrawals(paths, id));
+    withdrawn
+}
+
+/// The positions of envelope `id`'s notes a write-ahead of another envelope names
+/// a live withdrawal of. A write-ahead this build cannot read names none.
+fn written_down_withdrawals(paths: &RunPaths, id: u64) -> BTreeSet<usize> {
+    let Ok(written) = std::fs::read_dir(paths.dir.join(COMMITTING)) else {
+        return BTreeSet::new();
+    };
+    written
+        .flatten()
+        .filter_map(|file| std::fs::read_to_string(file.path()).ok())
+        .filter_map(|text| serde_json::from_str::<Committing>(&text).ok())
+        .flat_map(|committing| committing.operations.into_iter().flatten().flatten())
+        .filter_map(|operation| match operation {
+            edits::Operation::NoteWithdrawn {
+                envelope, index, ..
+            } if envelope == id => usize::try_from(index).ok(),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Answer an envelope with `outcome`, each of its notes a committed withdrawal
@@ -4721,6 +4748,7 @@ fn refused_keeping_withdrawals(
             Ok(_) => Answered::Unapplied,
         });
     }
+    crate::review::failpoint("after-edit-rejected")?;
     for (command, ruling) in commands.iter().zip(evaluated) {
         if let Ok(Delivery::TakenBack(operations)) = ruling {
             commit_command(
@@ -4735,7 +4763,6 @@ fn refused_keeping_withdrawals(
             )?;
         }
     }
-    crate::review::failpoint("after-edit-rejected")?;
     let outcome = if kept {
         partly_applied(envelope.id, commands, &answers)
     } else {
