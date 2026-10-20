@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.80.2](https://github.com/nickderobertis/onepipeline/compare/v0.80.1...v0.80.2) - 2026-10-20
+
+### Added
+
+- withdraw a live manager note while its delivery is awaited ([#1054](https://github.com/nickderobertis/onepipeline/pull/1054))
+
+### Fixed
+
+- *(tests)* steady the writeback-cost journey and ask a follow its session only when the answer can matter ([#1065](https://github.com/nickderobertis/onepipeline/pull/1065))
+- *(release)* finish a re-run whose earlier attempt already published, and wait longer for npm ([#1067](https://github.com/nickderobertis/onepipeline/pull/1067))
+
 ## [0.80.1](https://github.com/nickderobertis/onepipeline/compare/v0.80.0...v0.80.1) - 2026-10-20
 
 ### Added
