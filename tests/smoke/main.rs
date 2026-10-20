@@ -250,7 +250,7 @@ fn why(world: &World, run: &str) -> String {
 /// A hosted runner is a fresh machine whose process numbering starts over, so
 /// two runs an hour apart on two runners can hand this process the same pid and
 /// so the same branch — and with it, because the worker's body is derived from
-/// the branch, the same `work.md` the scratch repository's `main` already
+/// the branch, the same work file the scratch repository's `main` already
 /// carries from the first. The worker's write leaves a clean tree, the merge
 /// path proves the branch level with `origin/main`, and the node settles
 /// `empty-branch` on a lifecycle this crate ran correctly. The workflow run and
@@ -373,6 +373,13 @@ fn a_lifecycle_node_opens_a_real_pull_request_merges_it_and_the_base_advances() 
     // its own history rather than on anything this crate did.
     let wrote = format!("the worker wrote this for {branch}");
     world.script("harness.work", &wrote);
+    // And into a file no other run writes: two smoke jobs from two pull requests share
+    // the scratch repository, and when both wrote the one `work.md` the first to merge
+    // left the second a `sync-conflict` on the base this crate never made.
+    world.script(
+        "harness.work-file",
+        &format!("work-{}.md", branch.replace('/', "-")),
+    );
     let plan = world.plan(
         "smoke",
         &plan_of(
