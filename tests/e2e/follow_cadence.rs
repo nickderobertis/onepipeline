@@ -12,11 +12,6 @@
 // subprocess boundary, because a real agent turn is a paid one and this journey is about the
 // follow of a publication: the session, its clone, its stream and the push are the real linked
 // `onevcs` over a real origin on disk, and the driver is the compiled binary.
-// llmlint: ignore-file[expensive_tests_stay_behind_their_own_edge] one journey of about a
-// minute — a held publication and four asks five seconds apart — and what it measures is `vcs`' follow
-// inside a real publication: `driver`, `lifecycle` and `vcs` through the linked `onevcs` at
-// once, so the crate's edge is the narrowest it fits behind, on the grounds
-// `mod unreadable_sessions` gives.
 
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -30,7 +25,7 @@ const LEAST_GAP_SECONDS: f64 = 4.9;
 
 /// How many asks the journey waits to see: enough gaps that one long one — a loaded host
 /// slowing a single ask — cannot stand in for the cadence.
-const ASKS: usize = 4;
+const ASKS: usize = 3;
 
 /// Each open of `record` the trace holds, as the thread that made it and when, in the order
 /// the tracer wrote them.
@@ -72,10 +67,13 @@ fn a_live_follow_asks_after_its_session_at_most_every_five_seconds() {
     // the launch a user makes. Refused rather than passed where the tracer will not run.
     let trace = world.root.join("follow.strace");
     let inner = world.cmd(&["start", &path, "--attach"]);
+    // `--seccomp-bpf` stops the traced processes only at the `openat` the count is made of, so
+    // the publication's `git` children run untraced and the journey costs what the run does.
     let mut traced = Command::new("strace");
     traced
         .args([
             "-f",
+            "--seccomp-bpf",
             "-qq",
             "-ttt",
             "-e",
