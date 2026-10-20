@@ -909,6 +909,10 @@ struct Pending {
     /// what a driver's launch wait is bounded by, however soon the worker picks that snapshot up.
     queued_items: usize,
     worker: WorkerState,
+    /// Whether the worker's last attempt failed in a way a wait can change and no attempt has
+    /// landed since: a projection waiting on the store, which nothing that waits on it to land
+    /// at closeout — the run's home — waits for.
+    retrying: bool,
     phase: RunPhase,
     /// Projections that failed and have not yet been raised with the planner.
     ///
@@ -1002,6 +1006,7 @@ impl Writeback {
         let pending = Arc::new((Mutex::new(Pending::default()), Condvar::new()));
         let worker_pending = Arc::clone(&pending);
         let run_dir = paths.dir.clone();
+        let closer_run_dir = paths.dir.clone();
         let store = Store::at(launch_dir(launch));
         let per_item = per_item_budget(launch);
         let closer_pending = Arc::clone(&pending);
@@ -1019,7 +1024,7 @@ impl Writeback {
         // take holds no projection back, and a projection holds back no closure.
         std::thread::Builder::new()
             .name(format!("closures-{}", paths.run))
-            .spawn(move || closer(&closer_store, per_item, &closer_pending))
+            .spawn(move || closer(&closer_store, &closer_run_dir, per_item, &closer_pending))
             .ok()?;
         // llmlint: ignore-end[changed_behavior_has_e2e]
         let writer = Self {
@@ -1975,6 +1980,7 @@ fn worker(
                 standing = Standing::Landing;
                 let (lock, _) = &*pending;
                 if let Ok(mut state) = lock.lock() {
+                    state.retrying = false;
                     state.last_success = Some(snapshot.clone());
                     if state.phase == RunPhase::Stopping && state.latest.is_none() {
                         return;
@@ -1996,6 +2002,7 @@ fn worker(
                 standing = Standing::Refused;
                 let (lock, _) = &*pending;
                 if let Ok(mut state) = lock.lock() {
+                    state.retrying = false;
                     state.unprojected.push(Unprojected {
                         project: snapshot.project.clone(),
                         items,
@@ -2062,6 +2069,13 @@ fn worker(
                     Some(wait) => Interval::Asked(wait),
                     None => Interval::Scheduled(retry_after(failures.get())),
                 };
+                {
+                    let (lock, ready) = &*pending;
+                    if let Ok(mut state) = lock.lock() {
+                        state.retrying = true;
+                        ready.notify_all();
+                    }
+                }
                 if !should_retry_after(&pending, interval) {
                     return;
                 }
@@ -2110,7 +2124,12 @@ fn worker(
 /// about on the same terms: a transient failure again on that schedule, a refusal a record, and
 /// a call still being asked about when the run stops no record, so the next driver to close the
 /// run out makes it — entry 133.
-fn closer(store: &Store, per_item: NonZeroU64, pending: &(Mutex<Pending>, Condvar)) {
+fn closer(
+    store: &Store,
+    run_dir: &Path,
+    per_item: NonZeroU64,
+    pending: &(Mutex<Pending>, Condvar),
+) {
     loop {
         let landing = {
             let (lock, ready) = pending;
@@ -2135,12 +2154,10 @@ fn closer(store: &Store, per_item: NonZeroU64, pending: &(Mutex<Pending>, Condva
                     };
                     state.homing = true;
                     drop(state);
-                    let Some(record) = settle_home(store, per_item, pending, &home) else {
-                        return;
-                    };
+                    let record = settle_home(store, run_dir, per_item, pending, &home);
                     let Ok(mut state) = lock.lock() else { return };
                     state.homing = false;
-                    state.homed = Some(record);
+                    state.homed = record;
                     ready.notify_all();
                     continue;
                 }
@@ -2210,26 +2227,33 @@ fn closer(store: &Store, per_item: NonZeroU64, pending: &(Mutex<Pending>, Condva
 
 /// The run's home marked `done` through [`crate::home::set_done`], once what the run projected
 /// last has landed, a transient failure asked again on the closures' schedule: the record the
-/// call finished in, or `None` where the run stopped before it was made or while it was still
-/// being asked.
+/// call finished in, or `None` where no call is made by this driver — the run stopped, the
+/// projection is waiting on a store that is failing, or the store asked to be left alone — or
+/// where the run stopped while it was still being asked. No record is what has the next driver
+/// to close the run out make the call.
 fn settle_home(
     store: &Store,
+    run_dir: &Path,
     per_item: NonZeroU64,
     pending: &(Mutex<Pending>, Condvar),
     home: &QualifiedId,
 ) -> Option<crate::payload::HomeStatus> {
     // After the close-out's projection, which a board pacing its writes can keep landing past
     // its own window: the two never write the run's items at once, and the close-out's wait for
-    // the home is time that projection lands in.
+    // the home is time that projection lands in. A projection waiting on the store is not
+    // waited for, so a store that is failing holds no run's ending any longer than it did.
     {
         let (lock, ready) = pending;
         let mut state = lock.lock().ok()?;
-        while state.unlanded() && state.phase != RunPhase::Stopping {
+        while state.unlanded() && !state.retrying && state.phase != RunPhase::Stopping {
             state = ready.wait(state).ok()?;
         }
-        if state.phase == RunPhase::Stopping {
+        if state.retrying || state.phase == RunPhase::Stopping {
             return None;
         }
+    }
+    if store_asked_to_wait(run_dir) {
+        return None;
     }
     let within = Deadline::Write { per_item, items: 1 }.within();
     let mut failures: u32 = 0;
