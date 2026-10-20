@@ -633,6 +633,9 @@ fn awaiting_an_answer(world: &World, run: &str) -> usize {
 /// it waits in the spool, as `<id>.offer.json`, until the sibling's own bound
 /// gives up on it. What is read is that spool's file names under each directory
 /// called `notes`, which is where a two-party member binds it.
+///
+/// `#[cfg(unix)]` because the one journey that reads it is.
+#[cfg(unix)]
 fn offers_in_spool(world: &World) -> usize {
     fn walk(dir: &Path, found: &mut usize) {
         let Ok(entries) = std::fs::read_dir(dir) else {
@@ -6506,6 +6509,10 @@ fn a_withdrawn_note_another_note_reads_as_part_of_takes_out_only_itself() {
 /// itself, as the run's writer: the withdrawal is committed, the envelope that
 /// carried the note while a driver ran is answered again with it refused, and a
 /// driver that then adopts the run composes the node's next dispatch without it.
+///
+/// `#[cfg(unix)]` because it ends the run's driver by pid, as the adoption
+/// journeys do.
+#[cfg(unix)]
 #[test]
 fn a_carried_note_withdrawn_with_nothing_driving_stays_withdrawn_once_the_run_is_adopted() {
     let world = World::new("note-withdraw-undriven");
