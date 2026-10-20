@@ -5580,6 +5580,13 @@ fn held_build_beside_a_kept_node(world: &World, run: &str) -> String {
     let mut launch = world.agentgraph_cmd(&["start", &path, "--detach"]);
     launch.env(CANCEL_GRACE_ENV, "1");
     world.run_on(launch, "start --detach").exited(0);
+    // The relayed `turn-started`, not only the fake's recorded prompt: the fake
+    // records the prompt before the driver has relayed the turn's address, and a
+    // note offered in that window is carried untaken with no reason — the gate's
+    // flake, where the deadline journey read back `carried` naming no deadline.
+    world.until("build's worker turn to open", |world| {
+        !openings_of(world, run, "build").is_empty()
+    });
     world.until("build's worker turn to record its prompt", |world| {
         worker_turns(world)
             .iter()
