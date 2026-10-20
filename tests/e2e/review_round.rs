@@ -771,6 +771,7 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
 /// it starts about 10,000, and more on a slower host, which renders and asks on a timer
 /// more often over a longer run — so the bound sits well above the first and below
 /// anything the round cost before.
+#[cfg(unix)]
 const GIT_STARTS: usize = 15_000;
 
 /// Hold the round to [`GIT_STARTS`].
