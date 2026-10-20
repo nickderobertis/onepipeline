@@ -527,6 +527,15 @@ mod tests {
     /// A deadline the clock can name is that instant; the largest a note may
     /// carry still forms one — the furthest the clock can name — without the
     /// overflow panicking, and never earlier than one it could name.
+    ///
+    /// Held here rather than by a journey because no journey can reach the
+    /// clock's own limit: the run bounds every deadline at
+    /// `9999-12-31T23:59:59.999Z` before it forms an instant
+    /// (`note::bounded_deadline`, which `status_shows_a_pending_notes_deadline_beside_its_delivering_state`
+    /// drives end to end with `u64::MAX`), and a monotonic clock that cannot
+    /// name eight thousand years ahead is one no host this suite runs on has.
+    /// Handing the function the unbounded duration directly is the only way to
+    /// reach its fallback at all.
     #[test]
     fn every_accepted_deadline_forms_an_instant_without_overflow() {
         // The latest instant the run names is the latest RFC 3339 writes, and
