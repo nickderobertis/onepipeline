@@ -991,8 +991,6 @@ impl Watch {
     /// node's repository through `onevcs`, git processes and all, and this is
     /// asked of every watched node on every pass.
     pub(crate) fn held(&self, watching: &[Node]) -> BTreeSet<String> {
-        // The adoption last: it is read off `onevcs`'s configuration, and a node nothing
-        // is unresolved or awaited for is held by no answer it could give.
         watching
             .iter()
             .filter(|node| {
@@ -1395,7 +1393,6 @@ impl Watch {
     ///
     /// The rung is asked last, for [`held`](Self::held)'s reason.
     pub(crate) fn ready_to_adopt(&self, told: &[Node]) -> Vec<(String, Vec<Released>)> {
-        // The adoption last, for the reason `held` reads it last.
         told.iter()
             .filter(|node| !self.adopted.contains(&node.id))
             .filter(|node| self.all_released(&node.id))
