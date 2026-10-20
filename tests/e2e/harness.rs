@@ -937,19 +937,29 @@ impl World {
         self
     }
 
-    /// The same world, with every `git` its commands start counted first by
-    /// `crates/testfakes`' `counted-git` and then run as the real one: see
-    /// [`World::git_starts`].
+    /// The same world, with every `git` its commands start counted first and then run as
+    /// the real one: see [`World::git_starts`].
     ///
-    /// Unix alone, where the count replaces itself with the real program, so a
-    /// start counted is one process; elsewhere it would be two, and would double
-    /// what it measures on the one host where it is dearest.
+    /// The count is a two-line shell program placed ahead of everything on the world's
+    /// `PATH`: it appends one line to the world's count, and then `exec`s the real `git`
+    /// with its argv, environment and directory untouched — so a start counted is still
+    /// one process, and one it could not count is one it does not run. Unix alone, where
+    /// that `exec` is a replacement rather than a second process, and where `/bin/sh`
+    /// runs it.
     #[cfg(unix)]
     pub fn counting_git(self) -> Self {
         let real = Self::resolved_on(&Command::new("git"), "git").expect("the host has a git");
         let counted = self.root.join("counted-git");
         std::fs::create_dir_all(&counted).expect("a directory for the counted git");
-        place(&double("counted-git"), &counted.join("git")).expect("the counted git is placed");
+        let quoted = |path: &Path| format!("'{}'", path_text(path).replace('\'', "'\\''"));
+        onepipeline_testfakes::executable(
+            &counted.join("git"),
+            format!(
+                "#!/bin/sh\nprintf 'start\\n' >> {} || exit 70\nexec {} \"$@\"\n",
+                quoted(&self.git_starts_log()),
+                quoted(&real),
+            ),
+        );
         let path = path_leading_with(&[
             counted,
             onevcs_binary()
@@ -957,20 +967,23 @@ impl World {
                 .expect("onevcs has a directory")
                 .to_path_buf(),
         ]);
-        let log = path_text(&self.root.join("git-starts.jsonl"));
         self.with_env("PATH", path.to_str().expect("a PATH this host can spell"))
-            .with_env(onepipeline_testfakes::COUNTED_GIT_LOG_ENV, &log)
-            .with_env(
-                onepipeline_testfakes::COUNTED_GIT_REAL_ENV,
-                &path_text(&real),
-            )
     }
 
-    /// Every `git` this world's commands have started so far, each by its argv,
-    /// where it was made with [`counting_git`](World::counting_git).
+    /// The file [`counting_git`](World::counting_git) counts each start into.
     #[cfg(unix)]
-    pub fn git_starts(&self) -> Vec<Value> {
-        read_jsonl(&self.root.join("git-starts.jsonl"))
+    pub fn git_starts_log(&self) -> PathBuf {
+        self.root.join("git-starts.log")
+    }
+
+    /// How many `git` processes this world's commands have started so far, where it
+    /// was made with [`counting_git`](World::counting_git).
+    #[cfg(unix)]
+    pub fn git_starts(&self) -> usize {
+        std::fs::read_to_string(self.git_starts_log())
+            .unwrap_or_default()
+            .lines()
+            .count()
     }
 
     /// The settings that declare this world's plans source to the binary under test.

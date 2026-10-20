@@ -1025,8 +1025,8 @@ pub(crate) fn landings_the_run_re_read(state: &mut RunState, paths: &RunPaths) {
 /// records for as long as the run goes. There a node's read is carried across
 /// that stream's consecutive renders for at most [`STREAM_READ_REUSE`] — see
 /// [`StreamReads`] — and is taken again at once after the stream records a
-/// settlement or restack of that node or a publication or landing of its session
-/// ([`moves_a_landing`]), and on the stream's final render — the one made once the
+/// settlement or restack of that node or any record of its session — its
+/// publication and landing among them — and on the stream's final render — the one made once the
 /// run's loop has finished, or the one printing the driver's exit where that came
 /// first — which reports the run as it settled and carries nothing. `status`,
 /// `results` and `watch` carry nothing and read on every render.
@@ -1053,15 +1053,21 @@ thread_local! {
     /// supervisory look costs to say one thing.
     //
     // llmlint: ignore[invalid_states_unrepresentable] a run id and a node id are the plain strings this whole crate spells them as — `RunPaths.run`, `RunState::landings`, `RunState::branches` — for the reason `src/ledger.rs`'s file-level suppression records, and `src/AGENTS.md` names a `RunId` newtype as interface drift. Newtypes at these two sites alone would disagree with every neighbour and convert at every boundary. Neither value is unchecked: the run id crossed `ledger::is_valid_run_id` when the run was launched, and the node id is one the run's own journal projected into its graph.
-    static READ_THIS_RENDER: std::cell::RefCell<BTreeMap<(String, String), std::rc::Rc<LandingRead>>> =
+    static READ_THIS_RENDER: std::cell::RefCell<BTreeMap<(String, String), Carried>> =
         const { std::cell::RefCell::new(BTreeMap::new()) };
 
-    /// The reads an attach stream on this thread carries across its renders, and
-    /// when each was taken. `None` outside one, which is every other view.
-    //
-    // llmlint: ignore[invalid_states_unrepresentable] keyed by run and node as `READ_THIS_RENDER` above is, for the reason recorded there.
-    static STREAM_READS: std::cell::RefCell<Option<BTreeMap<(String, String), Carried>>> =
-        const { std::cell::RefCell::new(None) };
+    /// Whether the renders on this thread are an attach stream's, which carry the
+    /// reads above from one render to the next — see [`StreamReads`].
+    static RENDERING: std::cell::Cell<Renders> = const { std::cell::Cell::new(Renders::EachAlone) };
+}
+
+/// What one render on a thread keeps of the last one's landing reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Renders {
+    /// Nothing: every view but an attach stream reads on every render.
+    EachAlone,
+    /// What is still inside [`STREAM_READ_REUSE`] and nothing has moved since.
+    AsOneStream,
 }
 
 /// How long an attach stream carries a node's landing read across its renders.
@@ -1076,7 +1082,7 @@ thread_local! {
 /// sooner, and its last render reads afresh.
 pub(crate) const STREAM_READ_REUSE: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// One landing read an attach stream carries, and when it was taken.
+/// One landing read a render holds, and when it was taken.
 struct Carried {
     read: std::rc::Rc<LandingRead>,
     taken: std::time::Instant,
@@ -1089,7 +1095,8 @@ impl Carried {
     }
 }
 
-/// An attach stream's reads, carried across its renders while this is held.
+/// An attach stream's renders, carrying their reads from one to the next while
+/// this is held.
 ///
 /// Held by [`crate::driver`]'s attach loop on the thread that renders, and by
 /// nothing else, so no other view ever reuses a read.
@@ -1098,24 +1105,21 @@ pub(crate) struct StreamReads(());
 impl StreamReads {
     /// Begin carrying reads across this thread's renders.
     pub(crate) fn begin() -> Self {
-        STREAM_READS.with_borrow_mut(|reads| *reads = Some(BTreeMap::new()));
+        READ_THIS_RENDER.with_borrow_mut(BTreeMap::clear);
+        RENDERING.set(Renders::AsOneStream);
         Self(())
     }
 
     /// Take every node's landing afresh on the next render, which is the one
     /// reporting the run as it settled.
     pub(crate) fn forget_all(&self) {
-        STREAM_READS.with_borrow_mut(|reads| {
-            if let Some(reads) = reads {
-                reads.clear();
-            }
-        });
+        READ_THIS_RENDER.with_borrow_mut(BTreeMap::clear);
     }
 
     /// Take a node's landing afresh where the stream just recorded something that
-    /// can move it: a settlement or restack of the node, or a record of its
-    /// session that moves the branch the read compares or the base it compares
-    /// it against — see [`moves_a_landing`].
+    /// can move it: a settlement or restack of the node, or any record of its
+    /// session — its publication and its landing among them. A session's records
+    /// that move nothing are let go of too, which costs a read and is never stale.
     ///
     /// And every node's, where the stream just recorded the driver exiting: the
     /// render printing that reports the run as it settled, and the stream's last
@@ -1129,13 +1133,10 @@ impl StreamReads {
             self.forget_all();
             return;
         }
-        STREAM_READS.with_borrow_mut(|reads| {
-            let Some(reads) = reads else {
-                return;
-            };
+        READ_THIS_RENDER.with_borrow_mut(|reads| {
             for event in events {
                 let moves = match event.source {
-                    Source::Vcs => onevcs_kind(event).is_some_and(moves_a_landing),
+                    Source::Vcs => true,
                     Source::Pipeline => {
                         event.kind.0 == PipelineKind::NodeSettled.as_str()
                             || event.kind.0 == PipelineKind::NodeRestacked.as_str()
@@ -1150,100 +1151,22 @@ impl StreamReads {
     }
 }
 
-/// Whether an `onevcs` record of a node's session moves its landing, so an attach
-/// stream reads it again rather than carrying the read it holds: its publication, its
-/// landing, and every other record of the branch or its base moving. The rest — a
-/// fetch, a lock, a check, a description, a release, the session opening or closing —
-/// leave both where the last read found them.
-///
-/// A `match` with no catch-all arm, so a kind `onevcs` adds is a build that fails here
-/// until somebody says which it is, rather than one carried past silently.
-//
-// llmlint: ignore[changed_behavior_has_e2e] the journeys hold every move an offline run makes
-// of a node already read inside one attach stream — its settlement and restack, and its
-// session's push, base merge and change request — in
-// `review_round::moved_drafts_were_read_again`. The other moving kinds reach an attach stream
-// for an already-read node only through what no offline journey stages there: a merge,
-// retarget, reopen or retirement somebody else makes while the stream runs, a draft lifted
-// after its settlement, a stack base assembled for a later dispatch. Each is decided by this
-// exhaustive match, and `an_attach_stream_lets_go_of_a_read_where_a_record_moves_its_landing`
-// drives every kind it answers `true` for, and the common ones it answers `false` for,
-// through the stream's own `forget_moved` over real envelopes.
-fn moves_a_landing(kind: onevcs::EventKind) -> bool {
-    use onevcs::EventKind as Kind;
-    match kind {
-        Kind::Push
-        | Kind::ChangeOpened
-        | Kind::ChangeDrafted
-        | Kind::DraftLifted
-        | Kind::ChangeReopened
-        | Kind::ChangeRetargeted
-        | Kind::ChangeMerged
-        | Kind::MergeCompleted
-        | Kind::BaseArrived
-        | Kind::BaseMerge
-        | Kind::CommitPreserved
-        | Kind::BranchPreserved
-        | Kind::BranchSuperseded
-        | Kind::BranchRetired
-        | Kind::StackBaseAssembled => true,
-        Kind::SessionOpened
-        | Kind::Fetch
-        | Kind::LockWait
-        | Kind::LockAcquired
-        | Kind::DraftLiftedEarly
-        | Kind::DraftKeptForReview
-        | Kind::ChecksSettled
-        | Kind::ChangeDescribed
-        | Kind::ChangeCheck
-        | Kind::MergeQueued
-        | Kind::RecoveryAttested
-        | Kind::SyncConflict
-        | Kind::SessionClosed
-        | Kind::ReleaseProbed
-        | Kind::ReleaseAcknowledged
-        | Kind::ReleaseObserved
-        | Kind::GateRun
-        | Kind::ReviewCommentsRead
-        | Kind::ReviewReplyPosted
-        | Kind::ChangeStandingsRead
-        | Kind::MergeArmed => false,
-    }
-}
-
-/// The `onevcs` kind a record of [`Source::Vcs`] carries, where it is one: `published`
-/// is this crate's own, and a kind a later `onevcs` wrote is one this build cannot
-/// place — neither is a move [`moves_a_landing`] can name, and the node's settlement
-/// that follows either is.
-fn onevcs_kind(event: &Envelope) -> Option<onevcs::EventKind> {
-    serde_json::from_value(serde_json::Value::String(event.kind.0.clone())).ok()
-}
-
 impl Drop for StreamReads {
     fn drop(&mut self) {
-        STREAM_READS.with_borrow_mut(|reads| *reads = None);
+        RENDERING.set(Renders::EachAlone);
+        READ_THIS_RENDER.with_borrow_mut(BTreeMap::clear);
     }
-}
-
-/// The read an attach stream already holds for one node, where it is still
-/// within [`STREAM_READ_REUSE`].
-fn carried(key: &(String, String)) -> Option<std::rc::Rc<LandingRead>> {
-    STREAM_READS.with_borrow(|reads| {
-        let carried = reads.as_ref()?.get(key)?;
-        carried
-            .still_carried(std::time::Instant::now())
-            .then(|| std::rc::Rc::clone(&carried.read))
-    })
 }
 
 /// Begin rendering `view` over `run`.
 fn rendering(view: Rendered, run: &str) -> Rendering {
-    let carried_for = STREAM_READS
-        .with_borrow(Option::is_some)
-        .then_some(STREAM_READ_REUSE);
-    let render = crate::rendercost::rendering_carrying(view, run, carried_for);
+    let render = crate::rendercost::rendering(view, run);
     if render.outermost() {
-        READ_THIS_RENDER.with_borrow_mut(BTreeMap::clear);
+        let now = std::time::Instant::now();
+        READ_THIS_RENDER.with_borrow_mut(|reads| match RENDERING.get() {
+            Renders::EachAlone => reads.clear(),
+            Renders::AsOneStream => reads.retain(|_, carried| carried.still_carried(now)),
+        });
     }
     Rendering(render)
 }
@@ -1403,13 +1326,9 @@ fn reported_landing_of(
 /// already took of it, or, inside an attach stream, the one it carries.
 fn read_now(run: &str, node: &str, branch: &str, repo: &str) -> std::rc::Rc<LandingRead> {
     let key = (run.to_owned(), node.to_owned());
-    if let Some(read) = READ_THIS_RENDER.with_borrow(|reads| reads.get(&key).cloned()) {
-        return read;
-    }
-    if let Some(read) = carried(&key) {
-        READ_THIS_RENDER.with_borrow_mut(|reads| {
-            reads.insert(key, std::rc::Rc::clone(&read));
-        });
+    if let Some(read) = READ_THIS_RENDER
+        .with_borrow(|reads| reads.get(&key).map(|held| std::rc::Rc::clone(&held.read)))
+    {
         return read;
     }
     // Everything the decision costs is counted against this node, which is what
@@ -1422,23 +1341,17 @@ fn read_now(run: &str, node: &str, branch: &str, repo: &str) -> std::rc::Rc<Land
     read
 }
 
-/// Hold a read just taken of one node for the rest of this render, and for the
-/// attach stream this render is part of, if any.
+/// Hold a read just taken of one node for the rest of this render, and, inside an
+/// attach stream, for the renders after it.
 fn hold(run: &str, node: &str, read: std::rc::Rc<LandingRead>) {
-    let key = (run.to_owned(), node.to_owned());
-    STREAM_READS.with_borrow_mut(|reads| {
-        if let Some(reads) = reads {
-            reads.insert(
-                key.clone(),
-                Carried {
-                    read: std::rc::Rc::clone(&read),
-                    taken: std::time::Instant::now(),
-                },
-            );
-        }
-    });
     READ_THIS_RENDER.with_borrow_mut(|reads| {
-        reads.insert(key, read);
+        reads.insert(
+            (run.to_owned(), node.to_owned()),
+            Carried {
+                read,
+                taken: std::time::Instant::now(),
+            },
+        );
     });
 }
 
@@ -3561,35 +3474,25 @@ fn outstanding_landings(view: &RunView, render: &Rendering) -> Outstanding {
 /// render or the attach stream it is part of already holds is not read again.
 fn read_side_by_side(view: &RunView, nodes: &[&String]) {
     let run = &view.paths.run;
-    let wanted: Vec<(&String, &str, &str)> = nodes
+    let wanted: Vec<&String> = nodes
         .iter()
+        .copied()
         .filter(|node| {
-            !view.state.stated_landings.contains_key(**node)
-                && view.state.landings.get(**node) != Some(&Landing::Landed)
+            !view.state.stated_landings.contains_key(*node)
+                && view.state.landings.get(*node) != Some(&Landing::Landed)
+                && view
+                    .state
+                    .graph
+                    .get(*node)
+                    .is_some_and(|node| node.repo.is_some())
         })
-        .filter_map(|node| {
-            let branch = view.state.branches.get(*node)?;
-            let repo = view.state.graph.get(node)?.repo.as_deref()?;
-            Some((*node, branch.as_str(), repo))
-        })
-        .filter(|(node, _, _)| {
+        .filter(|node| {
             let key = (run.clone(), (*node).clone());
             !READ_THIS_RENDER.with_borrow(|reads| reads.contains_key(&key))
-                && carried(&key).is_none()
         })
         .collect();
-    let read = crate::vcs::landings_now(
-        &wanted
-            .iter()
-            .map(|(node, branch, repo)| crate::vcs::LandingAsk {
-                node,
-                branch,
-                repo: Some(*repo),
-            })
-            .collect::<Vec<_>>(),
-    );
-    for ((node, _, _), read) in wanted.into_iter().zip(read) {
-        hold(run, node, std::rc::Rc::new(read));
+    for (node, read) in crate::vcs::landings_now(&view.state, &wanted) {
+        hold(run, &node, std::rc::Rc::new(read));
     }
 }
 
@@ -5402,110 +5305,127 @@ fn review_lines(view: &RunView) -> String {
 
 #[cfg(test)]
 mod tests {
-    /// What an attach stream lets go of, over the records it is handed: a node's read
-    /// goes where the stream records it settling or restacking, or where its session
-    /// records a kind that moves a landing; it stays through any other record — a
-    /// session's that moves nothing, an agent's, another node's — and every read goes
-    /// before the final render.
+    /// Why the attach stream's carrying is held by unit tests over its own render
+    /// scopes rather than by a journey: a read carried and a read taken afresh print
+    /// the same line whenever nothing moved in between, which is the only case the
+    /// carrying exists for, so no command's output tells them apart. What a journey
+    /// can see — the round's git processes, bounded in `tests/e2e/review_round.rs` —
+    /// is the cost carrying saves, not which read a render took; these drive the real
+    /// render scope, the real stream guard and the real records the stream is handed.
+    fn reads_held() -> Vec<String> {
+        READ_THIS_RENDER.with_borrow(|reads| reads.keys().map(|(_, node)| node.clone()).collect())
+    }
+
+    fn holding(nodes: &[&str]) {
+        for node in nodes {
+            hold(
+                "demo",
+                node,
+                std::rc::Rc::new(crate::vcs::LandingRead::Refused {
+                    because: "unread".into(),
+                }),
+            );
+        }
+    }
+
+    /// A stream's next render keeps the reads still inside their window, and lets go of
+    /// one past it; a render outside a stream keeps nothing, and neither does one after
+    /// the stream ends.
     #[test]
-    fn an_attach_stream_lets_go_of_a_read_where_a_record_moves_its_landing() {
-        let held = |key: &str| {
-            STREAM_READS.with_borrow(|reads| {
-                reads
-                    .as_ref()
-                    .is_some_and(|reads| reads.contains_key(&("demo".to_owned(), key.to_owned())))
-            })
-        };
-        let carry = |nodes: &[&str]| {
-            for node in nodes {
-                hold(
-                    "demo",
-                    node,
-                    std::rc::Rc::new(crate::vcs::LandingRead::Refused {
+    fn a_stream_render_keeps_its_reads_inside_their_window_and_no_other_render_does() {
+        let stream = StreamReads::begin();
+        holding(&["fresh"]);
+        let stale = std::time::Instant::now()
+            .checked_sub(STREAM_READ_REUSE)
+            .expect("an instant a window ago");
+        READ_THIS_RENDER.with_borrow_mut(|reads| {
+            reads.insert(
+                ("demo".to_owned(), "stale".to_owned()),
+                Carried {
+                    read: std::rc::Rc::new(crate::vcs::LandingRead::Refused {
                         because: "unread".into(),
                     }),
-                );
-            }
-        };
-        let vcs = |kind: onevcs::EventKind, node: &str| {
-            let wire = serde_json::to_value(kind).expect("a kind is its wire word");
-            relayed(
-                EventKind(wire.as_str().expect("a word").into()),
-                Source::Vcs,
-                Some(node),
-                &[],
-            )
-        };
+                    taken: stale,
+                },
+            );
+        });
+        drop(rendering(Rendered::Summary, "demo"));
+        assert_eq!(reads_held(), ["fresh"], "the stream's next render");
+        drop(stream);
+        assert!(
+            reads_held().is_empty(),
+            "a stream that ended left its reads behind"
+        );
+
+        holding(&["alone"]);
+        drop(rendering(Rendered::Status, "demo"));
+        assert!(
+            reads_held().is_empty(),
+            "a render outside a stream kept a read"
+        );
+    }
+
+    /// What an attach stream lets go of, over the records it is handed: a node's read
+    /// goes where the stream records it settling or restacking, or records anything of
+    /// its session; it stays through a record of its own that moves nothing, an
+    /// agent's, and another node's; and every read goes before the final render and in
+    /// the render printing the driver's exit.
+    #[test]
+    fn an_attach_stream_lets_go_of_a_read_where_a_record_moves_its_landing() {
         let stream = StreamReads::begin();
-        use onevcs::EventKind as Kind;
-        // Every kind that moves a landing, by name, and the ones a session records most
-        // often that do not.
-        let moving = [
-            Kind::Push,
-            Kind::ChangeOpened,
-            Kind::ChangeDrafted,
-            Kind::DraftLifted,
-            Kind::ChangeReopened,
-            Kind::ChangeRetargeted,
-            Kind::ChangeMerged,
-            Kind::MergeCompleted,
-            Kind::BaseArrived,
-            Kind::BaseMerge,
-            Kind::CommitPreserved,
-            Kind::BranchPreserved,
-            Kind::BranchSuperseded,
-            Kind::BranchRetired,
-            Kind::StackBaseAssembled,
-        ]
-        .map(|kind| (true, kind));
-        let still = [
-            Kind::SessionOpened,
-            Kind::Fetch,
-            Kind::LockWait,
-            Kind::ChangeCheck,
-            Kind::ChecksSettled,
-            Kind::GateRun,
-            Kind::DraftKeptForReview,
-            Kind::ChangeDescribed,
-            Kind::SessionClosed,
-        ]
-        .map(|kind| (false, kind));
-        for (moving, kind) in moving.into_iter().chain(still) {
-            carry(&["a", "b"]);
-            stream.forget_moved("demo", &[&vcs(kind, "a")]);
-            assert_eq!(held("a"), !moving, "{kind:?} of a's session");
-            assert!(held("b"), "{kind:?} of a's session let go of b's read");
-        }
-        for kind in [
-            crate::journal::PipelineKind::NodeSettled,
-            crate::journal::PipelineKind::NodeRestacked,
-        ] {
-            carry(&["a", "b"]);
-            stream.forget_moved("demo", &[&event(kind, Some("a"), &[])]);
-            assert!(!held("a") && held("b"), "{kind:?} of a");
-        }
-        carry(&["a"]);
-        stream.forget_moved(
-            "demo",
-            &[
-                &event(crate::journal::PipelineKind::NodeDispatched, Some("a"), &[]),
-                &relayed(
+        for (lets_go, record) in [
+            (
+                true,
+                relayed(EventKind("push".into()), Source::Vcs, Some("a"), &[]),
+            ),
+            (
+                true,
+                relayed(EventKind("fetch".into()), Source::Vcs, Some("a"), &[]),
+            ),
+            (
+                true,
+                relayed(EventKind("published".into()), Source::Vcs, Some("a"), &[]),
+            ),
+            (
+                true,
+                event(crate::journal::PipelineKind::NodeSettled, Some("a"), &[]),
+            ),
+            (
+                true,
+                event(crate::journal::PipelineKind::NodeRestacked, Some("a"), &[]),
+            ),
+            (
+                false,
+                event(crate::journal::PipelineKind::NodeDispatched, Some("a"), &[]),
+            ),
+            (
+                false,
+                relayed(
                     EventKind("turn-message".into()),
                     Source::Agentgraph,
                     Some("a"),
                     &[],
                 ),
-                &relayed(EventKind("published".into()), Source::Vcs, Some("a"), &[]),
-            ],
-        );
-        assert!(held("a"), "a record that moves nothing let go of a's read");
-        carry(&["a", "b"]);
+            ),
+        ] {
+            holding(&["a", "b"]);
+            stream.forget_moved("demo", &[&record]);
+            let expected: &[&str] = if lets_go { &["b"] } else { &["a", "b"] };
+            assert_eq!(
+                reads_held(),
+                expected,
+                "{:?} {}",
+                record.source,
+                record.kind.0
+            );
+        }
+        holding(&["a", "b"]);
         stream.forget_all();
         assert!(
-            !held("a") && !held("b"),
+            reads_held().is_empty(),
             "the final render carried a read into it"
         );
-        carry(&["a", "b"]);
+        holding(&["a", "b"]);
         stream.forget_moved(
             "demo",
             &[&event(
@@ -5515,32 +5435,28 @@ mod tests {
             )],
         );
         assert!(
-            !held("a") && !held("b"),
+            reads_held().is_empty(),
             "the render printing the driver's exit carried a read into it"
-        );
-        drop(stream);
-        assert!(
-            STREAM_READS.with_borrow(Option::is_none),
-            "a stream that ended left its reads for the next view on this thread"
         );
     }
 
-    /// An attach stream's read is carried inside its window and taken again once the
-    /// window has passed, measured from when the read was taken.
+    /// A read is carried inside its window and taken again once the window has
+    /// passed, measured from when the read was taken.
     #[test]
     fn a_carried_landing_read_lapses_at_the_end_of_its_window() {
         let taken = std::time::Instant::now();
-        let carried = super::Carried {
+        let carried = Carried {
             read: std::rc::Rc::new(crate::vcs::LandingRead::Refused {
                 because: "unread".into(),
             }),
             taken,
         };
         assert!(carried.still_carried(taken));
-        assert!(carried
-            .still_carried(taken + super::STREAM_READ_REUSE - std::time::Duration::from_millis(1)));
-        assert!(!carried.still_carried(taken + super::STREAM_READ_REUSE));
-        assert!(!carried.still_carried(taken + super::STREAM_READ_REUSE * 6));
+        assert!(
+            carried.still_carried(taken + STREAM_READ_REUSE - std::time::Duration::from_millis(1))
+        );
+        assert!(!carried.still_carried(taken + STREAM_READ_REUSE));
+        assert!(!carried.still_carried(taken + STREAM_READ_REUSE * 6));
     }
 
     use super::*;

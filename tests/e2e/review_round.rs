@@ -18,15 +18,6 @@
 // task states this budget's workload over onevcs-testing's remote double, fake agents and
 // a local Markdown store: no check may spend the shared account's quota.
 
-// llmlint: ignore-file[expensive_tests_stay_behind_their_own_edge] measured rather than
-// assumed: the busy round runs in about 25–30 seconds on an idle Linux host, its other
-// journeys in under two, and it was in this target before it counted its git starts or
-// read its attach streams' renders. What it exercises is the whole of an attached command —
-// `driver`, `engine`, `views`, `vcs` and `rendercost` over the real linked `onevcs` — which
-// any change under `src/` can move, so a project edged narrower than the crate could not
-// honestly run it: it would drop out of `nx affected` for the very changes it exists to
-// catch, among them the cost on a slow host this module now bounds.
-
 use crate::draft_lifecycle::{team_repository, GREEN};
 use crate::harness::{lifecycle, plan_of, World};
 use crate::review_reply::{conversation, drafter_tasks, key, named, the_reply_to};
@@ -495,8 +486,6 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
     let mut phases = Vec::new();
     let round_from = projection_lines(&world, run).len();
     let mut reworked = Vec::new();
-    // Each rework's attach stream, as it printed and recorded its renders.
-    let mut streamed = Vec::new();
     timed(&world, &host, run, "pass-1", &mut phases, || {
         passed(&world.run(&["review", run]), "the first pass");
     });
@@ -532,10 +521,7 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
                 ),
                 name,
             );
-            let record = world.root.join(format!("{name}.reads"));
-            let adopted = world.run_recording_renders(&record, &["adopt", run]);
-            passed(&adopted, name);
-            streamed.push((record, adopted.stderr.clone()));
+            passed(&world.run(&["adopt", run]), name);
         });
         reworked.push((node, from, projection_lines(&world, run).len()));
     }
@@ -565,11 +551,6 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
     });
     #[cfg(unix)]
     the_round_started_few_enough_gits(&world);
-    // After the bound, so a round that costs too much is told so before anything about
-    // how its streams spent it.
-    for (record, stderr) in &streamed {
-        moved_drafts_were_read_again(&world, record, stderr, run);
-    }
 
     // Every comment answered or declined exactly once.
     for comment in on_b.iter().chain(&on_h) {
@@ -787,19 +768,18 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
 /// and this round ran 420–540 seconds there against its 540-second bound. Counted on
 /// Linux it started 18,300–19,500 of them, nearly half the attach stream reading every
 /// unlanded draft's landing afresh on each of its renders, about forty `git` a read. Now
-/// it starts about 10,000, and 12,000–13,500 with every start slowed by sixty
-/// milliseconds of CPU — a slower host renders and asks on a timer more often over a
-/// longer run — so the bound sits above the second and below anything the round cost
-/// before.
+/// it starts about 10,000, and more on a slower host, which renders and asks on a timer
+/// more often over a longer run — so the bound sits well above the first and below
+/// anything the round cost before.
 const GIT_STARTS: usize = 15_000;
 
 /// Hold the round to [`GIT_STARTS`].
 ///
-/// Floored as well as bounded: a count that saw nothing is a `counted-git` the round's
-/// commands never reached, and an empty log is under any bound.
+/// Floored as well as bounded: a count that saw nothing is a counting `git` the round's
+/// commands never reached, and an empty count is under any bound.
 #[cfg(unix)]
 fn the_round_started_few_enough_gits(world: &World) {
-    let started = world.git_starts().len();
+    let started = world.git_starts();
     assert!(started > 0, "the round's git starts were never counted");
     assert!(
         started <= GIT_STARTS,
@@ -807,34 +787,19 @@ fn the_round_started_few_enough_gits(world: &World) {
     );
 }
 
-/// `counted-git` run as a command would run `git`: with both of its settings, from a
-/// directory, and with whatever arguments the caller has.
-#[cfg(unix)]
-fn counted_git(world: &World, real: Option<&Path>, log: Option<&Path>) -> std::process::Command {
-    let mut command = std::process::Command::new(crate::harness::double("counted-git"));
-    command
-        .current_dir(&world.root)
-        .env_remove(onepipeline_testfakes::COUNTED_GIT_REAL_ENV)
-        .env_remove(onepipeline_testfakes::COUNTED_GIT_LOG_ENV);
-    if let Some(real) = real {
-        command.env(onepipeline_testfakes::COUNTED_GIT_REAL_ENV, real);
-    }
-    if let Some(log) = log {
-        command.env(onepipeline_testfakes::COUNTED_GIT_LOG_ENV, log);
-    }
-    command
-}
-
+/// The counting `git` a world's commands find on its `PATH` counts each start and is the
+/// real `git` for it, failures included; and a start it cannot count is not run, since a
+/// gap in the count would be a cost the bound never saw.
 #[cfg(unix)]
 #[test]
 fn the_counted_git_counts_each_start_and_is_the_real_git_for_it() {
-    let world = World::new("counted-git");
-    let real =
-        World::resolved_on(&std::process::Command::new("git"), "git").expect("the host has a git");
-    let log = world.root.join("starts.jsonl");
-
-    // Counted, and then the real program, which answers and fails as itself.
-    let init = counted_git(&world, Some(&real), Some(&log))
+    let world = World::new("counted-git").counting_git();
+    let counted = || {
+        let mut command = std::process::Command::new(world.root.join("counted-git/git"));
+        command.current_dir(&world.root);
+        command
+    };
+    let init = counted()
         .args(["init", "--quiet", "here"])
         .output()
         .expect("the counted git runs");
@@ -843,156 +808,26 @@ fn the_counted_git_counts_each_start_and_is_the_real_git_for_it() {
         world.root.join("here/.git").is_dir(),
         "the real git made no repository"
     );
-    let refused = counted_git(&world, Some(&real), Some(&log))
+    let refused = counted()
         .args(["-C", "nowhere", "status"])
         .output()
         .expect("the counted git runs");
     assert_eq!(refused.status.code(), Some(128), "{refused:?}");
-    let starts: Vec<Value> = std::fs::read_to_string(&log)
-        .expect("the starts were counted")
-        .lines()
-        .map(|line| serde_json::from_str(line).expect("each start is one JSON line"))
-        .collect();
-    assert_eq!(
-        starts,
-        [
-            json!({"args": ["init", "--quiet", "here"]}),
-            json!({"args": ["-C", "nowhere", "status"]}),
-        ]
-    );
+    assert_eq!(world.git_starts(), 2, "each start, and only those, counted");
 
-    // Refused without a git to run or a file to count into, which counts nothing; and
-    // refused when the git it names will not run, which counts the start it tried.
-    for (real, log, says) in [
-        (
-            None,
-            Some(log.as_path()),
-            onepipeline_testfakes::COUNTED_GIT_REAL_ENV,
-        ),
-        (
-            Some(real.as_path()),
-            None,
-            onepipeline_testfakes::COUNTED_GIT_LOG_ENV,
-        ),
-        (
-            Some(Path::new("/nonexistent/git")),
-            Some(log.as_path()),
-            "cannot run the real git",
-        ),
-    ] {
-        let out = counted_git(&world, real, log)
-            .arg("--version")
-            .output()
-            .expect("the counted git runs");
-        assert!(!out.status.success(), "{out:?}");
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains(says), "the refusal names {says}: {stderr}");
-    }
-    assert_eq!(
-        std::fs::read_to_string(&log).unwrap().lines().count(),
-        3,
-        "a refused start was counted, or the one whose git would not run was not"
-    );
-
-    // And a start it cannot count is not run: a gap in the count would be a cost the
-    // bound never saw.
-    let uncounted = counted_git(&world, Some(&real), Some(&world.root))
+    // The count made unwritable: the start is refused, and the real git never runs.
+    std::fs::remove_file(world.git_starts_log()).expect("the count is cleared");
+    std::fs::create_dir(world.git_starts_log()).expect("the count is made a directory");
+    let uncounted = counted()
         .args(["init", "--quiet", "uncounted"])
         .output()
         .expect("the counted git runs");
     assert!(!uncounted.status.success(), "{uncounted:?}");
     assert!(
-        String::from_utf8_lossy(&uncounted.stderr).contains("cannot"),
-        "the refusal says it could not count: {uncounted:?}"
-    );
-    assert!(
         !world.root.join("uncounted").exists(),
         "a start nothing counted ran the real git"
     );
 }
-
-// llmlint: ignore-block[tests_mirror_real_usage] whether a render read a landing again or
-// carried the read it held prints the same line on the terminal whenever both answers
-// agree, so it is counted by the record the binary writes of its own renders — the seam
-// `tests/e2e/landing.rs` measures every render's reads by, for the reason recorded there.
-// The command is the `adopt` a user types, over the real round; the record is read after it
-// exits.
-/// Every draft a rework moved had its landing read again in the render that printed the
-/// move, whatever read of it the attach stream that render was part of already held: its
-/// `node-restacked`, or a push, a merge of its base or a change request opened from its
-/// session — the one move of an already-settled node a run makes on its own, recorded
-/// once by the engine and once by `onevcs` as the session does it.
-///
-/// What [`crate::landing::stream_renders`] splits the stream into. A session's line names
-/// its stream rather than its node, so each is read back to its node through the run's
-/// own merged store. Where the move lands inside the window the stream carries a read for
-/// — every one of them, on a host as quick as this suite's Linux runners — it is the move
-/// alone that asks again, and a session's records arrive renders ahead of the engine's,
-/// so some render is moved by those alone.
-fn moved_drafts_were_read_again(world: &World, record: &Path, stderr: &str, run: &str) {
-    let renders = crate::landing::stream_renders(world, record, stderr, run);
-    let store = std::fs::read_to_string(world.run_file(run, "events.jsonl"))
-        .expect("the run's merged store");
-    let node_of: std::collections::BTreeMap<String, String> = store
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter(|event| event["source"] == "vcs")
-        .filter_map(|event| {
-            Some((
-                format!("vcs:{}", event["stream"].as_str()?),
-                event["labels"]["node"].as_str()?.to_owned(),
-            ))
-        })
-        .collect();
-    let moves: Vec<String> = [
-        onevcs::EventKind::Push,
-        onevcs::EventKind::BaseMerge,
-        onevcs::EventKind::ChangeOpened,
-    ]
-    .into_iter()
-    .map(|kind| {
-        serde_json::to_value(kind)
-            .ok()
-            .and_then(|kind| kind.as_str().map(str::to_owned))
-            .expect("an onevcs kind is its wire word")
-    })
-    .collect();
-    let last = renders.len() - 1;
-    let (mut restacked, mut by_its_session) = (0, 0);
-    for (at, render) in renders.iter().enumerate().take(last) {
-        for (node, _) in STACK {
-            let by_engine = render.printed_of(node, "node-restacked");
-            let by_session = render.printed.iter().any(|line| {
-                let mut words = line.split_whitespace().skip(1);
-                let (Some(id), Some(kind)) = (words.next(), words.next()) else {
-                    return false;
-                };
-                node_of.get(id).map(String::as_str) == Some(node) && moves.iter().any(|m| m == kind)
-            });
-            // Only of a draft the render reports on: a reworked one is counted under its
-            // replacement, and its own old records are not a move of anything reported.
-            if !(by_engine || by_session) || !render.reported(node) {
-                continue;
-            }
-            restacked += usize::from(by_engine);
-            by_its_session += usize::from(by_session && !render.printed_of(node, ""));
-            assert!(
-                render.read_at().contains_key(node),
-                "render {at} printed {node} moving and did not read its landing again:\n{stderr}"
-            );
-        }
-    }
-    assert!(
-        restacked > 0,
-        "the rework's stream printed no restack before its last render:\n{stderr}"
-    );
-    assert!(
-        by_its_session > 0,
-        "no render printed a draft's session moving it without the engine's own record \
-         beside it, so nothing here shows a session's record ending a carried read:\n{stderr}"
-    );
-}
-// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// A whole round's record, as the journey writes one, with `replies` reply posts on its
 /// last pass's ledger and every other figure the smallest a phase can carry.

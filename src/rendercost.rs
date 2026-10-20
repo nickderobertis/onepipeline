@@ -100,6 +100,7 @@ impl Act {
 }
 
 /// What a render is, while it renders.
+#[derive(Clone)]
 // llmlint: ignore[invalid_states_unrepresentable] a run id and a node id are the plain strings this whole crate spells them as — `RunPaths.run`, `RunState::landings`, `RunState::branches` — for the reason `src/ledger.rs`'s file-level suppression records, and `src/AGENTS.md` names a `RunId` newtype as interface drift. Newtypes at these two sites alone would disagree with every neighbour and convert at every boundary. Neither value is unchecked: the run id crossed `ledger::is_valid_run_id` when the run was launched, and the node id is one the run's own journal projected into its graph.
 struct Inside {
     /// Which view, so a reader of a file three renders appended to can tell them
@@ -165,17 +166,6 @@ pub(crate) struct Render {
 }
 
 pub(crate) fn rendering(view: Rendered, run: &str) -> Render {
-    rendering_carrying(view, run, None)
-}
-
-/// The same, for a render inside an attach stream, which carries a landing read across
-/// its renders for `carried_for`: the render's record says so, so a journey holding the
-/// stream to that window reads the window off the record rather than restating it.
-pub(crate) fn rendering_carrying(
-    view: Rendered,
-    run: &str,
-    carried_for: Option<std::time::Duration>,
-) -> Render {
     let outermost = INSIDE.with_borrow_mut(|inside| {
         if inside.is_some() {
             return false;
@@ -188,13 +178,7 @@ pub(crate) fn rendering_carrying(
         true
     });
     if outermost {
-        record(
-            Act::Began,
-            carried_for.map_or_else(
-                || json!({}),
-                |carried| json!({ "carried_ms": carried.as_millis() }),
-            ),
-        );
+        record(Act::Began, json!({}));
     }
     Render { outermost }
 }
@@ -229,15 +213,15 @@ impl Drop for Render {
 
 /// The render a thread is inside, taken so that work it hands to other threads is
 /// counted against that render as if it had done the work itself.
-// llmlint: ignore[invalid_states_unrepresentable] the run id is the plain string `Inside` carries, for the reason recorded on it.
-pub(crate) struct Within(Option<(Rendered, String)>);
+pub(crate) struct Within(Option<Inside>);
 
 /// The render this thread is inside, if any — see [`Within::adopted`].
 pub(crate) fn within() -> Within {
     Within(INSIDE.with_borrow(|inside| {
-        inside
-            .as_ref()
-            .map(|inside| (inside.view, inside.run.clone()))
+        inside.as_ref().map(|inside| Inside {
+            node: None,
+            ..inside.clone()
+        })
     }))
 }
 
@@ -248,12 +232,8 @@ impl Within {
     /// taken outside one, so a read nobody is rendering stays uncounted.
     pub(crate) fn adopted(&self) -> Adopted {
         let adopted = INSIDE.with_borrow_mut(|inside| match (&*inside, &self.0) {
-            (None, Some((view, run))) => {
-                *inside = Some(Inside {
-                    view: *view,
-                    run: run.clone(),
-                    node: None,
-                });
+            (None, Some(within)) => {
+                *inside = Some(within.clone());
                 true
             }
             _ => false,
@@ -317,27 +297,14 @@ impl Drop for Deciding {
 /// repository from scratch every time, and whether it got as far as resolving or
 /// opening one is inside an answer this does not read. What it counts is
 /// therefore exactly the cost [`crate::vcs::landing_now`] cannot collapse.
-///
-/// Stamped, as [`landing_read_taken`] is, because it is written as the read it closes
-/// returns: the two stamps are the span one read took, and spans of one render that
-/// overlap are reads that were taken side by side.
 pub(crate) fn repository_asked(repo: Option<&str>) {
-    record(
-        Act::RepositoryAsked,
-        json!({ "repo": repo, "at_ms": crate::sys::now_millis() }),
-    );
+    record(Act::RepositoryAsked, json!({ "repo": repo }));
 }
 
-/// Record that one landing decision began a read, and when.
-///
-/// The moment is the wall clock's, in milliseconds, because what it is read for
-/// is the gap between two reads of one node: an attach stream carries a read
-/// across its renders for a bounded window, and a journey tells a read taken
-/// after that window lapsed from one taken inside it by the gap alone.
 pub(crate) fn landing_read_taken(reference: &str, repo: Option<&str>) {
     record(
         Act::LandingRead,
-        json!({ "reference": reference, "repo": repo, "at_ms": crate::sys::now_millis() }),
+        json!({ "reference": reference, "repo": repo }),
     );
 }
 

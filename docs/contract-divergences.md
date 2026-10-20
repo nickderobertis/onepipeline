@@ -1156,13 +1156,13 @@ unlanded node's landing from scratch, about forty `git` processes a node, was
 nearly half of what a ten-draft review round started, and on a host where
 starting a process is slow that round ran past its journey's bound. So within
 one attach stream a node's read is carried across the stream's consecutive
-renders for at most a short, fixed window (`views::STREAM_READ_REUSE`, which each
-of the stream's render-cost records states), and is taken again at once after
-the stream records a settlement or restack of that node, or a publication or
-landing record of its session (`views::moves_a_landing`). The stream's final
-render — the one reporting the run as it settled, made once the run's loop has
-finished or, where the driver's exit was printed before that, the render
-printing it — carries nothing and reads every landing it reports afresh.
+renders for at most a short, fixed window (`views::STREAM_READ_REUSE`), and is
+taken again at once after the stream records a settlement or restack of that
+node, or any record of its session — its publication and landing among them.
+The stream's final render — the one reporting the run as it settled, made once
+the run's loop has finished or, where the driver's exit was printed before
+that, the render printing it — carries nothing and reads every landing it
+reports afresh.
 `status`, `results` and `watch` carry nothing and read on every render.
 Whichever view it is, the summary takes the reads it needs side by side rather
 than one after another, as the driver's own close-out does, and each is still

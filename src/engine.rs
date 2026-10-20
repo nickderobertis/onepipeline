@@ -10953,31 +10953,17 @@ fn landings_after_asking_again(state: &RunState) -> BTreeMap<String, Landing> {
     let mut landings = state.landings.clone();
     // A draft merged into another node's branch lands only with that node: its own
     // merged change request says nothing about the root.
-    let asked: Vec<(String, &str, Option<&str>)> = landings
+    let asked: Vec<&String> = state
+        .landings
         .iter()
         .filter(|(_, landing)| **landing == Landing::Unlanded)
-        .map(|(node, _)| node.clone())
-        .filter(|node| !state.absorbed.contains_key(node))
-        .filter_map(|node| {
-            let branch = state.branches.get(&node)?;
-            // The node's own repository, so a branch name two identities both hold
-            // is asked about the one this run's work is in rather than refused as
-            // an ambiguity the run has already resolved.
-            let repo = state.graph.get(&node).and_then(|node| node.repo.as_deref());
-            Some((node, branch.as_str(), repo))
-        })
+        .map(|(node, _)| node)
+        .filter(|node| !state.absorbed.contains_key(*node))
         .collect();
-    let read = crate::vcs::landings_now(
-        &asked
-            .iter()
-            .map(|(node, branch, repo)| crate::vcs::LandingAsk {
-                node,
-                branch,
-                repo: *repo,
-            })
-            .collect::<Vec<_>>(),
-    );
-    for ((node, _, _), read) in asked.into_iter().zip(read) {
+    // Each in the node's own repository, so a branch name two identities both hold
+    // is asked about the one this run's work is in rather than refused as an
+    // ambiguity the run has already resolved — see `vcs::landings_now`.
+    for (node, read) in crate::vcs::landings_now(state, &asked) {
         if read.proves_landed() {
             landings.insert(node, Landing::Landed);
         }
