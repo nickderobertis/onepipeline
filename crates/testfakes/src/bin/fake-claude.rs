@@ -505,7 +505,12 @@ fn streamed_prompt() -> Option<String> {
                 "claude --input-format stream-json read a line that is not JSON ({error}): {line}"
             ))
         });
-        if frame["type"] != "user" {
+        let Some(kind) = frame.get("type").and_then(serde_json::Value::as_str) else {
+            fake::fail(&format!(
+                "a stream-json line is not a frame object naming its type: {frame}"
+            ));
+        };
+        if kind != "user" {
             continue;
         }
         let Some(blocks) = frame["message"]["content"].as_array() else {
