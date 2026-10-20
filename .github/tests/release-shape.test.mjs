@@ -18,8 +18,13 @@ const read = (path) => readFileSync(join(ROOT, path), "utf8");
 const release = parse(read(".github/workflows/release.yml"));
 const releasePlz = parse(read(".github/workflows/release-plz.yml"));
 const VERSION = read("Cargo.toml").match(/^\[package\][\s\S]*?^version = "([^"]+)"/m)[1];
-const PLATFORMS = ["linux", "macos", "windows"];
-const RUNNERS = { linux: "ubuntu-latest", macos: "macos-latest", windows: "windows-latest" };
+const PLATFORMS = ["linux", "linux-arm64", "macos", "windows"];
+const RUNNERS = {
+  linux: "ubuntu-latest",
+  "linux-arm64": "ubuntu-24.04-arm",
+  macos: "macos-latest",
+  windows: "windows-latest",
+};
 
 const plans = Object.fromEntries(
   [...PLATFORMS, "common"].map((platform) => [
@@ -53,7 +58,7 @@ const targets = JSON.parse(
 /// `publish`'s, whose outcome record its own step uploads.
 function uploadsOf(step) {
   const run = step.run ?? "";
-  const found = run.match(/^just release-(linux|macos|windows) publish$/);
+  const found = run.match(/^just release-(linux|linux-arm64|macos|windows) publish$/);
   if (found) return plans[found[1]].artifacts;
   if (run === "just release-publish publish") {
     return plans.common.artifacts.filter((a) => a.kind !== "outcome");
@@ -68,9 +73,10 @@ const uploads = Object.entries(release.jobs).flatMap(([job, spec]) =>
 );
 
 describe("the CD jobs", () => {
-  it("release.yml is exactly the three build jobs and publish, on their own runners", () => {
+  it("release.yml is exactly the four build jobs and publish, on their own runners", () => {
     assert.deepEqual(Object.keys(release.jobs).sort(), [
       "build-linux",
+      "build-linux-arm64",
       "build-macos",
       "build-windows",
       "publish",
@@ -90,6 +96,7 @@ describe("the CD jobs", () => {
     assert.equal(release.jobs.publish["timeout-minutes"], 30);
     assert.deepEqual([...release.jobs.publish.needs].sort(), [
       "build-linux",
+      "build-linux-arm64",
       "build-macos",
       "build-windows",
     ]);
@@ -165,7 +172,7 @@ describe("who uploads what", () => {
   it("every declared target and covered package is uploaded by the jobs its published_by names", () => {
     const jobs = Object.keys(release.jobs);
     for (const target of targets.target) {
-      const named = [...target.published_by.matchAll(/`([a-z-]+)`/g)]
+      const named = [...target.published_by.matchAll(/`([a-z0-9-]+)`/g)]
         .map((m) => m[1])
         .filter((name) => jobs.includes(name));
       assert.ok(named.length > 0, `${target.id}'s published_by names a release.yml job`);
@@ -192,7 +199,12 @@ describe("who uploads what", () => {
     const wheels = uploads
       .filter(([, , a]) => a.package === "pypi:onepipeline-cli")
       .map(([job]) => job);
-    assert.deepEqual([...new Set(wheels)].sort(), ["build-linux", "build-macos", "build-windows"]);
+    assert.deepEqual([...new Set(wheels)].sort(), [
+      "build-linux",
+      "build-linux-arm64",
+      "build-macos",
+      "build-windows",
+    ]);
     const declared = new Set(targets.target.flatMap((t) => [t.id, ...(t.covers ?? [])]));
     for (const [, , artifact] of uploads) {
       if (artifact.package)
@@ -224,26 +236,21 @@ describe("who uploads what", () => {
   });
 });
 
-describe("the dropped targets", () => {
-  const dropped =
-    /aarch64-unknown-linux-gnu|x86_64-apple-darwin|macos-15-intel|macos-13\b|ubuntu-[0-9.]+-arm|-arm64\b.*runs-on|linux-arm64|darwin-x64/;
+describe("the dropped target", () => {
+  const dropped = /x86_64-apple-darwin|macos-15-intel|macos-13\b|darwin-x64/;
 
-  it("no workflow or recipe builds, publishes or verifies arm64 Linux or Intel macOS", () => {
+  it("no workflow or recipe builds, publishes or verifies Intel macOS", () => {
     for (const name of readdirSync(WORKFLOWS)) {
       const text = readFileSync(join(WORKFLOWS, name), "utf8");
       assert.doesNotMatch(text, dropped, `${name} names a dropped target or runner`);
       for (const [job, spec] of Object.entries(parse(text).jobs ?? {})) {
         assert.doesNotMatch(
           JSON.stringify(spec["runs-on"] ?? ""),
-          /arm|intel|macos-13/,
+          /intel|macos-13/,
           `${name} ${job}`,
         );
         for (const leg of spec.strategy?.matrix?.include ?? []) {
-          assert.doesNotMatch(
-            JSON.stringify(leg),
-            /arm|intel|aarch64-unknown-linux/,
-            `${name} ${job}`,
-          );
+          assert.doesNotMatch(JSON.stringify(leg), /intel|x86_64-apple-darwin/, `${name} ${job}`);
         }
       }
     }
@@ -259,27 +266,88 @@ describe("the dropped targets", () => {
     }
   });
 
-  it("release-targets.toml declares no dropped target, and retires both npm packages", () => {
+  it("release-targets.toml declares no dropped target, and retires its npm package", () => {
     for (const target of targets.target) {
-      assert.doesNotMatch(
-        JSON.stringify(target),
-        /linux-arm64|darwin-x64|aarch64-unknown-linux|x86_64-apple-darwin/,
-      );
+      assert.doesNotMatch(JSON.stringify(target), /darwin-x64|x86_64-apple-darwin/);
     }
-    assert.deepEqual(targets.retired.map((r) => r.id).sort(), [
-      "npm:onepipeline-cli-darwin-x64",
-      "npm:onepipeline-cli-linux-arm64",
-    ]);
+    assert.deepEqual(
+      targets.retired.map((r) => r.id),
+      ["npm:onepipeline-cli-darwin-x64"],
+    );
   });
 });
 
-// Why plan mode is the proof for macOS and Windows: the macOS and Windows build recipes need native macOS and Windows toolchains this Linux host cannot run, so inside the dispatch their proof is the recipes' plan mode checked against the last release's published artifacts; the Linux recipe is driven for real end to end, and the hosted build jobs build and run the foreign artifacts on every release.
+describe("arm64 Linux", () => {
+  const arm = /aarch64-unknown-linux-gnu|linux-arm64|ubuntu-[0-9.]+-arm/;
+
+  it("is built, published and verified natively by build-linux-arm64 alone", () => {
+    const job = release.jobs["build-linux-arm64"];
+    assert.equal(job["runs-on"], "ubuntu-24.04-arm", "an arm64 runner builds it natively");
+    assert.deepEqual(plans["linux-arm64"].targets, ["aarch64-unknown-linux-gnu"]);
+    for (const [platform, plan] of Object.entries(plans)) {
+      if (platform === "linux-arm64") continue;
+      assert.doesNotMatch(JSON.stringify(plan), arm, `${platform}'s plan builds arm64 Linux`);
+    }
+    // Native, not cross-compiled: no emulator, cross toolchain or added Rust target.
+    for (const step of job.steps) {
+      assert.doesNotMatch(
+        `${step.uses ?? ""} ${step.run ?? ""}`,
+        /setup-qemu|binfmt|\bcross\b|cargo-zigbuild|rustup target add/,
+        "build-linux-arm64 cross-compiles",
+      );
+    }
+    assert.deepEqual(
+      job.steps.map((s) => s.run).filter(Boolean),
+      release.jobs["build-linux"].steps
+        .map((s) => s.run)
+        .filter(Boolean)
+        .map((run) => run.replace("release-linux ", "release-linux-arm64 ")),
+      "build-linux-arm64 runs build-linux's phases through its own recipe",
+    );
+    for (const [name, workflow] of Object.entries({ "release-plz.yml": releasePlz })) {
+      assert.doesNotMatch(JSON.stringify(workflow), arm, `${name} names arm64 Linux`);
+    }
+  });
+
+  it("publish waits for it and records its result, published and verified outcomes", () => {
+    const publish = release.jobs.publish;
+    assert.ok(publish.needs.includes("build-linux-arm64"));
+    const gate = publish.steps.find((s) => s.run === "just release-publish publish");
+    for (const job of publish.needs) {
+      assert.match(gate.if, new RegExp(`needs\\.${job}\\.result == 'success'`), job);
+    }
+    const outcome = publish.steps.find((s) => s.run === "just release-outcome");
+    for (const [phase, value] of [
+      ["RESULT", "needs.build-linux-arm64.result"],
+      ["PUBLISHED", "needs.build-linux-arm64.outputs.published"],
+      ["VERIFIED", "needs.build-linux-arm64.outputs.verified"],
+    ]) {
+      assert.equal(outcome.env[`LINUX_ARM64_${phase}`], `\${{ ${value} }}`);
+    }
+  });
+
+  it("gets no pull-request job: ci.yml builds no arm64 target and runs on no arm runner", () => {
+    const text = readFileSync(join(WORKFLOWS, "ci.yml"), "utf8");
+    assert.doesNotMatch(text, arm);
+    for (const [job, spec] of Object.entries(parse(text).jobs ?? {})) {
+      assert.doesNotMatch(JSON.stringify(spec["runs-on"] ?? ""), /arm/, `ci.yml ${job}`);
+    }
+  });
+
+  it("release-targets.toml covers its npm package again and no longer retires it", () => {
+    const npm = targets.target.find((t) => t.id === "npm:onepipeline-cli");
+    assert.ok(npm.covers.includes("npm:onepipeline-cli-linux-arm64"));
+    assert.ok(!targets.retired.some((r) => r.id === "npm:onepipeline-cli-linux-arm64"));
+  });
+});
+
+// Why plan mode is the proof for arm64 Linux, macOS and Windows: their build recipes need a native arm64 Linux, macOS or Windows host this x86-64 Linux host is not, so inside the dispatch their proof is the recipes' plan mode checked against the last release's published artifacts (v0.74.1 still shipped arm64 Linux); the x86-64 Linux recipe is driven for real end to end, and the hosted build jobs build and run the foreign artifacts on every release.
 describe("each platform's plan", () => {
   const published = JSON.parse(read(".github/fixtures/release-v0.74.1-published.json"));
   const as = (name) => name.replaceAll(published.version, VERSION);
-  const droppedTargets = ["aarch64-unknown-linux-gnu", "x86_64-apple-darwin"];
-  const droppedNpm = ["onepipeline-cli-linux-arm64", "onepipeline-cli-darwin-x64"];
-  const droppedWheels = ["macosx_10_12_x86_64", "manylinux_2_17_aarch64"];
+  const droppedTargets = ["x86_64-apple-darwin"];
+  const droppedNpm = ["onepipeline-cli-darwin-x64"];
+  const droppedWheels = ["macosx_10_12_x86_64"];
 
   for (const platform of PLATFORMS) {
     it(`${platform}: is what v0.74.1 published for ${platform}'s targets, at this version`, () => {
@@ -314,7 +382,7 @@ describe("each platform's plan", () => {
         assert.ok(was, `${npm.package} is a package v0.74.1 published`);
         assert.deepEqual([npm.os, npm.cpu], [was.os[0], was.cpu[0]]);
         assert.equal(npm.file, `${was.name}-${VERSION}.tgz`);
-        if (platform === "linux") {
+        if (platform === "linux" || platform === "linux-arm64") {
           assert.equal(wheel.file.includes("manylinux_2_17"), true);
           for (const artifact of mine.filter((a) => a.kind !== "checksum")) {
             assert.equal(artifact.glibc_floor, "2.17", `${artifact.file}'s glibc floor`);
@@ -324,7 +392,7 @@ describe("each platform's plan", () => {
     });
   }
 
-  it("together the plans are everything v0.74.1 published but the dropped targets", () => {
+  it("together the plans are everything v0.74.1 published but the dropped target", () => {
     const planned = Object.values(plans).flatMap((p) => p.artifacts);
     const files = new Set(planned.map((a) => a.file));
     for (const name of published.release_assets.map(as)) {

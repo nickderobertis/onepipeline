@@ -666,9 +666,10 @@ engines-split:
     @bash scripts/linked-engines.sh --format split
 
 # Outside `check` and `gate` because it pulls the manylinux image and a toolchain
-# over the network and needs Docker. release.yml's `build-linux` job (through
-# `release-linux`) and ci.yml's `wheel` job both build with this script, so there
-# is one Linux wheel build.
+# over the network and needs Docker. release.yml's `build-linux` and
+# `build-linux-arm64` jobs (through `release-linux` and `release-linux-arm64`)
+# and ci.yml's `wheel` job all build with this script, so there is one Linux
+# wheel build.
 # Build the Linux wheel for TARGET inside the release's manylinux image, into OUT.
 wheel-linux target out="dist":
     @bash scripts/build-linux-wheel.sh --target {{quote(target)}} --out {{quote(out)}}
@@ -682,8 +683,11 @@ wheel-linux target out="dist":
 # it would publish and publishes nothing. Outside
 # `check` and `gate`: building needs Docker (Linux) or that platform's own
 # toolchain, and publishing needs the release's credentials.
-# Release the Linux artifacts, one PHASE at a time (plan, build, publish, verify, dry-run).
+# Release the Linux (x86-64) artifacts, one PHASE at a time (plan, build, publish, verify, dry-run).
 release-linux phase="dry-run": (_release "linux" phase)
+
+# Release the Linux (arm64) artifacts, one PHASE at a time, on an arm64 Linux host.
+release-linux-arm64 phase="dry-run": (_release "linux-arm64" phase)
 
 # Release the macOS (Apple silicon) artifacts, one PHASE at a time.
 release-macos phase="dry-run": (_release "macos" phase)

@@ -6,9 +6,9 @@
 // which runs the real manylinux build (Docker), `uv`, `pip`, `npm` and `cargo`;
 // the registries and GitHub they talk to are local servers
 // (`support/release-doubles.mjs`, `npm/test/registry-support.mjs`) that the
-// journeys can inspect and tell to fail. macOS and Windows artifacts, which this
-// host cannot build, are stood in for by files with their planned names, so the
-// availability check has every platform to find or miss.
+// journeys can inspect and tell to fail. arm64 Linux, macOS and Windows
+// artifacts, which this host cannot build, are stood in for by files with their
+// planned names, so the availability check has every platform to find or miss.
 //
 // Outside the deterministic gate: the build needs Docker, the manylinux image
 // and a Rust toolchain from the network, and minutes of release compile. Run it
@@ -187,10 +187,10 @@ async function platformPackage(target, binary, version = VERSION) {
   return result.stdout.trim();
 }
 
-/// What the macOS and Windows build jobs would have published, by planned name.
+/// What the arm64 Linux, macOS and Windows build jobs would have published, by planned name.
 async function otherPlatformsPublished(s, linux) {
   const binary = linux.artifacts.find((a) => a.kind === "archive").path;
-  for (const platform of ["macos", "windows"]) {
+  for (const platform of ["linux-arm64", "macos", "windows"]) {
     const plan = JSON.parse(
       execFileSync("just", [`release-${platform}`, "plan"], { encoding: "utf8" }),
     );
@@ -743,7 +743,8 @@ describe("publish's own verification", () => {
       const results = JSON.parse(readFileSync(join(out, "common", "publish-results.json"), "utf8"));
       assert.deepEqual(results["npm-launcher"], { published: "success", verified: "failure" });
       const jobs = {};
-      for (const key of ["LINUX", "MACOS", "WINDOWS"]) jobs[`${key}_RESULT`] = "success";
+      for (const key of ["LINUX", "LINUX_ARM64", "MACOS", "WINDOWS"])
+        jobs[`${key}_RESULT`] = "success";
       const recorded = await run("just", ["release-outcome"], { env: { ...env, ...jobs } });
       assert.equal(recorded.code, 0, said(recorded));
       const record = JSON.parse(
@@ -806,6 +807,8 @@ describe("publish: the platform-independent artifacts", () => {
       /not every platform is published, so nothing platform-independent is/,
     );
     for (const missing of [
+      `onepipeline-v${VERSION}-aarch64-unknown-linux-gnu.tar.gz on the Release`,
+      `npm:onepipeline-cli-linux-arm64@${VERSION} on npm`,
       `onepipeline-v${VERSION}-aarch64-apple-darwin.tar.gz on the Release`,
       `onepipeline_cli-${VERSION}-py3-none-win_amd64.whl on PyPI`,
       `npm:onepipeline-cli-darwin-arm64@${VERSION} on npm`,
@@ -889,7 +892,7 @@ describe("publish: the crate, and a registry that loses an artifact", () => {
   /// Every platform's assets on the Release, with PyPI and npm switched off.
   async function assetsOnly() {
     const s = await services();
-    for (const platform of ["linux", "macos", "windows"]) {
+    for (const platform of ["linux", "linux-arm64", "macos", "windows"]) {
       const plan = JSON.parse(
         execFileSync("just", [`release-${platform}`, "plan"], { encoding: "utf8" }),
       );
@@ -956,7 +959,8 @@ describe("publish: the crate, and a registry that loses an artifact", () => {
       assert.equal(refused.code, 1, said(refused));
       assert.deepEqual(results().crate, { published: "failure", verified: "skipped" });
       const jobs = {};
-      for (const key of ["LINUX", "MACOS", "WINDOWS"]) jobs[`${key}_RESULT`] = "success";
+      for (const key of ["LINUX", "LINUX_ARM64", "MACOS", "WINDOWS"])
+        jobs[`${key}_RESULT`] = "success";
       const recorded = await run("just", ["release-outcome"], { env: { ...env, ...jobs } });
       assert.equal(recorded.code, 0, said(recorded));
       const record = JSON.parse(
