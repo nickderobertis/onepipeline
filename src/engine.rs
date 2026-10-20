@@ -4378,23 +4378,56 @@ fn withdrawn_notes(paths: &RunPaths, id: u64, commands: &[Command]) -> BTreeSet<
 }
 
 /// The positions of envelope `id`'s notes a write-ahead of another envelope names
-/// a live withdrawal of. A write-ahead this build cannot read names none.
+/// a live withdrawal of.
+///
+/// Each write-ahead is read as recovery reads it — through [`read_committing`],
+/// against the queued envelope its name says it is for — and a withdrawal counts
+/// only where the command it is written down beside is a `withdraw-note` naming
+/// that very note. A write-ahead that fails either check names none.
 fn written_down_withdrawals(paths: &RunPaths, id: u64) -> BTreeSet<usize> {
     let Ok(written) = std::fs::read_dir(paths.dir.join(COMMITTING)) else {
         return BTreeSet::new();
     };
-    written
-        .flatten()
-        .filter_map(|file| std::fs::read_to_string(file.path()).ok())
-        .filter_map(|text| serde_json::from_str::<Committing>(&text).ok())
-        .flat_map(|committing| committing.operations.into_iter().flatten().flatten())
-        .filter_map(|operation| match operation {
-            edits::Operation::NoteWithdrawn {
-                envelope, index, ..
-            } if envelope == id => usize::try_from(index).ok(),
-            _ => None,
-        })
-        .collect()
+    let channel = ChannelState::new(paths);
+    let mut withdrawn = BTreeSet::new();
+    for file in written.flatten() {
+        let path = file.path();
+        let Some(queued) = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .and_then(|stem| stem.parse::<u64>().ok())
+            .and_then(|by| channel.commands_of(by))
+        else {
+            continue;
+        };
+        let Ok(committing) = read_committing(&path, &queued) else {
+            continue;
+        };
+        for (command, operations) in queued.commands.iter().zip(&committing.operations) {
+            let Command::WithdrawNote {
+                envelope: named,
+                index: at,
+                ..
+            } = command
+            else {
+                continue;
+            };
+            for operation in operations.iter().flatten() {
+                if let edits::Operation::NoteWithdrawn {
+                    envelope, index, ..
+                } = operation
+                {
+                    if *envelope == id
+                        && index == at
+                        && named.trim().parse::<u64>().ok() == Some(id)
+                    {
+                        withdrawn.extend(usize::try_from(*index).ok());
+                    }
+                }
+            }
+        }
+    }
+    withdrawn
 }
 
 /// Answer an envelope with `outcome`, each of its notes a committed withdrawal
