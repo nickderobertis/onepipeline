@@ -3954,6 +3954,8 @@ fn answer_recovered(
                 (_, Command::Note { .. }) if withdrawn.contains(&index) => {
                     Answered::Refused(RecordedRefusal::Text(WITHDRAWN_LIVE.to_string()))
                 }
+                // Refused as it was delivered, and kept nothing of this command.
+                (None, _) if written.refused_at_delivery => Answered::Unapplied,
                 (Some(operations), _) => {
                     commit_command(
                         paths,
@@ -4470,6 +4472,7 @@ fn hand_envelope(
     // the rest committed, and which commands were notes still outstanding — see
     // [`answer_recovered`].
     let committing = Committing {
+        refused_at_delivery: false,
         envelope: id,
         operations: ruled
             .iter()
@@ -4678,24 +4681,29 @@ fn refused_keeping_withdrawals(
 ) -> Result<bool> {
     let commands = &envelope.commands;
     let author = envelope.author.clone();
+    let kept = evaluated
+        .iter()
+        .any(|ruling| matches!(ruling, Ok(Delivery::TakenBack(_))));
+    // Written down before its first record, as any envelope of several is: a
+    // driver that dies between them answers it from this and the journal —
+    // each kept withdrawal committed once, and the rest refused or of no effect.
+    if kept && commands.len() > 1 {
+        let committing = Committing {
+            envelope: envelope.id,
+            operations: evaluated
+                .iter()
+                .map(|ruling| match ruling {
+                    Ok(Delivery::TakenBack(operations)) => Some(operations.clone()),
+                    _ => None,
+                })
+                .collect(),
+            refused_at_delivery: true,
+        };
+        ledger::write_json(&committing_path(paths, envelope.id), &committing)?;
+    }
     let mut answers = Vec::with_capacity(commands.len());
-    let mut kept = false;
     for (command, ruling) in commands.iter().zip(evaluated) {
         answers.push(match ruling {
-            Ok(Delivery::TakenBack(operations)) => {
-                commit_command(
-                    paths,
-                    journal,
-                    state,
-                    author.clone(),
-                    command,
-                    operations,
-                    in_flight,
-                    envelope.id,
-                )?;
-                kept = true;
-                Answered::Committed(None)
-            }
             Err(error) => {
                 record_rejection(
                     paths,
@@ -4707,8 +4715,23 @@ fn refused_keeping_withdrawals(
                 )?;
                 Answered::Refused(RecordedRefusal::of(error))
             }
+            Ok(Delivery::TakenBack(_)) => Answered::Committed(None),
             Ok(_) => Answered::Unapplied,
         });
+    }
+    for (command, ruling) in commands.iter().zip(evaluated) {
+        if let Ok(Delivery::TakenBack(operations)) = ruling {
+            commit_command(
+                paths,
+                journal,
+                state,
+                author.clone(),
+                command,
+                operations,
+                in_flight,
+                envelope.id,
+            )?;
+        }
     }
     crate::review::failpoint("after-edit-rejected")?;
     let outcome = if kept {
@@ -4762,6 +4785,7 @@ fn record_delivered(
     // see [`answer_recovered`]. One command is one record, which nothing can
     // leave half written, so only an envelope of several is written down.
     let committing = Committing {
+        refused_at_delivery: false,
         envelope: envelope.id,
         operations: delivered
             .iter()
@@ -4868,6 +4892,12 @@ fn prune_committing(paths: &RunPaths, channel: &ChannelState) {
 struct Committing {
     envelope: u64,
     operations: Vec<Option<Vec<edits::Operation>>>,
+    /// The envelope was refused as it was delivered, and its `null` commands
+    /// are the ones that refused or had no effect: what it commits is only each
+    /// live note a `withdraw-note` of it already took back — see
+    /// [`refused_keeping_withdrawals`]. Omitted where it is not.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    refused_at_delivery: bool,
 }
 
 /// What `envelope`'s writer wrote down before journalling its first record, or
@@ -12048,6 +12078,7 @@ mod tests {
             &Committing {
                 envelope: id,
                 operations: vec![Some(Vec::new()), None, None],
+                refused_at_delivery: false,
             },
         )
         .expect("written down");

@@ -6841,13 +6841,18 @@ fn a_note_its_delivery_answered_untaken_is_refused_while_its_envelope_is_outstan
 /// `withdraw-note`, naming a note its delivery already answered `carried` but
 /// has not recorded yet, so it refuses only once it is applied. The envelope is
 /// answered applied in part: the withdrawal that took its note back `applied`,
-/// the other refused naming why. The withdrawn note is answered refused carrying
-/// the reason, journalled by nothing but its withdrawal, and presented to no turn.
+/// the other refused naming why, and an amend beside them `validated`, having had
+/// no effect. The withdrawn note is answered refused carrying the reason,
+/// journalled by nothing but its withdrawal, and presented to no turn.
 #[test]
 fn a_live_withdrawal_stays_recorded_when_a_later_command_of_its_envelope_refuses() {
     let world = World::new("note-withdraw-beside-refused");
     let run = "withdrawbesiderefused";
-    held_conversation(&world, run, vec![agent("build", &[])]);
+    held_conversation(
+        &world,
+        run,
+        vec![agent("build", &[]), agent("later", &["build"])],
+    );
 
     let before = admitted(&world, run);
     let notes = submitted(
@@ -6868,11 +6873,7 @@ fn a_live_withdrawal_stays_recorded_when_a_later_command_of_its_envelope_refuses
     world
         .run_with_stdin_on(
             world.agentgraph_cmd(&["reply", run]),
-            &json!({"version": 2, "commands": [
-                withdraw_op(sent, 1, WITHDRAWN_BECAUSE),
-                withdraw_op(sent, 0, WITHDRAWN_BECAUSE),
-            ]})
-            .to_string(),
+            &withdrawing_beside_a_refusal(sent).to_string(),
         )
         .exited(REFUSED);
     assert_eq!(
@@ -6889,28 +6890,7 @@ fn a_live_withdrawal_stays_recorded_when_a_later_command_of_its_envelope_refuses
         "the withdrawal that took its note back was not recorded once"
     );
     let withdrawing = queued_id_of(&world, run, "withdraw-note");
-    let answer = outcome_of(&world, run, withdrawing).expect("answered");
-    assert_eq!(
-        [
-            &answer["applied"],
-            &answer["results"][0]["outcome"],
-            &answer["results"][1]["outcome"]
-        ],
-        [&json!(false), &json!("applied"), &json!("refused")],
-        "{answer}"
-    );
-    assert!(
-        answer["reason"]
-            .as_str()
-            .is_some_and(|reason| reason.starts_with("applied in part:")),
-        "{answer}"
-    );
-    assert!(
-        answer["results"][1]["reason"]
-            .as_str()
-            .is_some_and(|reason| reason.contains("`carried`")),
-        "{answer}"
-    );
+    assert_answered_in_part(&world, run, withdrawing);
 
     release(&world.fakes, "turn.go");
     release(&world.fakes, "turn.settle");
@@ -6933,6 +6913,166 @@ fn a_live_withdrawal_stays_recorded_when_a_later_command_of_its_envelope_refuses
         .iter()
         .all(|prompt| !prompt.contains(LIVE_WITHDRAWN)));
     assert_eq!(withdrawals(&world, run).len(), 1);
+}
+
+/// One envelope withdrawing note 1 of envelope `sent` — offered, untaken — then
+/// note 0, which its delivery already answered `carried`, beside an amend.
+fn withdrawing_beside_a_refusal(sent: u64) -> Value {
+    json!({"version": 2, "commands": [
+        withdraw_op(sent, 1, WITHDRAWN_BECAUSE),
+        withdraw_op(sent, 0, WITHDRAWN_BECAUSE),
+        {"op": "amend", "id": "later", "text": LATER_RULING},
+    ]})
+}
+
+/// What [`withdrawing_beside_a_refusal`]'s amend asks of `later`, which no note
+/// waits on, so the envelope is held behind nothing.
+const LATER_RULING: &str = "later: read the fixture from fixtures/v3";
+
+/// Assert [`withdrawing_beside_a_refusal`]'s envelope `id` was answered once,
+/// applied in part: the withdrawal `applied`, the refused one naming its note's
+/// disposition, and the amend `validated` with no effect.
+fn assert_answered_in_part(world: &World, run: &str, id: u64) {
+    assert_eq!(outcomes_for(world, run, id), 1);
+    let answer = outcome_of(world, run, id).expect("answered");
+    assert_eq!(
+        [
+            &answer["applied"],
+            &answer["results"][0]["outcome"],
+            &answer["results"][1]["outcome"],
+            &answer["results"][2]["outcome"]
+        ],
+        [
+            &json!(false),
+            &json!("applied"),
+            &json!("refused"),
+            &json!("validated")
+        ],
+        "{answer}"
+    );
+    assert!(
+        answer["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.starts_with("applied in part:")),
+        "{answer}"
+    );
+    assert!(
+        answer["results"][1]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("`carried`")),
+        "{answer}"
+    );
+    assert!(
+        answer["results"][2]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("had no effect")),
+        "{answer}"
+    );
+    assert!(
+        world
+            .events_of(run, "edit-committed")
+            .iter()
+            .all(|event| event["payload"]["command"]["text"] != LATER_RULING),
+        "the amend beside the refusal was applied"
+    );
+}
+
+/// A driver that dies after committing a live withdrawal its envelope keeps
+/// beside a refusal, before answering that envelope, leaves the driver that
+/// takes the run over to answer it from what it wrote down: applied in part,
+/// once, with the withdrawal committed exactly once and the withdrawn note
+/// answered refused carrying its reason. The driver is held between the two by
+/// the debug build's own crash seam, and ended there.
+#[cfg(unix)]
+#[test]
+fn a_kept_withdrawal_its_driver_died_before_answering_is_answered_in_part_by_the_next() {
+    let world = World::new("note-withdraw-kept-died");
+    let run = "withdrawkeptdied";
+    let seam = world.root.join("withdraw-seam");
+    std::fs::create_dir_all(&seam).expect("the seam's directory");
+    std::fs::write(seam.join("after-note-withdrawn"), "").expect("the seam is armed");
+    world.script(
+        "judge.asks-again",
+        "Run the check again and report what it said.",
+    );
+    world.script("turn.hold", "hold");
+    world.write_graphs();
+    world.write_supervised_node_graph();
+    let path = world.plan(
+        run,
+        &plan_of(run, vec![agent("build", &[]), agent("later", &["build"])]),
+    );
+    let mut start = world.agentgraph_cmd(&["start", &path, "--detach"]);
+    start.env("ONEPIPELINE_REVIEW_FAILPOINT", &seam);
+    world.run_on(start, "start --detach").exited(0);
+    world.until("build's worker turn to open", |world| {
+        !openings_of(world, run, "build").is_empty()
+    });
+
+    let before = admitted(&world, run);
+    let notes = submitted(
+        &world,
+        run,
+        &json!({"version": 2, "commands": [
+            timed_note("build", THIRD_CARRIED, "turn-end", true, 1),
+            note_op_with("build", LIVE_WITHDRAWN, "turn-end", true),
+        ]})
+        .to_string(),
+    );
+    world.until(
+        "the timed note to expire and the note behind it to wait",
+        |world| admitted(world, run) == before + 2 && awaiting_an_answer(world, run) == 1,
+    );
+    let sent = queued_id_of(&world, run, LIVE_WITHDRAWN);
+    let withdrawing = submitted(&world, run, &withdrawing_beside_a_refusal(sent).to_string());
+    world.until(
+        "the kept withdrawal to be committed and its driver held",
+        |_| seam.join("after-note-withdrawn.reached").is_file(),
+    );
+    let withdrawing_id = queued_id_of(&world, run, "withdraw-note");
+    assert_eq!(withdrawals(&world, run).len(), 1);
+    assert!(
+        outcome_of(&world, run, withdrawing_id).is_none(),
+        "the envelope was answered before its driver died"
+    );
+
+    harness::end_driver(&world, run);
+    world
+        .run_on(
+            world.agentgraph_cmd(&["adopt", run, "--detach"]),
+            "adopt --detach",
+        )
+        .exited(0);
+    world.until("the next driver to answer the envelope", |world| {
+        outcome_of(world, run, withdrawing_id).is_some()
+    });
+    let output = withdrawing.wait_with_output().expect("the binary runs");
+    assert_eq!(output.status.code(), Some(REFUSED));
+    assert_answered_in_part(&world, run, withdrawing_id);
+    assert_eq!(
+        withdrawals(&world, run).len(),
+        1,
+        "the next driver committed the withdrawal a second time"
+    );
+    release(&world.fakes, "turn.go");
+    release(&world.fakes, "turn.settle");
+    let output = notes.wait_with_output().expect("the binary runs");
+    assert_eq!(output.status.code(), Some(REFUSED));
+    let result = result_of(&world, run, sent, 1);
+    assert_eq!(result["outcome"], json!("refused"), "{result}");
+    assert!(
+        result["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains(WITHDRAWN_BECAUSE)),
+        "{result}"
+    );
+    assert_eq!(rejected_reading(&world, run, LIVE_WITHDRAWN), 0);
+    world.until("the run to settle", |world| {
+        !world.events_of(run, "node-settled").is_empty()
+    });
+    assert!(prompts(&world)
+        .iter()
+        .all(|prompt| !prompt.contains(LIVE_WITHDRAWN)));
 }
 
 /// Withdrawing a live note leaves a carried note of the same text to the same
