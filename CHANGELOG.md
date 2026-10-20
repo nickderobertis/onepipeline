@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.79.2](https://github.com/nickderobertis/onepipeline/compare/v0.79.1...v0.79.2) - 2026-10-20
+
+### Fixed
+
+- *(e2e)* keep the busy review round within its bound on Windows ([#1047](https://github.com/nickderobertis/onepipeline/pull/1047))
+
 ## [0.79.1](https://github.com/nickderobertis/onepipeline/compare/v0.79.0...v0.79.1) - 2026-10-20
 
 ### Fixed
