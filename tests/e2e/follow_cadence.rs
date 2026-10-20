@@ -12,8 +12,8 @@
 // subprocess boundary, because a real agent turn is a paid one and this journey is about the
 // follow of a publication: the session, its clone, its stream and the push are the real linked
 // `onevcs` over a real origin on disk, and the driver is the compiled binary.
-// llmlint: ignore-file[expensive_tests_stay_behind_their_own_edge] one journey of about
-// twenty-five seconds — four asks five seconds apart — and what it measures is `vcs`' follow
+// llmlint: ignore-file[expensive_tests_stay_behind_their_own_edge] one journey of about a
+// minute — a held publication and four asks five seconds apart — and what it measures is `vcs`' follow
 // inside a real publication: `driver`, `lifecycle` and `vcs` through the linked `onevcs` at
 // once, so the crate's edge is the narrowest it fits behind, on the grounds
 // `mod unreadable_sessions` gives.
