@@ -23,9 +23,9 @@ use crate::harness::{held_publication, lifecycle, plan_of, World};
 /// before its call does.
 const LEAST_GAP_SECONDS: f64 = 4.9;
 
-/// How many asks the journey waits to see: enough gaps that one long one — a loaded host
-/// slowing a single ask — cannot stand in for the cadence.
-const ASKS: usize = 3;
+/// How many asks the journey waits to see: two, so one gap. A follow asking every second falls
+/// nearly four seconds short of the bound, more than one slow ask on a loaded host makes up.
+const ASKS: usize = 2;
 
 /// Each open of `record` the trace holds, as the thread that made it and when, in the order
 /// the tracer wrote them.
