@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Release onepipeline one platform at a time, then the platform-independent rest.
 
-release.yml's three build jobs and its `publish` job are each one call of this
+release.yml's four build jobs and its `publish` job are each one call of this
 through the `just release-<platform>` / `just release-publish` recipes, so a
 release and a developer drive the same steps. What each phase does, and in what
 order, is AGENTS.md's "Commits, releases, and merging".
 
 Usage:
-  release.py plan PLATFORM [--version V]       PLATFORM: linux, macos, windows or common
+  release.py plan PLATFORM [--version V]       PLATFORM: linux, linux-arm64, macos, windows or common
   release.py build PLATFORM [--out DIR]        build each target once, package, test-install
   release.py publish PLATFORM [--out DIR] [--dry-run]
   release.py verify PLATFORM [--out DIR]       install from the registries and run it
@@ -60,23 +60,27 @@ _spec = importlib.util.spec_from_file_location('staged', SCRIPTS / 'build-staged
 staged = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(staged)
 
-# The targets each build job builds, once each. Intel macOS and Linux arm64 are
-# not built: README.md says how to install there from source.
+# The targets each build job builds, once each, on a runner of that target's own
+# architecture. Intel macOS is not built: README.md says how to install there
+# from source.
 PLATFORMS = {
     'linux': ['x86_64-unknown-linux-gnu'],
+    'linux-arm64': ['aarch64-unknown-linux-gnu'],
     'macos': ['aarch64-apple-darwin'],
     'windows': ['x86_64-pc-windows-msvc'],
 }
 
 # The wheel platform tag each target's build is held to, and the glibc floor a
-# Linux binary may not exceed. Linux builds once, inside the manylinux2014 image,
-# so its archive and npm package carry the wheel's binary and the wheel's floor.
+# Linux binary may not exceed. Each Linux target builds once, inside its
+# architecture's manylinux2014 image, so its archive and npm package carry the
+# wheel's binary and the wheel's floor.
 WHEEL_PLATFORM = {
     'x86_64-unknown-linux-gnu': 'manylinux_2_17_x86_64.manylinux2014_x86_64',
+    'aarch64-unknown-linux-gnu': 'manylinux_2_17_aarch64.manylinux2014_aarch64',
     'aarch64-apple-darwin': 'macosx_11_0_arm64',
     'x86_64-pc-windows-msvc': 'win_amd64',
 }
-GLIBC_FLOOR = {'x86_64-unknown-linux-gnu': (2, 17)}
+GLIBC_FLOOR = {'x86_64-unknown-linux-gnu': (2, 17), 'aarch64-unknown-linux-gnu': (2, 17)}
 
 PYPI_NAME = 'onepipeline-cli'
 NPM_LAUNCHER = 'onepipeline-cli'
@@ -205,6 +209,12 @@ def npm_package(target):
     return f"onepipeline-cli-{facts['platform']}-{facts['arch']}", facts
 
 
+def job_key(platform):
+    """The prefix of the environment release.yml hands `outcome` for one build job:
+    `linux-arm64` is LINUX_ARM64, because a shell variable name has no `-`."""
+    return platform.upper().replace('-', '_')
+
+
 def check_targets():
     declared = set(staged.supported_targets())
     built = {target for targets in PLATFORMS.values() for target in targets}
@@ -302,8 +312,8 @@ def conform(platform, version, artifacts):
                f"{artifact['glibc_floor']}", 'build it inside the manylinux2014 image, as `just wheel-linux` does')
 
 
-def compile_wheel(platform, target, out):
-    if platform == 'linux':
+def compile_wheel(target, out):
+    if target in GLIBC_FLOOR:
         wheels = out / 'wheels' / target
         wheels.mkdir(parents=True, exist_ok=True)
         try:
@@ -325,7 +335,7 @@ def build(args):
     fresh(out)
     records = []
     for target in PLATFORMS[args.platform]:
-        wheel = compile_wheel(args.platform, target, out)
+        wheel = compile_wheel(target, out)
         try:
             records.append(staged.package(target, wheel, out, version))
         except (ValueError, OSError, subprocess.SubprocessError) as error:
@@ -850,12 +860,12 @@ def outcome(args):
             results['npm-launcher']['published'] = 'success'
     for platform in PLATFORMS:
         for phase in ['RESULT', 'PUBLISHED', 'VERIFIED']:
-            value = os.environ.get(f'{platform.upper()}_{phase}', '')
-            expect(value in ('', *RESULTS), f"{platform.upper()}_{phase} is '{value}', not a job or step result GitHub reports",
+            value = os.environ.get(f'{job_key(platform)}_{phase}', '')
+            expect(value in ('', *RESULTS), f"{job_key(platform)}_{phase} is '{value}', not a job or step result GitHub reports",
                    'pass success, failure, cancelled or skipped')
     builds = {}
     for platform in PLATFORMS:
-        key = platform.upper()
+        key = job_key(platform)
         job = os.environ.get(f'{key}_RESULT') or 'skipped'
         builds[platform] = {phase: os.environ.get(f'{key}_{phase.upper()}') or job
                             for phase in ['published', 'verified']}

@@ -4178,7 +4178,7 @@ mod tests {
     /// The commit the loop journals once a conversation answered the note it
     /// was offered.
     fn record_delivery(paths: &RunPaths, text: &str) {
-        let reached = crate::note::Reached::Worker;
+        let reached = crate::note::Reached::Worker { turn: None };
         crate::journal::Journal::open(paths)
             .emit(
                 crate::journal::PipelineKind::EditCommitted,
@@ -4194,6 +4194,7 @@ mod tests {
                         routed_to: reached.routed_to().to_vec(),
                         reached,
                         envelope: None,
+                        index: None,
                     }]),
                 )]),
             )

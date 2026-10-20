@@ -33,7 +33,7 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use onevcs::{Bound, SessionRequest, WorkspaceCapacity};
+use onevcs::{Bound, Ineligibility, IneligibleSlot, SessionRequest, WorkspaceCapacity};
 use serde_json::{json, Value};
 
 use crate::channel::Surface;
@@ -167,6 +167,73 @@ impl WorkspaceHold {
     }
 }
 
+/// One capacity reading a node is held on: the hold it records, and the idle slots the
+/// reading would not let this node's request take, each with the sibling's reason.
+///
+/// The slots are beside the hold rather than in it because the `workspace` entry is
+/// fixed by the contract to the reading's numbers, and a hold is diffed pass to pass
+/// against the entry it wrote: what the slots add is said in the `workspace-wait` text,
+/// where the numbers already are.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Reading {
+    pub hold: WorkspaceHold,
+    /// Every slot nobody is in that `hold.idle` does not count, which only the text says.
+    pub ineligible: Vec<IneligibleSlot>,
+}
+
+impl Reading {
+    pub(crate) fn of(capacity: &WorkspaceCapacity) -> Self {
+        Self {
+            hold: WorkspaceHold::of(capacity),
+            ineligible: capacity.ineligible.clone(),
+        }
+    }
+}
+
+/// The idle slots a held node's request cannot take, as the `workspace-wait` text says
+/// them: `None` where the reading names none.
+fn unusable(ineligible: &[IneligibleSlot]) -> Option<String> {
+    if ineligible.is_empty() {
+        return None;
+    }
+    let each: Vec<String> = ineligible
+        .iter()
+        .map(|slot| {
+            let why = match &slot.reason {
+                Ineligibility::OtherLender { execution_checkout } => format!(
+                    "bound to another execution checkout, {}",
+                    execution_checkout.display()
+                ),
+                // llmlint: ignore-block[changed_behavior_has_e2e] these three render the same typed
+                // reading the `OtherLender` arm above does, through the one function
+                // `lifecycle::a_node_held_beside_an_idle_slot_it_cannot_take_is_told_which_slot_and_why`
+                // drives end to end, and none of them can be put on a hold through an interface:
+                // `onevcs` refuses to close a session a process still works in, so a slot is passed
+                // over for one only when a session's record ended without a close, and a broken
+                // slot is counted by `admits` and `admitted`, so it never holds a node itself.
+                // `pool::tests::the_wait_surface_names_each_slot_the_request_cannot_take_and_why`
+                // holds each word.
+                Ineligibility::HeldByProcess { pids } => format!(
+                    "held by a live process ({})",
+                    pids.iter()
+                        .map(|pid| format!("pid {pid}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                Ineligibility::Broken { detail } => {
+                    format!("broken, recreated by the open that takes it — {detail}")
+                }
+                Ineligibility::NoLender { detail } => {
+                    format!("broken with no lender, recreated by the open that takes it — {detail}")
+                }
+            };
+            // llmlint: ignore-end[changed_behavior_has_e2e]
+            format!("slot {}: {why}", slot.number)
+        })
+        .collect();
+    Some(each.join("; "))
+}
+
 /// Whether one node's session would be placed now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Admission {
@@ -210,6 +277,9 @@ pub(crate) struct Workspaces {
     placing: BTreeMap<String, String>,
     /// The nodes held this pass, and the reading each is held on.
     held: BTreeMap<String, WorkspaceHold>,
+    /// The idle slots each node held this pass cannot take, where its reading named
+    /// any: what its `workspace-wait` says beside the numbers.
+    unusable: BTreeMap<String, Vec<IneligibleSlot>>,
     /// The nodes whose open the identity refused, held on the refusal's own
     /// reading until the next paced re-read comes due.
     ///
@@ -218,7 +288,7 @@ pub(crate) struct Workspaces {
     /// away and found room would dispatch into the same refusal again, and a
     /// pass that found none would say what the refusal already said. Either
     /// way the next read is the paced one.
-    refused: BTreeMap<String, (Instant, WorkspaceHold)>,
+    refused: BTreeMap<String, (Instant, Reading)>,
     /// Where each refused re-dispatch stood, for the dispatch that resumes it.
     ///
     /// A first attempt refused has nothing behind it and is absent here: it
@@ -241,6 +311,7 @@ impl Workspaces {
         Self {
             placing: BTreeMap::new(),
             held: BTreeMap::new(),
+            unusable: BTreeMap::new(),
             refused: BTreeMap::new(),
             resuming: BTreeMap::new(),
             read_at: None,
@@ -254,6 +325,7 @@ impl Workspaces {
     /// reads this pass makes.
     pub(crate) fn begin_pass(&mut self, in_flight: impl Fn(&str) -> bool) {
         self.held.clear();
+        self.unusable.clear();
         self.placing.retain(|node, _| in_flight(node));
     }
 
@@ -270,9 +342,9 @@ impl Workspaces {
     /// long — then applies this pass's own dispatches over the reading.
     pub(crate) fn admit(&mut self, node: &str, request: &SessionRequest) -> Admission {
         // A refusal the identity made stands until the paced re-read.
-        if let Some((at, hold)) = self.refused.get(node) {
+        if let Some((at, reading)) = self.refused.get(node) {
             if at.elapsed() < self.every {
-                self.held.insert(node.to_owned(), hold.clone());
+                self.hold(node, reading.clone());
                 return Admission::Held;
             }
             self.refused.remove(node);
@@ -303,12 +375,22 @@ impl Workspaces {
         // reading counted, less what the loop has placed and not yet seen.
         let admitted = capacity.admitted && (already == 0 || capacity.admits.admits(already));
         if !admitted {
-            self.held
-                .insert(node.to_owned(), WorkspaceHold::of(&capacity));
+            self.hold(node, Reading::of(&capacity));
             return Admission::Held;
         }
         self.placing.insert(node.to_owned(), capacity.identity);
         Admission::Admitted
+    }
+
+    /// Hold `node` this pass on `reading`, its slots kept apart from the hold so the
+    /// `workspace` entry the engine diffs stays the reading's numbers alone.
+    fn hold(&mut self, node: &str, reading: Reading) {
+        self.held.insert(node.to_owned(), reading.hold);
+        if reading.ineligible.is_empty() {
+            self.unusable.remove(node);
+        } else {
+            self.unusable.insert(node.to_owned(), reading.ineligible);
+        }
     }
 
     /// `node`'s open was just refused: hold it on the reading taken after the
@@ -318,11 +400,12 @@ impl Workspaces {
     pub(crate) fn refused(
         &mut self,
         node: &str,
-        hold: Option<WorkspaceHold>,
+        reading: Option<Reading>,
         resume: Option<Box<crate::lifecycle::Continuation>>,
     ) {
-        if let Some(hold) = hold {
-            self.refused.insert(node.to_owned(), (Instant::now(), hold));
+        if let Some(reading) = reading {
+            self.refused
+                .insert(node.to_owned(), (Instant::now(), reading));
         }
         match resume {
             Some(continuation) => self.resuming.insert(node.to_owned(), continuation),
@@ -386,7 +469,9 @@ impl Workspaces {
             if !self.surfaced.due(paths, node, &content) {
                 continue;
             }
-            let queued = crate::engine::raised(paths, journal, wait_surface(node, hold))?;
+            let unusable = self.unusable.get(node).and_then(|slots| unusable(slots));
+            let surface = wait_surface(node, hold, unusable.as_deref());
+            let queued = crate::engine::raised(paths, journal, surface)?;
             self.surfaced.queued(node, content, &queued);
         }
         let held = &self.held;
@@ -395,14 +480,18 @@ impl Workspaces {
     }
 }
 
-/// The surface a held node's wait raises.
-fn wait_surface(node: &str, hold: &WorkspaceHold) -> Surface {
+/// The surface a held node's wait raises, naming beside the numbers each idle slot its
+/// request cannot take and why.
+fn wait_surface(node: &str, hold: &WorkspaceHold, unusable: Option<&str>) -> Surface {
+    let unusable = unusable
+        .map(|slots| format!(", and the idle slot(s) it cannot take are {slots}"))
+        .unwrap_or_default();
     Surface {
         id: 0,
         kind: WAIT_SURFACE_KIND.to_owned(),
         message: format!(
             "node '{node}' is held: the '{identity}' workspace admits no more sessions now — \
-             {numbers}. `onevcs pool status {identity}` names the holders. Nothing times this \
+             {numbers}{unusable}. `onevcs pool status {identity}` names the holders. Nothing times this \
              out and nothing will fail the node: it dispatches the pass the identity admits \
              it. Close a session, raise pool or overflow for this identity in the host's \
              workspaces.yml, or stop the run.",
@@ -558,7 +647,7 @@ mod tests {
     /// names the holders, and that nothing times it out.
     #[test]
     fn the_wait_surface_says_what_a_reader_needs_and_blocks_nothing() {
-        let surface = wait_surface("service", &a_hold());
+        let surface = wait_surface("service", &a_hold(), None);
         assert_eq!(surface.kind, WAIT_SURFACE_KIND);
         assert!(!surface.blocking);
         assert_eq!(surface.workstream.as_deref(), Some("service"));
@@ -574,6 +663,52 @@ mod tests {
                 surface.message
             );
         }
+    }
+
+    /// Each idle slot the reading would not let the request take is named with the
+    /// sibling's reason, beside the numbers; a reading that names none adds nothing.
+    #[test]
+    fn the_wait_surface_names_each_slot_the_request_cannot_take_and_why() {
+        let slots = [
+            IneligibleSlot {
+                number: 1,
+                reason: Ineligibility::OtherLender {
+                    execution_checkout: "/srv/primary".into(),
+                },
+            },
+            IneligibleSlot {
+                number: 2,
+                reason: Ineligibility::HeldByProcess { pids: vec![41, 42] },
+            },
+            IneligibleSlot {
+                number: 3,
+                reason: Ineligibility::Broken {
+                    detail: "no clone".into(),
+                },
+            },
+            IneligibleSlot {
+                number: 4,
+                reason: Ineligibility::NoLender {
+                    detail: "no record".into(),
+                },
+            },
+        ];
+        let said = unusable(&slots).expect("four slots are named");
+        let surface = wait_surface("service", &a_hold(), Some(&said));
+        for names in [
+            "0 in use, and the idle slot(s) it cannot take are slot 1: bound to another \
+             execution checkout, /srv/primary; slot 2: held by a live process (pid 41, pid 42); \
+             slot 3: broken, recreated by the open that takes it — no clone; slot 4: broken \
+             with no lender, recreated by the open that takes it — no record.",
+            "onevcs pool status github.com/owner/service",
+        ] {
+            assert!(
+                surface.message.contains(names),
+                "the surface does not say {names:?}: {}",
+                surface.message
+            );
+        }
+        assert_eq!(unusable(&[]), None);
     }
 
     /// The poll bound falls back to the shipped one rather than to zero or to
@@ -606,7 +741,14 @@ mod tests {
         let mut workspaces = Workspaces::new();
         assert_eq!(workspaces.next_read(), Duration::MAX);
         workspaces.every = Duration::from_secs(3_600);
-        workspaces.refused("service", Some(a_hold()), None);
+        workspaces.refused(
+            "service",
+            Some(Reading {
+                hold: a_hold(),
+                ineligible: Vec::new(),
+            }),
+            None,
+        );
         let request = SessionRequest {
             repo: "nowhere".into(),
             branch: None,

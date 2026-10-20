@@ -317,7 +317,10 @@ fn the_store_is_discovered_from_the_launch_directory_by_the_read_and_by_every_wr
         world.until_store("the change after the repair to reach the board", |world| {
             world.store_tasks(&project).iter().any(|task| {
                 task["item"]["metadata"]["onepipeline.id"] == "later"
-                    && task["item"]["metadata"]["onepipeline.context"] == repaired.as_str()
+                    && crate::harness::carries_latest(
+                        &task["item"]["metadata"]["onepipeline.context"],
+                        repaired.as_str(),
+                    )
             })
         });
     }
@@ -1534,10 +1537,22 @@ fn an_unreachable_store_is_reported_and_attempted_again_on_the_next_change_while
     world.until("the next edit to reach the store", |world| {
         world.store_tasks(&project).iter().any(|task| {
             task["item"]["metadata"]["onepipeline.id"] == "later"
-                && task["item"]["metadata"]["onepipeline.context"]
-                    == "project this now the store is back"
+                && crate::harness::carries_latest(
+                    &task["item"]["metadata"]["onepipeline.context"],
+                    "project this now the store is back",
+                )
         })
     });
+    // Both notes carried to `later`, together and in carry order: the one sent
+    // while the store was away is projected beside the one after it, not lost.
+    assert!(
+        world.store_tasks(&project).iter().any(|task| {
+            task["item"]["metadata"]["onepipeline.id"] == "later"
+                && task["item"]["metadata"]["onepipeline.context"]
+                    == "retry this projection\n\nproject this now the store is back"
+        }),
+        "the store does not carry both of later's carried notes in carry order"
+    );
 
     // Take it away again for terminal settlement. It remains unreachable until
     // the journal says the graph is complete and the terminal publication has
@@ -1806,15 +1821,15 @@ fn unasked_across(world: &World, run: &str, asked: usize, span: Duration) {
     }
 }
 
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these nine wait on
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these ten wait on
 // is the schedule and its absence — a refused projection not being asked again across a window
 // the old schedule retried in, a transient one being asked at intervals that grow, a rate
 // limit's own wait being served in full, and a run settling over refusals — which cannot be
 // observed in less time than the schedule takes. The edge they need is the crate under test:
 // they drive the compiled `onepipeline` binary against its own write-back worker and the real
-// store, eight of them through the store double, exactly as the six schedule journeys below do,
+// store, nine of them through the store double, exactly as the six schedule journeys below do,
 // so a project of their own would declare the same dependency and skip nothing. The reason
-// those six record for staying in this binary is these nine's too.
+// those six record for staying in this binary is these ten's too.
 /// A projection the store **refuses** is reported once and is not asked again on a timer: the
 /// store would refuse the same projection the same way, and against a hosted destination every
 /// attempt spends its allowance for nothing. It is attempted again when the run's graph next
@@ -1890,8 +1905,10 @@ fn a_projection_the_store_refuses_is_reported_once_and_attempted_again_when_the_
     world.until_store("the changed graph to reach the board", |world| {
         world.store_tasks(&project).iter().any(|task| {
             task["item"]["metadata"]["onepipeline.id"] == "later"
-                && task["item"]["metadata"]["onepipeline.context"]
-                    == "project this onto the board that came back"
+                && crate::harness::carries_latest(
+                    &task["item"]["metadata"]["onepipeline.context"],
+                    "project this onto the board that came back",
+                )
         })
     });
     assert_eq!(
@@ -1999,6 +2016,80 @@ fn a_refusal_of_any_call_an_attempt_makes_stops_the_retry_timer() {
             "{scenario}: the refusal changed what executed"
         );
     }
+}
+
+/// A create the destination stored and then answered malformed is reported as the copy
+/// failure it is: the destination may hold an item the copy never learned the id of. The
+/// line an operator reads and the surface the planner is told by name the destination, the
+/// plugin method whose answer was malformed and the residue to inspect for — the store's
+/// own words — under the class it refuses, so no timer asks again and lands a second item
+/// beside the one the destination kept.
+#[test]
+fn a_create_the_destination_stored_and_answered_malformed_names_the_destination_and_its_residue() {
+    let run = "writeback-uncertain-create";
+    let (world, project) =
+        a_run_whose_destination_can_start_refusing("store-writeback-uncertain-create", run);
+    world.script(
+        &format!("{}.write_task.malformed", crate::harness::SCRIPTED_KEY),
+        "",
+    );
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [
+                {"op": "add", "node": agent("extra", &["work"])}
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+    world.until("the uncertain create to be reported", |world| {
+        streaks_reported(world, run) >= 1
+    });
+
+    let destination = crate::harness::STORE_SOURCE;
+    let said = [
+        format!("{destination} may hold an item it could not take back"),
+        format!("{destination}'s answer to write_task was malformed"),
+        format!("inspect {destination} for an item this copy may have created"),
+        "class: refused, kind: malformed".to_owned(),
+    ];
+    let line = the_line_reported(&world, run);
+    for words in &said {
+        assert!(
+            line.contains(words.as_str()),
+            "the line does not say {words:?}: {line}"
+        );
+    }
+    asked_nothing_more(&world, run, REFUSAL_WINDOW / 2, || {});
+    let surfaces = surfaces_raised(&world, run);
+    assert_eq!(
+        surfaces.len(),
+        1,
+        "the planner was not told exactly once: {surfaces:?}"
+    );
+    for words in &said {
+        assert!(
+            surfaces[0].contains(words.as_str()),
+            "the surface does not say {words:?}: {}",
+            surfaces[0]
+        );
+    }
+    // The residue the failure warns of is real: the destination kept the one item it was
+    // asked to create, and nothing created a second.
+    let extra = world
+        .store_tasks(&project)
+        .into_iter()
+        .filter(|task| task["item"]["metadata"]["onepipeline.id"] == "extra")
+        .count();
+    assert_eq!(
+        extra, 1,
+        "the destination does not hold exactly the one item it stored"
+    );
+    assert_eq!(
+        dispatched(&world, run),
+        ["work"],
+        "the failure changed what executed"
+    );
 }
 
 /// A failure the store does not refuse keeps today's schedule exactly: a rate limit, and a
@@ -2635,8 +2726,10 @@ fn a_projection_the_real_store_refuses_is_not_asked_again_until_the_graph_change
     world.until_store("the changed graph to reach the board", |world| {
         world.store_tasks(&project).iter().any(|task| {
             task["item"]["metadata"]["onepipeline.id"] == "later"
-                && task["item"]["metadata"]["onepipeline.context"]
-                    == "project this onto the board that came back"
+                && crate::harness::carries_latest(
+                    &task["item"]["metadata"]["onepipeline.context"],
+                    "project this onto the board that came back",
+                )
         })
     });
 
@@ -3068,7 +3161,10 @@ fn a_projection_that_recovered_is_retried_as_promptly_as_ever_when_it_next_fails
     world.until_store("the projection to catch the board up", |world| {
         world.store_tasks(&project).iter().any(|task| {
             task["item"]["metadata"]["onepipeline.id"] == "later"
-                && task["item"]["metadata"]["onepipeline.context"] == "the first outage"
+                && crate::harness::carries_latest(
+                    &task["item"]["metadata"]["onepipeline.context"],
+                    "the first outage",
+                )
         })
     });
 
@@ -3312,7 +3408,10 @@ fn an_unwritable_shadow_store_is_reported_retried_and_recovered() {
     world.until_store("the committed edit to reach the recovered store", |world| {
         world.store_tasks(&project).iter().any(|task| {
             task["item"]["metadata"]["onepipeline.id"] == "later"
-                && task["item"]["metadata"]["onepipeline.context"] == "capture recovered"
+                && crate::harness::carries_latest(
+                    &task["item"]["metadata"]["onepipeline.context"],
+                    "capture recovered",
+                )
         })
     });
 
@@ -3822,7 +3921,10 @@ fn derived_waiting_failed_and_parked_states_reach_the_board_under_their_own_word
                         .is_some_and(|body| body.contains("Keep this body."))
                     && task["item"]["metadata"]["onepipeline.persona"] == "engineer"
                     && task["item"]["metadata"]["onepipeline.max_turns"] == 7
-                    && task["item"]["metadata"]["onepipeline.context"] == "carry this note"
+                    && crate::harness::carries_latest(
+                        &task["item"]["metadata"]["onepipeline.context"],
+                        "carry this note",
+                    )
             })
             && tasks.iter().any(|task| {
                 task["item"]["metadata"]["onepipeline.id"] == "local"
@@ -4875,6 +4977,220 @@ fn author_project(store: &std::path::Path, identifier: &str, title: &str) {
         format!("---\ntitle: {}\n---\n\n", json!(title)),
     )
     .expect("the fixture project is authored");
+}
+
+/// Two distinct carried notes that the planner context writes alike — one whose
+/// paragraphs a blank line divides, one whose paragraphs a line holding a space
+/// divides — with a third carried between them: withdrawing either takes out that
+/// note and leaves the other two where they were carried, on the board as the
+/// withdrawing driver projects it, on the board again once an adopting driver has
+/// replayed the journal, and in the next dispatch that adopter composes.
+#[test]
+fn a_withdrawn_note_written_alike_to_another_leaves_the_other_in_carry_order() {
+    let blank = "the fixture moved\n\nto fixtures/v6";
+    let spaced = "the fixture moved\n \nto fixtures/v6";
+    let between = "keep the loader as it is";
+    // Both read as this entry in a planner context.
+    let entry = "the fixture moved\n \nto fixtures/v6";
+    for (case, withdrawn, left) in [
+        ("blank", 0, [between, entry]),
+        ("spaced", 2, [entry, between]),
+    ] {
+        let world = World::new(&format!("store-withdraw-alike-{case}"));
+        world.script("work.wait", "hold");
+        let name = format!("withdrawalike{case}");
+        let project = world.plan(
+            &name,
+            &plan_of(
+                &name,
+                vec![
+                    crate::harness::agent("work", &[]),
+                    crate::harness::agent("later", &["work"]),
+                ],
+            ),
+        );
+        world.run(&["start", &project, "--detach"]).exited(0);
+        world.until_store("work's running state to reach the store", |world| {
+            projected_words(world, &project)
+                .get("work")
+                .is_some_and(|word| word == "in progress")
+        });
+        for text in [blank, between, spaced] {
+            noted(&world, &name, "later", text);
+        }
+        let sent: Vec<u64> =
+            std::fs::read_to_string(world.run_file(&name, "channel/commands.jsonl"))
+                .expect("the command queue")
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .filter(|record| record["commands"][0]["op"] == "note")
+                .filter_map(|record| record["id"].as_u64())
+                .collect();
+        assert_eq!(sent.len(), 3, "{case}: {sent:?}");
+        world
+            .run_with_stdin(
+                &["reply", &name],
+                &json!({"version": 2, "commands": [{"op": "withdraw-note",
+                    "envelope": sent[withdrawn].to_string(), "index": 0,
+                    "reason": "the fixture moved back"}]})
+                .to_string(),
+            )
+            .exited(0);
+        let expected = left.join("\n\n");
+        let later_context = |world: &World| {
+            world
+                .store_tasks(&project)
+                .into_iter()
+                .find(|task| task["item"]["metadata"]["onepipeline.id"] == "later")
+                .map(|task| task["item"]["metadata"]["onepipeline.context"].clone())
+        };
+        world.until_store(
+            &format!("{case}: the withdrawal to reach the board"),
+            |world| later_context(world) == Some(json!(expected)),
+        );
+
+        crate::harness::end_driver(&world, &name);
+        let projected = |world: &World| {
+            std::fs::read_to_string(world.run_file(&name, "writeback-projections.jsonl"))
+                .map_or(0, |log| log.lines().count())
+        };
+        let before = projected(&world);
+        world.run(&["adopt", &name, "--detach"]).exited(0);
+        world.until_store("the adopted driver to project what it replayed", |world| {
+            projected(world) > before
+        });
+        assert_eq!(
+            later_context(&world),
+            Some(json!(expected)),
+            "{case}: the replayed run projected the notes left out of carry order"
+        );
+        world.release("work.go");
+        world.until("later to be dispatched by the adopted driver", |world| {
+            world.journal(&name).iter().any(|event| {
+                event["labels"]["node"] == "later"
+                    && event["kind"] == "turn-activity"
+                    && event["payload"]["task"].is_string()
+            })
+        });
+        let task = world
+            .journal(&name)
+            .into_iter()
+            .find(|event| event["labels"]["node"] == "later" && event["kind"] == "turn-activity")
+            .and_then(|event| event["payload"]["task"].as_str().map(str::to_owned))
+            .expect("later's task");
+        let notes = task
+            .split_once("## Planner context")
+            .and_then(|(_, context)| context.trim().split_once("\n\n"))
+            .map(|(_, notes)| notes.trim().to_owned())
+            .unwrap_or_else(|| panic!("later's dispatch has no planner context:\n{task}"));
+        assert_eq!(
+            notes, expected,
+            "{case}: the replayed run did not compose later with the notes left in carry order"
+        );
+    }
+}
+
+/// Three notes carried to one node — A, then B, then A again — and the first A
+/// withdrawn: the board's `onepipeline.context` reads B then A as the driver that
+/// applied the withdrawal projects it, and again once a driver that adopts the
+/// run has replayed its journal, and the node's next dispatch, composed by that
+/// adopter, is handed B then A as its planner context.
+#[test]
+fn a_withdrawn_carried_note_leaves_its_twin_after_the_note_between_live_and_after_replay() {
+    let world = World::new("store-withdraw-twin");
+    world.script("work.wait", "hold");
+    let name = "withdrawtwin";
+    let project = world.plan(
+        name,
+        &plan_of(
+            name,
+            vec![
+                crate::harness::agent("work", &[]),
+                crate::harness::agent("later", &["work"]),
+            ],
+        ),
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until_store("work's running state to reach the store", |world| {
+        projected_words(world, &project)
+            .get("work")
+            .is_some_and(|word| word == "in progress")
+    });
+    let (twin, between) = (
+        "the fixture moved to fixtures/v5",
+        "keep the loader as it is",
+    );
+    for text in [twin, between, twin] {
+        noted(&world, name, "later", text);
+    }
+    let first = std::fs::read_to_string(world.run_file(name, "channel/commands.jsonl"))
+        .expect("the command queue")
+        .lines()
+        .find(|line| line.contains(twin))
+        .and_then(|line| serde_json::from_str::<Value>(line).ok())
+        .and_then(|record| record["id"].as_u64())
+        .expect("the first note's envelope is queued");
+    world
+        .run_with_stdin(
+            &["reply", name],
+            &json!({"version": 2, "commands": [{"op": "withdraw-note",
+                "envelope": first.to_string(), "index": 0,
+                "reason": "the fixture moved back"}]})
+            .to_string(),
+        )
+        .exited(0);
+    let expected = format!("{between}\n\n{twin}");
+    let later_context = |world: &World| {
+        world
+            .store_tasks(&project)
+            .into_iter()
+            .find(|task| task["item"]["metadata"]["onepipeline.id"] == "later")
+            .map(|task| task["item"]["metadata"]["onepipeline.context"].clone())
+    };
+    world.until_store("the withdrawal to reach the board", |world| {
+        later_context(world) == Some(json!(expected))
+    });
+
+    // Replayed: a driver taking the run over folds the journal, withdrawal and all,
+    // and projects what it folded.
+    crate::harness::end_driver(&world, name);
+    let projected = |world: &World| {
+        std::fs::read_to_string(world.run_file(name, "writeback-projections.jsonl"))
+            .map_or(0, |log| log.lines().count())
+    };
+    let before = projected(&world);
+    world.run(&["adopt", name, "--detach"]).exited(0);
+    world.until_store("the adopted driver to project what it replayed", |world| {
+        projected(world) > before
+    });
+    assert_eq!(
+        later_context(&world),
+        Some(json!(expected)),
+        "the replayed run projected a different planner context onto the board"
+    );
+    world.release("work.go");
+    world.until("later to be dispatched by the adopted driver", |world| {
+        world.journal(name).iter().any(|event| {
+            event["labels"]["node"] == "later"
+                && event["kind"] == "turn-activity"
+                && event["payload"]["task"].is_string()
+        })
+    });
+    let task = world
+        .journal(name)
+        .into_iter()
+        .find(|event| event["labels"]["node"] == "later" && event["kind"] == "turn-activity")
+        .and_then(|event| event["payload"]["task"].as_str().map(str::to_owned))
+        .expect("later's task");
+    let notes = task
+        .split_once("## Planner context")
+        .and_then(|(_, context)| context.trim().split_once("\n\n"))
+        .map(|(_, notes)| notes.trim().to_owned())
+        .unwrap_or_else(|| panic!("later's dispatch has no planner context:\n{task}"));
+    assert_eq!(
+        notes, expected,
+        "the replayed run did not compose later with B then A"
+    );
 }
 
 /// No assertion in these journeys is a bare presence assertion over metadata the writer

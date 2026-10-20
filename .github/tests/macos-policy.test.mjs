@@ -757,7 +757,7 @@ test("release publication waits for every platform's own build, test-install and
       assert.doesNotMatch(step.uses ?? "", /(upload|download)-artifact/, `${key} moves artifacts`);
     }
   }
-  for (const key of ["build-linux", "build-macos", "build-windows"]) {
+  for (const key of ["build-linux", "build-linux-arm64", "build-macos", "build-windows"]) {
     assert.deepEqual(ancestors(key), [], `${key} waits for no other platform`);
     assert.ok(
       ancestors("publish").includes(key),
@@ -973,7 +973,7 @@ test("actual producer commands govern credential guards and architecture overrid
       runGraph(release, { ...s, cratePublish })
         .filter((j) => j.selected)
         .map((j) => j.job),
-      ["build-linux", "build-macos", "build-windows", "publish"],
+      ["build-linux", "build-linux-arm64", "build-macos", "build-windows", "publish"],
     );
   const snapshot = JSON.parse(
     readFileSync(".github/fixtures/visual-docs-reusable.origin.json", "utf8"),

@@ -9,7 +9,7 @@
 //! oneharness's own `ONEHARNESS_BIN_CLAUDE_CODE` seam.
 //!
 //! It speaks Claude Code's headless surface — `claude -p [PROMPT]
-//! [--input-format text] --permission-mode M --output-format json|stream-json
+//! [--input-format text|stream-json] --permission-mode M --output-format json|stream-json
 //! [--json-schema S] [--verbose]` — and answers in the shape oneharness
 //! normalizes: for a streaming run, Anthropic content-block lines and a terminal
 //! `{"type":"result",…}`; for a buffered one, that result document alone. A run
@@ -166,13 +166,15 @@ const MODES: [&str; 5] = [
 // `MODES` above, and for the same reason.
 const FORMATS: [&str; 2] = ["json", "stream-json"];
 
-/// The `--input-format` values oneharness names: `text` alone, which is how it
-/// says the prompt it is about to send — on the argv or on stdin — is prose. The
-/// other value the real CLI takes, `stream-json`, arrives as a stream of
-/// envelopes this double neither reads nor answers in.
+/// The `--input-format` values oneharness names: `text`, which is how it says the
+/// prompt it is about to send — on the argv or on stdin — is prose, and
+/// `stream-json`, which is how a **control-enabled** run sends it: the prompt is
+/// the first `user` frame of a stream that stays open for out-of-band control
+/// frames. This double reads that frame and nothing after it — see
+/// [`streamed_prompt`].
 // llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the same gate as
 // `MODES` above, and for the same reason.
-const INPUT_FORMATS: [&str; 1] = ["text"];
+const INPUT_FORMATS: [&str; 2] = ["text", "stream-json"];
 
 fn turn(args: &[String], dir: &std::path::Path) -> ExitCode {
     let Some(prompt) = prompt(args) else {
@@ -461,6 +463,9 @@ fn prompt(args: &[String]) -> Option<String> {
     let at = args.iter().position(|arg| arg == "-p")?;
     match args.get(at + 1) {
         Some(next) if !next.starts_with('-') => Some(next.clone()),
+        _ if fake::flag(args, "--input-format").as_deref() == Some("stream-json") => {
+            streamed_prompt()
+        }
         _ => {
             use std::io::Read;
             let mut text = String::new();
@@ -469,6 +474,81 @@ fn prompt(args: &[String]) -> Option<String> {
         }
     }
 }
+
+/// The prompt of a control-enabled run: the text of the first `user` frame on
+/// stdin, in the shape oneharness's own `prompt_frame` writes.
+///
+/// Once it is read this double closes its stdin, which makes it a harness that
+/// offers **no out-of-band control**: oneharness keeps the stream open to write
+/// a `control_request` into the turn, and a frame written to a harness that no
+/// longer reads is refused, so an interrupt reports that it reached no turn. That
+/// is the harness every single-sided journey here has always run against — deaf
+/// to the ask, so a held turn is still there when a cancellation's deadline
+/// arrives — and closing is what keeps it so now that oneharness asks for
+/// control of every turn it can.
+fn streamed_prompt() -> Option<String> {
+    use std::io::BufRead;
+    let mut stdin = std::io::stdin().lock();
+    let mut line = String::new();
+    let text = loop {
+        line.clear();
+        if stdin.read_line(&mut line).ok()? == 0 {
+            return None;
+        }
+        if line.trim().is_empty() {
+            continue;
+        }
+        // Validated rather than skipped: Claude Code refuses a stream-json line
+        // that is not a frame, so a harness writing one has to fail here too.
+        let frame = serde_json::from_str::<serde_json::Value>(&line).unwrap_or_else(|error| {
+            fake::fail(&format!(
+                "claude --input-format stream-json read a line that is not JSON ({error}): {line}"
+            ))
+        });
+        let Some(kind) = frame.get("type").and_then(serde_json::Value::as_str) else {
+            fake::fail(&format!(
+                "a stream-json line is not a frame object naming its type: {frame}"
+            ));
+        };
+        if kind != "user" {
+            continue;
+        }
+        let Some(blocks) = frame["message"]["content"].as_array() else {
+            fake::fail(&format!(
+                "a stream-json user frame carries no content block array: {frame}"
+            ));
+        };
+        break blocks
+            .iter()
+            .map(
+                |block| match (block["type"].as_str(), block["text"].as_str()) {
+                    (Some("text"), Some(text)) => text,
+                    _ => fake::fail(&format!(
+                    "a stream-json user frame carries a block that is not a text block: {block}"
+                )),
+                },
+            )
+            .collect::<String>();
+    };
+    drop(stdin);
+    deaf_to_control();
+    (!text.trim().is_empty()).then_some(text)
+}
+
+/// Stop reading stdin, so nothing written to it later reaches this process.
+#[cfg(unix)]
+fn deaf_to_control() {
+    // SAFETY: descriptor 0 is this process's stdin, which nothing in it reads
+    // again — the only handle on it was the lock dropped above.
+    unsafe {
+        libc::close(0);
+    }
+}
+
+/// Elsewhere there is no unix descriptor to close; oneharness opens no control
+/// socket off unix either, so nothing writes a control frame.
+#[cfg(not(unix))]
+fn deaf_to_control() {}
 
 /// One streamed tool call, as an Anthropic content block.
 ///

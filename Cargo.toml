@@ -723,9 +723,19 @@ resolver = "2"
 # squash and the integrate train alike, read here through
 # `onevcs::landing_closes` in `closures::Landing::of`. `src/closures.rs` hands
 # those issues to the store (entry 132 of `docs/contract-divergences.md`);
-# `tests/e2e/closures.rs` drives it. A **requirement**, because `^0.52` admits no
-# 0.56.x; `onevcs-testing` 0.19.12 requires exactly `=0.56.2`, so the pair moves
-# as one.
+# `tests/e2e/closures.rs` drives it. A **requirement**, because `^0.52` admits
+# no 0.56.x.
+#
+# `onevcs` 0.56.3 is the floor only because `onevcs-testing` 0.19.13 — the
+# release that carries every one of the test-support implementations this
+# crate's journeys double the host with — requires exactly `=0.56.3`, so the
+# pair moves as one.
+#
+# 0.56.1 below it is the release whose two new shapes this crate reads: a
+# publication held on `boundary::Unavailability::HostVisibility` settles as that
+# unavailable check, and `WorkspaceCapacity::ineligible` is named in a held node's
+# `workspace-wait` (`src/pool.rs`). It asks visibility with `gh api --include`,
+# which `fake-gh` answers status line first.
 #
 # The floor may not fall below `onevcs` 0.52.0, the release the declared-maintenance
 # producer supplied for this crate's idle pool maintenance, the `onevcs.toml`
@@ -776,10 +786,14 @@ resolver = "2"
 # `oneharness-core` 0.28.1 (see that pin). It requires `^0.28.1` and `onejudge`
 # `^0.19.5`, so the three move as one.
 #
-# `oneagentgraph` 0.5.14 is the floor because it is the release that links the
-# shared app-server core 0.28.3 (see that pin for where the pool lives). It still
-# requires `^0.28.1` and `onejudge` `^0.19.5`, so the lock resolves that one core
-# for all three.
+# `oneagentgraph` 0.6.0 is the floor because it publishes the **note offer**:
+# `control::offer_note` admits a note and hands back a `NoteOffer` this crate
+# waits on, waits on until a deadline, or withdraws, and a `live` note interrupts
+# the addressed party's turn. `src/agentgraph.rs` and `tests/note/main.rs` hold
+# it. It also supersedes 0.5.14, the release that first linked the shared
+# app-server core (see the `oneharness-core` pin for where the pool lives). It
+# requires `onejudge ^0.20.0`, `onemessagebus ^0.9.3` and
+# `oneharness-core ^0.28.4`, so the four move as one.
 #
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
@@ -801,8 +815,8 @@ resolver = "2"
 rust-version = "1.97"
 
 [workspace.dependencies]
-oneagentgraph = "0.5.14"
-onevcs = "0.56.2"
+oneagentgraph = "0.6.0"
+onevcs = "0.56.3"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is
@@ -827,7 +841,9 @@ onevcs = "0.56.2"
 #
 # 0.9.1 reads and writes its YAML through `serde-saphyr` rather than a libyaml
 # translation, as every sibling release linked beside it does.
-onemessagebus = "0.9.1"
+#
+# 0.9.3 is the release `oneagentgraph` 0.6.0 requires.
+onemessagebus = "0.9.3"
 # **Not a third sibling this crate composes** — nothing here launches, calls, or
 # spawns onejudge. It is one vocabulary: the verdicts a two-party member settles
 # on, which `oneagentgraph` copies onto the `member-settled` this crate relays.
@@ -923,10 +939,14 @@ onemessagebus = "0.9.1"
 # translation reaches this build through it; `oneagentgraph` 0.5.13 requires it.
 # It also relinks onto `oneharness-core` 0.28.x, so the spawned side of a
 # two-party member resolves the same plugins-off core.
-# 0.19.5 carries the shared app-server sweeper (onejudge #177). Keep it
-# instead of 0.20.0: that unrelated breaking release (#182) is outside the
-# linked oneagentgraph 0.5.14's ^0.19.5 requirement and would resolve twice.
-onejudge = "0.19.5"
+#
+# **0.20.0 delivers a note by interrupting the live turn**: `Note.delivery`
+# chooses `Interrupt` or `TurnEnd`, and `Accepted` answers `Interrupted` or
+# `AtTurnEnd`, which `src/note.rs` records as a note's `turn`. It still carries
+# the shared app-server sweeper 0.19.5 introduced (onejudge #177). A requirement
+# for the same pre-1.0 reason: `^0.19` admits no 0.20.x. `oneagentgraph` 0.6.0
+# requires it, so the lock resolves onejudge once.
+onejudge = "0.20.0"
 # **Test-support only**, and named for one reason: `crates/testfakes`'s
 # `oneharness` double writes the report onejudge reads back, and that report is
 # oneharness's own typed contract. Written by hand it would be fifty fields of
@@ -1024,7 +1044,7 @@ onejudge = "0.19.5"
 # **requirement** for the same pre-1.0 reason as every raise above: no earlier
 # caret admits a 0.28.x. `oneagentgraph` 0.5.13 and `onejudge` 0.19.5 each
 # require `^0.28.1`, so the three move together or the lock resolves the core
-# twice.
+# twice. `oneagentgraph` 0.6.0 requires `^0.28.4`.
 #
 # **0.28.5 is the shared app-server release** a host adopts (oneharness #1488,
 # #1495): concurrent controlled Codex turns under one configuration share one
@@ -1034,8 +1054,8 @@ onejudge = "0.19.5"
 # hosts no sweeper. `tests/e2e/dispatch.rs`'s
 # `two_concurrent_judged_codex_turns_share_one_app_server` holds both. A
 # **requirement**, so no build admitting 0.28.2 is one a host adopts for it;
-# `oneagentgraph` 0.5.14 and `onejudge` 0.19.5 admit this core, so the
-# lock resolves the core once.
+# `oneagentgraph` 0.6.0 and `onejudge` 0.20.0 admit this core, so the lock
+# resolves the core once.
 oneharness-core = "0.28.5"
 # The sibling's own test-support crate, from the **same** revision as the library
 # it implements — here by resolving both from the registry at the releases cut
@@ -1047,7 +1067,7 @@ oneharness-core = "0.28.5"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.19.12"
+onevcs-testing = "0.19.13"
 # The store, linked: `src/taskgraph.rs` says how the engine calls it. `-plugin-api` is
 # named for the values the store answers with, and `-local-md` for the plugin
 # `crates/testfakes` hosts in process.
@@ -1089,6 +1109,15 @@ onevcs-testing = "0.19.12"
 # takes `statuses` and may report an item `skipped`, a store failure gains
 # `statuses-not-tasks`, and a closed item's status name follows its closure.
 #
+# **A copy says when it may have left an item behind**: a create the destination
+# answered malformed is `EngineError::CopyDestinationUncertain`, naming the destination
+# and the plugin method, because the plugin may have stored the item under an id the
+# copy never learned. `src/writeback.rs` classes it by the malformed answer it wraps, as
+# the store does — refused, so no timer creates a second item — and carries the store's
+# words into the line and the surface; `tests/e2e/store.rs`'s
+# `a_create_the_destination_stored_and_answered_malformed_names_the_destination_and_its_residue`
+# drives it. The variant arrived in 0.7.2, so a lower pin does not compile.
+#
 # **No earlier release than 0.7.3**: it leaves a source a layer refines but no layer defines
 # unconfigured rather than failing every load, so a host's user layer may route to
 # sources only one checkout defines; and it answers a dependency read a private source
@@ -1112,7 +1141,7 @@ windows-sys = "0.61"
 
 [package]
 name = "onepipeline"
-version = "0.78.0"
+version = "0.79.2"
 edition = "2021"
 rust-version.workspace = true
 description = "Execute a task DAG over oneagentgraph and onevcs, merging their event streams into one."

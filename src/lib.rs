@@ -123,6 +123,7 @@ mod unwatched;
 mod vcs;
 mod watch;
 mod watchers;
+mod withdrawal;
 mod writeback;
 mod yaml;
 

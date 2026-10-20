@@ -226,10 +226,10 @@ impl From<&crate::note::Reached> for ReachedWord {
         use crate::note::Reached as R;
         match reached {
             R::Queued => Self::Queued,
-            R::Worker => Self::Worker,
-            R::Supervisor => Self::Supervisor,
+            R::Worker { .. } => Self::Worker,
+            R::Supervisor { .. } => Self::Supervisor,
             R::JudgedWith { .. } => Self::JudgedWith,
-            R::Carried => Self::Carried,
+            R::Carried { .. } => Self::Carried,
         }
     }
 }
@@ -2391,6 +2391,23 @@ mod tests {
             // one deliberate addition since the capture — the filter's optional
             // `significance` matcher field, which only admits more.
             let mut held = held.clone();
+            // And onejudge 0.20.0's optional note `delivery`, defaulted to the
+            // interrupt, which admits every note the capture admitted —
+            // entry 133 of `docs/contract-divergences.md`.
+            if text == "agent.note@1" {
+                if let Some(properties) = held
+                    .pointer_mut("/properties")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    properties.remove("delivery");
+                }
+                if let Some(definitions) = held
+                    .pointer_mut("/$defs")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    definitions.remove("Delivery");
+                }
+            }
             if text == "agent.event-filter@1" {
                 if let Some(properties) = held
                     .pointer_mut("/$defs/Matcher/properties")
@@ -2954,12 +2971,14 @@ mod tests {
         use crate::note::Reached as R;
         for reached in [
             R::Queued,
-            R::Worker,
-            R::Supervisor,
+            R::Worker { turn: None },
+            R::Supervisor {
+                turn: Some(crate::note::NoteTurn::Interrupted),
+            },
             R::JudgedWith {
                 completion_reason: String::new(),
             },
-            R::Carried,
+            R::carried(),
         ] {
             let tagged = serde_json::to_value(&reached).expect("a delivery serializes");
             assert_eq!(

@@ -2757,6 +2757,9 @@ fn attach(
     // the one death that is raised rather than only relayed. See
     // [`report_a_stopped_chain`].
     let mut chains = engine::ChainRecords::default();
+    // Held for the whole stream, on the thread that renders it: see
+    // [`views::StreamReads`] for what it carries and when it lets go.
+    let carried = views::StreamReads::begin();
 
     let driving = paths.clone();
     let letting_go = watch.letting_go();
@@ -2868,6 +2871,9 @@ fn attach(
                 ))
             })
             .collect();
+        // See `StreamReads::before_render` for what the render about to be made of
+        // these records carries from the last one.
+        carried.before_render(&paths.run, &fresh, concluded);
         if !fresh.is_empty() || !headed {
             let rendered = views::monitor_shown(&view, fresh);
             for line in rendered.lines().skip(usize::from(headed)) {
@@ -4240,6 +4246,9 @@ pub(crate) fn submit_envelope(
                         envelope.author.clone(),
                         operations,
                     )?;
+                    // A note this withdrew is its own envelope's to answer again,
+                    // as it is when a driver applies the withdrawal.
+                    crate::withdrawal::answer_each(paths, operations, None)?;
                     // The planner is told what any other author did here as well as
                     // in the loop: which of the two applied an edit is an accident of
                     // whether anything was driving the run, and the planner owns the
@@ -4536,6 +4545,15 @@ fn validate_here(
         let launch: crate::ledger::LaunchRecord = crate::ledger::read_json(&paths.launch())?;
         return crate::reply::staged_decline(paths, state, launch.review_reply_graph(), operations);
     }
+    if let Command::WithdrawNote {
+        envelope,
+        index,
+        reason,
+    } = command
+    {
+        return crate::withdrawal::validate(paths, envelope, *index, reason)
+            .map(engine::Staged::Compiled);
+    }
     let Command::Note {
         id,
         addressee,
@@ -4543,6 +4561,7 @@ fn validate_here(
         criterion,
         deliver,
         persist,
+        delivery_timeout_seconds,
     } = command
     else {
         return Ok(engine::Staged::Compiled(operations));
@@ -4552,7 +4571,7 @@ fn validate_here(
         addressee: *addressee,
         text,
         criterion: criterion.as_ref(),
-        reach: crate::note::Reach::of(id, *deliver, *persist)?,
+        reach: crate::note::Reach::of(id, *deliver, *persist, *delivery_timeout_seconds)?,
         // Nothing is driving the run, so the frontier this was validated
         // against is the whole of what says whether the node has a dispatch
         // left to carry the note to.

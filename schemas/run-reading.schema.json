@@ -265,6 +265,13 @@
               "type": "string",
               "description": "When it was offered, in epoch milliseconds — RFC 3339 on the wire."
             },
+            "deadline": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "When the note being offered stops waiting for a turn to take it, in\nepoch milliseconds — RFC 3339 on the wire. Present exactly where that\nnote carries a `delivery_timeout_seconds`, and omitted otherwise."
+            },
             "state": {
               "type": "string",
               "const": "delivering"

@@ -230,6 +230,7 @@ pub fn op_of(command: &Command) -> &'static str {
         Command::Complete { .. } => "complete",
         Command::Amend { .. } => "amend",
         Command::Note { .. } => "note",
+        Command::WithdrawNote { .. } => "withdraw-note",
         Command::Finding { .. } => "finding",
         Command::Settle { .. } => "settle",
         Command::Rework { .. } => "rework",
@@ -257,7 +258,12 @@ pub fn target_of(command: &Command) -> Option<String> {
         | Command::Decline { id, .. } => Some(id.clone()),
         Command::Attest { reference } => Some(reference.clone()),
         Command::Finding { id, .. } => id.clone(),
-        Command::Review { .. } | Command::Readjust { .. } | Command::Complete { .. } => None,
+        // It names an envelope rather than a node, and is never held behind the
+        // note it takes back.
+        Command::WithdrawNote { .. }
+        | Command::Review { .. }
+        | Command::Readjust { .. }
+        | Command::Complete { .. } => None,
     }
 }
 
@@ -488,7 +494,12 @@ pub enum Command {
     /// is composed into the node's next dispatch**. Neither decides the other's
     /// question, and saying so is load-bearing: `deliver: next` and
     /// `persist: true` both read as "on the next dispatch", and a reader who
-    /// conflates them gets this contract wrong. Their four combinations:
+    /// conflates them gets this contract wrong. `live` and `turn-end` both
+    /// attempt the running turn and differ only in how: `live` interrupts it and
+    /// opens its replacement on the note, falling back to the turn's end where
+    /// that turn cannot be interrupted, and `turn-end` waits for it to end and
+    /// never interrupts. Each combines with `persist` as `live` does below. The
+    /// combinations:
     ///
     /// * `live` with `persist: false` — the running turn is attempted; where it
     ///   took the note that is the whole of the delivery, and where it did not
@@ -542,8 +553,9 @@ pub enum Command {
     /// `reached` word the run records, and [`Delivered`](crate::note::Delivered)
     /// for a caller on this crate's own surface:
     ///
-    /// * `worker` — the worker's live turn took it.
-    /// * `supervisor` — the supervisor's live turn took it.
+    /// * `worker` — the worker's live turn took it, with a `turn` saying whether
+    ///   that turn was `interrupted` or reached at its end (`turn-end`).
+    /// * `supervisor` — the supervisor's live turn took it, with the same `turn`.
     /// * `judged-with` — the supervisor's decision was re-taken with it in hand
     ///   and completed, carrying that completion reason, so no further worker
     ///   turn took it.
@@ -601,10 +613,12 @@ pub enum Command {
         /// Whether live delivery is attempted, and **only** that.
         ///
         /// Optional, defaulting to [`Deliver::Live`], and omitted from a
-        /// serialized note that carries the default. `live` attempts to reach
-        /// the node's running turn; `next` attempts no live delivery at all.
-        /// Whether the note is composed into a later dispatch is
-        /// [`persist`](Self::Note::persist)'s question alone.
+        /// serialized note that carries the default. `live` interrupts the
+        /// node's running turn with it, or reaches that turn as it ends where it
+        /// cannot be interrupted; `turn-end` reaches the running turn only as it
+        /// ends; `next` attempts no live delivery at all. Whether the note is
+        /// composed into a later dispatch is [`persist`](Self::Note::persist)'s
+        /// question alone.
         #[serde(default, skip_serializing_if = "Deliver::is_default")]
         deliver: Deliver,
         /// Whether the note is composed into the node's next dispatch, and
@@ -622,6 +636,44 @@ pub enum Command {
         /// Read it as "do not lose this" rather than as "send it twice".
         #[serde(default = "persists", skip_serializing_if = "is_true")]
         persist: bool,
+        /// How long a note may wait to be taken by a turn, in whole seconds
+        /// from the moment it is offered.
+        ///
+        /// Optional, with no default: absent, the note waits for as long as the
+        /// node's dispatch runs, as it always has. Present, a note no turn has
+        /// taken by then is withdrawn whole, and
+        /// [`persist`](Self::Note::persist) decides what follows by its own
+        /// rule: `true` carries it to the node's next dispatch, because it
+        /// reached no running turn, and `false` refuses it, naming the deadline.
+        /// That holds for a `live` note whose turn could not be interrupted as
+        /// much as for a `turn-end` one. Refused at the envelope when it is `0`,
+        /// which no note can meet, and beside `deliver: next`, which waits on no
+        /// turn for it to bound. Every other value is accepted; one past the
+        /// latest instant the run can name — `9999-12-31T23:59:59.999Z`, or the
+        /// host clock's own limit — waits until that instant.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delivery_timeout_seconds: Option<u64>,
+    },
+    /// Take back a `note` an earlier envelope sent, before any turn reads it.
+    ///
+    /// It names the note by where it was sent: the envelope's id and the note's
+    /// 0-based position among that envelope's commands. It applies while the
+    /// note is still untaken in its live conversation, or carried and not yet
+    /// composed into a dispatch. The run then records `note-withdrawn`, and the
+    /// note's own command is answered refused, carrying this `reason`. A note a
+    /// turn already took, one already answered or composed, and a position that
+    /// holds no note are each refused, naming what the record says became of it.
+    ///
+    /// Never held behind a note still waiting on its conversation, as `cancel`
+    /// is not: the note it most often takes back is exactly such a note.
+    #[serde(rename = "withdraw-note")]
+    WithdrawNote {
+        /// The id of the envelope the note was sent in.
+        envelope: String,
+        /// The note's 0-based position among that envelope's commands.
+        index: u32,
+        /// Why it is withdrawn. Required, and refused when blank.
+        reason: String,
     },
     /// Raise one finding to the planner, changing nothing about the graph.
     ///
@@ -920,29 +972,27 @@ fn persists() -> bool {
     true
 }
 
-/// Whether a [`Note`](Command::Note) attempts live delivery — and nothing else.
+/// Whether a [`Note`](Command::Note) attempts live delivery, and how.
 ///
-/// Two values, and the third one this crate used to carry is **gone**. `auto`
-/// named a combination of *both* axes — attempt the running turn, and fall
-/// through to the next dispatch when there is none — and that fall-through is
-/// persistence spelled a second way, so a contract carrying both `auto` and
-/// [`persist`](Command::Note::persist) would have two ways to say one thing.
-/// What `auto` meant has an exact spelling in the survivor: `deliver: live` with
-/// `persist: true`, which is also the default, so a caller that says nothing
-/// gets it.
+/// Three values. `live`, the default, interrupts the addressed party's running
+/// turn and opens its replacement on the note; it falls back to the turn's end
+/// only where that turn cannot be interrupted. `turn-end` waits for the running
+/// turn to end and never interrupts it. `next` makes no live attempt at all.
+/// What happens where no turn takes the note is not this field's question: it is
+/// [`persist`](Command::Note::persist)'s.
 ///
-/// A value outside these two is refused by serde, naming what it read — this is
-/// external input like any other field, and `auto` is refused by that same rule.
+/// A value outside these three is refused by serde, naming what it read — this
+/// is external input like any other field, and the retired `auto` is refused by
+/// that same rule.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "kebab-case")]
 pub enum Deliver {
-    /// Attempt the node's running turn.
-    ///
-    /// What happens where there is none is not this field's question: it is
-    /// [`persist`](Command::Note::persist)'s, which either carries the note to
-    /// the node's next dispatch or refuses it for having reached nobody.
+    /// Interrupt the addressed party's running turn with it, or reach that turn
+    /// at its end where it cannot be interrupted.
     #[default]
     Live,
+    /// Reach the running turn only once it ends, never interrupting it.
+    TurnEnd,
     /// Attempt no live delivery at all, leaving a running turn alone.
     Next,
 }
@@ -2334,6 +2384,10 @@ impl ChannelState {
     }
 
     /// The reconciler's answer to one envelope, if it has given one.
+    ///
+    /// Its **latest** answer: an envelope one of whose notes a later
+    /// `withdraw-note` took back is answered again, with that note's command
+    /// refused, and the answer written last is the one that stands.
     pub fn outcome_of(&self, id: u64) -> Option<CommandOutcome> {
         self.plain(COMMAND_OUTCOMES)
             .ok()?
@@ -2341,7 +2395,19 @@ impl ChannelState {
             .ok()?
             .into_iter()
             .filter_map(|(record, _)| serde_json::from_value::<CommandOutcome>(record).ok())
-            .find(|outcome| outcome.id == id)
+            .rfind(|outcome| outcome.id == id)
+    }
+
+    /// The commands envelope `id` was sent with, as the command queue holds it,
+    /// or `None` for an id it holds no envelope under.
+    pub(crate) fn commands_of(&self, id: u64) -> Option<QueuedCommands> {
+        self.plain(COMMANDS)
+            .ok()?
+            .log(None)
+            .ok()?
+            .into_iter()
+            .filter(|(record, _)| record.get("id").and_then(Value::as_u64) == Some(id))
+            .find_map(|(record, _)| serde_json::from_value(record).ok())
     }
 
     /// How many outcome lines the reconciler has written so far: the mark a

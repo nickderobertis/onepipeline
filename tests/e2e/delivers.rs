@@ -470,6 +470,77 @@ fn a_ticket_the_store_cannot_write_raises_the_planner_surface_and_settles_the_ru
     );
 }
 
+/// A ticket in a source some configuration layer refines but no layer declares a plugin for
+/// is a projection that did not land, named as the store names it: the planner hears the
+/// write-back was refused for an incomplete source, and the run settles exactly as it would
+/// have.
+///
+/// Such a source is not configured, and only a command naming it is refused — so the plan,
+/// read from a source that is, launches, and the refusal arrives where the write-back first
+/// names the ticket's source.
+#[test]
+fn a_ticket_in_a_source_no_layer_declares_a_plugin_for_is_refused_as_an_incomplete_source() {
+    let world = World::new("delivers-incomplete-source");
+    let root = tickets_root(&world);
+    // A `config` field and nothing else: the source is refined and never declared.
+    let world = world.with_env(
+        &format!(
+            "ONETASKGRAPH_SOURCES__{}__CONFIG__ROOT",
+            TICKETS.to_uppercase()
+        ),
+        &root.to_string_lossy(),
+    );
+    let delivered = format!("{TICKETS}:board/work");
+    let name = "incomplete-source";
+    let project = world.plan(
+        name,
+        &plan_of(
+            name,
+            vec![
+                delivering(agent("work", &[]), &[&delivered]),
+                agent("after", &["work"]),
+            ],
+        ),
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
+
+    world.until("the planner to hear the ticket was not moved", |world| {
+        !unprojected_surfaces(world, name).is_empty()
+    });
+    let message = unprojected_surfaces(&world, name).remove(0);
+    assert!(
+        message.contains(&delivered)
+            && message.contains(&format!(
+                "source \"{TICKETS}\" is not configured here: no configuration layer declares \
+                 its plugin"
+            )),
+        "the surface does not name the ticket and why its source was refused: {message}"
+    );
+    assert!(
+        message
+            .lines()
+            .any(|line| line == "class: refused, kind: incomplete-source"),
+        "the surface does not carry the store's class and kind for the refusal: {message}"
+    );
+
+    world.until("the run to settle", |world| settled(world, name));
+    let result = world.run_json(name, "result.json");
+    assert_eq!(result["state"], "complete", "{result}");
+    assert!(
+        result["nodes"]
+            .as_array()
+            .expect("result nodes")
+            .iter()
+            .all(|node| node["status"] == "done"),
+        "a ticket in an incomplete source changed a settlement: {result}"
+    );
+    assert_eq!(
+        dispatches(&world, name),
+        2,
+        "the refusal changed scheduling"
+    );
+}
+
 /// A launch whose first projection the store refuses still dispatches, and the planner hears
 /// the projection did not land.
 #[test]

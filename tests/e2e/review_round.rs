@@ -434,6 +434,8 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
         .through_scripted_source();
     team_repository(&world);
     world.script("gh.checks", GREEN);
+    #[cfg(unix)]
+    let world = world.counting_git();
     let graph = world.review_reply_graph();
     let run = "round";
     let nodes: Vec<Value> = STACK
@@ -547,6 +549,8 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
     timed(&world, &host, run, "pass-2", &mut phases, || {
         passed(&world.run(&["review", run]), "the second pass");
     });
+    #[cfg(unix)]
+    the_round_started_few_enough_gits(&world);
 
     // Every comment answered or declined exactly once.
     for comment in on_b.iter().chain(&on_h) {
@@ -754,6 +758,76 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
     ] {
         assert!(detail.contains(part), "the detail lacks {part:?}: {detail}");
     }
+}
+
+/// The most `git` processes the round's commands may start, from the launch through
+/// the second pass.
+///
+/// The figure that sets how long this journey takes where starting a process is slow:
+/// on the Windows runner a `git` start costs some twenty times what it does on Linux,
+/// and this round ran 420–540 seconds there against its 540-second bound. Counted on
+/// Linux it started 18,300–19,500 of them, nearly half the attach stream reading every
+/// unlanded draft's landing afresh on each of its renders, about forty `git` a read. Now
+/// it starts about 10,000, and more on a slower host, which renders and asks on a timer
+/// more often over a longer run — so the bound sits well above the first and below
+/// anything the round cost before.
+#[cfg(unix)]
+const GIT_STARTS: usize = 15_000;
+
+/// Hold the round to [`GIT_STARTS`].
+///
+/// Floored as well as bounded: a count that saw nothing is a counting `git` the round's
+/// commands never reached, and an empty count is under any bound.
+#[cfg(unix)]
+fn the_round_started_few_enough_gits(world: &World) {
+    let started = world.git_starts();
+    assert!(started > 0, "the round's git starts were never counted");
+    assert!(
+        started <= GIT_STARTS,
+        "the round started {started} git processes, over its {GIT_STARTS}"
+    );
+}
+
+/// The counting `git` a world's commands find on its `PATH` counts each start and is the
+/// real `git` for it, failures included; and a start it cannot count is not run, since a
+/// gap in the count would be a cost the bound never saw.
+#[cfg(unix)]
+#[test]
+fn the_counted_git_counts_each_start_and_is_the_real_git_for_it() {
+    let world = World::new("counted-git").counting_git();
+    let counted = || {
+        let mut command = std::process::Command::new(world.root.join("counted-git/git"));
+        command.current_dir(&world.root);
+        command
+    };
+    let init = counted()
+        .args(["init", "--quiet", "here"])
+        .output()
+        .expect("the counted git runs");
+    assert!(init.status.success(), "{init:?}");
+    assert!(
+        world.root.join("here/.git").is_dir(),
+        "the real git made no repository"
+    );
+    let refused = counted()
+        .args(["-C", "nowhere", "status"])
+        .output()
+        .expect("the counted git runs");
+    assert_eq!(refused.status.code(), Some(128), "{refused:?}");
+    assert_eq!(world.git_starts(), 2, "each start, and only those, counted");
+
+    // The count made unwritable: the start is refused, and the real git never runs.
+    std::fs::remove_file(world.git_starts_log()).expect("the count is cleared");
+    std::fs::create_dir(world.git_starts_log()).expect("the count is made a directory");
+    let uncounted = counted()
+        .args(["init", "--quiet", "uncounted"])
+        .output()
+        .expect("the counted git runs");
+    assert!(!uncounted.status.success(), "{uncounted:?}");
+    assert!(
+        !world.root.join("uncounted").exists(),
+        "a start nothing counted ran the real git"
+    );
 }
 
 /// A whole round's record, as the journey writes one, with `replies` reply posts on its

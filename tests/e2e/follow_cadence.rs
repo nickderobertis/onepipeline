@@ -18,10 +18,10 @@ use std::process::{Command, Stdio};
 
 use crate::harness::{held_publication, lifecycle, plan_of, World};
 
-/// The least time between two asks the follow makes, a little under the second it waits:
+/// The least time between two asks the follow makes, a little under the five seconds it waits:
 /// the tracer stamps each open when the call enters, and the follow's own clock starts
 /// before its call does.
-const LEAST_GAP_SECONDS: f64 = 0.9;
+const LEAST_GAP_SECONDS: f64 = 4.9;
 
 /// How many asks the journey waits to see: enough gaps that one long one — a loaded host
 /// slowing a single ask — cannot stand in for the cadence.
@@ -43,7 +43,7 @@ fn opens_of(trace: &Path, record: &str) -> Vec<(String, f64)> {
         .collect()
 }
 
-/// A live follow asks after its session at most once a second, while the stream it relays is
+/// A live follow asks after its session at most once every five seconds, while the stream it relays is
 /// read as it grows and the follow still ends the moment its publication does.
 ///
 /// The publication is held at the repository's merge path, so for as long as this journey
@@ -52,7 +52,7 @@ fn opens_of(trace: &Path, record: &str) -> Vec<(String, f64)> {
 /// binary is: the tracer is Linux's, and the cadence it measures is the same code on every
 /// platform.
 #[test]
-fn a_live_follow_asks_after_its_session_at_most_once_a_second() {
+fn a_live_follow_asks_after_its_session_at_most_every_five_seconds() {
     let world = World::new("follow-cadence");
     let go = world.fakes.join("push.go");
     let held = held_publication(&world, &go);
@@ -127,7 +127,7 @@ fn a_live_follow_asks_after_its_session_at_most_once_a_second() {
         "the run did not settle once its publication went through"
     );
 
-    // One thread asks — the follow's — and every ask it made after the first is a second or
+    // One thread asks — the follow's — and every ask it made after the first is five seconds or
     // more after the one before.
     let threads: std::collections::BTreeSet<&str> = asked[from..]
         .iter()
@@ -144,6 +144,6 @@ fn a_live_follow_asks_after_its_session_at_most_once_a_second() {
         .collect();
     assert!(
         gaps.iter().all(|gap| *gap >= LEAST_GAP_SECONDS),
-        "the follow asked after its session less than a second after it last asked: gaps {gaps:?}"
+        "the follow asked after its session less than five seconds after it last asked: gaps {gaps:?}"
     );
 }

@@ -1188,17 +1188,17 @@ fn addressed(addressee: crate::note::Addressee) -> &'static str {
 /// earlier dispatch acted on it or never saw it.
 fn delivered_as(reached: &crate::note::Reached) -> &'static str {
     match reached {
-        crate::note::Reached::Worker => {
+        crate::note::Reached::Worker { .. } => {
             "delivered into the worker's turn, and read by the supervisor with that turn's response"
         }
-        crate::note::Reached::Supervisor => {
+        crate::note::Reached::Supervisor { .. } => {
             "delivered into the supervisor's turn, and read by the worker with that decision"
         }
         crate::note::Reached::JudgedWith { .. } => {
             "delivered into the supervisor's turn, whose decision with it in hand was completion"
         }
         crate::note::Reached::Queued => "queued to the next turn of that conversation to open",
-        crate::note::Reached::Carried => {
+        crate::note::Reached::Carried { .. } => {
             "delivered while no turn of that dispatch was live, and carried to this one"
         }
     }
@@ -2228,7 +2228,7 @@ mod tests {
                     .parse()
                     .expect("a usable note"),
                 criterion: None,
-                reached: crate::note::Reached::Worker,
+                reached: crate::note::Reached::Worker { turn: None },
             },
             crate::note::RecordedNote {
                 addressee: crate::note::Addressee::Worker,
@@ -2240,7 +2240,7 @@ mod tests {
                         .parse()
                         .expect("a usable criterion"),
                 ),
-                reached: crate::note::Reached::Carried,
+                reached: crate::note::Reached::Carried { reason: None },
             },
         ];
         let rendered = step.rendered_task_carrying(&node, &[], &notes);

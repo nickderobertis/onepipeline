@@ -2271,12 +2271,34 @@ pub(crate) fn fold_operations(state: &mut RunState, operations: &[Operation], at
             Operation::NoteDelivered {
                 node,
                 text,
-                reached: crate::note::Reached::Carried,
+                reached: crate::note::Reached::Carried { .. },
                 ..
             } => {
-                state
-                    .pending_context
-                    .insert(node.clone(), text.as_str().to_string());
+                let carried = crate::note::with_carried(
+                    state.pending_context.get(node).map(String::as_str),
+                    text.as_str(),
+                );
+                state.pending_context.insert(node.clone(), carried);
+            }
+            // A carried note withdrawn before a dispatch took it is owed to
+            // nobody, and every other note carried beside it still is.
+            Operation::NoteWithdrawn {
+                node,
+                text,
+                alike_after,
+                ..
+            } => {
+                let left = state.pending_context.get(node).and_then(|context| {
+                    crate::note::without_carried(context, text.as_str(), *alike_after)
+                });
+                match left {
+                    Some(left) => {
+                        state.pending_context.insert(node.clone(), left);
+                    }
+                    None => {
+                        state.pending_context.remove(node);
+                    }
+                }
             }
             _ => {}
         }
@@ -3174,12 +3196,16 @@ mod tests {
                         routed_to: Vec::new(),
                         reached,
                         envelope: None,
+                        index: None,
                     }]),
                 )],
             )
         };
 
-        let carried = fold(&[started.clone(), delivered(crate::note::Reached::Carried)]);
+        let carried = fold(&[
+            started.clone(),
+            delivered(crate::note::Reached::Carried { reason: None }),
+        ]);
         assert_eq!(carried.pending_context["build"], "the fixture moved");
         assert_eq!(
             carried
@@ -3192,12 +3218,107 @@ mod tests {
             "a note no turn took did not reach the node it is still owed to"
         );
 
-        let taken = fold(&[started, delivered(crate::note::Reached::Worker)]);
+        let taken = fold(&[
+            started,
+            delivered(crate::note::Reached::Worker { turn: None }),
+        ]);
         assert!(
             taken.pending_context.is_empty(),
             "a note a running turn read was also owed to the dispatch after it"
         );
         assert_eq!(taken.graph.get("build").expect("build").context, None);
+    }
+
+    /// Replay reaches the planner context the live driver composed: two notes
+    /// carried to one node are both owed to its next dispatch, and withdrawing
+    /// either — the first or the last — leaves exactly the other, in the graph
+    /// the dispatch renders and in what the run says is pending.
+    #[test]
+    fn a_withdrawn_carried_note_leaves_the_other_carried_note_owed_on_replay() {
+        let plan = plan_of_nodes(vec![agent("build", &[])]);
+        let started = pipeline(
+            journal::PipelineKind::RunStarted,
+            0,
+            None,
+            &[("plan", json!(plan))],
+        );
+        let carried = |seq: u64, text: &str| {
+            pipeline(
+                journal::PipelineKind::EditCommitted,
+                seq,
+                None,
+                &[(
+                    "operations",
+                    json!([Operation::NoteDelivered {
+                        node: "build".into(),
+                        addressee: crate::note::Addressee::Worker,
+                        text: text.parse().expect("a usable note"),
+                        criterion: None,
+                        shown_to: Vec::new(),
+                        routed_to: Vec::new(),
+                        reached: crate::note::Reached::Carried { reason: None },
+                        envelope: Some(seq),
+                        index: Some(0),
+                    }]),
+                )],
+            )
+        };
+        let withdrawn = |envelope: u64, text: &str| {
+            pipeline(
+                journal::PipelineKind::EditCommitted,
+                3,
+                None,
+                &[(
+                    "operations",
+                    json!([Operation::NoteWithdrawn {
+                        node: "build".into(),
+                        envelope,
+                        index: 0,
+                        reason: crate::note::WithdrawalReason::try_from(
+                            "the fixture moved back".to_string(),
+                        )
+                        .expect("a reason"),
+                        from: crate::note::WithdrawnFrom::Carried,
+                        text: text.parse().expect("a usable note"),
+                        alike_after: 0,
+                    }]),
+                )],
+            )
+        };
+        let both = [
+            started.clone(),
+            carried(1, "the fixture moved"),
+            carried(2, "keep the loader"),
+        ];
+        let owed = fold(&both);
+        assert_eq!(
+            owed.pending_context["build"],
+            "the fixture moved\n\nkeep the loader"
+        );
+        for (envelope, gone, left) in [
+            (1, "the fixture moved", "keep the loader"),
+            (2, "keep the loader", "the fixture moved"),
+        ] {
+            let mut journal = both.to_vec();
+            journal.push(withdrawn(envelope, gone));
+            let replayed = fold(&journal);
+            assert_eq!(replayed.pending_context["build"], left);
+            assert_eq!(
+                replayed
+                    .graph
+                    .get("build")
+                    .expect("build")
+                    .context
+                    .as_deref(),
+                Some(left),
+                "replay did not leave the other carried note in the planner context"
+            );
+        }
+        let mut alone = vec![started, carried(1, "the fixture moved")];
+        alone.push(withdrawn(1, "the fixture moved"));
+        let none = fold(&alone);
+        assert!(none.pending_context.is_empty());
+        assert_eq!(none.graph.get("build").expect("build").context, None);
     }
 
     /// An arrival note the running turn could not take is owed to the node's next
