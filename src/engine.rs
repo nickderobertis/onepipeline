@@ -4406,23 +4406,12 @@ fn written_down_withdrawals(paths: &RunPaths, id: u64) -> BTreeSet<usize> {
             continue;
         };
         for (command, operations) in queued.commands.iter().zip(&committing.operations) {
-            let Command::WithdrawNote {
-                envelope: named,
-                index: at,
-                ..
-            } = command
-            else {
-                continue;
-            };
             for operation in operations.iter().flatten() {
                 if let edits::Operation::NoteWithdrawn {
                     envelope, index, ..
                 } = operation
                 {
-                    if *envelope == id
-                        && index == at
-                        && named.trim().parse::<u64>().ok() == Some(id)
-                    {
+                    if *envelope == id && withdraws_as_written(command, operation) {
                         withdrawn.extend(usize::try_from(*index).ok());
                     }
                 }
@@ -4982,6 +4971,25 @@ impl Course {
     }
 }
 
+/// Whether `operation` is a withdrawal of the very note `command` — a
+/// `withdraw-note` — names: what a write-ahead may list beside that command.
+fn withdraws_as_written(command: &Command, operation: &edits::Operation) -> bool {
+    let (
+        Command::WithdrawNote {
+            envelope: named,
+            index: at,
+            ..
+        },
+        edits::Operation::NoteWithdrawn {
+            envelope, index, ..
+        },
+    ) = (command, operation)
+    else {
+        return false;
+    };
+    index == at && named.trim().parse::<u64>().ok() == Some(*envelope)
+}
+
 /// Whether `operations` is one live withdrawal: all a command of an envelope
 /// refused at delivery may have committed.
 fn is_a_kept_withdrawal(operations: &[edits::Operation]) -> bool {
@@ -5012,15 +5020,20 @@ fn read_committing(
             // that keeps such a file from being committed as though a withdrawal kept it, held
             // by `a_refused_envelopes_write_ahead_lists_only_kept_withdrawals`.
             if written.course == Course::RefusedKeepingWithdrawals
-                && !written
-                    .operations
-                    .iter()
-                    .flatten()
-                    .all(|operations| is_a_kept_withdrawal(operations))
+                && !envelope.commands.iter().zip(&written.operations).all(
+                    |(command, operations)| {
+                        operations.as_deref().is_none_or(|operations| {
+                            is_a_kept_withdrawal(operations)
+                                && operations
+                                    .iter()
+                                    .all(|operation| withdraws_as_written(command, operation))
+                        })
+                    },
+                )
             {
                 return Err(
                     "it was refused at delivery and names operations other than a live \
-                     withdrawal it kept"
+                     withdrawal it kept beside the `withdraw-note` naming that note"
                         .to_string(),
                 );
             }
@@ -15488,7 +15501,13 @@ mod tests {
         let envelope = crate::channel::QueuedCommands {
             id: 1,
             author: crate::channel::Author::planner(),
-            commands: vec![note_to("build"), note_to("build")],
+            commands: vec![
+                serde_json::from_value(json!({
+                    "op": "withdraw-note", "envelope": "0", "index": 1, "reason": "moved back",
+                }))
+                .expect("a withdraw-note"),
+                note_to("build"),
+            ],
         };
         let kept = edits::Operation::NoteWithdrawn {
             node: "build".into(),
@@ -15512,7 +15531,14 @@ mod tests {
             .expect("written down");
             read_committing(&path, &envelope)
         };
-        assert!(written(vec![Some(vec![kept]), None]).is_ok());
+        assert!(written(vec![Some(vec![kept.clone()]), None]).is_ok());
+        // A live withdrawal, but beside a command that is not the `withdraw-note`
+        // naming it: refused too.
+        let beside_a_note = written(vec![None, Some(vec![kept])]).expect_err("not its command");
+        assert!(
+            beside_a_note.contains("beside the `withdraw-note` naming that note"),
+            "{beside_a_note}"
+        );
         let refused = written(vec![Some(Vec::new()), None]).expect_err("not a kept withdrawal");
         assert!(
             refused.contains("other than a live withdrawal"),

@@ -6919,7 +6919,7 @@ fn a_live_withdrawal_stays_recorded_when_a_later_command_of_its_envelope_refuses
 /// beside another live note, is handed once it is released: the withdrawn note
 /// is offered to nobody and answered refused carrying the withdrawal's reason,
 /// journalled by nothing but its withdrawal, while the note beside it is
-/// offered and answered `applied`.
+/// offered to the same held turn and answered `applied` at its end.
 #[test]
 fn a_held_envelope_hands_its_live_note_beside_the_one_withdrawn_while_it_waited() {
     let world = World::new("note-withdraw-held-beside");
@@ -6929,7 +6929,7 @@ fn a_held_envelope_hands_its_live_note_beside_the_one_withdrawn_while_it_waited(
     let first = submitted(
         &world,
         run,
-        &envelope(note_op_with("build", NOTE, "turn-end", true)),
+        &envelope(timed_note("build", NOTE, "turn-end", true, 1)),
     );
     world.until("the first note to be admitted", |world| {
         admitted(world, run) > before
@@ -6956,9 +6956,16 @@ fn a_held_envelope_hands_its_live_note_beside_the_one_withdrawn_while_it_waited(
         .exited(0)
         .out_has("\"state\":\"applied\"");
 
+    // The first note is carried at its deadline with the turn still held, which
+    // releases the held envelope: its withdrawn note is offered to nobody, and
+    // the note beside it waits on the same held turn.
+    assert!(answered(first).contains("\"state\":\"applied\""));
+    world.until(
+        "the note beside the withdrawn one to be admitted",
+        |world| admitted(world, run) == before + 2 && awaiting_an_answer(world, run) == 1,
+    );
     release(&world.fakes, "turn.go");
     release(&world.fakes, "turn.settle");
-    assert!(answered(first).contains("\"state\":\"applied\""));
     let output = held.wait_with_output().expect("the binary runs");
     assert_eq!(output.status.code(), Some(REFUSED));
     let outcome = outcome_of(&world, run, held_id).expect("answered");
@@ -6985,12 +6992,14 @@ fn a_held_envelope_hands_its_live_note_beside_the_one_withdrawn_while_it_waited(
             .any(|event| event["payload"]["command"]["text"] == SECOND_CARRIED),
         "the note beside the withdrawn one was not recorded"
     );
-    // The first note was offered, and the note beside the withdrawn one was too
-    // unless the conversation had ended by then and it was carried instead.
-    let beside_offered = recorded_note(&world, run, SECOND_CARRIED)["reached"] != "carried";
+    assert_eq!(
+        recorded_note(&world, run, SECOND_CARRIED)["turn"],
+        json!("turn-end"),
+        "the note beside the withdrawn one did not reach the held turn's end"
+    );
     assert_eq!(
         admitted(&world, run),
-        before + 1 + usize::from(beside_offered),
+        before + 2,
         "the withdrawn note was offered to the conversation"
     );
     world.until("the run to settle", |world| {
