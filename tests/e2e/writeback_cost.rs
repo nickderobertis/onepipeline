@@ -109,7 +109,10 @@ fn at_rest(world: &World, what: &str) {
             .iter()
             .filter(|record| record["calls"] != json!({}))
             .count();
-        let between_commands = asked.last().is_some_and(|call| call[0] == END);
+        // The run's home is the one call a settled run makes after its last attempt's command
+        // has ended, on a store of its own: entry 134.
+        let between_commands = asked.last().is_some_and(|call| call[0] == END)
+            || !world.events_of(RUN, "home-status").is_empty();
         if landed && between_commands && called_by_attempts == ended {
             return;
         }
@@ -407,16 +410,27 @@ fn the_comparable_plan() -> (Value, Vec<Value>, Vec<Vec<Vec<String>>>) {
         .map(|(at, _)| at)
         .expect("the write-back opened the store");
     let (launch, writeback) = calls.split_at(second);
+    // The run's home, marked `done` once the run has settled — the last calls the store is
+    // asked, on a store of their own after the write-back's last command ended: entry 134.
+    let last_end = writeback
+        .iter()
+        .rposition(|call| call[0] == END)
+        .expect("the write-back ended a command");
+    let (writeback, home) = writeback.split_at(last_end + 1);
     let charged: Vec<Value> = std::fs::read_to_string(world.fakes.join("store.charged.jsonl"))
         .expect("the meter charged something")
         .lines()
         .map(|line| serde_json::from_str(line).expect("a charge is JSON"))
         .collect();
     // Every request the launch's read made was answered, so its charges are the first of them.
-    let launch_charged = launch
-        .iter()
-        .filter(|call| call[0] != "initialize" && call[0] != "metering")
-        .count();
+    let answered = |calls: &[Vec<String>]| {
+        calls
+            .iter()
+            .filter(|call| call[0] != "initialize" && call[0] != "metering")
+            .count()
+    };
+    let launch_charged = answered(launch);
+    let home_charges_start = charged.len() - answered(home);
     let recorded = records(&world);
     let figures = json!({
         "launch_read": {
@@ -426,10 +440,14 @@ fn the_comparable_plan() -> (Value, Vec<Value>, Vec<Vec<Vec<String>>>) {
         "writeback": {
             "calls": by_method(writeback.iter()),
             "calls_total": writeback.len(),
-            "spent": spent(charged[launch_charged..].iter()),
+            "spent": spent(charged[launch_charged..home_charges_start].iter()),
             "attempts": recorded.len(),
             "failed_attempts": recorded.iter().filter(|record| record["outcome"] == "failed").count(),
             "whole_attempts": recorded.iter().filter(|record| record["scope"] == "whole").count(),
+        },
+        "home": {
+            "calls": by_method(home.iter()),
+            "spent": spent(charged[home_charges_start..].iter()),
         },
     });
     // Each attempt that called the store, as the calls its own command made: the write-back's

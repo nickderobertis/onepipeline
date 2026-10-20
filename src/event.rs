@@ -411,6 +411,16 @@ pub enum PipelineKind {
     ScratchRemoved,
     /// Dispatch scratch was measured and kept at a non-success ending or pause.
     ScratchRetained,
+    /// What the store answered when the run's home was marked `done`: entry 134 of
+    /// `docs/contract-divergences.md`.
+    ///
+    /// At most one per run, once the store's `set_project_status` call for the run's
+    /// home has finished — written, or failed for good — after the run reached the
+    /// success ending. Carries the home's qualified `project`, the `outcome`, the
+    /// `status` the store read back, and the failure's `class` and `reason`.
+    ///
+    /// Last, so adding it moves no earlier variant's place in the order.
+    HomeStatus,
 }
 
 impl PipelineKind {
@@ -424,6 +434,7 @@ impl PipelineKind {
             Self::NodeDispatched => "node-dispatched",
             Self::NodeSettled => "node-settled",
             Self::LandingClosures => "landing-closures",
+            Self::HomeStatus => "home-status",
             Self::NodeRequeued => "node-requeued",
             Self::EditCommitted => "edit-committed",
             Self::CommandAccepted => "command-accepted",
@@ -518,6 +529,7 @@ pub const PIPELINE_KINDS: &[PipelineKind] = &[
     PipelineKind::NodeDispatched,
     PipelineKind::NodeSettled,
     PipelineKind::LandingClosures,
+    PipelineKind::HomeStatus,
     PipelineKind::NodeRequeued,
     PipelineKind::EditCommitted,
     PipelineKind::CommandAccepted,

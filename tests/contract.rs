@@ -1020,7 +1020,7 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), EVENTS_BUNDLE_VERSION);
     assert_eq!(
-        divergence_block("132.")["bundle_versions"]["events"],
+        divergence_block("134.")["bundle_versions"]["events"],
         EVENTS_BUNDLE_VERSION,
         "the events bundle version must be the one the newest entry raising it records"
     );
@@ -2379,6 +2379,47 @@ fn the_landing_closures_record_is_what_the_divergence_record_names() {
             "a landing-closures record whose {member} is {word:?} was admitted"
         );
     }
+}
+
+/// The record entry 134 proposes is the one this build declares for `home-status`: both of its
+/// examples — a home written and a home the store refused — are admitted by the published
+/// document, a record missing a member every writer writes with a value, or naming an outcome
+/// or class nobody declared, is refused, and the kind is the vocabulary's own.
+#[test]
+fn the_home_status_record_is_what_the_divergence_record_names() {
+    use onepipeline::event::PipelineKind;
+    use onepipeline::payload::{registry, schema_of};
+    let block = divergence_block("134.");
+    assert_eq!(block["kind"], PipelineKind::HomeStatus.as_str());
+    let id = schema_of(PipelineKind::HomeStatus);
+    let registry = registry();
+    for example in ["record", "failed"] {
+        registry
+            .check(&id, &block[example])
+            .unwrap_or_else(|why| panic!("entry 134's {example} is refused: {why}"));
+    }
+    for member in ["project", "outcome"] {
+        let mut short = block["record"].clone();
+        short.as_object_mut().expect("a record").remove(member);
+        assert!(
+            registry.check(&id, &short).is_err(),
+            "a home-status record without {member} was admitted"
+        );
+    }
+    for (member, word) in [("outcome", "projected"), ("class", "slow")] {
+        let mut unknown = block["failed"].clone();
+        unknown[member] = Value::String(word.into());
+        assert!(
+            registry.check(&id, &unknown).is_err(),
+            "a home-status record whose {member} is {word:?} was admitted"
+        );
+    }
+    let mut unknown = block["record"].clone();
+    unknown["status"]["category"] = Value::String("finished".into());
+    assert!(
+        registry.check(&id, &unknown).is_err(),
+        "a home-status record whose status is in no category was admitted"
+    );
 }
 
 /// The rework surface entry 121 proposes is this build's own: its two ops
@@ -6701,7 +6742,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // undocumented wire; a kind the contract lists and the enum does not carry is
     // a promise nothing keeps. `PIPELINE_KINDS` is what `Journal::emit` accepts,
     // so this is the emitted set and not a second copy of it.
-    assert_eq!(PIPELINE_KINDS.len(), 65, "the closed set changed size");
+    assert_eq!(PIPELINE_KINDS.len(), 66, "the closed set changed size");
     let listed: BTreeSet<String> = backticked()
         .into_iter()
         .filter(|token| {
@@ -6712,7 +6753,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // record proposes, and no others: a kind neither document names fails here.
     let proposed: BTreeSet<String> = [
         "40.", "47.", "55.", "65.", "70.", "92.", "119.", "121.", "122.", "123.", "126.", "127.",
-        "130.", "132.",
+        "130.", "132.", "134.",
     ]
     .into_iter()
     .flat_map(|entry| {

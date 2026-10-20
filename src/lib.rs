@@ -91,6 +91,7 @@ mod flow;
 mod flowwatch;
 mod freespace;
 mod graph;
+mod home;
 mod hooks;
 mod hostphases;
 mod hostview;

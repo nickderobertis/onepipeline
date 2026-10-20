@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.80.0](https://github.com/nickderobertis/onepipeline/compare/v0.79.2...v0.80.0) - 2026-10-20
+
+### Added
+
+- *(release)* build, publish and verify linux-arm64 again as a sixth release job ([#1052](https://github.com/nickderobertis/onepipeline/pull/1052))
+- [**breaking**] interrupt live turns with manager notes and bound or withdraw their delivery ([#1048](https://github.com/nickderobertis/onepipeline/pull/1048))
+
 ## [0.79.2](https://github.com/nickderobertis/onepipeline/compare/v0.79.1...v0.79.2) - 2026-10-20
 
 ### Fixed

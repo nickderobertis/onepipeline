@@ -712,6 +712,9 @@ fn a_stored_project_is_carried_on_by_a_cold_host_that_takes_it_over() {
         missing("this run still carries a stand-in for `gh`, so it would never reach GitHub")
     );
     first.script("harness.work", &format!("continued from the store {stamp}"));
+    // A file of this run's own: another job's smoke shares the scratch repository, and
+    // two runs writing one file conflict on whichever base merged the other first.
+    first.script("harness.work-file", &format!("continuation-{stamp}.md"));
     first.script("harness.work-per-task", "");
     // Only the agent node above the stack is held, and from before the launch: the engine
     // dispatches a lifecycle node again after a failed publication, and a hold on every

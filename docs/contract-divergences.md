@@ -12192,3 +12192,87 @@ first, moved this record to 133.
   "bundle_versions": {"events": "1.8.0", "planner_channel": "1.6.0"}
 }
 ```
+
+## 134. A plan's home stayed open work on its board after every node of its run was done — OPEN
+
+**Proposal, for the planner who owns the contract: one further narrowing of "onepipeline writes
+no ticket itself", and one record kind, `home-status`.** Entry 132 narrows that sentence of
+`docs/contract.md`'s "Status writes back" text to the items the GitHub issues a landing closed
+hold, which the store moves. This narrows it exactly as far again: the engine writes **one item
+of its own — the run's home project, once, to `done`, through the store**. It still writes no
+ticket a `delivers` names and no member project. Nothing in the stack ever marked a plan's home
+finished, so the board a product owner reads every plan off kept every finished plan as open
+work; written once, when every node of the run is `done`, a plan's card tells the truth at the
+moment the plan finishes, for one store call per finished run and none for a run that did not
+finish.
+
+What this build does is the block below, and the block is the source.
+
+**No setting.** The engine gains no option, no launch-record field, no flag and no environment
+variable for this, and an adoption replays nothing new.
+
+**When.** Once per run, when the run reaches the success ending — every node `done`: the ending
+`src/hooks.rs`'s `verdict` calls success and the views print `SETTLED` — at the moment a driver
+judges that ending as it closes the run out: the driver that settles the run's last node, and
+an adoption that finds the run so ended, after `driver-adopted` and the adoption-time standings
+read. A run whose journal already holds a `home-status` record writes nothing more, whatever
+endings follow. A run that ends any other way — `ENDED failed`, `ENDED unfinished`, `ENDED
+stopped`, a host shutdown — or pauses writes nothing to its home; one later carried to the
+success ending — an operator `settle`, a retry that settles — writes it then, as the success
+hook fires then.
+
+**What.** One `onetaskgraph_core::Engine::set_project_status(home, StatusCategory::Done)` call,
+`home` the run's project as its launch recorded it, through the store configuration the
+write-back already loads for the run (`Store::at` over the launch record's directory). The home
+only: no member project the home names at `onetaskgraph.members`, and no task. The call is made
+on the write-back's closure thread, off the reconcile loop and best effort like every
+write-back: a transient failure is asked again on the
+closures' retry schedule, within the close-out window a settled run's closures have; a refusal
+is recorded `failed` and raised as a **non-blocking** planner surface naming the home and the
+store's words; and none of it changes a node's settlement, the run's ending, a hook, an edit
+ruling or a scheduling decision. The call is made once the close-out's projection has landed,
+so the two never write the run's items at once; a driver whose projection is instead waiting on
+a failing store, or inside a wait the store asked for, makes no call, so a store that is failing
+holds no run's ending any longer than it did. Neither that driver nor one still asking again
+when it lets go leaves a record, so the next driver to close the run out — an adoption — makes
+the call.
+
+**The record.** One journal record per run, kind `home-status`, written once the call has
+finished — written, or failed for good — in the shape below: `project` is the home's qualified
+id, `status` the `ProjectStatusSet.status` the store answered, `null` unless `outcome` is
+`written`, and `class` and `reason` are `null` unless `outcome` is `failed`. It is declared once
+in the event vocabulary, beside `landing-closures`. `onepipeline results` names it under the
+run's hooks: the home, the outcome, and the status it reads as or, when failed, the class and
+reason.
+
+Driven end to end by `tests/e2e/closures.rs`: a one-node run from a `local-md` home whose landing
+closes a plan home's issue on one of two loopback boards; a two-node run from a board home,
+written only once its second node settles, and not at all when that node fails or the run is
+stopped — until the failed node is settled `done`; an adoption of a run that settled while the
+board could not take the write; and a board refusing the write for good. And by
+`tests/e2e/linear_writeback.rs`, for a home on Linear. `tests/contract.rs` holds the block's
+`record` and `failed` to the vocabulary's declaration of `home-status`, and the events bundle
+`schemas/events.json` publishes at the next minor, `1.9.0`, which adds that one document: a
+stream this build writes is one an earlier reader reads, less the new kind.
+
+```json
+{
+  "kind": "home-status",
+  "event_kinds": ["home-status"],
+  "record": {
+    "project": "plans:ship-the-widget",
+    "outcome": "written",
+    "status": {"category": "done", "name": "done"},
+    "class": null,
+    "reason": null
+  },
+  "failed": {
+    "project": "board:PLAN-12",
+    "outcome": "failed",
+    "status": null,
+    "class": "refused",
+    "reason": "the source refused the write"
+  },
+  "bundle_versions": {"events": "1.9.0"}
+}
+```

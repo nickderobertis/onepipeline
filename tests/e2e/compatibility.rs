@@ -493,9 +493,10 @@ fn a_reader_from_before_the_change_reads_a_journal_this_build_writes() {
     let root = world.fakes.join("both-versions-root");
     run_of(&root, "written-at-2", &journal);
     run_of(&root, "written-at-1", FIXTURE);
-    // The one line the two may differ by is `status`'s reading of the
-    // `driver-exited` record this build writes and the fixture predates: it is
-    // held present here, and every other line has to match.
+    // The two lines the two may differ by are `status`'s reading of the
+    // `driver-exited` record this build writes and the fixture predates, and
+    // `results`' reading of the `home-status` record, which the fixture predates
+    // too: each is held present here, and every other line has to match.
     let written_at_2 = views_of(&world, &root, "written-at-2").replace("written-at-2", "run");
     let (exited, rest): (Vec<&str>, Vec<&str>) = written_at_2
         .split_inclusive('\n')
@@ -503,6 +504,13 @@ fn a_reader_from_before_the_change_reads_a_journal_this_build_writes() {
     assert!(
         exited.len() == 1 && exited[0].contains(": settled complete"),
         "`status` does not report the driver's ending this build journalled: {written_at_2}"
+    );
+    let (home, rest): (Vec<&str>, Vec<&str>) = rest
+        .into_iter()
+        .partition(|line| line.starts_with("  home "));
+    assert!(
+        home.len() == 1 && home[0].contains(" — written: done"),
+        "`results` does not report the home this build journalled: {written_at_2}"
     );
     assert_eq!(
         rest.concat(),
