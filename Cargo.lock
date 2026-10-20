@@ -1556,12 +1556,13 @@ dependencies = [
 
 [[package]]
 name = "onemessagebus"
-version = "0.9.1"
+version = "0.9.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ae7dfd47a38b52451c6b00288604d0c4c3f640a0192a302fd00732f805d3729"
+checksum = "e92d9e607e00b9335169fee1a32fc6e544f76eb76ed7e5a8dd90bdc094b0dd9f"
 dependencies = [
  "getrandom 0.3.4",
  "jsonschema 0.56.0",
+ "rustix",
  "rustls",
  "rustls-native-certs",
  "schemars",
@@ -1740,9 +1741,9 @@ dependencies = [
 
 [[package]]
 name = "onevcs"
-version = "0.56.2"
+version = "0.56.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "05923d5908426e70b739929d0956dc89040720351e07aca1d8480af1b1b8bbe8"
+checksum = "f03c2ca2e07651a6f28d75a40123d3ceecd33428eeb1abacb600233ce1e0871f"
 dependencies = [
  "aho-corasick",
  "clap",
@@ -1772,9 +1773,9 @@ dependencies = [
 
 [[package]]
 name = "onevcs-testing"
-version = "0.19.12"
+version = "0.19.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "042a4bddc58313f16f93a1e50cc5168a070b5817bf555112d60ad2b7a12ed78e"
+checksum = "34d7c31bb7be1fca7936099d449bdcf76a6b3d250bb321ee8303da8fc0173039"
 dependencies = [
  "onevcs",
  "serde",

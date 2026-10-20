@@ -723,9 +723,19 @@ resolver = "2"
 # squash and the integrate train alike, read here through
 # `onevcs::landing_closes` in `closures::Landing::of`. `src/closures.rs` hands
 # those issues to the store (entry 132 of `docs/contract-divergences.md`);
-# `tests/e2e/closures.rs` drives it. A **requirement**, because `^0.52` admits no
-# 0.56.x; `onevcs-testing` 0.19.12 requires exactly `=0.56.2`, so the pair moves
-# as one.
+# `tests/e2e/closures.rs` drives it. A **requirement**, because `^0.52` admits
+# no 0.56.x.
+#
+# `onevcs` 0.56.3 is the floor only because `onevcs-testing` 0.19.13 — the
+# release that carries every one of the test-support implementations this
+# crate's journeys double the host with — requires exactly `=0.56.3`, so the
+# pair moves as one.
+#
+# 0.56.1 below it is the release whose two new shapes this crate reads: a
+# publication held on `boundary::Unavailability::HostVisibility` settles as that
+# unavailable check, and `WorkspaceCapacity::ineligible` is named in a held node's
+# `workspace-wait` (`src/pool.rs`). It asks visibility with `gh api --include`,
+# which `fake-gh` answers status line first.
 #
 # The floor may not fall below `onevcs` 0.52.0, the release the declared-maintenance
 # producer supplied for this crate's idle pool maintenance, the `onevcs.toml`
@@ -802,7 +812,7 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 oneagentgraph = "0.5.14"
-onevcs = "0.56.2"
+onevcs = "0.56.3"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is
@@ -1047,7 +1057,7 @@ oneharness-core = "0.28.5"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.19.12"
+onevcs-testing = "0.19.13"
 # The store, linked: `src/taskgraph.rs` says how the engine calls it. `-plugin-api` is
 # named for the values the store answers with, and `-local-md` for the plugin
 # `crates/testfakes` hosts in process.
@@ -1093,6 +1103,15 @@ onevcs-testing = "0.19.12"
 # for a project's own card — which the `landing-closures` record keeps verbatim, and the
 # store moves a project whose issue a landing closes. It adds `Engine::set_project_status`,
 # which marks a run's home `done` when the run settles (`src/writeback.rs`, entry 133).
+#
+# **A copy says when it may have left an item behind**: a create the destination
+# answered malformed is `EngineError::CopyDestinationUncertain`, naming the destination
+# and the plugin method, because the plugin may have stored the item under an id the
+# copy never learned. `src/writeback.rs` classes it by the malformed answer it wraps, as
+# the store does — refused, so no timer creates a second item — and carries the store's
+# words into the line and the surface; `tests/e2e/store.rs`'s
+# `a_create_the_destination_stored_and_answered_malformed_names_the_destination_and_its_residue`
+# drives it. The variant arrived in 0.7.2, so a lower pin does not compile.
 #
 # **No earlier release than 0.7.3**: it leaves a source a layer refines but no layer defines
 # unconfigured rather than failing every load, so a host's user layer may route to
