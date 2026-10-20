@@ -3154,10 +3154,12 @@ pub fn apply(graph: &mut Graph, operation: &Operation) {
         Operation::ContextAdded { .. } => {}
         // A carried note taken back is owed to no dispatch, so the context it
         // was folded onto the node as comes off again — and only that note's.
+        // A live note was folded onto nothing, so nothing comes off for it.
         Operation::NoteWithdrawn {
             node,
             text,
             alike_after,
+            from: crate::note::WithdrawnFrom::Carried,
             ..
         } => {
             if let Some(node) = graph.get_mut(node) {
@@ -3166,6 +3168,7 @@ pub fn apply(graph: &mut Graph, operation: &Operation) {
                 });
             }
         }
+        Operation::NoteWithdrawn { .. } => {}
         // The one disposition that moved the graph: no turn took the note, so it
         // is owed to the node's next dispatch and replay has to put it back
         // where the reconciler did.

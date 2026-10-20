@@ -138,9 +138,8 @@ pub enum Reached {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum WithdrawnFrom {
-    /// Untaken in its live conversation's inbox. No build writes it yet: a live
-    /// note's offer cannot be taken back while it is waited on, so this build
-    /// refuses that withdrawal — see `docs/contract-divergences.md`.
+    /// Live and untaken: waiting in its conversation's inbox, queued behind an
+    /// earlier note to the same node, or in an envelope held unjudged behind one.
     Live,
     /// Carried to the node's next dispatch, and not yet composed into one.
     Carried,

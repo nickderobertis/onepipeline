@@ -4551,8 +4551,16 @@ fn validate_here(
         reason,
     } = command
     {
-        return crate::withdrawal::validate(paths, envelope, *index, reason)
-            .map(engine::Staged::Compiled);
+        // A live note nothing is delivering is one a driver that ended claimed:
+        // whether a turn took it is what nobody here can say.
+        return match crate::withdrawal::validate(paths, envelope, *index, reason)? {
+            crate::withdrawal::Validated::Carried(operations) => {
+                Ok(engine::Staged::Compiled(operations))
+            }
+            crate::withdrawal::Validated::Live(operation) => {
+                Err(crate::withdrawal::undriven(&operation))
+            }
+        };
     }
     let Command::Note {
         id,

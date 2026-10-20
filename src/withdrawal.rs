@@ -6,12 +6,13 @@
 //! committed, the answer its envelope was given, and whether a dispatch has been
 //! composed with it since.
 //!
-//! **This build withdraws carried notes only.** A note still waiting in its
-//! live conversation's inbox is held by a delivery that is waiting on it, and
-//! the offer `oneagentgraph` hands back cannot be taken back while it is waited
-//! on, so such a withdrawal is refused naming that, and the note's own delivery
-//! carries on untouched. `docs/contract-divergences.md` states the interim and
-//! what retires it.
+//! A note the record holds no answer for is still live: offered to its
+//! conversation and waited on, queued behind an earlier note to the same node,
+//! or in an envelope held unjudged behind one. Which of those it is lives with
+//! the run's driver rather than in its record, so [`validate`] answers it as
+//! [`Validated::Live`] and the driver decides it — see `engine::TakeBack`. A
+//! note offered to its conversation is taken back through the offer's
+//! `NoteWithdrawer`, which succeeds exactly when no turn took it first.
 
 use crate::channel::{ChannelState, Command, CommandOutcome, CommandVerdict};
 use crate::edits::Operation;
@@ -20,21 +21,32 @@ use crate::event::Envelope;
 use crate::note::{Placement, Reached, WithdrawalReason, WithdrawnFrom};
 use crate::views::RunPaths;
 
+/// What one valid `withdraw-note` commits, as far as the run's record decides it.
+#[derive(Debug)]
+pub(crate) enum Validated {
+    /// A carried note not yet composed into a dispatch: the one operation that
+    /// takes it back, decided by the record alone.
+    Carried(Vec<Operation>),
+    /// A note the record holds no answer for, so still live: the operation that
+    /// takes it back, committed once the run's driver has taken it back from
+    /// wherever its delivery stands.
+    Live(Operation),
+}
+
 /// Validate one `withdraw-note` against the run's record, and compile the one
 /// operation it commits.
 ///
 /// # Errors
 ///
 /// [`Error::Refused`] naming why the note cannot be withdrawn: there is no such
-/// envelope or no note at that position; the note was already answered, already
-/// composed into a dispatch, or already withdrawn; or it is still being
-/// delivered live, which this build cannot take back.
+/// envelope or no note at that position; or the note was already answered,
+/// already composed into a dispatch, or already withdrawn.
 pub(crate) fn validate(
     paths: &RunPaths,
     envelope: &str,
     index: u32,
     reason: &str,
-) -> Result<Vec<Operation>> {
+) -> Result<Validated> {
     let refuse = |why: String| Error::Refused(format!("withdraw-note: {why}"));
     let Ok(reason) = WithdrawalReason::try_from(reason.to_string()) else {
         return Err(refuse(
@@ -102,7 +114,7 @@ pub(crate) fn validate(
                         && crate::note::reads_alike(held.note.text.as_str(), text.as_str())
                 })
                 .count();
-            Ok(vec![Operation::NoteWithdrawn {
+            Ok(Validated::Carried(vec![Operation::NoteWithdrawn {
                 node,
                 envelope: id,
                 index,
@@ -110,7 +122,7 @@ pub(crate) fn validate(
                 from: WithdrawnFrom::Carried,
                 text: text.clone(),
                 alike_after: u32::try_from(alike_after).unwrap_or(u32::MAX),
-            }])
+            }]))
         }
         Some(reached) => Err(refuse(format!(
             "{named} was already answered {}: a turn took it, and a conversation has no undo",
@@ -129,14 +141,103 @@ pub(crate) fn validate(
                  note of it to take back",
                 verdict(result.outcome)
             ))),
-            None => Err(refuse(format!(
-                "{named} is still being delivered to that node's live conversation, and a \
-                 live note cannot be withdrawn yet: withdrawing it waits on oneagentgraph \
-                 making a note offer withdrawable while it is waited on. Its delivery is left \
-                 as it was"
-            ))),
+            None => {
+                let Some(Command::Note { text, .. }) = sent.commands.get(position) else {
+                    return Err(refuse(format!("{named} is no longer a note")));
+                };
+                Ok(Validated::Live(Operation::NoteWithdrawn {
+                    node,
+                    envelope: id,
+                    index,
+                    reason,
+                    from: WithdrawnFrom::Live,
+                    text: text.clone(),
+                    alike_after: 0,
+                }))
+            }
         },
     }
+}
+
+/// The refusal of a `withdraw-note` naming a live note whose delivery has
+/// already answered — `disposition` saying what it answered — though the record
+/// does not hold that answer yet.
+pub(crate) fn already_answered(operation: &Operation, disposition: Option<&Reached>) -> Error {
+    let Operation::NoteWithdrawn {
+        node,
+        envelope,
+        index,
+        ..
+    } = operation
+    else {
+        return Error::Refused("withdraw-note: it names no note".to_string());
+    };
+    let named = format!("note {index} of envelope {envelope}, to node '{node}'");
+    Error::Refused(match disposition {
+        Some(reached) => format!(
+            "withdraw-note: {named} was already answered {}: a turn took it, and a \
+             conversation has no undo",
+            self::disposition(reached)
+        ),
+        None => format!(
+            "withdraw-note: {named} was already answered without a turn taking it, and its \
+             envelope is answered with that once the rest of it is"
+        ),
+    })
+}
+
+/// The refusal of a `withdraw-note` naming a live note that a turn took while
+/// the withdrawal was being decided: `why` is the conversation's own account.
+pub(crate) fn taken_first(operation: &Operation, why: &str) -> Error {
+    let Operation::NoteWithdrawn {
+        node,
+        envelope,
+        index,
+        ..
+    } = operation
+    else {
+        return Error::Refused("withdraw-note: it names no note".to_string());
+    };
+    Error::Refused(format!(
+        "withdraw-note: note {index} of envelope {envelope}, to node '{node}', was already \
+         taken by a turn of that node's conversation ({why}), and a conversation has no undo"
+    ))
+}
+
+/// The refusal of a `withdraw-note` naming a live note whose delivery a driver
+/// that has ended was making: whether a turn took it cannot be established, and
+/// the driver taking the run over answers it refused.
+pub(crate) fn undriven(operation: &Operation) -> Error {
+    let Operation::NoteWithdrawn {
+        node,
+        envelope,
+        index,
+        ..
+    } = operation
+    else {
+        return Error::Refused("withdraw-note: it names no note".to_string());
+    };
+    Error::Refused(format!(
+        "withdraw-note: note {index} of envelope {envelope}, to node '{node}', has no answer \
+         and no running driver is delivering it: the driver that claimed its envelope ended \
+         before answering it, so whether a turn took it cannot be established, and the next \
+         driver answers it refused"
+    ))
+}
+
+/// Every command position of envelope `sent` a committed withdrawal took back:
+/// what the envelope's own judgment skips once it is judged, for a note
+/// withdrawn while its envelope was held unjudged.
+pub(crate) fn withdrawn_from(paths: &RunPaths, sent: u64) -> std::collections::BTreeSet<usize> {
+    readable(&crate::journal::read(&paths.journal()))
+        .into_iter()
+        .filter_map(|(_, operation)| match operation {
+            Operation::NoteWithdrawn {
+                envelope, index, ..
+            } if envelope == sent => usize::try_from(index).ok(),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Answer `sent` again now that its note at `index` was withdrawn by envelope
