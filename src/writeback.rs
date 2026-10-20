@@ -912,6 +912,10 @@ struct Pending {
     /// what a driver's launch wait is bounded by, however soon the worker picks that snapshot up.
     queued_items: usize,
     worker: WorkerState,
+    /// Whether the worker is waiting on the store — its last attempt failed in a way a wait can
+    /// change and none has landed since, or it is honouring a wait the store asked for — which
+    /// nothing that waits on its projection to land at closeout, the run's home, waits for.
+    waiting_on_store: bool,
     phase: RunPhase,
     /// Projections that failed and have not yet been raised with the planner.
     ///
@@ -925,6 +929,24 @@ struct Pending {
     closing: Option<crate::closures::Landing>,
     /// The records of closure calls that finished, for the reconcile loop to journal.
     closed: Vec<crate::payload::LandingClosures>,
+    /// Where the run's home stands on the closure thread: entry 134.
+    home: HomeWork,
+}
+
+/// Where the run's home stands on the closure thread: entry 134.
+#[derive(Default)]
+enum HomeWork {
+    /// Nothing owed: never, or its record has been handed to the reconcile loop, or this
+    /// driver made no call.
+    #[default]
+    Idle,
+    /// Owed its `done`, and not yet taken up.
+    Owed(QualifiedId),
+    /// Taken up: waiting on the close-out's projection, calling the store, or waiting out a
+    /// retry — until the call has finished or the driver makes none.
+    Asking,
+    /// The call finished, and this is its record, for the reconcile loop to journal.
+    Answered(crate::payload::HomeStatus),
 }
 
 impl Pending {
@@ -934,9 +956,11 @@ impl Pending {
         self.latest.is_some() || self.worker == WorkerState::Working
     }
 
-    /// Whether a landing's closures are still owed: queued, or being called.
+    /// Whether a landing's closures, or the run's home, are still owed: queued, or being called.
     fn closing_owed(&self) -> bool {
-        !self.closures.is_empty() || self.closing.is_some()
+        !self.closures.is_empty()
+            || self.closing.is_some()
+            || matches!(self.home, HomeWork::Owed(_) | HomeWork::Asking)
     }
 
     fn queue(&mut self, snapshot: Snapshot) -> bool {
@@ -970,6 +994,8 @@ pub struct Writeback {
     /// a `change-merged` and the `merge-completed` beside it, or a landing a catch-up finds
     /// again — is one call.
     closures_owed: Mutex<BTreeSet<String>>,
+    /// Whether this driver has handed the closure thread the run's home: once per driver.
+    home_owed: std::sync::atomic::AtomicBool,
 }
 
 /// Whose board a driver's projections write to.
@@ -996,6 +1022,7 @@ impl Writeback {
         let pending = Arc::new((Mutex::new(Pending::default()), Condvar::new()));
         let worker_pending = Arc::clone(&pending);
         let run_dir = paths.dir.clone();
+        let closer_run_dir = paths.dir.clone();
         let store = Store::at(launch_dir(launch));
         let per_item = per_item_budget(launch);
         let closer_pending = Arc::clone(&pending);
@@ -1013,7 +1040,7 @@ impl Writeback {
         // take holds no projection back, and a projection holds back no closure.
         std::thread::Builder::new()
             .name(format!("closures-{}", paths.run))
-            .spawn(move || closer(&closer_store, per_item, &closer_pending))
+            .spawn(move || closer(&closer_store, &closer_run_dir, per_item, &closer_pending))
             .ok()?;
         // llmlint: ignore-end[changed_behavior_has_e2e]
         let writer = Self {
@@ -1022,6 +1049,7 @@ impl Writeback {
             held: Mutex::new(None),
             board: Mutex::new(Board::Driving),
             closures_owed: Mutex::new(BTreeSet::new()),
+            home_owed: std::sync::atomic::AtomicBool::new(false),
         };
         // The project is retained in each snapshot rather than in the worker so a malformed
         // old launch record disables projection without weakening LaunchRecord's compatibility.
@@ -1455,6 +1483,14 @@ impl Writeback {
             // exits. This keeps a completed run from racing a person's next store call,
             // while the hard call limit preserves write-back's latency boundary.
             self.closing_out_until(deadline, Pending::unlanded);
+            // The run's home, marked `done` once the run has reached the success ending and
+            // never again once its journal records the call: entry 134. The closure thread
+            // makes the call once this projection has landed, inside the closures' window below.
+            if crate::hooks::succeeded(statuses) && !crate::home::recorded(paths) {
+                if let Ok(home) = launch.project.parse() {
+                    self.settle_home(home);
+                }
+            }
         }
         // And the closures still owed — whoever holds the project's board, the issues this
         // run's own landings closed are this run's. A run every node of which has settled has
@@ -1490,11 +1526,45 @@ impl Writeback {
         true
     }
 
-    /// Whether a closure call has finished whose record the loop has not journalled: what
-    /// the reconcile loop's wait is woken by, as it is by a failed projection.
+    /// Owe the run's home its `done`, unless this driver already owes or has made it.
+    ///
+    /// Answers whether it was queued. Never waits: the call is the closure thread's.
+    pub(crate) fn settle_home(&self, home: QualifiedId) -> bool {
+        if self
+            .home_owed
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            return false;
+        }
+        let (lock, ready) = &*self.pending;
+        if let Ok(mut pending) = lock.lock() {
+            pending.home = HomeWork::Owed(home);
+            ready.notify_all();
+        }
+        true
+    }
+
+    /// Whether a closure call, or the home's, has finished whose record the loop has not
+    /// journalled: what the reconcile loop's wait is woken by, as it is by a failed projection.
     pub(crate) fn has_closed(&self) -> bool {
         let (lock, _) = &*self.pending;
-        lock.lock().is_ok_and(|pending| !pending.closed.is_empty())
+        lock.lock().is_ok_and(|pending| {
+            !pending.closed.is_empty() || matches!(pending.home, HomeWork::Answered(_))
+        })
+    }
+
+    /// Take the record of the home's call, once it has finished.
+    pub(crate) fn take_homed(&self) -> Option<crate::payload::HomeStatus> {
+        let (lock, _) = &*self.pending;
+        lock.lock()
+            .ok()
+            .and_then(|mut pending| match std::mem::take(&mut pending.home) {
+                HomeWork::Answered(record) => Some(record),
+                other => {
+                    pending.home = other;
+                    None
+                }
+            })
     }
 
     /// Take the records of the closure calls that finished since this was last asked.
@@ -1866,6 +1936,13 @@ fn worker(
                     UNREADABLE_WAIT_RECHECK
                 }
             };
+            {
+                let (lock, ready) = &*pending;
+                if let Ok(mut state) = lock.lock() {
+                    state.waiting_on_store = true;
+                    ready.notify_all();
+                }
+            }
             if !should_retry_after(&pending, Interval::Asked(interval)) {
                 return;
             }
@@ -1932,6 +2009,7 @@ fn worker(
                 standing = Standing::Landing;
                 let (lock, _) = &*pending;
                 if let Ok(mut state) = lock.lock() {
+                    state.waiting_on_store = false;
                     state.last_success = Some(snapshot.clone());
                     if state.phase == RunPhase::Stopping && state.latest.is_none() {
                         return;
@@ -1953,6 +2031,7 @@ fn worker(
                 standing = Standing::Refused;
                 let (lock, _) = &*pending;
                 if let Ok(mut state) = lock.lock() {
+                    state.waiting_on_store = false;
                     state.unprojected.push(Unprojected {
                         project: snapshot.project.clone(),
                         items,
@@ -2019,6 +2098,13 @@ fn worker(
                     Some(wait) => Interval::Asked(wait),
                     None => Interval::Scheduled(retry_after(failures.get())),
                 };
+                {
+                    let (lock, ready) = &*pending;
+                    if let Ok(mut state) = lock.lock() {
+                        state.waiting_on_store = true;
+                        ready.notify_all();
+                    }
+                }
                 if !should_retry_after(&pending, interval) {
                     return;
                 }
@@ -2062,22 +2148,52 @@ fn worker(
 ///
 /// A landing still being asked about when the run stops is left with no record, so the next
 /// adoption's catch-up makes its call.
-fn closer(store: &Store, per_item: NonZeroU64, pending: &(Mutex<Pending>, Condvar)) {
+///
+/// The run's home, once owed, is asked about on the same terms: a transient failure again on that schedule, a refusal a record, and
+/// a call still being asked about when the run stops no record, so the next driver to close the
+/// run out makes it — entry 134.
+fn closer(
+    store: &Store,
+    run_dir: &Path,
+    per_item: NonZeroU64,
+    pending: &(Mutex<Pending>, Condvar),
+) {
     loop {
         let landing = {
             let (lock, ready) = pending;
             let Ok(mut state) = lock.lock() else { return };
-            while state.closures.is_empty() && state.phase != RunPhase::Stopping {
+            while state.closures.is_empty()
+                && !matches!(state.home, HomeWork::Owed(_))
+                && state.phase != RunPhase::Stopping
+            {
                 state = match ready.wait(state) {
                     Ok(state) => state,
                     Err(_) => return,
                 };
             }
-            let Some(landing) = state.closures.pop_front() else {
-                return;
-            };
-            state.closing = Some(landing.clone());
-            landing
+            // llmlint: ignore[changed_behavior_has_e2e] which of a landing and the home this
+            // thread takes first when both are queued is no promise: each is its own store call
+            // over its own items, recorded in its own record, and neither reads the other's
+            // outcome — the order exists only because one thread serves both. What each call
+            // does is driven by the closure and home journeys of `tests/e2e/closures.rs`.
+            match state.closures.pop_front() {
+                Some(landing) => {
+                    state.closing = Some(landing.clone());
+                    landing
+                }
+                None => {
+                    let HomeWork::Owed(home) = std::mem::replace(&mut state.home, HomeWork::Asking)
+                    else {
+                        return;
+                    };
+                    drop(state);
+                    let record = settle_home(store, run_dir, per_item, pending, &home);
+                    let Ok(mut state) = lock.lock() else { return };
+                    state.home = record.map_or(HomeWork::Idle, HomeWork::Answered);
+                    ready.notify_all();
+                    continue;
+                }
+            }
         };
         let mut failures: u32 = 0;
         // The attempt that carried a delivered ticket's failure, which a retry cannot answer.
@@ -2138,6 +2254,63 @@ fn closer(store: &Store, per_item: NonZeroU64, pending: &(Mutex<Pending>, Condva
             state.closed.push(record);
         }
         ready.notify_all();
+    }
+}
+
+/// The run's home marked `done` through [`crate::home::set_done`], once what the run projected
+/// last has landed, a transient failure asked again on the closures' schedule: the record the
+/// call finished in, or `None` where no call is made by this driver — the run stopped, the
+/// projection is waiting on a store that is failing, or the store asked to be left alone — or
+/// where the run stopped while it was still being asked. No record is what has the next driver
+/// to close the run out make the call.
+fn settle_home(
+    store: &Store,
+    run_dir: &Path,
+    per_item: NonZeroU64,
+    pending: &(Mutex<Pending>, Condvar),
+    home: &QualifiedId,
+) -> Option<crate::payload::HomeStatus> {
+    // After the close-out's projection, which a board pacing its writes can keep landing past
+    // its own window: the two never write the run's items at once, and the close-out's wait for
+    // the home is time that projection lands in. A projection waiting on the store is not
+    // waited for, so a store that is failing holds no run's ending any longer than it did.
+    {
+        let (lock, ready) = pending;
+        let mut state = lock.lock().ok()?;
+        while state.unlanded() && !state.waiting_on_store && state.phase != RunPhase::Stopping {
+            state = ready.wait(state).ok()?;
+        }
+        if state.waiting_on_store
+            || state.phase == RunPhase::Stopping
+            || store_asked_to_wait(run_dir)
+        {
+            return None;
+        }
+    }
+    let within = Deadline::Write { per_item, items: 1 }.within();
+    let mut failures: u32 = 0;
+    // A failpoint, so a journey can read the home as it stood before the write.
+    if let Err(error) = crate::ordering::meet("ONEPIPELINE_TEST_HOME_GATE") {
+        eprintln!("onepipeline: {error}");
+    }
+    loop {
+        match crate::home::set_done(store, home, within) {
+            crate::home::Answer::Finished(record) => return Some(record),
+            crate::home::Answer::Transient(reason) => {
+                failures = failures.saturating_add(1);
+                if failures == 1 {
+                    eprintln!(
+                        "onetaskgraph write-back of {home} as done failed: {reason}; retrying, \
+                         spacing further attempts out to {} seconds apart while it keeps failing",
+                        RETRY_CEILING.as_secs()
+                    );
+                }
+                // Binding, as a closure's is, so a close-out does not lift it.
+                if !should_retry_after(pending, Interval::Asked(retry_after(failures))) {
+                    return None;
+                }
+            }
+        }
     }
 }
 
@@ -6260,6 +6433,7 @@ mod tests {
             held: Mutex::new(None),
             board: Mutex::new(super::Board::Driving),
             closures_owed: Mutex::new(std::collections::BTreeSet::new()),
+            home_owed: std::sync::atomic::AtomicBool::new(false),
         };
         writeback.closing_out_until(Instant::now() + super::CLOSEOUT_WAIT, Pending::unlanded);
         assert!(

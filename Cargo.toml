@@ -1109,6 +1109,11 @@ onevcs-testing = "0.19.13"
 # takes `statuses` and may report an item `skipped`, a store failure gains
 # `statuses-not-tasks`, and a closed item's status name follows its closure.
 #
+# **0.9.0 is the floor now.** A `complete_issues` item carries `kind` — `task`, or `project`
+# for a project's own card — which the `landing-closures` record keeps verbatim, and the
+# store moves a project whose issue a landing closes. It adds `Engine::set_project_status`,
+# which marks a run's home `done` when the run settles (`src/writeback.rs`, entry 134).
+#
 # **A copy says when it may have left an item behind**: a create the destination
 # answered malformed is `EngineError::CopyDestinationUncertain`, naming the destination
 # and the plugin method, because the plugin may have stored the item under an id the
@@ -1122,9 +1127,9 @@ onevcs-testing = "0.19.13"
 # unconfigured rather than failing every load, so a host's user layer may route to
 # sources only one checkout defines; and it answers a dependency read a private source
 # cannot without failing it. `tests/e2e/store.rs` drives both.
-onetaskgraph-core = "=0.8.0"
-onetaskgraph-plugin-api = "=0.8.0"
-onetaskgraph-local-md = "=0.8.0"
+onetaskgraph-core = "=0.9.0"
+onetaskgraph-plugin-api = "=0.9.0"
+onetaskgraph-local-md = "=0.9.0"
 # Test-support only: the budget checker's own library, at exactly the release `justfile`'s
 # `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
 onebudgetspec-core = "=0.1.5"

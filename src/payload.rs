@@ -1815,6 +1815,39 @@ pub(crate) enum ClosureOutcome {
     Failed,
 }
 
+/// `home-status`: what the store answered when the run's home was marked `done` — entry 134
+/// of `docs/contract-divergences.md`, whose fenced examples `tests/contract.rs` holds to this
+/// type.
+///
+/// One per run, written once the call has finished. Every member is always written, `status`,
+/// `class` and `reason` as `null` when they have nothing to say, so a reader reads one fixed
+/// shape.
+// llmlint: ignore[invalid_states_unrepresentable] Entry 134 fixes this record's flat shape for its consumers — `status`, `class` and `reason` beside `outcome` rather than inside a tagged variant, as `landing-closures` has them — and `home::record` is its one constructor, which fills `status` exactly when the outcome is `written` and the other two exactly when it is `failed`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct HomeStatus {
+    /// The run's home, by the qualified id its launch recorded.
+    pub(crate) project: String,
+    /// Whether the store wrote the home `done`, or failed to for good.
+    pub(crate) outcome: HomeOutcome,
+    /// The home's status as the store read it back — `null` unless `outcome` is `written`.
+    pub(crate) status: Option<onetaskgraph_plugin_api::Status>,
+    /// The failure's class, as the store decided it — `null` unless `outcome` is `failed`.
+    pub(crate) class: Option<crate::writeback::FailureClass>,
+    /// Why it failed, in the store's words — `null` unless `outcome` is `failed`.
+    pub(crate) reason: Option<String>,
+}
+
+/// What the call marking a run's home `done` came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum HomeOutcome {
+    /// The store wrote the home `done`.
+    Written,
+    /// The store refused the write, and it is not asked again.
+    Failed,
+}
+
 /// `node-absorbed`: a draft's change request was merged into another node's branch, so
 /// its work reaches the root only with that node's.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -2281,6 +2314,7 @@ payload_messages! {
     NodeDispatched => "node-dispatched";
     NodeSettled => "node-settled";
     LandingClosures => "landing-closures";
+    HomeStatus => "home-status";
     NodeRequeued => "node-requeued";
     EditCommitted => "edit-committed";
     CommandAccepted => "command-accepted";
