@@ -2757,6 +2757,9 @@ fn attach(
     // the one death that is raised rather than only relayed. See
     // [`report_a_stopped_chain`].
     let mut chains = engine::ChainRecords::default();
+    // Held for the whole stream, on the thread that renders it: see
+    // [`views::StreamReads`] for what it carries and when it lets go.
+    let carried = views::StreamReads::begin();
 
     let driving = paths.clone();
     let letting_go = watch.letting_go();
@@ -2868,6 +2871,9 @@ fn attach(
                 ))
             })
             .collect();
+        // See `StreamReads::before_render` for what the render about to be made of
+        // these records carries from the last one.
+        carried.before_render(&paths.run, &fresh, concluded);
         if !fresh.is_empty() || !headed {
             let rendered = views::monitor_shown(&view, fresh);
             for line in rendered.lines().skip(usize::from(headed)) {

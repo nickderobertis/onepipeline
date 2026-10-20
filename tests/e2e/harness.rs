@@ -937,6 +937,55 @@ impl World {
         self
     }
 
+    /// The same world, with every `git` its commands start counted first and then run as
+    /// the real one: see [`World::git_starts`].
+    ///
+    /// The count is a two-line shell program placed ahead of everything on the world's
+    /// `PATH`: it appends one line to the world's count, and then `exec`s the real `git`
+    /// with its argv, environment and directory untouched — so a start counted is still
+    /// one process, and one it could not count is one it does not run. Unix alone, where
+    /// that `exec` is a replacement rather than a second process, and where `/bin/sh`
+    /// runs it.
+    #[cfg(unix)]
+    pub fn counting_git(self) -> Self {
+        let real = Self::resolved_on(&Command::new("git"), "git").expect("the host has a git");
+        let counted = self.root.join("counted-git");
+        std::fs::create_dir_all(&counted).expect("a directory for the counted git");
+        let quoted = |path: &Path| format!("'{}'", path_text(path).replace('\'', "'\\''"));
+        onepipeline_testfakes::executable(
+            &counted.join("git"),
+            format!(
+                "#!/bin/sh\nprintf 'start\\n' >> {} || exit 70\nexec {} \"$@\"\n",
+                quoted(&self.git_starts_log()),
+                quoted(&real),
+            ),
+        );
+        let path = path_leading_with(&[
+            counted,
+            onevcs_binary()
+                .parent()
+                .expect("onevcs has a directory")
+                .to_path_buf(),
+        ]);
+        self.with_env("PATH", path.to_str().expect("a PATH this host can spell"))
+    }
+
+    /// The file [`counting_git`](World::counting_git) counts each start into.
+    #[cfg(unix)]
+    pub fn git_starts_log(&self) -> PathBuf {
+        self.root.join("git-starts.log")
+    }
+
+    /// How many `git` processes this world's commands have started so far, where it
+    /// was made with [`counting_git`](World::counting_git).
+    #[cfg(unix)]
+    pub fn git_starts(&self) -> usize {
+        std::fs::read_to_string(self.git_starts_log())
+            .unwrap_or_default()
+            .lines()
+            .count()
+    }
+
     /// The settings that declare this world's plans source to the binary under test.
     fn plans_source(&self) -> Vec<(String, String)> {
         let prefix = format!("ONETASKGRAPH_SOURCES__{}", STORE_SOURCE.to_uppercase());

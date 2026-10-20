@@ -812,6 +812,14 @@ pub(crate) enum LandingRead {
     },
 }
 
+impl LandingRead {
+    /// Whether this read shows the work on its base: `onevcs` answered, and what
+    /// it answered is landed. A refusal proves nothing either way.
+    pub(crate) fn proves_landed(&self) -> bool {
+        matches!(self, LandingRead::Answered(landed) if landed.is_landed())
+    }
+}
+
 /// Ask `onevcs` whether one branch's work has reached its base, as of now.
 ///
 /// [`onevcs::landing_status`] is the landing decision on that library's public
@@ -872,10 +880,87 @@ fn read_of(answered: onevcs::Result<onevcs::Landed>) -> LandingRead {
 /// replaces a settlement's own dated claim — so collapsing the other two costs
 /// nothing and a name promising a verdict would.
 pub(crate) fn proved_landed(branch: &str, repo: Option<&str>) -> bool {
-    matches!(
-        landing_now(branch, repo),
-        LandingRead::Answered(landed) if landed.is_landed()
-    )
+    landing_now(branch, repo).proves_landed()
+}
+
+/// [`landing_now`] of each of `nodes` that `state` records a branch for, asked of
+/// that branch in the node's own repository, and handed back by node in the order
+/// asked — taken side by side, see [`side_by_side`].
+///
+/// For the places that take every read at once and wait on all of them: each is
+/// `onevcs` taking the repository from scratch and running `git` tens of times,
+/// none depends on another, and one after another they were a tail as long as
+/// their sum — longest where starting a process is slowest.
+///
+/// Each read is counted against the node it was asked for and the render the
+/// caller is inside, if any — see [`crate::rendercost::within`] — so a read taken
+/// on another thread costs the render exactly what one taken in it would.
+pub(crate) fn landings_now(
+    state: &crate::projection::RunState,
+    nodes: &[&String],
+) -> Vec<(String, LandingRead)> {
+    let asked: Vec<&String> = nodes
+        .iter()
+        .copied()
+        .filter(|node| state.branches.contains_key(*node))
+        .collect();
+    let within = crate::rendercost::within();
+    let read = side_by_side(&asked, helpers_for(asked.len()), |node| {
+        let _adopted = within.adopted();
+        let _deciding = crate::rendercost::deciding(node);
+        // The node's own repository, so a branch name two identities both hold is
+        // asked about the one this run's work is in.
+        let repo = state.graph.get(node).and_then(|node| node.repo.as_deref());
+        landing_now(&state.branches[*node], repo)
+    });
+    asked.into_iter().cloned().zip(read).collect()
+}
+
+/// How many threads besides the caller's [`side_by_side`] starts for `reads`: as
+/// many as the host has cores, counting the caller's, and never more than there
+/// are reads to share.
+fn helpers_for(reads: usize) -> usize {
+    std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(reads)
+        .saturating_sub(1)
+}
+
+/// `read` of each of `items`, in order, taken by the calling thread and as many as
+/// `helpers` more, each taking the next item not yet taken until none is left.
+///
+/// The caller reads too, and a helper the host will not start is one fewer pair
+/// of hands rather than a refusal: every item is read whatever number started.
+fn side_by_side<T: Sync, R: Send>(
+    items: &[T],
+    helpers: usize,
+    read: impl Fn(&T) -> R + Sync,
+) -> Vec<R> {
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let answers = std::sync::Mutex::new(Vec::with_capacity(items.len()));
+    let reading = || loop {
+        let at = next.fetch_add(1, Ordering::Relaxed);
+        let Some(item) = items.get(at) else {
+            return;
+        };
+        let answer = read(item);
+        answers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((at, answer));
+    };
+    std::thread::scope(|scope| {
+        for _ in 0..helpers {
+            // Not started is one fewer helper: the queue is the same queue either way.
+            let _ = std::thread::Builder::new().spawn_scoped(scope, reading);
+        }
+        reading();
+    });
+    let mut answers = answers
+        .into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    answers.sort_by_key(|(at, _)| *at);
+    answers.into_iter().map(|(_, answer)| answer).collect()
 }
 
 /// The nodes whose publication left its work on the origin with the merge path
@@ -1892,6 +1977,19 @@ fn kind_of(kind: onevcs::EventKind) -> crate::event::EventKind {
 /// How often a follow asks the stream for what has been appended since.
 const FOLLOW_POLL: Duration = Duration::from_millis(20);
 
+/// How often a follow asks whether its session has closed.
+///
+/// Far less often than it reads the stream, because the two cost different
+/// things: a read of the stream is a file read, and the question is
+/// [`onevcs::session`], which runs `git` about ten times in the session's
+/// clone to answer it. What ends a follow is [`Follower::finish`], called before
+/// the close; this is only what ends one whose session something else closed,
+/// so asking it every pass bought nothing but those processes — on a host where
+/// starting one is slow, a core's worth for every session open, and still a
+/// third of one when asked every second. Five seconds is the longest a follow
+/// outlives a close made elsewhere.
+const FOLLOW_CLOSED_ASK: Duration = Duration::from_secs(5);
+
 /// A session's own event stream, followed as `onevcs` writes it.
 ///
 /// Read *once at settlement*, a lifecycle node's push, change request, check
@@ -1918,20 +2016,29 @@ pub fn follow(
     let followed = token.clone();
     let reader = std::thread::Builder::new()
         .name(format!("onevcs-{}-events", token.0))
-        .spawn(move || loop {
-            // Read *before* asking whether the session closed, so a record
-            // written between the two is relayed on the next pass rather than
-            // lost to a follow that stopped one read early.
-            for envelope in next_batch(&mut stream, &followed) {
-                if let Ok(mut reached) = reached.lock() {
-                    reached.reached(&envelope);
+        .spawn(move || {
+            let mut asked = std::time::Instant::now();
+            loop {
+                // Read *before* asking whether the session closed, so a record
+                // written between the two is relayed on the next pass rather than
+                // lost to a follow that stopped one read early.
+                for envelope in next_batch(&mut stream, &followed) {
+                    if let Ok(mut reached) = reached.lock() {
+                        reached.reached(&envelope);
+                    }
+                    sink(envelope);
                 }
-                sink(envelope);
+                if stopping.load(Ordering::SeqCst) {
+                    return;
+                }
+                if asked.elapsed() >= FOLLOW_CLOSED_ASK {
+                    if settled(&followed) {
+                        return;
+                    }
+                    asked = std::time::Instant::now();
+                }
+                std::thread::sleep(FOLLOW_POLL);
             }
-            if stopping.load(Ordering::SeqCst) || settled(&followed) {
-                return;
-            }
-            std::thread::sleep(FOLLOW_POLL);
         });
     match reader {
         Ok(reader) => Some(Follower {
@@ -4505,6 +4612,169 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A follow nobody finishes still relays its stream as it grows, and ends on
+    /// its own once it asks whether its session closed — every
+    /// [`FOLLOW_CLOSED_ASK`] rather than on every read of the stream.
+    ///
+    /// The session here has no record at all, which [`settled`] answers as closed
+    /// for the reason it gives; a session somebody else closed takes the same arm.
+    /// Driven through [`follow`] itself over a real stream on disk, and timed only
+    /// as loosely as the interval it is about.
+    ///
+    /// The cadence is held here rather than by a journey. The arm it paces is driven
+    /// end to end by `tests/e2e/unreadable_sessions.rs`, where a live attached run's
+    /// follow meets its session's record going unreadable and says so; but *how
+    /// often* it asks prints nothing — a follow that asked on every pass would end the
+    /// same way, only sooner and dearer — so the interval is asserted where the clock
+    /// it runs on can be watched without the binary's own instrumentation.
+    #[test]
+    fn a_follow_nobody_finishes_relays_its_stream_and_ends_once_it_asks_after_its_session() {
+        let _home = super::scratch_home_held();
+        let root = std::env::temp_dir().join(format!("onepipeline-asked-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("streams")).expect("a scratch state root");
+        std::env::set_var(onevcs_home(), &root);
+
+        let token = "s-closed-elsewhere";
+        let record = |seq: u64, kind: &str| {
+            serde_json::json!({
+                "v": 1,
+                "ts": "2026-01-01T00:00:00.000Z",
+                "stream": token,
+                "seq": seq,
+                "source": "vcs",
+                "kind": kind,
+                "labels": {},
+                "payload": {},
+                "artifacts": [],
+            })
+            .to_string()
+        };
+        let stream = root.join("streams").join(format!("{token}.ndjson"));
+        std::fs::write(&stream, format!("{}\n", record(1, "session-opened")))
+            .expect("the stream is written");
+
+        let relayed = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&relayed);
+        let began = std::time::Instant::now();
+        let follower = follow(
+            &SessionToken(token.into()),
+            None,
+            Box::new(move |envelope| sink.lock().expect("the relay").push(envelope.seq)),
+        )
+        .expect("the stream is followed");
+        std::thread::sleep(Duration::from_millis(300));
+        std::fs::write(
+            &stream,
+            format!("{}\n{}\n", record(1, "session-opened"), record(2, "push")),
+        )
+        .expect("the stream grows");
+
+        let reader = follower.reader.as_ref().expect("the follow has a reader");
+        std::thread::sleep(Duration::from_secs(2));
+        assert!(
+            !reader.is_finished(),
+            "the follow asked whether its session closed sooner than every {FOLLOW_CLOSED_ASK:?}"
+        );
+        let deadline = FOLLOW_CLOSED_ASK + Duration::from_secs(5);
+        while !reader.is_finished() && began.elapsed() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            reader.is_finished(),
+            "a follow whose session closed elsewhere was still running after {deadline:?}"
+        );
+        assert_eq!(
+            *relayed.lock().expect("the relay"),
+            vec![1, 2],
+            "the follow did not relay its stream, before and after it started, before it ended"
+        );
+        let _ = follower.finish();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Every item [`side_by_side`] is handed is read once and answered in the order
+    /// it was handed, whatever number of helpers is asked for — none at all among
+    /// them, which is also what a host that starts none of them leaves.
+    #[test]
+    fn reads_side_by_side_are_each_answered_once_in_the_order_asked() {
+        for helpers in [0, 1, 7] {
+            for count in [0, 1, 9] {
+                let items: Vec<usize> = (0..count).collect();
+                let calls = std::sync::atomic::AtomicUsize::new(0);
+                let read = side_by_side(&items, helpers, |item| {
+                    calls.fetch_add(1, Ordering::Relaxed);
+                    item * 10
+                });
+                assert_eq!(
+                    read,
+                    items.iter().map(|item| item * 10).collect::<Vec<_>>(),
+                    "{count} items over {helpers} helpers were not each answered in order"
+                );
+                assert_eq!(
+                    calls.into_inner(),
+                    count,
+                    "an item was read twice or not at all"
+                );
+            }
+        }
+    }
+
+    /// With a helper to take one, two reads are under way at the same moment.
+    ///
+    /// Held here rather than by a journey: what it is about is invisible on every
+    /// command's output — a render prints the same lines whether its reads ran one
+    /// after another or together — and a journey could only infer it from the host's
+    /// clock, which is the load this exists to cut. So each read waits for another
+    /// to be under way beside it, and says whether one was: read one after another,
+    /// the first waits out the whole of its patience alone.
+    #[test]
+    fn reads_side_by_side_are_under_way_at_once() {
+        let under_way = std::sync::Mutex::new(0_usize);
+        let arrived = std::sync::Condvar::new();
+        let met = side_by_side(&[(), ()], 1, |()| {
+            let mut count = under_way.lock().expect("the count");
+            *count += 1;
+            arrived.notify_all();
+            let (count, waited) = arrived
+                .wait_timeout_while(count, Duration::from_secs(10), |count| *count < 2)
+                .expect("the count");
+            drop(count);
+            !waited.timed_out()
+        });
+        assert_eq!(
+            met,
+            [true, true],
+            "the two reads were not under way at once"
+        );
+    }
+
+    /// [`landings_now`] reads each node the run recorded a branch for, of that
+    /// branch, and hands the answers back by node in the order asked; a node with no
+    /// branch has nothing to read and is left out.
+    #[test]
+    fn landings_now_reads_each_node_s_recorded_branch_in_the_order_asked() {
+        let _home = super::scratch_home_held();
+        let root =
+            std::env::temp_dir().join(format!("onepipeline-side-by-side-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a scratch state root");
+        std::env::set_var(onevcs_home(), &root);
+
+        let mut state = crate::projection::RunState::default();
+        for node in ["a", "c", "d"] {
+            state.branches.insert(node.into(), format!("me/{node}"));
+        }
+        let nodes: Vec<String> = ["d", "a", "b", "c"].map(String::from).to_vec();
+        let asked: Vec<&String> = nodes.iter().collect();
+        let read = landings_now(&state, &asked);
+        let expected: Vec<(String, LandingRead)> = ["d", "a", "c"]
+            .map(|node| (node.to_owned(), landing_now(&format!("me/{node}"), None)))
+            .to_vec();
+        assert_eq!(read, expected);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// The variable naming the sibling's state root, spelled once.
     ///
     /// `onevcs` publishes no constant for it, so the test that points it at a
@@ -4752,6 +5022,6 @@ mod tests {
 
     /// What [`proved_landed`] decides, without a repository to ask.
     fn proved_landed_from(read: &LandingRead) -> bool {
-        matches!(read, LandingRead::Answered(landed) if landed.is_landed())
+        read.proves_landed()
     }
 }

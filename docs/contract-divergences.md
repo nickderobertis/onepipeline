@@ -1148,6 +1148,26 @@ Two rules bound it:
   whose landing an earlier read could not decide, are exactly the two answers a
   later merge changes.
 
+That second rule has **one exception, and it is this crate's behaviour rather
+than a resolution of this proposal: an attach stream.** `start --attach` and the
+other attached commands render after every batch of records for as long as the
+run goes, and on a busy run that is back to back — each render taking every
+unlanded node's landing from scratch, about forty `git` processes a node, was
+nearly half of what a ten-draft review round started, and on a host where
+starting a process is slow that round ran past its journey's bound. So within
+one attach stream a node's read is carried across the stream's consecutive
+renders for at most a short, fixed window (`views::STREAM_READ_REUSE`), and is
+taken again at once after the stream records a settlement or restack of that
+node, or any record of its session — its publication and landing among them.
+The stream's final render — the one reporting the run as it settled, made once
+the run's loop has finished or, where the driver's exit was printed before
+that, the render printing it — carries nothing and reads every landing it
+reports afresh.
+`status`, `results` and `watch` carry nothing and read on every render.
+Whichever view it is, the summary takes the reads it needs side by side rather
+than one after another, as the driver's own close-out does, and each is still
+counted against the render and the node it was taken for.
+
 A read that cannot decide is reported as **undecided**, distinctly from landed and
 from not landed, with the settlement's own dated claim behind it — the property
 the dated phrasing was protecting, kept. `tests/e2e/landing.rs` drives all of it

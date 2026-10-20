@@ -1021,6 +1021,16 @@ pub(crate) fn landings_the_run_re_read(state: &mut RunState, paths: &RunPaths) {
 /// are exactly `not landed` and `could not be decided`, and a view that reused
 /// yesterday's would be the stale claim this exists to stop making.
 ///
+/// **One exception: an attach stream**, which renders after every batch of
+/// records for as long as the run goes. There a node's read is carried across
+/// that stream's consecutive renders for at most [`STREAM_READ_REUSE`] — see
+/// [`StreamReads`] — and is taken again at once after the stream records a
+/// settlement or restack of that node or any record of its session — its
+/// publication and landing among them — and on the stream's final render — the one made once the
+/// run's loop has finished, or the one printing the driver's exit where that came
+/// first — which reports the run as it settled and carries nothing. `status`,
+/// `results` and `watch` carry nothing and read on every render.
+///
 /// Nested scopes are one render: `status` prints [`RunView::summary`] inside
 /// itself, and a second scope there would empty the memo half-way through and
 /// ask every node twice.
@@ -1043,15 +1053,135 @@ thread_local! {
     /// supervisory look costs to say one thing.
     //
     // llmlint: ignore[invalid_states_unrepresentable] a run id and a node id are the plain strings this whole crate spells them as — `RunPaths.run`, `RunState::landings`, `RunState::branches` — for the reason `src/ledger.rs`'s file-level suppression records, and `src/AGENTS.md` names a `RunId` newtype as interface drift. Newtypes at these two sites alone would disagree with every neighbour and convert at every boundary. Neither value is unchecked: the run id crossed `ledger::is_valid_run_id` when the run was launched, and the node id is one the run's own journal projected into its graph.
-    static READ_THIS_RENDER: std::cell::RefCell<BTreeMap<(String, String), std::rc::Rc<LandingRead>>> =
+    static READ_THIS_RENDER: std::cell::RefCell<BTreeMap<(String, String), Carried>> =
         const { std::cell::RefCell::new(BTreeMap::new()) };
+
+    /// Whether the renders on this thread are an attach stream's, which carry the
+    /// reads above from one render to the next — see [`StreamReads`].
+    static RENDERING: std::cell::Cell<Renders> = const { std::cell::Cell::new(Renders::EachAlone) };
+}
+
+/// What one render on a thread keeps of the last one's landing reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Renders {
+    /// Nothing: every view but an attach stream reads on every render.
+    EachAlone,
+    /// What is still inside [`STREAM_READ_REUSE`] and nothing has moved since.
+    AsOneStream,
+}
+
+/// How long an attach stream carries a node's landing read across its renders.
+///
+/// The stream renders after every batch of records, which on a busy run is
+/// back to back, and each render took every unlanded node's landing from
+/// scratch — `onevcs` resolving the repository and running `git` some forty
+/// times a node. That was nearly half the processes a busy attached command
+/// started, and, one read after another, a tail after its run had finished. Ten
+/// seconds is a merge somebody else performs going unreported for no longer than
+/// a person takes to look up from it; the stream's own records end the reuse
+/// sooner, and its last render reads afresh.
+pub(crate) const STREAM_READ_REUSE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// One landing read a render holds, and when it was taken.
+struct Carried {
+    read: std::rc::Rc<LandingRead>,
+    taken: std::time::Instant,
+}
+
+impl Carried {
+    /// Whether, at `now`, the read is still inside [`STREAM_READ_REUSE`].
+    fn still_carried(&self, now: std::time::Instant) -> bool {
+        now.saturating_duration_since(self.taken) < STREAM_READ_REUSE
+    }
+}
+
+/// An attach stream's renders, carrying their reads from one to the next while
+/// this is held.
+///
+/// Held by [`crate::driver`]'s attach loop on the thread that renders, and by
+/// nothing else, so no other view ever reuses a read.
+pub(crate) struct StreamReads(());
+
+impl StreamReads {
+    /// Begin carrying reads across this thread's renders.
+    pub(crate) fn begin() -> Self {
+        READ_THIS_RENDER.with_borrow_mut(BTreeMap::clear);
+        RENDERING.set(Renders::AsOneStream);
+        Self(())
+    }
+
+    /// Make ready for the render of `fresh`, the records the stream is about to
+    /// print, `concluded` once the run's loop has finished.
+    ///
+    /// The stream's last render reports the run as it settled, so it reads every
+    /// landing afresh — as does the render printing the driver's exit, which is the
+    /// last one where nothing is left to print after it; before them, a node's read
+    /// is carried only until the stream records something that moves it.
+    pub(crate) fn before_render(&self, run: &str, fresh: &[&Envelope], concluded: bool) {
+        if concluded {
+            self.forget_all();
+        } else {
+            self.forget_moved(run, fresh);
+        }
+    }
+
+    /// Take every node's landing afresh on the next render, which is the one
+    /// reporting the run as it settled.
+    fn forget_all(&self) {
+        READ_THIS_RENDER.with_borrow_mut(BTreeMap::clear);
+    }
+
+    /// Take a node's landing afresh where the stream just recorded something that
+    /// can move it: a settlement or restack of the node, or any record of its
+    /// session — its publication and its landing among them. A session's records
+    /// that move nothing are let go of too, which costs a read and is never stale.
+    ///
+    /// And every node's, where the stream just recorded the driver exiting: the
+    /// render printing that reports the run as it settled, and the stream's last
+    /// pass renders only what it has not printed yet — so where the exit was
+    /// printed before the run's loop was seen to finish, that render is the
+    /// stream's final one.
+    fn forget_moved(&self, run: &str, events: &[&Envelope]) {
+        if events.iter().any(|event| {
+            event.source == Source::Pipeline && event.kind.0 == PipelineKind::DriverExited.as_str()
+        }) {
+            self.forget_all();
+            return;
+        }
+        READ_THIS_RENDER.with_borrow_mut(|reads| {
+            for event in events {
+                let moves = match event.source {
+                    Source::Vcs => true,
+                    Source::Pipeline => {
+                        event.kind.0 == PipelineKind::NodeSettled.as_str()
+                            || event.kind.0 == PipelineKind::NodeRestacked.as_str()
+                    }
+                    Source::Agentgraph => false,
+                };
+                if let (true, Some(node)) = (moves, event.labels.node.as_deref()) {
+                    reads.remove(&(run.to_owned(), node.to_owned()));
+                }
+            }
+        });
+    }
+}
+
+impl Drop for StreamReads {
+    fn drop(&mut self) {
+        RENDERING.set(Renders::EachAlone);
+        READ_THIS_RENDER.with_borrow_mut(BTreeMap::clear);
+    }
 }
 
 /// Begin rendering `view` over `run`.
 fn rendering(view: Rendered, run: &str) -> Rendering {
     let render = crate::rendercost::rendering(view, run);
     if render.outermost() {
-        READ_THIS_RENDER.with_borrow_mut(BTreeMap::clear);
+        let now = std::time::Instant::now();
+        READ_THIS_RENDER.with_borrow_mut(|reads| match RENDERING.get() {
+            Renders::EachAlone => reads.clear(),
+            Renders::AsOneStream => reads.retain(|_, carried| carried.still_carried(now)),
+        });
     }
     Rendering(render)
 }
@@ -1208,10 +1338,12 @@ fn reported_landing_of(
 }
 
 /// One node's landing, read now — or handed back from the read this render
-/// already took of it.
+/// already took of it, or, inside an attach stream, the one it carries.
 fn read_now(run: &str, node: &str, branch: &str, repo: &str) -> std::rc::Rc<LandingRead> {
     let key = (run.to_owned(), node.to_owned());
-    if let Some(read) = READ_THIS_RENDER.with_borrow(|reads| reads.get(&key).cloned()) {
+    if let Some(read) = READ_THIS_RENDER
+        .with_borrow(|reads| reads.get(&key).map(|held| std::rc::Rc::clone(&held.read)))
+    {
         return read;
     }
     // Everything the decision costs is counted against this node, which is what
@@ -1220,10 +1352,22 @@ fn read_now(run: &str, node: &str, branch: &str, repo: &str) -> std::rc::Rc<Land
         let _deciding = crate::rendercost::deciding(node);
         std::rc::Rc::new(crate::vcs::landing_now(branch, Some(repo)))
     };
-    READ_THIS_RENDER.with_borrow_mut(|reads| {
-        reads.insert(key, std::rc::Rc::clone(&read));
-    });
+    hold(run, node, std::rc::Rc::clone(&read));
     read
+}
+
+/// Hold a read just taken of one node for the rest of this render, and, inside an
+/// attach stream, for the renders after it.
+fn hold(run: &str, node: &str, read: std::rc::Rc<LandingRead>) {
+    READ_THIS_RENDER.with_borrow_mut(|reads| {
+        reads.insert(
+            (run.to_owned(), node.to_owned()),
+            Carried {
+                read,
+                taken: std::time::Instant::now(),
+            },
+        );
+    });
 }
 
 /// Everything a view needs about one run, read once.
@@ -3322,22 +3466,10 @@ struct Outstanding {
 /// while nine of the eleven had landed, and an adoption node was dispatched three
 /// times against work that was already on its base.
 fn outstanding_landings(view: &RunView, render: &Rendering) -> Outstanding {
-    let statuses = view.state.statuses();
+    let summarised = summarised(view);
+    read_side_by_side(view, &summarised);
     let mut outstanding = Outstanding::default();
-    for (node, _) in view
-        .state
-        .landings
-        .iter()
-        // A node whose change is held as a draft has not landed and is not one of
-        // these: this list is work an operator has to *decide* about — a change
-        // sitting open that nobody merged — and a draft is a change this run is
-        // deliberately holding and will lift itself. It has a line of its own,
-        // which says what it is waiting on.
-        .filter(|(node, _)| statuses.get(*node) != Some(&NodeStatus::CompleteDraft))
-        // A reworked node's change is its replacement's now — the same branch and
-        // the same change request — so it is counted once, under the replacement.
-        .filter(|(node, _)| !view.state.reworks.contains_key(*node))
-    {
+    for node in summarised {
         match reported_landing(view, render, node).stands() {
             Stands::NotLanded => outstanding.not_landed.push(node.clone()),
             Stands::Undecided => outstanding.undecided.push(node.clone()),
@@ -3345,6 +3477,56 @@ fn outstanding_landings(view: &RunView, render: &Rendering) -> Outstanding {
         }
     }
     outstanding
+}
+
+/// Take, side by side, the landing reads `nodes` will ask this render for and it
+/// does not already hold — see [`crate::vcs::landings_now`] — so the render finds
+/// each one taken rather than taking them one after another.
+///
+/// The same reads [`reported_landing_of`] would take, of the same nodes, counted
+/// against the same render: a node recorded landed or stated is never read, a
+/// node with no branch or no repository has nothing to read, and a node this
+/// render or the attach stream it is part of already holds is not read again.
+fn read_side_by_side(view: &RunView, nodes: &[&String]) {
+    let run = &view.paths.run;
+    let wanted: Vec<&String> = nodes
+        .iter()
+        .copied()
+        .filter(|node| {
+            !view.state.stated_landings.contains_key(*node)
+                && view.state.landings.get(*node) != Some(&Landing::Landed)
+                && view
+                    .state
+                    .graph
+                    .get(node)
+                    .is_some_and(|node| node.repo.is_some())
+        })
+        .filter(|node| {
+            let key = (run.clone(), (*node).clone());
+            !READ_THIS_RENDER.with_borrow(|reads| reads.contains_key(&key))
+        })
+        .collect();
+    for (node, read) in crate::vcs::landings_now(&view.state, &wanted) {
+        hold(run, &node, std::rc::Rc::new(read));
+    }
+}
+
+/// The nodes whose landing [`outstanding_landings`] reports on, in id order.
+fn summarised(view: &RunView) -> Vec<&String> {
+    let statuses = view.state.statuses();
+    view.state
+        .landings
+        .keys()
+        // A node whose change is held as a draft has not landed and is not one of
+        // these: this list is work an operator has to *decide* about — a change
+        // sitting open that nobody merged — and a draft is a change this run is
+        // deliberately holding and will lift itself. It has a line of its own,
+        // which says what it is waiting on.
+        .filter(|node| statuses.get(*node) != Some(&NodeStatus::CompleteDraft))
+        // A reworked node's change is its replacement's now — the same branch and
+        // the same change request — so it is counted once, under the replacement.
+        .filter(|node| !view.state.reworks.contains_key(*node))
+        .collect()
 }
 
 /// The nodes whose work is complete and whose change is held back as a draft,
@@ -5138,6 +5320,170 @@ fn review_lines(view: &RunView) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Why the attach stream's carrying is held by unit tests over its own render
+    /// scopes rather than by a journey: a read carried and a read taken afresh print
+    /// the same line whenever nothing moved in between, which is the only case the
+    /// carrying exists for, so no command's output tells them apart. What a journey
+    /// can see — the round's git processes, bounded in `tests/e2e/review_round.rs` —
+    /// is the cost carrying saves, not which read a render took; these drive the real
+    /// render scope, the real stream guard and the real records the stream is handed.
+    fn reads_held() -> Vec<String> {
+        READ_THIS_RENDER.with_borrow(|reads| reads.keys().map(|(_, node)| node.clone()).collect())
+    }
+
+    fn holding(nodes: &[&str]) {
+        for node in nodes {
+            hold(
+                "demo",
+                node,
+                std::rc::Rc::new(crate::vcs::LandingRead::Refused {
+                    because: "unread".into(),
+                }),
+            );
+        }
+    }
+
+    /// A stream's next render keeps the reads still inside their window, and lets go of
+    /// one past it; a render outside a stream keeps nothing, and neither does one after
+    /// the stream ends.
+    #[test]
+    fn a_stream_render_keeps_its_reads_inside_their_window_and_no_other_render_does() {
+        let stream = StreamReads::begin();
+        holding(&["fresh"]);
+        let stale = std::time::Instant::now()
+            .checked_sub(STREAM_READ_REUSE)
+            .expect("an instant a window ago");
+        READ_THIS_RENDER.with_borrow_mut(|reads| {
+            reads.insert(
+                ("demo".to_owned(), "stale".to_owned()),
+                Carried {
+                    read: std::rc::Rc::new(crate::vcs::LandingRead::Refused {
+                        because: "unread".into(),
+                    }),
+                    taken: stale,
+                },
+            );
+        });
+        drop(rendering(Rendered::Summary, "demo"));
+        assert_eq!(reads_held(), ["fresh"], "the stream's next render");
+        drop(stream);
+        assert!(
+            reads_held().is_empty(),
+            "a stream that ended left its reads behind"
+        );
+
+        holding(&["alone"]);
+        drop(rendering(Rendered::Status, "demo"));
+        assert!(
+            reads_held().is_empty(),
+            "a render outside a stream kept a read"
+        );
+    }
+
+    /// What an attach stream lets go of before each render, over the records that
+    /// render is about to print — the one call the driver's attach loop makes: a
+    /// node's read goes where the stream records it settling or restacking, or records
+    /// anything of its session; it stays through a record of its own that moves
+    /// nothing, an agent's, and another node's; and every read goes before the render
+    /// made once the run's loop has finished, and before the one printing the
+    /// driver's exit.
+    ///
+    /// A structural assertion rather than a journey, and for a reason beyond the one
+    /// above: the stream's last render folds the run's own settled report — see
+    /// [`landings_the_run_re_read`] — so a change the driver's close-out found landed
+    /// prints landed whether or not that render read it again, and a move made between
+    /// two renders is visible only as a landing that changed with no record of the
+    /// node, which no offline journey can time inside the window.
+    #[test]
+    fn an_attach_stream_lets_go_of_a_read_where_a_record_moves_its_landing() {
+        let stream = StreamReads::begin();
+        for (lets_go, record) in [
+            (
+                true,
+                relayed(EventKind("push".into()), Source::Vcs, Some("a"), &[]),
+            ),
+            (
+                true,
+                relayed(EventKind("fetch".into()), Source::Vcs, Some("a"), &[]),
+            ),
+            (
+                true,
+                relayed(EventKind("published".into()), Source::Vcs, Some("a"), &[]),
+            ),
+            (
+                true,
+                event(crate::journal::PipelineKind::NodeSettled, Some("a"), &[]),
+            ),
+            (
+                true,
+                event(crate::journal::PipelineKind::NodeRestacked, Some("a"), &[]),
+            ),
+            (
+                false,
+                event(crate::journal::PipelineKind::NodeDispatched, Some("a"), &[]),
+            ),
+            (
+                false,
+                relayed(
+                    EventKind("turn-message".into()),
+                    Source::Agentgraph,
+                    Some("a"),
+                    &[],
+                ),
+            ),
+        ] {
+            holding(&["a", "b"]);
+            stream.before_render("demo", &[&record], false);
+            let expected: &[&str] = if lets_go { &["b"] } else { &["a", "b"] };
+            assert_eq!(
+                reads_held(),
+                expected,
+                "{:?} {}",
+                record.source,
+                record.kind.0
+            );
+        }
+        holding(&["a", "b"]);
+        stream.before_render("demo", &[], true);
+        assert!(
+            reads_held().is_empty(),
+            "the final render carried a read into it"
+        );
+        holding(&["a", "b"]);
+        stream.before_render(
+            "demo",
+            &[&event(
+                crate::journal::PipelineKind::DriverExited,
+                None,
+                &[],
+            )],
+            false,
+        );
+        assert!(
+            reads_held().is_empty(),
+            "the render printing the driver's exit carried a read into it"
+        );
+    }
+
+    /// A read is carried inside its window and taken again once the window has
+    /// passed, measured from when the read was taken.
+    #[test]
+    fn a_carried_landing_read_lapses_at_the_end_of_its_window() {
+        let taken = std::time::Instant::now();
+        let carried = Carried {
+            read: std::rc::Rc::new(crate::vcs::LandingRead::Refused {
+                because: "unread".into(),
+            }),
+            taken,
+        };
+        assert!(carried.still_carried(taken));
+        assert!(
+            carried.still_carried(taken + STREAM_READ_REUSE - std::time::Duration::from_millis(1))
+        );
+        assert!(!carried.still_carried(taken + STREAM_READ_REUSE));
+        assert!(!carried.still_carried(taken + STREAM_READ_REUSE * 6));
+    }
+
     use super::*;
     use crate::event::{EventKind, Labels, ENVELOPE_VERSION};
     use crate::filter::Filters;
