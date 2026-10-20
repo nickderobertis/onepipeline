@@ -750,6 +750,26 @@ fn plain(path: &Path) -> PathBuf {
     }
 }
 
+/// Where every world's scratch root is made: the temporary directory, except on
+/// macOS, where it is `/tmp`.
+///
+/// A held turn's control socket is bound at
+/// `<state home>/oneharness/sessions/control/<session>.sock`, and a unix socket
+/// address is at most 104 bytes on macOS. The runner's temporary directory,
+/// resolved, is `/private/var/folders/<2>/<28>/T/`, and under it the control
+/// directory alone took 108: no session name fit, so no turn there could be
+/// interrupted, and the interrupt journeys in `tests/note` waited for an answer
+/// that never came. `/tmp` resolves to `/private/tmp`, which leaves the session
+/// name about 40 bytes. `a_worlds_control_socket_fits_this_platforms_address_limit`
+/// holds it.
+fn scratch_base() -> PathBuf {
+    if cfg!(target_os = "macos") {
+        PathBuf::from("/tmp")
+    } else {
+        std::env::temp_dir()
+    }
+}
+
 /// The environment variable the linked `oneharness-core` reads its per-user
 /// state directory from, by platform: `%LOCALAPPDATA%` on Windows and
 /// `$XDG_STATE_HOME` everywhere else — the library's own
@@ -819,7 +839,7 @@ impl World {
         // something its teardown can reach. See [`Drop for World`](World).
         onepipeline_testfakes::containment::enrol();
         LIVE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let root = std::env::temp_dir().join(format!(
+        let root = scratch_base().join(format!(
             "op-{}-{}",
             std::process::id(),
             NTH.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
@@ -7353,6 +7373,28 @@ fn a_runs_settling_patience_is_one_step_per_node_on_its_longest_chain() {
 /// privilege no CI account is guaranteed to hold. What `resolved` has to get
 /// right on Windows is [`plain`]'s rule, and the test below holds that one on
 /// every platform.
+/// A world's state home leaves a held turn room to bind its control socket on
+/// this platform, at the address onejudge dials for a session name of the length
+/// a graph mints. See [`scratch_base`]: on macOS the temporary directory left
+/// none.
+#[cfg(unix)]
+#[test]
+fn a_worlds_control_socket_fits_this_platforms_address_limit() {
+    use oneharness_core::domain::control::{socket_address_within_limit, socket_path};
+    let world = World::new("control-socket");
+    let store = world.state_home().join("oneharness").join("sessions");
+    let socket = socket_path(&store, "node-scope-1760000000000-123456-worker-skill")
+        .unwrap_or_else(|too_long| {
+            panic!(
+                "no control socket fits under a world's state home: {} is past the limit",
+                too_long.path().display()
+            )
+        });
+    if let Err(too_long) = socket_address_within_limit(&socket) {
+        panic!("{} is past the limit", too_long.path().display());
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn a_directory_reached_through_a_symlink_resolves_to_the_directory_itself() {
