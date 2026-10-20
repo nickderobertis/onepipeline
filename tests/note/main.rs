@@ -6517,9 +6517,11 @@ fn a_live_note_withdrawn_while_its_turn_is_held_reaches_no_turn() {
 /// is still outstanding: each `withdraw-note` is applied and journalled without
 /// waiting for the first note's answer. Once the turn is released the first note
 /// reaches it and is recorded; neither withdrawn note is ever offered to the
-/// conversation or presented to a turn, neither is recorded as anything but its
-/// withdrawal, and each envelope is answered with exactly its withdrawn note
-/// refused, carrying the withdrawal's reason.
+/// conversation or presented to a turn, and neither is recorded as anything but
+/// its withdrawal. The first envelope is answered with its withdrawn note
+/// refused, carrying the withdrawal's reason; the held one, which also amends a
+/// node nobody added, is refused whole, its note still carrying the withdrawal's
+/// reason and its amend its own.
 #[test]
 fn live_notes_behind_an_outstanding_one_are_withdrawn_without_waiting_for_it() {
     let world = World::new("note-withdraw-behind");
@@ -6540,10 +6542,14 @@ fn live_notes_behind_an_outstanding_one_are_withdrawn_without_waiting_for_it() {
         admitted(world, run) > before
     });
     let both = queued_id_of(&world, run, NOTE);
-    let held = submitted(
+    // Sent through the bus, since `reply` refuses the amend before it is queued.
+    sent_through_the_bus(
         &world,
         run,
-        &envelope(note_op_with("build", HELD_WITHDRAWN, "turn-end", true)),
+        &json!({"version": 2, "commands": [
+            note_op_with("build", HELD_WITHDRAWN, "turn-end", true),
+            {"op": "amend", "id": "nothing-by-this-name", "text": NOWHERE_RULING},
+        ]}),
     );
     let queue = world.run_file(run, "channel/commands.jsonl");
     world.until("the held note to be queued", |_| {
@@ -6600,8 +6606,25 @@ fn live_notes_behind_an_outstanding_one_are_withdrawn_without_waiting_for_it() {
         json!("turn-end"),
         "the first note did not reach its turn's end"
     );
-    let output = held.wait_with_output().expect("the binary runs");
-    assert_eq!(output.status.code(), Some(REFUSED));
+    world.until("the held envelope to be answered", |world| {
+        outcome_of(world, run, held_id).is_some()
+    });
+    let refused_whole = outcome_of(&world, run, held_id).expect("answered");
+    assert_eq!(
+        [
+            &refused_whole["applied"],
+            &refused_whole["results"][1]["outcome"]
+        ],
+        [&json!(false), &json!("refused")],
+        "{refused_whole}"
+    );
+    assert!(
+        world
+            .events_of(run, "edit-rejected")
+            .iter()
+            .any(|event| event["payload"]["command"]["text"] == NOWHERE_RULING),
+        "the held envelope's amend was not refused on its own merits"
+    );
     world.until("the run to settle", |world| {
         !world.events_of(run, "node-settled").is_empty()
     });
@@ -6639,7 +6662,10 @@ fn live_notes_behind_an_outstanding_one_are_withdrawn_without_waiting_for_it() {
 /// A `cancel` of a node whose `turn-end` note is still untaken in its held
 /// conversation's inbox takes the note back from that conversation as well as
 /// answering it: the note is refused naming the cancel, the member takes it out
-/// of its inbox, and no turn is ever presented with it.
+/// of its inbox, and no turn is ever presented with it. A note queued behind it
+/// in its envelope and a note in an envelope held behind it, each withdrawn
+/// before the cancel, are answered as withdrawn rather than preempted — refused
+/// carrying the withdrawal's reason, and journalled by nothing but it.
 #[test]
 fn a_cancel_takes_back_the_untaken_live_note_to_its_node() {
     let world = World::new("note-cancel-withdraws");
@@ -6649,12 +6675,35 @@ fn a_cancel_takes_back_the_untaken_live_note_to_its_node() {
     let note = submitted(
         &world,
         run,
-        &envelope(note_op_with("build", PREEMPTED_NOTE, "turn-end", true)),
+        &json!({"version": 2, "commands": [
+            note_op_with("build", PREEMPTED_NOTE, "turn-end", true),
+            note_op_with("build", QUEUED_WITHDRAWN, "turn-end", true),
+        ]})
+        .to_string(),
     );
     world.until("the note to wait in build's inbox", |world| {
         awaiting_an_answer(world, run) == 1
     });
     let sent = queued_id_of(&world, run, PREEMPTED_NOTE);
+    let held = submitted(
+        &world,
+        run,
+        &envelope(note_op_with("build", HELD_WITHDRAWN, "turn-end", true)),
+    );
+    let queue = world.run_file(run, "channel/commands.jsonl");
+    world.until("the held note to be queued", |_| {
+        std::fs::read_to_string(&queue).is_ok_and(|queued| queued.contains(HELD_WITHDRAWN))
+    });
+    let held_id = queued_id_of(&world, run, HELD_WITHDRAWN);
+    for (envelope_id, index) in [(sent, 1), (held_id, 0)] {
+        world
+            .run_with_stdin_on(
+                world.agentgraph_cmd(&["reply", run]),
+                &envelope(withdraw_op(envelope_id, index, WITHDRAWN_BECAUSE)),
+            )
+            .exited(0)
+            .out_has("\"state\":\"applied\"");
+    }
     let cancel = submitted(
         &world,
         run,
@@ -6668,6 +6717,20 @@ fn a_cancel_takes_back_the_untaken_live_note_to_its_node() {
     let output = note.wait_with_output().expect("the binary runs");
     assert_eq!(output.status.code(), Some(REFUSED));
     assert_preempted(&world, run, sent, cancel_id, PREEMPTED_NOTE);
+    let output = held.wait_with_output().expect("the binary runs");
+    assert_eq!(output.status.code(), Some(REFUSED));
+    for (envelope_id, index, text) in [(sent, 1, QUEUED_WITHDRAWN), (held_id, 0, HELD_WITHDRAWN)] {
+        let result = result_of(&world, run, envelope_id, index);
+        assert_eq!(result["outcome"], json!("refused"), "{result}");
+        assert!(
+            result["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains(WITHDRAWN_BECAUSE)),
+            "{text:?} was answered as something other than its withdrawal: {result}"
+        );
+        assert_eq!(outcomes_for(&world, run, envelope_id), 1);
+        assert_eq!(rejected_reading(&world, run, text), 0, "{text:?}");
+    }
     world.until("the member to take the note out of its inbox", |world| {
         awaiting_an_answer(world, run) == 0
     });
@@ -6675,17 +6738,335 @@ fn a_cancel_takes_back_the_untaken_live_note_to_its_node() {
     world.until("build to settle", |world| {
         !world.events_of(run, "node-settled").is_empty()
     });
-    assert!(
-        prompts(&world)
-            .iter()
-            .all(|prompt| !prompt.contains(PREEMPTED_NOTE)),
-        "the preempted note was presented to a turn"
-    );
+    for text in [PREEMPTED_NOTE, QUEUED_WITHDRAWN, HELD_WITHDRAWN] {
+        assert!(
+            prompts(&world).iter().all(|prompt| !prompt.contains(text)),
+            "{text:?} was presented to a turn"
+        );
+    }
     assert_eq!(
         withdrawals(&world, run).len(),
-        0,
+        2,
         "a cancel's preemption was recorded as a withdraw-note"
     );
+}
+
+/// A note its delivery already answered without a turn taking it, while the
+/// rest of its envelope is still being delivered, is refused by a `withdraw-note`
+/// naming that disposition, and nothing is committed: one refused at its deadline
+/// on a receiver that has answered, while another receiver keeps the envelope
+/// outstanding; and one carried at its deadline, while the note queued behind it
+/// to the same node keeps that receiver outstanding. Once that receiver answers,
+/// the carried note is on the record, and withdrawing it as carried is applied.
+#[test]
+fn a_note_its_delivery_answered_untaken_is_refused_while_its_envelope_is_outstanding() {
+    let world = World::new("note-withdraw-answered");
+    let run = "withdrawanswered";
+    held_apart(&world, run, vec![agent("build", &[]), agent("lint", &[])]);
+
+    let before = admitted(&world, run);
+    let envelope_of_three = submitted(
+        &world,
+        run,
+        &json!({"version": 2, "commands": [
+            timed_note("build", THIRD_CARRIED, "turn-end", true, 1),
+            note_op_with("build", NOTE, "turn-end", true),
+            timed_note("lint", UNCARRIED_NOTE, "turn-end", false, 1),
+        ]})
+        .to_string(),
+    );
+    world.until(
+        "both timed notes to expire and the note behind them to wait",
+        |world| {
+            admitted(world, run) == before + 3
+                && awaiting_an_answer(world, run) == 1
+                && rejected_reading(world, run, UNCARRIED_NOTE) == 1
+        },
+    );
+    let sent = queued_id_of(&world, run, NOTE);
+    let refused = |index: u32, why: &str| {
+        world
+            .run_with_stdin_on(
+                world.agentgraph_cmd(&["reply", run]),
+                &envelope(withdraw_op(sent, index, WITHDRAWN_BECAUSE)),
+            )
+            .exited(REFUSED)
+            .err_has(why);
+    };
+    refused(2, "already answered without a turn taking it");
+    refused(0, "already answered `carried` by its delivery");
+    assert_eq!(withdrawals(&world, run).len(), 0);
+    assert_eq!(
+        world
+            .events_of(run, "edit-rejected")
+            .iter()
+            .filter(|event| event["payload"]["command"]["op"] == "withdraw-note")
+            .count(),
+        2
+    );
+    assert!(outcome_of(&world, run, sent).is_none());
+
+    release_turn_of(&world, run, "build");
+    let output = envelope_of_three
+        .wait_with_output()
+        .expect("the binary runs");
+    assert_eq!(output.status.code(), Some(REFUSED));
+    assert_eq!(
+        recorded_note(&world, run, THIRD_CARRIED)["reached"],
+        json!("carried")
+    );
+    world
+        .run_with_stdin_on(
+            world.agentgraph_cmd(&["reply", run]),
+            &envelope(withdraw_op(sent, 0, WITHDRAWN_BECAUSE)),
+        )
+        .exited(0)
+        .out_has("\"state\":\"applied\"");
+    assert_eq!(
+        withdrawals(&world, run)
+            .iter()
+            .map(|withdrawn| withdrawn["from"].clone())
+            .collect::<Vec<_>>(),
+        [json!("carried")]
+    );
+    release_turn_of(&world, run, "lint");
+    world.until("the run to settle", |world| {
+        world.events_of(run, "node-settled").len() >= 2
+    });
+}
+
+/// Withdrawing a live note leaves a carried note of the same text to the same
+/// node owed to that node's next dispatch: the live withdrawal takes nothing off
+/// the node's carried context. The cancel parks the run's only node and its
+/// driver exits, so the requeue is applied with nothing driving and the driver
+/// that adopts the run replays the journal — withdrawal and all — before it
+/// composes the node's next dispatch, which carries the carried note, once.
+#[test]
+fn a_live_withdrawal_leaves_an_identical_carried_note_to_the_nodes_next_dispatch() {
+    let world = World::new("note-withdraw-live-twin");
+    let run = "withdrawlivetwin";
+    held_cancellable_conversation(&world, run, vec![agent("build", &[])]);
+    world
+        .run_with_stdin_on(
+            world.agentgraph_cmd(&["reply", run]),
+            &envelope(note_op_with("build", LIVE_WITHDRAWN, "next", true)),
+        )
+        .exited(0)
+        .out_has("\"state\":\"applied\"");
+    let before = admitted(&world, run);
+    let live = submitted(
+        &world,
+        run,
+        &envelope(note_op_with("build", LIVE_WITHDRAWN, "turn-end", true)),
+    );
+    world.until("the live note to be admitted", |world| {
+        admitted(world, run) > before
+    });
+    let queue = world.run_file(run, "channel/commands.jsonl");
+    let live_id = std::fs::read_to_string(&queue)
+        .expect("the command queue")
+        .lines()
+        .filter(|line| line.contains(LIVE_WITHDRAWN))
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter_map(|record| record["id"].as_u64())
+        .max()
+        .expect("the live note's envelope is queued");
+    world
+        .run_with_stdin_on(
+            world.agentgraph_cmd(&["reply", run]),
+            &envelope(withdraw_op(live_id, 0, WITHDRAWN_BECAUSE)),
+        )
+        .exited(0)
+        .out_has("\"state\":\"applied\"");
+    let output = live.wait_with_output().expect("the binary runs");
+    assert_eq!(output.status.code(), Some(REFUSED));
+
+    world
+        .run_with_stdin_on(
+            world.agentgraph_cmd(&["reply", run]),
+            &envelope(json!({"op": "cancel", "id": "build", "reason": "start it over"})),
+        )
+        .exited(0);
+    world.until("build to settle cancelled", |world| {
+        !world.events_of(run, "node-settled").is_empty()
+    });
+    world
+        .run_with_stdin_on(
+            world.agentgraph_cmd(&["reply", run]),
+            &envelope(json!({"op": "requeue", "id": "build"})),
+        )
+        .exited(0);
+    world.until("the driver to exit", |world| {
+        !world.events_of(run, "driver-exited").is_empty()
+    });
+    world
+        .run_on(
+            world.agentgraph_cmd(&["adopt", run, "--detach"]),
+            "adopt --detach",
+        )
+        .exited(0);
+    world.until("build's next dispatch", |world| {
+        dispatches_of(world, run, "build").len() >= 2
+            && !dispatches_of(world, run, "build")[1].is_empty()
+    });
+    let task = dispatches_of(&world, run, "build")[1][0].clone();
+    let context = task
+        .split_once("## Planner context")
+        .map(|(_, context)| context)
+        .unwrap_or_else(|| panic!("build's next dispatch has no planner context:\n{task}"));
+    assert_eq!(
+        context.matches(LIVE_WITHDRAWN).count(),
+        1,
+        "the carried note was not composed into build's next dispatch once:\n{task}"
+    );
+}
+
+/// A live note in an envelope no driver claimed — queued while nothing drives
+/// the run — is withdrawn by `reply` itself, from `live`; and the driver that
+/// adopts the run claims that envelope and answers it with the note refused,
+/// carrying the withdrawal's reason, never offering it to the conversation.
+#[test]
+fn a_live_note_no_driver_claimed_is_withdrawn_with_nothing_driving() {
+    let world = World::new("note-withdraw-unclaimed");
+    let run = "withdrawunclaimed";
+    held_conversation(&world, run, vec![agent("build", &[])]);
+    harness::end_driver(&world, run);
+    sent_through_the_bus(
+        &world,
+        run,
+        &json!({"version": 2, "commands": [
+            note_op_with("build", LIVE_WITHDRAWN, "turn-end", true),
+        ]}),
+    );
+    let queue = world.run_file(run, "channel/commands.jsonl");
+    world.until("the note to be queued", |_| {
+        std::fs::read_to_string(&queue).is_ok_and(|queued| queued.contains(LIVE_WITHDRAWN))
+    });
+    let sent = queued_id_of(&world, run, LIVE_WITHDRAWN);
+    world
+        .run_with_stdin_on(
+            world.agentgraph_cmd(&["reply", run]),
+            &envelope(withdraw_op(sent, 0, WITHDRAWN_BECAUSE)),
+        )
+        .exited(0)
+        .out_has("\"state\":\"applied\"");
+    assert_eq!(
+        withdrawals(&world, run)
+            .iter()
+            .map(|withdrawn| [withdrawn["envelope"].clone(), withdrawn["from"].clone()])
+            .collect::<Vec<_>>(),
+        [[json!(sent), json!("live")]]
+    );
+    let admitted_before = admitted(&world, run);
+    world
+        .run_on(
+            world.agentgraph_cmd(&["adopt", run, "--detach"]),
+            "adopt --detach",
+        )
+        .exited(0);
+    world.until("the adopter to answer the queued note", |world| {
+        outcome_of(world, run, sent).is_some()
+    });
+    let result = result_of(&world, run, sent, 0);
+    assert_eq!(result["outcome"], json!("refused"), "{result}");
+    assert!(
+        result["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains(WITHDRAWN_BECAUSE)),
+        "{result}"
+    );
+    assert_eq!(rejected_reading(&world, run, LIVE_WITHDRAWN), 0);
+    assert_eq!(
+        admitted(&world, run),
+        admitted_before,
+        "the adopter offered the withdrawn note"
+    );
+    release(&world.fakes, "turn.go");
+    release(&world.fakes, "turn.settle");
+    world.until("the run to settle", |world| {
+        !world.events_of(run, "node-settled").is_empty()
+    });
+    assert!(prompts(&world)
+        .iter()
+        .all(|prompt| !prompt.contains(LIVE_WITHDRAWN)));
+}
+
+/// A driver that dies while a note it withdrew from its delivery's queue still
+/// waits behind another leaves the next driver to answer the envelope from what
+/// the journal holds of it — the amend beside the notes, committed as it was
+/// handed: the note still being delivered is refused as its driver's death
+/// leaves it, the amend stays applied, and the withdrawn note is answered as
+/// withdrawn — refused, carrying the withdrawal's reason, with no refusal of its
+/// own journalled.
+#[test]
+fn a_note_withdrawn_from_a_dead_drivers_delivery_is_answered_withdrawn_by_the_next() {
+    let world = World::new("note-withdraw-died-queued");
+    let run = "withdrawdiedqueued";
+    held_conversation(&world, run, vec![agent("build", &[])]);
+    let before = admitted(&world, run);
+    let both = submitted(
+        &world,
+        run,
+        &json!({"version": 2, "commands": [
+            note_op_with("build", NOTE, "turn-end", true),
+            note_op_with("build", QUEUED_WITHDRAWN, "turn-end", true),
+            {"op": "amend", "id": "build", "text": BUILD_RULING},
+        ]})
+        .to_string(),
+    );
+    world.until("the first note to be admitted", |world| {
+        admitted(world, run) > before
+    });
+    let sent = queued_id_of(&world, run, NOTE);
+    world
+        .run_with_stdin_on(
+            world.agentgraph_cmd(&["reply", run]),
+            &envelope(withdraw_op(sent, 1, WITHDRAWN_BECAUSE)),
+        )
+        .exited(0)
+        .out_has("\"state\":\"applied\"");
+    // The amend committed as the envelope was handed, which is what the next
+    // driver answers the envelope from.
+    harness::end_driver(&world, run);
+    world
+        .run_on(
+            world.agentgraph_cmd(&["adopt", run, "--detach"]),
+            "adopt --detach",
+        )
+        .exited(0);
+    world.until("the adopter to answer the envelope", |world| {
+        outcome_of(world, run, sent).is_some()
+    });
+    let output = both.wait_with_output().expect("the binary runs");
+    assert_eq!(output.status.code(), Some(REFUSED));
+    assert_eq!(outcomes_for(&world, run, sent), 1);
+    let outcome = outcome_of(&world, run, sent).expect("answered");
+    assert_eq!(
+        [
+            &outcome["results"][0]["outcome"],
+            &outcome["results"][1]["outcome"],
+            &outcome["results"][2]["outcome"]
+        ],
+        [&json!("refused"), &json!("refused"), &json!("applied")],
+        "{outcome}"
+    );
+    assert!(
+        outcome["results"][1]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains(WITHDRAWN_BECAUSE)),
+        "the withdrawn note was not answered as withdrawn: {outcome}"
+    );
+    assert_eq!(rejected_reading(&world, run, NOTE), 1);
+    assert_eq!(rejected_reading(&world, run, QUEUED_WITHDRAWN), 0);
+    assert_eq!(withdrawals(&world, run).len(), 1);
+    release(&world.fakes, "turn.go");
+    release(&world.fakes, "turn.settle");
+    world.until("the run to settle", |world| {
+        !world.events_of(run, "node-settled").is_empty()
+    });
+    assert!(prompts(&world)
+        .iter()
+        .all(|prompt| !prompt.contains(QUEUED_WITHDRAWN)));
 }
 
 /// A note to the supervisor that interrupts its held turn, where the decision

@@ -4551,16 +4551,16 @@ fn validate_here(
         reason,
     } = command
     {
-        // A live note nothing is delivering is one a driver that ended claimed:
-        // whether a turn took it is what nobody here can say.
-        return match crate::withdrawal::validate(paths, envelope, *index, reason)? {
-            crate::withdrawal::Validated::Carried(operations) => {
-                Ok(engine::Staged::Compiled(operations))
-            }
-            crate::withdrawal::Validated::Live(operation) => {
-                Err(crate::withdrawal::undriven(&operation))
-            }
-        };
+        // Nothing is driving the run, and a driver that claimed envelopes it never
+        // answered sends this one through the queue instead — so a live note with
+        // no answer here is in an envelope no driver claimed, offered to nobody,
+        // and a driver that judges it later skips it (`engine::seated`).
+        return Ok(engine::Staged::Compiled(match crate::withdrawal::validate(
+            paths, envelope, *index, reason,
+        )? {
+            crate::withdrawal::Validated::Carried(operations) => operations,
+            crate::withdrawal::Validated::Live(operation) => vec![operation],
+        }));
     }
     let Command::Note {
         id,

@@ -5359,6 +5359,10 @@ impl TakeBack {
                 ));
             };
             now.withdrawn.insert(*position);
+            // llmlint: ignore[changed_behavior_has_e2e] a turn taking the offered note between
+            // this read and the withdrawal is two processes racing for one note, which no gate
+            // the doubled turn reads can time from outside; the withdrawer's own answer decides
+            // it, and the refusal is the same `taken_first` a note the record shows taken earns.
             if let Err(why) = withdrawer.withdraw() {
                 now.withdrawn.remove(position);
                 return Err(crate::withdrawal::taken_first(operation, &why.to_string()));

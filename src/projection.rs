@@ -2283,6 +2283,12 @@ pub(crate) fn fold_operations(state: &mut RunState, operations: &[Operation], at
             // A carried note withdrawn before a dispatch took it is owed to
             // nobody, and every other note carried beside it still is.
             // A live one never was owed to a dispatch, so nothing comes off.
+            // llmlint: ignore[changed_behavior_has_e2e] a live note goes only to a node a
+            // dispatch already reached, for which `may_hold_a_note` answers from
+            // `dispatched_at` whatever this holds, so no journey can observe it; the graph's
+            // own fold beside it is driven by `tests/note`'s
+            // `a_live_withdrawal_leaves_an_identical_carried_note_to_the_nodes_next_dispatch`,
+            // and this one by the projection tests' live withdrawal beside a carried twin.
             Operation::NoteWithdrawn {
                 node,
                 text,
@@ -3265,7 +3271,7 @@ mod tests {
                 )],
             )
         };
-        let withdrawn = |envelope: u64, text: &str| {
+        let withdrawn_from = |envelope: u64, text: &str, from| {
             pipeline(
                 journal::PipelineKind::EditCommitted,
                 3,
@@ -3280,12 +3286,15 @@ mod tests {
                             "the fixture moved back".to_string(),
                         )
                         .expect("a reason"),
-                        from: crate::note::WithdrawnFrom::Carried,
+                        from,
                         text: text.parse().expect("a usable note"),
                         alike_after: 0,
                     }]),
                 )],
             )
+        };
+        let withdrawn = |envelope: u64, text: &str| {
+            withdrawn_from(envelope, text, crate::note::WithdrawnFrom::Carried)
         };
         let both = [
             started.clone(),
@@ -3293,6 +3302,23 @@ mod tests {
             carried(2, "keep the loader"),
         ];
         let owed = fold(&both);
+        // A live note of the same text, withdrawn, was carried onto nothing, so
+        // both carried notes stay owed to the node's next dispatch.
+        let mut beside_live = both.to_vec();
+        beside_live.push(withdrawn_from(
+            4,
+            "the fixture moved",
+            crate::note::WithdrawnFrom::Live,
+        ));
+        let kept = fold(&beside_live);
+        assert_eq!(
+            kept.pending_context["build"],
+            "the fixture moved\n\nkeep the loader"
+        );
+        assert_eq!(
+            kept.graph.get("build").expect("build").context.as_deref(),
+            Some("the fixture moved\n\nkeep the loader")
+        );
         assert_eq!(
             owed.pending_context["build"],
             "the fixture moved\n\nkeep the loader"

@@ -174,6 +174,11 @@ pub(crate) fn already_answered(operation: &Operation, disposition: Option<&Reach
     };
     let named = format!("note {index} of envelope {envelope}, to node '{node}'");
     Error::Refused(match disposition {
+        Some(Reached::Carried { .. }) => format!(
+            "withdraw-note: {named} was already answered `carried` by its delivery, which \
+             records it once that node's other notes in its envelope are answered; withdraw \
+             it as a carried note then"
+        ),
         Some(reached) => format!(
             "withdraw-note: {named} was already answered {}: a turn took it, and a \
              conversation has no undo",
