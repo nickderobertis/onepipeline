@@ -49,9 +49,10 @@ pub(crate) fn set_done(store: &Store, home: &QualifiedId, within: Duration) -> A
     };
     let runtime = match crate::taskgraph::runtime() {
         Ok(runtime) => runtime,
-        // llmlint: ignore[changed_behavior_has_e2e] a host refusing this process a runtime is
-        // resource exhaustion no CLI journey can arrange; it is said and asked again.
+        // llmlint: ignore-block[changed_behavior_has_e2e] a host refusing this process a runtime
+        // is resource exhaustion no CLI journey can arrange; it is said and asked again.
         Err(error) => return Answer::Transient(format!("the store cannot be called: {error}")),
+        // llmlint: ignore-end[changed_behavior_has_e2e]
     };
     let answered = runtime.block_on(async {
         tokio::time::timeout(
@@ -63,15 +64,16 @@ pub(crate) fn set_done(store: &Store, home: &QualifiedId, within: Duration) -> A
         .await
     });
     match answered {
-        // llmlint: ignore[changed_behavior_has_e2e] the deadline is the sixty-second command
-        // floor plus one item, and a settled run's close-out waits thirty seconds for its home,
-        // so a driver lets go — leaving no record, for the next driver to make the call — before
-        // this arm can answer at close-out; it bounds a call a driver driving again after an edit
-        // left running, and answers as the transient arm the failing-board journeys drive.
+        // llmlint: ignore-block[changed_behavior_has_e2e] the deadline is the sixty-second
+        // command floor plus one item, and a settled run's close-out waits thirty seconds for its
+        // home, so a driver lets go — leaving no record, for the next driver to make the call —
+        // before this arm can answer at close-out; it bounds a call a driver driving again after
+        // an edit left running, and answers as the transient arm the failing-board journeys drive.
         Err(_) => Answer::Transient(format!(
             "project status set exceeded {} seconds",
             within.as_secs()
         )),
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         Ok(Err(error)) => match crate::writeback::class_of_engine(&error) {
             FailureClass::Transient => {
                 Answer::Transient(crate::views::one_line(&error.to_string()))

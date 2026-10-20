@@ -356,7 +356,7 @@ fn the_comparable_plan() -> (Value, Vec<Value>, Vec<Vec<Vec<String>>>) {
             .count()
     };
     let launch_charged = answered(launch);
-    let home_charged = charged.len() - answered(home);
+    let home_charges_start = charged.len() - answered(home);
     let recorded = records(&world);
     let figures = json!({
         "launch_read": {
@@ -366,14 +366,14 @@ fn the_comparable_plan() -> (Value, Vec<Value>, Vec<Vec<Vec<String>>>) {
         "writeback": {
             "calls": by_method(writeback.iter()),
             "calls_total": writeback.len(),
-            "spent": spent(charged[launch_charged..home_charged].iter()),
+            "spent": spent(charged[launch_charged..home_charges_start].iter()),
             "attempts": recorded.len(),
             "failed_attempts": recorded.iter().filter(|record| record["outcome"] == "failed").count(),
             "whole_attempts": recorded.iter().filter(|record| record["scope"] == "whole").count(),
         },
         "home": {
             "calls": by_method(home.iter()),
-            "spent": spent(charged[home_charged..].iter()),
+            "spent": spent(charged[home_charges_start..].iter()),
         },
     });
     // Each attempt that called the store, as the calls its own command made: the write-back's
