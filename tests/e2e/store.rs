@@ -4905,6 +4905,117 @@ fn author_project(store: &std::path::Path, identifier: &str, title: &str) {
     .expect("the fixture project is authored");
 }
 
+/// Two distinct carried notes that the planner context writes alike — one whose
+/// paragraphs a blank line divides, one whose paragraphs a line holding a space
+/// divides — with a third carried between them: withdrawing either takes out that
+/// note and leaves the other two where they were carried, on the board as the
+/// withdrawing driver projects it, on the board again once an adopting driver has
+/// replayed the journal, and in the next dispatch that adopter composes.
+#[test]
+fn a_withdrawn_note_written_alike_to_another_leaves_the_other_in_carry_order() {
+    let blank = "the fixture moved\n\nto fixtures/v6";
+    let spaced = "the fixture moved\n \nto fixtures/v6";
+    let between = "keep the loader as it is";
+    // Both read as this entry in a planner context.
+    let entry = "the fixture moved\n \nto fixtures/v6";
+    for (case, withdrawn, left) in [
+        ("blank", 0, [between, entry]),
+        ("spaced", 2, [entry, between]),
+    ] {
+        let world = World::new(&format!("store-withdraw-alike-{case}"));
+        world.script("work.wait", "hold");
+        let name = format!("withdrawalike{case}");
+        let project = world.plan(
+            &name,
+            &plan_of(
+                &name,
+                vec![
+                    crate::harness::agent("work", &[]),
+                    crate::harness::agent("later", &["work"]),
+                ],
+            ),
+        );
+        world.run(&["start", &project, "--detach"]).exited(0);
+        world.until_store("work's running state to reach the store", |world| {
+            projected_words(world, &project)
+                .get("work")
+                .is_some_and(|word| word == "in progress")
+        });
+        for text in [blank, between, spaced] {
+            noted(&world, &name, "later", text);
+        }
+        let sent: Vec<u64> =
+            std::fs::read_to_string(world.run_file(&name, "channel/commands.jsonl"))
+                .expect("the command queue")
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .filter(|record| record["commands"][0]["op"] == "note")
+                .filter_map(|record| record["id"].as_u64())
+                .collect();
+        assert_eq!(sent.len(), 3, "{case}: {sent:?}");
+        world
+            .run_with_stdin(
+                &["reply", &name],
+                &json!({"version": 2, "commands": [{"op": "withdraw-note",
+                    "envelope": sent[withdrawn].to_string(), "index": 0,
+                    "reason": "the fixture moved back"}]})
+                .to_string(),
+            )
+            .exited(0);
+        let expected = left.join("\n\n");
+        let later_context = |world: &World| {
+            world
+                .store_tasks(&project)
+                .into_iter()
+                .find(|task| task["item"]["metadata"]["onepipeline.id"] == "later")
+                .map(|task| task["item"]["metadata"]["onepipeline.context"].clone())
+        };
+        world.until_store(
+            &format!("{case}: the withdrawal to reach the board"),
+            |world| later_context(world) == Some(json!(expected)),
+        );
+
+        crate::harness::end_driver(&world, &name);
+        let projected = |world: &World| {
+            std::fs::read_to_string(world.run_file(&name, "writeback-projections.jsonl"))
+                .map_or(0, |log| log.lines().count())
+        };
+        let before = projected(&world);
+        world.run(&["adopt", &name, "--detach"]).exited(0);
+        world.until_store("the adopted driver to project what it replayed", |world| {
+            projected(world) > before
+        });
+        assert_eq!(
+            later_context(&world),
+            Some(json!(expected)),
+            "{case}: the replayed run projected the notes left out of carry order"
+        );
+        world.release("work.go");
+        world.until("later to be dispatched by the adopted driver", |world| {
+            world.journal(&name).iter().any(|event| {
+                event["labels"]["node"] == "later"
+                    && event["kind"] == "turn-activity"
+                    && event["payload"]["task"].is_string()
+            })
+        });
+        let task = world
+            .journal(&name)
+            .into_iter()
+            .find(|event| event["labels"]["node"] == "later" && event["kind"] == "turn-activity")
+            .and_then(|event| event["payload"]["task"].as_str().map(str::to_owned))
+            .expect("later's task");
+        let notes = task
+            .split_once("## Planner context")
+            .and_then(|(_, context)| context.trim().split_once("\n\n"))
+            .map(|(_, notes)| notes.trim().to_owned())
+            .unwrap_or_else(|| panic!("later's dispatch has no planner context:\n{task}"));
+        assert_eq!(
+            notes, expected,
+            "{case}: the replayed run did not compose later with the notes left in carry order"
+        );
+    }
+}
+
 /// Three notes carried to one node — A, then B, then A again — and the first A
 /// withdrawn: the board's `onepipeline.context` reads B then A as the driver that
 /// applied the withdrawal projects it, and again once a driver that adopts the

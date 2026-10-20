@@ -588,6 +588,14 @@ pub(crate) fn without_carried(context: &str, text: &str, alike_after: u32) -> Op
     (!left.trim().is_empty()).then_some(left)
 }
 
+/// Whether two carried notes are written as the same entry of a planner
+/// context, which is what [`without_carried`] matches and what a withdrawal's
+/// `alike_after` counts: notes whose texts differ only where [`entry_of`] writes
+/// a blank line read alike there.
+pub(crate) fn reads_alike(one: &str, other: &str) -> bool {
+    entry_of(one) == entry_of(other)
+}
+
 /// A carried note as its node's planner context holds it: its text, with every
 /// blank line inside it written as a line holding one space.
 ///

@@ -12095,7 +12095,8 @@ retire this interim. The manager approved the record's `text` under correlation
 `c-6e20576dba29b78e543c876cbb9a85c8`: replay takes a withdrawn note's text off the node it
 was carried onto, and nothing else. Beside it the record carries `alike_after` — omitted
 where it is `0` — counting the notes still owed to the node, carried after this one, that
-read the same, so replay takes out exactly this one of several identical entries, counted
+read the same — the same entry as the planner context writes them, so two texts differing
+only where a blank line is written as a line holding a space count as alike — so replay takes out exactly this one of several identical entries, counted
 back from the latest — approved under correlation `c-a8f7631e42a3be052eee59da9fdc9a9f`,
 and held by `tests/e2e/store.rs`'s
 `a_withdrawn_carried_note_leaves_its_twin_after_the_note_between_live_and_after_replay`,

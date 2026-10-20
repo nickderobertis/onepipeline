@@ -93,11 +93,13 @@ pub(crate) fn validate(
                 return Err(refuse(format!("{named} is no longer a note")));
             };
             // Which of the node's identical carried entries is this note's, for
-            // replay to take out exactly it.
+            // replay to take out exactly it — identical as the planner context
+            // writes them, which is how replay matches them.
             let alike_after = owed[at + 1..]
                 .iter()
                 .filter(|held| {
-                    !held.note.reached.a_conversation_read_it() && held.note.text == *text
+                    !held.note.reached.a_conversation_read_it()
+                        && crate::note::reads_alike(held.note.text.as_str(), text.as_str())
                 })
                 .count();
             Ok(vec![Operation::NoteWithdrawn {
@@ -596,6 +598,10 @@ mod tests {
             without_carried(&joined, "a\n\nb", 0).as_deref(),
             Some("a\n\nb")
         );
+        // Two texts the context writes as one entry read alike, so a withdrawal
+        // counts them as it counts the same text twice.
+        assert!(crate::note::reads_alike("a\n\nb", "a\n \nb"));
+        assert!(!crate::note::reads_alike("a\n\nb", "a b"));
         // The same text carried twice, another between: which one is withdrawn
         // is the count of identical entries after it.
         let twice = with_carried(Some(&with_carried(Some("a"), "b")), "a");
