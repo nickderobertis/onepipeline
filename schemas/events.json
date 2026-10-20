@@ -1,5 +1,5 @@
 {
-  "version": "1.8.0",
+  "version": "1.9.0",
   "description": "The agent stack's event envelope, filter, artifact reference and labels, and the payload of every onepipeline pipeline kind, as onepipeline declares them.",
   "schemas": [
     {
@@ -1402,6 +1402,154 @@
               }
             ],
             "description": "What one landing's closure call came to."
+          },
+          "FailureClass": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "refused",
+                "description": "A failure no retry can change."
+              },
+              {
+                "type": "string",
+                "const": "transient",
+                "description": "A failure a wait can change."
+              }
+            ],
+            "description": "Whether asking the store again, unchanged, could change its answer — the store's own\nword, and the one thing this worker branches on.\n\n`refused` is a failure no retry can change: a projection the store refused never reaches\nthe board however often it is asked, and each attempt against a hosted destination spends\nits allowance for nothing. `transient` is everything a wait can change, a rate limit\nincluded. The mapping from a failure to its class is the store's —\n[`onetaskgraph_core::classify`] — and is never restated here, and no message is ever read\nto decide. This is the record's own vocabulary, which [`ProjectionRecord`] writes and a\nreader of it names, so it is converted from the store's by an exhaustive match: a class\nthe store adds is a compile error here rather than a line this build writes and cannot\nread back."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.home-status@2",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "project": {
+            "type": "string",
+            "description": "The run's home, by the qualified id its launch recorded."
+          },
+          "outcome": {
+            "$ref": "#/$defs/HomeOutcome",
+            "description": "Whether the store wrote the home `done`, or failed to for good."
+          },
+          "status": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Status"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The home's status as the store read it back — `null` unless `outcome` is `written`."
+          },
+          "class": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/FailureClass"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The failure's class, as the store decided it — `null` unless `outcome` is `failed`."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why it failed, in the store's words — `null` unless `outcome` is `failed`."
+          }
+        },
+        "required": [
+          "project",
+          "outcome"
+        ],
+        "description": "`home-status`: what the store answered when the run's home was marked `done` — entry 133\nof `docs/contract-divergences.md`, whose fenced examples `tests/contract.rs` holds to this\ntype.\n\nOne per run, written once the call has finished. Every member is always written, `status`,\n`class` and `reason` as `null` when they have nothing to say, so a reader reads one fixed\nshape.",
+        "title": "HomeStatus",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "HomeOutcome": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "written",
+                "description": "The store wrote the home `done`."
+              },
+              {
+                "type": "string",
+                "const": "failed",
+                "description": "The store refused the write, and it is not asked again."
+              }
+            ],
+            "description": "What the call marking a run's home `done` came to."
+          },
+          "Status": {
+            "type": "object",
+            "properties": {
+              "category": {
+                "$ref": "#/$defs/StatusCategory",
+                "description": "The normalised value filters compare against."
+              },
+              "name": {
+                "type": "string",
+                "description": "The source's own label for this status."
+              }
+            },
+            "required": [
+              "category",
+              "name"
+            ],
+            "description": "A source's status, kept in both normalised and original form.\n\n`category` is what every filter compares against; `name` is the source's own\nwording, preserved so display never flattens \"In Review\" into \"In Progress\"."
+          },
+          "StatusCategory": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "draft",
+                "description": "Written down but not yet committed to as work."
+              },
+              {
+                "type": "string",
+                "const": "backlog",
+                "description": "Known about, not yet accepted as ready to work."
+              },
+              {
+                "type": "string",
+                "const": "todo",
+                "description": "Accepted and ready to be picked up, and nothing has claimed it."
+              },
+              {
+                "type": "string",
+                "const": "queued",
+                "description": "Claimed by work that will do it, and not yet started."
+              },
+              {
+                "type": "string",
+                "const": "in-progress",
+                "description": "Being worked on."
+              },
+              {
+                "type": "string",
+                "const": "done",
+                "description": "Finished."
+              },
+              {
+                "type": "string",
+                "const": "cancelled",
+                "description": "Abandoned."
+              },
+              {
+                "type": "string",
+                "const": "unknown",
+                "description": "The source reported a status this vocabulary cannot place."
+              }
+            ],
+            "description": "The normalised status vocabulary shared across every source."
           },
           "FailureClass": {
             "oneOf": [

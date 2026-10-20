@@ -2773,6 +2773,14 @@ fn close_out_and_drain(
     // answered has said nothing to report.
     crate::loopstats::flush(paths)?;
     if let Some(writeback) = writeback {
+        // The run's home, marked `done` once the run has reached the success ending and never
+        // again once its journal records the call: entry 133. Owed before the close-out, so
+        // the close-out's window for what the closure thread owes is the home's too.
+        if crate::hooks::succeeded(final_statuses) && !crate::home::recorded(paths) {
+            if let Ok(home) = launch.project.parse() {
+                writeback.settle_home(home);
+            }
+        }
         // A node that never started is released at closeout, so another reader may take up
         // what this run claimed and did not begin. A driver that goes on driving after an
         // edit found here publishes it `queued` again on its next pass.
@@ -10732,7 +10740,8 @@ fn report_unprojected(
 }
 
 /// Journal the `landing-closures` record of every closure call that finished since this was
-/// last asked, and raise a non-blocking surface for each that failed.
+/// last asked, and the `home-status` record of the home's, and raise a non-blocking surface for
+/// each that failed.
 ///
 /// What a failure raises blocks nothing, exactly as a failed projection does: the issues a
 /// landing closed are the store's to move, and a store that refused to move them settles no
@@ -10752,7 +10761,49 @@ fn report_closures(
             raise(paths, journal, closure_surface(&record))?;
         }
     }
+    // And the home's, raised the same way: the home is the store's to move, and a store that
+    // refused to settles nothing either.
+    if let Some(record) = writeback.take_homed() {
+        journal.emit(
+            journal::PipelineKind::HomeStatus,
+            journal::labels(&paths.run, None),
+            journal::object(&record)?,
+        )?;
+        if record.outcome == crate::payload::HomeOutcome::Failed {
+            raise(paths, journal, home_surface(&record))?;
+        }
+    }
     Ok(())
+}
+
+/// The finding a home the store did not mark `done` raises.
+fn home_surface(record: &crate::payload::HomeStatus) -> Surface {
+    let class = record
+        .class
+        .and_then(|class| serde_json::to_value(class).ok())
+        .and_then(|class| class.as_str().map(str::to_owned))
+        .unwrap_or_default();
+    Surface {
+        id: 0,
+        kind: crate::channel::SurfaceKind::FINDING.into(),
+        message: format!(
+            "the plan store did not mark this run's home {home} done.\n\
+             class: {class}\n\
+             reason: {reason}\n\
+             The run itself is unaffected — every node settled and nothing was failed on \
+             this — but the board may still show the plan as open work; move it by hand, or \
+             with `onetaskgraph project status set {home} done`.",
+            home = bounded(&record.project),
+            reason = bounded(&one_line(record.reason.as_deref().unwrap_or_default())),
+        ),
+        source: crate::channel::source::PROPOSAL.into(),
+        blocking: false,
+        queued_at: sys::now_millis(),
+        abandoned: false,
+        asker: None,
+        workstream: None,
+        correlation: None,
+    }
 }
 
 /// The finding one failed closure call raises.

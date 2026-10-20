@@ -922,6 +922,13 @@ struct Pending {
     closing: Option<crate::closures::Landing>,
     /// The records of closure calls that finished, for the reconcile loop to journal.
     closed: Vec<crate::payload::LandingClosures>,
+    /// The run's home, owed its `done` and not yet taken up: entry 133.
+    home: Option<QualifiedId>,
+    /// Whether the closure thread took the home up and is calling the store for it, or waiting
+    /// out the retry of — until its call has finished.
+    homing: bool,
+    /// The record of the home's call once it finished, for the reconcile loop to journal.
+    homed: Option<crate::payload::HomeStatus>,
 }
 
 impl Pending {
@@ -931,9 +938,9 @@ impl Pending {
         self.latest.is_some() || self.worker == WorkerState::Working
     }
 
-    /// Whether a landing's closures are still owed: queued, or being called.
+    /// Whether a landing's closures, or the run's home, are still owed: queued, or being called.
     fn closing_owed(&self) -> bool {
-        !self.closures.is_empty() || self.closing.is_some()
+        !self.closures.is_empty() || self.closing.is_some() || self.home.is_some() || self.homing
     }
 
     fn queue(&mut self, snapshot: Snapshot) -> bool {
@@ -967,6 +974,8 @@ pub struct Writeback {
     /// a `change-merged` and the `merge-completed` beside it, or a landing a catch-up finds
     /// again — is one call.
     closures_owed: Mutex<BTreeSet<String>>,
+    /// Whether this driver has handed the closure thread the run's home: once per driver.
+    home_owed: std::sync::atomic::AtomicBool,
 }
 
 /// Whose board a driver's projections write to.
@@ -1019,6 +1028,7 @@ impl Writeback {
             held: Mutex::new(None),
             board: Mutex::new(Board::Driving),
             closures_owed: Mutex::new(BTreeSet::new()),
+            home_owed: std::sync::atomic::AtomicBool::new(false),
         };
         // The project is retained in each snapshot rather than in the worker so a malformed
         // old launch record disables projection without weakening LaunchRecord's compatibility.
@@ -1487,11 +1497,39 @@ impl Writeback {
         true
     }
 
-    /// Whether a closure call has finished whose record the loop has not journalled: what
-    /// the reconcile loop's wait is woken by, as it is by a failed projection.
+    /// Owe the run's home its `done`, unless this driver already owes or has made it.
+    ///
+    /// Answers whether it was queued. Never waits: the call is the closure thread's, after the
+    /// closures queued before it.
+    pub(crate) fn settle_home(&self, home: QualifiedId) -> bool {
+        if self
+            .home_owed
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            return false;
+        }
+        let (lock, ready) = &*self.pending;
+        if let Ok(mut pending) = lock.lock() {
+            pending.home = Some(home);
+            ready.notify_all();
+        }
+        true
+    }
+
+    /// Whether a closure call, or the home's, has finished whose record the loop has not
+    /// journalled: what the reconcile loop's wait is woken by, as it is by a failed projection.
     pub(crate) fn has_closed(&self) -> bool {
         let (lock, _) = &*self.pending;
-        lock.lock().is_ok_and(|pending| !pending.closed.is_empty())
+        lock.lock()
+            .is_ok_and(|pending| !pending.closed.is_empty() || pending.homed.is_some())
+    }
+
+    /// Take the record of the home's call, once it has finished.
+    pub(crate) fn take_homed(&self) -> Option<crate::payload::HomeStatus> {
+        let (lock, _) = &*self.pending;
+        lock.lock()
+            .ok()
+            .and_then(|mut pending| pending.homed.take())
     }
 
     /// Take the records of the closure calls that finished since this was last asked.
@@ -2059,22 +2097,46 @@ fn worker(
 ///
 /// A landing still being asked about when the run stops is left with no record, so the next
 /// adoption's catch-up makes its call.
+///
+/// The run's home, once owed, is taken up after every landing queued before it, and asked
+/// about on the same terms: a transient failure again on that schedule, a refusal a record, and
+/// a call still being asked about when the run stops no record, so the next driver to close the
+/// run out makes it — entry 133.
 fn closer(store: &Store, per_item: NonZeroU64, pending: &(Mutex<Pending>, Condvar)) {
     loop {
         let landing = {
             let (lock, ready) = pending;
             let Ok(mut state) = lock.lock() else { return };
-            while state.closures.is_empty() && state.phase != RunPhase::Stopping {
+            while state.closures.is_empty()
+                && state.home.is_none()
+                && state.phase != RunPhase::Stopping
+            {
                 state = match ready.wait(state) {
                     Ok(state) => state,
                     Err(_) => return,
                 };
             }
-            let Some(landing) = state.closures.pop_front() else {
-                return;
-            };
-            state.closing = Some(landing.clone());
-            landing
+            match state.closures.pop_front() {
+                Some(landing) => {
+                    state.closing = Some(landing.clone());
+                    landing
+                }
+                None => {
+                    let Some(home) = state.home.take() else {
+                        return;
+                    };
+                    state.homing = true;
+                    drop(state);
+                    let Some(record) = settle_home(store, per_item, pending, &home) else {
+                        return;
+                    };
+                    let Ok(mut state) = lock.lock() else { return };
+                    state.homing = false;
+                    state.homed = Some(record);
+                    ready.notify_all();
+                    continue;
+                }
+            }
         };
         let mut failures: u32 = 0;
         // The attempt that carried a delivered ticket's failure, which a retry cannot answer.
@@ -2135,6 +2197,38 @@ fn closer(store: &Store, per_item: NonZeroU64, pending: &(Mutex<Pending>, Condva
             state.closed.push(record);
         }
         ready.notify_all();
+    }
+}
+
+/// The run's home marked `done` through [`crate::home::set_done`], a transient failure asked
+/// again on the closures' schedule: the record the call finished in, or `None` where the run
+/// stopped while it was still being asked.
+fn settle_home(
+    store: &Store,
+    per_item: NonZeroU64,
+    pending: &(Mutex<Pending>, Condvar),
+    home: &QualifiedId,
+) -> Option<crate::payload::HomeStatus> {
+    let within = Deadline::Write { per_item, items: 1 }.within();
+    let mut failures: u32 = 0;
+    loop {
+        match crate::home::set_done(store, home, within) {
+            crate::home::Answer::Finished(record) => return Some(record),
+            crate::home::Answer::Transient(reason) => {
+                failures = failures.saturating_add(1);
+                if failures == 1 {
+                    eprintln!(
+                        "onetaskgraph write-back of {home} as done failed: {reason}; retrying, \
+                         spacing further attempts out to {} seconds apart while it keeps failing",
+                        RETRY_CEILING.as_secs()
+                    );
+                }
+                // Binding, as a closure's is, so a close-out does not lift it.
+                if !should_retry_after(pending, Interval::Asked(retry_after(failures))) {
+                    return None;
+                }
+            }
+        }
     }
 }
 
@@ -6257,6 +6351,7 @@ mod tests {
             held: Mutex::new(None),
             board: Mutex::new(super::Board::Driving),
             closures_owed: Mutex::new(std::collections::BTreeSet::new()),
+            home_owed: std::sync::atomic::AtomicBool::new(false),
         };
         writeback.closing_out_until(Instant::now() + super::CLOSEOUT_WAIT, Pending::unlanded);
         assert!(
