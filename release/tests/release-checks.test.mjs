@@ -111,7 +111,7 @@ describe("an ineligible release", () => {
       vars,
       secrets: { GITHUB_TOKEN: "not-a-real-token", ...secrets },
       needs: Object.fromEntries(
-        ["build-linux", "build-macos", "build-windows"].map((job) => [
+        ["build-linux", "build-linux-arm64", "build-macos", "build-windows"].map((job) => [
           job,
           { result: "success", outputs: { published: "success", verified: "success" } },
         ]),
@@ -198,7 +198,7 @@ describe("an ineligible release", () => {
             [],
             `${job}: refused before asking GitHub anything`,
           );
-          for (const platform of ["linux", "macos", "windows", "common"]) {
+          for (const platform of ["linux", "linux-arm64", "macos", "windows", "common"]) {
             assert.ok(!existsSync(join(out, platform, "build.json")), `${job}: nothing was built`);
           }
           ran.push(`${job}: ${step.run}`);
@@ -580,7 +580,7 @@ describe("publish asks every registry before it writes anything", () => {
   async function everyPlatformOnTheRelease() {
     const github = await new GitHubDouble().start();
     const release = github.addRelease(TAG);
-    for (const platform of ["linux", "macos", "windows"]) {
+    for (const platform of ["linux", "linux-arm64", "macos", "windows"]) {
       for (const artifact of JSON.parse((await run("just", [`release-${platform}`, "plan"])).stdout)
         .artifacts) {
         if (artifact.destination === "github-release") {
@@ -653,6 +653,60 @@ describe("publish asks every registry before it writes anything", () => {
       assert.match(result.stderr, /npm could not be asked about onepipeline-cli-/);
     } finally {
       await Promise.all([github.stop(), npm.stop()]);
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses while linux-arm64 alone is missing, naming each of its artifacts, before publishing anything", async () => {
+    // Every other build job's assets and wheels are out; npm serves no platform
+    // package yet, so the launcher must not be published naming any of them.
+    const github = await new GitHubDouble().start();
+    const release = github.addRelease(TAG);
+    const pypi = await new PyPIDouble().start();
+    const npm = new Registry();
+    await npm.start();
+    const home = scratch("npm-home");
+    try {
+      for (const platform of ["linux", "macos", "windows"]) {
+        const plan = JSON.parse((await run("just", [`release-${platform}`, "plan"])).stdout);
+        for (const artifact of plan.artifacts) {
+          if (artifact.destination === "github-release") {
+            release.assets.push({
+              id: github.nextId++,
+              name: artifact.file,
+              content: Buffer.from(artifact.file),
+            });
+          } else if (artifact.destination === "pypi") {
+            pypi.serve(artifact.file, Buffer.from(artifact.file));
+          }
+        }
+      }
+      const result = await publishWith(github, {
+        ...pypi.env(),
+        ...npmConfig(npm, home),
+        PYPI_PUBLISH: "true",
+        NPM_PUBLISH: "true",
+      });
+      assert.match(
+        result.stderr,
+        /not every platform is published, so nothing platform-independent is/,
+      );
+      for (const missing of [
+        `onepipeline-v${VERSION}-aarch64-unknown-linux-gnu.tar.gz on the Release`,
+        `onepipeline-v${VERSION}-aarch64-unknown-linux-gnu.sha256 on the Release`,
+        `onepipeline_cli-${VERSION}-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.whl on PyPI`,
+        `npm:onepipeline-cli-linux-arm64@${VERSION} on npm`,
+      ]) {
+        assert.ok(result.stderr.includes(missing), `names ${missing}: ${said(result)}`);
+      }
+      assert.ok(
+        !result.stderr.includes(`x86_64-unknown-linux-gnu.tar.gz on the Release`),
+        "x86-64 Linux is not missing",
+      );
+      assert.equal(pypi.writes().length, 0, "nothing was uploaded to PyPI");
+      assert.deepEqual(npm.visible("onepipeline-cli"), [], "the launcher was not published");
+    } finally {
+      await Promise.all([github.stop(), pypi.stop(), npm.stop()]);
       rmSync(home, { recursive: true, force: true });
     }
   });
@@ -801,7 +855,7 @@ describe("the release outcome record", () => {
     });
     assert.equal(published.code, 0, said(published));
     const jobs = {};
-    for (const key of ["LINUX", "MACOS", "WINDOWS"]) {
+    for (const key of ["LINUX", "LINUX_ARM64", "MACOS", "WINDOWS"]) {
       Object.assign(jobs, {
         [`${key}_RESULT`]: "success",
         [`${key}_PUBLISHED`]: "success",
@@ -836,7 +890,8 @@ describe("the release outcome record", () => {
     ]);
     try {
       const jobs = {};
-      for (const key of ["LINUX", "MACOS", "WINDOWS"]) jobs[`${key}_RESULT`] = "success";
+      for (const key of ["LINUX", "LINUX_ARM64", "MACOS", "WINDOWS"])
+        jobs[`${key}_RESULT`] = "success";
       const result = await run("just", ["release-outcome"], {
         env: releaseEnv(github, out, { ...jobs, NPM_PUBLISH: "false" }),
       });
@@ -874,7 +929,7 @@ describe("the release outcome record", () => {
       }),
     );
     const jobs = {};
-    for (const key of ["LINUX", "MACOS", "WINDOWS"]) {
+    for (const key of ["LINUX", "LINUX_ARM64", "MACOS", "WINDOWS"]) {
       Object.assign(jobs, {
         [`${key}_RESULT`]: "success",
         [`${key}_PUBLISHED`]: "success",
@@ -902,6 +957,9 @@ describe("the release outcome record", () => {
       LINUX_RESULT: "failure",
       LINUX_PUBLISHED: "skipped",
       LINUX_VERIFIED: "skipped",
+      LINUX_ARM64_RESULT: "success",
+      LINUX_ARM64_PUBLISHED: "success",
+      LINUX_ARM64_VERIFIED: "success",
       MACOS_RESULT: "success",
       MACOS_PUBLISHED: "success",
       MACOS_VERIFIED: "success",
@@ -922,7 +980,7 @@ describe("the release outcome record", () => {
 
   it("records nothing shipped only when no build job reached its publish step", async () => {
     const failedBuilding = {};
-    for (const key of ["LINUX", "MACOS", "WINDOWS"]) {
+    for (const key of ["LINUX", "LINUX_ARM64", "MACOS", "WINDOWS"]) {
       Object.assign(failedBuilding, {
         [`${key}_RESULT`]: "failure",
         [`${key}_PUBLISHED`]: "skipped",
@@ -942,7 +1000,8 @@ describe("the release outcome record", () => {
     // A cancelled job reports no step outcomes, and may have stopped between
     // two uploads, so it is not proof that nothing shipped.
     const cancelled = {};
-    for (const key of ["LINUX", "MACOS", "WINDOWS"]) cancelled[`${key}_RESULT`] = "cancelled";
+    for (const key of ["LINUX", "LINUX_ARM64", "MACOS", "WINDOWS"])
+      cancelled[`${key}_RESULT`] = "cancelled";
     result = await run("just", ["release-outcome"], { env: releaseEnv(github, out, cancelled) });
     assert.equal(result.code, 0, said(result));
     assert.deepEqual(states(recorded())["pypi:onepipeline-cli"], [
@@ -954,7 +1013,7 @@ describe("the release outcome record", () => {
 
   function allJobs(published, verified) {
     const jobs = {};
-    for (const key of ["LINUX", "MACOS", "WINDOWS"]) {
+    for (const key of ["LINUX", "LINUX_ARM64", "MACOS", "WINDOWS"]) {
       Object.assign(jobs, {
         [`${key}_RESULT`]: "success",
         [`${key}_PUBLISHED`]: published[key] ?? "success",
@@ -974,6 +1033,24 @@ describe("the release outcome record", () => {
       }),
     );
   }
+
+  it("records a release whose linux-arm64 build failed as shipped but not verified", async () => {
+    launcherResults("success", "success");
+    const failed = {
+      LINUX_ARM64_RESULT: "failure",
+      LINUX_ARM64_PUBLISHED: "skipped",
+      LINUX_ARM64_VERIFIED: "skipped",
+    };
+    const result = await run("just", ["release-outcome"], {
+      env: releaseEnv(github, out, { ...allJobs({}, {}), ...failed }),
+    });
+    assert.equal(result.code, 0, said(result));
+    const record = recorded();
+    assert.equal(record.outcome, "shipped-unverified");
+    for (const id of ["pypi:onepipeline-cli", "npm:onepipeline-cli"]) {
+      assert.deepEqual(states(record)[id], ["shipped-unverified", "success", "failure"], id);
+    }
+  });
 
   it("records a build job whose publish step failed as shipped but not verified", async () => {
     launcherResults("success", "success");
@@ -1164,14 +1241,16 @@ describe("the release outcome record", () => {
   });
 
   it("refuses a job result GitHub does not report rather than guessing", async () => {
-    const result = await run("just", ["release-outcome"], {
-      env: releaseEnv(github, out, { LINUX_RESULT: "succeeded" }),
-    });
-    assert.equal(result.code, 1, said(result));
-    assert.match(
-      result.stderr,
-      /LINUX_RESULT is 'succeeded', not a job or step result GitHub reports/,
-    );
+    for (const key of ["LINUX_RESULT", "LINUX_ARM64_RESULT"]) {
+      const result = await run("just", ["release-outcome"], {
+        env: releaseEnv(github, out, { [key]: "succeeded" }),
+      });
+      assert.equal(result.code, 1, said(result));
+      assert.match(
+        result.stderr,
+        new RegExp(`${key} is 'succeeded', not a job or step result GitHub reports`),
+      );
+    }
   });
 });
 

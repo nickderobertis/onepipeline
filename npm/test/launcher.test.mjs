@@ -23,6 +23,7 @@ function hostTarget() {
   const key = `${process.platform}-${process.arch}`;
   const targets = {
     "linux-x64": "x86_64-unknown-linux-gnu",
+    "linux-arm64": "aarch64-unknown-linux-gnu",
     "darwin-arm64": "aarch64-apple-darwin",
     "win32-x64": "x86_64-pc-windows-msvc",
   };
@@ -440,10 +441,7 @@ describe("the npm distribution", () => {
     });
   }
 
-  for (const [key, name] of [
-    ["darwin-x64", /Intel macOS \(darwin-x64\) is no longer supported/],
-    ["linux-arm64", /arm64 Linux \(linux-arm64\) is no longer supported/],
-  ]) {
+  for (const [key, name] of [["darwin-x64", /Intel macOS \(darwin-x64\) is no longer supported/]]) {
     it(`refuses ${key} by name rather than looking for a package no release ships`, () => {
       const project = mkdtempSync(join(work, "app-"));
       installInto(project, [launcherTgz]);
@@ -472,6 +470,7 @@ describe("the npm distribution", () => {
     const supported = Object.keys(manifest.optionalDependencies);
     assert.deepEqual(supported.sort(), [
       "onepipeline-cli-darwin-arm64",
+      "onepipeline-cli-linux-arm64",
       "onepipeline-cli-linux-x64",
       "onepipeline-cli-win32-x64",
     ]);
@@ -510,6 +509,7 @@ it("refuses to stage an Intel macOS target, which no release builds any more", (
     );
     assert.equal(refused.status, 1, refused.stderr);
     assert.match(refused.stderr, /unsupported target; choose one of: .*aarch64-apple-darwin/);
+    assert.match(refused.stderr, /choose one of: .*aarch64-unknown-linux-gnu/);
     assert.doesNotMatch(refused.stderr, /choose one of: .*x86_64-apple-darwin/);
     assert.equal(existsSync(out), false);
   } finally {

@@ -3,10 +3,11 @@ name: Release
 # Build, test-install, publish and verify everything a published GitHub Release
 # ships, one platform per job, then the platform-independent rest:
 #
-#   * build-linux   — x86_64-unknown-linux-gnu
-#   * build-macos   — aarch64-apple-darwin (Intel macOS is not built)
-#   * build-windows — x86_64-pc-windows-msvc
-#   * publish       — the crate and the npm launcher, once every platform is out
+#   * build-linux       — x86_64-unknown-linux-gnu
+#   * build-linux-arm64 — aarch64-unknown-linux-gnu, built natively on an arm64 runner
+#   * build-macos       — aarch64-apple-darwin (Intel macOS is not built)
+#   * build-windows     — x86_64-pc-windows-msvc
+#   * publish           — the crate and the npm launcher, once every platform is out
 #
 # Each build job builds its targets once, packages the archive, the wheel and
 # the npm platform package from that one binary, test-installs those exact
@@ -16,7 +17,7 @@ name: Release
 # release and a developer run the same release/release.py, and `just
 # release-<platform> plan` lists everything a job publishes without building it.
 #
-# `publish` needs all three. It refuses a lock that links an engine twice,
+# `publish` needs all four. It refuses a lock that links an engine twice,
 # records the linked engines in the notes, confirms every registry serves every
 # platform, publishes the crate and the launcher, installs both, and records the
 # outcome. A failed build job leaves the platforms that built published and the
@@ -94,6 +95,44 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: just release-linux verify
+
+  # build-linux on GitHub's hosted arm64 runner: the same recipe builds natively
+  # in the aarch64 manylinux2014 image, and verifies on an arm64 host.
+  build-linux-arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    outputs:
+      published: ${{ steps.publish.outcome }}
+      verified: ${{ steps.verify.outcome }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - name: Build, package and test-install the Linux arm64 artifacts
+        run: just release-linux-arm64 build
+      - name: Publish the Linux arm64 artifacts
+        id: publish
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: just release-linux-arm64 publish
+      - name: Install the Linux arm64 artifacts from the registries and run them
+        id: verify
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: just release-linux-arm64 verify
 
   build-macos:
     runs-on: macos-latest
@@ -185,7 +224,7 @@ jobs:
   # Runs when a build job failed too, so the outcome is recorded either way; its
   # publish step runs only when every build job succeeded.
   publish:
-    needs: [build-linux, build-macos, build-windows]
+    needs: [build-linux, build-linux-arm64, build-macos, build-windows]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -206,8 +245,8 @@ jobs:
           tool: just
       - name: Publish the platform-independent artifacts
         if: >-
-          ${{ needs.build-linux.result == 'success' && needs.build-macos.result == 'success'
-          && needs.build-windows.result == 'success' }}
+          ${{ needs.build-linux.result == 'success' && needs.build-linux-arm64.result == 'success'
+          && needs.build-macos.result == 'success' && needs.build-windows.result == 'success' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -225,6 +264,9 @@ jobs:
           LINUX_RESULT: ${{ needs.build-linux.result }}
           LINUX_PUBLISHED: ${{ needs.build-linux.outputs.published }}
           LINUX_VERIFIED: ${{ needs.build-linux.outputs.verified }}
+          LINUX_ARM64_RESULT: ${{ needs.build-linux-arm64.result }}
+          LINUX_ARM64_PUBLISHED: ${{ needs.build-linux-arm64.outputs.published }}
+          LINUX_ARM64_VERIFIED: ${{ needs.build-linux-arm64.outputs.verified }}
           MACOS_RESULT: ${{ needs.build-macos.result }}
           MACOS_PUBLISHED: ${{ needs.build-macos.outputs.published }}
           MACOS_VERIFIED: ${{ needs.build-macos.outputs.verified }}
