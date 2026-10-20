@@ -1,13 +1,9 @@
 //! How often a live follow asks after the session it follows.
 //!
-//! A follow reads its session's stream every twentieth of a second and asks whether the
-//! session has been released far less often: the read is one file, and the ask is a library
-//! call that shells out to `git` in the session's clone about a dozen times. Asked at the
-//! stream's cadence, a follow spawned those processes back to back for the whole of a
-//! publication — on Windows, where a process is the expensive thing, that was most of what a
-//! busy review round cost. What is observed is the ask itself: each one reads the session's
-//! record, so the kernel's record of the driver opening that file is the count, taken
-//! without any knowledge of how the linked library asks.
+//! The cadence's reason is `FOLLOW_CLOSED_ASK`'s, in `src/vcs.rs`. What is observed here is the
+//! ask itself, from outside the binary: each one reads the session's record, so the kernel's
+//! record of the driver opening that file is the count, taken without any knowledge of how
+//! the linked library asks.
 // llmlint: ignore-file[e2e_not_mocked] `oneagentgraph` is the established double at its
 // subprocess boundary, because a real agent turn is a paid one and this journey is about the
 // follow of a publication: the session, its clone, its stream and the push are the real linked
@@ -130,8 +126,6 @@ fn a_live_follow_asks_after_its_session_at_most_every_five_seconds() {
         "the run did not settle once its publication went through"
     );
 
-    // One thread asks — the follow's — and every ask it made after the first is five seconds or
-    // more after the one before.
     let threads: std::collections::BTreeSet<&str> = asked[from..]
         .iter()
         .map(|(thread, _)| thread.as_str())
