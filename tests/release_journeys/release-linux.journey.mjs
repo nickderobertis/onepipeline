@@ -477,6 +477,130 @@ describe("a refused PyPI upload", () => {
   });
 });
 
+describe("a re-run after an earlier attempt published part of the Linux artifacts", () => {
+  const PACKAGE = "onepipeline-cli-linux-x64";
+  const EARLIER = join(ROOT, "target", "release-journeys", `earlier-${process.pid}`);
+
+  /// The build an earlier attempt of this release made: this run's binary with
+  /// bytes appended — still the same program, as a rebuild is, and not the same
+  /// file — packaged into every artifact by the release's own packaging and held
+  /// to the plan, as that attempt's build phase would have left it.
+  const EARLIER_BUILD = String.raw`
+import base64, hashlib, importlib.util, json, sys, zipfile
+from pathlib import Path
+spec = importlib.util.spec_from_file_location('release', 'release/release.py')
+release = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(release)
+source, out = Path(sys.argv[1]), Path(sys.argv[2])
+platform, target = 'linux', 'x86_64-unknown-linux-gnu'
+version = release.cargo_version()
+release.fresh(out)
+wheel = out / 'wheels' / target / source.name
+wheel.parent.mkdir(parents=True)
+with zipfile.ZipFile(source) as old, zipfile.ZipFile(wheel, 'w', zipfile.ZIP_DEFLATED) as new:
+    infos = old.infolist()
+    members = {info.filename: old.read(info) for info in infos}
+    exe = next(name for name in members if name.endswith('.data/scripts/onepipeline'))
+    members[exe] += b'\0built by an earlier attempt of this release\n'
+    record = next(name for name in members if name.endswith('.dist-info/RECORD'))
+    digest = base64.urlsafe_b64encode(hashlib.sha256(members[exe]).digest()).rstrip(b'=').decode()
+    members[record] = ''.join(f'{exe},sha256={digest},{len(members[exe])}\n' if line.split(',')[0] == exe
+                              else line + '\n' for line in members[record].decode().splitlines()).encode()
+    for info in infos:
+        new.writestr(info, members[info.filename])
+built = release.staged.package(target, wheel, out, version)
+paths = {'archive': Path(built['archive']), 'wheel': Path(built['wheel']), 'npm': Path(built['npm']),
+         'checksum': Path(built['archive']).with_name(f'onepipeline-v{version}-{target}.sha256')}
+files = [{**a, 'file': paths[a['kind']].name, 'path': str(paths[a['kind']]),
+          'sha256': hashlib.sha256(paths[a['kind']].read_bytes()).hexdigest()}
+         for a in release.plan(platform, version)['artifacts']]
+release.conform(platform, version, files)
+(out / 'build.json').write_text(json.dumps({'schema_version': 1, 'platform': platform, 'tag': f'v{version}',
+                                            'version': version, 'artifacts': files}))
+`;
+
+  let earlier;
+  before(async () => {
+    const wheel = linux.artifacts.find((a) => a.kind === "wheel").path;
+    const made = await run("python3", ["-c", EARLIER_BUILD, wheel, join(EARLIER, "linux")]);
+    assert.equal(made.code, 0, said(made));
+    earlier = JSON.parse(readFileSync(join(EARLIER, "linux", "build.json"), "utf8"));
+  });
+  after(() => rmSync(EARLIER, { recursive: true, force: true }));
+
+  const file = (build, kind) => build.artifacts.find((a) => a.kind === kind);
+
+  it("keeps everything the earlier attempt published, and verifies that build", async () => {
+    const s = await services();
+    try {
+      // The earlier attempt gave up on npm, which then served its package.
+      s.npm.lagFor(PACKAGE, 8000);
+      const gaveUp = await run("just", ["release-linux", "publish"], {
+        env: { ...s.env, ONEPIPELINE_RELEASE_OUT: EARLIER, PUBLISH_NPM_AWAIT_BUDGET: "2" },
+      });
+      assert.equal(gaveUp.code, 1, said(gaveUp));
+      assert.match(gaveUp.stderr, new RegExp(`still does not serve '${PACKAGE}@`));
+      for (const deadline = Date.now() + 30_000; !s.npm.visible(PACKAGE).includes(VERSION); ) {
+        assert.ok(Date.now() < deadline, "npm never served the earlier attempt's package");
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+      const landed = writesOf(s);
+
+      const env = { ...s.env, ONEPIPELINE_RELEASE_OUT: OUT };
+      const rerun = await run("just", ["release-linux", "publish"], { env });
+      assert.equal(rerun.code, 0, said(rerun));
+      assert.match(rerun.stdout, /PyPI already holds .* from an earlier attempt/, said(rerun));
+      assert.match(rerun.stdout, /npm already holds .* from an earlier attempt/, said(rerun));
+      assert.match(rerun.stdout, /the Release already holds .* from an earlier attempt .*; kept/);
+      assert.deepEqual(writesOf(s), landed, "nothing was uploaded again");
+
+      const verified = await run("just", ["release-linux", "verify"], { env });
+      assert.equal(verified.code, 0, said(verified));
+      assert.match(verified.stdout, /installs from its registry and runs$/m);
+      assert.doesNotMatch(verified.stdout, /more than one build/, said(verified));
+      assert.equal(
+        sha(s.pypi.files.get(file(earlier, "wheel").file).content),
+        file(earlier, "wheel").sha256,
+        "what verify installed from PyPI is the earlier attempt's wheel",
+      );
+    } finally {
+      await s.stop();
+    }
+  });
+
+  it("reports the registries serving two builds when npm took none of the earlier one", async () => {
+    const s = await services();
+    try {
+      // The earlier attempt reached the Release and PyPI, and npm refused it.
+      s.npm.refuseNextPublish = true;
+      const refused = await run("just", ["release-linux", "publish"], {
+        env: { ...s.env, ONEPIPELINE_RELEASE_OUT: EARLIER },
+      });
+      assert.equal(refused.code, 1, said(refused));
+
+      const env = { ...s.env, ONEPIPELINE_RELEASE_OUT: OUT };
+      const rerun = await run("just", ["release-linux", "publish"], { env });
+      assert.equal(rerun.code, 0, said(rerun));
+      assert.match(
+        rerun.stdout,
+        /the Release already holds .* from an earlier attempt .*; kept, because PyPI holds/,
+      );
+      const verified = await run("just", ["release-linux", "verify"], { env });
+      assert.equal(verified.code, 0, said(verified));
+      assert.match(
+        verified.stdout,
+        new RegExp(
+          `^release: ${TARGET} is served as more than one build: the Release \\S+, PyPI \\S+, npm \\S+;`,
+          "m",
+        ),
+        said(verified),
+      );
+    } finally {
+      await s.stop();
+    }
+  });
+});
+
 describe("registry verification refuses what a user could not run", () => {
   /// A double serving the Linux artifacts, with one of them replaced.
   async function serving({ wheel = true, npmBinary = null, npmVersion = VERSION } = {}) {

@@ -68,18 +68,21 @@ optional dependency it cannot resolve**, leaving an `onepipeline` on `PATH` with
 nothing to exec.
 
 **`npm publish` exiting 0 means the registry accepted the upload, not that it
-serves the version.** The gap was measured at 75 seconds on one release and
-around eight minutes on another. So the order a release publishes in is not the
-order the registry becomes able to answer in, and offering the launcher on the
-strength of five exit codes is what put a broken install in front of users for a
-window after each release.
+serves the version.** The gap was measured at 75 seconds on one release, around
+eight minutes on another, and past ten minutes on two of v0.80.0's packages. So
+the order a release publishes in is not the order the registry becomes able to
+answer in, and offering the launcher on the strength of five exit codes is what
+put a broken install in front of users for a window after each release.
 
 `scripts/publish-npm.sh` therefore asks the registry rather than the exit code:
 it does not return until the version it just published is served, and it refuses
 to publish any package before the exact versions that package's own manifest
-pins are served. Each platform's build job then installs its own platform
-package from npm and starts it on that OS, and `publish` installs and starts the
-launcher, so a release that would ship that window is red rather than green.
+pins are served, waiting at most `PUBLISH_NPM_AWAIT_BUDGET` seconds (fifteen
+minutes by default) in all. A job that gives up has still published, and its
+re-run keeps what npm took rather than publishing it again. Each platform's
+build job then installs its own platform package from npm and starts it on that
+OS, and `publish` installs and starts the launcher, so a release that would ship
+that window is red rather than green.
 
 ## Release outcome
 

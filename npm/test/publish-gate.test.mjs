@@ -607,6 +607,70 @@ describe("the npm publish order", () => {
     );
   });
 
+  it("waits fifteen minutes for npm by default, which v0.80.0's packages needed", async () => {
+    const reg = await freshRegistry();
+    const host = platforms.get(hostTarget());
+    // npm took more than 600s to serve two of v0.80.0's platform packages, and
+    // the job gave up on both. The wait it now allows is what its line names.
+    reg.holdUntilRead(host.name, 1);
+    const published = await attempt("bash", ["scripts/publish-npm.sh", host.tgz], {
+      env: { ...env, PUBLISH_NPM_AWAIT_INTERVAL: "1" },
+    });
+    assert.equal(published.code, 0, published.stderr);
+    const allowed = published.stderr.match(/within the (\d+)s this run waits for npm in all/);
+    assert.ok(allowed, `the wait named no deadline: ${published.stderr}`);
+    assert.ok(Number(allowed[1]) >= 900, `${allowed[1]}s is less than fifteen minutes`);
+  });
+
+  it("waits for every package it is handed within one deadline, not one each", async () => {
+    const reg = await freshRegistry();
+    // Each lags less than the deadline, and the two together more: a job's wait
+    // for npm is bounded by the deadline whatever number of packages it hands over.
+    const [first, second] = [...platforms.entries()]
+      .filter(([triple]) => triple !== hostTarget())
+      .map(([, platform]) => platform);
+    reg.lagFor(first.name, 3500);
+    reg.lagFor(second.name, 3500);
+    const refused = await attempt("bash", ["scripts/publish-npm.sh", first.tgz, second.tgz], {
+      env: { ...env, PUBLISH_NPM_AWAIT_BUDGET: "5", PUBLISH_NPM_AWAIT_INTERVAL: "1" },
+    });
+    assert.equal(refused.code, 1, refused.stderr);
+    assert.match(refused.stderr, new RegExp(`does not serve '${second.name}@${version}'`));
+    assert.match(refused.stderr, /the end of the 5s this run waits for npm in all/);
+    assert.ok(reg.visibleAt(`${first.name}@${version}`), "the first package was waited for");
+  });
+
+  it("waits for a package an earlier attempt published and npm does not serve yet, rather than failing", async () => {
+    const reg = await freshRegistry();
+    const host = platforms.get(hostTarget());
+    // The earlier attempt's upload was accepted and is still unserved when the
+    // re-run reaches it, so the re-run's publish is refused as a publish-over.
+    reg.holdUntilRead(host.name, 3);
+    const gaveUp = await attempt("bash", ["scripts/publish-npm.sh", host.tgz], {
+      env: { ...env, PUBLISH_NPM_AWAIT_BUDGET: "0", PUBLISH_NPM_AWAIT_INTERVAL: "1" },
+    });
+    assert.equal(gaveUp.code, 1, gaveUp.stderr);
+    assert.match(gaveUp.stderr, /still does not serve/);
+
+    const rerun = await attempt("bash", ["scripts/publish-npm.sh", host.tgz], {
+      env: { ...env, PUBLISH_NPM_AWAIT_INTERVAL: "1" },
+    });
+    assert.equal(rerun.code, 0, rerun.stderr);
+    assert.match(
+      rerun.stderr,
+      new RegExp(
+        `npm already holds ${host.name}@${version.replace(/\./g, "\\.")} from an earlier attempt`,
+      ),
+    );
+    assert.match(rerun.stdout, new RegExp(`published none; already on npm ${host.name}@`));
+    assert.equal(
+      reg.timeline.filter((e) => e.kind === "accepted").length,
+      1,
+      "the package was uploaded once",
+    );
+    assert.ok(reg.visibleAt(`${host.name}@${version}`), "the re-run returned before npm served it");
+  });
+
   it("refuses after publishing when the registry will not serve what it took", async () => {
     const reg = await freshRegistry();
     const host = platforms.get(hostTarget());
