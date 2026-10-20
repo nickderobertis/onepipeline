@@ -162,6 +162,10 @@ it installs back from its registry. The platform-independent artifacts wait for
 every platform. **A failed build job leaves the platforms that built published
 and the platform-independent artifacts unpublished** until the failed job and
 then `publish` are re-run; every upload skips what its registry already serves.
+A rebuild is not byte-identical, so a re-run keeps what PyPI and npm took from
+an earlier attempt rather than uploading over it, and the Release's archive
+follows them (`release/release.py`'s `publish` says how); verify reports a
+platform its registries serve as more than one build.
 
 **Where each tier runs follows from that release model.** Releases are batched:
 every merge since the last tag rides one release-plz release PR, so the commit

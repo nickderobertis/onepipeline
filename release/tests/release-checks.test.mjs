@@ -731,6 +731,204 @@ describe("publish asks every registry before it writes anything", () => {
   });
 });
 
+/// The interpreter `just _release-python` runs on this host.
+const PYTHON = process.platform === "win32" ? "python" : "python3";
+
+/// The Windows build job's build phase, minus the compiler, which this host does
+/// not have: a wheel whose executable is `payload`, packaged into the archive,
+/// its checksum and the npm package by the release's own packaging
+/// (`scripts/build-staged-release.py`), held to the plan, and listed in the
+/// build.json that phase writes. Two attempts' builds differ in the binary's
+/// bytes and nothing else, which is how a re-run's rebuild differs from the
+/// build an earlier attempt published.
+const STAND_IN_BUILD = String.raw`
+import hashlib, importlib.util, json, sys, zipfile
+from pathlib import Path
+spec = importlib.util.spec_from_file_location('release', 'release/release.py')
+release = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(release)
+out, payload = Path(sys.argv[1]), sys.argv[2].encode()
+platform, target = 'windows', 'x86_64-pc-windows-msvc'
+version = release.cargo_version()
+release.fresh(out)
+wheel = out / 'wheels' / target / release.wheel_name(version, target)
+wheel.parent.mkdir(parents=True)
+stem = f'onepipeline_cli-{version}'
+with zipfile.ZipFile(wheel, 'w') as bundle:
+    bundle.writestr(f'{stem}.dist-info/METADATA', f'Metadata-Version: 2.1\nName: onepipeline-cli\nVersion: {version}\n')
+    bundle.writestr(f'{stem}.dist-info/WHEEL', 'Wheel-Version: 1.0\nGenerator: release-checks\nRoot-Is-Purelib: false\nTag: py3-none-win_amd64\n')
+    bundle.writestr(f'{stem}.dist-info/sboms/onepipeline.cyclonedx.json', '{"bomFormat": "CycloneDX"}')
+    bundle.writestr(f'{stem}.data/scripts/onepipeline.exe', payload)
+    bundle.writestr(f'{stem}.dist-info/RECORD', '')
+record = release.staged.package(target, wheel, out, version)
+paths = {'archive': Path(record['archive']), 'wheel': Path(record['wheel']), 'npm': Path(record['npm']),
+         'checksum': Path(record['archive']).with_name(f'onepipeline-v{version}-{target}.sha256')}
+files = [{**a, 'file': paths[a['kind']].name, 'path': str(paths[a['kind']]),
+          'sha256': hashlib.sha256(paths[a['kind']].read_bytes()).hexdigest()}
+         for a in release.plan(platform, version)['artifacts']]
+release.conform(platform, version, files)
+(out / 'build.json').write_text(json.dumps({'schema_version': 1, 'platform': platform, 'tag': f'v{version}',
+                                            'version': version, 'artifacts': files}))
+`;
+
+describe("a re-run of a build job whose earlier attempt published part of it", () => {
+  const PACKAGE = "onepipeline-cli-win32-x64";
+
+  /// A build of the Windows job's artifacts under `base`, as its build phase leaves it.
+  async function standInBuild(base, payload) {
+    const result = await run(PYTHON, ["-c", STAND_IN_BUILD, join(base, "windows"), payload]);
+    assert.equal(result.code, 0, said(result));
+    const manifest = JSON.parse(readFileSync(join(base, "windows", "build.json"), "utf8"));
+    const of = (kind) => manifest.artifacts.find((a) => a.kind === kind);
+    return { manifest, of, bytes: (kind) => readFileSync(of(kind).path) };
+  }
+
+  async function services() {
+    const github = await new GitHubDouble().start();
+    github.addRelease(TAG);
+    const pypi = await new PyPIDouble().start();
+    const npm = new Registry();
+    await npm.start();
+    const home = scratch("npm-home");
+    const env = (out) =>
+      releaseEnv(github, out, {
+        ...pypi.env(),
+        ...npmConfig(npm, home),
+        UV_CACHE_DIR: join(home, "uv-cache"),
+        PUBLISH_NPM_AWAIT_BUDGET: "2",
+        PUBLISH_NPM_AWAIT_INTERVAL: "1",
+      });
+    /// Every upload each registry has taken, by what it took.
+    const writes = () => ({
+      release: github
+        .writes()
+        .map(
+          (r) =>
+            `${r.method} ${r.method === "POST" ? new URLSearchParams(r.query).get("name") : r.path}`,
+        ),
+      pypi: pypi.writes().length,
+      npm: npm.timeline.filter((e) => e.kind === "accepted").map((e) => e.identity),
+    });
+    const stop = async () => {
+      await Promise.all([github.stop(), pypi.stop(), npm.stop()]);
+      rmSync(home, { recursive: true, force: true });
+    };
+    return { github, pypi, npm, env, writes, stop };
+  }
+
+  /// What each registry serves of this platform now, as bytes or an npm integrity.
+  async function served(s, build) {
+    const asset = (kind) =>
+      s.github.release(TAG).assets.find((a) => a.name === build.of(kind).file)?.content;
+    const integrity = await run("npm", ["view", `${PACKAGE}@${VERSION}`, "dist.integrity"], {
+      env: npmConfig(s.npm, scratch("npm-view")),
+    });
+    return {
+      archive: asset("archive"),
+      checksum: asset("checksum"),
+      wheel: s.pypi.files.get(build.of("wheel").file)?.content,
+      npm: integrity.stdout.trim(),
+    };
+  }
+
+  function integrityOf(buffer) {
+    return `sha512-${createHash("sha512").update(buffer).digest("base64")}`;
+  }
+
+  /// The registries serve every file of `build`, and so one build.
+  async function servesOnly(s, build, label) {
+    const now = await served(s, build);
+    assert.ok(now.archive?.equals(build.bytes("archive")), `the Release serves ${label}'s archive`);
+    assert.ok(
+      now.checksum?.equals(build.bytes("checksum")),
+      `the Release serves ${label}'s checksum`,
+    );
+    assert.ok(now.wheel?.equals(build.bytes("wheel")), `PyPI serves ${label}'s wheel`);
+    assert.equal(now.npm, integrityOf(build.bytes("npm")), `npm serves ${label}'s package`);
+  }
+
+  async function until(condition, what) {
+    for (const deadline = Date.now() + 30_000; Date.now() < deadline; ) {
+      if (condition()) return;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    assert.fail(`${what} within 30s`);
+  }
+
+  it("treats what the earlier attempt published as published, uploading nothing again", async () => {
+    const s = await services();
+    const first = scratch("release-attempt-1");
+    const second = scratch("release-attempt-2");
+    try {
+      // v0.80.0's first attempt: every upload accepted, and npm serving the
+      // package only after the job had given up waiting for it.
+      const earlier = await standInBuild(first, "the first attempt's onepipeline.exe");
+      s.npm.lagFor(PACKAGE, 8000);
+      const gaveUp = await run("just", ["release-windows", "publish"], { env: s.env(first) });
+      assert.equal(gaveUp.code, 1, said(gaveUp));
+      assert.match(gaveUp.stderr, new RegExp(`still does not serve '${PACKAGE}@`), said(gaveUp));
+      await until(() => s.npm.visible(PACKAGE).includes(VERSION), "npm served the package");
+      const landed = s.writes();
+
+      // The re-run rebuilds, and the binary is not byte-reproducible.
+      const rebuilt = await standInBuild(second, "the second attempt's onepipeline.exe");
+      for (const kind of ["archive", "checksum", "wheel", "npm"]) {
+        assert.notEqual(rebuilt.of(kind).sha256, earlier.of(kind).sha256, `${kind} differs`);
+      }
+      const rerun = await run("just", ["release-windows", "publish"], { env: s.env(second) });
+      assert.equal(rerun.code, 0, said(rerun));
+      for (const line of [
+        `PyPI already holds ${earlier.of("wheel").file} from an earlier attempt of ${TAG}`,
+        `npm already holds ${PACKAGE}@${VERSION} from an earlier attempt of ${TAG}`,
+        `the Release already holds ${earlier.of("archive").file} and ${earlier.of("checksum").file} from an earlier attempt of ${TAG}; kept`,
+      ]) {
+        assert.ok(rerun.stdout.includes(line), `says: ${line}\n${said(rerun)}`);
+      }
+      assert.deepEqual(s.writes(), landed, "nothing was uploaded, replaced or deleted again");
+      await servesOnly(s, earlier, "the first attempt");
+    } finally {
+      await s.stop();
+      rmSync(first, { recursive: true, force: true });
+      rmSync(second, { recursive: true, force: true });
+    }
+  });
+
+  it("replaces the earlier attempt's Release assets when neither PyPI nor npm holds that build", async () => {
+    const s = await services();
+    const first = scratch("release-attempt-1");
+    const second = scratch("release-attempt-2");
+    try {
+      // The first attempt uploaded the Release's pair, then PyPI refused it,
+      // so nothing of that build reached a registry that cannot replace a file.
+      await standInBuild(first, "the first attempt's onepipeline.exe");
+      s.pypi.refuseNext(
+        "POST",
+        /^\/legacy\/$/,
+        403,
+        "Invalid or non-existent authentication information.",
+      );
+      const refused = await run("just", ["release-windows", "publish"], { env: s.env(first) });
+      assert.equal(refused.code, 1, said(refused));
+      assert.equal(s.pypi.files.size, 0, said(refused));
+
+      const rebuilt = await standInBuild(second, "the second attempt's onepipeline.exe");
+      const rerun = await run("just", ["release-windows", "publish"], { env: s.env(second) });
+      assert.equal(rerun.code, 0, said(rerun));
+      assert.ok(
+        rerun.stdout.includes(
+          `the Release held ${rebuilt.of("archive").file} and ${rebuilt.of("checksum").file} from an earlier attempt of ${TAG}; replaced with this build's`,
+        ),
+        said(rerun),
+      );
+      await servesOnly(s, rebuilt, "the second attempt");
+    } finally {
+      await s.stop();
+      rmSync(first, { recursive: true, force: true });
+      rmSync(second, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("a lock that links an engine twice", () => {
   let github;
   let copy;

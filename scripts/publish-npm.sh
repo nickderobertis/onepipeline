@@ -30,12 +30,16 @@ refuse() {
   exit 2
 }
 
-# How long to keep asking the registry, and how often. Ten minutes is far past
-# the worst lag observed (v0.22.3's linux-arm64 took eight) and still inside a
-# release job's patience. Both are settable so the journeys in
-# npm/test/publish-gate.test.mjs can drive the exhausted budget in seconds
-# rather than in minutes; nothing in CI sets either.
-await_budget="${PUBLISH_NPM_AWAIT_BUDGET:-600}"
+# How long to keep asking the registry, and how often. The budget is one
+# deadline for everything this invocation waits on, measured on the clock from
+# the first time the registry is found not to serve something, so a job handing
+# it several packages waits at most this long in all rather than this long per
+# package. Fifteen minutes because ten was not enough: v0.80.0's linux-x64 took
+# 513s and its linux-arm64 and darwin-arm64 packages were still unserved after
+# 600s. Both are settable so the journeys in npm/test/publish-gate.test.mjs can
+# drive the exhausted deadline in seconds rather than in minutes; nothing in CI
+# sets either.
+await_budget="${PUBLISH_NPM_AWAIT_BUDGET:-900}"
 await_interval="${PUBLISH_NPM_AWAIT_INTERVAL:-3}"
 
 # Both reach `sleep` and the arithmetic below, so they are checked here rather
@@ -68,11 +72,11 @@ await_interval=$((10#$interval_digits))
 
 # All digits is not yet a number of seconds: bash counts in `intmax_t` and
 # **wraps silently** rather than failing, so 2^63 comes back negative and 2^64
-# comes back 0. The negative one is why this is checked at all — `waited -ge
-# budget` below is true on the first miss, so an operator who asked for an
-# enormous wait would get none, and publish the unresolvable launcher this
-# script exists to hold back. Refused rather than clamped: a wait nobody asked
-# for is not a repair.
+# comes back 0. The negative one is why this is checked at all — a deadline of
+# now plus a negative budget has passed on the first miss, so an operator who
+# asked for an enormous wait would get none, and publish the unresolvable
+# launcher this script exists to hold back. Refused rather than clamped: a wait
+# nobody asked for is not a repair.
 [ "$await_budget" = "$(without_leading_zeros "$budget_digits")" ] || refuse \
   "PUBLISH_NPM_AWAIT_BUDGET is '$budget_digits', which is more seconds than this shell can hold" \
   "unset it to take the default, or set it to a whole number of seconds below $((1 << 62))"
@@ -104,10 +108,17 @@ registry_state() {
   return 2
 }
 
+# The one deadline every wait below shares, in bash's own clock (`SECONDS`, so
+# the time each `npm view` takes counts too): unset until the registry is first
+# found not to serve something, then that instant plus the budget. A job hands
+# this every npm package it publishes in one call, so the budget bounds the job's
+# whole wait for npm rather than each package's.
+deadline=""
+
 # Block until the registry serves `name@version`, or refuse. `$2` is what the
-# caller was about to do, so an exhausted budget says which promise broke.
+# caller was about to do, so an exhausted deadline says which promise broke.
 await_served() {
-  local identity="$1" next="$2" waited=0 state
+  local identity="$1" next="$2" started="$SECONDS" missed="" state
   while true; do
     state=0
     registry_state "$identity" || state=$?
@@ -117,10 +128,11 @@ await_served() {
         # success on purpose, and it is printed only when the registry actually
         # lagged — a healthy release prints none. It is the one warning anybody
         # gets while a publish is stalled, before the run that exhausts the
-        # budget, and it names which package stalled. scripts/retry-install.sh
-        # carries the same directive for the same reason.
-        if [ "$waited" -gt 0 ]; then
-          printf 'publish-npm: the registry took %ss to serve %s\n' "$waited" "$identity" >&2
+        # deadline, and it names which package stalled and how close it came.
+        # scripts/retry-install.sh carries the same directive for the same reason.
+        if [ -n "$missed" ]; then
+          printf 'publish-npm: the registry took %ss to serve %s, within the %ss this run waits for npm in all\n' \
+            "$((SECONDS - started))" "$identity" "$await_budget" >&2
         fi
         # llmlint: ignore-end[tool_output_is_signal]
         return 0
@@ -130,11 +142,12 @@ await_served() {
         fail "cannot query '$identity'; re-run the release when the npm registry is reachable"
         ;;
     esac
-    if [ "$waited" -ge "$await_budget" ]; then
-      fail "the registry still does not serve '$identity' after ${waited}s, so $next would install against a version nothing can resolve; re-run the release once https://www.npmjs.com/package/${identity%@*} shows it"
+    missed=1
+    [ -n "$deadline" ] || deadline=$((SECONDS + await_budget))
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      fail "the registry still does not serve '$identity' after $((SECONDS - started))s, the end of the ${await_budget}s this run waits for npm in all, so $next would install against a version nothing can resolve; re-run the release once https://www.npmjs.com/package/${identity%@*} shows it"
     fi
     sleep "$await_interval"
-    waited=$((waited + await_interval))
   done
 }
 
@@ -245,14 +258,24 @@ for package in "$@"; do
   if npm view "$identity" version --prefer-online >/dev/null 2>"$work/view-error"; then
     skipped="$skipped $identity"
   elif grep -Eq 'E404|404 Not Found' "$work/view-error"; then
-    if ! npm publish "$package" --access public >"$work/publish-output" 2>&1; then
+    if npm publish "$package" --access public >"$work/publish-output" 2>&1; then
+      # The upload was accepted. Whether the registry *serves* it is the
+      # separate question this whole file exists to stop assuming.
+      await_served "$identity" "whatever this release publishes next"
+      published="$published $identity"
+    elif grep -Eqi 'cannot publish over the previously published version' "$work/publish-output"; then
+      # npm took this version from an earlier attempt of the release and does
+      # not serve it yet — the attempt that gave up waiting is how a re-run gets
+      # here. A version is immutable, so the earlier upload is what this release
+      # ships; it is waited for like an upload of this run's, never re-sent.
+      printf 'publish-npm: npm already holds %s from an earlier attempt and does not serve it yet; waiting for it rather than publishing it again\n' \
+        "$identity" >&2
+      await_served "$identity" "whatever this release publishes next"
+      skipped="$skipped $identity"
+    else
       cat "$work/publish-output" >&2
       fail "npm could not publish '$identity'; fix the reported authentication or package error, then re-run the release"
     fi
-    # The upload was accepted. Whether the registry *serves* it is the separate
-    # question this whole file exists to stop assuming.
-    await_served "$identity" "whatever this release publishes next"
-    published="$published $identity"
   else
     cat "$work/view-error" >&2
     fail "cannot query '$identity'; re-run the release when the npm registry is reachable"
