@@ -1,0 +1,47 @@
+{
+  "schema": 1,
+  "shots": [
+    {
+      "name": "help",
+      "toggles": {},
+      "hash": "389ed45c2146a75a43cc4df021d9f52fffece07d7ad45b578b3ce0feb16dd8b4",
+      "image": "help.svg"
+    },
+    {
+      "name": "monitor",
+      "toggles": {},
+      "hash": "7f79625ee726197f72c3a812811bacc2cced8a8cf3f68f4ea78f15402ff85fdc",
+      "image": "monitor.svg"
+    },
+    {
+      "name": "results",
+      "toggles": {},
+      "hash": "75c79e759394d4a47a1a2dbf4a5d5cfeea5b75be22fa8defa0f2157517ecc1c3",
+      "image": "results.svg"
+    },
+    {
+      "name": "runs",
+      "toggles": {},
+      "hash": "7ca8f10e421b2aab5ab078a21a491552839d47af7707ac916328bc0c8efb129f",
+      "image": "runs.svg"
+    },
+    {
+      "name": "status",
+      "toggles": {},
+      "hash": "79219160efd18ec94d0a5a3ff24c305f759dce39f9bfe20b9c42a23693fbf355",
+      "image": "status.svg"
+    },
+    {
+      "name": "telemetry",
+      "toggles": {},
+      "hash": "02d8c5abe1e28eb4295eea0c2b8c16ede7db813a04faa311aeecbe5f65b3252b",
+      "image": "telemetry.svg"
+    },
+    {
+      "name": "watch",
+      "toggles": {},
+      "hash": "9a60736c01aef7b48494f19bfdd8394e1ee1a1b7b3b02707126bd8c40c506054",
+      "image": "watch.svg"
+    }
+  ]
+}
