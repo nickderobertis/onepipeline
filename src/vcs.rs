@@ -32,7 +32,7 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use onevcs::{
     DraftReason, EventStream, Lifecycle, MergePolicy, Providers, Publication, PublishOutcome,
@@ -1892,6 +1892,18 @@ fn kind_of(kind: onevcs::EventKind) -> crate::event::EventKind {
 /// How often a follow asks the stream for what has been appended since.
 const FOLLOW_POLL: Duration = Duration::from_millis(20);
 
+/// How often, at most, a follow asks whether its session has been released.
+///
+/// Far less often than it reads the stream, because the two cost different
+/// things: a read of the stream is a read of one file, and asking after the
+/// session is a library call that shells out to `git` in its clone, a dozen
+/// processes each time. Asked at the stream's cadence, a follow spawned them
+/// back to back for the whole of a publication, on a host where a process is
+/// the expensive thing — and what ends a follow its owner is still holding is
+/// [`Follower::finish`], not this; this ends one whose session somebody else
+/// released.
+const SETTLED_POLL: Duration = Duration::from_secs(1);
+
 /// A session's own event stream, followed as `onevcs` writes it.
 ///
 /// Read *once at settlement*, a lifecycle node's push, change request, check
@@ -1918,20 +1930,29 @@ pub fn follow(
     let followed = token.clone();
     let reader = std::thread::Builder::new()
         .name(format!("onevcs-{}-events", token.0))
-        .spawn(move || loop {
-            // Read *before* asking whether the session closed, so a record
-            // written between the two is relayed on the next pass rather than
-            // lost to a follow that stopped one read early.
-            for envelope in next_batch(&mut stream, &followed) {
-                if let Ok(mut reached) = reached.lock() {
-                    reached.reached(&envelope);
+        .spawn(move || {
+            let mut asked: Option<Instant> = None;
+            loop {
+                // Read *before* asking whether the session closed, so a record
+                // written between the two is relayed on the next pass rather than
+                // lost to a follow that stopped one read early.
+                for envelope in next_batch(&mut stream, &followed) {
+                    if let Ok(mut reached) = reached.lock() {
+                        reached.reached(&envelope);
+                    }
+                    sink(envelope);
                 }
-                sink(envelope);
+                if stopping.load(Ordering::SeqCst) {
+                    return;
+                }
+                if asked.is_none_or(|at| at.elapsed() >= SETTLED_POLL) {
+                    asked = Some(Instant::now());
+                    if settled(&followed) {
+                        return;
+                    }
+                }
+                std::thread::sleep(FOLLOW_POLL);
             }
-            if stopping.load(Ordering::SeqCst) || settled(&followed) {
-                return;
-            }
-            std::thread::sleep(FOLLOW_POLL);
         });
     match reader {
         Ok(reader) => Some(Follower {

@@ -987,12 +987,14 @@ impl Watch {
     /// launches on branch readiness alone, and a node whose every dependency
     /// resolved to nothing outside its repository is never held.
     pub(crate) fn held(&self, watching: &[Node]) -> BTreeSet<String> {
+        // The adoption last: it is read off `onevcs`'s configuration, and a node nothing
+        // is unresolved or awaited for is held by no answer it could give.
         watching
             .iter()
-            .filter(|node| adoption_of(node) == Adoption::Published)
             .filter(|node| {
                 self.unresolved.contains_key(&node.id) || self.awaits_a_release(&node.id)
             })
+            .filter(|node| adoption_of(node) == Adoption::Published)
             .map(|node| node.id.clone())
             .collect()
     }
@@ -1387,10 +1389,11 @@ impl Watch {
     /// back on that branch to move the pin, and lifting the draft is what that
     /// worker's own publication then does.
     pub(crate) fn ready_to_adopt(&self, told: &[Node]) -> Vec<(String, Vec<Released>)> {
+        // The adoption last, for the reason `held` reads it last.
         told.iter()
-            .filter(|node| adoption_of(node) == Adoption::Fast)
             .filter(|node| !self.adopted.contains(&node.id))
             .filter(|node| self.all_released(&node.id))
+            .filter(|node| adoption_of(node) == Adoption::Fast)
             .map(|node| (node.id.clone(), self.released(&node.id)))
             .collect()
     }
