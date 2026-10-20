@@ -1234,8 +1234,8 @@ impl GitHubEndpoint {
         Self::start(world, &json!({}), false, None, None, Some(plan)).listening(world)
     }
 
-    /// Answer every later Status write of the plan's home with `fault`: `refuse`, `fail` or
-    /// `pass`.
+    /// Answer every later Status write of the plan's home with `fault`: `refuse`, `fail`,
+    /// `fail-once` or `pass`.
     pub(super) fn home_fault(&self, fault: &str) {
         self.post("/home-fault", &json!({"fault": fault}));
     }

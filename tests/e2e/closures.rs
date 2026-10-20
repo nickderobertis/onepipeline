@@ -21,7 +21,9 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 
 use crate::draft_lifecycle::{team_repository, GREEN};
-use crate::harness::{agent, double, git, lifecycle, onevcs_binary, plan_of, Repository, World};
+use crate::harness::{
+    agent, double, git, human, lifecycle, onevcs_binary, plan_of, Repository, World,
+};
 use crate::linear_loopback::Linear;
 use crate::linear_writeback::{from_the_launch_directory, GitHubEndpoint};
 use crate::stacked_drafts::{change_from, settled};
@@ -2454,4 +2456,237 @@ fn a_home_the_board_refuses_is_recorded_failed_and_surfaced_without_touching_the
         crate::run_end_hooks::invocations(&world, BOARD_RUN),
         ["success"]
     );
+}
+
+/// A board that fails the home's write once, for now, is asked again by the same driver on the
+/// closures' schedule: the run's own close-out writes the home `done` and records it once, with
+/// nothing left for an adoption.
+#[test]
+fn a_home_write_that_fails_for_now_is_asked_again_by_the_same_driver() {
+    let (world, served, launch) = home_world(
+        "home-retried",
+        &json!({"tasks": {"only": []}, "status": "In Progress"}),
+    );
+    served.home_fault("fail-once");
+    from_launch(&world, &launch, &["start", BOARD_HOME, "--detach"]).exited(0);
+    world.until("the run to settle and record its home", |world| {
+        !homes_of(world, BOARD_RUN).is_empty()
+            && !world.events_of(BOARD_RUN, "driver-exited").is_empty()
+    });
+    assert_eq!(home_card(&served), home_done());
+    home_written(&world);
+    let (status, closed) = home_writes(&served);
+    assert_eq!(
+        (status.len(), closed.len()),
+        (2, 1),
+        "{status:#?} {closed:#?}"
+    );
+    assert_eq!(world.events_of(BOARD_RUN, "driver-adopted").len(), 0);
+}
+
+/// The `local-md` home a journey's run is launched from, by its file.
+fn local_home(world: &World, run: &str) -> PathBuf {
+    world
+        .store()
+        .join("projects")
+        .join(format!("{}.md", crate::harness::project_id(run)))
+}
+
+/// A run whose store configuration stops loading before it settles still settles `done`, and
+/// its one `home-status` record says `failed` — refused, in the store's words — which one
+/// non-blocking planner surface names beside the home; the home itself is not written.
+#[test]
+fn a_home_whose_store_configuration_stops_loading_is_recorded_failed() {
+    let world = World::new("home-unloaded");
+    let notes = world.root.join("notes");
+    std::fs::create_dir_all(&notes).expect("the notes source's root");
+    let launch = launch_dir(
+        &world,
+        &format!(
+            "  notes:\n    plugin: local-md\n    config:\n      root: {}\n",
+            notes.display()
+        ),
+    );
+    world.script("work.wait", "hold");
+    let run = "home-unloaded";
+    let project = world.plan(run, &plan_of(run, vec![agent("work", &[])]));
+    start_from(&world, &launch, &project);
+    world.until("work to be dispatched", |world| {
+        !world.events_of(run, "node-dispatched").is_empty()
+    });
+    std::fs::write(
+        launch.join("onetaskgraph.yaml"),
+        "sources: [this is not a mapping\n",
+    )
+    .expect("the configuration is broken");
+    world.release("work.go");
+    world.until("the run to settle and record its home", |world| {
+        !homes_of(world, run).is_empty() && !world.events_of(run, "driver-exited").is_empty()
+    });
+
+    assert_eq!(settled(&world, run, "work")["status"], "done");
+    let homes = homes_of(&world, run);
+    assert_eq!(homes.len(), 1, "{homes:#?}");
+    let payload = &homes[0]["payload"];
+    assert_eq!(payload["project"], project.as_str(), "{payload}");
+    assert_eq!(payload["outcome"], "failed", "{payload}");
+    assert_eq!(payload["status"], Value::Null, "{payload}");
+    assert_eq!(payload["class"], "refused", "{payload}");
+    assert!(
+        payload["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("the store configuration does not load")),
+        "{payload}"
+    );
+    let surfaced: Vec<Value> = world
+        .events_of(run, "planner-surface-queued")
+        .into_iter()
+        .map(|event| event["payload"].clone())
+        .filter(|surface| {
+            surface["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(&format!("home {project} done")))
+        })
+        .collect();
+    assert_eq!(surfaced.len(), 1, "{surfaced:#?}");
+    assert_eq!(surfaced[0]["blocking"], false, "{surfaced:#?}");
+    assert!(
+        surfaced[0]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("the store configuration does not load")),
+        "{surfaced:#?}"
+    );
+    let home = std::fs::read_to_string(local_home(&world, run)).expect("the home");
+    assert!(
+        !home.lines().any(|line| line.starts_with("status:")),
+        "the home was written:\n{home}"
+    );
+}
+
+/// A run launched as `nodes`, from a `local-md` home, whose driver lets go of it reading as
+/// `ending`, writes its home nothing and records nothing of it.
+fn ends_without_its_home(name: &str, nodes: Vec<Value>, ending: &str) {
+    let world = World::new(name);
+    let notes = world.root.join("notes");
+    std::fs::create_dir_all(&notes).expect("the notes source's root");
+    let launch = launch_dir(
+        &world,
+        &format!(
+            "  notes:\n    plugin: local-md\n    config:\n      root: {}\n",
+            notes.display()
+        ),
+    );
+    let project = world.plan(name, &plan_of(name, nodes));
+    start_from(&world, &launch, &project);
+    world.until("the driver to let go", |world| {
+        !world.events_of(name, "driver-exited").is_empty()
+    });
+    world.run(&["status", name]).exited(0).out_has(ending);
+    assert!(
+        homes_of(&world, name).is_empty(),
+        "{:#?}",
+        homes_of(&world, name)
+    );
+    let home = std::fs::read_to_string(local_home(&world, name)).expect("the home");
+    assert!(
+        !home.lines().any(|line| line.starts_with("status:")),
+        "the home was written:\n{home}"
+    );
+}
+
+/// A run paused on a decision — a person's action, ready — writes its home nothing.
+#[test]
+fn a_paused_run_writes_its_home_nothing() {
+    ends_without_its_home(
+        "home-paused",
+        vec![agent("work", &[]), human("approve", &["work"])],
+        "PAUSED",
+    );
+}
+
+/// A run that ended unfinished — a node parked, none failed — writes its home nothing.
+#[test]
+fn an_unfinished_run_writes_its_home_nothing() {
+    let mut later = agent("later", &[]);
+    later["parked"] = json!(true);
+    ends_without_its_home(
+        "home-unfinished",
+        vec![agent("work", &[]), later],
+        "ENDED unfinished",
+    );
+}
+
+/// The instant before which the run's directory says the store asked to be asked nothing, as
+/// Unix milliseconds, where it keeps one.
+fn kept_wait(world: &World, run: &str) -> Option<u64> {
+    std::fs::read_to_string(world.run_file(run, "writeback-wait.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|wait| wait["not_before_unix_ms"].as_u64())
+}
+
+/// A settled run whose close-out projection is waiting out a wait the store asked for asks the
+/// store nothing for its home and lets go on time, leaving no record; once the wait has passed
+/// and the store answers, the driver that adopts the run writes the home and records it once.
+#[test]
+fn a_home_is_not_asked_for_inside_a_wait_the_store_asked_for() {
+    let world = World::new("home-rate-limited");
+    world.script("work.wait", "hold");
+    let run = "home-rate-limited";
+    let project = world.plan(run, &plan_of(run, vec![agent("work", &[])]));
+    let world = world.through_scripted_source();
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("work to be dispatched", |world| {
+        !world.events_of(run, "node-dispatched").is_empty()
+    });
+    world.store_refuses(
+        "update_task",
+        &json!({"kind": "rate-limited", "retry_after_seconds": 5,
+                "message": "API rate limit exceeded"}),
+    );
+    world.release("work.go");
+    world.until("work to settle", |world| {
+        !world.events_of(run, "node-settled").is_empty()
+    });
+    let settled_at = std::time::Instant::now();
+    world.until("the driver to let go", |world| {
+        !world.events_of(run, "driver-exited").is_empty()
+    });
+    assert!(
+        settled_at.elapsed() < std::time::Duration::from_secs(20),
+        "the run's ending waited {:?} on a store that asked to be left alone",
+        settled_at.elapsed()
+    );
+    assert!(
+        homes_of(&world, run).is_empty(),
+        "{:#?}",
+        homes_of(&world, run)
+    );
+    let asked = |world: &World| {
+        world
+            .store_calls()
+            .iter()
+            .filter(|call| call[0] == "set_project_status")
+            .count()
+    };
+    assert_eq!(asked(&world), 0, "the home was asked for inside the wait");
+
+    world.store_stops_refusing("update_task");
+    world.until("the store's wait to pass", |world| {
+        kept_wait(world, run).is_some_and(|until| {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("a clock after the epoch")
+                .as_millis();
+            u128::from(until) < now
+        })
+    });
+    world
+        .run(&["adopt", run])
+        .exited(0)
+        .out_has("\"settlement\":\"complete\"");
+    let homes = homes_of(&world, run);
+    assert_eq!(homes.len(), 1, "{homes:#?}");
+    assert_eq!(homes[0]["payload"]["outcome"], "written", "{homes:#?}");
+    assert_eq!(asked(&world), 1);
 }

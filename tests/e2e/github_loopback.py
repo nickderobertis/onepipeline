@@ -24,8 +24,9 @@ request a stopped driver sent and never saw answered. POST `/reads` with `{"read
 a run's home: `{"tasks": {"first": [], "second": ["first"]}, "status": "In Progress"}` — each task
 by name with the tasks it is blocked by, in order, and the home's own Status option; without it
 the plan holds `anchor`, `work` and `other`, none blocked, at `Todo`. POST `/home-fault` with
-`{"fault": "refuse" | "fail" | "pass"}` answers every later Status write of the home that way:
-`refuse`d for good, `fail`ed with an HTTP 502, or taken.
+`{"fault": "refuse" | "fail" | "fail-once" | "pass"}` answers every later Status write of the
+home that way: `refuse`d for good, `fail`ed with an HTTP 502, failed so once and then taken, or
+taken.
 
 The URL is published to `<root>/endpoint` whole or not at all. For the regression journey that
 proves it, `GITHUB_LOOPBACK_PUBLISH_HOLD` names a directory: publication stops half-written,
@@ -356,8 +357,8 @@ class Handler(BaseHTTPRequestHandler):
                 answer = {"data": {}}
             elif self.path == "/home-fault":
                 fault = request.get("fault") if set(request) == {"fault"} else None
-                if fault not in ["refuse", "fail", "pass"]:
-                    raise ValueError("a home fault is refuse, fail or pass")
+                if fault not in ["refuse", "fail", "fail-once", "pass"]:
+                    raise ValueError("a home fault is refuse, fail, fail-once or pass")
                 with lock:
                     state["home_fault"] = fault
                 answer = {"data": {}}
@@ -411,6 +412,8 @@ class Handler(BaseHTTPRequestHandler):
         if state["home_fault"] == "refuse":
             return {"errors": [{"type": "UNPROCESSABLE",
                                 "message": "the loopback refuses the home's Status write"}]}, 200
+        if state["home_fault"] == "fail-once":
+            state["home_fault"] = "pass"
         return {"errors": [{"message": "the loopback is failing the home's write for now"}]}, 502
 
     def numbered(self, query, variables, request):
