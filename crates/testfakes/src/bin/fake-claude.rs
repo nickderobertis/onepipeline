@@ -495,16 +495,34 @@ fn streamed_prompt() -> Option<String> {
         if stdin.read_line(&mut line).ok()? == 0 {
             return None;
         }
-        let Ok(frame) = serde_json::from_str::<serde_json::Value>(&line) else {
+        if line.trim().is_empty() {
             continue;
-        };
+        }
+        // Validated rather than skipped: Claude Code refuses a stream-json line
+        // that is not a frame, so a harness writing one has to fail here too.
+        let frame = serde_json::from_str::<serde_json::Value>(&line).unwrap_or_else(|error| {
+            fake::fail(&format!(
+                "claude --input-format stream-json read a line that is not JSON ({error}): {line}"
+            ))
+        });
         if frame["type"] != "user" {
             continue;
         }
-        let blocks = frame["message"]["content"].as_array()?;
+        let Some(blocks) = frame["message"]["content"].as_array() else {
+            fake::fail(&format!(
+                "a stream-json user frame carries no content block array: {frame}"
+            ));
+        };
         break blocks
             .iter()
-            .filter_map(|block| block["text"].as_str())
+            .map(
+                |block| match (block["type"].as_str(), block["text"].as_str()) {
+                    (Some("text"), Some(text)) => text,
+                    _ => fake::fail(&format!(
+                    "a stream-json user frame carries a block that is not a text block: {block}"
+                )),
+                },
+            )
             .collect::<String>();
     };
     drop(stdin);
