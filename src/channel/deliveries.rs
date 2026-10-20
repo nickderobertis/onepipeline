@@ -50,6 +50,16 @@ pub enum Delivery {
         #[serde(with = "instant")]
         #[schemars(with = "String")]
         since: u64,
+        /// When the note being offered stops waiting for a turn to take it, in
+        /// epoch milliseconds — RFC 3339 on the wire. Present exactly where that
+        /// note carries a `delivery_timeout_seconds`, and omitted otherwise.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "optional_instant"
+        )]
+        #[schemars(with = "Option<String>")]
+        deadline: Option<u64>,
     },
     /// The driver holds the envelope unjudged behind `behind_envelope`'s live
     /// note to `node`, so that no later edit to that node overtakes it.
@@ -123,6 +133,37 @@ mod instant {
     }
 }
 
+/// An instant that may be absent, as [`instant`] writes one that is present.
+mod optional_instant {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    // serde hands a `skip_serializing_if` field to its serializer only when it
+    // is present.
+    #[allow(clippy::ref_option, reason = "the signature serde's `with` requires")]
+    pub(crate) fn serialize<S: Serializer>(
+        at: &Option<u64>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match at {
+            Some(at) => super::instant::serialize(at, serializer),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<u64>, D::Error> {
+        match Option::<String>::deserialize(deserializer)? {
+            None => Ok(None),
+            Some(text) => crate::projection::millis_of(&text)
+                .map(Some)
+                .ok_or_else(|| {
+                    serde::de::Error::custom(format!("{text:?} is not an RFC 3339 instant"))
+                }),
+        }
+    }
+}
+
 /// A node id as a reader is handed it: not blank, and with no control character.
 fn node_id<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
     let node = String::deserialize(deserializer)?;
@@ -181,6 +222,8 @@ mod tests {
             "deliveries": [
                 {"envelope": "1", "state": "delivering", "node": "build",
                  "since": "2026-10-18T09:00:00.000Z"},
+                {"envelope": "4", "state": "delivering", "node": "docs",
+                 "since": "2026-10-18T09:00:00.000Z", "deadline": "2026-10-18T09:00:02.000Z"},
                 {"envelope": "2", "state": "held", "node": "build",
                  "since": "2026-10-18T09:00:01.000Z", "behind_envelope": "1"},
             ],
@@ -195,6 +238,15 @@ mod tests {
                     delivery: Delivery::Delivering {
                         node: "build".into(),
                         since: at("2026-10-18T09:00:00.000Z"),
+                        deadline: None,
+                    },
+                },
+                LiveDelivery {
+                    envelope: 4,
+                    delivery: Delivery::Delivering {
+                        node: "docs".into(),
+                        since: at("2026-10-18T09:00:00.000Z"),
+                        deadline: Some(at("2026-10-18T09:00:02.000Z")),
                     },
                 },
                 LiveDelivery {
@@ -261,6 +313,7 @@ mod tests {
                 "delivering" => Delivery::Delivering {
                     node: "n".into(),
                     since: 0,
+                    deadline: Some(2_000),
                 },
                 "held" => Delivery::Held {
                     node: "n".into(),

@@ -4469,10 +4469,21 @@ fn driver_exit_lines(view: &RunView) -> String {
 /// What `status` says of one claimed envelope's live note.
 fn delivery_phrase(delivery: &Delivery) -> String {
     match delivery {
-        Delivery::Delivering { node, since } => format!(
-            "delivering a live note to {node} since {}",
-            sys::rfc3339_from_millis(*since)
-        ),
+        Delivery::Delivering {
+            node,
+            since,
+            deadline,
+        } => match deadline {
+            Some(deadline) => format!(
+                "delivering a live note to {node} since {}, until its deadline {}",
+                sys::rfc3339_from_millis(*since),
+                sys::rfc3339_from_millis(*deadline)
+            ),
+            None => format!(
+                "delivering a live note to {node} since {}",
+                sys::rfc3339_from_millis(*since)
+            ),
+        },
         Delivery::Held {
             node,
             since,

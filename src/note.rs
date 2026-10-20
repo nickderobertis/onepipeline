@@ -33,9 +33,9 @@
 //!   left it nowhere to go — so the caller chooses relaunch, tweak, or follow-up
 //!   rather than settling quietly into a record nobody reads.
 //!
-//! The field set, each field's default, the four combinations of `deliver` and
-//! `persist`, and the six dispositions are declared **once**, on
-//! [`Command::Note`]. Nothing here restates them.
+//! The field set, each field's default, the combinations of `deliver` and
+//! `persist`, a note's deadline, and the six dispositions are declared **once**,
+//! on [`Command::Note`]. Nothing here restates them.
 //!
 //! # What a note does *not* do
 //!
@@ -50,11 +50,12 @@
 use std::path::PathBuf;
 
 use oneagentgraph::note::Accepted;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub use oneagentgraph::note::{
-    Addressee, Criterion, Note, NoteRefused, NoteText, Party, Undelivered,
+    Addressee, Criterion, Delivery, Note, NoteRefused, NoteText, Party, Undelivered,
 };
 
 use crate::channel::{Author, Command, Deliver, Reply, REPLY_ENVELOPE_VERSION};
@@ -92,12 +93,22 @@ pub enum Reached {
     /// Nobody was taking a turn, so the next turn to open takes it.
     Queued,
     // llmlint: ignore-end[changed_behavior_has_e2e]
-    /// The worker's turn was live and was reopened carrying it, before the judge
-    /// was consulted — so the judge reads it with the worker's response.
-    Worker,
-    /// The judge's turn was live, so its decision was re-taken with the note in
+    /// The worker's turn took it — interrupted and replaced by one opening on
+    /// it, or reached as it ended — before the judge was consulted, so the judge
+    /// reads it with the worker's response.
+    Worker {
+        /// How that turn took it. Absent from a record written before the field
+        /// existed, which reads back as one that does not say.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn: Option<NoteTurn>,
+    },
+    /// The judge's turn took it, so its decision was re-taken with the note in
     /// hand and the note rides that response to the worker.
-    Supervisor,
+    Supervisor {
+        /// How that turn took it, as [`Worker::turn`](Self::Worker::turn).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn: Option<NoteTurn>,
+    },
     /// The judge's re-taken decision was completion: the work was passed with the
     /// note in hand, and there was no next worker turn to deliver it into.
     JudgedWith {
@@ -112,7 +123,50 @@ pub enum Reached {
     /// above say a live conversation read it, and this one says the next one
     /// will. A caller that cannot tell them apart is back in the incident this
     /// op was written from, so it is named rather than left to inference.
+    Carried {
+        /// Why no running turn took it, where the run knows more than that none
+        /// did: a note whose `delivery_timeout_seconds` passed untaken names that
+        /// deadline here. Omitted otherwise, and absent from every record
+        /// written before the field existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+}
+
+/// Where a note was when a `withdraw-note` took it back: the `from` its
+/// `note-withdrawn` record carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum WithdrawnFrom {
+    /// Untaken in its live conversation's inbox. No build writes it yet: a live
+    /// note's offer cannot be taken back while it is waited on, so this build
+    /// refuses that withdrawal — see `docs/contract-divergences.md`.
+    Live,
+    /// Carried to the node's next dispatch, and not yet composed into one.
     Carried,
+}
+
+/// How a live turn took a note: the `turn` a `worker` or `supervisor`
+/// disposition carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum NoteTurn {
+    /// The party's running turn was interrupted, and its replacement opened on
+    /// the note.
+    Interrupted,
+    /// The party's running turn was left to end, and the note reached it then.
+    TurnEnd,
+}
+
+impl NoteTurn {
+    /// The word the run's record carries it under.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Interrupted => "interrupted",
+            Self::TurnEnd => "turn-end",
+        }
+    }
 }
 
 impl Reached {
@@ -130,7 +184,24 @@ impl Reached {
     /// effect of an envelope that a later refusal cannot take back.
     #[must_use]
     pub fn a_conversation_read_it(&self) -> bool {
-        !matches!(self, Self::Carried)
+        !matches!(self, Self::Carried { .. })
+    }
+
+    /// The disposition of a note no running turn took, for no reason the run
+    /// knows beyond that.
+    #[must_use]
+    pub(crate) fn carried() -> Self {
+        Self::Carried { reason: None }
+    }
+
+    /// How the turn that took it took it, where a live turn did and the record
+    /// says.
+    #[must_use]
+    pub(crate) fn turn(&self) -> Option<NoteTurn> {
+        match self {
+            Self::Worker { turn } | Self::Supervisor { turn } => *turn,
+            Self::Queued | Self::JudgedWith { .. } | Self::Carried { .. } => None,
+        }
     }
 
     /// The word the run's own record carries this disposition under.
@@ -138,10 +209,10 @@ impl Reached {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Queued => "queued",
-            Self::Worker => "worker",
-            Self::Supervisor => "supervisor",
+            Self::Worker { .. } => "worker",
+            Self::Supervisor { .. } => "supervisor",
             Self::JudgedWith { .. } => "judged-with",
-            Self::Carried => "carried",
+            Self::Carried { .. } => "carried",
         }
     }
 
@@ -162,8 +233,8 @@ impl Reached {
     #[must_use]
     pub fn shown_at_delivery(&self) -> &'static [Party] {
         match self {
-            Self::Supervisor | Self::JudgedWith { .. } => &[Party::Supervisor],
-            Self::Queued | Self::Worker | Self::Carried => &[],
+            Self::Supervisor { .. } | Self::JudgedWith { .. } => &[Party::Supervisor],
+            Self::Queued | Self::Worker { .. } | Self::Carried { .. } => &[],
         }
     }
 
@@ -179,23 +250,23 @@ impl Reached {
     #[must_use]
     pub fn routed_to(&self) -> &'static [Party] {
         match self {
-            Self::Worker | Self::Queued => &[Party::Worker, Party::Supervisor],
-            Self::Supervisor => &[Party::Worker],
-            Self::JudgedWith { .. } | Self::Carried => &[],
+            Self::Worker { .. } | Self::Queued => &[Party::Worker, Party::Supervisor],
+            Self::Supervisor { .. } => &[Party::Worker],
+            Self::JudgedWith { .. } | Self::Carried { .. } => &[],
         }
     }
 }
 
 impl From<&Accepted> for Reached {
     fn from(accepted: &Accepted) -> Self {
+        let party = |party: &Party, turn: NoteTurn| match party {
+            Party::Worker => Self::Worker { turn: Some(turn) },
+            Party::Supervisor => Self::Supervisor { turn: Some(turn) },
+        };
         match accepted {
             Accepted::Queued => Self::Queued,
-            Accepted::Interrupted {
-                party: Party::Worker,
-            } => Self::Worker,
-            Accepted::Interrupted {
-                party: Party::Supervisor,
-            } => Self::Supervisor,
+            Accepted::Interrupted { party: whose } => party(whose, NoteTurn::Interrupted),
+            Accepted::AtTurnEnd { party: whose } => party(whose, NoteTurn::TurnEnd),
             Accepted::JudgedWith { completion_reason } => Self::JudgedWith {
                 completion_reason: completion_reason.clone(),
             },
@@ -207,7 +278,7 @@ impl From<&Accepted> for Reached {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Delivered {
     /// The run recorded a disposition for it, and this is which — a party of the
-    /// conversation that took it, or [`Reached::Carried`] for the note no turn
+    /// conversation that took it, or [`Reached::Carried { reason: None }`] for the note no turn
     /// took and the node's next dispatch will.
     To(Reached),
     /// Accepted and durable, and the run's reconciler had not answered it within
@@ -240,10 +311,9 @@ pub fn deliver(run: &RunPaths, node: &str, note: &Note) -> Result<Delivered> {
 
 /// The same delivery, naming both axes explicitly.
 ///
-/// `deliver` decides whether the running turn is attempted and `persist` whether
-/// the note is composed into the node's next dispatch; what each of their four
-/// combinations means is declared once, on
-/// [`Command::Note`].
+/// `deliver` decides whether the running turn is attempted, and how, and `persist`
+/// whether the note is composed into the node's next dispatch; what each of their
+/// combinations means is declared once, on [`Command::Note`].
 ///
 /// # Errors
 ///
@@ -252,7 +322,7 @@ pub fn deliver(run: &RunPaths, node: &str, note: &Note) -> Result<Delivered> {
 // llmlint: ignore[invalid_states_unrepresentable] the two axes stay two bare wire
 // values here on purpose: this call *is* the envelope's `note` op on this crate's
 // own surface, so a Rust caller and a JSON caller must be able to say the same
-// four combinations and get the same answer to each. Narrowing the pair to
+// combinations and get the same answer to each. Narrowing the pair to
 // [`Reach`] at this boundary would make the combination that reaches nobody
 // inexpressible in Rust and expressible in JSON, which is the two spellings
 // meaning different things — the one thing publishing this call exists to
@@ -275,6 +345,7 @@ pub fn deliver_with(
             criterion: note.criterion.clone(),
             deliver,
             persist,
+            delivery_timeout_seconds: None,
         }],
         ..Reply::default()
     };
@@ -287,30 +358,46 @@ pub fn deliver_with(
 /// `deliver` and `persist` are two independent fields on the wire and stay two —
 /// [`Command::Note`] is where what each of them decides is declared, and neither
 /// decides the other's question. Past the envelope they are only ever read
-/// together, and one of their four combinations reaches nobody by construction:
-/// this is that pair with the fourth removed, so nothing downstream of the
-/// boundary that refuses it can be handed it.
+/// together, and one of their combinations reaches nobody by construction: this
+/// is that pair with that one removed — and `live` and `turn-end` read as one
+/// here, since they differ only in how the running turn is reached, which the
+/// composed note carries — so nothing downstream of the boundary that refuses it
+/// can be handed it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Reach {
-    /// `deliver: live` with `persist: false`: the running turn and nothing else,
-    /// so a note no turn took is refused.
-    LiveOnly,
-    /// `deliver: live` with `persist: true`: the running turn, and the node's next
-    /// dispatch where there was no running turn. The op's default.
-    LiveThenNext,
+    /// `deliver: live` or `turn-end` with `persist: false`: the running turn and
+    /// nothing else, so a note no turn took is refused.
+    LiveOnly(Live),
+    /// `deliver: live` or `turn-end` with `persist: true`: the running turn, and
+    /// the node's next dispatch where there was no running turn. The op's
+    /// default, with `live`.
+    LiveThenNext(Live),
     /// `deliver: next` with `persist: true`: no live attempt, so the note never
-    /// reaches a running turn and is always composed forward.
+    /// reaches a running turn and is always composed forward — and has no
+    /// delivery mode or deadline to carry, since it waits on no turn.
     NextOnly,
+}
+
+/// How a live attempt reaches the running turn: the delivery mode the composed
+/// note is offered with, and how long it may wait for a turn to take it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Live {
+    /// Interrupt the running turn, or wait for it to end.
+    pub(crate) delivery: Delivery,
+    /// How long the note may wait for a turn to take it, measured from the
+    /// offer; `None` for as long as the dispatch runs.
+    pub(crate) deadline: Option<std::time::Duration>,
 }
 
 impl Reach {
     // llmlint: ignore[invalid_states_unrepresentable] this constructor is what
-    // makes the invalid state unrepresentable: it takes the envelope's two bare
+    // makes the invalid state unrepresentable: it takes the envelope's bare
     // fields exactly as the wire carries them and returns the three-variant enum
-    // the rule asks for, refusing the fourth. A parser of external input has to
-    // accept the shape that input can have, or there is nothing left to refuse.
-    /// The pair as the envelope carries it, or the one refusal the two fields
-    /// decide between them.
+    // the rule asks for, refusing the fourth and every deadline no live attempt
+    // carries. A parser of external input has to accept the shape that input can
+    // have, or there is nothing left to refuse.
+    /// The note's `deliver`, `persist` and `delivery_timeout_seconds` as the
+    /// envelope carries them, or the refusal they earn between them.
     ///
     /// This is the envelope-time half of the reach-nobody rule, and it is composed
     /// here — beside [`reaches_nobody`] and the delivery-time half — so the two
@@ -319,11 +406,21 @@ impl Reach {
     /// # Errors
     ///
     /// [`Error::Refused`] for `deliver: next` with `persist: false`, which
-    /// attempts no live delivery and composes the note into no dispatch.
-    pub(crate) fn of(node: &str, deliver: Deliver, persist: bool) -> Result<Self> {
+    /// attempts no live delivery and composes the note into no dispatch, and for
+    /// a deadline [`deadline_of`] refuses.
+    pub(crate) fn of(
+        node: &str,
+        deliver: Deliver,
+        persist: bool,
+        delivery_timeout_seconds: Option<u64>,
+    ) -> Result<Self> {
+        let deadline = deadline_of(node, deliver, delivery_timeout_seconds)?;
+        let live = |delivery| Live { delivery, deadline };
         match (deliver, persist) {
-            (Deliver::Live, false) => Ok(Self::LiveOnly),
-            (Deliver::Live, true) => Ok(Self::LiveThenNext),
+            (Deliver::Live, false) => Ok(Self::LiveOnly(live(Delivery::Interrupt))),
+            (Deliver::Live, true) => Ok(Self::LiveThenNext(live(Delivery::Interrupt))),
+            (Deliver::TurnEnd, false) => Ok(Self::LiveOnly(live(Delivery::TurnEnd))),
+            (Deliver::TurnEnd, true) => Ok(Self::LiveThenNext(live(Delivery::TurnEnd))),
             (Deliver::Next, true) => Ok(Self::NextOnly),
             (Deliver::Next, false) => Err(reaches_nobody(
                 node,
@@ -333,17 +430,219 @@ impl Reach {
         }
     }
 
+    /// How the running turn is attempted, where it is.
+    pub(crate) fn live(self) -> Option<Live> {
+        match self {
+            Self::LiveOnly(live) | Self::LiveThenNext(live) => Some(live),
+            Self::NextOnly => None,
+        }
+    }
+
     /// Whether the node's running turn is attempted at all.
     pub(crate) fn attempts_a_live_turn(self) -> bool {
-        !matches!(self, Self::NextOnly)
+        self.live().is_some()
     }
 
     /// Whether a note no running turn took is composed into the node's next
     /// dispatch.
     pub(crate) fn composes_forward(self) -> bool {
-        !matches!(self, Self::LiveOnly)
+        !matches!(self, Self::LiveOnly(_))
     }
 }
+
+/// How long a note may wait for a turn to take it, as its envelope's
+/// `delivery_timeout_seconds` states it, or the refusal that field earns.
+///
+/// Decided at the envelope, by [`Reach::of`]: a deadline of `0` is one no note
+/// can meet, and one beside `deliver: next` bounds a wait that note never makes,
+/// so neither reaches a run at all. Every other value is accepted, however large
+/// — see [`deadline_instant`] for one past what the clock can name.
+///
+/// # Errors
+///
+/// [`Error::Refused`] for either, naming the field and what about it.
+fn deadline_of(
+    node: &str,
+    deliver: Deliver,
+    seconds: Option<u64>,
+) -> Result<Option<std::time::Duration>> {
+    match (seconds, deliver) {
+        (None, _) => Ok(None),
+        (Some(0), _) => Err(Error::Refused(format!(
+            "note: node '{node}': `delivery_timeout_seconds` is 0, which no turn can meet; \
+             omit it to wait for as long as the dispatch runs, or give at least one second"
+        ))),
+        (Some(_), Deliver::Next) => Err(Error::Refused(format!(
+            "note: node '{node}': `delivery_timeout_seconds` bounds how long a note waits for a \
+             running turn, and `deliver: next` waits on none; omit it, or deliver `live` or \
+             `turn-end`"
+        ))),
+        (Some(seconds), Deliver::Live | Deliver::TurnEnd) => {
+            Ok(Some(std::time::Duration::from_secs(seconds)))
+        }
+    }
+}
+
+/// The latest instant this run can name, in epoch milliseconds:
+/// `9999-12-31T23:59:59.999Z`, past which RFC 3339 — what `status` and the
+/// live-delivery reading write a deadline as — has no year to write.
+pub(crate) const LATEST_NAMEABLE_MILLIS: u64 = 253_402_300_799_999;
+
+/// How long a note offered at `offered_at`, in epoch milliseconds, waits under a
+/// `delivery_timeout_seconds` of `deadline`: that long, or — for one that would
+/// run past the latest instant this run can name — until that instant.
+///
+/// Every positive value is accepted, so this is what keeps the wait the run
+/// performs and the deadline it reports one instant: bounded either way, never
+/// an unbounded wait, and never a deadline the run's own reading cannot read
+/// back.
+pub(crate) fn bounded_deadline(
+    deadline: std::time::Duration,
+    offered_at: u64,
+) -> std::time::Duration {
+    deadline.min(std::time::Duration::from_millis(
+        LATEST_NAMEABLE_MILLIS.saturating_sub(offered_at),
+    ))
+}
+
+/// The instant a deadline of `deadline` from `from` falls at, or — where this
+/// host's monotonic clock cannot name one that far ahead — the furthest instant it
+/// can name.
+///
+/// Every positive `delivery_timeout_seconds` is a deadline the envelope accepts,
+/// and the largest are further ahead than a clock represents. Such a wait stays
+/// bounded, at the latest instant there is, rather than becoming one with no
+/// deadline at all or panicking on the overflow.
+pub(crate) fn deadline_instant(
+    from: std::time::Instant,
+    deadline: std::time::Duration,
+) -> std::time::Instant {
+    if let Some(at) = from.checked_add(deadline) {
+        return at;
+    }
+    let (mut reachable, mut beyond) = (std::time::Duration::ZERO, deadline);
+    while beyond - reachable > std::time::Duration::from_secs(1) {
+        let middle = reachable + (beyond - reachable) / 2;
+        if from.checked_add(middle).is_some() {
+            reachable = middle;
+        } else {
+            beyond = middle;
+        }
+    }
+    from.checked_add(reachable).unwrap_or(from)
+}
+
+/// The reason a note whose deadline passed untaken is recorded with, carried or
+/// refused alike.
+pub(crate) fn expired(deadline: std::time::Duration) -> String {
+    format!(
+        "no turn took it within its `delivery_timeout_seconds: {}`, so it was withdrawn untaken",
+        deadline.as_secs()
+    )
+}
+
+/// The planner context a node holds once a note no turn took is carried onto
+/// it: every note carried there before it, then it.
+///
+/// Carried notes accumulate rather than replace one another, so each one the
+/// node is owed reaches its next dispatch's `## Planner context`. Each is one
+/// entry, set off from the one before it by a blank line — see [`entry_of`] for
+/// how a note's own blank lines are kept from reading as that separator.
+pub(crate) fn with_carried(context: Option<&str>, text: &str) -> String {
+    let entry = entry_of(text);
+    match context.filter(|context| !context.trim().is_empty()) {
+        Some(context) => format!("{context}{CARRIED_SEPARATOR}{entry}"),
+        None => entry,
+    }
+}
+
+/// The planner context left once the carried note reading `text` is withdrawn
+/// from it: that note's entry taken out, and every other entry left where it was,
+/// in order.
+///
+/// The context is split into its entries on the separator, which no carried
+/// entry holds ([`entry_of`]), so a note is matched whole — never one of its
+/// paragraphs, and never a run of other notes that happen to read as it. Where
+/// the same text was carried more than once, `alike_after` says which: how many
+/// entries reading the same come after the withdrawn one, so counting back from
+/// the latest finds exactly it. `None` where nothing is left; a context holding
+/// no such entry is returned unchanged.
+pub(crate) fn without_carried(context: &str, text: &str, alike_after: u32) -> Option<String> {
+    let entry = entry_of(text);
+    let mut entries: Vec<&str> = context.split(CARRIED_SEPARATOR).collect();
+    let alike: Vec<usize> = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, candidate)| **candidate == entry)
+        .map(|(at, _)| at)
+        .collect();
+    let Some(at) = alike
+        .iter()
+        .rev()
+        .nth(usize::try_from(alike_after).unwrap_or(usize::MAX))
+    else {
+        return Some(context.to_string());
+    };
+    entries.remove(*at);
+    let left = entries.join(CARRIED_SEPARATOR);
+    (!left.trim().is_empty()).then_some(left)
+}
+
+/// Whether two carried notes are written as the same entry of a planner
+/// context, which is what [`without_carried`] matches and what a withdrawal's
+/// `alike_after` counts: notes whose texts differ only where [`entry_of`] writes
+/// a blank line read alike there.
+pub(crate) fn reads_alike(one: &str, other: &str) -> bool {
+    entry_of(one) == entry_of(other)
+}
+
+/// A carried note as its node's planner context holds it: its text, with every
+/// blank line inside it written as a line holding one space.
+///
+/// The blank line is what sets one carried note off from the next, so a note's
+/// own would otherwise read as two notes, and a note reading as two others joined
+/// would read as them. A line holding a space renders as the same paragraph break
+/// in the task a worker reads, and never as the separator.
+fn entry_of(text: &str) -> String {
+    let mut entry = text.trim().to_string();
+    while entry.contains(CARRIED_SEPARATOR) {
+        entry = entry.replace(CARRIED_SEPARATOR, "\n \n");
+    }
+    entry
+}
+
+/// Why a note was withdrawn, as a `withdraw-note` said it: never blank, in the
+/// record that commits the withdrawal or anywhere it is read back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub(crate) struct WithdrawalReason(String);
+
+impl WithdrawalReason {
+    /// The reason's text.
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for WithdrawalReason {
+    type Error = String;
+
+    fn try_from(text: String) -> std::result::Result<Self, Self::Error> {
+        if text.trim().is_empty() {
+            return Err("a withdrawal's `reason` is blank".to_string());
+        }
+        Ok(Self(text))
+    }
+}
+
+impl From<WithdrawalReason> for String {
+    fn from(reason: WithdrawalReason) -> Self {
+        reason.0
+    }
+}
+
+/// What [`with_carried`] puts between two carried notes.
+const CARRIED_SEPARATOR: &str = "\n\n";
 
 /// The one refusal a note about delivery gets: it would reach nobody, and this
 /// names what left it nowhere to go.
@@ -367,8 +666,9 @@ pub(crate) fn of(
     addressee: Addressee,
     text: &NoteText,
     criterion: Option<&Criterion>,
+    delivery: Delivery,
 ) -> std::result::Result<Note, NoteRefused> {
-    let note = Note::new(addressee, text.as_str())?;
+    let note = Note::new(addressee, text.as_str())?.with_delivery(delivery);
     match criterion {
         None => Ok(note),
         Some(criterion) => note.binding(criterion.as_str()),
@@ -465,6 +765,9 @@ pub(crate) enum Placement {
 pub(crate) struct Held {
     pub note: RecordedNote,
     pub placement: Placement,
+    /// The envelope and command position it was sent at, where the record names
+    /// them: what a `withdraw-note` names it by.
+    pub sent: Option<(u64, u32)>,
 }
 
 impl Held {
@@ -552,6 +855,7 @@ pub(crate) fn standing(journal: &[Envelope], node: &str) -> Result<Standing> {
                 .map(|note| Held {
                     note,
                     placement: Placement::ComposedIntoIt,
+                    sent: None,
                 })
                 .collect();
             continue;
@@ -576,16 +880,33 @@ pub(crate) fn standing(journal: &[Envelope], node: &str) -> Result<Standing> {
         )
         .map_err(|error| unreadable_record(envelope, "operations", &error))?;
         for operation in operations {
-            let crate::edits::Operation::NoteDelivered { node: whose, .. } = &operation else {
-                continue;
-            };
-            if whose == node {
-                if let Some(note) = RecordedNote::of_delivery(&operation) {
-                    standing.held.push(Held {
-                        note,
-                        placement: Placement::DeliveredSince,
-                    });
+            match &operation {
+                crate::edits::Operation::NoteDelivered {
+                    node: whose,
+                    envelope,
+                    index,
+                    ..
+                } if whose == node => {
+                    if let Some(note) = RecordedNote::of_delivery(&operation) {
+                        standing.held.push(Held {
+                            note,
+                            placement: Placement::DeliveredSince,
+                            sent: envelope.zip(*index),
+                        });
+                    }
                 }
+                // A carried note taken back before a dispatch was composed with
+                // it is owed to none.
+                crate::edits::Operation::NoteWithdrawn {
+                    node: whose,
+                    envelope,
+                    index,
+                    ..
+                } if whose == node => standing.held.retain(|held| {
+                    held.placement != Placement::DeliveredSince
+                        || held.sent != Some((*envelope, *index))
+                }),
+                _ => {}
             }
         }
     }
@@ -672,7 +993,7 @@ pub(crate) fn carry(
     let store = carry_store(paths, node);
     let dir = paths.dir.join(CARRY_DIR);
     std::fs::create_dir_all(&dir).map_err(|source| Error::Ledger { path: dir, source })?;
-    of(addressee, text, criterion)
+    of(addressee, text, criterion, Delivery::default())
         .map_err(|why| why.to_string())
         .and_then(|note| {
             onemessagebus::Carry::sender::<Note, Accepted>(&store)
@@ -802,8 +1123,10 @@ impl Routing {
     /// disposition that routes nothing onward.
     fn of(reached: &Reached) -> Option<Self> {
         match reached {
-            Reached::Worker => Some(Self::ReopenedWorkerTurn(WorkerThenJudge::AwaitingWorker)),
-            Reached::Supervisor => Some(Self::RidesTheDecision),
+            Reached::Worker { .. } => {
+                Some(Self::ReopenedWorkerTurn(WorkerThenJudge::AwaitingWorker))
+            }
+            Reached::Supervisor { .. } => Some(Self::RidesTheDecision),
             // llmlint: ignore[changed_behavior_has_e2e] no journey drives this
             // arm, for the reason `Reached::Queued` states over that variant:
             // the conversation answers it only for a note offered with no turn
@@ -814,7 +1137,7 @@ impl Routing {
                 worker_shown: false,
                 judge_shown: false,
             }),
-            Reached::Carried => Some(Self::PresentedOutsideTheSeam(
+            Reached::Carried { .. } => Some(Self::PresentedOutsideTheSeam(
                 WorkerThenJudge::AwaitingWorker,
             )),
             Reached::JudgedWith { .. } => None,
@@ -971,6 +1294,12 @@ impl Shown {
             Ok(Value::Object(note)) => note,
             _ => serde_json::Map::new(),
         };
+        // `turn` on this record is the number of the turn the presentation
+        // opened, so the delivery's own word for how a turn took the note — the
+        // `note-delivered` record's — is not restated under the same key; nor is
+        // why a carried note reached no turn, which is that record's too.
+        payload.remove("turn");
+        payload.remove("reason");
         payload.insert(
             "party".into(),
             serde_json::to_value(self.evidence.party()).unwrap_or(Value::Null),
@@ -1161,8 +1490,8 @@ mod tests {
         );
 
         let journal = vec![
-            delivered(1, "later", "first", Reached::Carried),
-            delivered(2, "later", "second", Reached::Carried),
+            delivered(1, "later", "first", Reached::Carried { reason: None }),
+            delivered(2, "later", "second", Reached::Carried { reason: None }),
         ];
         let owed = standing(&journal, "later").expect("the fold reads");
         let adopted = drain_carried(&paths, "later", owed.clone()).expect("the store reads");
@@ -1264,6 +1593,7 @@ mod tests {
                     routed_to: reached.routed_to().to_vec(),
                     reached,
                     envelope: None,
+                    index: None,
                 }]),
             )],
         )
@@ -1285,11 +1615,16 @@ mod tests {
                 Some("build"),
                 &[("attempt", json!(1))],
             ),
-            delivered(2, "build", "first ruling", Reached::Worker),
+            delivered(2, "build", "first ruling", Reached::Worker { turn: None }),
             // Another node's note, on an unlabelled record like every committed
             // edit: matched on the operation's own node, so it stays out.
-            delivered(3, "other", "not yours", Reached::Worker),
-            delivered(4, "build", "landed nowhere", Reached::Carried),
+            delivered(3, "other", "not yours", Reached::Worker { turn: None }),
+            delivered(
+                4,
+                "build",
+                "landed nowhere",
+                Reached::Carried { reason: None },
+            ),
         ];
         let before = standing(&journal, "build").expect("the record reads");
         assert_eq!(texts(&before.notes()), ["first ruling", "landed nowhere"]);
@@ -1314,7 +1649,12 @@ mod tests {
             Some("build"),
             &[("attempt", json!(2)), (CARRIED_KEY, composed)],
         ));
-        continued.push(delivered(6, "build", "second ruling", Reached::Supervisor));
+        continued.push(delivered(
+            6,
+            "build",
+            "second ruling",
+            Reached::Supervisor { turn: None },
+        ));
         let after = standing(&continued, "build").expect("the record reads");
         assert_eq!(
             texts(&after.notes()),
@@ -1392,13 +1732,21 @@ mod tests {
     /// routes onward, written on the record as two facts rather than one.
     #[test]
     fn each_disposition_tells_a_confirmed_presentation_from_a_routed_one() {
-        assert!(Reached::Worker.shown_at_delivery().is_empty());
+        assert!(Reached::Worker { turn: None }
+            .shown_at_delivery()
+            .is_empty());
         assert_eq!(
-            Reached::Worker.routed_to(),
+            Reached::Worker { turn: None }.routed_to(),
             [Party::Worker, Party::Supervisor]
         );
-        assert_eq!(Reached::Supervisor.shown_at_delivery(), [Party::Supervisor]);
-        assert_eq!(Reached::Supervisor.routed_to(), [Party::Worker]);
+        assert_eq!(
+            Reached::Supervisor { turn: None }.shown_at_delivery(),
+            [Party::Supervisor]
+        );
+        assert_eq!(
+            Reached::Supervisor { turn: None }.routed_to(),
+            [Party::Worker]
+        );
         let judged = Reached::JudgedWith {
             completion_reason: "done".into(),
         };
@@ -1409,8 +1757,10 @@ mod tests {
             Reached::Queued.routed_to(),
             [Party::Worker, Party::Supervisor]
         );
-        assert!(Reached::Carried.shown_at_delivery().is_empty());
-        assert!(Reached::Carried.routed_to().is_empty());
+        assert!(Reached::Carried { reason: None }
+            .shown_at_delivery()
+            .is_empty());
+        assert!(Reached::Carried { reason: None }.routed_to().is_empty());
 
         // And on the wire each field is omitted where it is empty, so a record
         // of a carried note reads exactly as it did before either field.
@@ -1423,21 +1773,25 @@ mod tests {
             routed_to: reached.routed_to().to_vec(),
             reached,
             envelope: None,
+            index: None,
         };
-        let wire = serde_json::to_value(record(Reached::Carried)).expect("it serializes");
+        let wire =
+            serde_json::to_value(record(Reached::Carried { reason: None })).expect("it serializes");
         assert!(
             wire.get("shown_to").is_none() && wire.get("routed_to").is_none(),
             "{wire}"
         );
-        let wire = serde_json::to_value(record(Reached::Worker)).expect("it serializes");
+        let wire =
+            serde_json::to_value(record(Reached::Worker { turn: None })).expect("it serializes");
         assert!(wire.get("shown_to").is_none(), "{wire}");
         assert_eq!(wire["routed_to"], json!(["worker", "supervisor"]), "{wire}");
-        let wire = serde_json::to_value(record(Reached::Supervisor)).expect("it serializes");
+        let wire = serde_json::to_value(record(Reached::Supervisor { turn: None }))
+            .expect("it serializes");
         assert_eq!(wire["shown_to"], json!(["supervisor"]), "{wire}");
         assert_eq!(wire["routed_to"], json!(["worker"]), "{wire}");
         assert_eq!(
             serde_json::from_value::<Operation>(wire).expect("it reads back"),
-            record(Reached::Supervisor)
+            record(Reached::Supervisor { turn: None })
         );
     }
 
@@ -1501,7 +1855,11 @@ mod tests {
     #[test]
     fn a_presentation_is_recorded_when_the_stream_shows_it_and_in_the_producers_order() {
         let mut watch = Presentations::default();
-        watch.delivered_while_live(recorded("stop", Reached::Worker), 1_000, None);
+        watch.delivered_while_live(
+            recorded("stop", Reached::Worker { turn: None }),
+            1_000,
+            None,
+        );
 
         // A supervisor turn that opened before the note was offered, and a
         // worker turn that opened before it too, confirm nothing — whatever
@@ -1559,7 +1917,11 @@ mod tests {
         // delivery and owed only to the worker, by the delivered turn that rides
         // the decision.
         let mut watch = Presentations::default();
-        watch.delivered_while_live(recorded("ruling", Reached::Supervisor), 2_000, None);
+        watch.delivered_while_live(
+            recorded("ruling", Reached::Supervisor { turn: None }),
+            2_000,
+            None,
+        );
         assert!(watch.observe(&turn(8, 2_100, "user", 5, None)).is_empty());
         let shown = watch.observe(&turn_on(
             9,
@@ -1575,7 +1937,10 @@ mod tests {
         // One composed into the task is carried by the opening turn as the
         // task, and read by the supervisor that answers it.
         let mut watch = Presentations::default();
-        watch.composed_into_the_task(recorded("carried in", Reached::Carried), 3_000);
+        watch.composed_into_the_task(
+            recorded("carried in", Reached::Carried { reason: None }),
+            3_000,
+        );
         let shown = watch.observe(&turn(10, 3_100, "assistant", 1, Some("task")));
         assert_eq!(shown.len(), 1);
         assert_eq!(shown[0].evidence.party(), Party::Worker);
@@ -1591,7 +1956,10 @@ mod tests {
         // from. A turn cut short of the text, or carrying other words, is not.
         let mut watch = Presentations::default();
         watch.delivered_while_live(
-            recorded("stop re-running the tier", Reached::Carried),
+            recorded(
+                "stop re-running the tier",
+                Reached::Carried { reason: None },
+            ),
             5_000,
             None,
         );
@@ -1635,8 +2003,16 @@ mod tests {
         // apart — are each recorded on the turn that opened on them, and a
         // supervisor turn answering the first's turn is shown the first alone.
         let mut watch = Presentations::default();
-        watch.delivered_while_live(recorded("first ruling", Reached::Worker), 6_000, None);
-        watch.delivered_while_live(recorded("second ruling", Reached::Worker), 6_000, None);
+        watch.delivered_while_live(
+            recorded("first ruling", Reached::Worker { turn: None }),
+            6_000,
+            None,
+        );
+        watch.delivered_while_live(
+            recorded("second ruling", Reached::Worker { turn: None }),
+            6_000,
+            None,
+        );
         let shown = watch.observe(&turn_on(
             17,
             6_100,
@@ -1793,10 +2169,13 @@ mod tests {
             addressee: Addressee::Worker,
             text: "ship it".parse().expect("a usable note"),
             criterion: None,
-            shown_to: Reached::Supervisor.shown_at_delivery().to_vec(),
-            routed_to: Reached::Supervisor.routed_to().to_vec(),
-            reached: Reached::Supervisor,
+            shown_to: Reached::Supervisor { turn: None }
+                .shown_at_delivery()
+                .to_vec(),
+            routed_to: Reached::Supervisor { turn: None }.routed_to().to_vec(),
+            reached: Reached::Supervisor { turn: None },
             envelope: None,
+            index: None,
         })
         .expect("it serializes");
         let fields: Vec<String> = serde_json::from_value(block["note_delivered_fields"].clone())
@@ -1847,10 +2226,13 @@ mod tests {
                     .parse()
                     .expect("a usable criterion"),
             ),
-            shown_to: Reached::Supervisor.shown_at_delivery().to_vec(),
-            routed_to: Reached::Supervisor.routed_to().to_vec(),
-            reached: Reached::Supervisor,
+            shown_to: Reached::Supervisor { turn: None }
+                .shown_at_delivery()
+                .to_vec(),
+            routed_to: Reached::Supervisor { turn: None }.routed_to().to_vec(),
+            reached: Reached::Supervisor { turn: None },
             envelope: None,
+            index: None,
         };
         let note = RecordedNote::of_delivery(&delivery).expect("a delivery carries a note");
         let mut written = serde_json::to_value(&delivery).expect("it serializes");
