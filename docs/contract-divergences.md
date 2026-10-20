@@ -12060,8 +12060,12 @@ reconcile loop and best effort like every write-back: a transient failure is ask
 closures' retry schedule, within the close-out window a settled run's closures have; a refusal
 is recorded `failed` and raised as a **non-blocking** planner surface naming the home and the
 store's words; and none of it changes a node's settlement, the run's ending, a hook, an edit
-ruling or a scheduling decision. A call still being asked again when its driver lets go has no
-record, so the next driver to close the run out — an adoption — makes it.
+ruling or a scheduling decision. The call is made once the close-out's projection has landed,
+so the two never write the run's items at once; a driver whose projection is instead waiting on
+a failing store, or inside a wait the store asked for, makes no call, so a store that is failing
+holds no run's ending any longer than it did. Neither that driver nor one still asking again
+when it lets go leaves a record, so the next driver to close the run out — an adoption — makes
+the call.
 
 **The record.** One journal record per run, kind `home-status`, written once the call has
 finished — written, or failed for good — in the shape below: `project` is the home's qualified
