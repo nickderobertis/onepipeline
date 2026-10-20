@@ -12055,8 +12055,8 @@ hook fires then.
 `home` the run's project as its launch recorded it, through the store configuration the
 write-back already loads for the run (`Store::at` over the launch record's directory). The home
 only: no member project the home names at `onetaskgraph.members`, and no task. The call is made
-on the write-back's closure thread, after any landing's closures queued before it, off the
-reconcile loop and best effort like every write-back: a transient failure is asked again on the
+on the write-back's closure thread, off the reconcile loop and best effort like every
+write-back: a transient failure is asked again on the
 closures' retry schedule, within the close-out window a settled run's closures have; a refusal
 is recorded `failed` and raised as a **non-blocking** planner surface naming the home and the
 store's words; and none of it changes a node's settlement, the run's ending, a hook, an edit

@@ -930,8 +930,7 @@ struct Pending {
     home: HomeWork,
 }
 
-/// Where the run's home stands on the closure thread, which takes it up after every landing
-/// queued before it: entry 133.
+/// Where the run's home stands on the closure thread: entry 133.
 #[derive(Default)]
 enum HomeWork {
     /// Nothing owed: never, or its record has been handed to the reconcile loop, or this
@@ -1526,8 +1525,7 @@ impl Writeback {
 
     /// Owe the run's home its `done`, unless this driver already owes or has made it.
     ///
-    /// Answers whether it was queued. Never waits: the call is the closure thread's, after the
-    /// closures queued before it.
+    /// Answers whether it was queued. Never waits: the call is the closure thread's.
     pub(crate) fn settle_home(&self, home: QualifiedId) -> bool {
         if self
             .home_owed
@@ -2148,8 +2146,7 @@ fn worker(
 /// A landing still being asked about when the run stops is left with no record, so the next
 /// adoption's catch-up makes its call.
 ///
-/// The run's home, once owed, is taken up after every landing queued before it, and asked
-/// about on the same terms: a transient failure again on that schedule, a refusal a record, and
+/// The run's home, once owed, is asked about on the same terms: a transient failure again on that schedule, a refusal a record, and
 /// a call still being asked about when the run stops no record, so the next driver to close the
 /// run out makes it — entry 133.
 fn closer(
@@ -2171,6 +2168,11 @@ fn closer(
                     Err(_) => return,
                 };
             }
+            // llmlint: ignore[changed_behavior_has_e2e] which of a landing and the home this
+            // thread takes first when both are queued is no promise: each is its own store call
+            // over its own items, recorded in its own record, and neither reads the other's
+            // outcome — the order exists only because one thread serves both. What each call
+            // does is driven by the closure and home journeys of `tests/e2e/closures.rs`.
             match state.closures.pop_front() {
                 Some(landing) => {
                     state.closing = Some(landing.clone());
