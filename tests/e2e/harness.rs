@@ -4882,10 +4882,11 @@ impl World {
 }
 
 /// Whether one recorded `gh` invocation is `onevcs`'s probe of a repository's
-/// visibility — `gh api repos/<owner>/<name>` and nothing more.
+/// visibility — `gh api repos/<owner>/<name> --include` and nothing more.
 ///
 /// `onevcs` 0.44.0 on asks it before every write that could reach a public
-/// destination, to decide what the public boundary screens. It reads the
+/// destination, to decide what the public boundary screens, and 0.56.0 on asks it
+/// with `--include`, so a host that did not answer is told from one that refused. It reads the
 /// repository's metadata and nothing of a change request, a merge path or a ref,
 /// so a journey counting what a run asked the host about its *work* leaves it out.
 pub fn is_visibility_probe(call: &Value) -> bool {
@@ -4893,8 +4894,7 @@ pub fn is_visibility_probe(call: &Value) -> bool {
         .as_array()
         .map(|args| args.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
-    // `onevcs` 0.56 asks it with `--include`, to tell a host that did not answer apart.
-    matches!(args.as_slice(), ["api", path] | ["api", path, "--include"]
+    matches!(args.as_slice(), ["api", path, "--include"]
         if path.split('/').count() == 3 && path.starts_with("repos/"))
 }
 
@@ -5645,9 +5645,10 @@ fn start_stamp(pid: u32) -> Option<String> {
 }
 
 /// The other Unix hosts have no procfs, and the engine stamps `ps`'s `lstart`,
-/// read in UTC under the C locale so the spelling does not follow the reader's.
+/// read in UTC under the C locale so the spelling does not follow the reader's —
+/// on macOS followed by ` +0.` and the kernel's microseconds of that start.
 #[cfg(all(unix, not(target_os = "linux")))]
-fn start_stamp(pid: u32) -> Option<String> {
+pub(crate) fn start_stamp(pid: u32) -> Option<String> {
     let listed = Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "lstart="])
         .env("TZ", "UTC")
@@ -5656,7 +5657,29 @@ fn start_stamp(pid: u32) -> Option<String> {
         .output()
         .expect("this host answers about its processes");
     let answer = String::from_utf8_lossy(&listed.stdout).trim().to_string();
-    (listed.status.success() && !answer.is_empty()).then_some(answer)
+    let second = (listed.status.success() && !answer.is_empty()).then_some(answer)?;
+    #[cfg(target_os = "macos")]
+    let second = format!("{second} +0.{:06}", start_micros(pid)?);
+    Some(second)
+}
+
+/// The microseconds of `pid`'s start, as macOS's `proc_pidinfo` gives them.
+#[cfg(target_os = "macos")]
+fn start_micros(pid: u32) -> Option<u64> {
+    let size = libc::c_int::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).ok()?;
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
+    // SAFETY: `info` is writable storage of the flavor's struct, `size` its size.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            libc::c_int::try_from(pid).ok()?,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    // SAFETY: a whole answer sets every field.
+    (written == size).then(|| unsafe { info.assume_init() }.pbi_start_tvusec)
 }
 
 /// Windows stamps the process's creation `FILETIME` as `high:low`.
@@ -6166,7 +6189,8 @@ impl HeldPublication {
     }
 
     /// Whether the merge path has started holding the push — git is running the
-    /// hook, so the push is under way and nothing interrupts it from here.
+    /// hook, so the push is under way. Held at the repository's `pre-push`, a
+    /// caller's cancellation still stops it (`onevcs` 0.56 on).
     ///
     /// Not the same moment as the publication's last record before the push:
     /// `onevcs` asks its caller's cancellation between the two, so a journey

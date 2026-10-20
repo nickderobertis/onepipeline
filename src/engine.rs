@@ -2501,7 +2501,7 @@ fn converge(
                                 None
                             }
                         })
-                        .map(|capacity| crate::pool::WorkspaceHold::of(&capacity));
+                        .map(|capacity| crate::pool::Reading::of(&capacity));
                     workspaces.refused(&node, hold, resume);
                     // llmlint: ignore-end[changed_behavior_has_e2e]
                     state.refresh(paths);

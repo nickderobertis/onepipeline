@@ -387,28 +387,55 @@ fn protection(args: &[String], dir: &Path, path: &str) -> ExitCode {
     }
 }
 
-/// `gh api repos/R`: the repository itself, which `onevcs` 0.44.0 on asks for its
-/// visibility at every write that could reach a public destination.
+/// `gh api repos/R --include`: the repository itself, which `onevcs` 0.44.0 on asks for
+/// its visibility at every write that could reach a public destination, and 0.56.0 on
+/// asks with `--include`, so the response's status line and headers come first and a
+/// request the host did not answer is told from one it refused.
 ///
 /// `private` unless a journey scripts `gh.visibility`: a private destination is one
 /// the public boundary screens nothing for, which is what every journey here wrote
 /// before there was a boundary to ask.
 ///
-/// `onevcs` 0.56 asks it with `--include`, so a host that did not answer is told from
-/// one that refused: the status line and the blank line ending the headers come first,
-/// as `gh` prints them, and the body after.
+/// `gh.visibility.rate-limited` is the host **not answering** that read: GitHub's own
+/// `403` for a primary rate limit — no requests remaining, and the epoch it resets at,
+/// which the file holds — written as `gh api --include` writes any response, status line
+/// and headers on stdout ahead of the body, with `gh`'s one line on stderr and exit 1.
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the response is GitHub's, which
+// declares it nowhere this repository can read, and `onevcs::GitHub::visibility`'s parser of
+// it is private. Its gate is the real linked `onevcs` reading this answer: every journey that
+// publishes reads the `200` as the visibility it names, and
+// `tests/e2e/publication_boundary.rs`'s
+// `a_publication_whose_host_rate_limits_the_visibility_read_settles_on_an_unavailable_check`
+// asserts the `403`'s status, limit, resource, remaining and reset as onevcs read them, so a
+// shape that drifts from what onevcs parses fails a journey rather than a double nobody checks.
 fn repository(args: &[String], dir: &Path, path: &str) -> ExitCode {
-    let include = match &args[2..] {
-        [] => false,
-        [flag] if flag == "--include" => true,
-        _ => {
-            return fake::refuse(&format!(
-                "gh api {path} takes only --include here: {args:?}"
-            ))
-        }
-    };
+    if args.len() != 3 || args[2] != "--include" {
+        return fake::refuse(&format!(
+            "gh api {path} takes exactly `--include` here: {args:?}"
+        ));
+    }
     if path.split('/').any(str::is_empty) {
         return fake::refuse(&format!("gh api path '{path}' has an empty segment"));
+    }
+    if let Some(reset) = read_if_present(&dir.join("gh.visibility.rate-limited")) {
+        let reset: u64 = reset.trim().parse().unwrap_or_else(|_| {
+            fake::fail(&format!(
+                "gh.visibility.rate-limited holds {reset:?}, which is not the epoch second the limit resets at"
+            ))
+        });
+        let message = "API rate limit exceeded for user ID 1.";
+        print!(
+            "HTTP/2.0 403 Forbidden\r\nContent-Type: application/json; charset=utf-8\r\n\
+             X-Ratelimit-Limit: 5000\r\nX-Ratelimit-Remaining: 0\r\n\
+             X-Ratelimit-Reset: {reset}\r\nX-Ratelimit-Resource: core\r\n\
+             X-Ratelimit-Used: 5000\r\n\r\n{}",
+            serde_json::json!({
+                "message": message,
+                "documentation_url": "https://docs.github.com/rest/overview/rate-limits-for-the-rest-api",
+            })
+        );
+        eprintln!("gh: {message} (HTTP 403)");
+        return ExitCode::from(1);
     }
     let visibility = match read_if_present(&dir.join("gh.visibility")) {
         None => Visibility::Private,
@@ -418,11 +445,8 @@ fn repository(args: &[String], dir: &Path, path: &str) -> ExitCode {
             ))
         }),
     };
-    if include {
-        println!("HTTP/2.0 200 OK\r\nContent-Type: application/json\r\n\r");
-    }
-    println!(
-        "{}",
+    print!(
+        "HTTP/2.0 200 OK\r\nContent-Type: application/json; charset=utf-8\r\n\r\n{}",
         serde_json::json!({
             "visibility": visibility.word(),
             "private": visibility != Visibility::Public,
