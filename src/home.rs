@@ -63,6 +63,11 @@ pub(crate) fn set_done(store: &Store, home: &QualifiedId, within: Duration) -> A
         .await
     });
     match answered {
+        // llmlint: ignore[changed_behavior_has_e2e] the deadline is the sixty-second command
+        // floor plus one item, and a settled run's close-out waits thirty seconds for its home,
+        // so a driver lets go — leaving no record, for the next driver to make the call — before
+        // this arm can answer at close-out; it bounds a call a driver driving again after an edit
+        // left running, and answers as the transient arm the failing-board journeys drive.
         Err(_) => Answer::Transient(format!(
             "project status set exceeded {} seconds",
             within.as_secs()

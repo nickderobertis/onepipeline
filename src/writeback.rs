@@ -909,10 +909,10 @@ struct Pending {
     /// what a driver's launch wait is bounded by, however soon the worker picks that snapshot up.
     queued_items: usize,
     worker: WorkerState,
-    /// Whether the worker's last attempt failed in a way a wait can change and no attempt has
-    /// landed since: a projection waiting on the store, which nothing that waits on it to land
-    /// at closeout — the run's home — waits for.
-    retrying: bool,
+    /// Whether the worker is waiting on the store — its last attempt failed in a way a wait can
+    /// change and none has landed since, or it is honouring a wait the store asked for — which
+    /// nothing that waits on its projection to land at closeout, the run's home, waits for.
+    waiting_on_store: bool,
     phase: RunPhase,
     /// Projections that failed and have not yet been raised with the planner.
     ///
@@ -926,13 +926,25 @@ struct Pending {
     closing: Option<crate::closures::Landing>,
     /// The records of closure calls that finished, for the reconcile loop to journal.
     closed: Vec<crate::payload::LandingClosures>,
-    /// The run's home, owed its `done` and not yet taken up: entry 133.
-    home: Option<QualifiedId>,
-    /// Whether the closure thread took the home up and is calling the store for it, or waiting
-    /// out the retry of — until its call has finished.
-    homing: bool,
-    /// The record of the home's call once it finished, for the reconcile loop to journal.
-    homed: Option<crate::payload::HomeStatus>,
+    /// Where the run's home stands on the closure thread: entry 133.
+    home: HomeWork,
+}
+
+/// Where the run's home stands on the closure thread, which takes it up after every landing
+/// queued before it: entry 133.
+#[derive(Default)]
+enum HomeWork {
+    /// Nothing owed: never, or its record has been handed to the reconcile loop, or this
+    /// driver made no call.
+    #[default]
+    Idle,
+    /// Owed its `done`, and not yet taken up.
+    Owed(QualifiedId),
+    /// Taken up: waiting on the close-out's projection, calling the store, or waiting out a
+    /// retry — until the call has finished or the driver makes none.
+    Asking,
+    /// The call finished, and this is its record, for the reconcile loop to journal.
+    Answered(crate::payload::HomeStatus),
 }
 
 impl Pending {
@@ -944,7 +956,9 @@ impl Pending {
 
     /// Whether a landing's closures, or the run's home, are still owed: queued, or being called.
     fn closing_owed(&self) -> bool {
-        !self.closures.is_empty() || self.closing.is_some() || self.home.is_some() || self.homing
+        !self.closures.is_empty()
+            || self.closing.is_some()
+            || matches!(self.home, HomeWork::Owed(_) | HomeWork::Asking)
     }
 
     fn queue(&mut self, snapshot: Snapshot) -> bool {
@@ -1523,7 +1537,7 @@ impl Writeback {
         }
         let (lock, ready) = &*self.pending;
         if let Ok(mut pending) = lock.lock() {
-            pending.home = Some(home);
+            pending.home = HomeWork::Owed(home);
             ready.notify_all();
         }
         true
@@ -1533,8 +1547,9 @@ impl Writeback {
     /// journalled: what the reconcile loop's wait is woken by, as it is by a failed projection.
     pub(crate) fn has_closed(&self) -> bool {
         let (lock, _) = &*self.pending;
-        lock.lock()
-            .is_ok_and(|pending| !pending.closed.is_empty() || pending.homed.is_some())
+        lock.lock().is_ok_and(|pending| {
+            !pending.closed.is_empty() || matches!(pending.home, HomeWork::Answered(_))
+        })
     }
 
     /// Take the record of the home's call, once it has finished.
@@ -1542,7 +1557,13 @@ impl Writeback {
         let (lock, _) = &*self.pending;
         lock.lock()
             .ok()
-            .and_then(|mut pending| pending.homed.take())
+            .and_then(|mut pending| match std::mem::take(&mut pending.home) {
+                HomeWork::Answered(record) => Some(record),
+                other => {
+                    pending.home = other;
+                    None
+                }
+            })
     }
 
     /// Take the records of the closure calls that finished since this was last asked.
@@ -1914,6 +1935,13 @@ fn worker(
                     UNREADABLE_WAIT_RECHECK
                 }
             };
+            {
+                let (lock, ready) = &*pending;
+                if let Ok(mut state) = lock.lock() {
+                    state.waiting_on_store = true;
+                    ready.notify_all();
+                }
+            }
             if !should_retry_after(&pending, Interval::Asked(interval)) {
                 return;
             }
@@ -1980,7 +2008,7 @@ fn worker(
                 standing = Standing::Landing;
                 let (lock, _) = &*pending;
                 if let Ok(mut state) = lock.lock() {
-                    state.retrying = false;
+                    state.waiting_on_store = false;
                     state.last_success = Some(snapshot.clone());
                     if state.phase == RunPhase::Stopping && state.latest.is_none() {
                         return;
@@ -2002,7 +2030,7 @@ fn worker(
                 standing = Standing::Refused;
                 let (lock, _) = &*pending;
                 if let Ok(mut state) = lock.lock() {
-                    state.retrying = false;
+                    state.waiting_on_store = false;
                     state.unprojected.push(Unprojected {
                         project: snapshot.project.clone(),
                         items,
@@ -2072,7 +2100,7 @@ fn worker(
                 {
                     let (lock, ready) = &*pending;
                     if let Ok(mut state) = lock.lock() {
-                        state.retrying = true;
+                        state.waiting_on_store = true;
                         ready.notify_all();
                     }
                 }
@@ -2135,7 +2163,7 @@ fn closer(
             let (lock, ready) = pending;
             let Ok(mut state) = lock.lock() else { return };
             while state.closures.is_empty()
-                && state.home.is_none()
+                && !matches!(state.home, HomeWork::Owed(_))
                 && state.phase != RunPhase::Stopping
             {
                 state = match ready.wait(state) {
@@ -2149,15 +2177,14 @@ fn closer(
                     landing
                 }
                 None => {
-                    let Some(home) = state.home.take() else {
+                    let HomeWork::Owed(home) = std::mem::replace(&mut state.home, HomeWork::Asking)
+                    else {
                         return;
                     };
-                    state.homing = true;
                     drop(state);
                     let record = settle_home(store, run_dir, per_item, pending, &home);
                     let Ok(mut state) = lock.lock() else { return };
-                    state.homing = false;
-                    state.homed = record;
+                    state.home = record.map_or(HomeWork::Idle, HomeWork::Answered);
                     ready.notify_all();
                     continue;
                 }
@@ -2245,15 +2272,15 @@ fn settle_home(
     {
         let (lock, ready) = pending;
         let mut state = lock.lock().ok()?;
-        while state.unlanded() && !state.retrying && state.phase != RunPhase::Stopping {
+        while state.unlanded() && !state.waiting_on_store && state.phase != RunPhase::Stopping {
             state = ready.wait(state).ok()?;
         }
-        if state.retrying || state.phase == RunPhase::Stopping {
+        if state.waiting_on_store
+            || state.phase == RunPhase::Stopping
+            || store_asked_to_wait(run_dir)
+        {
             return None;
         }
-    }
-    if store_asked_to_wait(run_dir) {
-        return None;
     }
     let within = Deadline::Write { per_item, items: 1 }.within();
     let mut failures: u32 = 0;
