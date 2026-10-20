@@ -795,6 +795,13 @@ resolver = "2"
 # requires `onejudge ^0.20.0`, `onemessagebus ^0.9.3` and
 # `oneharness-core ^0.28.4`, so the four move as one.
 #
+# `oneagentgraph` 0.7.0 is the floor because it makes a note offer **withdrawable
+# while it is waited on**: `NoteOffer::withdrawer` hands back a `NoteWithdrawer`
+# another thread takes the note back with, and the wait in flight answers
+# `NoteDelivery::Withdrawn`. `src/engine.rs`'s `TakeBack` and a `cancel`'s
+# preemption withdraw a live note through it, and `tests/note`'s live-withdrawal
+# journeys hold it. It requires nothing this lock did not already resolve.
+#
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
 # second with no registry at all. A newer release one of these pins **holds back**
@@ -815,7 +822,7 @@ resolver = "2"
 rust-version = "1.97"
 
 [workspace.dependencies]
-oneagentgraph = "0.6.0"
+oneagentgraph = "0.7.0"
 onevcs = "0.56.3"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the

@@ -12108,7 +12108,30 @@ which party took a note, but not whether its turn was interrupted or only reache
    `## Planner context`, and replay reaches the same context), and the original envelope
    is answered again with that note's command `refused`, carrying the withdrawal's reason.
    **A later outcome for an envelope id supersedes an earlier one**: `outcome_of` reads the
-   latest.
+   latest. A live note no turn has taken is withdrawn too, with `from: live`: one offered
+   to its conversation through the offer's `NoteWithdrawer` (`oneagentgraph` 0.7.0), which
+   succeeds exactly when no turn took it, while the delivery's wait on it answers
+   `Withdrawn`; one queued behind an earlier note to the same node is never offered; and one
+   whose envelope is held unjudged behind another is skipped when that envelope is judged.
+   It is recorded once, by that `edit-committed`, and its envelope is answered with its
+   command `refused`, carrying the withdrawal's reason. A live note a turn already took is
+   refused naming its disposition, and its outcome is left as it was. A conversation has no
+   undo, so a live note its withdrawer took back stays withdrawn when a later command of the
+   same envelope refuses as it is delivered: its `note-withdrawn` is still committed once,
+   and that envelope is answered applied in part — the withdrawal `applied`, the refusing
+   command `refused`, every other command `validated`. **Ruled.** This was put to the
+   manager as option A of question `c-1090d325ced7472d94d454f1673b7b9b`, and re-asked as
+   `c-4f1358d1b14d36dd70b4c03e8c5f2c52` and `c-cbd47d568d8dd7c56b15aa135b142192`; all
+   three timed out unanswered, and none was taken as approval. The manager approved it under
+   correlation `c-41dfb3e80a73b07b16c16c2083ff9868` ("approve-A"), including the crash
+   recovery — a driver that dies before answering such an envelope leaves the next driver
+   to commit the kept withdrawal exactly once, never offering the note again meanwhile —
+   and the optional `course` field on the engine's internal write-ahead file, omitted where
+   the envelope delivered. The manager also directed that the reproduction and crash-seam
+   journeys be kept, and that the rule be stated in `docs/contract.md`, where it now stands
+   in the planner channel's envelope rules. It adds no op, field, verdict or record kind.
+   The alternatives were (B) staying all-or-nothing, with the note answered by a
+   placeholder reason and no record, and (C) refusing such envelopes at validation.
 
 **On Windows a `live` note never interrupts.** onejudge 0.20.0 opens no out-of-band
 control for a turn off unix, so no turn there can be interrupted whatever its harness
@@ -12120,19 +12143,9 @@ outcome, and a deadline bounds the wait as rule 2 says. `tests/note`'s
 that on Windows with a harness that serves control. On other platforms they use a
 harness that offers none. The journeys that interrupt a turn are unix-only.
 
-**Interim, ruled.** The manager ruled under correlation
-`c-aa4f02b18fb1d83a1495c1b07c2a2d77` that this node withdraws carried notes only. A note
-still untaken in its live conversation's inbox cannot be withdrawn through
-`oneagentgraph` 0.6.0: its relay takes the in-process offer out of its book for as long as a
-wait blocks on it, and a delivery waits on every live note it offers, so a withdrawal then
-answers `taken`. Such a `withdraw-note` is refused with an `edit-rejected` whose reason
-says live withdrawal waits on `oneagentgraph` making an offer withdrawable while it is
-waited on, and the note's delivery and outcome are left untouched. `from: live` is
-declared and written by no build yet. An `oneagentgraph` node that makes an offer
-withdrawable while it is waited on, and a later onepipeline node that relinks onto it,
-retire this interim. The manager approved the record's `text` under correlation
+**The record's `text`, ruled.** The manager approved the record's `text` under correlation
 `c-6e20576dba29b78e543c876cbb9a85c8`: replay takes a withdrawn note's text off the node it
-was carried onto, and nothing else. Beside it the record carries `alike_after` — omitted
+was carried onto, and nothing else; a `from: live` withdrawal takes nothing off any node. Beside it the record carries `alike_after` — omitted
 where it is `0` — counting the notes still owed to the node, carried after this one, that
 read the same — the same entry as the planner context writes them, so two texts differing
 only where a blank line is written as a line holding a space count as alike — so replay takes out exactly this one of several identical entries, counted
@@ -12152,9 +12165,9 @@ projected into `onepipeline.context`, in carry order, one paragraph each, and a 
 removes exactly its own. The store journeys that drive repeated `deliver: next` notes read
 the latest note as the context's last entry (`tests/e2e/harness.rs`'s `carries_latest`).
 
-**Carried over.** `cancel`'s preemption of a note still being delivered to its node is
-unchanged: the cancel answers that note refused, and ends the conversation that would have
-read it. **onepipeline#512**: v0.63.6 already answers a claimed envelope a dead driver left
+**Carried over.** `cancel`'s preemption of a note still being delivered to its node still
+answers that note refused and ends the conversation that would have read it, and now also
+takes an untaken note back through its `NoteWithdrawer`, so no turn is presented with it. **onepipeline#512**: v0.63.6 already answers a claimed envelope a dead driver left
 exactly once. What remained was an envelope with no outcome for as long as a held turn ran;
 an interrupt removes most of that, and `delivery_timeout_seconds` bounds the rest.
 
@@ -12184,7 +12197,6 @@ first, moved this record to 133.
   "carried_expired": {"kind": "note-delivered", "node": "build", "addressee": "worker", "text": "stop editing src/old.rs", "reached": "carried", "reason": "no turn took it within its `delivery_timeout_seconds: 2`, so it was withdrawn untaken", "envelope": 3, "index": 0},
   "withdrawn": {"kind": "note-withdrawn", "node": "build", "envelope": 3, "index": 0, "reason": "the fixture moved back", "from": "carried", "text": "stop editing src/old.rs"},
   "withdrawn_from": ["live", "carried"],
-  "live_withdrawal_refused": "a live note cannot be withdrawn yet",
   "result": {"index": 0, "op": "note", "outcome": "applied", "turn": "interrupted"},
   "result_before": {"index": 0, "op": "note", "outcome": "applied"},
   "delivering": {"envelope": "3", "state": "delivering", "node": "build", "since": "2026-10-19T09:00:00.000Z", "deadline": "2026-10-19T09:00:02.000Z"},
