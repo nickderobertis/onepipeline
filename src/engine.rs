@@ -5530,7 +5530,7 @@ impl TakeBack {
             return Err(crate::withdrawal::already_answered(
                 operation,
                 now.finished
-                    .get(*position)
+                    .get(position)
                     .and_then(|operations| reached_of(operations))
                     .as_ref(),
             ));
@@ -5878,7 +5878,7 @@ fn deliver_envelope(
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             now.answered += 1;
             if let Ok(operations) = &committed {
-                now.finished.push(operations.clone());
+                now.finished.insert(position, operations.clone());
             }
         }
         delivered.push(committed.map(|operations| delivered_as(seated, operations)));
@@ -5952,7 +5952,7 @@ fn deliver_seated(
     now.answered += 1;
     match answered {
         Ok(Some(operations)) => {
-            now.finished.push(operations.clone());
+            now.finished.insert(position, operations.clone());
             Ok(Delivery::Committed(operations))
         }
         // Taken back by a `withdraw-note`, whose commit is its record.
@@ -5988,8 +5988,9 @@ fn withdrawn_unrecorded(node: &str) -> Error {
 /// whether it is waiting on its conversation now.
 #[derive(Debug, Default)]
 pub(crate) struct Progress {
-    /// What each note the thread has finished committed, in command order.
-    finished: Vec<Vec<edits::Operation>>,
+    /// What each note the thread has finished committed, by its position among
+    /// the receiver's notes: a note withdrawn, refused or never offered has none.
+    finished: BTreeMap<usize, Vec<edits::Operation>>,
     /// The note the thread is waiting on its conversation for now, if it is
     /// waiting on one.
     offering: Option<Offering>,
@@ -6671,13 +6672,13 @@ impl NoteDeliveries {
                     progress.withdrawn.clone(),
                 )
             };
-            let mut finished = finished.into_iter();
+            let mut finished = finished;
             let delivered = lane
                 .notes
                 .iter()
                 .enumerate()
                 .map(|(position, index)| {
-                    let ruling = match finished.next() {
+                    let ruling = match finished.remove(&position) {
                         Some(operations) => Ok(Delivery::Committed(operations)),
                         None if withdrawn.contains(&position) => Ok(Delivery::Withdrawn),
                         None => Err(preempted_note(&node, by)),
@@ -15376,7 +15377,7 @@ mod tests {
     fn lane_offering(in_flight: &DeliveriesInFlight, node: &str, notes: Vec<usize>) -> Lane {
         Lane {
             progress: std::sync::Arc::new(std::sync::Mutex::new(Progress {
-                finished: Vec::new(),
+                finished: BTreeMap::new(),
                 offering: Some(Offering {
                     node: node.to_owned(),
                     deadline: None,
@@ -15512,7 +15513,10 @@ mod tests {
         );
         assert!(delivered.iter().all(std::result::Result::is_ok));
         let progress = progress.into_inner().expect("the progress is readable");
-        assert_eq!(progress.finished, [read, Vec::new()]);
+        assert_eq!(
+            progress.finished,
+            BTreeMap::from([(0, read), (1, Vec::new())])
+        );
         assert_eq!(progress.offering, None);
     }
 
@@ -15835,7 +15839,7 @@ mod tests {
             .lock()
             .expect("the progress is readable")
             .finished
-            .push(read);
+            .insert(0, read);
         let mut deliveries = deliveries_holding(
             &in_flight,
             [

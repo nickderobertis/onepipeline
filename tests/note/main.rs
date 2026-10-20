@@ -7002,6 +7002,105 @@ fn a_held_envelope_hands_its_live_note_beside_the_one_withdrawn_while_it_waited(
     assert_eq!(withdrawals(&world, run).len(), 1);
 }
 
+/// In one receiver's lane of four notes — a timed note carried at its deadline,
+/// a note withdrawn while it was queued behind that one, a second timed note
+/// carried at its deadline, and a note still waiting on the held turn — each
+/// note's answer is its own, whichever note before it was withdrawn: a
+/// withdrawal of the second carried note names it `carried`, and a cancel of
+/// the node answers the four as carried, withdrawn, carried, and preempted.
+#[test]
+fn a_lane_answers_each_note_by_its_own_position_past_a_withdrawn_one() {
+    let world = World::new("note-withdraw-lane-positions");
+    let run = "withdrawlanepositions";
+    held_cancellable_conversation(&world, run, vec![agent("build", &[])]);
+    let before = admitted(&world, run);
+    let lane = submitted(
+        &world,
+        run,
+        &json!({"version": 2, "commands": [
+            timed_note("build", THIRD_CARRIED, "turn-end", true, 3),
+            note_op_with("build", QUEUED_WITHDRAWN, "turn-end", true),
+            timed_note("build", FOURTH_CARRIED, "turn-end", true, 1),
+            note_op_with("build", NOTE, "turn-end", true),
+        ]})
+        .to_string(),
+    );
+    world.until("the first timed note to be admitted", |world| {
+        admitted(world, run) > before
+    });
+    let sent = queued_id_of(&world, run, NOTE);
+    world
+        .run_with_stdin_on(
+            world.agentgraph_cmd(&["reply", run]),
+            &envelope(withdraw_op(sent, 1, WITHDRAWN_BECAUSE)),
+        )
+        .exited(0)
+        .out_has("\"state\":\"applied\"");
+    world.until(
+        "both timed notes to be carried and the last note to wait",
+        |world| admitted(world, run) == before + 3 && awaiting_an_answer(world, run) == 1,
+    );
+    world
+        .run_with_stdin_on(
+            world.agentgraph_cmd(&["reply", run]),
+            &envelope(withdraw_op(sent, 2, WITHDRAWN_BECAUSE)),
+        )
+        .exited(REFUSED)
+        .err_has("already answered `carried` by its delivery");
+
+    let cancel = submitted(
+        &world,
+        run,
+        &envelope(json!({"op": "cancel", "id": "build", "reason": "wedged in a tool call"})),
+    );
+    assert!(answered(cancel).contains("\"state\":\"applied\""));
+    let cancel_id = queued_id_of(&world, run, "wedged in a tool call");
+    let output = lane.wait_with_output().expect("the binary runs");
+    assert_eq!(output.status.code(), Some(REFUSED));
+    let outcome = outcome_of(&world, run, sent).expect("answered");
+    assert_eq!(
+        (0..4)
+            .map(|index| outcome["results"][index]["outcome"].clone())
+            .collect::<Vec<_>>(),
+        [
+            json!("applied"),
+            json!("refused"),
+            json!("applied"),
+            json!("refused")
+        ],
+        "{outcome}"
+    );
+    assert!(
+        outcome["results"][1]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains(WITHDRAWN_BECAUSE)),
+        "{outcome}"
+    );
+    assert!(
+        outcome["results"][3]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains(&format!("envelope {cancel_id}"))),
+        "{outcome}"
+    );
+    for text in [THIRD_CARRIED, FOURTH_CARRIED] {
+        assert_eq!(
+            recorded_note(&world, run, text)["reached"],
+            json!("carried"),
+            "{text:?} was not recorded as its own carry"
+        );
+    }
+    assert_eq!(rejected_reading(&world, run, QUEUED_WITHDRAWN), 0);
+    assert!(
+        world
+            .events_of(run, "edit-committed")
+            .iter()
+            .all(|event| event["payload"]["command"]["text"] != QUEUED_WITHDRAWN),
+        "the withdrawn note was recorded as delivered"
+    );
+    assert_eq!(rejected_reading(&world, run, NOTE), 1);
+    assert_eq!(withdrawals(&world, run).len(), 1);
+}
+
 /// One envelope withdrawing note 1 of envelope `sent` — offered, untaken — then
 /// note 0, which its delivery already answered `carried`, beside an amend.
 fn withdrawing_beside_a_refusal(sent: u64) -> Value {
