@@ -2860,15 +2860,9 @@ fn attach(
                 ))
             })
             .collect();
-        // The stream's last render reports the run as it settled, so it reads every
-        // landing afresh — as does the render printing the driver's exit, which is the
-        // last one where nothing is left to print after it; before them, a node's read
-        // is carried only until the stream records something that moves it.
-        if concluded {
-            carried.forget_all();
-        } else {
-            carried.forget_moved(&paths.run, &fresh);
-        }
+        // See `StreamReads::before_render` for what the render about to be made of
+        // these records carries from the last one.
+        carried.before_render(&paths.run, &fresh, concluded);
         if !fresh.is_empty() || !headed {
             let rendered = views::monitor_shown(&view, fresh);
             for line in rendered.lines().skip(usize::from(headed)) {

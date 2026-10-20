@@ -1110,9 +1110,24 @@ impl StreamReads {
         Self(())
     }
 
+    /// Make ready for the render of `fresh`, the records the stream is about to
+    /// print, `concluded` once the run's loop has finished.
+    ///
+    /// The stream's last render reports the run as it settled, so it reads every
+    /// landing afresh — as does the render printing the driver's exit, which is the
+    /// last one where nothing is left to print after it; before them, a node's read
+    /// is carried only until the stream records something that moves it.
+    pub(crate) fn before_render(&self, run: &str, fresh: &[&Envelope], concluded: bool) {
+        if concluded {
+            self.forget_all();
+        } else {
+            self.forget_moved(run, fresh);
+        }
+    }
+
     /// Take every node's landing afresh on the next render, which is the one
     /// reporting the run as it settled.
-    pub(crate) fn forget_all(&self) {
+    fn forget_all(&self) {
         READ_THIS_RENDER.with_borrow_mut(BTreeMap::clear);
     }
 
@@ -1126,7 +1141,7 @@ impl StreamReads {
     /// pass renders only what it has not printed yet — so where the exit was
     /// printed before the run's loop was seen to finish, that render is the
     /// stream's final one.
-    pub(crate) fn forget_moved(&self, run: &str, events: &[&Envelope]) {
+    fn forget_moved(&self, run: &str, events: &[&Envelope]) {
         if events.iter().any(|event| {
             event.source == Source::Pipeline && event.kind.0 == PipelineKind::DriverExited.as_str()
         }) {
@@ -3483,7 +3498,7 @@ fn read_side_by_side(view: &RunView, nodes: &[&String]) {
                 && view
                     .state
                     .graph
-                    .get(*node)
+                    .get(node)
                     .is_some_and(|node| node.repo.is_some())
         })
         .filter(|node| {
@@ -5365,11 +5380,20 @@ mod tests {
         );
     }
 
-    /// What an attach stream lets go of, over the records it is handed: a node's read
-    /// goes where the stream records it settling or restacking, or records anything of
-    /// its session; it stays through a record of its own that moves nothing, an
-    /// agent's, and another node's; and every read goes before the final render and in
-    /// the render printing the driver's exit.
+    /// What an attach stream lets go of before each render, over the records that
+    /// render is about to print — the one call the driver's attach loop makes: a
+    /// node's read goes where the stream records it settling or restacking, or records
+    /// anything of its session; it stays through a record of its own that moves
+    /// nothing, an agent's, and another node's; and every read goes before the render
+    /// made once the run's loop has finished, and before the one printing the
+    /// driver's exit.
+    ///
+    /// A structural assertion rather than a journey, and for a reason beyond the one
+    /// above: the stream's last render folds the run's own settled report — see
+    /// [`landings_the_run_re_read`] — so a change the driver's close-out found landed
+    /// prints landed whether or not that render read it again, and a move made between
+    /// two renders is visible only as a landing that changed with no record of the
+    /// node, which no offline journey can time inside the window.
     #[test]
     fn an_attach_stream_lets_go_of_a_read_where_a_record_moves_its_landing() {
         let stream = StreamReads::begin();
@@ -5409,7 +5433,7 @@ mod tests {
             ),
         ] {
             holding(&["a", "b"]);
-            stream.forget_moved("demo", &[&record]);
+            stream.before_render("demo", &[&record], false);
             let expected: &[&str] = if lets_go { &["b"] } else { &["a", "b"] };
             assert_eq!(
                 reads_held(),
@@ -5420,19 +5444,20 @@ mod tests {
             );
         }
         holding(&["a", "b"]);
-        stream.forget_all();
+        stream.before_render("demo", &[], true);
         assert!(
             reads_held().is_empty(),
             "the final render carried a read into it"
         );
         holding(&["a", "b"]);
-        stream.forget_moved(
+        stream.before_render(
             "demo",
             &[&event(
                 crate::journal::PipelineKind::DriverExited,
                 None,
                 &[],
             )],
+            false,
         );
         assert!(
             reads_held().is_empty(),

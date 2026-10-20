@@ -910,7 +910,7 @@ pub(crate) fn landings_now(
         let _deciding = crate::rendercost::deciding(node);
         // The node's own repository, so a branch name two identities both hold is
         // asked about the one this run's work is in.
-        let repo = state.graph.get(*node).and_then(|node| node.repo.as_deref());
+        let repo = state.graph.get(node).and_then(|node| node.repo.as_deref());
         landing_now(&state.branches[*node], repo)
     });
     asked.into_iter().cloned().zip(read).collect()
