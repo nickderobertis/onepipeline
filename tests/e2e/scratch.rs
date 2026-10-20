@@ -313,6 +313,20 @@ fn reply(world: &World, run: &str, commands: serde_json::Value) {
         .exited(0);
 }
 
+/// Wait for the run's driver to let go of it, once its ending's scratch record is written.
+///
+/// A driver journals that record, and then its `driver-exited`, inside its final handover and
+/// *before* it releases the run's lock, so a run whose record is on the journal still reads
+/// as driven — `ACTIVE`, not ended — until the release that follows. A view or a discard
+/// made on the record alone reads that window wherever the release comes late enough, as it
+/// does on a host slow to end a process. See
+/// `driver::a_run_reads_let_go_only_once_its_driver_has_released_it`.
+fn let_go(world: &World, run: &str) {
+    world.until("the driver to let go", |world| {
+        world.run(&["status", run, "--json"]).json()["driven"] == false
+    });
+}
+
 fn read_views(world: &World, run: &str) -> (String, String) {
     let status = world.run(&["status", run]);
     status.exited(0);
@@ -436,6 +450,7 @@ fn failed_scratch_is_recorded_once_and_views_use_the_record_with_a_five_director
     world.until("the failed or unfinished ending records scratch", |world| {
         !world.events_of("seven", "scratch-retained").is_empty()
     });
+    let_go(&world, "seven");
     let records = world.events_of("seven", "scratch-retained");
     assert_eq!(records.len(), 1);
     let record = &records[0]["payload"];
@@ -519,6 +534,7 @@ fn discard_reports_its_own_walk_and_preserves_everything_else() {
     world.until("the failed ending", |world| {
         !world.events_of(&run, "scratch-retained").is_empty()
     });
+    let_go(&world, &run);
     assert_retained(&world, &run, "failed", 1);
     let mut expected: Vec<_> = dirs
         .iter()
@@ -735,9 +751,7 @@ fn made_live_again_after(partly_discarded: bool) {
     world.until("the run to end again", |world| {
         world.events_of(&run, "scratch-retained").len() == 2
     });
-    world.until("the driver to let go", |world| {
-        world.run(&["status", &run, "--json"]).json()["driven"] == false
-    });
+    let_go(&world, &run);
     let latest = assert_retained(&world, &run, "failed", 2);
     assert_eq!(latest["dirs"].as_array().unwrap().len(), 2);
 }
@@ -1086,6 +1100,7 @@ fn links_are_unlinked_without_following_them_and_a_link_scratch_root_is_refused(
                 )
                 .is_empty()
         });
+        let_go(&world, "links");
         if !success {
             world.run(&["scratch", "discard", "links"]).exited(0);
         }
@@ -1180,6 +1195,7 @@ fn partial_filesystem_failure_is_journalled_and_visible_for_both_removal_trigger
                 )
                 .is_empty()
         });
+        let_go(&world, "partial");
         let discarded = if success {
             None
         } else {
@@ -1367,6 +1383,7 @@ fn retained_disk_usage_matches_du_for_sparse_files_and_hard_links() {
     world.until("the retention record", |world| {
         !world.events_of("usage", "scratch-retained").is_empty()
     });
+    let_go(&world, "usage");
     let record = world.events_of("usage", "scratch-retained");
     assert_eq!(record[0]["payload"]["total_bytes"], bytes);
     assert_eq!(record[0]["payload"]["dirs"][0]["bytes"], bytes);
