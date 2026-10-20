@@ -126,6 +126,9 @@ mod filter;
 // reserve on the wall clock, which is the behaviour under test and about ten seconds.
 mod flow;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+// Linux-only: its claim is read off the kernel's trace of the driver, as `agents`' is.
+#[cfg(target_os = "linux")]
+mod follow_cadence;
 mod holds;
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] ten journeys, about five
 // minutes together on a loaded host (290 s at load1 about 17), nearly all of it three cold reads of a generated
