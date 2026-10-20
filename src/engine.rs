@@ -3955,7 +3955,9 @@ fn answer_recovered(
                     Answered::Refused(RecordedRefusal::Text(WITHDRAWN_LIVE.to_string()))
                 }
                 // Refused as it was delivered, and kept nothing of this command.
-                (None, _) if written.refused_at_delivery => Answered::Unapplied,
+                (None, _) if written.course == Course::RefusedKeepingWithdrawals => {
+                    Answered::Unapplied
+                }
                 (Some(operations), _) => {
                     commit_command(
                         paths,
@@ -4472,7 +4474,7 @@ fn hand_envelope(
     // the rest committed, and which commands were notes still outstanding — see
     // [`answer_recovered`].
     let committing = Committing {
-        refused_at_delivery: false,
+        course: Course::Delivered,
         envelope: id,
         operations: ruled
             .iter()
@@ -4697,7 +4699,7 @@ fn refused_keeping_withdrawals(
                     _ => None,
                 })
                 .collect(),
-            refused_at_delivery: true,
+            course: Course::RefusedKeepingWithdrawals,
         };
         ledger::write_json(&committing_path(paths, envelope.id), &committing)?;
     }
@@ -4785,7 +4787,7 @@ fn record_delivered(
     // see [`answer_recovered`]. One command is one record, which nothing can
     // leave half written, so only an envelope of several is written down.
     let committing = Committing {
-        refused_at_delivery: false,
+        course: Course::Delivered,
         envelope: envelope.id,
         operations: delivered
             .iter()
@@ -4892,12 +4894,42 @@ fn prune_committing(paths: &RunPaths, channel: &ChannelState) {
 struct Committing {
     envelope: u64,
     operations: Vec<Option<Vec<edits::Operation>>>,
-    /// The envelope was refused as it was delivered, and its `null` commands
-    /// are the ones that refused or had no effect: what it commits is only each
-    /// live note a `withdraw-note` of it already took back — see
-    /// [`refused_keeping_withdrawals`]. Omitted where it is not.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    refused_at_delivery: bool,
+    /// How the envelope's delivery phase ended. Omitted where it delivered.
+    #[serde(default, skip_serializing_if = "Course::delivered")]
+    course: Course,
+}
+
+/// How an envelope's delivery phase ended, as its writer wrote it down.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum Course {
+    /// Every command it reached committed: each listed operation is committed.
+    #[default]
+    Delivered,
+    /// A command of it refused as it was delivered. What it commits is only each
+    /// live note a `withdraw-note` of it already took back, which is all a
+    /// listed operation may be — [`read_committing`] refuses anything else —
+    /// and its `null` commands refused or had no effect: see
+    /// [`refused_keeping_withdrawals`].
+    RefusedKeepingWithdrawals,
+}
+
+impl Course {
+    fn delivered(&self) -> bool {
+        *self == Self::Delivered
+    }
+}
+
+/// Whether `operations` is one live withdrawal: all a command of an envelope
+/// refused at delivery may have committed.
+fn is_a_kept_withdrawal(operations: &[edits::Operation]) -> bool {
+    matches!(
+        operations,
+        [edits::Operation::NoteWithdrawn {
+            from: crate::note::WithdrawnFrom::Live,
+            ..
+        }]
+    )
 }
 
 /// What `envelope`'s writer wrote down before journalling its first record, or
@@ -4912,6 +4944,24 @@ fn read_committing(
             serde_json::from_str::<Committing>(&text).map_err(|failure| failure.to_string())
         })
         .and_then(|written| {
+            // llmlint: ignore[changed_behavior_has_e2e] only a file edited by hand carries
+            // anything but a live withdrawal under this course — no verb, driver or death writes
+            // one — so a journey reaching it would prove the fixture; it is the trust boundary
+            // that keeps such a file from being committed as though a withdrawal kept it, held
+            // by `a_refused_envelopes_write_ahead_lists_only_kept_withdrawals`.
+            if written.course == Course::RefusedKeepingWithdrawals
+                && !written
+                    .operations
+                    .iter()
+                    .flatten()
+                    .all(|operations| is_a_kept_withdrawal(operations))
+            {
+                return Err(
+                    "it was refused at delivery and names operations other than a live \
+                     withdrawal it kept"
+                        .to_string(),
+                );
+            }
             if written.envelope == envelope.id
                 && written.operations.len() == envelope.commands.len()
             {
@@ -12078,7 +12128,7 @@ mod tests {
             &Committing {
                 envelope: id,
                 operations: vec![Some(Vec::new()), None, None],
-                refused_at_delivery: false,
+                course: Course::Delivered,
             },
         )
         .expect("written down");
@@ -15279,6 +15329,51 @@ mod tests {
             since: 0,
             notes,
         }
+    }
+
+    /// What a writer wrote down for an envelope refused at delivery is read back
+    /// only where every operation it lists is a live withdrawal it kept: a file
+    /// edited to list anything else under that course is refused, not committed.
+    #[test]
+    fn a_refused_envelopes_write_ahead_lists_only_kept_withdrawals() {
+        let root =
+            std::env::temp_dir().join(format!("onepipeline-kept-withdrawals-{}", sys::pid()));
+        std::fs::create_dir_all(&root).expect("a scratch directory");
+        let path = root.join("1.json");
+        let envelope = crate::channel::QueuedCommands {
+            id: 1,
+            author: crate::channel::Author::planner(),
+            commands: vec![note_to("build"), note_to("build")],
+        };
+        let kept = edits::Operation::NoteWithdrawn {
+            node: "build".into(),
+            envelope: 0,
+            index: 1,
+            reason: crate::note::WithdrawalReason::try_from("moved back".to_string())
+                .expect("a reason"),
+            from: crate::note::WithdrawnFrom::Live,
+            text: "stop editing src/old.rs".parse().expect("a note"),
+            alike_after: 0,
+        };
+        let written = |operations: Vec<Option<Vec<edits::Operation>>>| {
+            ledger::write_json(
+                &path,
+                &Committing {
+                    envelope: 1,
+                    operations,
+                    course: Course::RefusedKeepingWithdrawals,
+                },
+            )
+            .expect("written down");
+            read_committing(&path, &envelope)
+        };
+        assert!(written(vec![Some(vec![kept]), None]).is_ok());
+        let refused = written(vec![Some(Vec::new()), None]).expect_err("not a kept withdrawal");
+        assert!(
+            refused.contains("other than a live withdrawal"),
+            "{refused}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A live note to `node` from the planner.
