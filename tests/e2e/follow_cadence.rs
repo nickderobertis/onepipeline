@@ -8,6 +8,10 @@
 //! busy review round cost. What is observed is the ask itself: each one reads the session's
 //! record, so the kernel's record of the driver opening that file is the count, taken
 //! without any knowledge of how the linked library asks.
+// llmlint: ignore-file[e2e_not_mocked] `oneagentgraph` is the established double at its
+// subprocess boundary, because a real agent turn is a paid one and this journey is about the
+// follow of a publication: the session, its clone, its stream and the push are the real linked
+// `onevcs` over a real origin on disk, and the driver is the compiled binary.
 
 use std::path::Path;
 use std::process::{Command, Stdio};

@@ -127,8 +127,13 @@ mod filter;
 mod flow;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 // Linux-only: its claim is read off the kernel's trace of the driver, as `agents`' is.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] one journey of about ten
+// seconds, and what it measures is `vcs`' follow inside a real publication — `driver`,
+// `lifecycle` and `vcs` through the linked `onevcs` at once — so the crate's edge is the
+// narrowest it fits behind, on the grounds `mod unreadable_sessions` gives.
 #[cfg(target_os = "linux")]
 mod follow_cadence;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod holds;
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] ten journeys, about five
 // minutes together on a loaded host (290 s at load1 about 17), nearly all of it three cold reads of a generated
