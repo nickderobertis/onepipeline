@@ -4383,7 +4383,9 @@ fn withdrawn_notes(paths: &RunPaths, id: u64, commands: &[Command]) -> BTreeSet<
 /// Each write-ahead is read as recovery reads it — through [`read_committing`],
 /// against the queued envelope its name says it is for — and a withdrawal counts
 /// only where the command it is written down beside is a `withdraw-note` naming
-/// that very note. A write-ahead that fails either check names none.
+/// that very note. A write-ahead that fails either check names none — which only
+/// a run directory edited by hand holds, so `only_a_valid_write_ahead_names_a_withdrawal_to_skip`
+/// holds each refusal over a real run directory and channel rather than a journey.
 fn written_down_withdrawals(paths: &RunPaths, id: u64) -> BTreeSet<usize> {
     let Ok(written) = std::fs::read_dir(paths.dir.join(COMMITTING)) else {
         return BTreeSet::new();
@@ -15390,6 +15392,88 @@ mod tests {
             since: 0,
             notes,
         }
+    }
+
+    /// A withdrawal a pending write-ahead names keeps a note from being offered
+    /// again only where that write-ahead is its envelope's own and reads back:
+    /// a file named for no envelope, for one the queue does not hold, holding
+    /// what does not parse, or listing a withdrawal beside a command that is not
+    /// the `withdraw-note` naming that note, names none.
+    #[test]
+    fn only_a_valid_write_ahead_names_a_withdrawal_to_skip() {
+        let root =
+            std::env::temp_dir().join(format!("onepipeline-written-withdrawals-{}", sys::pid()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = RunPaths::under(&root, "demo");
+        paths.create().expect("the run directory");
+        let channel = ChannelState::new(&paths);
+        let notes = channel
+            .submit(
+                crate::channel::Author::planner(),
+                &[note_to("build"), note_to("build")],
+            )
+            .expect("queued");
+        let withdraw = |index: u32| -> Command {
+            serde_json::from_value(json!({
+                "op": "withdraw-note", "envelope": notes.to_string(), "index": index,
+                "reason": "moved back",
+            }))
+            .expect("a withdraw-note")
+        };
+        let amend: Command = serde_json::from_value(json!({
+            "op": "amend", "id": "build", "text": "keep it short",
+        }))
+        .expect("an amend");
+        let by = channel
+            .submit(
+                crate::channel::Author::planner(),
+                &[withdraw(1), withdraw(0), amend],
+            )
+            .expect("queued");
+        let kept = |index: u32| edits::Operation::NoteWithdrawn {
+            node: "build".into(),
+            envelope: notes,
+            index,
+            reason: crate::note::WithdrawalReason::try_from("moved back".to_string())
+                .expect("a reason"),
+            from: crate::note::WithdrawnFrom::Live,
+            text: "stop editing src/old.rs".parse().expect("a note"),
+            alike_after: 0,
+        };
+        let write = |name: &str, operations: Vec<Option<Vec<edits::Operation>>>| {
+            ledger::write_json(
+                &paths.dir.join(COMMITTING).join(name),
+                &Committing {
+                    envelope: by,
+                    operations,
+                    course: Course::RefusedKeepingWithdrawals,
+                },
+            )
+            .expect("written down");
+        };
+        let found = || written_down_withdrawals(&paths, notes);
+
+        // Its own, and read back: the withdrawal of note 1 counts.
+        write(&format!("{by}.json"), vec![Some(vec![kept(1)]), None, None]);
+        assert_eq!(found(), BTreeSet::from([1]));
+        // Listed beside the `withdraw-note` naming another note: none.
+        write(&format!("{by}.json"), vec![Some(vec![kept(0)]), None, None]);
+        assert_eq!(found(), BTreeSet::new());
+        // Beside a command that is no `withdraw-note` at all: none.
+        write(&format!("{by}.json"), vec![None, None, Some(vec![kept(1)])]);
+        assert_eq!(found(), BTreeSet::new());
+        std::fs::remove_file(committing_path(&paths, by)).expect("removed");
+        // Named for no envelope, or for one the queue does not hold: none.
+        write(
+            "not-an-envelope.json",
+            vec![Some(vec![kept(1)]), None, None],
+        );
+        write("999.json", vec![Some(vec![kept(1)]), None, None]);
+        assert_eq!(found(), BTreeSet::new());
+        // What does not parse, under its envelope's own name: none.
+        std::fs::write(committing_path(&paths, by), "{ not json").expect("written");
+        assert_eq!(found(), BTreeSet::new());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// What a writer wrote down for an envelope refused at delivery is read back
