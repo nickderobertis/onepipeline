@@ -6835,6 +6835,106 @@ fn a_note_its_delivery_answered_untaken_is_refused_while_its_envelope_is_outstan
     });
 }
 
+/// A live note taken back by a `withdraw-note` stays withdrawn — recorded once,
+/// carrying the supplied reason — when a later command of the same envelope
+/// refuses as it is delivered. Here that later command is a second
+/// `withdraw-note`, naming a note its delivery already answered `carried` but
+/// has not recorded yet, so it refuses only once it is applied. The envelope is
+/// answered applied in part: the withdrawal that took its note back `applied`,
+/// the other refused naming why. The withdrawn note is answered refused carrying
+/// the reason, journalled by nothing but its withdrawal, and presented to no turn.
+#[test]
+fn a_live_withdrawal_stays_recorded_when_a_later_command_of_its_envelope_refuses() {
+    let world = World::new("note-withdraw-beside-refused");
+    let run = "withdrawbesiderefused";
+    held_conversation(&world, run, vec![agent("build", &[])]);
+
+    let before = admitted(&world, run);
+    let notes = submitted(
+        &world,
+        run,
+        &json!({"version": 2, "commands": [
+            timed_note("build", THIRD_CARRIED, "turn-end", true, 1),
+            note_op_with("build", LIVE_WITHDRAWN, "turn-end", true),
+        ]})
+        .to_string(),
+    );
+    world.until(
+        "the timed note to expire and the note behind it to wait",
+        |world| admitted(world, run) == before + 2 && awaiting_an_answer(world, run) == 1,
+    );
+    let sent = queued_id_of(&world, run, LIVE_WITHDRAWN);
+
+    world
+        .run_with_stdin_on(
+            world.agentgraph_cmd(&["reply", run]),
+            &json!({"version": 2, "commands": [
+                withdraw_op(sent, 1, WITHDRAWN_BECAUSE),
+                withdraw_op(sent, 0, WITHDRAWN_BECAUSE),
+            ]})
+            .to_string(),
+        )
+        .exited(REFUSED);
+    assert_eq!(
+        withdrawals(&world, run),
+        [json!({
+            "kind": "note-withdrawn",
+            "node": "build",
+            "envelope": sent,
+            "index": 1,
+            "reason": WITHDRAWN_BECAUSE,
+            "from": "live",
+            "text": LIVE_WITHDRAWN,
+        })],
+        "the withdrawal that took its note back was not recorded once"
+    );
+    let withdrawing = queued_id_of(&world, run, "withdraw-note");
+    let answer = outcome_of(&world, run, withdrawing).expect("answered");
+    assert_eq!(
+        [
+            &answer["applied"],
+            &answer["results"][0]["outcome"],
+            &answer["results"][1]["outcome"]
+        ],
+        [&json!(false), &json!("applied"), &json!("refused")],
+        "{answer}"
+    );
+    assert!(
+        answer["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.starts_with("applied in part:")),
+        "{answer}"
+    );
+    assert!(
+        answer["results"][1]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("`carried`")),
+        "{answer}"
+    );
+
+    release(&world.fakes, "turn.go");
+    release(&world.fakes, "turn.settle");
+    let output = notes.wait_with_output().expect("the binary runs");
+    assert_eq!(output.status.code(), Some(REFUSED));
+    let result = result_of(&world, run, sent, 1);
+    assert_eq!(result["outcome"], json!("refused"), "{result}");
+    assert!(
+        result["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains(WITHDRAWN_BECAUSE)),
+        "the withdrawn note's command lost the withdrawal's reason: {result}"
+    );
+    assert_eq!(outcomes_for(&world, run, sent), 1);
+    assert_eq!(rejected_reading(&world, run, LIVE_WITHDRAWN), 0);
+    world.until("the run to settle", |world| {
+        !world.events_of(run, "node-settled").is_empty()
+    });
+    assert!(prompts(&world)
+        .iter()
+        .all(|prompt| !prompt.contains(LIVE_WITHDRAWN)));
+    assert_eq!(withdrawals(&world, run).len(), 1);
+}
+
 /// Withdrawing a live note leaves a carried note of the same text to the same
 /// node owed to that node's next dispatch: the live withdrawal takes nothing off
 /// the node's carried context. The cancel parks the run's only node and its

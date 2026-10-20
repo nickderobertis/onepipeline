@@ -4441,7 +4441,12 @@ fn hand_envelope(
             _ if ruled.iter().flatten().any(std::result::Result::is_err) => {
                 ruled.push(Some(Ok(Delivery::NotAttempted)));
             }
-            other => ruled.push(Some(commits_of(other).map(Delivery::Committed))),
+            other => {
+                let seated = is_seated(&other);
+                ruled.push(Some(
+                    commits_of(other).map(|operations| delivered_as(seated, operations)),
+                ));
+            }
         }
     }
     // llmlint: ignore-block[changed_behavior_has_e2e] a retitle the host refuses beside a live
@@ -4449,30 +4454,15 @@ fn hand_envelope(
     // answered through the same `refused_envelope`; arranging it beside a held note needs the
     // fake host to refuse one call of a reply and not the next, which `commits_of` declines.
     if ruled.iter().flatten().any(std::result::Result::is_err) {
-        // Nothing of it is journalled, and no note of it is offered.
+        // Nothing of it is journalled but a live note it already took back, and
+        // no note of it is offered.
         let evaluated: Vec<std::result::Result<Delivery, Error>> = ruled
             .into_iter()
             .map(|ruling| ruling.unwrap_or(Ok(Delivery::NotAttempted)))
             .collect();
-        for (command, ruling) in commands.iter().zip(&evaluated) {
-            if let Err(error) = ruling {
-                record_rejection(
-                    paths,
-                    journal,
-                    envelope.author.clone(),
-                    command,
-                    error,
-                    Some(id),
-                )?;
-            }
-        }
-        answer_through_withdrawals(
-            paths,
-            channel,
-            commands,
-            refused_envelope(id, commands, &evaluated),
-        )?;
-        return Ok(false);
+        return refused_keeping_withdrawals(
+            paths, journal, state, channel, in_flight, &envelope, &evaluated,
+        );
     }
     // llmlint: ignore-end[changed_behavior_has_e2e]
     // Written down before its first record, with no operations for its notes:
@@ -4660,6 +4650,76 @@ fn names_of(commands: &[Command]) -> BTreeSet<String> {
         .collect()
 }
 
+/// Answer an envelope a command of refused at delivery, journalling each refusal
+/// — and committing, before anything else, each live note a `withdraw-note` of
+/// it already took back from its delivery.
+///
+/// A conversation has no undo: a note its withdrawer took back is never
+/// presented to any turn, whatever the commands after it then say. So that
+/// withdrawal is recorded as it happened — its `note-withdrawn` committed once,
+/// and the note's own envelope answered refused carrying its reason — and the
+/// envelope is answered **applied in part**: each such withdrawal `applied`,
+/// each command that refused `refused`, and every other command `validated`,
+/// having had no effect. Where none took a note back, the envelope is refused
+/// whole, as any is.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the run's record, journal, state and channel, the dispatches in flight, \
+              the envelope, and what its delivery phase answered"
+)]
+fn refused_keeping_withdrawals(
+    paths: &RunPaths,
+    journal: &mut Journal,
+    state: &mut Projected,
+    channel: &ChannelState,
+    in_flight: &mut BTreeMap<String, Dispatch>,
+    envelope: &crate::channel::QueuedCommands,
+    evaluated: &[std::result::Result<Delivery, Error>],
+) -> Result<bool> {
+    let commands = &envelope.commands;
+    let author = envelope.author.clone();
+    let mut answers = Vec::with_capacity(commands.len());
+    let mut kept = false;
+    for (command, ruling) in commands.iter().zip(evaluated) {
+        answers.push(match ruling {
+            Ok(Delivery::TakenBack(operations)) => {
+                commit_command(
+                    paths,
+                    journal,
+                    state,
+                    author.clone(),
+                    command,
+                    operations,
+                    in_flight,
+                    envelope.id,
+                )?;
+                kept = true;
+                Answered::Committed(None)
+            }
+            Err(error) => {
+                record_rejection(
+                    paths,
+                    journal,
+                    author.clone(),
+                    command,
+                    error,
+                    Some(envelope.id),
+                )?;
+                Answered::Refused(RecordedRefusal::of(error))
+            }
+            Ok(_) => Answered::Unapplied,
+        });
+    }
+    crate::review::failpoint("after-edit-rejected")?;
+    let outcome = if kept {
+        partly_applied(envelope.id, commands, &answers)
+    } else {
+        refused_envelope(envelope.id, commands, evaluated)
+    };
+    answer_through_withdrawals(paths, channel, commands, outcome)?;
+    Ok(kept)
+}
+
 /// Phase 3 of one envelope: journal what its delivery phase answered, and answer
 /// its submitter.
 ///
@@ -4690,26 +4750,9 @@ fn record_delivered(
     let delivered = match all_or_each_ruling(delivered) {
         Ok(delivered) => delivered,
         Err(evaluated) => {
-            for (command, ruling) in commands.iter().zip(&evaluated) {
-                if let Err(error) = ruling {
-                    record_rejection(
-                        paths,
-                        journal,
-                        author.clone(),
-                        command,
-                        error,
-                        Some(envelope.id),
-                    )?;
-                }
-            }
-            crate::review::failpoint("after-edit-rejected")?;
-            answer_through_withdrawals(
-                paths,
-                channel,
-                commands,
-                refused_envelope(envelope.id, commands, &evaluated),
-            )?;
-            return Ok(false);
+            return refused_keeping_withdrawals(
+                paths, journal, state, channel, in_flight, &envelope, &evaluated,
+            );
         }
     };
 
@@ -4970,7 +5013,7 @@ fn answered_envelope(
             .iter()
             .map(|answer| match answer {
                 Answered::Committed(turn) => *turn,
-                Answered::Refused(_) | Answered::NotAttempted => None,
+                Answered::Refused(_) | Answered::NotAttempted | Answered::Unapplied => None,
             })
             .collect();
         return applied_envelope(id, commands, &turns);
@@ -4983,7 +5026,9 @@ fn answered_envelope(
             .into_iter()
             .map(|answer| match answer {
                 Answered::Refused(reason) => Err(reason),
-                Answered::Committed(_) | Answered::NotAttempted => Ok(Delivery::NotAttempted),
+                Answered::Committed(_) | Answered::NotAttempted | Answered::Unapplied => {
+                    Ok(Delivery::NotAttempted)
+                }
             })
             .collect();
         return refused_envelope(id, commands, &evaluated);
@@ -5034,11 +5079,11 @@ fn partly_applied(id: u64, commands: &[Command], answered: &[Answered]) -> Comma
             .map(|(index, (command, answer))| {
                 let refusal = match answer {
                     Answered::Refused(reason) => reason.refusal(),
-                    Answered::Committed(_) | Answered::NotAttempted => None,
+                    Answered::Committed(_) | Answered::NotAttempted | Answered::Unapplied => None,
                 };
                 let turn = match answer {
                     Answered::Committed(turn) => *turn,
-                    Answered::Refused(_) | Answered::NotAttempted => None,
+                    Answered::Refused(_) | Answered::NotAttempted | Answered::Unapplied => None,
                 };
                 let (outcome, reason) = match answer {
                     Answered::Committed(_) => (crate::channel::CommandVerdict::Applied, None),
@@ -5052,6 +5097,13 @@ fn partly_applied(id: u64, commands: &[Command], answered: &[Answered]) -> Comma
                             "not applied: an earlier note of this envelope to the same node \
                              refused, so this one was never offered; the envelope's command(s) \
                              {committed} committed — resend this one on its own"
+                        )),
+                    ),
+                    Answered::Unapplied => (
+                        crate::channel::CommandVerdict::Validated,
+                        Some(format!(
+                            "not applied: command(s) {refused} of this envelope refused as it \
+                             was delivered, so this one had no effect — resend it on its own"
                         )),
                     ),
                 };
@@ -5375,6 +5427,22 @@ impl TakeBack {
     }
 }
 
+/// What the delivery phase did with one command it reached and that did not
+/// refuse: committed, or — for a `withdraw-note` seated on a delivery — taken
+/// back from that delivery, which nothing can undo.
+fn delivered_as(seated: bool, operations: Vec<edits::Operation>) -> Delivery {
+    if seated {
+        Delivery::TakenBack(operations)
+    } else {
+        Delivery::Committed(operations)
+    }
+}
+
+/// Whether `step` is a `withdraw-note` seated on the delivery holding its note.
+fn is_seated(step: &Staged) -> bool {
+    matches!(step, Staged::TakeBack(take_back) if take_back.seat.is_some())
+}
+
 /// The disposition a note's delivery record names, where the operations are one.
 fn reached_of(operations: &[edits::Operation]) -> Option<crate::note::Reached> {
     operations.iter().find_map(|operation| match operation {
@@ -5662,6 +5730,7 @@ fn deliver_envelope(
             delivered.push(Ok(Delivery::Withdrawn));
             continue;
         }
+        let seated = is_seated(&step);
         let committed = commits_of(step);
         if let Some(progress) = progress {
             let mut now = progress
@@ -5672,7 +5741,7 @@ fn deliver_envelope(
                 now.finished.push(operations.clone());
             }
         }
-        delivered.push(committed.map(Delivery::Committed));
+        delivered.push(committed.map(|operations| delivered_as(seated, operations)));
     }
     delivered
 }
@@ -5839,6 +5908,11 @@ enum Delivery {
     /// commits nothing of its own, since the withdrawal is its record, and its
     /// envelope's answer refuses it — see [`crate::withdrawal::as_withdrawn`].
     Withdrawn,
+    /// A `withdraw-note` that took a live note back from the delivery holding
+    /// it, and these are the operations it commits. A conversation has no undo,
+    /// so it is committed even where a later command of its envelope refuses —
+    /// see [`refused_keeping_withdrawals`].
+    TakenBack(Vec<edits::Operation>),
 }
 
 impl Delivery {
@@ -5849,7 +5923,7 @@ impl Delivery {
     /// reads this as empty for that reason.
     fn committed(&self) -> &[edits::Operation] {
         match self {
-            Self::Committed(operations) => operations,
+            Self::Committed(operations) | Self::TakenBack(operations) => operations,
             Self::NotAttempted | Self::Withdrawn => &[],
         }
     }
@@ -5954,6 +6028,9 @@ enum Answered {
     /// Never offered, because an earlier note to the same receiver refused:
     /// nothing of it happened.
     NotAttempted,
+    /// Validated, and not applied because another command of its envelope
+    /// refused at delivery: nothing of it happened.
+    Unapplied,
 }
 
 /// One receiver of a handed envelope, until its conversation answers.
@@ -6634,7 +6711,7 @@ fn settle_lane(
             continue;
         };
         let answered = match ruling {
-            Ok(Delivery::Committed(operations)) => {
+            Ok(Delivery::Committed(operations) | Delivery::TakenBack(operations)) => {
                 let operations = from_envelope(&operations, id, index);
                 commit_command(
                     paths,

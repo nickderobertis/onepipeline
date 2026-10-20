@@ -12115,7 +12115,13 @@ which party took a note, but not whether its turn was interrupted or only reache
    whose envelope is held unjudged behind another is skipped when that envelope is judged.
    It is recorded once, by that `edit-committed`, and its envelope is answered with its
    command `refused`, carrying the withdrawal's reason. A live note a turn already took is
-   refused naming its disposition, and its outcome is left as it was.
+   refused naming its disposition, and its outcome is left as it was. A conversation has no
+   undo, so a live note its withdrawer took back stays withdrawn when a later command of the
+   same envelope refuses as it is delivered: its `note-withdrawn` is still committed once,
+   and that envelope is answered applied in part — the withdrawal `applied`, the refusing
+   command `refused`, every other command `validated`. This build applied that as option A
+   of question `c-1090d325ced7472d94d454f1673b7b9b`, which the manager left unanswered; it
+   adds no op, field, verdict or record kind, and stays a proposal until ruled.
 
 **On Windows a `live` note never interrupts.** onejudge 0.20.0 opens no out-of-band
 control for a turn off unix, so no turn there can be interrupted whatever its harness
