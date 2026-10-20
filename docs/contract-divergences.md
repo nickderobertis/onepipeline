@@ -12119,14 +12119,19 @@ which party took a note, but not whether its turn was interrupted or only reache
    undo, so a live note its withdrawer took back stays withdrawn when a later command of the
    same envelope refuses as it is delivered: its `note-withdrawn` is still committed once,
    and that envelope is answered applied in part — the withdrawal `applied`, the refusing
-   command `refused`, every other command `validated`. **Unruled proposal, not an agreed
-   resolution:** this build implements it as option A of question
-   `c-1090d325ced7472d94d454f1673b7b9b`, re-asked as `c-4f1358d1b14d36dd70b4c03e8c5f2c52`
-   and `c-cbd47d568d8dd7c56b15aa135b142192` with an explicit request for approval. All
-   three timed out without a reply, and a timeout is not approval. It adds no op, field,
-   verdict or record kind. The alternatives put to the manager were (B) staying all-or-nothing,
-   with the note answered by a placeholder reason and no record, and (C) refusing such
-   envelopes at validation. It stays a proposal until the manager rules.
+   command `refused`, every other command `validated`. **Ruled.** This was put to the
+   manager as option A of question `c-1090d325ced7472d94d454f1673b7b9b`, and re-asked as
+   `c-4f1358d1b14d36dd70b4c03e8c5f2c52` and `c-cbd47d568d8dd7c56b15aa135b142192`; all
+   three timed out unanswered, and none was taken as approval. The manager approved it under
+   correlation `c-41dfb3e80a73b07b16c16c2083ff9868` ("approve-A"), including the crash
+   recovery — a driver that dies before answering such an envelope leaves the next driver
+   to commit the kept withdrawal exactly once, never offering the note again meanwhile —
+   and the optional `course` field on the engine's internal write-ahead file, omitted where
+   the envelope delivered. The manager also directed that the reproduction and crash-seam
+   journeys be kept, and that the rule be stated in `docs/contract.md`, where it now stands
+   in the planner channel's envelope rules. It adds no op, field, verdict or record kind.
+   The alternatives were (B) staying all-or-nothing, with the note answered by a
+   placeholder reason and no record, and (C) refusing such envelopes at validation.
 
 **On Windows a `live` note never interrupts.** onejudge 0.20.0 opens no out-of-band
 control for a turn off unix, so no turn there can be interrupted whatever its harness
