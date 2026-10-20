@@ -5303,6 +5303,12 @@ fn result_of(world: &World, run: &str, id: u64, index: usize) -> Value {
 ///
 /// The held turn is never released: the redirect is what ends it, so a delivery
 /// that only waited for the turn to end could not pass.
+/// Unix only, like every journey here that interrupts a turn: onejudge opens no
+/// out-of-band control for a turn off unix, so on Windows a `live` note reaches
+/// its party at the turn's end, which
+/// [`a_live_note_to_a_held_worker_turn_with_no_lever_reaches_it_at_its_end`]
+/// holds there.
+#[cfg(unix)]
 #[test]
 fn a_live_note_interrupts_the_held_worker_turn_and_its_replacement_opens_on_it() {
     let world = World::new("note-interrupt");
@@ -5463,6 +5469,12 @@ fn a_turn_end_note_waits_for_the_held_turn_to_end_and_never_interrupts_it() {
 /// decision is re-taken on a replacement turn that opens on the note — once — and
 /// judges against its criterion. That decision completes the work, so the note is
 /// recorded `judged-with`, and no later worker turn is handed it.
+/// Unix only, like every journey here that interrupts a turn: onejudge opens no
+/// out-of-band control for a turn off unix, so on Windows a `live` note reaches
+/// its party at the turn's end, which
+/// [`a_live_note_to_a_held_worker_turn_with_no_lever_reaches_it_at_its_end`]
+/// holds there.
+#[cfg(unix)]
 #[test]
 fn a_note_to_the_supervisor_interrupts_the_held_judge_turn_and_its_replacement_decides_with_it() {
     let world = World::new("note-judge-interrupt");
@@ -5521,6 +5533,154 @@ fn a_note_to_the_supervisor_interrupts_the_held_judge_turn_and_its_replacement_d
             .iter()
             .all(|prompt| !prompt.contains(NOTE)),
         "a worker turn was handed a note the judge completed the work with"
+    );
+}
+
+/// Leave this world's held turn with no lever to interrupt it. On Windows that is
+/// a harness that serves control, because the lever is missing there whatever the
+/// harness offers: onejudge opens no out-of-band control for a turn off unix.
+/// Elsewhere it is a harness that offers none.
+fn without_a_lever(world: &World) {
+    if cfg!(windows) {
+        world.script("harness.control", "serve");
+    }
+}
+
+/// A default `live` note to a held worker turn that nothing can interrupt waits
+/// for that turn to end, and reaches the worker then: never answered while the
+/// turn is held, never aborting it, recorded with `turn: turn-end` in the journal
+/// and in the note's channel outcome, opened on by the worker's next turn exactly
+/// once, and judged against by the supervisor. This is what a `live` note does on
+/// Windows, where onejudge opens no control for a turn.
+#[test]
+fn a_live_note_to_a_held_worker_turn_with_no_lever_reaches_it_at_its_end() {
+    let world = World::new("note-no-lever");
+    let run = "nolever";
+    without_a_lever(&world);
+    held_conversation(&world, run, vec![agent("build", &[])]);
+    let held = held_worker_prompt(&world);
+
+    let before = admitted(&world, run);
+    let mut note = submitted(
+        &world,
+        run,
+        &envelope(note_op("build", "worker", NOTE, Some(CRITERION))),
+    );
+    world.until("the note to be admitted to the conversation", |world| {
+        admitted(world, run) > before
+    });
+    assert!(
+        note.try_wait().expect("the reply is readable").is_none(),
+        "a live note was answered while the turn it could not interrupt was still held"
+    );
+    assert!(
+        worked(&world).iter().all(|prompt| !prompt.contains(NOTE)),
+        "the worker was handed the note before its held turn ended"
+    );
+
+    release(&world.fakes, "turn.go");
+    release(&world.fakes, "turn.settle");
+    assert!(answered(note).contains("\"state\":\"applied\""));
+    world.until("the run to settle", |world| {
+        !world.events_of(run, "node-settled").is_empty()
+    });
+    let operation = recorded(&world, run);
+    assert_eq!(
+        [&operation["reached"], &operation["turn"]],
+        [&json!("worker"), &json!("turn-end")],
+        "{operation}"
+    );
+    let id = queued_id_of(&world, run, NOTE);
+    assert_eq!(
+        result_of(&world, run, id, 0)["turn"],
+        json!("turn-end"),
+        "the note's channel outcome does not say it reached the turn at its end"
+    );
+    assert!(
+        aborted(&world).is_empty(),
+        "a turn with no lever was aborted"
+    );
+    assert!(
+        ended(&world).contains(&held),
+        "the held turn did not run to its end"
+    );
+    let worker = worker_turns(&world);
+    let at = worker
+        .iter()
+        .position(|prompt| *prompt == held)
+        .expect("the held turn's prompt");
+    let next = worker
+        .get(at + 1)
+        .unwrap_or_else(|| panic!("no turn opened after the held one:\n{worker:#?}"));
+    assert_eq!(
+        next.matches(NOTE).count(),
+        1,
+        "the worker's next turn did not open on the note exactly once:\n{next}"
+    );
+    assert!(
+        judged(&world)
+            .iter()
+            .any(|prompt| prompt.contains(CRITERION)),
+        "no decision of the supervisor judged against the note's criterion:\n{:#?}",
+        judged(&world)
+    );
+}
+
+/// A note to the supervisor, sent while a judge turn nothing can interrupt is
+/// held, waits for that turn to end and reaches the supervisor then: never
+/// answered while the turn is held, never aborting it, and taken into a decision
+/// that is handed the note and its criterion. It is recorded `judged-with`, or as
+/// reaching the supervisor with `turn: turn-end`, and never as having interrupted
+/// anything. This is what such a note does on Windows.
+#[test]
+fn a_live_note_to_a_held_judge_turn_with_no_lever_reaches_the_supervisor_at_its_end() {
+    let world = World::new("note-judge-no-lever");
+    let run = "judgenolever";
+    without_a_lever(&world);
+    held_judge(&world, run, vec![agent("build", &[])]);
+    let held = held_judge_prompt(&world);
+
+    let before = admitted(&world, run);
+    let mut note = submitted(
+        &world,
+        run,
+        &envelope(note_op("build", "supervisor", NOTE, Some(CRITERION))),
+    );
+    world.until("the note to be admitted to the conversation", |world| {
+        admitted(world, run) > before
+    });
+    assert!(
+        note.try_wait().expect("the reply is readable").is_none(),
+        "a live note was answered while the judge turn it could not interrupt was still held"
+    );
+
+    release(&world.fakes, "judge.go");
+    assert!(answered(note).contains("\"state\":\"applied\""));
+    world.until("the run to settle", |world| {
+        !world.events_of(run, "node-settled").is_empty()
+    });
+    assert!(
+        aborted(&world).is_empty(),
+        "a judge turn with no lever was aborted"
+    );
+    assert!(
+        ended(&world).contains(&held),
+        "the held judge turn did not run to its end"
+    );
+    let operation = recorded(&world, run);
+    assert!(
+        operation["reached"] == json!("judged-with")
+            || [&operation["reached"], &operation["turn"]]
+                == [&json!("supervisor"), &json!("turn-end")],
+        "the note is recorded neither as judged with nor as reaching the supervisor at its \
+         turn's end: {operation}"
+    );
+    assert!(
+        judged(&world)
+            .iter()
+            .any(|prompt| prompt.contains(NOTE) && prompt.contains(CRITERION)),
+        "no decision of the supervisor was handed the note and its criterion:\n{:#?}",
+        judged(&world)
     );
 }
 
@@ -6198,6 +6358,12 @@ fn a_withdrawal_is_applied_beside_a_waiting_note_and_each_refusal_names_why() {
 /// re-taken on it sends the worker back, is recorded as having interrupted the
 /// supervisor's turn — in the journal and in the envelope's outcome — and rides
 /// that decision to the worker as the supervisor's note.
+/// Unix only, like every journey here that interrupts a turn: onejudge opens no
+/// out-of-band control for a turn off unix, so on Windows a `live` note reaches
+/// its party at the turn's end, which
+/// [`a_live_note_to_a_held_worker_turn_with_no_lever_reaches_it_at_its_end`]
+/// holds there.
+#[cfg(unix)]
 #[test]
 fn a_note_that_interrupts_the_held_judge_turn_rides_its_re_taken_decision_to_the_worker() {
     let world = World::new("note-judge-interrupt-continues");

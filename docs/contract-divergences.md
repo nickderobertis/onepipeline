@@ -12090,6 +12090,16 @@ which party took a note, but not whether its turn was interrupted or only reache
    **A later outcome for an envelope id supersedes an earlier one**: `outcome_of` reads the
    latest.
 
+**On Windows a `live` note never interrupts.** onejudge 0.20.0 opens no out-of-band
+control for a turn off unix, so no turn there can be interrupted whatever its harness
+offers. A `live` note to a running turn there waits for the turn's end, which is rule 1's
+fallback. It is recorded with `turn: turn-end` in the journal and in the note's channel
+outcome, and a deadline bounds the wait as rule 2 says. `tests/note`'s
+`a_live_note_to_a_held_worker_turn_with_no_lever_reaches_it_at_its_end` and
+`a_live_note_to_a_held_judge_turn_with_no_lever_reaches_the_supervisor_at_its_end` hold
+that on Windows with a harness that serves control. On other platforms they use a
+harness that offers none. The journeys that interrupt a turn are unix-only.
+
 **Interim, ruled.** The manager ruled under correlation
 `c-aa4f02b18fb1d83a1495c1b07c2a2d77` that this node withdraws carried notes only. A note
 still untaken in its live conversation's inbox cannot be withdrawn through
