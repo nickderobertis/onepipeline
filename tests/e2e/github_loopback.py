@@ -7,8 +7,9 @@ second argument names a JSON file of caller metadata to seed onto issues by name
 
 `GITHUB_LOOPBACK_ISSUES` names a JSON file of numbered issues and the boards that hold them,
 for the journeys about the issues a landing closes: `{"repository": "owner/name", "issues":
-{"7": {"state": "OPEN", "reason": null, "delivers": ["source:ticket"]}, ...}, "boards": {"1":
-{"7": "Todo"}, ...}}`, `delivers` optional and written into the issue's metadata slot. A read
+{"7": {"state": "OPEN", "reason": null, "delivers": ["source:ticket"], "subissues": 2}, ...},
+"boards": {"1": {"7": "Todo"}, ...}}`, `delivers` optional and written into the issue's metadata
+slot, and `subissues` optional, the count of sub-issues that makes an issue a plan's home. A read
 of an `ISSUE-<n>` this endpoint holds no issue for fails with an HTTP 502. Those
 issues are read by repository and number, as `task status complete` reads them, and a board's
 source names its board in its endpoint, `/board/<number>/graphql`, so every request is logged
@@ -18,6 +19,13 @@ good, `fail-once` with an HTTP 502, `transient` — failed once with an HTTP 502
 then held until POST `/release` — or `hold` until `/release` and then dropped unapplied, the
 request a stopped driver sent and never saw answered. POST `/reads` with `{"reads": ["pass" |
 "refuse", ...]}` answers the next reads of issues by reference that way, one each, in order.
+
+`GITHUB_LOOPBACK_PLAN` names a JSON file reshaping the named board's plan, for the journeys about
+a run's home: `{"tasks": {"first": [], "second": ["first"]}, "status": "In Progress"}` — each task
+by name with the tasks it is blocked by, in order, and the home's own Status option; without it
+the plan holds `anchor`, `work` and `other`, none blocked, at `Todo`. POST `/home-fault` with
+`{"fault": "refuse" | "fail" | "pass"}` answers every later Status write of the home that way:
+`refuse`d for good, `fail`ed with an HTTP 502, or taken.
 
 The URL is published to `<root>/endpoint` whole or not at all. For the regression journey that
 proves it, `GITHUB_LOOPBACK_PUBLISH_HOLD` names a directory: publication stops half-written,
@@ -34,13 +42,27 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 root = pathlib.Path(sys.argv[1])
 seeded = json.loads(pathlib.Path(sys.argv[2]).read_text()) if len(sys.argv) > 2 else {}
+shaped = (json.loads(pathlib.Path(os.environ["GITHUB_LOOPBACK_PLAN"]).read_text())
+          if os.environ.get("GITHUB_LOOPBACK_PLAN") else
+          {"tasks": {"anchor": [], "work": [], "other": []}, "status": "Todo"})
+if (not isinstance(shaped, dict) or set(shaped) != {"tasks", "status"}
+        or not isinstance(shaped["tasks"], dict) or not shaped["tasks"]
+        or "plan" in shaped["tasks"]
+        or not all(isinstance(blocked, list) and all(by in shaped["tasks"] and by != task
+                                                     for by in blocked)
+                   for task, blocked in shaped["tasks"].items())):
+    raise SystemExit("a plan names its tasks, each with the tasks it is blocked by, and a status")
+TASKS = list(shaped["tasks"])
+NAMES = ["plan"] + TASKS
 if (not isinstance(seeded, dict)
-        or set(seeded) - {"plan", "anchor", "work", "other"}
+        or set(seeded) - set(NAMES)
         or not all(isinstance(metadata, dict) and all(isinstance(key, str) for key in metadata)
                    and not any(key.startswith(("onepipeline.", "onetaskgraph.")) for key in metadata)
                    for metadata in seeded.values())):
     raise SystemExit("seeded metadata must map issue names to objects of caller keys")
-options = ["Todo", "Queued", "In Progress", "Needs Attention", "Done", "Canceled"]
+options = ["Todo", "Queued", "In Progress", "Needs Attention", "Done", "Canceled", "Shipped"]
+if shaped["status"] not in options:
+    raise SystemExit("the plan's status must be a Status option")
 host = {"__typename": "ProjectV2Field", "id": "HOST", "name": "Host", "dataType": "TEXT"}
 
 
@@ -57,16 +79,25 @@ def described(content, metadata):
     return content + "\n\n<!-- onetaskgraph.metadata\n" + json.dumps(metadata) + "\n-->"
 
 
-state = {"issues": {}, "requests": []}
-for name in ["plan", "anchor", "work", "other"]:
+state = {"issues": {}, "requests": [], "home_fault": "pass"}
+for name in NAMES:
     metadata = ({"onepipeline.schema_version": 3, "onepipeline.concurrency": 1,
                  "onepipeline.goal": {"text": "Keep people's board edits"}}
                 if name == "plan" else
                 {"onepipeline.id": name, "onepipeline.persona": "engineer", **seeded.get(name, {})})
     content = "" if name == "plan" else (
         f"## What\nDo {name}.\n\n## Why\nSo the run can settle.\n\n## Acceptance criteria\n- {name} is done.")
-    state["issues"][name] = {"body": described(content, metadata), "status": "Todo", "state": "OPEN",
-                              "title": "github-edits" if name == "plan" else name, "host": None}
+    state["issues"][name] = {"body": described(content, metadata),
+                             "status": shaped["status"] if name == "plan" else "Todo",
+                             "state": "OPEN", "reason": None,
+                             "title": "github-edits" if name == "plan" else name, "host": None}
+
+
+def related(name):
+    """The far end of a dependency, as the `Related` fragment reads it."""
+    held = state["issues"][name]
+    return {"id": name, "title": held["title"], "body": held["body"], "parent": {"id": "plan"},
+            "subIssuesSummary": {"total": 0}}
 
 
 def issue(name):
@@ -76,14 +107,17 @@ def issue(name):
         values.append({"text": held["host"], "field": {"id": host["id"], "name": host["name"]}})
     membership = {"id": "ITEM-" + name, "project": {"id": "BOARD", "number": 1},
                   "fieldValues": connection(values)}
+    blocked_by = shaped["tasks"].get(name, [])
+    blocking = [task for task, blocked in shaped["tasks"].items() if name in blocked]
     value = {"__typename": "Issue", "id": name, "title": held["title"],
-             "body": held["body"], "state": held["state"], "stateReason": None, "number": 1,
-             "url": None, "parent": None if name == "plan" else {"id": "plan"},
-             "subIssuesSummary": {"total": 3 if name == "plan" else 0},
+             "body": held["body"], "state": held["state"], "stateReason": held["reason"],
+             "number": 1, "url": None, "parent": None if name == "plan" else {"id": "plan"},
+             "subIssuesSummary": {"total": len(TASKS) if name == "plan" else 0},
              "labels": connection([]), "projectItems": connection([membership]),
-             "blockedBy": connection([]), "blocking": connection([])}
+             "blockedBy": connection([related(by) for by in blocked_by]),
+             "blocking": connection([related(task) for task in blocking])}
     if name == "plan":
-        value["subIssues"] = connection([issue("anchor"), issue("work"), issue("other")])
+        value["subIssues"] = connection([issue(task) for task in TASKS])
     return value
 
 
@@ -103,8 +137,11 @@ def numbered_fixture(document):
         raise SystemExit("numbered issues must name a repository, its issues and its boards")
     for number, held in document["issues"].items():
         if (not NUMBER.match(number) or not isinstance(held, dict)
-                or not {"state", "reason"} <= set(held) <= {"state", "reason", "delivers"}
+                or not {"state", "reason"} <= set(held) <= {"state", "reason", "delivers",
+                                                             "subissues"}
                 or held["reason"] not in STATES.get(held["state"], [])
+                or not isinstance(held.get("subissues", 0), int)
+                or isinstance(held.get("subissues", 0), bool) or held.get("subissues", 0) < 0
                 or not isinstance(held.get("delivers", []), list)
                 or not all(isinstance(ticket, str) and ":" in ticket
                            for ticket in held.get("delivers", []))):
@@ -164,7 +201,8 @@ def numbered_issue(number):
             "createdAt": "2026-10-01T00:00:00Z", "updatedAt": "2026-10-01T00:00:00Z",
             "state": held["state"], "stateReason": held["reason"],
             "repository": {"nameWithOwner": numbered["repository"]}, "parent": None,
-            "subIssuesSummary": {"total": 0}, "commentCount": {"totalCount": 0},
+            "subIssuesSummary": {"total": held.get("subissues", 0)},
+            "commentCount": {"totalCount": 0},
             "relationshipEvents": {"totalCount": 0},
             "projectItems": {"nodes": memberships,
                              "pageInfo": {"hasNextPage": False, "endCursor": None}}}
@@ -316,6 +354,13 @@ class Handler(BaseHTTPRequestHandler):
                 with lock:
                     state["fault"], state["queued"] = faults[0], faults[1:]
                 answer = {"data": {}}
+            elif self.path == "/home-fault":
+                fault = request.get("fault") if set(request) == {"fault"} else None
+                if fault not in ["refuse", "fail", "pass"]:
+                    raise ValueError("a home fault is refuse, fail or pass")
+                with lock:
+                    state["home_fault"] = fault
+                answer = {"data": {}}
             elif self.path == "/release":
                 released.set()
                 answer = {"data": {}}
@@ -352,7 +397,21 @@ class Handler(BaseHTTPRequestHandler):
         answer = self.numbered(query, variables, request)
         if answer is not None:
             return answer
+        answer = self.home_fault(query, variables)
+        if answer is not None:
+            return answer
         return self.named(query, variables), 200
+
+    def home_fault(self, query, variables):
+        """What a Status write of the home meets while `/home-fault` says other than `pass`."""
+        supplied = variables.get("input") if isinstance(variables.get("input"), dict) else {}
+        if (state["home_fault"] == "pass" or "updateProjectV2ItemFieldValue(" not in query
+                or supplied.get("itemId") != "ITEM-plan" or supplied.get("fieldId") != "STATUS"):
+            return None
+        if state["home_fault"] == "refuse":
+            return {"errors": [{"type": "UNPROCESSABLE",
+                                "message": "the loopback refuses the home's Status write"}]}, 200
+        return {"errors": [{"message": "the loopback is failing the home's write for now"}]}, 502
 
     def numbered(self, query, variables, request):
         """The numbered issues' operations, or `None` for one about the named ones."""
@@ -412,6 +471,7 @@ class Handler(BaseHTTPRequestHandler):
                 held["body"] = supplied["body"]
             if movement is not None:
                 held["state"] = movement["value"]
+                held["reason"] = movement.get("stateReason")
             return {"data": {"updateIssue": {"issue": {"id": supplied["id"]}}}}
         if "second:updateProjectV2ItemFieldValue(" in query:
             raise ValueError("the batched field update is not served here")

@@ -53,7 +53,7 @@ pub enum Operation {
     /// `issueUpdate`: one issue written.
     IssueUpdate,
     /// `projectUpdate`: the project's content written — where Linear keeps a project's
-    /// metadata, the driver claim among it.
+    /// metadata, the driver claim among it — or its status alone.
     ProjectUpdate,
     /// Anything else, which this endpoint refuses by name.
     Unknown,
@@ -268,6 +268,21 @@ impl Linear {
             .unwrap_or_default()
     }
 
+    /// The name of the project status the project is at.
+    pub fn project_status(&self) -> String {
+        self.lock().project_status.clone()
+    }
+
+    /// The id of the project status named `name`.
+    pub fn status_id(&self, name: &str) -> String {
+        self.lock()
+            .statuses
+            .iter()
+            .find(|named| named.name == name)
+            .map(|named| named.id.clone())
+            .unwrap_or_else(|| panic!("the workspace has no project status {name:?}"))
+    }
+
     /// The name of the workflow state `id` names, where the team has one.
     pub fn state_named(&self, id: &str) -> Option<String> {
         self.lock()
@@ -447,6 +462,28 @@ impl Linear {
                     Ok(issue) => json!({"issueUpdate": {"success": true, "issue": issue}}),
                     Err(why) => return refusal(&why),
                 }
+            }
+            Operation::ProjectUpdate if variables["input"].get("statusId").is_some() => {
+                // A status written alone, as `set_project_status` writes one: the input holds
+                // nothing else, and names a status the workspace has.
+                let status = variables["input"]
+                    .as_object()
+                    .filter(|input| input.len() == 1)
+                    .and_then(|input| input["statusId"].as_str())
+                    .and_then(|id| world.statuses.iter().find(|named| named.id == id))
+                    .cloned();
+                let Some(status) = status else {
+                    return refusal(
+                        "a status projectUpdate carries one `statusId` the workspace has",
+                    );
+                };
+                if id != PROJECT {
+                    return refusal(&format!("no project {id}"));
+                }
+                world.project_status = status.name.clone();
+                json!({"projectUpdate": {"success": true, "project": {
+                    "id": PROJECT, "status": {"name": status.name, "type": status.kind},
+                }}})
             }
             Operation::ProjectUpdate => {
                 let Some(content) = variables["input"]["content"].as_str() else {

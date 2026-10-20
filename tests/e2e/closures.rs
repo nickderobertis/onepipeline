@@ -1881,3 +1881,577 @@ fn a_retry_refused_for_good_after_a_delivered_ticket_failed_is_the_record_kept()
     );
     finished(&world, run);
 }
+
+/// A board's status mapping whose project half gives `done` an option of its own, `Shipped`, so
+/// what a home is written at is read off its own kind's mapping.
+const HOME_MAPPING: &str = "      status_mapping:
+        todo: Todo
+        queued: Queued
+        in-progress: In Progress
+        unknown: Needs Attention
+        done: { task: Done, project: Shipped }
+        cancelled: Canceled
+";
+
+/// One loopback board's source, by its number, whose mapping is [`HOME_MAPPING`].
+fn home_board_source(name: &str, served: &GitHubEndpoint, number: u64) -> String {
+    board_source(name, served, number).replace(BOARD_MAPPING, HOME_MAPPING)
+}
+
+/// Every `home-status` record of `run`.
+fn homes_of(world: &World, run: &str) -> Vec<Value> {
+    world.events_of(run, "home-status")
+}
+
+/// A landing on a real `local-direct` repository, in a run launched from a `local-md` home,
+/// whose commit closes issue 5 — a plan's home on board A, open at `In Progress`, which board B
+/// does not hold — moves that home's card to its project-kind `done` option and closes it,
+/// writing board B nothing and reading neither board whole; and once the run has settled, the
+/// run's own `local-md` home reads `status: done` and nothing else of it changed, with one
+/// `home-status` record saying so. Nothing anywhere names a closure or a home.
+#[test]
+fn a_landing_closes_a_plan_home_on_its_board_and_the_settled_run_marks_its_own_home_done() {
+    let (world, served) = world_with(
+        "home-local",
+        "local-direct",
+        &json!({
+            "repository": REPOSITORY,
+            "issues": {
+                "5": {"state": "OPEN", "reason": null, "subissues": 2},
+                "9": issue("OPEN", None),
+            },
+            "boards": {"1": {"5": "In Progress"}, "2": {"9": "Todo"}},
+        }),
+    );
+    let gate = crate::harness::Rendezvous::failpoint();
+    // llmlint: ignore-block[tests_mirror_real_usage] the task asks that nothing of the home but
+    // its status changes, which is a comparison with the home as it stood just before the write;
+    // the failpoint holds the real closure thread there while the journey reads the real file,
+    // and every write and record asserted after it is the real store's and the real journal's.
+    let world = world.with_env("ONEPIPELINE_TEST_HOME_GATE", &gate.address());
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let notes = world.root.join("notes");
+    std::fs::create_dir_all(&notes).expect("the notes source's root");
+    let launch = launch_dir(
+        &world,
+        &format!(
+            "{}{}  notes:\n    plugin: local-md\n    config:\n      root: {}\n",
+            home_board_source("board-a", &served, 1),
+            home_board_source("board-b", &served, 2),
+            notes.display(),
+        ),
+    );
+    world.script("service.work", "the worker wrote this\n");
+    world.script(
+        "service.commit-saying",
+        "feat: ship the service\n\nCloses #5",
+    );
+    let run = "home-local";
+    let project = world.plan(run, &plan_of(run, vec![lifecycle("service", &[])]));
+    let home = world
+        .store()
+        .join("projects")
+        .join(format!("{}.md", crate::harness::project_id(run)));
+    let board_b_before = served.state()["numbered"]["boards"]["2"].clone();
+    start_from(&world, &launch, &project);
+
+    let held = gate.arrived();
+    let before = std::fs::read_to_string(&home).expect("the home as it stood before the write");
+    assert!(
+        homes_of(&world, run).is_empty(),
+        "{:#?}",
+        homes_of(&world, run)
+    );
+    held.release();
+    world.until("the run's home and its landing to be recorded", |world| {
+        !homes_of(world, run).is_empty()
+            && !closures_of(world, run).is_empty()
+            && !world.events_of(run, "driver-exited").is_empty()
+    });
+
+    let records = closures_of(&world, run);
+    assert_eq!(records.len(), 1, "{records:#?}");
+    let payload = &records[0]["payload"];
+    assert_eq!(payload["outcome"], "projected", "{payload}");
+    let items: Vec<(Value, Value, Value, Value)> = payload["items"]
+        .as_array()
+        .expect("the store's items")
+        .iter()
+        .map(|item| {
+            (
+                item["source"].clone(),
+                item["issue"].clone(),
+                item["kind"].clone(),
+                item["action"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        items,
+        [
+            (
+                json!("board-a"),
+                json!("owner/service#5"),
+                json!("project"),
+                json!("updated")
+            ),
+            (
+                json!("board-b"),
+                json!("owner/service#5"),
+                json!("task"),
+                json!("absent")
+            ),
+        ]
+    );
+    let mut unsupported: Vec<String> = serde_json::from_value(payload["unsupported"].clone())
+        .expect("the store's unsupported sources");
+    unsupported.sort();
+    assert_eq!(unsupported, ["notes", "plans"]);
+    assert_eq!(
+        card(&served, "1", "5"),
+        (json!("Shipped"), issue("CLOSED", Some("COMPLETED")))
+    );
+    assert_eq!(
+        served.state()["numbered"]["boards"]["2"],
+        board_b_before,
+        "board B moved"
+    );
+    assert_eq!(
+        writes_of(&served),
+        [
+            json!({"board": 1, "issue": 5, "field": "Status", "value": "Shipped"}),
+            json!({"issue": 5, "state": "CLOSED", "reason": "COMPLETED"}),
+        ]
+    );
+    for request in log_of(&served) {
+        assert!(
+            request["path"] != "/board/2/graphql"
+                || !request["query"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .trim_start()
+                    .starts_with("mutation"),
+            "board B was written: {request}"
+        );
+    }
+    read_no_board_whole(&served);
+
+    // The one other change the home carries is the run's own publication fence, which the driver
+    // lets go of once its close-out — the home's write included — has returned: entry 128.
+    let after = std::fs::read_to_string(&home).expect("the home after the write");
+    assert!(
+        after.contains("\"onepipeline.publishing\": null"),
+        "the driver did not let go of its publications:\n{after}"
+    );
+    let unstatused = |text: &str| -> Vec<String> {
+        text.lines()
+            .filter(|line| {
+                !line.starts_with("status:") && !line.contains("\"onepipeline.publishing\":")
+            })
+            .map(str::to_owned)
+            .collect()
+    };
+    assert!(
+        after.lines().any(|line| line == "status: done"),
+        "the home does not read done:\n{after}"
+    );
+    assert_eq!(
+        unstatused(&after),
+        unstatused(&before),
+        "more of the home than its status changed:\n{before}\n---\n{after}"
+    );
+    let homes = homes_of(&world, run);
+    assert_eq!(homes.len(), 1, "{homes:#?}");
+    assert_eq!(
+        homes[0]["payload"],
+        json!({
+            "project": project, "outcome": "written",
+            "status": {"category": "done", "name": "done"}, "class": null, "reason": null,
+        })
+    );
+    world
+        .run(&["results", run])
+        .exited(0)
+        .out_has(&format!("home {project} — written: done"));
+}
+
+/// The plan a board-home journey reads off the named board: `first`, then `second`, which is
+/// blocked by it, under a home open at `In Progress`.
+fn two_tasks() -> Value {
+    json!({"tasks": {"first": [], "second": ["first"]}, "status": "In Progress"})
+}
+
+/// The run a board home's plan is read as, named for the home's title.
+const BOARD_RUN: &str = "github-edits";
+
+/// The board home, by its qualified id.
+const BOARD_HOME: &str = "board:plan";
+
+/// A world whose loopback board holds the plan `plan` describes, and a launch directory whose
+/// `onetaskgraph.yaml` declares that board alone.
+fn home_world(name: &str, plan: &Value) -> (World, GitHubEndpoint, PathBuf) {
+    let world = World::new(name).with_env(TOKEN_ENV, "loopback-token");
+    let served = GitHubEndpoint::serve_plan(&world, plan);
+    let launch = launch_dir(
+        &world,
+        &format!(
+            "  board:\n    plugin: github-projects\n    config:\n      owner: generic\n      \
+             project_number: 1\n      token_env: {TOKEN_ENV}\n      endpoint: {}/graphql\n\
+             {HOME_MAPPING}",
+            served.url.trim()
+        ),
+    );
+    (world, served, launch)
+}
+
+/// `args` of the binary, configured by the launch directory alone.
+fn from_launch(world: &World, launch: &Path, args: &[&str]) -> crate::harness::Run {
+    let command = from_the_launch_directory(world, launch, args);
+    world.run_on(command, &args.join(" "))
+}
+
+/// The home's card, its issue's state, and the reason it was closed for.
+fn home_card(served: &GitHubEndpoint) -> (Value, Value, Value) {
+    let plan = served.state()["issues"]["plan"].clone();
+    (
+        plan["status"].clone(),
+        plan["state"].clone(),
+        plan["reason"].clone(),
+    )
+}
+
+/// The home as it was launched: open, at `In Progress`.
+fn home_open() -> (Value, Value, Value) {
+    (json!("In Progress"), json!("OPEN"), Value::Null)
+}
+
+/// The home as a `done` write leaves it: at its project-kind option, closed as completed.
+fn home_done() -> (Value, Value, Value) {
+    (json!("Shipped"), json!("CLOSED"), json!("COMPLETED"))
+}
+
+/// The requests the loopback took that wrote the home: its `Status` option writes, and its issue
+/// state writes.
+fn home_writes(served: &GitHubEndpoint) -> (Vec<Value>, Vec<Value>) {
+    let requests = served.state()["requests"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let mutating = |request: &Value, root: &str| {
+        request["query"]
+            .as_str()
+            .is_some_and(|query| query.contains(root))
+    };
+    let status = requests
+        .iter()
+        .filter(|request| {
+            mutating(request, "updateProjectV2ItemFieldValue(")
+                && request["variables"]["input"]["itemId"] == "ITEM-plan"
+                && request["variables"]["input"]["fieldId"] == "STATUS"
+        })
+        .cloned()
+        .collect();
+    let state = requests
+        .iter()
+        .filter(|request| {
+            mutating(request, "updateIssue(")
+                && request["variables"]["input"]["id"] == "plan"
+                && !request["variables"]["input"]["stateInput"].is_null()
+        })
+        .cloned()
+        .collect();
+    (status, state)
+}
+
+/// The run's home is untouched: its card and issue as launched, no request wrote either, and
+/// the journal holds no `home-status` record.
+fn home_untouched(world: &World, served: &GitHubEndpoint) {
+    assert_eq!(home_card(served), home_open());
+    assert_eq!(home_writes(served), (vec![], vec![]));
+    assert!(
+        homes_of(world, BOARD_RUN).is_empty(),
+        "{:#?}",
+        homes_of(world, BOARD_RUN)
+    );
+}
+
+/// The run's one `home-status` record says the store wrote its board home `done`.
+fn home_written(world: &World) {
+    let homes = homes_of(world, BOARD_RUN);
+    assert_eq!(homes.len(), 1, "{homes:#?}");
+    assert_eq!(
+        homes[0]["payload"],
+        json!({
+            "project": BOARD_HOME, "outcome": "written",
+            "status": {"category": "done", "name": "Shipped"}, "class": null, "reason": null,
+        })
+    );
+}
+
+/// The status `node`'s last settlement wrote, where it has settled.
+fn settled_as(world: &World, node: &str) -> Option<Value> {
+    world
+        .events_of(BOARD_RUN, "node-settled")
+        .into_iter()
+        .rev()
+        .find(|event| event["labels"]["node"] == node)
+        .map(|event| event["payload"]["status"].clone())
+}
+
+/// Whether `node` has been dispatched.
+fn dispatched(world: &World, node: &str) -> bool {
+    world
+        .events_of(BOARD_RUN, "node-dispatched")
+        .iter()
+        .any(|event| event["labels"]["node"] == node)
+}
+
+/// A run launched from a home on a loopback board writes that home nothing while a node is still
+/// live, however much of the plan has settled; once its last node settles `done` and the run
+/// reaches `SETTLED`, the home's card is at its project-kind `done` option and its issue closed
+/// as completed — by exactly one `Status` write and one close, reading no board whole — every
+/// task card is where its settlement put it, and the run holds one `home-status` record.
+#[test]
+fn a_board_home_is_written_done_once_its_last_node_settles_and_not_before() {
+    let (world, served, launch) = home_world("home-board", &two_tasks());
+    world.script("second.wait", "hold");
+    from_launch(&world, &launch, &["start", BOARD_HOME, "--detach"]).exited(0);
+    world.until("first to settle while second is held", |world| {
+        settled_as(world, "first") == Some(json!("done")) && dispatched(world, "second")
+    });
+    home_untouched(&world, &served);
+    let settled_first = served.state()["requests"].as_array().map_or(0, Vec::len);
+
+    world.release("second.go");
+    world.until("the run to settle and record its home", |world| {
+        !homes_of(world, BOARD_RUN).is_empty()
+            && !world.events_of(BOARD_RUN, "driver-exited").is_empty()
+    });
+    assert_eq!(settled_as(&world, "second"), Some(json!("done")));
+    world
+        .run(&["status", BOARD_RUN])
+        .exited(0)
+        .out_has("SETTLED");
+    assert_eq!(home_card(&served), home_done());
+    let state = served.state();
+    for task in ["first", "second"] {
+        assert_eq!(state["issues"][task]["status"], "Done", "{task}: {state}");
+    }
+    home_written(&world);
+    let (status, closed) = home_writes(&served);
+    assert_eq!(status.len(), 1, "{status:#?}");
+    assert_eq!(
+        status[0]["variables"]["input"]["value"],
+        json!({"singleSelectOptionId": "Shipped"})
+    );
+    assert_eq!(closed.len(), 1, "{closed:#?}");
+    assert_eq!(
+        closed[0]["variables"]["input"]["stateInput"],
+        json!({"value": "CLOSED", "stateReason": "COMPLETED"})
+    );
+    for request in &state["requests"].as_array().expect("a request log")[settled_first..] {
+        assert!(
+            !request["query"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("items("),
+            "a request after the run's first settlement read the board's items: {request}"
+        );
+    }
+    world
+        .run(&["results", BOARD_RUN])
+        .exited(0)
+        .out_has("home board:plan — written: Shipped");
+}
+
+/// A run whose last node fails ends `failed` and writes its home nothing; once an operator
+/// settles that node `done` with a landing and a driver adopts the run, it reaches `SETTLED` and
+/// writes the home `done` then, recording it once.
+#[test]
+fn a_failed_run_writes_its_home_only_once_a_settle_carries_it_to_success() {
+    let (world, served, launch) = home_world("home-failed", &two_tasks());
+    world.script("second.fail", "1");
+    from_launch(&world, &launch, &["start", BOARD_HOME, "--detach"]).exited(0);
+    world.until("the run to end failed", |world| {
+        settled_as(world, "second") == Some(json!("failed"))
+            && !world.events_of(BOARD_RUN, "driver-exited").is_empty()
+    });
+    home_untouched(&world, &served);
+
+    world
+        .run_with_stdin(
+            &["reply", BOARD_RUN],
+            &json!({"version": 2, "commands": [
+                {"op": "settle", "id": "second", "outcome": "done",
+                 "evidence": "the work landed by hand",
+                 "landing": "0123456789abcdef0123456789abcdef01234567"}
+            ]})
+            .to_string(),
+        )
+        .exited(0)
+        .out_has("\"applied\"");
+    from_launch(&world, &launch, &["adopt", BOARD_RUN])
+        .exited(0)
+        .out_has("\"settlement\":\"complete\"");
+    assert_eq!(home_card(&served), home_done());
+    home_written(&world);
+    let (status, closed) = home_writes(&served);
+    assert_eq!(
+        (status.len(), closed.len()),
+        (1, 1),
+        "{status:#?} {closed:#?}"
+    );
+}
+
+/// A run stopped while its last node is live writes its home nothing.
+#[test]
+fn a_stopped_run_writes_its_home_nothing() {
+    let (world, served, launch) = home_world("home-stopped", &two_tasks());
+    world.script("second.wait", "hold");
+    from_launch(&world, &launch, &["start", BOARD_HOME, "--detach"]).exited(0);
+    world.until("second to be dispatched", |world| {
+        dispatched(world, "second")
+    });
+    world.run(&["stop", BOARD_RUN]).exited(0);
+    world.until("the stopped driver to let go", |world| {
+        !world.events_of(BOARD_RUN, "run-stopped").is_empty()
+    });
+    home_untouched(&world, &served);
+}
+
+/// A run that reached `SETTLED` while its board could not take the home's write — failing it
+/// for now until the run had settled — leaves no record; the driver that adopts it once the
+/// board answers writes the home once and records it, and adopting it again writes nothing more.
+#[test]
+fn an_adoption_writes_the_home_a_settled_run_could_not_reach_once() {
+    let (world, served, launch) = home_world(
+        "home-adopted",
+        &json!({"tasks": {"only": []}, "status": "In Progress"}),
+    );
+    served.home_fault("fail");
+    from_launch(&world, &launch, &["start", BOARD_HOME, "--detach"]).exited(0);
+    world.until("the settled run's driver to let go", |world| {
+        !world.events_of(BOARD_RUN, "driver-exited").is_empty()
+    });
+    world
+        .run(&["status", BOARD_RUN])
+        .exited(0)
+        .out_has("SETTLED");
+    assert!(
+        homes_of(&world, BOARD_RUN).is_empty(),
+        "{:#?}",
+        homes_of(&world, BOARD_RUN)
+    );
+    assert_eq!(home_card(&served), home_open());
+    assert!(
+        !home_writes(&served).0.is_empty(),
+        "the settled run never asked the board"
+    );
+
+    served.home_fault("pass");
+    let refused = home_writes(&served).0.len();
+    from_launch(&world, &launch, &["adopt", BOARD_RUN])
+        .exited(0)
+        .out_has("\"settlement\":\"complete\"");
+    assert_eq!(home_card(&served), home_done());
+    home_written(&world);
+    let (status, closed) = home_writes(&served);
+    assert_eq!(
+        (status.len() - refused, closed.len()),
+        (1, 1),
+        "{status:#?} {closed:#?}"
+    );
+
+    from_launch(&world, &launch, &["adopt", BOARD_RUN])
+        .exited(0)
+        .out_has("\"settlement\":\"complete\"");
+    home_written(&world);
+    assert_eq!(home_writes(&served), (status, closed));
+}
+
+/// A board that refuses the home's write for good changes nothing about the run: its node
+/// settles `done`, the success hook fires once and succeeds, and the run's one `home-status`
+/// record says `failed` with the store's class and words, which one non-blocking planner surface
+/// names beside the home; adopting the run afterwards writes nothing more.
+#[test]
+fn a_home_the_board_refuses_is_recorded_failed_and_surfaced_without_touching_the_run() {
+    let (world, served, launch) = home_world(
+        "home-refused",
+        &json!({"tasks": {"only": []}, "status": "In Progress"}),
+    );
+    let records = crate::run_end_hooks::records(&world);
+    std::fs::create_dir_all(&records).expect("a hook record directory");
+    let world = world.with_env(crate::run_end_hooks::RECORD_ENV, &records.to_string_lossy());
+    let hook = crate::run_end_hooks::hook(&world);
+    served.home_fault("refuse");
+    from_launch(
+        &world,
+        &launch,
+        &["start", BOARD_HOME, "--detach", "--success-hook", &hook],
+    )
+    .exited(0);
+    world.until(
+        "the run's home to be recorded and its hook to finish",
+        |world| {
+            !homes_of(world, BOARD_RUN).is_empty()
+                && !world.events_of(BOARD_RUN, "run-hook-finished").is_empty()
+        },
+    );
+
+    assert_eq!(settled_as(&world, "only"), Some(json!("done")));
+    assert_eq!(
+        crate::run_end_hooks::invocations(&world, BOARD_RUN),
+        ["success"]
+    );
+    let finished = world.events_of(BOARD_RUN, "run-hook-finished");
+    assert_eq!(finished.len(), 1, "{finished:#?}");
+    assert_eq!(finished[0]["payload"]["hook"], "success");
+    assert_eq!(finished[0]["payload"]["ending"], "succeeded");
+    let homes = homes_of(&world, BOARD_RUN);
+    assert_eq!(homes.len(), 1, "{homes:#?}");
+    let payload = &homes[0]["payload"];
+    assert_eq!(payload["project"], BOARD_HOME, "{payload}");
+    assert_eq!(payload["outcome"], "failed", "{payload}");
+    assert_eq!(payload["status"], Value::Null, "{payload}");
+    assert_eq!(payload["class"], "refused", "{payload}");
+    let reason = payload["reason"].as_str().expect("the store's words");
+    assert!(
+        reason.contains("the loopback refuses the home's Status write"),
+        "{payload}"
+    );
+    let surfaced: Vec<Value> = world
+        .events_of(BOARD_RUN, "planner-surface-queued")
+        .into_iter()
+        .map(|event| event["payload"].clone())
+        .filter(|surface| {
+            surface["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(BOARD_HOME))
+        })
+        .collect();
+    assert_eq!(surfaced.len(), 1, "{surfaced:#?}");
+    assert_eq!(surfaced[0]["blocking"], false, "{surfaced:#?}");
+    assert!(
+        surfaced[0]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("the loopback refuses the home's Status write")),
+        "{surfaced:#?}"
+    );
+    assert_eq!(home_card(&served), home_open());
+    world
+        .run(&["results", BOARD_RUN])
+        .exited(0)
+        .out_has("home board:plan — failed (refused): ")
+        .out_has("the loopback refuses the home's Status write");
+
+    let asked = home_writes(&served);
+    from_launch(&world, &launch, &["adopt", BOARD_RUN])
+        .exited(0)
+        .out_has("\"settlement\":\"complete\"");
+    assert_eq!(home_writes(&served), asked);
+    assert_eq!(homes_of(&world, BOARD_RUN).len(), 1);
+    assert_eq!(
+        crate::run_end_hooks::invocations(&world, BOARD_RUN),
+        ["success"]
+    );
+}

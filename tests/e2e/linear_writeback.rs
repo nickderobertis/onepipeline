@@ -1219,13 +1219,25 @@ impl GitHubEndpoint {
     }
 
     fn serve_with_replace_refusal(world: &World, seeded: &Value, refuse_replace: bool) -> Self {
-        Self::start(world, seeded, refuse_replace, None, None).listening(world)
+        Self::start(world, seeded, refuse_replace, None, None, None).listening(world)
     }
 
     /// Serve the board under `world` with the numbered issues and boards `issues` states, in
     /// the shape `github_loopback.py`'s `GITHUB_LOOPBACK_ISSUES` reads.
     pub(super) fn serve_issues(world: &World, issues: &Value) -> Self {
-        Self::start(world, &json!({}), false, None, Some(issues)).listening(world)
+        Self::start(world, &json!({}), false, None, Some(issues), None).listening(world)
+    }
+
+    /// Serve the board under `world` with its plan reshaped as `plan` states, in the shape
+    /// `github_loopback.py`'s `GITHUB_LOOPBACK_PLAN` reads.
+    pub(super) fn serve_plan(world: &World, plan: &Value) -> Self {
+        Self::start(world, &json!({}), false, None, None, Some(plan)).listening(world)
+    }
+
+    /// Answer every later Status write of the plan's home with `fault`: `refuse`, `fail` or
+    /// `pass`.
+    pub(super) fn home_fault(&self, fault: &str) {
+        self.post("/home-fault", &json!({"fault": fault}));
     }
 
     /// The GraphQL endpoint the source of board `number` names, so the request log says which
@@ -1290,6 +1302,7 @@ impl GitHubEndpoint {
         refuse_replace: bool,
         publish_hold: Option<&Path>,
         issues: Option<&Value>,
+        plan: Option<&Value>,
     ) -> StartedEndpoint {
         let dir = world.root.join("github-endpoint");
         std::fs::create_dir_all(&dir).expect("endpoint directory");
@@ -1298,6 +1311,11 @@ impl GitHubEndpoint {
         let numbered = issues.map(|issues| {
             let path = dir.join("issues.json");
             std::fs::write(&path, issues.to_string()).expect("the numbered issues");
+            path
+        });
+        let shaped = plan.map(|plan| {
+            let path = dir.join("plan.json");
+            std::fs::write(&path, plan.to_string()).expect("the plan's shape");
             path
         });
         let held_state = refuse_replace.then(|| {
@@ -1342,6 +1360,9 @@ runpy.run_path(sys.argv[0], run_name='__main__')
         }
         if let Some(numbered) = &numbered {
             command.env("GITHUB_LOOPBACK_ISSUES", numbered);
+        }
+        if let Some(shaped) = &shaped {
+            command.env("GITHUB_LOOPBACK_PLAN", shaped);
         }
         let child = command
             .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/e2e/github_loopback.py"))
@@ -1436,7 +1457,7 @@ fn the_github_endpoint_url_is_readable_only_once_completely_written() {
     let world = World::new("github-endpoint-publication");
     let hold = world.root.join("publish-hold");
     std::fs::create_dir_all(&hold).expect("publication hold directory");
-    let mut started = GitHubEndpoint::start(&world, &json!({}), false, Some(&hold), None);
+    let mut started = GitHubEndpoint::start(&world, &json!({}), false, Some(&hold), None, None);
     world.until("the endpoint's publication to be held", |_| {
         started.assert_running("its publication was held");
         hold.join("held").is_file()
@@ -1789,6 +1810,89 @@ urllib.request.urlopen(urllib.request.Request(sys.argv[1] + "/graphql", data=bod
         Some(&("HOST".to_owned(), json!({"text": FOLLOW_UP_HOST})))
     );
     assert_eq!(served.state()["issues"]["other"]["host"], FOLLOW_UP_HOST);
+}
+
+/// A run whose home is a Linear project marks that project `done` once its one node has settled
+/// and the run reached `SETTLED`: one `projectUpdate` carrying only `statusId`, the workspace's
+/// status the per-kind mapping gives a project's `done`, after which nothing more is written —
+/// no member project, and no issue beyond the settlement — and one `home-status` record.
+#[test]
+fn a_settled_run_marks_its_linear_home_done_with_one_status_write() {
+    let name = "linear-home";
+    let world = World::new(name).with_env(KEY_ENV, "a-loopback-key");
+    let linear = Linear::serve(
+        STATES,
+        STATUSES,
+        name,
+        &described(
+            "",
+            &json!({
+                "onepipeline.schema_version": onepipeline::plan::PLAN_SCHEMA_VERSION,
+                "onepipeline.concurrency": 1,
+                "onepipeline.goal": {"text": format!("Deliver {name}")},
+            }),
+        ),
+        "In Progress",
+    );
+    let only = linear.file(
+        "chore: only",
+        &described(
+            &task_text("only"),
+            &json!({"onepipeline.id": "only", "onepipeline.persona": "engineer"}),
+        ),
+        "Todo",
+    );
+    let launch = world.root.join("launch-directory");
+    std::fs::create_dir_all(&launch).expect("a launch directory");
+    std::fs::write(launch.join("onetaskgraph.yaml"), configuration(&linear))
+        .expect("the launch directory's store configuration");
+    let project = format!("{SOURCE}:{PROJECT}");
+    let start = from_the_launch_directory(&world, &launch, &["start", &project, "--detach"]);
+    world.run_on(start, "start --detach").exited(0);
+    world.until("the run to settle and record its home", |world| {
+        !world.events_of(name, "home-status").is_empty()
+            && !world.events_of(name, "driver-exited").is_empty()
+    });
+
+    assert_eq!(linear.state_of(&only), "Done");
+    assert_eq!(linear.project_status(), "Completed");
+    let log = linear.log();
+    let written: Vec<usize> = log
+        .iter()
+        .enumerate()
+        .filter(|(_, request)| {
+            request.operation == Operation::ProjectUpdate
+                && request.variables["input"].get("statusId").is_some()
+        })
+        .map(|(at, _)| at)
+        .collect();
+    assert_eq!(written.len(), 1, "{log:#?}");
+    assert_eq!(
+        log[written[0]].variables,
+        json!({"id": PROJECT, "input": {"statusId": linear.status_id("Completed")}})
+    );
+    for request in &log[written[0] + 1..] {
+        assert!(
+            !matches!(
+                request.operation,
+                Operation::IssueUpdate | Operation::ProjectUpdate
+            ),
+            "the run wrote Linear after its home: {request:#?}"
+        );
+    }
+    let homes = world.events_of(name, "home-status");
+    assert_eq!(homes.len(), 1, "{homes:#?}");
+    assert_eq!(
+        homes[0]["payload"],
+        json!({
+            "project": project, "outcome": "written",
+            "status": {"category": "done", "name": "Completed"}, "class": null, "reason": null,
+        })
+    );
+    world
+        .run(&["results", name])
+        .exited(0)
+        .out_has(&format!("home {project} — written: Completed"));
 }
 
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
