@@ -2690,3 +2690,63 @@ fn a_home_is_not_asked_for_inside_a_wait_the_store_asked_for() {
     assert_eq!(homes[0]["payload"]["outcome"], "written", "{homes:#?}");
     assert_eq!(asked(&world), 1);
 }
+
+/// A settled run whose close-out projection is failing on a store that is down — a transient
+/// failure that names no wait — asks the store nothing for its home and lets go, leaving no
+/// record and no kept wait; once the store answers, the driver that adopts the run writes the
+/// home and records it once.
+#[test]
+fn a_home_is_not_asked_for_while_the_projection_fails_on_a_store_that_is_down() {
+    let world = World::new("home-store-down");
+    world.script("work.wait", "hold");
+    let run = "home-store-down";
+    let project = world.plan(run, &plan_of(run, vec![agent("work", &[])]));
+    let world = world.through_scripted_source();
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("work to be dispatched", |world| {
+        !world.events_of(run, "node-dispatched").is_empty()
+    });
+    world.store_refuses(
+        "update_task",
+        &json!({"kind": "unavailable", "message": "connection reset by the destination"}),
+    );
+    world.release("work.go");
+    world.until("work to settle", |world| {
+        !world.events_of(run, "node-settled").is_empty()
+    });
+    world.until("the driver to let go", |world| {
+        !world.events_of(run, "driver-exited").is_empty()
+    });
+    assert!(
+        homes_of(&world, run).is_empty(),
+        "{:#?}",
+        homes_of(&world, run)
+    );
+    assert_eq!(
+        kept_wait(&world, run),
+        None,
+        "the store asked for no wait, so none is kept"
+    );
+    let asked = |world: &World| {
+        world
+            .store_calls()
+            .iter()
+            .filter(|call| call[0] == "set_project_status")
+            .count()
+    };
+    assert_eq!(
+        asked(&world),
+        0,
+        "the home was asked for while the projection failed"
+    );
+
+    world.store_stops_refusing("update_task");
+    world
+        .run(&["adopt", run])
+        .exited(0)
+        .out_has("\"settlement\":\"complete\"");
+    let homes = homes_of(&world, run);
+    assert_eq!(homes.len(), 1, "{homes:#?}");
+    assert_eq!(homes[0]["payload"]["outcome"], "written", "{homes:#?}");
+    assert_eq!(asked(&world), 1);
+}

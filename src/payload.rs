@@ -2427,7 +2427,7 @@ mod tests {
             let mut held = held.clone();
             // And onejudge 0.20.0's optional note `delivery`, defaulted to the
             // interrupt, which admits every note the capture admitted —
-            // entry 134 of `docs/contract-divergences.md`.
+            // entry 133 of `docs/contract-divergences.md`.
             if text == "agent.note@1" {
                 if let Some(properties) = held
                     .pointer_mut("/properties")

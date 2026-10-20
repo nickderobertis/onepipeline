@@ -71,7 +71,7 @@ mod checkpoint;
 // they exercise is the write-back's closure thread and the close-out every run that settles ends
 // in — `closures`, `home`, `writeback`, `engine`, `hooks` and the landing verbs in `land` — so
 // a project edged narrower than the crate could not honestly run them, and any change to how a
-// run ends can put the cost back. Entries 132 and 133.
+// run ends can put the cost back. Entries 132 and 134.
 mod closures;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod concurrency;
