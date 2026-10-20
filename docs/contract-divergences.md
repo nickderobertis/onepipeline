@@ -10752,6 +10752,15 @@ still resumes, and the launch config's own `planner` override is the operator's.
    places a filter refusal by line and column rather than by list path; the
    contract's marked copy of the bus grammar is re-decided against it unchanged.
 
+   *2026-10-18, re-decided against 0.9.2.* The lock takes `onemessagebus` 0.9.2,
+   which `^0.9.1` permits. Between the two releases only `src/inbox.rs`,
+   `src/spool.rs` and `src/lib.rs` change, and `src/shared_clock.rs` is added: a
+   bounded offer and withdrawal on the inbox. The envelope, the filter grammar and
+   the matcher are byte for byte the same in both, so the manager ruled that
+   `docs/contract.md`'s marked copy is re-decided against 0.9.2 with no change to
+   its text. Only the release it names moves. The filter paragraph's line-and-column
+   placement, re-decided against 0.9.1 above, is the same in 0.9.2.
+
 ```json
 {
   "verbs": ["publish-branch", "repo-recover", "integrate"],

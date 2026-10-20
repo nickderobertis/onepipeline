@@ -1806,15 +1806,15 @@ fn unasked_across(world: &World, run: &str, asked: usize, span: Duration) {
     }
 }
 
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these nine wait on
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these ten wait on
 // is the schedule and its absence — a refused projection not being asked again across a window
 // the old schedule retried in, a transient one being asked at intervals that grow, a rate
 // limit's own wait being served in full, and a run settling over refusals — which cannot be
 // observed in less time than the schedule takes. The edge they need is the crate under test:
 // they drive the compiled `onepipeline` binary against its own write-back worker and the real
-// store, eight of them through the store double, exactly as the six schedule journeys below do,
+// store, nine of them through the store double, exactly as the six schedule journeys below do,
 // so a project of their own would declare the same dependency and skip nothing. The reason
-// those six record for staying in this binary is these nine's too.
+// those six record for staying in this binary is these ten's too.
 /// A projection the store **refuses** is reported once and is not asked again on a timer: the
 /// store would refuse the same projection the same way, and against a hosted destination every
 /// attempt spends its allowance for nothing. It is attempted again when the run's graph next
@@ -1999,6 +1999,80 @@ fn a_refusal_of_any_call_an_attempt_makes_stops_the_retry_timer() {
             "{scenario}: the refusal changed what executed"
         );
     }
+}
+
+/// A create the destination stored and then answered malformed is reported as the copy
+/// failure it is: the destination may hold an item the copy never learned the id of. The
+/// line an operator reads and the surface the planner is told by name the destination, the
+/// plugin method whose answer was malformed and the residue to inspect for — the store's
+/// own words — under the class it refuses, so no timer asks again and lands a second item
+/// beside the one the destination kept.
+#[test]
+fn a_create_the_destination_stored_and_answered_malformed_names_the_destination_and_its_residue() {
+    let run = "writeback-uncertain-create";
+    let (world, project) =
+        a_run_whose_destination_can_start_refusing("store-writeback-uncertain-create", run);
+    world.script(
+        &format!("{}.write_task.malformed", crate::harness::SCRIPTED_KEY),
+        "",
+    );
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [
+                {"op": "add", "node": agent("extra", &["work"])}
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+    world.until("the uncertain create to be reported", |world| {
+        streaks_reported(world, run) >= 1
+    });
+
+    let destination = crate::harness::STORE_SOURCE;
+    let said = [
+        format!("{destination} may hold an item it could not take back"),
+        format!("{destination}'s answer to write_task was malformed"),
+        format!("inspect {destination} for an item this copy may have created"),
+        "class: refused, kind: malformed".to_owned(),
+    ];
+    let line = the_line_reported(&world, run);
+    for words in &said {
+        assert!(
+            line.contains(words.as_str()),
+            "the line does not say {words:?}: {line}"
+        );
+    }
+    asked_nothing_more(&world, run, REFUSAL_WINDOW / 2, || {});
+    let surfaces = surfaces_raised(&world, run);
+    assert_eq!(
+        surfaces.len(),
+        1,
+        "the planner was not told exactly once: {surfaces:?}"
+    );
+    for words in &said {
+        assert!(
+            surfaces[0].contains(words.as_str()),
+            "the surface does not say {words:?}: {}",
+            surfaces[0]
+        );
+    }
+    // The residue the failure warns of is real: the destination kept the one item it was
+    // asked to create, and nothing created a second.
+    let extra = world
+        .store_tasks(&project)
+        .into_iter()
+        .filter(|task| task["item"]["metadata"]["onepipeline.id"] == "extra")
+        .count();
+    assert_eq!(
+        extra, 1,
+        "the destination does not hold exactly the one item it stored"
+    );
+    assert_eq!(
+        dispatched(&world, run),
+        ["work"],
+        "the failure changed what executed"
+    );
 }
 
 /// A failure the store does not refuse keeps today's schedule exactly: a rate limit, and a

@@ -1191,10 +1191,35 @@ impl StartToken {
                 .get_or_init(|| ps_process_start_token(self.pid));
             legacy_reading(now.as_deref(), recorded)
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        {
+            macos_reading(&self.recorded, recorded)
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             TokenReading::Different
         }
+    }
+}
+
+/// A macOS record that is not this process's token word for word. One in the
+/// older spelling — `lstart` alone, written by a build before the microseconds
+/// were — is the same where its second is this process's, at the one-second
+/// resolution it was written to, so a run a previous build launched stays
+/// stoppable; anything else is another process.
+///
+/// Pure, so it is compiled into every target's tests and held on hosts that are
+/// not macOS too.
+// llmlint: ignore[changed_behavior_has_e2e] what this tells apart is one pid handed to a second
+// process inside the second the first started in, and no test can ask a host to reuse a pid that
+// fast; every journey that records a start and reads it back runs through here on macOS, and
+// `a_macos_start_token_tells_apart_two_starts_in_one_second` holds each spelling on every host.
+#[cfg(any(test, target_os = "macos"))]
+fn macos_reading(now: &str, recorded: &str) -> TokenReading {
+    let legacy = !recorded.contains(START_MICROS);
+    match now.split_once(START_MICROS) {
+        Some((second, _)) if legacy && second == recorded => TokenReading::Same,
+        _ => TokenReading::Different,
     }
 }
 
@@ -1434,9 +1459,17 @@ fn platform_process_start_token(pid: u32) -> Option<StartToken> {
 /// looked at from another is two processes with two environments, and the view
 /// that exists to say whether its dispatches are alive reported them dead.
 /// Pinning the zone and locale on the child leaves the reading a function of the
-/// process alone. Its one-second resolution means a pid reused within the same
-/// rendered second cannot be distinguished; that is the portability cost on a
-/// platform without a finer stable process identity.
+/// process alone.
+///
+/// `lstart` is spelled to the second, which cannot tell apart two processes
+/// started within one: a driver retained to displace another can take that
+/// one's pid and its record would read as claimed before the driver had done
+/// anything. So on macOS the kernel's own microseconds of the same start —
+/// `proc_pidinfo`'s `PROC_PIDTBSDINFO`, which answers for a zombie too — follow
+/// the second, see `kernel_start_micros`. Where the kernel will not say there
+/// is no token, as where `ps` will not: a second alone would read as another
+/// process against the record this very process wrote. The other targets
+/// without procfs keep the one-second spelling.
 ///
 /// Read strictly. A `ps` that cannot run, exits non-zero, or writes bytes this
 /// cannot decode is not an answer, and neither is an empty line — a token
@@ -1450,7 +1483,54 @@ fn platform_process_start_token(pid: u32) -> Option<StartToken> {
 /// host misbehaving rather than from the process ending.
 #[cfg(all(unix, not(target_os = "linux")))]
 fn platform_process_start_token(pid: u32) -> Option<StartToken> {
-    ps_process_start_token(pid).map(|recorded| StartToken { recorded })
+    let second = ps_process_start_token(pid)?;
+    #[cfg(target_os = "macos")]
+    let recorded = format!("{second}{START_MICROS}{:06}", kernel_start_micros(pid)?);
+    #[cfg(not(target_os = "macos"))]
+    let recorded = second;
+    Some(StartToken { recorded })
+}
+
+/// What a macOS start token carries between `lstart`'s second and the kernel's
+/// microseconds of it.
+#[cfg(any(test, target_os = "macos"))]
+const START_MICROS: &str = " +0.";
+
+/// The microseconds of `pid`'s start the kernel recorded, or `None` where it
+/// will not say: no such process, or an answer that is not the whole record.
+///
+/// A non-zero `arg` is what asks this flavor to answer for a zombie as well:
+/// XNU's `proc_pidinfo` looks among exited, unreaped processes for
+/// `PROC_PIDTBSDINFO` only when it is set, and reads it for nothing else. With
+/// it zero, a child that had already exited — a dispatch or a retained driver
+/// that settled at once — had no token, so its claim was refused and a record
+/// naming another process read as its own.
+#[cfg(target_os = "macos")]
+fn kernel_start_micros(pid: u32) -> Option<u64> {
+    const FIND_ZOMBIE: u64 = 1;
+    let pid = libc::c_int::try_from(pid).ok()?;
+    let size = libc::c_int::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).ok()?;
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
+    // SAFETY: `info` is writable storage of the flavor's struct and `size` is
+    // its exact size, so the kernel writes nothing beyond it.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            FIND_ZOMBIE,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    // llmlint: ignore[changed_behavior_has_e2e] a short `proc_pidinfo` answer or a
+    // microsecond field of a million or more is the kernel misreporting a process, not a state a
+    // test can put it in; the process that is not there at all is the `ps` refusal above.
+    if written != size {
+        return None;
+    }
+    // SAFETY: the kernel answered with the whole struct, so every field is set.
+    let info = unsafe { info.assume_init() };
+    (info.pbi_start_tvusec < 1_000_000).then_some(info.pbi_start_tvusec)
 }
 
 /// How a Linux start token is spelled ahead of its clock ticks.
@@ -2267,6 +2347,76 @@ mod tests {
             legacy_reading(Some("not a time"), "not a time"),
             TokenReading::Inexact
         );
+    }
+
+    /// A macOS token is `lstart`'s second and the kernel's microseconds of it,
+    /// so two processes started within one second read as two. A record a build
+    /// before the microseconds wrote is `lstart` alone, and is still this
+    /// process's where its second is.
+    #[test]
+    fn a_macos_start_token_tells_apart_two_starts_in_one_second() {
+        let now = "Sun Oct 11 19:23:36 2026 +0.004211";
+        for (recorded, reading) in [
+            ("Sun Oct 11 19:23:36 2026", TokenReading::Same),
+            (
+                "Sun Oct 11 19:23:36 2026 +0.731052",
+                TokenReading::Different,
+            ),
+            ("Sun Oct 11 19:23:37 2026", TokenReading::Different),
+            (
+                "a token in no spelling this host writes",
+                TokenReading::Different,
+            ),
+        ] {
+            assert_eq!(macos_reading(now, recorded), reading, "{recorded:?}");
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let token = process_start_token(pid()).expect("this host says when a process started");
+            assert!(
+                token.recorded().contains(START_MICROS),
+                "{:?} carries no microseconds",
+                token.recorded()
+            );
+        }
+    }
+
+    /// A child that has exited and not been reaped still is the process its pid
+    /// names, and is asked for its start exactly as it was while it ran: a
+    /// dispatch or a retained driver that settles at once is claimed by that
+    /// token, and one with none is refused or read by its pid alone.
+    #[cfg(unix)]
+    #[test]
+    fn an_exited_unreaped_child_keeps_the_start_token_it_ran_under() {
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .expect("a child starts");
+        let running = child_start_token(&child);
+        let pid = libc::id_t::try_from(child.id()).expect("a pid fits an id_t");
+        // SAFETY: an all-zero `siginfo_t` is a valid out-parameter, and
+        // `WNOWAIT` leaves the child unreaped, so its pid is not handed on.
+        let exited = unsafe {
+            let mut info: libc::siginfo_t = std::mem::zeroed();
+            libc::waitid(
+                libc::P_PID,
+                pid,
+                &raw mut info,
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        assert_eq!(exited, 0, "the child is waited on without being reaped");
+        let zombie = child_start_token(&child).expect("an exited, unreaped child has a start");
+        if let Some(running) = running {
+            assert_eq!(zombie.recorded(), running.recorded());
+        }
+        #[cfg(target_os = "macos")]
+        assert!(
+            zombie.recorded().contains(START_MICROS),
+            "{:?} carries no microseconds",
+            zombie.recorded()
+        );
+        child.wait().expect("the child is reaped");
     }
 
     /// The signals entry 88 of the divergence register says an interrupted

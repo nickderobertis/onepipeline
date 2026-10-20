@@ -40,6 +40,11 @@
 //!   read or the targeted update answers that the store holds no such item, with no failure
 //!   beside it, for as long as the file is there: what a hosted destination answers for a
 //!   board or an issue somebody deleted.
+//! * `<key>.<method>.malformed` — every call of that method is **served** by the real store,
+//!   so a write it carries is applied, and then answered with a result the plugin protocol
+//!   does not give that method: a plugin that stored what it was asked to and then answered
+//!   in a shape the engine refuses, which leaves the item at the destination under an id
+//!   nobody was told.
 //! * `<key>.<method>.rendezvous` — the address this source meets the test at before it
 //!   answers that method, held until the test lets go; written by `World::rendezvous`, read by
 //!   `fake::meet`. The one way to make a store call **slow** rather than wrong.
@@ -371,6 +376,12 @@ impl Scripted {
             "id": request.id, "method": request.method.0, "params": request.params,
         });
         let mut answered = host.ask(&relayed)?;
+        // Served first and answered malformed after: the write is in the store either way.
+        if answered.contains_key("result")
+            && present(&self.scenario(&format!("{method}.malformed")))?
+        {
+            return Ok(json!({"id": request.id, "result": {"malformed": true}}));
+        }
         if let Some(key) = handle(&self.scenario("task.key"))? {
             keyed(method, &mut answered, &key);
         }
