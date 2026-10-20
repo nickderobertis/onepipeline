@@ -282,7 +282,8 @@ _crate-lint:
 # so no change could ever select one without the other, and running the two as
 # separate nextest processes would put eight process trees on the machine where
 # `.config/nextest.toml`'s one group allows four.
-rest-tier := "not binary(smoke) and not binary(release_channel) and not binary(note) and not binary(e2e) and not binary(contract) and not binary(stop_verdict) and not binary(pool_workload) and not binary(scratch_workload)"
+rest-tier := "not binary(codex_server) and not binary(smoke) and not binary(release_channel) and not binary(note) and not binary(e2e) and not binary(contract) and not binary(stop_verdict) and not binary(pool_workload) and not binary(scratch_workload)"
+codex-server-tier := "binary(codex_server)"
 e2e-tier := "binary(e2e)"
 contract-tier := "binary(contract)"
 note-tier := "binary(note) and not test(/^harness::/)"
@@ -831,3 +832,8 @@ lint-llm-diff base="origin/main" *nx_args:
     LLMLINT_DIFF_BASE_SHA="$sha" ONEPIPELINE_NX_SHOW_OUTPUT=1 NX_RUN_COMMANDS_DIRECTLY=false \
       exec bash scripts/nx.sh run onepipeline:lint-llm-diff "$@"
 
+
+# The double's own protocol/backstop checks, with an independent cache edge.
+_codex-server-test: (_tier-test "codex_server" codex-server-tier)
+
+_codex-server-test-quick: (_tier-test-quick codex-server-tier)

@@ -802,7 +802,7 @@ echo "$1" >> "$JUST_CALLS"
 tree=target/llvm-cov-target
 case "$1" in
   _crate-coverage-clean) rm -rf "$tree" ;;
-  _crate-test-archive) ;;
+  _crate-test-archive | _crate-lint) ;;
   _crate-coverage) ls "$tree" > "$JUST_SAW" ;;
   *)
     tier="$(sed -n "s/^$1:.*(_tier-test \\"\\([a-z0-9_]*\\)\\".*/\\1/p" justfile)"
@@ -816,7 +816,13 @@ case "$1" in
     ;;
 esac
 `;
-  const TIER_RECIPES = ["_crate-test-rest", "_e2e-test", "_contract-test", "_note-test"];
+  const TIER_RECIPES = [
+    "_crate-test-rest",
+    "_e2e-test",
+    "_contract-test",
+    "_note-test",
+    "_codex-server-test",
+  ];
 
   it("restores its profiles for the aggregate to merge beside the tier that ran", (t) => {
     const repo = scratchRepository(t);
@@ -846,7 +852,7 @@ esac
 
     const cold = aggregate();
     for (const recipe of TIER_RECIPES) assert.ok(cold.ran.includes(recipe), cold.ran.join(" "));
-    assert.deepEqual(tiersIn(cold.merged), ["contract", "e2e", "note", "rest"]);
+    assert.deepEqual(tiersIn(cold.merged), ["codex_server", "contract", "e2e", "note", "rest"]);
 
     // Only the note tier's inputs change; the budget record the e2e tier
     // writes is gone, as it is on a fresh runner.
@@ -859,11 +865,46 @@ esac
       `only the changed tier runs: ${warm.ran.join(" ")}`,
     );
     assert.ok(warm.ran.includes("_crate-coverage-clean"), warm.ran.join(" "));
-    assert.deepEqual(tiersIn(warm.merged), ["contract", "e2e", "note", "rest"]);
+    assert.deepEqual(tiersIn(warm.merged), ["codex_server", "contract", "e2e", "note", "rest"]);
     assert.ok(
       existsSync(join(repo.path, "target", "budget-records", "stacked-spikes-stage.json")),
       "the replayed e2e tier did not restore the budget record `budgets` reads",
     );
+  });
+
+  it("reruns Codex checks for their own inputs while lint still covers other modules", (t) => {
+    const repo = scratchRepository(t);
+    mkdirSync(join(repo.path, "bin"));
+    writeFileSync(join(repo.path, "bin", "just"), DOUBLE, { mode: 0o755 });
+    const calls = join(repo.path, "just.calls");
+    const ranRecipe = (target, recipe) => {
+      writeFileSync(calls, "");
+      const result = run(
+        ["scripts/nx.sh", "run", target],
+        { PATH: `${join(repo.path, "bin")}:${process.env.PATH}`, JUST_CALLS: calls },
+        repo.path,
+      );
+      assert.equal(result.status, 0, result.stderr);
+      return readFileSync(calls, "utf8").split("\n").includes(recipe);
+    };
+    const tierRan = () => ranRecipe("onepipeline-codex-server:test", "_codex-server-test");
+    const lintRan = () => ranRecipe("onepipeline:lint", "_crate-lint");
+    assert.equal(tierRan(), true);
+    assert.equal(lintRan(), true);
+    for (const [path, expected] of [
+      ["src/driver.rs", false],
+      ["crates/testfakes/src/bin/fake-gh.rs", false],
+      ["crates/testfakes/src/hosted.rs", false],
+      ["crates/testfakes/src/containment.rs", false],
+      ["crates/testfakes/src/yaml.rs", false],
+      ["crates/testfakes/src/lib.rs", true],
+      ["crates/testfakes/src/bin/fake-codex.rs", true],
+      ["crates/testfakes/src/codex_app_server.rs", true],
+    ]) {
+      repo.change(path);
+      assert.equal(tierRan(), expected, path);
+      assert.equal(lintRan(), true, `onepipeline:lint must still cover ${path}`);
+    }
   });
 
   it("runs again after a change to the doubles or either configuration file", (t) => {

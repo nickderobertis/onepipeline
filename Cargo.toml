@@ -780,7 +780,9 @@ resolver = "2"
 # `control::offer_note` admits a note and hands back a `NoteOffer` this crate
 # waits on, waits on until a deadline, or withdraws, and a `live` note interrupts
 # the addressed party's turn. `src/agentgraph.rs` and `tests/note/main.rs` hold
-# it. It requires `onejudge ^0.20.0`, `onemessagebus ^0.9.3` and
+# it. It also supersedes 0.5.14, the release that first linked the shared
+# app-server core (see the `oneharness-core` pin for where the pool lives). It
+# requires `onejudge ^0.20.0`, `onemessagebus ^0.9.3` and
 # `oneharness-core ^0.28.4`, so the four move as one.
 #
 # `just engines-current` fails when a resolution lags its requirement *or* when
@@ -930,9 +932,10 @@ onemessagebus = "0.9.3"
 #
 # **0.20.0 delivers a note by interrupting the live turn**: `Note.delivery`
 # chooses `Interrupt` or `TurnEnd`, and `Accepted` answers `Interrupted` or
-# `AtTurnEnd`, which `src/note.rs` records as a note's `turn`. A requirement for
-# the same pre-1.0 reason: `^0.19` admits no 0.20.x. `oneagentgraph` 0.6.0
-# requires it.
+# `AtTurnEnd`, which `src/note.rs` records as a note's `turn`. It still carries
+# the shared app-server sweeper 0.19.5 introduced (onejudge #177). A requirement
+# for the same pre-1.0 reason: `^0.19` admits no 0.20.x. `oneagentgraph` 0.6.0
+# requires it, so the lock resolves onejudge once.
 onejudge = "0.20.0"
 # **Test-support only**, and named for one reason: `crates/testfakes`'s
 # `oneharness` double writes the report onejudge reads back, and that report is
@@ -1033,6 +1036,17 @@ onejudge = "0.20.0"
 # require `^0.28.1`, so the three move together or the lock resolves the core
 # twice. `oneagentgraph` 0.6.0 requires `^0.28.4`, and 0.28.5 is the newest
 # release the registry carries.
+#
+# **0.28.5 is the shared app-server release** a host adopts (oneharness #1488,
+# #1495): concurrent controlled Codex turns under one configuration share one
+# pooled `codex app-server`. The pool and its sweeper live in the `oneharness`
+# process a judged member's onejudge spawns; the `onepipeline` binary runs only
+# uncontrolled single-sided turns in process, so it leases no pooled server and
+# hosts no sweeper. `tests/e2e/dispatch.rs`'s
+# `two_concurrent_judged_codex_turns_share_one_app_server` holds both. A
+# **requirement**, so no build admitting 0.28.2 is one a host adopts for it;
+# `oneagentgraph` 0.6.0 and `onejudge` 0.20.0 admit this core, so the lock
+# resolves the core once.
 oneharness-core = "0.28.5"
 # The sibling's own test-support crate, from the **same** revision as the library
 # it implements — here by resolving both from the registry at the releases cut
@@ -1393,3 +1407,9 @@ path = "tests/scratch_workload/main.rs"
 strip = true
 lto = "thin"
 codegen-units = 1
+
+# Wire-level refusal checks for the shared Codex app-server double, isolated
+# from the dispatch journeys so its backstops rerun only for their own inputs.
+[[test]]
+name = "codex_server"
+path = "tests/codex_server/main.rs"
