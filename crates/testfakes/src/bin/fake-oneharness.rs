@@ -702,11 +702,15 @@ const TURN_ENDED: &str = "oneharness-turn-ended";
 /// turn is held, and `unreachable` binds the address and answers nothing, so a
 /// redirect is refused and the held turn goes on. Absent, the turn offers no
 /// control at all — a harness with no control mechanism — and a note waits for
-/// the turn to end. Only a *held* turn is redirected: every other turn this
-/// double runs is over before a redirect could reach it, so one arriving then is
-/// refused as having no active turn, exactly as the real run refuses one between
-/// turns. The request and the answers are the core's own types, read and written
-/// through its `parse_request` and `ControlResponse::to_line`.
+/// the turn to end. A turn is redirectable from the moment it binds its socket,
+/// as a real run's is, so a redirect that arrives before the turn has reached its
+/// hold is kept and ends that hold at once: a journey's signal that a turn is
+/// held is written before the hold begins, and refusing in that window turned a
+/// note the turn could take into one it never would. Only a *held* turn is
+/// redirected: one that ends without holding refuses what it took as having no
+/// active turn, exactly as the real run refuses one between turns. The request
+/// and the answers are the core's own types, read and written through its
+/// `parse_request` and `ControlResponse::to_line`.
 mod control {
     use onepipeline_testfakes as fake;
     use std::path::{Path, PathBuf};
@@ -716,24 +720,32 @@ mod control {
     /// carried it is waiting for.
     pub(super) struct Redirect {
         pub(super) input: String,
-        answer: std::sync::mpsc::Sender<()>,
+        /// Handed the acknowledgement the request sends once `redirected` is
+        /// written back to it.
+        answer: std::sync::mpsc::Sender<std::sync::mpsc::Sender<()>>,
     }
 
     impl Redirect {
         /// The replacement turn has opened on it, so the request is answered
-        /// `redirected`.
+        /// `redirected` — and this returns only once that answer is written, so
+        /// a turn that ends straight after cannot exit with it unsent, which the
+        /// requester would read as a refused redirect for a turn already aborted.
         pub(super) fn delivered(self) {
-            let _ = self.answer.send(());
+            let (written, acknowledged) = std::sync::mpsc::channel();
+            if self.answer.send(written).is_ok() {
+                let _ = acknowledged.recv();
+            }
         }
     }
 
-    /// Where the turn's control stands: not held, so nothing can be redirected,
-    /// or held, with the redirect that ends the hold once one arrives.
+    /// Where the turn's control stands: past its hold or its end, so nothing can
+    /// be redirected, or in flight, with the redirect that ends its hold once one
+    /// arrives.
     #[derive(Default)]
     enum State {
         #[default]
         Idle,
-        Holding {
+        InFlight {
             taken: Option<Redirect>,
         },
     }
@@ -753,9 +765,13 @@ mod control {
         let _ = BOUND.set(bind(args, dir));
     }
 
-    /// Unbind it, so a later turn of the same session binds afresh.
+    /// Unbind it, so a later turn of the same session binds afresh, refusing a
+    /// redirect the turn took and never held for.
     pub(super) fn close() {
         if let Some(Some(bound)) = BOUND.get() {
+            drop(std::mem::take(
+                &mut *bound.state.lock().unwrap_or_else(PoisonError::into_inner),
+            ));
             let _ = std::fs::remove_file(&bound.socket);
             let _ = std::fs::remove_file(&bound.marker);
         }
@@ -768,12 +784,10 @@ mod control {
             fake::wait_for(gate);
             return None;
         };
-        *bound.state.lock().unwrap_or_else(PoisonError::into_inner) =
-            State::Holding { taken: None };
         fake::wait_for_any(&[gate.to_path_buf(), bound.marker.clone()]);
         let mut state = bound.state.lock().unwrap_or_else(PoisonError::into_inner);
         match std::mem::take(&mut *state) {
-            State::Holding { taken } => taken,
+            State::InFlight { taken } => taken,
             State::Idle => None,
         }
     }
@@ -810,7 +824,7 @@ mod control {
             fake::fail(&format!("cannot bind {}: {error}", socket.display()))
         });
         let marker = dir.join(format!("redirect.{}", std::process::id()));
-        let state = std::sync::Arc::new(Mutex::new(State::default()));
+        let state = std::sync::Arc::new(Mutex::new(State::InFlight { taken: None }));
         if serving {
             let (state, marker) = (std::sync::Arc::clone(&state), marker.clone());
             std::thread::spawn(move || {
@@ -851,6 +865,7 @@ mod control {
         {
             return;
         }
+        let mut acknowledge = None;
         let response = match parse_request(&line) {
             Err(why) => ControlResponse::refused(why, ControlReason::Unsupported),
             Ok(request) => match request.input() {
@@ -863,7 +878,7 @@ mod control {
                     let taken = {
                         let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
                         match &mut *state {
-                            State::Holding {
+                            State::InFlight {
                                 taken: taken @ None,
                             } => {
                                 *taken = Some(Redirect {
@@ -872,12 +887,13 @@ mod control {
                                 });
                                 true
                             }
-                            State::Holding { taken: Some(_) } | State::Idle => false,
+                            State::InFlight { taken: Some(_) } | State::Idle => false,
                         }
                     };
                     if taken && std::fs::write(marker, "redirected").is_ok() {
                         match answered.recv() {
-                            Ok(()) => {
+                            Ok(written) => {
+                                acknowledge = Some(written);
                                 ControlResponse::redirected(ControlShape::ClaudeControlRequest)
                             }
                             Err(_) => ControlResponse::refused(
@@ -896,6 +912,10 @@ mod control {
         };
         let mut stream = stream;
         let _ = stream.write_all(response.to_line().as_bytes());
+        let _ = stream.flush();
+        if let Some(written) = acknowledge {
+            let _ = written.send(());
+        }
     }
 }
 
