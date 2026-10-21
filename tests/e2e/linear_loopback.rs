@@ -945,24 +945,9 @@ pub const PATIENCE: Duration = Duration::from_secs(120);
 /// record — exactly as hosted Linear would answer it. Every rule holds outside a fenced block
 /// and outside an inline code span opened and closed on one line, which are kept byte for byte,
 /// and a Markdown link or image is kept as written. Each rule is listed in [`RULES`] with the
-/// ruling's own example, and `the_loopback_stores_every_example_the_ruling_states` holds each:
-///
-/// - a line opening `- ` is a `* ` bullet;
-/// - a line after a list item that opens no block of its own runs on from it, indented under its
-///   text;
-/// - a table's delimiter row outside a list item is one `--` a cell, alignment colons kept, one
-///   space beside every pipe;
-/// - an `http://` or `https://` URL is linked to itself, trailing punctuation outside the link;
-/// - a domain-like token under one of [`AUTOLINKED`] is linked to `http://` and itself;
-/// - a `[` that opens no link, and every `]`, are escaped;
-/// - a `~` is escaped;
-/// - a single-underscore emphasis is written with asterisks;
-/// - the backslash of `\"` is dropped, and a backslash before a letter is doubled;
-/// - a line opening `-->` is escaped;
-/// - a fenced block and a lone image are set apart by a blank line from the lines beside them;
-/// - a run of blank lines is one blank line;
-/// - the content ends at its last line holding anything, but for a table's last row, which keeps
-///   its line break.
+/// ruling's own example. `the_loopback_stores_every_example_the_ruling_states` holds each, and
+/// `the_loopback_stores_what_the_linked_plugin_declares` reconciles the whole model with the
+/// linked plugin's own declaration, so a rule the ruling adds or changes fails here.
 pub fn stored_form(content: &str) -> String {
     let mut stored = String::with_capacity(content.len());
     // The fence a block is open under: its character and how many of it opened it.
@@ -1504,4 +1489,113 @@ fn malformed_requests_are_refused_before_a_valid_graphql_read() {
     let answer: Value = serde_json::from_str(body).expect("the GraphQL response");
     assert_eq!(answer["data"]["project"]["id"], PROJECT);
     assert_eq!(linear.log().len(), 3);
+}
+
+/// The model is reconciled with the linked Linear plugin's own declaration of what Linear
+/// stores — `TaskSource::stored_form`, the function its ruling names — over every example of
+/// [`RULES`] and a corpus mixing every construct a rule reads, domains under top-level domains
+/// on [`AUTOLINKED`] and off it among them: a rule the ruling adds, drops or changes, or a domain
+/// it moves on or off its list, fails here rather than leaving this endpoint modelling a
+/// Linear the store no longer declares.
+#[test]
+fn the_loopback_stores_what_the_linked_plugin_declares() {
+    let plugin = onetaskgraph_core::PluginKind::Linear.plugin();
+    let source = plugin
+        .build(
+            &onetaskgraph_plugin_api::SourceName::new("tracker").expect("a source name"),
+            &json!({"api_key_env": "LOOPBACK_KEY", "team": TEAM, "endpoint": "http://127.0.0.1:9/graphql"}),
+            &onetaskgraph_core::Secrets::load(onetaskgraph_core::Environment::from_pairs([(
+                "LOOPBACK_KEY",
+                "a-loopback-key",
+            )]))
+            .expect("no secrets file is named"),
+        )
+        .unwrap_or_else(|error| panic!("the linked Linear plugin builds: {error}"));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("a runtime");
+    let declared = |content: &str| {
+        runtime
+            .block_on(source.stored_form(content))
+            .unwrap_or_else(|error| panic!("the plugin declares what it stores: {error}"))
+    };
+
+    let mut corpus: Vec<String> = RULES
+        .iter()
+        .flat_map(|(_, written, kept)| [(*written).to_owned(), (*kept).to_owned()])
+        .collect();
+    // Every two- and three-letter top-level domain and the longer ones in common use, decided
+    // independently of [`AUTOLINKED`], so a domain the plugin links and this list omits — or
+    // the reverse — is in the corpus whichever list moved.
+    let letters = || ('a'..='z').map(String::from);
+    let mut tops: Vec<String> = letters()
+        .flat_map(|first| letters().map(move |second| format!("{first}{second}")))
+        .collect();
+    tops.extend(
+        tops.clone()
+            .into_iter()
+            .flat_map(|two| letters().map(move |third| format!("{two}{third}"))),
+    );
+    tops.extend(["info", "live", "tech", "site", "shop", "blog", "cloud"].map(str::to_owned));
+    let domains: Vec<String> = tops.iter().map(|top| format!("a.{top}")).collect();
+    corpus.extend(domains.iter().map(|domain| format!("see {domain} now")));
+    let atoms: Vec<String> = [
+        "- ",
+        "* ",
+        "  ",
+        "| a | b |",
+        "| --- |:-:|",
+        "```",
+        "~~~",
+        "\n",
+        "\n\n",
+        "x",
+        "_y_",
+        "snake_case",
+        "https://a.io/b.",
+        "[x]",
+        "]",
+        "~",
+        "\\\"",
+        "\\d",
+        "-->",
+        "`code _a_`",
+        "![a](u)",
+        "[l](t)",
+        "# h",
+        "> q",
+        "1. one",
+        "<!-- m `{\"k\":1}` -->",
+        " ",
+        "\t",
+        "a@b.com",
+        "\r\n",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .chain([" a.com ", " a.io/b ", " a.xyz ", "x.example.org."].map(str::to_owned))
+    .collect();
+    // A fixed linear congruential sequence, so a failure names the same input on every run.
+    let mut seed: u64 = 0x5eed;
+    let mut next = || {
+        seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        usize::try_from(seed >> 33).expect("31 bits fit")
+    };
+    for _ in 0..20_000 {
+        let length = next() % 12;
+        corpus.push(
+            (0..length)
+                .map(|_| atoms[next() % atoms.len()].as_str())
+                .collect(),
+        );
+    }
+    for content in corpus {
+        assert_eq!(
+            stored_form(&content),
+            declared(&content),
+            "the loopback and the linked Linear plugin store {content:?} differently"
+        );
+    }
 }
