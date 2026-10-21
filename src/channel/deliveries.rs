@@ -116,7 +116,9 @@ pub enum Delivery {
 
 /// A note waiting in its receiver's inbox: [`Delivery`]'s `queued` state and no
 /// other, so a reading of the inbox cannot name a delivery that is not waiting
-/// there. Its wire shape is that state's, `state` included.
+/// there. Its wire shape is that state's, `state` included, and
+/// `an_inbox_delivery_is_the_queued_delivery_and_no_other_state` holds the two
+/// to one value and one schema.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(tag = "state", rename_all = "lowercase")]
 pub enum InboxDelivery {
@@ -495,5 +497,84 @@ mod tests {
             Some(LiveDeliveries::of(Vec::new()))
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `InboxDelivery` is `Delivery::Queued` and nothing else: each writes the
+    /// other's value, with and without a deadline, their `queued` schemas are one
+    /// shape apart from their prose, and no other state reaches the inbox — so
+    /// the inbox reading and the sidecar cannot come to state two shapes of one
+    /// queued note.
+    #[test]
+    fn an_inbox_delivery_is_the_queued_delivery_and_no_other_state() {
+        let since = 1_792_400_403_000;
+        for deadline in [None, Some(since + 2_000)] {
+            let queued = Delivery::Queued {
+                node: "build".into(),
+                since,
+                deadline,
+            };
+            let inbox = queued
+                .clone()
+                .into_inbox()
+                .expect("a queued note is in the inbox");
+            assert_eq!(
+                serde_json::to_value(&inbox).expect("it writes"),
+                serde_json::to_value(&queued).expect("it writes"),
+                "the inbox writes a queued note other than the sidecar does"
+            );
+        }
+        for other in [
+            Delivery::Delivering {
+                node: "build".into(),
+                since,
+                deadline: None,
+            },
+            Delivery::Held {
+                node: "build".into(),
+                since,
+                behind_envelope: 2,
+            },
+        ] {
+            assert_eq!(other.into_inbox(), None);
+        }
+
+        fn shape(mut schema: serde_json::Value) -> serde_json::Value {
+            match &mut schema {
+                serde_json::Value::Object(object) => {
+                    object.remove("description");
+                    for value in object.values_mut() {
+                        *value = shape(value.take());
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for item in items.iter_mut() {
+                        *item = shape(item.take());
+                    }
+                }
+                _ => {}
+            }
+            schema
+        }
+        let schema_of = |schema: schemars::Schema| {
+            shape(schema.to_value())["oneOf"]
+                .as_array()
+                .expect("a tagged enum is a oneOf")
+                .iter()
+                .filter(|variant| variant["properties"]["state"]["const"] == "queued")
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let generator = || {
+            schemars::generate::SchemaSettings::draft2020_12()
+                .for_serialize()
+                .into_generator()
+        };
+        let inbox = schema_of(generator().into_root_schema_for::<InboxDelivery>());
+        assert_eq!(inbox.len(), 1, "the inbox states a state other than queued");
+        assert_eq!(
+            inbox,
+            schema_of(generator().into_root_schema_for::<Delivery>()),
+            "the inbox's queued schema is not the sidecar's"
+        );
     }
 }
