@@ -125,6 +125,19 @@ fn status_reads_the_public_id_the_launch_recorded_and_an_older_record_derives_it
             "a record holding no public id read another derivation"
         );
     }
+    // A record holding a public id the launch could not have decided for its run — a word
+    // naming the private repository, another run's hash — is not taken at its word: it reads the
+    // derivation over its id.
+    for planted in [json!("zephyrine-leaked"), json!(hashed(B))] {
+        let mut planted_record = launched_a.clone();
+        planted_record["public_id"] = planted.clone();
+        rewrite(&world, A, &planted_record);
+        assert_eq!(
+            reading(&world, A)["public_id"],
+            json!(hashed(A)),
+            "a planted public id {planted} was read as A's"
+        );
+    }
     rewrite(&world, A, &launched_a);
 
     // Recorded, not derived on each read: with A's repository no longer registered private,
@@ -482,6 +495,31 @@ fn a_claim_naming_the_public_id_is_read_back_taken_over_and_released() {
     assert_eq!(taken.len(), 1, "{taken:?}\n{said}");
     assert_eq!(taken[0]["payload"]["previous"], claim);
     assert_eq!(stored_claim(&world, &project), Value::Null);
+
+    // A record is a run's own only in the directory it names: a gone run whose directory was
+    // moved is not this host's run by its public id, so the takeover claims the project and
+    // waits for its driver, as it waits for another host's.
+    let moved = "zephyrine-moved";
+    let project = world.plan(moved, &plan_of(moved, vec![agent("moved", &[])]));
+    held_and_claimed(&world, &project, moved, "moved");
+    let shutdown = world.run(&["shutdown", moved, "--grace", "1"]);
+    assert!([0, 2].contains(&shutdown.code), "{}", shutdown.stderr);
+    std::fs::rename(
+        world.runs.join(moved),
+        world.runs.join("zephyrine-moved-elsewhere"),
+    )
+    .expect("the run's directory moves");
+    world.unscript("moved.wait");
+    let taken = world.run_from(
+        &world.project,
+        &["start", &project, "--attach", "--take-over"],
+    );
+    taken.exited(0);
+    assert!(
+        taken.stderr.contains("--take-over claimed"),
+        "a record naming another directory was taken as this host's run: {}",
+        taken.stderr
+    );
 
     // A stop releases the claim its public id names.
     let stopped = "zephyrine-stopped";
