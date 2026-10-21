@@ -233,7 +233,7 @@ fn rerun_times() -> usize {
 
 const SCHEDULING_MANIFEST: &str = "[package]\nname = \"nextest-scheduling-fixture\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[workspace]\n\n[[test]]\nname = \"e2e\"\npath = \"tests/e2e.rs\"\n\n[[test]]\nname = \"note\"\npath = \"tests/note.rs\"\n\n[[test]]\nname = \"release_channel\"\npath = \"tests/release_channel.rs\"\n\n[[test]]\nname = \"oneagentgraph_liveness\"\npath = \"tests/oneagentgraph_liveness.rs\"\n";
 
-/// One test matching each of the configuration's three four-thread overrides,
+/// One test matching each of the configuration's four four-thread overrides,
 /// with a one-thread test before them and one after in the binary's order.
 const SCHEDULING_E2E: &str = r#"
 fn nap(ms: u64) {
@@ -260,6 +260,12 @@ mod listing {
 mod maintenance {
     #[test]
     fn a_maintenance_journey() {
+        super::nap(200)
+    }
+}
+mod review_round {
+    #[test]
+    fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
         super::nap(200)
     }
 }
@@ -336,7 +342,7 @@ fn a_test_needing_the_whole_group_never_strands_the_tests_queued_behind_it() {
         "under .config/nextest.toml, nextest left tests unrun:\n{log}"
     );
     assert!(
-        log.contains("10 tests run: 10 passed"),
+        log.contains("11 tests run: 11 passed"),
         "every test of the fixture ran and passed:\n{log}"
     );
 }

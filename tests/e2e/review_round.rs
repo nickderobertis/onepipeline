@@ -788,6 +788,53 @@ fn the_round_started_few_enough_gits(world: &World) {
     );
 }
 
+/// The busy round takes the whole of the `e2e` group, so on the four-core Windows leg it
+/// runs alone, which keeps it inside its limit: `.config/nextest.toml` says why.
+///
+/// nextest accepts a `test(=…)` that matches nothing, so a renamed round would quietly
+/// lose its override; this holds the override to the journey's name, and to scheduling
+/// first as every whole-group override must.
+// llmlint: ignore-block[tests_mirror_real_usage] the subject is the runner's
+// configuration, which only nextest executes; running nextest from inside a test
+// it is running is the nesting `.config/nextest.toml` already declines.
+#[test]
+fn the_busy_review_round_takes_the_whole_group() {
+    let name = "the_busy_review_round_ends_answered_and_true_and_records_what_it_spent";
+    let text = std::fs::read_to_string(crate::harness::repo_file(".config/nextest.toml"))
+        .expect("the runner's configuration ships");
+    let config: toml::Value = toml::from_str(&text).expect("the configuration parses");
+    let cap = config["test-groups"]["e2e"]["max-threads"]
+        .as_integer()
+        .expect("the e2e group has a cap");
+    let overrides = config["profile"]["default"]["overrides"]
+        .as_array()
+        .expect("the default profile has overrides");
+    let required = overrides
+        .iter()
+        .find(|entry| entry["filter"].as_str().is_some_and(|filter| filter.contains(name)))
+        .expect("an override names the busy round");
+    assert_eq!(
+        required["filter"].as_str(),
+        Some(format!("binary(e2e) and test(=review_round::{name})").as_str())
+    );
+    assert_eq!(
+        required
+            .get("threads-required")
+            .and_then(toml::Value::as_integer),
+        Some(cap)
+    );
+    assert_eq!(
+        required.get("priority").and_then(toml::Value::as_integer),
+        Some(100)
+    );
+    let source = std::fs::read_to_string(crate::harness::repo_file("tests/e2e/review_round.rs"))
+        .expect("this module ships");
+    assert!(
+        source.contains(&format!("\nfn {name}() {{")),
+        "review_round::{name} is no longer a journey, so the override naming it holds nothing"
+    );
+} // llmlint: ignore-end[tests_mirror_real_usage]
+
 /// The counting `git` a world's commands find on its `PATH` counts each start and is the
 /// real `git` for it, failures included; and a start it cannot count is not run, since a
 /// gap in the count would be a cost the bound never saw.
