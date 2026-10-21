@@ -485,6 +485,36 @@ fn passed(output: &crate::harness::Run, what: &str) {
     );
 }
 
+/// Keep the node identity, failure detail and lifecycle order a concise command omits.
+fn passed_in_round(world: &World, run: &str, output: &crate::harness::Run, what: &str) {
+    let events = world.journal(run);
+    let short: Vec<&Value> = events
+        .iter()
+        .filter(|event| event["kind"] == "node-settled" && event["payload"]["status"] != "done")
+        .collect();
+    let order: Vec<&Value> = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event["kind"].as_str(),
+                Some(
+                    "node-ready"
+                        | "node-dispatched"
+                        | "node-restack-started"
+                        | "node-restacked"
+                        | "node-settled"
+                        | "session-opened"
+                )
+            )
+        })
+        .collect();
+    assert_eq!(
+        output.code, 0,
+        "{what}:\n{}\n{}\nsettled short of done: {short:#?}\nlifecycle event order: {order:#?}",
+        output.stdout, output.stderr
+    );
+}
+
 /// Where `bash` resolves on `path`, given the Windows directory `system_root` names.
 ///
 /// Not `Command::new("bash")`, which on Windows finds the WSL launcher first — the reason
@@ -596,17 +626,7 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
     // A command the run ended unsuccessfully names each node it settled short of done, with
     // the detail that settlement carries: the concise stream says only the outcome's word.
     let ran = |output: crate::harness::Run, what: &str| {
-        let short: Vec<Value> = world
-            .events_of(run, "node-settled")
-            .into_iter()
-            .filter(|event| event["payload"]["status"] != "done")
-            .map(|event| event["payload"].clone())
-            .collect();
-        assert_eq!(
-            output.code, 0,
-            "{what}:\n{}\n{}\nsettled short of done: {short:#?}",
-            output.stdout, output.stderr
-        );
+        passed_in_round(&world, run, &output, what);
         said.borrow_mut().push(output.stderr);
     };
     let round_from = projection_lines(&world, run).len();
@@ -1005,6 +1025,60 @@ fn the_counted_git_counts_each_start_and_is_the_real_git_for_it() {
         !world.root.join("uncounted").exists(),
         "a start nothing counted ran the real git"
     );
+}
+
+/// An unavailable executor fails the real command; its assertion keeps the settlement's
+/// identity and detail, then the dispatch-to-settlement order. Reading that failed run
+/// successfully is still a successful command.
+#[test]
+fn a_failed_round_command_names_its_node_detail_and_event_order() {
+    let world = World::new("round-diagnostic");
+    let missing = world.root.join("no-such-executor");
+    let world = world.with_env(
+        "ONEPIPELINE_ONEAGENTGRAPH_BIN",
+        missing.to_str().expect("a path the environment can carry"),
+    );
+    let run = "round-diagnostic";
+    let project = world.plan(run, &plan_of(run, vec![crate::harness::agent("n9", &[])]));
+    let output = world.run(&["start", &project, "--attach"]);
+    output.exited(3);
+    let settlements = world.events_of(run, "node-settled");
+    let settlement = settlements
+        .last()
+        .expect("the unavailable executor settled n9");
+    assert_eq!(settlement["labels"]["node"], "n9");
+    let detail = settlement["payload"]["detail"]
+        .as_str()
+        .expect("the refusal explains itself");
+    let outcome = settlement["payload"]["outcome"]
+        .as_str()
+        .expect("the refusal names its outcome");
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        passed_in_round(&world, run, &output, "rework-h");
+    }))
+    .expect_err("a failed command must fail the round assertion");
+    let message = panic
+        .downcast_ref::<String>()
+        .expect("the assertion's message");
+    let (_, report) = message
+        .split_once("settled short of done:")
+        .expect("the failed settlements");
+    let (failed, order) = report
+        .split_once("lifecycle event order:")
+        .expect("the event order");
+    assert!(
+        failed.contains("\"labels\""),
+        "the failed settlement lost its node labels: {failed}"
+    );
+    let detail = format!("{detail:?}");
+    for expected in ["n9", "failed", outcome, &detail] {
+        assert!(failed.contains(expected), "missing {expected:?}: {failed}");
+    }
+    let dispatched = order.find("node-dispatched").expect("the dispatch");
+    let settled = order.find("node-settled").expect("the settlement");
+    assert!(dispatched < settled, "the event order changed: {order}");
+    let status = world.run(&["status", run]);
+    passed_in_round(&world, run, &status, "reading the failed run");
 }
 
 /// A whole round's record, as the journey writes one, with `replies` reply posts on its
