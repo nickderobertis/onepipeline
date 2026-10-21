@@ -1854,7 +1854,15 @@ fn a_settled_run_marks_its_linear_home_done_with_one_status_write() {
             && !world.events_of(name, "driver-exited").is_empty()
     });
 
-    assert_eq!(linear.state_of(&only), "Done");
+    assert_eq!(
+        linear.state_of(&only),
+        "Done",
+        "requests: {:#?}\nprojections: {}\njournal: {:#?}",
+        linear.log(),
+        std::fs::read_to_string(world.run_file(name, "writeback-projections.jsonl"))
+            .unwrap_or_default(),
+        world.journal(name),
+    );
     assert_eq!(linear.project_status(), "Completed");
     let log = linear.log();
     let written: Vec<usize> = log
