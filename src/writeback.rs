@@ -697,6 +697,12 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         // llmlint: ignore[changed_behavior_has_e2e] unreachable from a write-back: only `project graph` raises these, and a write-back reads and copies but never draws a graph; `writeback::tests` holds each word.
         EngineError::GraphGroupNotText { .. } => decided("graph-group"),
         EngineError::DependencyCycle { .. } => decided("dependency-cycle"),
+        // A destination that stored a write's content other than its declared rewrite
+        // explains: the item was written, so asking again writes the same text and is refused
+        // the same way. `writeback::tests` holds the word.
+        EngineError::StoredContentDiverged { .. } => decided("stored-content-diverged"),
+        // llmlint: ignore[changed_behavior_has_e2e] unreachable from a write-back: only a routed copy of a whole plan chooses a home, and a write-back copies into the one project the run was launched from; `writeback::tests` holds the word.
+        EngineError::SplitPrivateHome { .. } => decided("split-private-home"),
         // The public boundary's refusals, in the store's own words for each: every one of
         // them is decided before the write's first mutation, so none is worth asking again.
         EngineError::NotPrivateDestination { .. } => decided("not-private-destination"),
@@ -6107,6 +6113,19 @@ mod tests {
             EngineError::QueryNotTasks,
             EngineError::CommentsNotDocuments,
             EngineError::ChangedWhileCopied { item: id() },
+            EngineError::StoredContentDiverged {
+                item: id(),
+                line: 1,
+                sent: Some("- a".to_owned()),
+                stored: Some("* a".to_owned()),
+            },
+            EngineError::SplitPrivateHome {
+                project: id(),
+                destinations: vec![(
+                    onetaskgraph_plugin_api::SourceName::new("private").expect("a source name"),
+                    vec![id()],
+                )],
+            },
             EngineError::NotWritable {
                 name: "plans".into(),
                 kind: "in-memory".into(),
