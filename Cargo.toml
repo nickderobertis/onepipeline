@@ -1383,6 +1383,10 @@ toml = "1"
 # `tests/budgets.rs` loads `budgets.yaml` and parses the result its command writes through the
 # checker's own library; the pin is in `[workspace.dependencies]`.
 onebudgetspec-core = { workspace = true }
+# `tests/e2e/public_id.rs` validates what `status --json` prints against
+# `schemas/run-reading.schema.json` itself; the release the lock already resolves for a
+# sibling, with no remote reference resolution.
+jsonschema = { version = "0.56", default-features = false }
 
 [[test]]
 name = "e2e"

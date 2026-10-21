@@ -1582,6 +1582,7 @@ dependencies = [
  "async-trait",
  "clap",
  "fs4",
+ "jsonschema 0.56.0",
  "libc",
  "minijinja",
  "oneagentgraph",
