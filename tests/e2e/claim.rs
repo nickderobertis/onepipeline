@@ -277,7 +277,14 @@ fn until_claim(world: &World, run: &str, state: &str) -> ClaimFile {
 /// One driver with `x` in flight, `y` ready behind `w`, and lifecycle node `z`'s work
 /// finished and its publication asked for, while `unconfirming` keeps every read of its
 /// claim from confirming it for several lease windows; then the store answers again.
-fn an_unconfirmed_claim_keeps_its_work_and_starts_nothing(name: &str, unconfirming: Unconfirming) {
+///
+/// `run` is the run's id, kept short — two characters — so the watch lines it is read on
+/// are measured against the screenshots' columns with room for the run id they carry twice.
+fn an_unconfirmed_claim_keeps_its_work_and_starts_nothing(
+    name: &str,
+    run: &str,
+    unconfirming: Unconfirming,
+) {
     let base = claim_world(name);
     let world = match &unconfirming {
         Unconfirming::Late(holding) => {
@@ -300,7 +307,6 @@ fn an_unconfirmed_claim_keeps_its_work_and_starts_nothing(name: &str, unconfirmi
     let x = world.rendezvous("x");
     let z = world.rendezvous("z");
     let w = world.rendezvous("w");
-    let run = name;
     let mut plan = plan_of(
         run,
         vec![
@@ -437,15 +443,15 @@ fn an_unconfirmed_claim_keeps_its_work_and_starts_nothing(name: &str, unconfirmi
         watched.stderr
     );
     for line in &lines {
+        // The state and its age, and nothing more: the next field follows at once.
         assert!(
             !age_of(line).is_empty()
-                && line.contains(&format!("  CLAIM UNCONFIRMED {}", age_of(line))),
-            "a watch line without the claim's state and age: {line:?}"
+                && line.contains(&format!("  CLAIM UNCONFIRMED {}  ", age_of(line))),
+            "a watch line without the claim's state and age alone: {line:?}"
         );
-        // A heartbeat's segment keeps it inside the columns the screenshots render at.
-        if line.starts_with("-- watching") {
-            assert!(line.chars().count() <= 118, "{line:?}");
-        }
+        // Under a short run id the heartbeat and the ending line both keep within the
+        // columns the screenshots render at, segment and all.
+        assert!(line.chars().count() <= 118, "{line:?}");
     }
 
     // The store answers again: the next read confirms the claim, and the driver carries on.
@@ -473,7 +479,11 @@ fn an_unconfirmed_claim_keeps_its_work_and_starts_nothing(name: &str, unconfirmi
 /// Every read of the claim the store fails, for several lease windows.
 #[test]
 fn a_claim_whose_reads_fail_keeps_its_dispatch_and_starts_nothing_until_a_read_confirms_it() {
-    an_unconfirmed_claim_keeps_its_work_and_starts_nothing("claim-failed", Unconfirming::Failed);
+    an_unconfirmed_claim_keeps_its_work_and_starts_nothing(
+        "claim-failed",
+        "cf",
+        Unconfirming::Failed,
+    );
 }
 
 /// Every read of the claim the store declines for its rate limit, for several lease windows.
@@ -481,6 +491,7 @@ fn a_claim_whose_reads_fail_keeps_its_dispatch_and_starts_nothing_until_a_read_c
 fn a_claim_whose_reads_are_rate_limited_keeps_its_dispatch_and_starts_nothing() {
     an_unconfirmed_claim_keeps_its_work_and_starts_nothing(
         "claim-limited",
+        "cr",
         Unconfirming::RateLimited,
     );
 }
@@ -490,6 +501,7 @@ fn a_claim_whose_reads_are_rate_limited_keeps_its_dispatch_and_starts_nothing() 
 fn a_claim_whose_reads_answer_late_keeps_its_dispatch_and_starts_nothing() {
     an_unconfirmed_claim_keeps_its_work_and_starts_nothing(
         "claim-late",
+        "cl",
         Unconfirming::Late(Arc::new(AtomicBool::new(false))),
     );
 }
