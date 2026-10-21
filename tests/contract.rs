@@ -4574,10 +4574,9 @@ fn the_run_history_surface_is_what_the_contract_names() {
     let at = history["summary_schema_version"]
         .as_u64()
         .expect("the block states the summary version the field arrived at");
-    assert_eq!(
-        u64::from(SUMMARY_SCHEMA_VERSION),
-        at,
-        "the summary schema moved past the version the block states"
+    assert!(
+        u64::from(SUMMARY_SCHEMA_VERSION) >= at,
+        "the summary schema predates the history field's introduction"
     );
     assert!(
         CONTRACT.contains(&spelled(&["opt_out"])),
@@ -7155,7 +7154,7 @@ fn the_contract_names_the_retention_path_and_the_release_it_ships_in() {
 
 #[test]
 fn the_driver_contracts_invocation_parses_exactly_as_written() {
-    let documented = "onepipeline start PROJECT [--attach|--detach] \
+    let documented = "onepipeline start PROJECT [--label KEY=VALUE]... [--group SOURCE:PROJECT] [--attach|--detach] \
                       [--dag-graph off|REF] [--pr-author-graph REF] \
                       [--heartbeat-interval 1800] \
                       [--set PATH=VALUE]... [--node-set PATH=VALUE]... \
@@ -9280,12 +9279,22 @@ fn verb_functions_in_contract() -> BTreeSet<String> {
     backticked_in(verbs_paragraph())
         .into_iter()
         .chain(backticked_in(
+            CONTRACT
+                .split("\n\n")
+                .find(|paragraph| paragraph.contains("The SDK exposes\n`verbs::label("))
+                .expect("the label SDK declaration")
+                .split("`verbs::{")
+                .next()
+                .expect("the functions precede their supporting types"),
+        ))
+        .chain(backticked_in(
             include_str!("../docs/contract-divergences.md")
                 .split("## 123.")
                 .nth(1)
                 .expect("scratch proposal"),
         ))
         .filter_map(|span| {
+            let span = span.strip_prefix("verbs::").unwrap_or(&span);
             let name: String = span
                 .chars()
                 .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
@@ -9368,6 +9377,8 @@ fn the_contract_names_every_post_launch_verb_the_sdk_publishes_and_no_other() {
     let _: fn(&RunPaths, &str) -> Result<Receipt> = verbs::attest;
     let _: fn(&RunPaths, SurfaceKind, String) -> Result<Surfaced> = verbs::surface;
     let _: fn(&Surfaced) -> String = verbs::render_surfaced;
+    let _: fn(&RunPaths, verbs::LabelRequest<'_>) -> Result<verbs::LabelOverlay> = verbs::label;
+    let _: fn(&verbs::LabelOverlay) -> String = verbs::render_labelled;
     let _: fn(&RunPaths, StopRequest<'_>) -> Result<Stopped> = verbs::stop;
     let _: fn(&Stopped) -> String = verbs::render_stopped;
     let _: fn(&Path, ShutdownRequest) -> Result<Shutdown> = verbs::shutdown;
@@ -11546,6 +11557,8 @@ fn the_interrupting_note_surface_is_what_entry_133_names() {
 #[test]
 fn the_label_overlay_is_the_contract_document() {
     use onepipeline::verbs::{LabelGroup, LabelKey, LabelOverlay, LabelValue, RunGroup};
+    assert_eq!(SUMMARY_SCHEMA_VERSION, 11);
+    assert!(CONTRACT.contains("11 (one after 10)"));
     let example: Value = serde_json::from_str(&fenced_block_naming("json", "\"set_by\"")).unwrap();
     let overlay: LabelOverlay = serde_json::from_value(example.clone()).unwrap();
     assert_eq!(serde_json::to_value(&overlay).unwrap(), example);

@@ -239,10 +239,28 @@ pub(crate) fn replace(
 ) -> Result<LabelOverlay> {
     let launch: LaunchRecord = ledger::read_json(&paths.launch())?;
     let state = crate::checkpoint::fold_and_checkpoint(paths);
-    if !crate::views::liveness(&launch, &state, paths).is_undriven()
-        && !launch.owned_by(request.session)
-        && !request.force
-    {
+    // A copied run can prove its driver exited without this host knowing that PID.
+    // The exit is written before releasing ownership, so the matching lock still wins.
+    let exited = crate::journal::read(&paths.journal())
+        .iter()
+        .rev()
+        .find(|event| {
+            event.source == crate::event::Source::Pipeline
+                && event.kind.0 == crate::journal::PipelineKind::DriverExited.as_str()
+        })
+        .and_then(|event| crate::projection::DriverClaim::of_stream(&event.stream))
+        .filter(|claim| claim.is(launch.recorded_host(), launch.driver_pid()));
+    let driven = if let Some(claim) = exited.as_ref() {
+        !crate::views::let_go(
+            launch.recorded_host(),
+            launch.driver_pid(),
+            Some(claim),
+            paths,
+        )
+    } else {
+        !crate::views::liveness(&launch, &state, paths).is_undriven()
+    };
+    if driven && !launch.owned_by(request.session) && !request.force {
         return Err(Error::NotOwned {
             run: paths.run.clone(),
             owner: launch.owner_label(request.session),

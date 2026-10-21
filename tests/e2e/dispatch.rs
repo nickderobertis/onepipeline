@@ -6826,3 +6826,55 @@ fn run_labels_recorded_host_runs_and_force_authorization() {
         world.run_file("claim", "result.json").is_file()
     });
 }
+
+/// Foreign-host exit evidence permits labelling only after the matching lock is released.
+#[test]
+fn run_labels_foreign_exit_requires_released_ownership() {
+    let world = World::new("labels-foreign-exit");
+    let run = "nx-heal-removal-revise";
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/recorded/run-root/run-labels/ended");
+    let dir = world.runs.join(run);
+    std::fs::create_dir_all(&dir).unwrap();
+    for file in ["launch.json", "plan.json", "events.jsonl", "summary.json"] {
+        std::fs::copy(fixture.join(file), dir.join(file)).unwrap();
+    }
+    let launch = world.run_json(run, "launch.json");
+    let foreign_host = format!("reader-{}", launch["host"].as_str().unwrap());
+    let on_foreign_host = |args: &[&str]| {
+        let mut command = world.cmd(args);
+        command.env("HOSTNAME", &foreign_host);
+        world.run_on(command, &args.join(" "))
+    };
+    // llmlint: ignore-block[tests_mirror_real_usage] captured run directories may include an ownership lock. Replaying that external lock state proves that driver-exited alone cannot authorize a label while the same claim still owns the run; no recorded process is signalled or graph executed, and a separate real-start release-gate journey proves the live ordering.
+    std::fs::write(
+        dir.join("owner.lock"),
+        serde_json::to_vec(&json!({
+            "host": launch["host"], "pid": launch["pid"], "started": launch["started"],
+            "acquired_at": launch["started_at"], "verb": "drive-run"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let before_launch = std::fs::read(dir.join("launch.json")).unwrap();
+    let before_journal = std::fs::read(dir.join("events.jsonl")).unwrap();
+    on_foreign_host(&["label", run, "--label", "kind=spikes"])
+        .exited(REFUSED)
+        .err_has("belongs to");
+    assert!(!dir.join("labels.json").exists());
+    // llmlint: ignore[tests_mirror_real_usage] this releases only the replayed external lock above, never a live driver's lock. The recorded graph must not execute; the separate real-start release-gate journey proves that a real driver holds the same protection until its own release.
+    std::fs::remove_file(dir.join("owner.lock")).unwrap();
+    on_foreign_host(&["label", run, "--label", "kind=spikes"]).exited(0);
+    let reading = on_foreign_host(&["status", run, "--json"]);
+    reading.exited(0);
+    assert_eq!(reading.json()["labels"]["kind"], "spikes");
+    assert_eq!(
+        std::fs::read(dir.join("launch.json")).unwrap(),
+        before_launch
+    );
+    assert_eq!(
+        std::fs::read(dir.join("events.jsonl")).unwrap(),
+        before_journal
+    );
+}
