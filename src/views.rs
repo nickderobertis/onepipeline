@@ -273,6 +273,7 @@ pub struct RunReading {
     /// otherwise `run-` followed by the first 12 lowercase hex digits of the SHA-256 of the
     /// run id's UTF-8 bytes. Decided once, at the launch, and kept in its record; a run
     /// whose record holds none reads the same derivation over its id.
+    // llmlint: ignore[invalid_states_unrepresentable] a field of the published `RunReading`, which the approved contract fixes as exactly its fields and `schemas/run-reading.schema.json` types as a string; the checked id is `publicid::PublicId` everywhere inside the crate, and `reading` is the only constructor, filling it from `publicid::of_record`, so a public newtype here would add surface the contract does not name and check nothing the crate's own type does not.
     pub public_id: String,
     // llmlint: ignore-block[invalid_states_unrepresentable] these five fields are the
     // `status <RUN> --json` document exactly as the approved contract fixes it — `word` and
@@ -371,7 +372,7 @@ pub fn reading(view: &RunView) -> RunReading {
     RunReading {
         schema_version: RUN_READING_SCHEMA_VERSION,
         run_id: view.paths.run.clone(),
-        public_id: crate::publicid::of_record(&view.launch),
+        public_id: crate::publicid::of_record(&view.launch).into_string(),
         word: standing.word(),
         liveness: liveness.as_str(),
         driven: !liveness.is_undriven(),

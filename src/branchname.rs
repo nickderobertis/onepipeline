@@ -175,7 +175,7 @@ pub(crate) struct Naming {
     /// What `plan.name` renders as on a branch of a public repository: the run's public id
     /// where the launch found the plan's name fails the public-output check, and `None`
     /// where it may be named there as it is.
-    pub public_name: Option<String>,
+    pub public_name: Option<crate::publicid::PublicId>,
 }
 
 /// What a run names its branches with, or why it cannot name one: the sentence a
@@ -243,8 +243,8 @@ impl Naming {
             task["key"] = json!(key);
         }
         let plan_name = match (&self.public_name, node.repo.as_deref()) {
-            (Some(public_name), Some(repo)) if public(repo) => public_name,
-            _ => &self.plan_name,
+            (Some(public_name), Some(repo)) if public(repo) => public_name.as_str(),
+            _ => self.plan_name.as_str(),
         };
         json!({
             "task": task,
@@ -356,7 +356,7 @@ mod tests {
     #[test]
     fn a_withheld_plan_name_renders_as_the_public_id_on_a_public_repositorys_branch_only() {
         let mut withheld = naming(DEFAULT_TEMPLATE);
-        withheld.public_name = Some("run-0123456789ab".to_owned());
+        withheld.public_name = Some(crate::publicid::hashed("secret-plan"));
         let on = |repo: &str| Node {
             id: "build".into(),
             repo: Some(repo.to_owned()),
@@ -364,8 +364,11 @@ mod tests {
         };
         let public = |repo: &str| repo == "library";
         assert_eq!(
-            withheld.render_with(&on("library"), public).as_deref(),
-            Ok("run-0123456789ab/build")
+            withheld.render_with(&on("library"), public),
+            Ok(format!(
+                "{}/build",
+                crate::publicid::hashed("secret-plan").as_str()
+            ))
         );
         assert_eq!(
             withheld.render_with(&on("service"), public).as_deref(),

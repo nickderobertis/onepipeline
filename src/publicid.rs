@@ -26,8 +26,26 @@ use std::sync::Mutex;
 
 use crate::ledger::LaunchRecord;
 
+/// A run's public id, which only this module makes: the run id the check passed, the hashed
+/// form of one, or the one a launch recorded — so a run id nothing checked is never handed
+/// where a public id is asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PublicId(String);
+
+impl PublicId {
+    /// The id as it is written.
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The id as it is written, owned.
+    pub(crate) fn into_string(self) -> String {
+        self.0
+    }
+}
+
 /// `run-` and the first twelve lowercase hex digits of the SHA-256 of `run`'s UTF-8 bytes.
-pub(crate) fn hashed(run: &str) -> String {
+pub(crate) fn hashed(run: &str) -> PublicId {
     use sha2::Digest;
     let digest = sha2::Sha256::digest(run.as_bytes());
     let hex: String = digest
@@ -35,7 +53,7 @@ pub(crate) fn hashed(run: &str) -> String {
         .take(6)
         .map(|byte| format!("{byte:02x}"))
         .collect();
-    format!("run-{hex}")
+    PublicId(format!("run-{hex}"))
 }
 
 /// Whether `term` may be named on a public destination, as the linked `onevcs` answers over
@@ -65,14 +83,22 @@ fn passes_with(
     }
 }
 
+/// Whether a plan's own name may be named where the destination is not private.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PlanName {
+    /// The check passed it, or the plan has none: it is written as it is.
+    Named,
+    /// The check refused it or could not answer: the public id is written in its place.
+    Withheld,
+}
+
 /// What a launch records about how its run is named publicly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Decided {
     /// The run's public id.
-    pub(crate) id: String,
-    /// Whether the plan's own name fails the check, so a destination that is not private
-    /// carries the public id in its place.
-    pub(crate) name_withheld: bool,
+    pub(crate) id: PublicId,
+    /// Whether the plan's own name may be named where the destination is not private.
+    pub(crate) plan_name: PlanName,
 }
 
 /// Decide `run`'s public id, and whether `name` — the plan's — may be named publicly.
@@ -90,25 +116,30 @@ fn decide_with(
     mut passes: impl FnMut(&str) -> std::result::Result<bool, String>,
 ) -> Decided {
     let id = if passes(run) == Ok(true) {
-        run.to_owned()
+        PublicId(run.to_owned())
     } else {
         hashed(run)
     };
-    let name_withheld = name
+    let plan_name = if name
         .filter(|name| !name.is_empty())
-        .is_some_and(|name| passes(name) != Ok(true));
-    Decided { id, name_withheld }
+        .is_some_and(|name| passes(name) != Ok(true))
+    {
+        PlanName::Withheld
+    } else {
+        PlanName::Named
+    };
+    Decided { id, plan_name }
 }
 
 /// The public ids this process derived for records that hold none, by run id.
-static DERIVED: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
+static DERIVED: Mutex<BTreeMap<String, PublicId>> = Mutex::new(BTreeMap::new());
 
 /// `launch`'s public id: the one its launch recorded, or — for a record written before there
 /// was one — the same derivation over its id. A read must answer, so where the check cannot,
 /// such a record reads the hashed form, which names nothing.
-pub(crate) fn of_record(launch: &LaunchRecord) -> String {
+pub(crate) fn of_record(launch: &LaunchRecord) -> PublicId {
     if !launch.public_id.is_empty() {
-        return launch.public_id.clone();
+        return PublicId(launch.public_id.clone());
     }
     let run = &launch.run_id;
     if let Some(known) = DERIVED
@@ -119,7 +150,7 @@ pub(crate) fn of_record(launch: &LaunchRecord) -> String {
         return known;
     }
     let derived = match passes(run) {
-        Ok(true) => run.clone(),
+        Ok(true) => PublicId(run.clone()),
         Ok(false) | Err(_) => hashed(run),
     };
     if let Ok(mut known) = DERIVED.lock() {
@@ -161,7 +192,7 @@ pub(crate) fn on_store(launch: &LaunchRecord) -> String {
     if home_declared_private(launch) {
         launch.run_id.clone()
     } else {
-        of_record(launch)
+        of_record(launch).into_string()
     }
 }
 
@@ -170,7 +201,7 @@ pub(crate) fn on_store(launch: &LaunchRecord) -> String {
 /// source private, and the name itself otherwise.
 pub(crate) fn name_on_store(launch: &LaunchRecord, name: &str) -> String {
     if launch.name_withheld && !home_declared_private(launch) {
-        of_record(launch)
+        of_record(launch).into_string()
     } else {
         name.to_owned()
     }
@@ -200,8 +231,8 @@ mod tests {
     fn the_hashed_form_is_run_and_twelve_hex_digits_of_the_ids_sha256() {
         // SHA-256("abc"), FIPS 180-2's own example.
         let id = hashed("abc");
-        assert_eq!(id, "run-ba7816bf8f01");
-        assert_eq!(id.len(), "run-".len() + 12);
+        assert_eq!(id.as_str(), "run-ba7816bf8f01");
+        assert_eq!(id.as_str().len(), "run-".len() + 12);
     }
 
     #[test]
@@ -210,19 +241,19 @@ mod tests {
         assert_eq!(
             decided,
             Decided {
-                id: "public-plan".to_owned(),
-                name_withheld: false
+                id: PublicId("public-plan".to_owned()),
+                plan_name: PlanName::Named
             }
         );
         let decided = decide_with("secret-plan", Some("secret plan"), |_| Ok(false));
         assert_eq!(decided.id, hashed("secret-plan"));
-        assert!(decided.name_withheld);
+        assert_eq!(decided.plan_name, PlanName::Withheld);
         // No name is nothing to withhold, and is never asked.
         let decided = decide_with("secret-plan", None, |term| {
             assert_eq!(term, "secret-plan");
             Ok(false)
         });
-        assert!(!decided.name_withheld);
+        assert_eq!(decided.plan_name, PlanName::Named);
     }
 
     #[test]
@@ -234,7 +265,7 @@ mod tests {
             unanswered,
             Decided {
                 id: hashed("x"),
-                name_withheld: true
+                plan_name: PlanName::Withheld
             }
         );
         // A name the check cannot judge is withheld even where the id passes.
@@ -248,8 +279,8 @@ mod tests {
         assert_eq!(
             decided,
             Decided {
-                id: "x".to_owned(),
-                name_withheld: true
+                id: PublicId("x".to_owned()),
+                plan_name: PlanName::Withheld
             }
         );
     }

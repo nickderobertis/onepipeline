@@ -1522,7 +1522,7 @@ fn start(args: &StartArgs) -> Result<i32> {
             run: if store.source_declared_private(project.source()) {
                 run.clone()
             } else {
-                public.id.clone()
+                public.id.as_str().to_owned()
             },
             host: sys::hostname(),
             session: crate::vcs::usable(&sys::launching_session()),
@@ -1701,8 +1701,8 @@ fn start(args: &StartArgs) -> Result<i32> {
         // llmlint: ignore-end[changed_behavior_has_e2e]
         oneharness_sessions: Some(sessions_file(&paths)?),
         flow: flow.map(|id| id.as_str().to_owned()).unwrap_or_default(),
-        public_id: public.id,
-        name_withheld: public.name_withheld,
+        public_id: public.id.into_string(),
+        name_withheld: public.plan_name == crate::publicid::PlanName::Withheld,
     };
     record.driven_by_this_process();
     // The record is durable *before* anything that reads it exists. The engine
