@@ -114,6 +114,50 @@ pub enum Delivery {
     },
 }
 
+/// A note waiting in its receiver's inbox: [`Delivery`]'s `queued` state and no
+/// other, so a reading of the inbox cannot name a delivery that is not waiting
+/// there. Its wire shape is that state's, `state` included.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(tag = "state", rename_all = "lowercase")]
+pub enum InboxDelivery {
+    /// The envelope is answered, and its live note waits in `node`'s inbox for
+    /// that node's turn to take it.
+    Queued {
+        /// The node whose inbox holds the note.
+        // llmlint: ignore[invalid_states_unrepresentable] the node id, as `Delivery::Delivering`'s `node` says; it is copied from a `Delivery` already checked by `node_id` as it was read.
+        node: String,
+        /// When it was handed to that inbox, in epoch milliseconds — RFC 3339 on
+        /// the wire.
+        #[serde(with = "instant")]
+        #[schemars(with = "String")]
+        since: u64,
+        /// When the note stops waiting for a turn to take it, as
+        /// `Delivery::Queued`'s `deadline` says.
+        #[serde(skip_serializing_if = "Option::is_none", with = "optional_instant")]
+        #[schemars(with = "Option<String>")]
+        deadline: Option<u64>,
+    },
+}
+
+impl Delivery {
+    /// The note this delivery holds in an inbox, or `None` where it is not
+    /// `queued` there.
+    pub(crate) fn into_inbox(self) -> Option<InboxDelivery> {
+        match self {
+            Self::Queued {
+                node,
+                since,
+                deadline,
+            } => Some(InboxDelivery::Queued {
+                node,
+                since,
+                deadline,
+            }),
+            Self::Delivering { .. } | Self::Held { .. } => None,
+        }
+    }
+}
+
 /// One entry of the sidecar: an envelope, by its channel id, and where its
 /// delivery stands. An envelope with notes to several receivers has one entry
 /// per receiver still outstanding.

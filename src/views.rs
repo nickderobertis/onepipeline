@@ -320,8 +320,8 @@ pub struct InboxNote {
     #[schemars(with = "String")]
     pub envelope: u64,
     /// The receiving node and since when its note has waited there, as the run's
-    /// live driver last wrote it.
-    pub delivery: Delivery,
+    /// live driver last wrote it — `queued`, the one state a note in an inbox has.
+    pub delivery: InboxDelivery,
 }
 
 /// One command envelope claimed off a run's queue with no outcome yet, as
@@ -342,7 +342,7 @@ pub struct UnansweredEnvelope {
 
 /// Where one claimed envelope's live note stands — the one type the run's
 /// live-delivery sidecar and this reading both carry.
-pub use crate::channel::deliveries::Delivery;
+pub use crate::channel::deliveries::{Delivery, InboxDelivery};
 
 /// Each envelope claimed off the run's queue with no outcome, in claim order,
 /// with where its live note stands when a driver is live.
@@ -378,10 +378,11 @@ fn inbox_of(view: &RunView, liveness: DriverLiveness) -> Vec<InboxNote> {
         .map(|live| {
             live.deliveries
                 .into_iter()
-                .filter(|entry| matches!(entry.delivery, Delivery::Queued { .. }))
-                .map(|entry| InboxNote {
-                    envelope: entry.envelope,
-                    delivery: entry.delivery,
+                .filter_map(|entry| {
+                    Some(InboxNote {
+                        envelope: entry.envelope,
+                        delivery: entry.delivery.into_inbox()?,
+                    })
                 })
                 .collect()
         })
@@ -4531,25 +4532,23 @@ fn note_lines(view: &RunView) -> String {
     let inbox = inbox_of(view, view.liveness());
     let mut out = String::new();
     for note in &inbox {
-        if let Delivery::Queued {
+        let InboxDelivery::Queued {
             node,
             since,
             deadline,
-        } = &note.delivery
-        {
-            let until = deadline.map_or_else(String::new, |deadline| {
-                format!(
-                    ", until its deadline {}",
-                    sys::rfc3339_from_millis(deadline)
-                )
-            });
-            out.push_str(&format!(
-                "  inbox: {node} holds envelope {}'s note, queued since {}{until} — the \
-                 envelope is answered, and {node}'s turn takes the note when it takes notes\n",
-                note.envelope,
-                sys::rfc3339_from_millis(*since)
-            ));
-        }
+        } = &note.delivery;
+        let until = deadline.map_or_else(String::new, |deadline| {
+            format!(
+                ", until its deadline {}",
+                sys::rfc3339_from_millis(deadline)
+            )
+        });
+        out.push_str(&format!(
+            "  inbox: {node} holds envelope {}'s note, queued since {}{until} — the \
+             envelope is answered, and {node}'s turn takes the note when it takes notes\n",
+            note.envelope,
+            sys::rfc3339_from_millis(*since)
+        ));
     }
     let channel = crate::channel::ChannelState::new(&view.paths);
     // The latest answer per envelope: a withdrawal answers one again.
@@ -4561,7 +4560,7 @@ fn note_lines(view: &RunView) -> String {
     let waiting = |id: u64, node: &str| {
         inbox.iter().any(|note| {
             note.envelope == id
-                && matches!(&note.delivery, Delivery::Queued { node: at, .. } if at == node)
+                && matches!(&note.delivery, InboxDelivery::Queued { node: at, .. } if at == node)
         })
     };
     let mut left: Vec<(u64, usize, crate::channel::Command)> = Vec::new();
