@@ -62,6 +62,15 @@ pub enum Operation {
     IssueCreate,
     /// `projectCreate`: the project filed, as a copy files a plan.
     ProjectCreate,
+    /// `document(id:)`: one document.
+    Document,
+    /// `documents(first:,filter:)`: a page of documents — every one this endpoint holds,
+    /// whatever the filter, which the plugin confirms each row against itself.
+    Documents,
+    /// `documentCreate`: one document filed under the project.
+    DocumentCreate,
+    /// `documentUpdate`: one document's title or content written.
+    DocumentUpdate,
     /// Anything else, which this endpoint refuses by name.
     Unknown,
 }
@@ -79,10 +88,18 @@ impl Operation {
             Self::IssueCreate
         } else if query.starts_with("mutation") && query.contains("projectCreate(") {
             Self::ProjectCreate
+        } else if query.starts_with("mutation") && query.contains("documentCreate(") {
+            Self::DocumentCreate
+        } else if query.starts_with("mutation") && query.contains("documentUpdate(") {
+            Self::DocumentUpdate
         } else if query.starts_with("mutation") {
             Self::Unknown
         } else if query.contains("projects(") {
             Self::Projects
+        } else if query.contains("documents(") {
+            Self::Documents
+        } else if query.contains("document(id:") {
+            Self::Document
         } else if query.contains("issues(") {
             Self::Issues
         } else if query.contains("issue(id:") && query.contains("relations(") {
@@ -139,6 +156,13 @@ struct Issue {
     priority: u64,
 }
 
+#[derive(Clone, Debug)]
+struct Document {
+    id: String,
+    title: String,
+    content: String,
+}
+
 #[derive(Default)]
 struct World {
     states: Vec<Named>,
@@ -150,6 +174,7 @@ struct World {
     /// it into.
     project_held: bool,
     issues: Vec<Issue>,
+    documents: Vec<Document>,
     log: Vec<Request>,
     faults: BTreeMap<Operation, VecDeque<Fault>>,
     held: bool,
@@ -227,6 +252,15 @@ impl Linear {
             .find(|held| held.id == issue)
             .unwrap_or_else(|| panic!("no issue {issue}"));
         held.description = stored_form(&edit(&held.description));
+    }
+
+    /// Every document this endpoint holds, by id, with its content as stored.
+    pub fn documents(&self) -> Vec<(String, String)> {
+        self.lock()
+            .documents
+            .iter()
+            .map(|held| (held.id.clone(), held.content.clone()))
+            .collect()
     }
 
     /// Every issue this endpoint holds, by id, with its title and its description as stored.
@@ -403,6 +437,8 @@ impl Linear {
                     | Operation::ProjectRelations
                     | Operation::IssueUpdate
                     | Operation::ProjectUpdate
+                    | Operation::Document
+                    | Operation::DocumentUpdate
             ) && !variables["id"]
                 .as_str()
                 .is_some_and(|id| !id.trim().is_empty())
@@ -461,7 +497,9 @@ impl Linear {
             | Operation::Project
             | Operation::ProjectRelations
             | Operation::IssueUpdate
-            | Operation::ProjectUpdate => variables["id"].as_str().expect("validated request ID"),
+            | Operation::ProjectUpdate
+            | Operation::Document
+            | Operation::DocumentUpdate => variables["id"].as_str().expect("validated request ID"),
             _ => "",
         };
         let data = match operation {
@@ -571,6 +609,36 @@ impl Linear {
                     Err(why) => return refusal(&why),
                 }
             }
+            Operation::Document => json!({"document": world
+                .documents
+                .iter()
+                .find(|held| held.id == id)
+                .map_or(Value::Null, |held| world.render_document(held))}),
+            Operation::Documents => json!({"documents": {
+                "nodes": world
+                    .documents
+                    .iter()
+                    .map(|held| world.render_document(held))
+                    .collect::<Vec<_>>(),
+                "pageInfo": {"hasNextPage": false, "endCursor": null},
+            }}),
+            Operation::DocumentCreate | Operation::DocumentUpdate => {
+                let Some(input) = variables["input"].as_object() else {
+                    return refusal("a document write carries an `input` object");
+                };
+                let target = (operation == Operation::DocumentUpdate).then_some(id);
+                match world.write_document(target, input) {
+                    Ok(document) => {
+                        let root = if target.is_some() {
+                            "documentUpdate"
+                        } else {
+                            "documentCreate"
+                        };
+                        json!({root: {"success": true, "document": document}})
+                    }
+                    Err(why) => return refusal(&why),
+                }
+            }
             Operation::Unknown => return refusal(&format!("the loopback answers no {query}")),
         };
         json!({"data": data})
@@ -637,6 +705,58 @@ impl World {
         let answer = json!({"id": issue.id, "description": issue.description});
         self.issues.push(issue);
         Ok(answer)
+    }
+
+    /// File a document under the project, or write the one `target` names, its content stored
+    /// as Linear stores it.
+    fn write_document(
+        &mut self,
+        target: Option<&str>,
+        input: &Map<String, Value>,
+    ) -> Result<Value, String> {
+        let text = |field: &str| input.get(field).and_then(Value::as_str);
+        if let Some(project) = text("projectId").filter(|project| !self.holds(project)) {
+            return Err(format!("Entity not found: Project {project}"));
+        }
+        let document = match target {
+            Some(id) => self
+                .documents
+                .iter_mut()
+                .find(|held| held.id == id)
+                .ok_or_else(|| "Entity not found: Document".to_owned())?,
+            None => {
+                let (Some(title), Some(_)) = (text("title"), text("content")) else {
+                    return Err("a documentCreate carries a `title` and a `content`".to_owned());
+                };
+                let id = format!("document-{}", self.documents.len() + 1);
+                self.documents.push(Document {
+                    id,
+                    title: title.to_owned(),
+                    content: String::new(),
+                });
+                self.documents.last_mut().expect("just filed")
+            }
+        };
+        if let Some(title) = text("title") {
+            title.clone_into(&mut document.title);
+        }
+        if let Some(content) = text("content") {
+            document.content = stored_form(content);
+        }
+        Ok(json!({"id": document.id, "content": document.content}))
+    }
+
+    fn render_document(&self, document: &Document) -> Value {
+        json!({
+            "id": document.id,
+            "title": document.title,
+            "content": document.content,
+            "url": format!("https://linear.app/generic/document/{}", document.id),
+            "createdAt": "2026-10-01T00:00:00.000Z",
+            "updatedAt": "2026-10-01T00:00:00.000Z",
+            "archivedAt": null,
+            "project": {"id": PROJECT},
+        })
     }
 
     fn render(&self, issue: &Issue) -> Value {

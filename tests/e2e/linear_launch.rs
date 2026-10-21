@@ -82,39 +82,38 @@ fn homed(name: &str) -> Homed {
         );
     }
 
-    // The store's own copy files the plan in Linear: the project, then each task under it.
-    let report = linked_store(&world, &launch, |engine| async move {
-        engine
-            .copy(&onetaskgraph_core::CopyRequest {
-                items: onetaskgraph_core::CopyItems::new(vec![global(&format!(
-                    "{STORE_SOURCE}:{}",
-                    project_id(NAME)
-                ))])
-                .expect("one item"),
-                scope: onetaskgraph_core::CopyScope::Projects { tasks: true },
-                destination: onetaskgraph_plugin_api::SourceName::new(SOURCE)
-                    .expect("a source name"),
-                match_by: None,
-                recreate: false,
-                create: false,
-                dry_run: false,
-                comments: false,
-                no_link: false,
-                expect: None,
-                statuses: Vec::new(),
-            })
-            .await
-            .unwrap_or_else(|error| panic!("the copy files the plan in Linear: {error}"))
-    });
-    let home = report
-        .items
-        .first()
-        .and_then(|item| item.action.destination())
-        .unwrap_or_else(|| panic!("the copy reports where the project landed: {report:?}"));
-    assert_eq!(
-        home.to_string(),
-        format!("{SOURCE}:{PROJECT}"),
-        "{report:?}"
+    // The store's own copy files the plan in Linear: the project, then each task under it,
+    // then the plan's design document after them, as an operator's tooling copies one.
+    let home = copied(
+        &world,
+        &launch,
+        &format!("{STORE_SOURCE}:{}", project_id(NAME)),
+        onetaskgraph_core::CopyScope::Projects { tasks: true },
+    );
+    assert_eq!(home, format!("{SOURCE}:{PROJECT}"));
+    world.write_item(
+        &world.store().join("documents").join("design.md"),
+        &[
+            ("title", json!("Design")),
+            ("project", json!(project_id(NAME))),
+        ],
+        DESIGN,
+    );
+    let document = copied(
+        &world,
+        &launch,
+        &format!("{STORE_SOURCE}:design"),
+        onetaskgraph_core::CopyScope::Documents,
+    );
+    let held = linear
+        .documents()
+        .into_iter()
+        .find(|(id, _)| document == format!("{SOURCE}:{id}"))
+        .map(|(_, content)| content)
+        .unwrap_or_else(|| panic!("Linear holds no {document}"));
+    assert!(
+        held.starts_with(&stored_form(DESIGN)) && !held.contains("\n- "),
+        "the design document is not held as Linear stores it:\n{held}"
     );
 
     let issues = linear
@@ -139,6 +138,40 @@ fn homed(name: &str) -> Homed {
         launch,
         issues,
     }
+}
+
+/// The plan's design document: a list, and a table whose delimiter row Linear rewrites.
+const DESIGN: &str =
+    "## Design\n- Build on example.com.\n\n| part | owner |\n| --- | --- |\n| core | build |\n";
+
+/// Copy `item` into Linear with the linked store's copy over `scope`, and answer where it landed.
+fn copied(world: &World, launch: &Path, item: &str, scope: onetaskgraph_core::CopyScope) -> String {
+    let item = global(item);
+    let report = linked_store(world, launch, |engine| async move {
+        engine
+            .copy(&onetaskgraph_core::CopyRequest {
+                items: onetaskgraph_core::CopyItems::new(vec![item]).expect("one item"),
+                scope,
+                destination: onetaskgraph_plugin_api::SourceName::new(SOURCE)
+                    .expect("a source name"),
+                match_by: None,
+                recreate: false,
+                create: false,
+                dry_run: false,
+                comments: false,
+                no_link: false,
+                expect: None,
+                statuses: Vec::new(),
+            })
+            .await
+            .unwrap_or_else(|error| panic!("the copy files it in Linear: {error}"))
+    });
+    report
+        .items
+        .first()
+        .and_then(|item| item.action.destination())
+        .unwrap_or_else(|| panic!("the copy reports where it landed: {report:?}"))
+        .to_string()
 }
 
 /// One task of `native`, created by the released `onetaskgraph` from `plan-task` with `criteria`.
