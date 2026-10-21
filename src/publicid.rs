@@ -8,9 +8,11 @@
 //! followed by the first twelve lowercase hex digits of the SHA-256 of the id's UTF-8 bytes,
 //! which says nothing about the run.
 //!
-//! It is decided once, where the run id is minted, and kept in the launch record: a check
-//! that cannot answer refuses the launch rather than guessing either way. A record written
-//! before there was one reads the same derivation over its id ([`of_record`]).
+//! It is decided once, where the run id is minted, and kept in the launch record. Where the
+//! check cannot answer, the id is the hashed form and the plan's name is withheld: neither
+//! names anything, so the launch goes on rather than one unreadable private declaration
+//! stopping every launch on the host. A record written before there was one reads the same
+//! derivation over its id ([`of_record`]).
 //!
 //! Where the engine uses it: every write-back to a plan store whose source is not declared
 //! `visibility: private` names the run by it in `onepipeline.driver.run` and
@@ -22,11 +24,7 @@
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
-use crate::error::{Error, Result};
 use crate::ledger::LaunchRecord;
-
-/// What the public-output check is called, in a refusal that names it.
-pub(crate) const CHECK: &str = "the public-output check (`onevcs` `check_public_output`)";
 
 /// `run-` and the first twelve lowercase hex digits of the SHA-256 of `run`'s UTF-8 bytes.
 pub(crate) fn hashed(run: &str) -> String {
@@ -79,11 +77,10 @@ pub(crate) struct Decided {
 
 /// Decide `run`'s public id, and whether `name` — the plan's — may be named publicly.
 ///
-/// # Errors
-///
-/// [`Error::Refused`] naming the check where it cannot answer for either: nothing is
-/// guessed, and the launch goes no further.
-pub(crate) fn decide(run: &str, name: Option<&str>) -> Result<Decided> {
+/// Only a pass names either: where the check refuses or cannot answer, the id is the hashed
+/// form and the name is withheld, so nothing that may be private is guessed onto a public
+/// destination, and the launch is never refused for it.
+pub(crate) fn decide(run: &str, name: Option<&str>) -> Decided {
     decide_with(run, name, passes)
 }
 
@@ -91,23 +88,16 @@ fn decide_with(
     run: &str,
     name: Option<&str>,
     mut passes: impl FnMut(&str) -> std::result::Result<bool, String>,
-) -> Result<Decided> {
-    let refused = |why: String| {
-        Error::Refused(format!(
-            "{CHECK} could not answer whether run '{run}' may be named on a public \
-             destination, so no public id was decided and nothing was launched: {why}"
-        ))
-    };
-    let id = if passes(run).map_err(refused)? {
+) -> Decided {
+    let id = if passes(run) == Ok(true) {
         run.to_owned()
     } else {
         hashed(run)
     };
-    let name_withheld = match name.filter(|name| !name.is_empty()) {
-        Some(name) => !passes(name).map_err(refused)?,
-        None => false,
-    };
-    Ok(Decided { id, name_withheld })
+    let name_withheld = name
+        .filter(|name| !name.is_empty())
+        .is_some_and(|name| passes(name) != Ok(true));
+    Decided { id, name_withheld }
 }
 
 /// The public ids this process derived for records that hold none, by run id.
@@ -216,8 +206,7 @@ mod tests {
 
     #[test]
     fn an_id_the_check_passes_is_its_own_public_id_and_one_it_refuses_is_hashed() {
-        let decided = decide_with("public-plan", Some("public plan"), |_| Ok(true))
-            .expect("the check answered");
+        let decided = decide_with("public-plan", Some("public plan"), |_| Ok(true));
         assert_eq!(
             decided,
             Decided {
@@ -225,38 +214,44 @@ mod tests {
                 name_withheld: false
             }
         );
-        let decided = decide_with("secret-plan", Some("secret plan"), |_| Ok(false))
-            .expect("the check answered");
+        let decided = decide_with("secret-plan", Some("secret plan"), |_| Ok(false));
         assert_eq!(decided.id, hashed("secret-plan"));
         assert!(decided.name_withheld);
         // No name is nothing to withhold, and is never asked.
         let decided = decide_with("secret-plan", None, |term| {
             assert_eq!(term, "secret-plan");
             Ok(false)
-        })
-        .expect("the check answered");
+        });
         assert!(!decided.name_withheld);
     }
 
     #[test]
-    fn a_check_that_cannot_answer_refuses_naming_the_check() {
-        let refused = decide_with("x", None, |_| Err("the registry could not be read".into()))
-            .expect_err("no answer is no public id");
-        let message = refused.to_string();
-        assert!(message.contains(CHECK), "{message}");
-        assert!(
-            message.contains("the registry could not be read"),
-            "{message}"
+    fn a_check_that_cannot_answer_hashes_the_id_and_withholds_the_name() {
+        let unanswered = decide_with("x", Some("name"), |_| {
+            Err("the registry could not be read".into())
+        });
+        assert_eq!(
+            unanswered,
+            Decided {
+                id: hashed("x"),
+                name_withheld: true
+            }
         );
-        let refused = decide_with("x", Some("name"), |term| {
+        // A name the check cannot judge is withheld even where the id passes.
+        let decided = decide_with("x", Some("name"), |term| {
             if term == "x" {
                 Ok(true)
             } else {
                 Err("no answer".into())
             }
-        })
-        .expect_err("a name the check cannot judge refuses too");
-        assert!(refused.to_string().contains(CHECK));
+        });
+        assert_eq!(
+            decided,
+            Decided {
+                id: "x".to_owned(),
+                name_withheld: true
+            }
+        );
     }
 
     #[test]

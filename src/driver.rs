@@ -1506,8 +1506,8 @@ fn start(args: &StartArgs) -> Result<i32> {
     let root = ledger::runs_root();
     let run = mint_run_id(&plan, project.native(), &root);
     // Its public id, decided where the id is minted and before anything records the run: a
-    // check that cannot answer refuses the launch rather than guessing either way.
-    let public = crate::publicid::decide(&run, plan.name.as_deref())?;
+    // check that cannot answer gives the hashed form, which names nothing.
+    let public = crate::publicid::decide(&run, plan.name.as_deref());
     // A takeover of a driver that may still be acting starts nothing until that driver has
     // let go: its claim is written now, and the project is read again — what this launch
     // continues, and what its write-back starts from — once the displaced driver has

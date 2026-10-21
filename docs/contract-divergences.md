@@ -12312,9 +12312,14 @@ once, where the id is minted, and kept in the launch record as `public_id`, besi
 `name_withheld` — whether the plan's own name failed the same check — both omitted when empty,
 so every record an earlier build wrote reads unchanged. A record holding no public id reads the
 same derivation over its id, and the hashed form where the check cannot answer, because a read
-must answer and that form names nothing. A launch whose check cannot answer is refused before
-its run directory exists, naming the check. The reading's `schema_version` stays `1`: the field
-is additive, and the schema closes no object.
+must answer and that form names nothing. A launch whose check cannot answer is not refused: its
+public id is the hashed form and the plan's name is withheld, neither carrying a word of the
+plan's title. The node's task first stated a refusal there; the planner who owns the contract
+ruled it out once this build showed it refused every launch on a host holding one private
+repository whose committed declaration cannot be read — including plans naming no private
+repository, which `publication_boundary` and `lifecycle` journeys run on such a host — and the
+hashed form keeps the privacy the refusal protected. The reading's `schema_version` stays `1`:
+the field is additive, and the schema closes no object.
 
 **Where it is written.** On a plan store whose project's source is not declared
 `visibility: private` — the store's own declaration — `onepipeline.driver.run` and

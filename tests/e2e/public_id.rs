@@ -1,7 +1,8 @@
 //! A run's public id: what `status --json` reads it as, that it is decided once at the launch,
-//! that a launch whose check cannot answer is refused, and where the engine writes it — the
-//! claim, fence and name on a plan store whose source is not declared private, and `plan.name`
-//! on a public repository's branch — driven end to end against the compiled binary.
+//! that a launch whose check cannot answer takes the hashed form and runs, and where the engine
+//! writes it — the claim, fence and name on a plan store whose source is not declared private,
+//! and `plan.name` on a public repository's branch — driven end to end against the compiled
+//! binary.
 //!
 //! The host registers two repositories: `service`, which its rules file declares public, and
 //! `zephyrine`, which it declares private, so `zephyrine` is a term no public output may carry.
@@ -146,7 +147,7 @@ fn status_reads_the_public_id_the_launch_recorded_and_an_older_record_derives_it
 }
 
 #[test]
-fn a_launch_whose_public_output_check_cannot_answer_is_refused_before_anything_is_dispatched() {
+fn a_launch_whose_public_output_check_cannot_answer_takes_the_hashed_id_and_runs() {
     let world = World::new("public-id-unanswerable");
     world.repository("local-direct", &[]);
     registered(&world);
@@ -173,30 +174,31 @@ fn a_launch_whose_public_output_check_cannot_answer_is_refused_before_anything_i
         &["commit", "-qm", "chore: break it"],
     );
 
-    let project = world.plan(A, &plan_of(A, vec![agent("work", &[])]));
-    let refused = world.run(&["start", &project, "--attach"]);
-    assert_ne!(refused.code, 0, "{}", refused.stdout);
-    refused.err_has("the public-output check");
-    assert!(
-        world
-            .invocations()
-            .iter()
-            .all(|call| call["tool"] != "oneagentgraph"),
-        "a node was dispatched under a launch whose check could not answer"
-    );
-    let recorded: Vec<String> = std::fs::read_dir(&world.runs)
-        .map(|entries| {
-            entries
-                .filter_map(Result::ok)
-                .filter(|entry| entry.path().join("launch.json").is_file())
-                .map(|entry| entry.file_name().to_string_lossy().into_owned())
-                .collect()
-        })
-        .unwrap_or_default();
-    assert!(
-        recorded.is_empty(),
-        "a refused launch left a run recording a public id: {recorded:?}"
-    );
+    // Both plans launch and run: the check cannot answer for either name, so neither is
+    // guessed public. Each gets the hashed form, which carries no word of its title, and
+    // withholds its plan's name.
+    for name in [A, B] {
+        let project = world.plan(name, &plan_of(name, vec![agent("work", &[])]));
+        world.run(&["start", &project, "--attach"]).settled();
+        assert_eq!(
+            world.run_json(name, "result.json")["state"],
+            "complete",
+            "{}",
+            world.dump()
+        );
+        let launched = record(&world, name);
+        assert_eq!(launched["public_id"], json!(hashed(name)), "{launched}");
+        assert_eq!(launched["name_withheld"], true, "{launched}");
+        let read = reading(&world, name);
+        assert_eq!(read["public_id"], json!(hashed(name)), "{read}");
+        let public_id = read["public_id"].as_str().expect("a public id");
+        for word in name.split('-') {
+            assert!(
+                !public_id.contains(word),
+                "{public_id} carries {word:?} of the title {name:?}"
+            );
+        }
+    }
 }
 
 /// The plan store's metadata of `project`, as the store holds it now.
