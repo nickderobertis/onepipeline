@@ -12291,8 +12291,8 @@ stream this build writes is one an earlier reader reads, less the new kind.
 
 ## 135. A driver ended its own healthy dispatches when it could not confirm its claim in time — OPEN
 
-**Amendment of #965's ruling (entry 128), by the manager's ruling for this build: an
-unconfirmed claim keeps the work in flight; only another driver's claim ends it.** Entry 128
+**Proposal, approved by the manager for this build: amendment of #965's ruling (entry 128).
+An unconfirmed claim keeps the work in flight; only another driver's claim ends it.** Entry 128
 read the claim on the reconcile loop, so a long pass delayed the read, and its lease's
 watchdog ended every dispatch once no read had confirmed the claim for two intervals and the
 read deadline. A read that failed, or one skipped inside a wait the store asked for, renewed
