@@ -9133,8 +9133,10 @@ in memory until a later driver's recovery.
 4. **A live driver answers every envelope it claims.** An envelope whose processing fails
    is answered `applied: false`, its reason naming the failure, unless it was answered
    before it failed, and every envelope claimed with it is still processed and answered on
-   that pass. Only a failure to write that answer ends the pass, and the envelopes it had
-   not reached are kept for the same driver's next pass.
+   that pass. Only a failure to write that answer ends the pass, and the answer and the
+   envelopes the pass had not reached are kept for the same driver's next pass, which
+   writes the answer first. An undecodable record whose refusal cannot be answered is kept
+   the same way.
 5. **`channel/deliveries.json` and `status` keep telling which notes wait in which inbox**,
    with `queued` in place of a held envelope where that is now the state. The sidecar's
    `Delivery` gains `{state: "queued", node, since, deadline?}`, which this build writes
@@ -9186,7 +9188,11 @@ same unreadable sidecars.
 `a_cancel_preempts_the_notes_queued_for_its_node_and_nothing_waits_behind_them`,
 `nothing_waits_behind_an_outstanding_note_and_the_sidecar_names_each_queued` and
 `a_receivers_waiting_notes_are_offered_once_the_earlier_note_is_answered` drive the real
-reconciler with deliveries outstanding.
+reconciler with deliveries outstanding, and
+`answers_a_pass_could_not_write_are_kept_with_what_it_had_not_reached` drives it over a real
+queue whose outcome log refuses a write and then takes one. `src/views.rs`'s
+`status_names_the_latest_queued_notes_results_and_counts_the_rest` holds the bound on the
+`note:` lines.
 
 ### A `cancel` preempts the note its node never answers — proposal, open
 
