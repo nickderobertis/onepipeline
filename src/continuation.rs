@@ -752,7 +752,9 @@ impl ClaimWatch {
         Some(Self {
             store: Store::at(&launch.dir),
             project,
-            run: paths.run.clone(),
+            // As the store names this run: its public id, where the store does not declare
+            // the project's source private.
+            run: crate::publicid::on_store(launch),
             host: crate::sys::hostname(),
             run_dir: paths.dir.clone(),
             displaced: taken_over(paths),
@@ -1436,11 +1438,12 @@ pub(crate) fn release_left_standing(
         return;
     };
     let host = crate::sys::hostname();
+    let run = crate::publicid::on_store(launch);
     // Both read as the launch reads a claim: one that is not one is nobody's to release.
     let ours = |metadata: &BTreeMap<String, Value>| {
         matches!(
             claim_of(project.as_str(), metadata),
-            Ok(Some(claim)) if claim.names(&paths.run, &host)
+            Ok(Some(claim)) if claim.names(&run, &host)
         )
     };
     let landed: BTreeMap<String, Value> = crate::writeback::landed_claim(&paths.dir)

@@ -6,7 +6,7 @@ code takes the nearest thing that does exist, and the divergence is recorded
 here as a proposal for the planner who owns the contract. Nothing on this list is
 resolved unilaterally.
 
-Entries **1–9, 23–32, 34, 74, 75, 77, 78, 79, 81, 82, 83, 89, 91, 94, 96, 97, 99, 100, 102, 106, 107 and 117** have since been **ruled on by the planner who
+Entries **1–9, 23–32, 34, 74, 75, 77, 78, 79, 81, 82, 83, 89, 91, 94, 96, 97, 99, 100, 102, 106, 107, 117 and 135** have since been **ruled on by the planner who
 owns the contract**, and `docs/contract.md` was amended to carry each ruling. They stay
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
@@ -12288,3 +12288,42 @@ stream this build writes is one an earlier reader reads, less the new kind.
   "bundle_versions": {"events": "1.9.0"}
 }
 ```
+
+## 135. A run named after a private repository named it on every public tracker and branch it wrote to — RESOLVED
+
+**Ruling: every run has a public id — decided by the planner who owns the contract in
+ai-orchestrator's node `op-link-linear-store`, whose follow-up flow (`aio-adopt-linear-road`)
+reads it.** `docs/contract.md`'s run-reading paragraph and its example now carry `public_id`;
+the field name, its derivation and `schemas/run-reading.schema.json`, which declares it
+required, are fixed by that ruling.
+
+**What was wrong.** A run id is minted from its plan's name, so a plan titled after a private
+repository minted an id carrying that repository's name, and the run wrote it into the driver
+claim and publication fence of every plan store it projected onto, the plan's name beside them,
+and into the branches it cut — on a public tracker and a public repository as on a private
+one. A store whose boundary is switched on refused those writes, so such a run could not report
+its work in public at all.
+
+**The rule.** `public_id` is the run id itself where the linked `onevcs`'s public-output check
+(`check_public_output`) passes the id as metadata bound for a public destination with the term
+scope left out — every private identity registered on the host — and otherwise `run-` followed
+by the first 12 lowercase hex digits of the SHA-256 of the run id's UTF-8 bytes. It is decided
+once, where the id is minted, and kept in the launch record as `public_id`, beside
+`name_withheld` — whether the plan's own name failed the same check — both omitted when empty,
+so every record an earlier build wrote reads unchanged. A record holding no public id reads the
+same derivation over its id, and the hashed form where the check cannot answer, because a read
+must answer and that form names nothing. A launch whose check cannot answer is refused before
+its run directory exists, naming the check. The reading's `schema_version` stays `1`: the field
+is additive, and the schema closes no object.
+
+**Where it is written.** On a plan store whose project's source is not declared
+`visibility: private` — the store's own declaration — `onepipeline.driver.run` and
+`onepipeline.publishing.run` carry the public id, and `onepipeline.name` carries it where the
+plan's name is withheld; the driver reads its own claim and fence back by that name, and a
+takeover finds a claimed run of this host by it. A branch rendered for a node whose repository
+the linked `onevcs` reports public renders `plan.name` as the public id where the plan's name is
+withheld. Every other write is unchanged, and a run whose id and name pass writes exactly what
+it wrote before.
+
+**What this build does.** `src/publicid.rs` decides and derives it; `tests/e2e/public_id.rs`
+drives every rule above through the compiled binary.

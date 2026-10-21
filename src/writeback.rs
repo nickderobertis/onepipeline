@@ -1184,7 +1184,7 @@ impl Writeback {
             return;
         }
         let driver = DriverWrite::Release {
-            run: paths.run.clone(),
+            run: crate::publicid::on_store(launch),
             host: crate::sys::hostname(),
         };
         if let Some(snapshot) = snapshot_of(paths, launch, state, statuses, Claim::Released, driver)
@@ -1340,7 +1340,10 @@ fn snapshot_of(
                     metadata.insert("onepipeline.goal".into(), json!(goal));
                 }
                 if let Some(name) = &plan.name {
-                    metadata.insert("onepipeline.name".into(), json!(name));
+                    metadata.insert(
+                        "onepipeline.name".into(),
+                        json!(crate::publicid::name_on_store(launch, name)),
+                    );
                 }
                 // As launched: each end names its lineage's root, which is the id the
                 // store's own item for that lineage carries whatever retried it.
@@ -1777,7 +1780,7 @@ pub(crate) fn release_stopped(paths: &RunPaths, launch: &LaunchRecord) {
     let state = crate::checkpoint::Projected::open(paths);
     let statuses = state.statuses();
     let driver = DriverWrite::Release {
-        run: paths.run.clone(),
+        run: crate::publicid::on_store(launch),
         host: launch.host.clone(),
     };
     let Some(snapshot) = snapshot_of(paths, launch, &state, &statuses, Claim::Released, driver)

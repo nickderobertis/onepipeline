@@ -267,6 +267,13 @@ pub struct RunReading {
     pub schema_version: u32,
     /// The run.
     pub run_id: String,
+    /// What the run is named by wherever the destination is not private: the run id itself
+    /// where the linked `onevcs`'s public-output check passes it as metadata bound for a
+    /// public destination, over every private identity registered on the host, and
+    /// otherwise `run-` followed by the first 12 lowercase hex digits of the SHA-256 of the
+    /// run id's UTF-8 bytes. Decided once, at the launch, and kept in its record; a run
+    /// whose record holds none reads the same derivation over its id.
+    pub public_id: String,
     // llmlint: ignore-block[invalid_states_unrepresentable] these five fields are the
     // `status <RUN> --json` document exactly as the approved contract fixes it — `word` and
     // `liveness` as the printed words, and `driven`, `ending` and `paused` as three fields
@@ -364,6 +371,7 @@ pub fn reading(view: &RunView) -> RunReading {
     RunReading {
         schema_version: RUN_READING_SCHEMA_VERSION,
         run_id: view.paths.run.clone(),
+        public_id: crate::publicid::of_record(&view.launch),
         word: standing.word(),
         liveness: liveness.as_str(),
         driven: !liveness.is_undriven(),
@@ -5732,6 +5740,8 @@ mod tests {
             oneharness_sessions: None,
             flow: String::new(),
             envelope_reviewer_bar: Default::default(),
+            public_id: String::new(),
+            name_withheld: false,
         }
     }
 
