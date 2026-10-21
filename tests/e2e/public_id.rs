@@ -198,6 +198,19 @@ fn a_launch_whose_public_output_check_cannot_answer_takes_the_hashed_id_and_runs
                 "{public_id} carries {word:?} of the title {name:?}"
             );
         }
+        // A record holding no public id, read while the check still cannot answer, reads the
+        // hashed form too: a read must answer, and that form names nothing.
+        let mut older = launched.clone();
+        older
+            .as_object_mut()
+            .expect("a record is a mapping")
+            .remove("public_id");
+        rewrite(&world, name, &older);
+        assert_eq!(
+            reading(&world, name)["public_id"],
+            json!(hashed(name)),
+            "an older record read under an unanswerable check named its run"
+        );
     }
 }
 
@@ -331,5 +344,155 @@ fn a_store_not_declared_private_and_a_public_branch_carry_the_public_id_and_noth
         unchanged.branch.ends_with(&format!("{B}/ship")),
         "{}",
         unchanged.branch
+    );
+}
+
+/// A plan named after the private repository whose one node publishes into that repository:
+/// the branch renders `plan.name` as the plan's own name, because only a public repository's
+/// branch takes the public id in its place. (A plan that also holds a public repository's node
+/// is mixed, and the boundary names that node's branch itself; the public branch's own case
+/// is `a_store_not_declared_private_and_a_public_branch_carry_the_public_id_and_nothing_else_changes`.)
+#[test]
+fn a_withheld_name_stays_on_a_private_repositorys_branch() {
+    let world = World::new("public-id-private-branch");
+    world.repository("local-direct", &[]);
+    registered(&world);
+    let mut kept = lifecycle("keep", &[]);
+    kept["repo"] = json!("zephyrine");
+    let project = world.plan(A, &plan_of(A, vec![kept]));
+    world.run(&["start", &project, "--attach"]).settled();
+    assert_eq!(record(&world, A)["name_withheld"], true);
+    let private = branch_of(&world, A, "keep");
+    assert!(
+        private.ends_with(&format!("{A}/keep")),
+        "the private repository's branch lost A's name: {private}"
+    );
+}
+
+/// The project's `onepipeline.driver`, as the store holds it: `null` where it holds none.
+fn stored_claim(world: &World, project: &str) -> Value {
+    world.store_project(project)["items"][0]["item"]["metadata"]
+        .get("onepipeline.driver")
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+
+/// Launch `project` detached, its one node `node` held, and wait for the store to name `run` by its
+/// public id as the project's driver.
+fn held_and_claimed(world: &World, project: &str, run: &str, node: &str) -> Value {
+    world.script(&format!("{node}.wait"), "hold");
+    world
+        .run_from(&world.project, &["start", project, "--detach"])
+        .exited(0);
+    world.until(
+        &format!("the store to name {run} by its public id"),
+        |world| stored_claim(world, project)["run"] == json!(hashed(run)),
+    );
+    stored_claim(world, project)
+}
+
+/// A run named after the private repository claims its project by its public id, and every
+/// read of the claim after that knows the claim as its own: its driver reads it back on each
+/// claim interval and goes on driving, a takeover of it while it drives writes the successor's
+/// own public id, a takeover once its driver is gone finds the run by its public id and waits
+/// on nothing, and its stop and its closeout release it.
+#[test]
+fn a_claim_naming_the_public_id_is_read_back_taken_over_and_released() {
+    let world = World::new("public-id-claim")
+        .with_env("ONEPIPELINE_CLAIM_INTERVAL_SECONDS", "2")
+        .with_env(crate::harness::CANCEL_GRACE_ENV, "1");
+    world.repository("local-direct", &[]);
+    registered(&world);
+    let project = world.plan(A, &plan_of(A, vec![agent("work", &[])]));
+
+    // Driving: three claim intervals pass, and each read finds the run's own claim.
+    held_and_claimed(&world, &project, A, "work");
+    std::thread::sleep(std::time::Duration::from_secs(7));
+    assert!(
+        world.events_of(A, "driver-superseded").is_empty(),
+        "the driver read its own claim, naming its public id, as a takeover"
+    );
+
+    // A takeover while it drives claims the project by the successor's own public id first.
+    let successor = format!("{A}-2");
+    let mut taking = world.cmd(&["start", &project, "--detach", "--take-over"]);
+    let taking = taking
+        .current_dir(&world.project)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the takeover starts");
+    // Read while the displaced driver is still held, so the claim read is the one the takeover
+    // itself wrote rather than one the successor's run writes once it starts.
+    world.until("the successor's claim to reach the store", |world| {
+        stored_claim(world, &project)["run"] != json!(hashed(A))
+    });
+    assert_eq!(
+        stored_claim(&world, &project)["run"],
+        json!(hashed(&successor)),
+        "the takeover claimed the project by the successor's run id"
+    );
+    assert!(
+        !world.run_file(A, "result.json").is_file(),
+        "the displaced driver finished before the takeover's claim was read"
+    );
+    world.unscript("work.wait");
+    world.release("work.go");
+    let answered = taking.wait_with_output().expect("the takeover answers");
+    assert_eq!(
+        answered.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&answered.stderr)
+    );
+    world.until("the successor to close out", |world| {
+        world.run_file(&successor, "result.json").is_file()
+    });
+    world.until("the successor's closeout to release its claim", |world| {
+        stored_claim(world, &project) == Value::Null
+    });
+
+    // A run whose driver is gone: the takeover finds it by the public id its claim names, so
+    // it writes no claim first and waits on nothing. A plan of its own, also named after the
+    // private repository, so its run starts from nothing settled, and a node of its own, since
+    // the release above lets every later hold of `work` go.
+    let gone = "zephyrine-gone";
+    let project = world.plan(gone, &plan_of(gone, vec![agent("gone", &[])]));
+    let claim = held_and_claimed(&world, &project, gone, "gone");
+    let shutdown = world.run(&["shutdown", gone, "--grace", "1"]);
+    assert!([0, 2].contains(&shutdown.code), "{}", shutdown.stderr);
+    assert_eq!(
+        stored_claim(&world, &project),
+        claim,
+        "the shutdown took the claim: {}",
+        shutdown.stderr
+    );
+    world.unscript("gone.wait");
+    let taken = world.run_from(
+        &world.project,
+        &["start", &project, "--attach", "--take-over"],
+    );
+    taken.exited(0);
+    assert!(
+        !taken.stderr.contains("--take-over claimed"),
+        "the takeover did not find {gone} by its public id: {}",
+        taken.stderr
+    );
+    let adopter = format!("{gone}-2");
+    let said = taken.stderr.clone();
+    let taken = world.events_of(&adopter, "driver-taken-over");
+    assert_eq!(taken.len(), 1, "{taken:?}\n{said}");
+    assert_eq!(taken[0]["payload"]["previous"], claim);
+    assert_eq!(stored_claim(&world, &project), Value::Null);
+
+    // A stop releases the claim its public id names.
+    let stopped = "zephyrine-stopped";
+    let project = world.plan(stopped, &plan_of(stopped, vec![agent("stopped", &[])]));
+    held_and_claimed(&world, &project, stopped, "stopped");
+    world.run(&["stop", stopped]).exited(0);
+    assert_eq!(
+        stored_claim(&world, &project),
+        Value::Null,
+        "the stop left the claim standing"
     );
 }
