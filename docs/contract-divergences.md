@@ -12338,9 +12338,9 @@ it wrote before.
 drives every rule above through the compiled binary.
 
 
-## 136. Withdrawn project tasks are outside the executable plan
+## 136. Withdrawn project tasks are outside the executable plan — RESOLVED
 
-**Decision.** The manager of issue #789 approved excluding withdrawn tasks before node ids
+**Ruling:** The manager of issue #789 approved excluding withdrawn tasks before node ids
 are claimed or the first launch projection runs. A store task with status category
 `Cancelled` is withdrawn unless its stored `onepipeline.settlement` has status `cancelled`
 and its `onepipeline.projected_status` is `cancelled`. This new additive, projection-only,
