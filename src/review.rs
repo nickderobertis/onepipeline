@@ -584,6 +584,23 @@ pub(crate) fn failpoint(stage: &str) -> Result<()> {
     Ok(())
 }
 
+/// Test-only failure seam beside [`failpoint`], compiled into the debug binary
+/// the journeys drive: where the failpoint directory holds a file named `stage`,
+/// the step fails with an error naming it rather than pausing.
+pub(crate) fn failing(stage: &str) -> Result<()> {
+    #[cfg(debug_assertions)]
+    if let Some(directory) = std::env::var_os("ONEPIPELINE_REVIEW_FAILPOINT") {
+        if std::path::Path::new(&directory).join(stage).is_file() {
+            return Err(Error::Invalid(format!(
+                "test failpoint '{stage}' failed this step"
+            )));
+        }
+    }
+    #[cfg(not(debug_assertions))]
+    let _ = stage;
+    Ok(())
+}
+
 fn record_surface(paths: &RunPaths, journal: &mut Journal, surface: &Surface) -> Result<()> {
     journal.emit(
         PipelineKind::PlannerSurfaceQueued,

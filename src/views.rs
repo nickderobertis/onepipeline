@@ -296,6 +296,24 @@ pub struct RunReading {
     /// in claim order — omitted when there is none.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub unanswered: Vec<UnansweredEnvelope>,
+    /// Every live note the run's live driver holds in a receiver's inbox — its
+    /// envelope already answered, with that note `queued` — in envelope order:
+    /// omitted when there is none, and when no driver is live.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub inbox: Vec<InboxNote>,
+}
+
+/// One envelope's live note waiting in a receiver's inbox, as `status <RUN>
+/// --json` reads it: the envelope is answered, and its `delivery` is `queued`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
+pub struct InboxNote {
+    /// The channel envelope id — a decimal string in the document.
+    #[serde(with = "crate::channel::deliveries::envelope_id")]
+    #[schemars(with = "String")]
+    pub envelope: u64,
+    /// The receiving node and since when its note has waited there, as the run's
+    /// live driver last wrote it.
+    pub delivery: Delivery,
 }
 
 /// One command envelope claimed off a run's queue with no outcome yet, as
@@ -341,6 +359,27 @@ fn unanswered_of(view: &RunView, liveness: DriverLiveness) -> Vec<UnansweredEnve
         .collect()
 }
 
+/// Each live note the run's live driver holds in a receiver's inbox, from its
+/// sidecar — nothing where no driver is live, since a driver that is gone holds
+/// no inbox and the next one records an answer for each note it left.
+fn inbox_of(view: &RunView, liveness: DriverLiveness) -> Vec<InboxNote> {
+    if liveness.is_undriven() {
+        return Vec::new();
+    }
+    crate::channel::deliveries::LiveDeliveries::read(&view.paths)
+        .map(|live| {
+            live.deliveries
+                .into_iter()
+                .filter(|entry| matches!(entry.delivery, Delivery::Queued { .. }))
+                .map(|entry| InboxNote {
+                    envelope: entry.envelope,
+                    delivery: entry.delivery,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Read one run's ending, its pause, or neither, off its fold.
 ///
 /// The run-end hook judge's own verdict — `hooks::verdict` is
@@ -370,6 +409,7 @@ pub fn reading(view: &RunView) -> RunReading {
         ending,
         paused,
         unanswered: unanswered_of(view, liveness),
+        inbox: inbox_of(view, liveness),
     }
 }
 
@@ -2705,6 +2745,7 @@ pub(crate) fn status_reporting(view: &RunView, providers: Providers) -> String {
             out.push_str(&shutdown.line(&view.paths.run));
         }
         out.push_str(&driver_exit_lines(view));
+        out.push_str(&note_lines(view));
         // What this run carried on from its project's store rather than ran, and where each
         // node it continued stands: a reader of a run launched on a host that never ran
         // them would otherwise find drafts with no dispatch behind them.
@@ -4466,9 +4507,172 @@ fn driver_exit_lines(view: &RunView) -> String {
     out
 }
 
+/// How many notes answered `queued` that have left their inbox `status` names
+/// with what became of each, the latest first being the last printed.
+const NOTES_SHOWN: usize = 5;
+
+/// What `status` says of the run's queued notes: each the live driver holds in
+/// a receiver's inbox, and then each of the latest [`NOTES_SHOWN`] answered
+/// `queued` that has left it, with its own record — taken, carried or refused.
+///
+/// An envelope carrying a live note is answered as the note is handed to its
+/// receiver's inbox, so a submitter is told at once what applied and what waits
+/// for a turn; these lines are where the rest of that note's story is read.
+fn note_lines(view: &RunView) -> String {
+    let inbox = inbox_of(view, view.liveness());
+    let mut out = String::new();
+    for note in &inbox {
+        if let Delivery::Queued {
+            node,
+            since,
+            deadline,
+        } = &note.delivery
+        {
+            let until = deadline.map_or_else(String::new, |deadline| {
+                format!(
+                    ", until its deadline {}",
+                    sys::rfc3339_from_millis(deadline)
+                )
+            });
+            out.push_str(&format!(
+                "  inbox: {node} holds envelope {}'s note, queued since {}{until} — the \
+                 envelope is answered, and {node}'s turn takes the note when it takes notes\n",
+                note.envelope,
+                sys::rfc3339_from_millis(*since)
+            ));
+        }
+    }
+    let channel = crate::channel::ChannelState::new(&view.paths);
+    // The latest answer per envelope: a withdrawal answers one again.
+    let answers: BTreeMap<u64, crate::channel::CommandOutcome> = channel
+        .outcomes()
+        .into_iter()
+        .map(|outcome| (outcome.id, outcome))
+        .collect();
+    let waiting = |id: u64, node: &str| {
+        inbox.iter().any(|note| {
+            note.envelope == id
+                && matches!(&note.delivery, Delivery::Queued { node: at, .. } if at == node)
+        })
+    };
+    let mut left: Vec<(u64, usize, crate::channel::Command)> = Vec::new();
+    for (id, answer) in &answers {
+        let queued: Vec<usize> = answer
+            .results
+            .iter()
+            .filter(|result| result.outcome == crate::channel::CommandVerdict::Queued)
+            .map(|result| result.index)
+            .collect();
+        if queued.is_empty() {
+            continue;
+        }
+        let Some(sent) = channel.commands_of(*id) else {
+            continue;
+        };
+        for index in queued {
+            if let Some(command @ crate::channel::Command::Note { id: node, .. }) =
+                sent.commands.get(index)
+            {
+                if !waiting(*id, node) {
+                    left.push((*id, index, command.clone()));
+                }
+            }
+        }
+    }
+    let earlier = left.len().saturating_sub(NOTES_SHOWN);
+    if earlier > 0 {
+        out.push_str(&format!(
+            "  {earlier} earlier note(s) answered queued are not shown here\n"
+        ));
+    }
+    let delivered = crate::withdrawal::readable(&view.events);
+    for (id, index, command) in left.split_off(earlier) {
+        let crate::channel::Command::Note { id: node, .. } = &command else {
+            continue;
+        };
+        let result = crate::withdrawal::delivered(
+            &delivered,
+            id,
+            u32::try_from(index).unwrap_or(u32::MAX),
+        )
+        .map(|reached| {
+            format!(
+                "note-delivered {}",
+                crate::withdrawal::disposition(&reached)
+            )
+        })
+        .or_else(|| refused_note(&view.events, id, index, &command))
+        .unwrap_or_else(|| {
+            "no answer is recorded yet: the driver that handed it is gone, and the run's next \
+                 driver records one"
+                .to_string()
+        });
+        out.push_str(&format!(
+            "  note: envelope {id}'s note {index} to {node}, answered queued — {result}\n"
+        ));
+    }
+    out
+}
+
+/// The refusal the run journalled for `command`, at `index` of envelope `id`,
+/// if it journalled one: named by its index, or — in a record written before
+/// refusals named one — by the command as sent.
+fn refused_note(
+    events: &[Envelope],
+    id: u64,
+    index: usize,
+    command: &crate::channel::Command,
+) -> Option<String> {
+    let sent = serde_json::json!(command);
+    events.iter().find_map(|event| {
+        let at = event
+            .payload
+            .get("index")
+            .and_then(serde_json::Value::as_u64);
+        (event.source == Source::Pipeline
+            && PipelineKind::from_wire(&event.kind) == Some(PipelineKind::EditRejected)
+            && event
+                .payload
+                .get("envelope")
+                .and_then(serde_json::Value::as_u64)
+                == Some(id)
+            && at.map_or_else(
+                || event.payload.get("command") == Some(&sent),
+                |at| usize::try_from(at).ok() == Some(index),
+            ))
+        .then(|| {
+            format!(
+                "refused: {}",
+                one_line(
+                    event
+                        .payload
+                        .get("reason")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("no reason was recorded")
+                )
+            )
+        })
+    })
+}
+
 /// What `status` says of one claimed envelope's live note.
 fn delivery_phrase(delivery: &Delivery) -> String {
     match delivery {
+        Delivery::Queued {
+            node,
+            since,
+            deadline,
+        } => match deadline {
+            Some(deadline) => format!(
+                "its note queued in {node}'s inbox since {}, until its deadline {}",
+                sys::rfc3339_from_millis(*since),
+                sys::rfc3339_from_millis(*deadline)
+            ),
+            None => format!(
+                "its note queued in {node}'s inbox since {}",
+                sys::rfc3339_from_millis(*since)
+            ),
+        },
         Delivery::Delivering {
             node,
             since,

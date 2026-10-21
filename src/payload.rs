@@ -761,6 +761,12 @@ pub(crate) struct EditRejected {
     /// field existed, and from one no queued envelope produced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) envelope: Option<u64>,
+    /// Where in that envelope's `commands` the refused command sat, from zero:
+    /// what names a refused note among several alike in one envelope. Present
+    /// beside `envelope`, and absent from a record written before the field
+    /// existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) index: Option<u64>,
     /// The refusal by kind, where it was one the reconciler names as one; `reason`
     /// is then its text. Absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -1,13 +1,15 @@
 //! What a live driver is doing with each claimed envelope whose live note has
 //! not been answered: the `deliveries.json` sidecar beside the channel's queues.
 //!
-//! A claimed envelope with no outcome line is, read off the queues alone, three
-//! different facts: a note a live driver is still delivering into a turn, an
-//! envelope that driver holds behind another envelope's note to the same node,
-//! and one a driver that has gone claimed and will never answer. Only the driver
-//! knows the first two, so it writes them down here — atomically, whenever what
-//! it holds outstanding or held changes, and empty when it exits — and `status`
-//! reads them together with the driver's liveness.
+//! An envelope carrying a live note is answered as its notes are handed to their
+//! receivers' inboxes, each note `queued`, and what the receiver's turn makes of
+//! a note is that note's own record, written later. Which notes still wait in
+//! which inbox is something only the live driver knows, so it writes it down
+//! here — atomically, whenever what it holds changes, and empty when it exits —
+//! and `status` reads it together with the driver's liveness. A driver built
+//! before that wrote two other states for a claimed envelope with no outcome
+//! line, a note it was still delivering and an envelope it held behind another's
+//! note, and both are still read.
 //!
 //! **One declaration.** [`Delivery`] is both the sidecar's entry and the
 //! `delivery` object `status --json` carries on each such envelope's reading, so
@@ -40,7 +42,11 @@ pub(crate) const DELIVERIES_SCHEMA_VERSION: u32 = 1;
 #[serde(tag = "state", rename_all = "lowercase")]
 pub enum Delivery {
     /// The driver is waiting on `node`'s conversation to answer the envelope's
-    /// live note.
+    /// live note before it answers the envelope.
+    ///
+    /// Written by a driver built before envelopes were answered as their notes
+    /// are handed off; this build writes [`Queued`](Self::Queued) instead, and
+    /// reads this from such a driver's sidecar.
     Delivering {
         /// The node whose conversation the note was offered to.
         // llmlint: ignore[invalid_states_unrepresentable] a node id is the plan's own `String` everywhere this crate carries one — `Command`, `Node`, the journal's labels — and a newtype here alone would be a second spelling of it; what a reader is handed is checked non-blank and free of control characters by `node_id` as it is read.
@@ -61,8 +67,36 @@ pub enum Delivery {
         #[schemars(with = "Option<String>")]
         deadline: Option<u64>,
     },
+    /// The envelope is answered, and its live note waits in `node`'s inbox for
+    /// that node's turn to take it: the state a live driver writes for every
+    /// note it has handed off and not yet recorded an answer for.
+    Queued {
+        /// The node whose inbox holds the note.
+        // llmlint: ignore[invalid_states_unrepresentable] the node id, as `Delivering`'s `node` says.
+        #[serde(deserialize_with = "node_id")]
+        node: String,
+        /// When it was handed to that inbox, in epoch milliseconds — RFC 3339 on
+        /// the wire.
+        #[serde(with = "instant")]
+        #[schemars(with = "String")]
+        since: u64,
+        /// When the note stops waiting for a turn to take it, as `Delivering`'s
+        /// `deadline` says: present exactly where the note being offered carries
+        /// a `delivery_timeout_seconds`.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "optional_instant"
+        )]
+        #[schemars(with = "Option<String>")]
+        deadline: Option<u64>,
+    },
     /// The driver holds the envelope unjudged behind `behind_envelope`'s live
     /// note to `node`, so that no later edit to that node overtakes it.
+    ///
+    /// Written by a driver built before envelopes were answered as their notes
+    /// are handed off; this build writes [`Queued`](Self::Queued) instead, and
+    /// reads this from such a driver's sidecar.
     Held {
         /// The node whose outstanding note it waits behind.
         // llmlint: ignore[invalid_states_unrepresentable] the node id, as `Delivering`'s `node` says.
@@ -226,6 +260,10 @@ mod tests {
                  "since": "2026-10-18T09:00:00.000Z", "deadline": "2026-10-18T09:00:02.000Z"},
                 {"envelope": "2", "state": "held", "node": "build",
                  "since": "2026-10-18T09:00:01.000Z", "behind_envelope": "1"},
+                {"envelope": "5", "state": "queued", "node": "build",
+                 "since": "2026-10-18T09:00:03.000Z"},
+                {"envelope": "6", "state": "queued", "node": "docs",
+                 "since": "2026-10-18T09:00:03.000Z", "deadline": "2026-10-18T09:00:05.000Z"},
             ],
         });
         let read: LiveDeliveries = serde_json::from_value(wire.clone()).expect("it reads");
@@ -255,6 +293,22 @@ mod tests {
                         node: "build".into(),
                         since: at("2026-10-18T09:00:01.000Z"),
                         behind_envelope: 1,
+                    },
+                },
+                LiveDelivery {
+                    envelope: 5,
+                    delivery: Delivery::Queued {
+                        node: "build".into(),
+                        since: at("2026-10-18T09:00:03.000Z"),
+                        deadline: None,
+                    },
+                },
+                LiveDelivery {
+                    envelope: 6,
+                    delivery: Delivery::Queued {
+                        node: "docs".into(),
+                        since: at("2026-10-18T09:00:03.000Z"),
+                        deadline: Some(at("2026-10-18T09:00:05.000Z")),
                     },
                 },
             ])
@@ -320,6 +374,11 @@ mod tests {
                     since: 0,
                     behind_envelope: 1,
                 },
+                "queued" => Delivery::Queued {
+                    node: "n".into(),
+                    since: 0,
+                    deadline: Some(2_000),
+                },
                 other => panic!("the reading states a state this type has not: {other}"),
             };
             let written = serde_json::to_value(LiveDelivery {
@@ -374,6 +433,8 @@ mod tests {
                    "since": "2026-10-18T09:00:00.000Z", "behind_envelope": "0"}),
             json!({"envelope": "1", "state": "held", "node": "build",
                    "since": "2026-10-18T09:00:00.000Z", "behind_envelope": "-1"}),
+            json!({"envelope": "1", "state": "queued", "node": "",
+                   "since": "2026-10-18T09:00:00.000Z"}),
         ] {
             std::fs::write(
                 paths.channel(DELIVERIES_FILE),

@@ -136,12 +136,14 @@ pub(crate) fn validate(
                 "{named} was already answered refused: {}",
                 result.reason.as_deref().unwrap_or("no reason was recorded")
             ))),
-            Some(result) => Err(refuse(format!(
+            // Answered as it was handed to its receiver's inbox, and still live
+            // there until that receiver's turn takes it.
+            Some(result) if result.outcome != CommandVerdict::Queued => Err(refuse(format!(
                 "{named} was already answered `{}`, and the run's record holds no carried \
                  note of it to take back",
                 verdict(result.outcome)
             ))),
-            None => {
+            _ => {
                 let Some(Command::Note { text, .. }) = sent.commands.get(position) else {
                     return Err(refuse(format!("{named} is no longer a note")));
                 };
@@ -418,7 +420,11 @@ fn withdrawn_by(
 
 /// What the delivery of note `index` of envelope `sent` recorded, if it recorded
 /// anything.
-fn delivered(records: &[(Option<u64>, Operation)], sent: u64, index: u32) -> Option<Reached> {
+pub(crate) fn delivered(
+    records: &[(Option<u64>, Operation)],
+    sent: u64,
+    index: u32,
+) -> Option<Reached> {
     records.iter().find_map(|(_, operation)| match operation {
         Operation::NoteDelivered {
             envelope: Some(from),
@@ -440,7 +446,7 @@ fn delivered(records: &[(Option<u64>, Operation)], sent: u64, index: u32) -> Opt
 /// nor an answer it owes is refused for it. A withdrawal hidden in such a record
 /// is one this build cannot act on either way; the `withdraw-note` that would
 /// have to decide against it is what refuses.
-fn readable(journal: &[Envelope]) -> Vec<(Option<u64>, Operation)> {
+pub(crate) fn readable(journal: &[Envelope]) -> Vec<(Option<u64>, Operation)> {
     journal
         .iter()
         .filter(|envelope| {
@@ -508,7 +514,7 @@ fn committed(journal: &[Envelope]) -> Result<Vec<(Option<u64>, Operation)>> {
 }
 
 /// How a delivered note's record words its disposition, for a refusal.
-fn disposition(reached: &Reached) -> String {
+pub(crate) fn disposition(reached: &Reached) -> String {
     match (reached, reached.turn()) {
         (Reached::JudgedWith { completion_reason }, _) => {
             format!("`judged-with` ({completion_reason})")
@@ -525,6 +531,7 @@ fn verdict(verdict: CommandVerdict) -> &'static str {
         CommandVerdict::Validated => "validated",
         CommandVerdict::Delivered => "delivered",
         CommandVerdict::Refused => "refused",
+        CommandVerdict::Queued => "queued",
     }
 }
 
