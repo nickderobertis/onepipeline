@@ -12482,12 +12482,14 @@ layout, so its new `queued` word is one a reader of the layout before it cannot 
 planner-channel document's major is raised. The `edit-rejected` record's optional `index`
 is additive, so the events bundle's minor is raised.
 
-**Both public enum additions are breaking, ruled.** `Delivery`, re-exported by `views`,
-is also a public exhaustive enum. The manager accepted `Delivery::Queued` as a second
-breaking change beside `CommandVerdict::Queued` in this same breaking change under
-correlation `c-942acecf8edb6fdef09f0d76f00ac602`. Consumers matching either enum must
-handle its new variant. Every other change remains additive, including the receipt's
-optional `notes` key and the inbox reading.
+**Four Rust source-compatibility breaks, ruled.** The public exhaustive enums gain
+`CommandVerdict::Queued` and `Delivery::Queued` (`Delivery` is re-exported by `views`).
+The public structs gain `Receipt::notes` and `RunReading::inbox`, which also change
+struct literals and exhaustive destructuring. The manager accepted all four in this
+same breaking change under correlation `c-f1a4f2c43bc78b8cb14a6a962a0b97f3`.
+**Additive means wire-additive:** changed wire and disk shapes only add optional fields
+or values; the new receipt and inbox fields are omitted when empty. Every other
+public-type change is a new type.
 
 ```json
 {
